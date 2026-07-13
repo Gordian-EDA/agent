@@ -37,6 +37,15 @@ pub struct PinMeta {
 #[derive(Debug, Clone, Default)]
 pub struct SymbolMeta {
     pub pins: Vec<PinMeta>,
+    /// Human-readable KiCad library description, often including decisive
+    /// electrical ratings such as current, voltage, or package.
+    pub description: Option<String>,
+    /// Manufacturer datasheet URL carried by the KiCad symbol.
+    pub datasheet: Option<String>,
+    /// Library-default footprint, when the symbol declares one.
+    pub footprint: Option<String>,
+    /// Search keywords supplied by the KiCad library.
+    pub keywords: Option<String>,
 }
 
 /// Resolve a pin reference (`id`) within a pin list, matching by **number

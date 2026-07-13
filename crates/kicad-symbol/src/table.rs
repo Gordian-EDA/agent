@@ -68,7 +68,13 @@ impl SymbolTable {
                 unit,
             })
             .collect();
-        self.inline.insert(lib_id.into(), SymbolMeta { pins });
+        self.inline.insert(
+            lib_id.into(),
+            SymbolMeta {
+                pins,
+                ..Default::default()
+            },
+        );
         self
     }
 
@@ -172,6 +178,7 @@ fn global_label_meta() -> SymbolMeta {
             dir: PinDir::Passive,
             unit: 1,
         }],
+        ..Default::default()
     }
 }
 

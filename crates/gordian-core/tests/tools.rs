@@ -76,6 +76,33 @@ fn get_symbol_info_tool_returns_full_pin_table_for_stm32() {
 }
 
 #[test]
+fn get_symbol_info_surfaces_part_ratings_before_selection() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let out = run_tool(
+        "get_symbol_info",
+        serde_json::json!({ "lib_id": "Regulator_Linear:TPS73633DBV" }),
+        &ctx,
+    )
+    .unwrap();
+
+    assert!(
+        out["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("400mA")),
+        "the model must see that this part cannot satisfy a >=500mA requirement: {out}"
+    );
+    assert!(out["datasheet"].as_str().is_some(), "{out}");
+    assert_eq!(
+        out["default_footprint"],
+        serde_json::json!("Package_TO_SOT_SMD:SOT-23-5"),
+        "{out}"
+    );
+}
+
+#[test]
 fn get_symbol_info_tool_suggests_for_unknown_part() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");

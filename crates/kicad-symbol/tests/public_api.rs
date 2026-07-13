@@ -14,6 +14,7 @@ fn root_exports_and_existing_modules_remain_importable() {
             dir: PinDir::Passive,
             unit: 1,
         }],
+        ..Default::default()
     };
 
     assert_eq!(find_pin(&meta.pins, "1").unwrap().name, "A");

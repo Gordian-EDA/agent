@@ -44,7 +44,17 @@ pub(crate) fn read_lib_dir(path: &Path) -> io::Result<HashMap<String, SymbolMeta
 
 #[derive(Default)]
 struct LibReader {
-    raw: HashMap<String, (Vec<PinMeta>, Option<String>)>,
+    raw: HashMap<String, RawSymbol>,
+}
+
+#[derive(Clone, Default)]
+struct RawSymbol {
+    pins: Vec<PinMeta>,
+    extends: Option<String>,
+    description: Option<String>,
+    datasheet: Option<String>,
+    footprint: Option<String>,
+    keywords: Option<String>,
 }
 
 impl LibReader {
@@ -54,11 +64,27 @@ impl LibReader {
             other => io::Error::new(io::ErrorKind::InvalidData, other.to_string()),
         })?;
 
-        // First pass: own pins + extends target per top-level symbol.
+        // First pass: own pins/properties + extends target per top-level symbol.
         self.raw.extend(doc.ast().symbols.iter().filter_map(|sym| {
             let name = sym.name.clone()?;
-            let pins = own_pins(sym);
-            Some((name, (pins, sym.extends.clone())))
+            let property = |key: &str| {
+                sym.properties
+                    .iter()
+                    .find(|property| property.key.eq_ignore_ascii_case(key))
+                    .map(|property| property.value.clone())
+                    .filter(|value| !value.trim().is_empty())
+            };
+            Some((
+                name,
+                RawSymbol {
+                    pins: own_pins(sym),
+                    extends: sym.extends.clone(),
+                    description: property("Description"),
+                    datasheet: property("Datasheet"),
+                    footprint: property("Footprint"),
+                    keywords: property("ki_keywords"),
+                },
+            ))
         }));
         Ok(())
     }
@@ -68,8 +94,8 @@ impl LibReader {
         self.raw
             .keys()
             .map(|name| {
-                let pins = resolve_pins(&self.raw, name, &mut HashSet::new());
-                (name.clone(), SymbolMeta { pins })
+                let meta = resolve_meta(&self.raw, name, &mut HashSet::new());
+                (name.clone(), meta)
             })
             .collect()
     }
@@ -127,29 +153,38 @@ fn pin_meta(pin: &SymPin, unit: u8) -> Option<PinMeta> {
     })
 }
 
-/// Resolve a symbol's pins, following `extends` when it has none of its own.
+/// Resolve a symbol's metadata, following `extends` for inherited properties
+/// and for pins when the child has none of its own.
 ///
 /// Chains of arbitrary depth are supported; `visited` guarantees termination
 /// on `extends` cycles. A cycle or a missing parent is not an error: the
-/// symbol simply keeps the pins it has (none, since we only descend past
-/// pinless symbols) and downstream lookups surface unknown-pin diagnostics
-/// against that honest, empty pin set.
-fn resolve_pins<'a>(
-    raw: &'a HashMap<String, (Vec<PinMeta>, Option<String>)>,
+/// symbol keeps its own metadata, and a pinless symbol may therefore resolve
+/// to an honest empty pin set for downstream unknown-pin diagnostics.
+fn resolve_meta<'a>(
+    raw: &'a HashMap<String, RawSymbol>,
     name: &'a str,
     visited: &mut HashSet<&'a str>,
-) -> Vec<PinMeta> {
+) -> SymbolMeta {
     if !visited.insert(name) {
-        return Vec::new(); // extends cycle: terminate deliberately
+        return SymbolMeta::default(); // extends cycle: terminate deliberately
     }
-    let Some((pins, extends)) = raw.get(name) else {
-        return Vec::new(); // missing parent: keep the pins we have
+    let Some(symbol) = raw.get(name) else {
+        return SymbolMeta::default(); // missing parent
     };
-    if !pins.is_empty() {
-        return pins.clone();
-    }
-    match extends {
-        Some(parent) => resolve_pins(raw, parent, visited),
-        None => Vec::new(),
+    let parent = symbol
+        .extends
+        .as_deref()
+        .map(|parent| resolve_meta(raw, parent, visited))
+        .unwrap_or_default();
+    SymbolMeta {
+        pins: if symbol.pins.is_empty() {
+            parent.pins
+        } else {
+            symbol.pins.clone()
+        },
+        description: symbol.description.clone().or(parent.description),
+        datasheet: symbol.datasheet.clone().or(parent.datasheet),
+        footprint: symbol.footprint.clone().or(parent.footprint),
+        keywords: symbol.keywords.clone().or(parent.keywords),
     }
 }

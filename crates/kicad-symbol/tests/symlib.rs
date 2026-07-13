@@ -47,6 +47,43 @@ fn extends_chain_resolves() {
 }
 
 #[test]
+fn symbol_properties_surface_electrical_ratings_and_inherit() {
+    let lib_text = r#"(kicad_symbol_lib
+	(version 20231120)
+	(generator "test")
+	(symbol "Base"
+		(property "Footprint" "Package:SOT-23-5" (at 0 0 0))
+		(property "Datasheet" "https://example.test/ldo.pdf" (at 0 0 0))
+		(property "Description" "400mA fixed LDO" (at 0 0 0))
+		(property "ki_keywords" "LDO 400mA" (at 0 0 0))
+		(symbol "Base_1_1"
+			(pin power_in line (at 0 0 0) (length 2.54)
+				(name "VIN" (effects (font (size 1.27 1.27))))
+				(number "1" (effects (font (size 1.27 1.27)))))
+		)
+	)
+	(symbol "Fixed3V3"
+		(extends "Base")
+		(property "Description" "400mA fixed 3.3V LDO" (at 0 0 0))
+	)
+)
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("ratings.kicad_sym"), lib_text).unwrap();
+    let t = SymbolTable::from_symbol_dir(dir.path().to_path_buf());
+    let meta = t.symbol("ratings:Fixed3V3").unwrap();
+
+    assert_eq!(meta.description.as_deref(), Some("400mA fixed 3.3V LDO"));
+    assert_eq!(
+        meta.datasheet.as_deref(),
+        Some("https://example.test/ldo.pdf")
+    );
+    assert_eq!(meta.footprint.as_deref(), Some("Package:SOT-23-5"));
+    assert_eq!(meta.keywords.as_deref(), Some("LDO 400mA"));
+    assert_eq!(meta.pins.len(), 1);
+}
+
+#[test]
 fn deep_extends_chain_resolves() {
     let Some(t) = installed() else {
         eprintln!("SKIP");

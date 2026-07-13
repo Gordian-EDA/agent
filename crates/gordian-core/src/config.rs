@@ -21,7 +21,7 @@ pub const DEFAULT_MAX_TOKENS: u32 = 16_384;
 
 /// Default number of symbol and footprint hits when a tool input does not
 /// provide its own limit.
-pub const DEFAULT_SEARCH_LIMIT: usize = 8;
+pub const DEFAULT_SEARCH_LIMIT: usize = 5;
 
 /// Default long-edge cap for rendered schematic and board PNGs.
 pub const DEFAULT_RENDER_MAX_PX: u32 = 1600;

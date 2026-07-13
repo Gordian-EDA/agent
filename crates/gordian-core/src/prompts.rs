@@ -23,7 +23,7 @@ One YAML document:
   nets:
     VIN: { class: power }
 
-Component keys are plain refdes matching `[A-Z]+[0-9]+` (`R1`, not `C_VCAP1`). `part:` is a real KiCAD `Lib:Name`. R/C/L/D/LED aliases are built in; search other parts with `search_symbols` and reuse hits. Use `get_symbol_info` for ICs and ambiguous/power pins.
+Component keys are plain refdes matching `[A-Z]+[0-9]+` (`R1`, not `C_VCAP1`). `part:` is a real KiCAD `Lib:Name`. R/C/L/D/LED aliases are built in; search other parts with `search_symbols` and reuse hits. For ICs, use `get_symbol_info` to verify ratings and inspect ambiguous/power pins.
 `pins:` maps pin name or quoted pin number to a net; use numbers when names repeat. Unlisted pins become no-connect except power-INPUT pins, which must be wired. Net names should be UPPER_SNAKE.
 
 Useful sugar:

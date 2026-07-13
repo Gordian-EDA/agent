@@ -43,7 +43,7 @@ use serde_json::{Value, json};
 
 use circuit_lang::compile;
 use circuit_lang::model::{Component, Design, PinTarget};
-use kicad_cli::KicadCli;
+use kicad_cli::{ErcReport, KicadCli};
 use sch_io::read::lift;
 
 use crate::{AgentRuntime, Tool};
@@ -68,14 +68,14 @@ pub fn tool_defs() -> Vec<Tool> {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string" },
-                        "limit": { "type": "integer", "description": "Max hits (default 8).", "minimum": 1 }
+                        "limit": { "type": "integer", "description": "Max hits (default 5).", "minimum": 1 }
                     },
                     "required": ["query"]
                 }),
             },
             Def {
                 name: "get_symbol_info".into(),
-                description: "Return pin number/name/type/unit for a symbol `Lib:Name`."
+                description: "Return symbol ratings/datasheet/default footprint and pins."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -183,7 +183,7 @@ pub fn tool_defs() -> Vec<Tool> {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string" },
-                        "limit": { "type": "integer", "description": "Max hits (default 8).", "minimum": 1 }
+                        "limit": { "type": "integer", "description": "Max hits (default 5).", "minimum": 1 }
                     },
                     "required": ["query"]
                 }),
@@ -629,7 +629,14 @@ fn get_symbol_info(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     })
                 })
                 .collect();
-            Ok(json!({ "lib_id": lib_id, "pins": pins }))
+            Ok(json!({
+                "lib_id": lib_id,
+                "description": meta.description,
+                "keywords": meta.keywords,
+                "datasheet": meta.datasheet,
+                "default_footprint": meta.footprint,
+                "pins": pins,
+            }))
         }
         None => {
             let suggestions = ctx.provider().suggest(&lib_id);
@@ -880,6 +887,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             out["erc"] = json!({
                 "errors": errors,
                 "warnings": warnings,
+                "violations": erc_violation_values(&report),
             });
             out["erc_checked"] = json!(true);
             if errors == 0 && warnings == 0 {
@@ -1132,7 +1140,17 @@ fn run_erc(ctx: &AgentRuntime) -> Result<Value> {
         .erc(ctx.sch_path())
         .with_context(|| format!("running ERC on {}", ctx.sch_path().display()))?;
 
-    let violations: Vec<Value> = report
+    let violations = erc_violation_values(&report);
+
+    Ok(json!({
+        "errors": report.error_count(),
+        "warnings": report.warning_count(),
+        "violations": violations,
+    }))
+}
+
+fn erc_violation_values(report: &ErcReport) -> Vec<Value> {
+    report
         .violations
         .iter()
         .map(|v| {
@@ -1146,13 +1164,7 @@ fn run_erc(ctx: &AgentRuntime) -> Result<Value> {
             }
             item
         })
-        .collect();
-
-    Ok(json!({
-        "errors": report.error_count(),
-        "warnings": report.warning_count(),
-        "violations": violations,
-    }))
+        .collect()
 }
 
 /// A resolution hint for the ERC violation classes agents repeatedly fight
