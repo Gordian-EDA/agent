@@ -509,12 +509,12 @@ impl<P: Provider> Agent<P> {
         let mut failed_route_attempts = 0usize;
         let mut last_route_failure: Option<Value> = None;
         // `spawn_blocking` work is not cancelled when its join handle times out.
-        // Remember exact timed-out invocations so the model cannot immediately
-        // overlap the same operation while the original may still be finishing.
+        // Remember timed-out invocations so the model cannot overlap a mutation
+        // while the original non-cancellable work may still be finishing.
         let mut timed_out_tool_calls: Vec<(String, Value, u64)> = Vec::new();
-        // Advances after any dispatched mutating tool. An unchanged apply/route
-        // retry stays blocked after a timeout, while a real draft/board fix makes
-        // the same argument shape (often `{}`) a distinct invocation.
+        // Advances after any dispatched mutating tool. It distinguishes exact
+        // retries of timed-out reads; a timed-out mutation instead makes every
+        // later mutation unsafe for the rest of this subturn.
         let mut tool_state_revision = 0u64;
         let mut provider_requests = 0usize;
         let mut discovery_rounds_used: HashMap<String, usize> = HashMap::new();
@@ -700,6 +700,8 @@ impl<P: Provider> Agent<P> {
                     },
                 );
                 let route_retry_blocked = route_retry_blocked(failed_route_attempts, &call.fn_name);
+                let timed_out_mutation_blocked =
+                    timed_out_mutation_blocked(&timed_out_tool_calls, &call.fn_name);
                 let timeout_retry_blocked =
                     timed_out_retry_blocked(&timed_out_tool_calls, call, tool_state_revision);
                 let discovery_budget_blocked =
@@ -713,7 +715,19 @@ impl<P: Provider> Agent<P> {
                     && !timeout_retry_blocked
                     && !discovery_budget_blocked
                     && !schematic_review_blocked;
-                let (mut content, images, image_path) = if schematic_review_blocked {
+                let (mut content, images, image_path) = if timed_out_mutation_blocked {
+                    (
+                        json!({
+                            "error": "project mutation blocked after a timed-out mutation",
+                            "code": "timed_out_mutation_conflict",
+                            "prior_timed_out_tools": timed_out_tool_calls.iter().map(|(name, _, _)| name).collect::<Vec<_>>(),
+                            "note": "The prior mutation runs in non-cancellable blocking work and may still finish. No further schematic or PCB mutation is safe in this turn; use read-only inspection if useful, then report the timeout honestly.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if schematic_review_blocked {
                     (
                         json!({
                             "error": "semantic schematic review required before PCB regeneration",
@@ -1059,19 +1073,28 @@ fn schematic_review_required_before_pcb(
 }
 
 /// A timed-out `spawn_blocking` task may continue after its join handle is
-/// dropped. Applying the same draft through `{}` or explicit YAML is the same
-/// mutation, so block every `apply_design` retry until authoring advances the
-/// state revision. Other tools retain the narrower exact-call guard.
+/// dropped. Once a mutation times out, no later mutation is safe in this
+/// subturn. Reads retain the narrower exact-call, same-revision guard.
 fn timed_out_retry_blocked(
     timed_out: &[(String, Value, u64)],
     call: &ToolCall,
     state_revision: u64,
 ) -> bool {
+    if timed_out_mutation_blocked(timed_out, &call.fn_name) {
+        return true;
+    }
     timed_out.iter().any(|(name, arguments, revision)| {
         name == &call.fn_name
             && *revision == state_revision
             && (name == "apply_design" || arguments == &call.fn_arguments)
     })
+}
+
+fn timed_out_mutation_blocked(timed_out: &[(String, Value, u64)], fn_name: &str) -> bool {
+    tool_effect(fn_name) != ToolEffect::ReadOnly
+        && timed_out
+            .iter()
+            .any(|(name, _, _)| tool_effect(name) != ToolEffect::ReadOnly)
 }
 
 fn tool_result_is_timeout(value: &Value) -> bool {
@@ -2514,7 +2537,7 @@ mod tests {
     }
 
     #[test]
-    fn timed_out_apply_retry_guard_uses_the_project_state_revision() {
+    fn timed_out_mutation_guard_is_terminal_for_mutations_in_the_subturn() {
         let timed_out = vec![(
             "apply_design".to_string(),
             json!({"yaml": "components: []"}),
@@ -2542,11 +2565,19 @@ mod tests {
             &call("validate_design", json!({"yaml": "components: []"})),
             3,
         ));
-        assert!(!timed_out_retry_blocked(
+        assert!(timed_out_retry_blocked(
             &timed_out,
             &call("apply_design", json!({"yaml": "components: []"})),
             4,
         ));
+        assert!(timed_out_retry_blocked(
+            &timed_out,
+            &call("regenerate_board", json!({"bounds": {"w": 80, "h": 60}})),
+            4,
+        ));
+
+        let read_timeout = vec![("render_schematic".to_string(), json!({}), 3)];
+        assert!(!timed_out_mutation_blocked(&read_timeout, "apply_design"));
     }
 
     #[test]
