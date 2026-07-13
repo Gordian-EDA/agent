@@ -820,21 +820,16 @@ fn infer_layer_names(
 }
 
 fn pad_world(fp: &FootprintInstance, pad: &Pad) -> Point2 {
-    let origin = fp
-        .position
+    // Footprint children returned by GetItems are normalized to board-space by
+    // KiCad: moving a footprint translates every Pad.position, and rotating it
+    // rotates those positions about the footprint origin. This contradicts the
+    // legacy proto comment that calls the field relative, so do not apply the
+    // parent transform a second time here.
+    pad.position
         .as_ref()
         .map(point)
-        .unwrap_or(Point2 { x: 0.0, y: 0.0 });
-    let offset = pad
-        .position
-        .as_ref()
-        .map(point)
-        .unwrap_or(Point2 { x: 0.0, y: 0.0 });
-    let offset = offset.rotate(footprint_angle(fp));
-    Point2 {
-        x: origin.x + offset.x,
-        y: origin.y + offset.y,
-    }
+        .or_else(|| fp.position.as_ref().map(point))
+        .unwrap_or(Point2 { x: 0.0, y: 0.0 })
 }
 
 fn footprint_angle(fp: &FootprintInstance) -> f64 {
@@ -864,13 +859,13 @@ fn pad_size(pad: &Pad) -> (f64, f64) {
 }
 
 fn pad_angle(fp: &FootprintInstance, pad: &Pad) -> f64 {
-    footprint_angle(fp)
-        + pad
-            .pad_stack
-            .as_ref()
-            .and_then(|s| s.angle.as_ref())
-            .map(|a| a.value_degrees)
-            .unwrap_or(0.0)
+    // PadStack.angle is likewise already board-absolute. Fall back to the
+    // parent angle only for older or synthetic payloads that omit it.
+    pad.pad_stack
+        .as_ref()
+        .and_then(|stack| stack.angle.as_ref())
+        .map(|angle| angle.value_degrees)
+        .unwrap_or_else(|| footprint_angle(fp))
 }
 
 fn pad_layers(pad: &Pad, layer_names: &[String]) -> Vec<LayerRef> {
@@ -1242,14 +1237,17 @@ mod tests {
     fn footprint_with_pad(
         origin: (f64, f64),
         rotation: f64,
-        pad_offset: (f64, f64),
+        pad_position: (f64, f64),
         pad_size: (f64, f64),
     ) -> FootprintInstance {
         let pad = Pad {
             number: "1".to_owned(),
-            position: Some(v(pad_offset.0, pad_offset.1)),
+            position: Some(v(pad_position.0, pad_position.1)),
             pad_stack: Some(PadStack {
                 r#type: PadStackType::PstNormal as i32,
+                angle: Some(Angle {
+                    value_degrees: rotation,
+                }),
                 layers: vec![BoardLayer::BlFCu as i32],
                 copper_layers: vec![PadStackLayer {
                     layer: BoardLayer::BlFCu as i32,
@@ -1306,7 +1304,10 @@ mod tests {
 
     #[test]
     fn rotated_footprint_pads_round_trip_between_ipc_and_placement_geometry() {
-        let fp = footprint_with_pad((10.0, 20.0), 90.0, (2.0, 1.0), (4.0, 2.0));
+        // KiCad IPC returns footprint children in board coordinates. This pad
+        // began at local (2, 1); after the parent's +90° rotation and move to
+        // (10, 20), its serialized world position is (11, 18).
+        let fp = footprint_with_pad((10.0, 20.0), 90.0, (11.0, 18.0), (4.0, 2.0));
         let snapshot = snapshot_from_items(vec![fp], vec![], vec![], vec![], vec![]);
 
         let pad_obstacle = snapshot
