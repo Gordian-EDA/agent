@@ -723,7 +723,7 @@ fn validate_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         draft
     };
     let result = compile(&yaml, ctx.provider());
-    Ok(compile_report(&result.diagnostics))
+    compile_authoring_report(&result, ctx)
 }
 
 /// Build the `{ok, diagnostics, errors, warnings}` report a compile yields.
@@ -772,6 +772,58 @@ pub(crate) fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
     report
 }
 
+/// Add physical package compatibility to the normal circuit-language report.
+/// Keeping this beside `compile_report` makes create/edit/validate/apply expose
+/// the same pre-compose contract.
+fn compile_authoring_report(
+    result: &circuit_lang::CompileResult,
+    ctx: &AgentRuntime,
+) -> Result<Value> {
+    let mut report = compile_report(&result.diagnostics);
+    if let Some(design) = &result.design {
+        add_footprint_compatibility(&mut report, design, ctx)?;
+    }
+    Ok(report)
+}
+
+/// Returns `true` when at least one incompatible assignment was found.
+fn add_footprint_compatibility(
+    report: &mut Value,
+    design: &Design,
+    ctx: &AgentRuntime,
+) -> Result<bool> {
+    let mismatches = crate::footprint_compat::design_pin_mismatches(ctx, design)?;
+    if mismatches.is_empty() {
+        return Ok(false);
+    }
+
+    let errors = report.get("errors").and_then(Value::as_u64).unwrap_or(0)
+        + u64::try_from(mismatches.len()).unwrap_or(u64::MAX);
+    let diagnostics = report["diagnostics"]
+        .as_array_mut()
+        .expect("compile_report diagnostics must be an array");
+    diagnostics.extend(mismatches.iter().map(|mismatch| {
+        format!(
+            "error[footprint_pin_mismatch]: {} uses symbol {} with footprint {}; \
+             symbol pins absent from footprint: {:?}; footprint pads absent from symbol: {:?}",
+            mismatch.reference,
+            mismatch.symbol,
+            mismatch.footprint,
+            mismatch.symbol_pins_absent_from_footprint,
+            mismatch.footprint_pads_absent_from_symbol,
+        )
+        .into()
+    }));
+    report["ok"] = json!(false);
+    report["errors"] = json!(errors);
+    report["footprint_pin_mismatches"] = serde_json::to_value(mismatches)?;
+    report["next_tool"] = json!("edit_design");
+    report["next"] = json!(
+        "choose a footprint whose named electrical pad numbers match the symbol pins, then apply_design; unnumbered mechanical pads and repeated pads with a valid shared number are allowed"
+    );
+    Ok(true)
+}
+
 // ── 5. apply_design ────────────────────────────────────────────────────────
 
 fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -808,12 +860,15 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
     // Compile first; never render or write a design with errors.
     let result = compile(&yaml, ctx.provider());
+    let mut report = compile_report(&result.diagnostics);
     let Some(design) = result.design else {
-        let mut report = compile_report(&result.diagnostics);
         // `ok` is already false here (errors > 0), but be explicit for the LLM.
         report["ok"] = json!(false);
         return Ok(report);
     };
+    if add_footprint_compatibility(&mut report, &design, ctx)? {
+        return Ok(report);
+    }
 
     // Prior design (for the diff), lifted from the existing schematic.
     let prior_design = if ctx.sch_path().exists() {
@@ -1213,7 +1268,8 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     ctx.workspace()
         .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
-    let mut report = compile_report(&compile(&yaml, ctx.provider()).diagnostics);
+    let result = compile(&yaml, ctx.provider());
+    let mut report = compile_authoring_report(&result, ctx)?;
     report["draft_written"] = json!(true);
     add_draft_next_step(&mut report);
     Ok(report)
@@ -1230,7 +1286,8 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Some(yaml) = full_yaml {
         ctx.workspace()
             .write_draft(yaml, current_sch_text(ctx).as_deref())?;
-        let mut report = compile_report(&compile(yaml, ctx.provider()).diagnostics);
+        let result = compile(yaml, ctx.provider());
+        let mut report = compile_authoring_report(&result, ctx)?;
         report["draft_written"] = json!(true);
         report["mode"] = json!("full_replace");
         add_draft_next_step(&mut report);
@@ -1267,7 +1324,8 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     ctx.workspace()
         .write_draft(&edited, current_sch_text(ctx).as_deref())?;
 
-    let mut report = compile_report(&compile(&edited, ctx.provider()).diagnostics);
+    let result = compile(&edited, ctx.provider());
+    let mut report = compile_authoring_report(&result, ctx)?;
     report["replacements"] = json!(if replace_all { count } else { 1 });
     add_draft_next_step(&mut report);
     Ok(report)
@@ -1277,6 +1335,9 @@ fn add_draft_next_step(report: &mut Value) {
     let errors = report.get("errors").and_then(Value::as_u64).unwrap_or(0);
     let warnings = report.get("warnings").and_then(Value::as_u64).unwrap_or(0);
     report["validated"] = json!(true);
+    if report.get("next_tool").is_some() {
+        return; // preserve a more specific physical-compatibility recovery
+    }
     if errors == 0 && warnings == 0 {
         report["next_tool"] = json!("apply_design");
         report["next"] = json!(

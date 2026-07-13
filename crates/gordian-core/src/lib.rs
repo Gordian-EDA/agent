@@ -31,6 +31,7 @@
 
 mod agent;
 pub mod config;
+mod footprint_compat;
 pub mod llm;
 pub mod multisheet;
 pub mod prompts;

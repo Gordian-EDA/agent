@@ -760,6 +760,23 @@ fn staged_footprint_dir() -> (tempfile::TempDir, std::path::PathBuf) {
     ] {
         std::fs::copy(src.join(name), pretty.join(name)).unwrap();
     }
+    // Deliberately small connector package used to prove a large schematic
+    // connector cannot silently inherit a package with only four contacts.
+    std::fs::write(
+        pretty.join("PinHeader_1x04_Test.kicad_mod"),
+        r#"(footprint "PinHeader_1x04_Test"
+  (version 20240108)
+  (generator "gordian-test")
+  (layer "F.Cu")
+  (fp_rect (start -1 -1) (end 1 9) (stroke (width 0.05) (type default)) (fill none) (layer "F.CrtYd"))
+  (pad "1" thru_hole rect (at 0 0) (size 1.7 1.7) (drill 1) (layers "*.Cu" "*.Mask"))
+  (pad "2" thru_hole circle (at 0 2.54) (size 1.7 1.7) (drill 1) (layers "*.Cu" "*.Mask"))
+  (pad "3" thru_hole circle (at 0 5.08) (size 1.7 1.7) (drill 1) (layers "*.Cu" "*.Mask"))
+  (pad "4" thru_hole circle (at 0 7.62) (size 1.7 1.7) (drill 1) (layers "*.Cu" "*.Mask"))
+  (pad "" np_thru_hole circle (at 0 10) (size 1 1) (drill 1) (layers "*.Cu" "*.Mask"))
+)"#,
+    )
+    .unwrap();
     let path = tmp.path().to_path_buf();
     (tmp, path)
 }
@@ -795,6 +812,95 @@ fn validate_design_uses_the_stored_draft_without_resending_yaml() {
 
     assert_eq!(validated["ok"], serde_json::json!(true), "{validated}");
     assert_eq!(validated["errors"], serde_json::json!(0), "{validated}");
+}
+
+const CONNECTOR_60_WITH_FOUR_PAD_FOOTPRINT: &str = r#"
+version: 1
+blocks:
+  main:
+    components:
+      J1:
+        part: Connector:Conn_15X4
+        footprint: Fixtures:PinHeader_1x04_Test
+"#;
+
+#[test]
+fn create_design_rejects_60_pin_symbol_with_four_pad_footprint() {
+    let (ctx, _guard) = fixture_ctx();
+
+    let out = run_tool(
+        "create_design",
+        serde_json::json!({ "yaml": CONNECTOR_60_WITH_FOUR_PAD_FOOTPRINT }),
+        &ctx,
+    )
+    .unwrap();
+
+    assert_eq!(out["ok"], serde_json::json!(false), "{out}");
+    assert_eq!(out["errors"], serde_json::json!(1), "{out}");
+    assert_eq!(out["next_tool"], serde_json::json!("edit_design"), "{out}");
+    let mismatch = &out["footprint_pin_mismatches"][0];
+    assert_eq!(mismatch["reference"], serde_json::json!("J1"), "{out}");
+    assert_eq!(
+        mismatch["symbol_pins_absent_from_footprint"]
+            .as_array()
+            .map(Vec::len),
+        Some(60),
+        "{out}"
+    );
+    assert_eq!(
+        mismatch["footprint_pads_absent_from_symbol"],
+        serde_json::json!(["1", "2", "3", "4"]),
+        "{out}"
+    );
+    assert!(
+        out["next"]
+            .as_str()
+            .is_some_and(|next| next.contains("pad numbers match")),
+        "{out}"
+    );
+}
+
+#[test]
+fn edit_and_apply_preview_reject_incompatible_footprint_before_compose() {
+    let (ctx, _guard) = fixture_ctx();
+    let valid = r#"
+version: 1
+blocks:
+  main:
+    components:
+      R1:
+        part: Device:R
+        footprint: Fixtures:R_0603_1608Metric
+        pins: {1: SIG, 2: GND}
+"#;
+    let created = run_tool("create_design", serde_json::json!({ "yaml": valid }), &ctx).unwrap();
+    assert_eq!(created["ok"], serde_json::json!(true), "{created}");
+
+    let edited = run_tool(
+        "edit_design",
+        serde_json::json!({ "yaml": CONNECTOR_60_WITH_FOUR_PAD_FOOTPRINT }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(edited["ok"], serde_json::json!(false), "{edited}");
+    assert_eq!(
+        edited["mode"],
+        serde_json::json!("full_replace"),
+        "{edited}"
+    );
+    assert_eq!(
+        edited["footprint_pin_mismatches"][0]["reference"],
+        serde_json::json!("J1"),
+        "{edited}"
+    );
+
+    let preview = run_tool("apply_design", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(preview["ok"], serde_json::json!(false), "{preview}");
+    assert!(preview.get("would_write").is_none(), "{preview}");
+    assert!(
+        !ctx.sch_path().exists(),
+        "preview must not compose/write a schematic"
+    );
 }
 
 #[test]
