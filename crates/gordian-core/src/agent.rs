@@ -30,6 +30,7 @@
 //! [`AutoApprove`] is the headless test/automation implementation; an interactive
 //! UI supplies its own.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -69,9 +70,9 @@ const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 /// this bounds every other cycle (and therefore cost and context growth).
 const MAX_PROVIDER_REQUESTS_PER_TURN: usize = 32;
 
-/// Cap catalog exploration before the model must reuse its best prior hits.
-/// One assistant completion may batch several discovery calls and still costs
-/// only one round.
+/// Cap each kind of catalog exploration before the model must reuse its best
+/// prior hits. One assistant completion may batch several same-kind discovery
+/// calls and still costs that tool only one round.
 const MAX_DISCOVERY_ROUNDS_PER_SUBTURN: usize = 2;
 
 /// The human mutation gate. The loop calls [`Approvals::approve`] with either a
@@ -516,7 +517,7 @@ impl<P: Provider> Agent<P> {
         // the same argument shape (often `{}`) a distinct invocation.
         let mut tool_state_revision = 0u64;
         let mut provider_requests = 0usize;
-        let mut discovery_rounds_used = 0usize;
+        let mut discovery_rounds_used: HashMap<String, usize> = HashMap::new();
         let mut last_assistant_text = String::new();
 
         loop {
@@ -649,17 +650,28 @@ impl<P: Provider> Agent<P> {
                 });
             }
 
-            // Several symbol/footprint lookups batched into one assistant
-            // completion are one discovery round. After two such completions,
-            // synthesize only the discovery responses; unrelated calls in the
-            // same completion must still execute.
-            let has_discovery_calls = tool_calls
+            // Each exact discovery tool gets two completion-level rounds. A
+            // batch of same-named calls costs one round; exhausting one tool
+            // must not block another discovery tool or unrelated calls.
+            let discovery_tools_this_completion: HashSet<&str> = tool_calls
                 .iter()
-                .any(|call| is_discovery_tool(&call.fn_name));
-            let discovery_round_blocked =
-                has_discovery_calls && discovery_rounds_used >= MAX_DISCOVERY_ROUNDS_PER_SUBTURN;
-            if has_discovery_calls && !discovery_round_blocked {
-                discovery_rounds_used += 1;
+                .filter(|call| is_discovery_tool(&call.fn_name))
+                .map(|call| call.fn_name.as_str())
+                .collect();
+            let discovery_tools_blocked: HashSet<&str> = discovery_tools_this_completion
+                .iter()
+                .copied()
+                .filter(|name| {
+                    discovery_rounds_used.get(*name).copied().unwrap_or(0)
+                        >= MAX_DISCOVERY_ROUNDS_PER_SUBTURN
+                })
+                .collect();
+            for name in discovery_tools_this_completion
+                .iter()
+                .copied()
+                .filter(|name| !discovery_tools_blocked.contains(name))
+            {
+                *discovery_rounds_used.entry(name.to_string()).or_default() += 1;
             }
 
             // Run every requested tool, collecting the responses into one `tool`
@@ -687,7 +699,7 @@ impl<P: Provider> Agent<P> {
                 let timeout_retry_blocked =
                     timed_out_retry_blocked(&timed_out_tool_calls, call, tool_state_revision);
                 let discovery_budget_blocked =
-                    discovery_round_blocked && is_discovery_tool(&call.fn_name);
+                    discovery_tools_blocked.contains(call.fn_name.as_str());
                 let dispatched =
                     !route_retry_blocked && !timeout_retry_blocked && !discovery_budget_blocked;
                 let (mut content, images, image_path) = if discovery_budget_blocked {
@@ -2052,6 +2064,20 @@ mod tests {
         }
     }
 
+    fn tool_results(messages: &[ChatMessage]) -> HashMap<String, Value> {
+        messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|part| match part {
+                ContentPart::ToolResponse(response) => Some((
+                    response.call_id.clone(),
+                    serde_json::from_str::<Value>(&response.content).unwrap(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn test_runtime() -> AgentRuntime {
         let footprints = tempfile::tempdir().unwrap();
         // `project_info` does not build the footprint catalog, so the fixture
@@ -2248,7 +2274,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_budget_counts_completions_and_preserves_other_calls() {
+    async fn discovery_budget_is_independent_per_tool_and_preserves_other_calls() {
         let script = vec![
             batched_tool_calls(&[
                 ("first-a", "search_symbols", json!({"query": "resistor"})),
@@ -2256,9 +2282,58 @@ mod tests {
             ]),
             tool_call("second", "search_symbols", json!({"query": "connector"})),
             batched_tool_calls(&[
-                ("third-a", "search_symbols", json!({"query": "diode"})),
-                ("third-b", "get_symbol_info", json!({"lib_id": "Device:R"})),
-                ("third-project", "project_info", json!({})),
+                ("third-symbol", "search_symbols", json!({"query": "diode"})),
+                (
+                    "first-info",
+                    "get_symbol_info",
+                    json!({"lib_id": "Device:R"}),
+                ),
+                (
+                    "first-footprints",
+                    "search_footprints",
+                    json!({"query": "DIP-8"}),
+                ),
+                (
+                    "first-footprint-info",
+                    "get_footprint_info",
+                    json!({"lib_id": "Package_DIP:DIP-8_W7.62mm"}),
+                ),
+                ("project-after-symbols", "project_info", json!({})),
+            ]),
+            batched_tool_calls(&[
+                (
+                    "second-info",
+                    "get_symbol_info",
+                    json!({"lib_id": "Device:C"}),
+                ),
+                (
+                    "second-footprints",
+                    "search_footprints",
+                    json!({"query": "SOIC-8"}),
+                ),
+                (
+                    "second-footprint-info",
+                    "get_footprint_info",
+                    json!({"lib_id": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"}),
+                ),
+            ]),
+            batched_tool_calls(&[
+                (
+                    "third-info",
+                    "get_symbol_info",
+                    json!({"lib_id": "Device:D"}),
+                ),
+                (
+                    "third-footprints",
+                    "search_footprints",
+                    json!({"query": "SOT-23"}),
+                ),
+                (
+                    "third-footprint-info",
+                    "get_footprint_info",
+                    json!({"lib_id": "Package_TO_SOT_SMD:SOT-23"}),
+                ),
+                ("project-after-all", "project_info", json!({})),
             ]),
             final_text("authored with the prior hits"),
         ];
@@ -2272,36 +2347,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.stop_reason, StopReason::Completed);
-        assert_eq!(outcome.tool_calls_made, 4);
+        assert_eq!(outcome.tool_calls_made, 11);
 
         let requests = seen.lock().unwrap();
-        let final_request = requests.last().expect("final request was recorded");
-        let mut results = std::collections::HashMap::new();
-        for response in final_request
-            .iter()
-            .flat_map(|message| message.content.iter())
-            .filter_map(|part| match part {
-                ContentPart::ToolResponse(response) => Some(response),
-                _ => None,
-            })
-        {
-            results.insert(
-                response.call_id.as_str(),
-                serde_json::from_str::<Value>(&response.content).unwrap(),
+        let after_third_round = tool_results(&requests[3]);
+        assert_eq!(
+            after_third_round["third-symbol"]["code"],
+            "discovery_budget_exhausted"
+        );
+        for id in [
+            "first-info",
+            "first-footprints",
+            "first-footprint-info",
+            "project-after-symbols",
+        ] {
+            assert_ne!(
+                after_third_round[id]["code"], "discovery_budget_exhausted",
+                "exhausted search_symbols must not block {id}"
             );
         }
-        for id in ["third-a", "third-b"] {
-            assert_eq!(results[id]["code"], "discovery_budget_exhausted");
-            assert!(
-                results[id]["note"]
-                    .as_str()
-                    .unwrap()
-                    .contains("proceed to authoring")
-            );
+
+        let after_fifth_round = tool_results(&requests[5]);
+        for id in ["third-info", "third-footprints", "third-footprint-info"] {
+            assert_eq!(after_fifth_round[id]["code"], "discovery_budget_exhausted");
         }
         assert_ne!(
-            results["third-project"]["code"], "discovery_budget_exhausted",
-            "a non-discovery call in the same completion must still dispatch"
+            after_fifth_round["project-after-all"]["code"], "discovery_budget_exhausted",
+            "a non-discovery call in the same completion must dispatch"
         );
     }
 

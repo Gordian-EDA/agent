@@ -40,7 +40,7 @@ NEW: write one complete `create_design(yaml)` draft. EDIT: call `read_schematic(
 Treat validation warnings as work, not success. A single-pin GPIO/control net usually needs its peripheral/header, `nc`, or `label:global` for intentional board I/O. Expose only requested I/O; mark spare pins `nc`.
 
 Schematic flow:
-1. Batch needed symbol/pin/footprint lookups in one tool-call round, plus at most one refinement; never serially search synonyms/cosmetic variants. Use built-ins directly: `Device:R`, `Device:C`, `Device:LED`, `power:GND`, `power:+3V3`, `Connector:Conn_01x02_Pin`.
+1. Batch each lookup tool's calls in one round, with at most one refinement per tool; never serially search synonyms/cosmetic variants. Use built-ins directly: `Device:R`, `Device:C`, `Device:LED`, `power:GND`, `power:+3V3`, `Connector:Conn_01x02_Pin`.
 2. For a PCB, choose real footprints now with `search_footprints` / `get_footprint_info`; put `footprint:` in YAML before apply.
 3. Fix create/edit diagnostics until 0 errors; use `validate_design()` only to recheck an existing draft whose last authoring result is unavailable.
 4. Optionally `review_design(intent)` once, then `apply_design()` through approval. Apply already runs ERC.
