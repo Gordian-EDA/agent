@@ -48,13 +48,28 @@ impl GenaiProvider {
             .model
             .clone()
             .context("llm.model not set in Gordian config")?;
-        let adapter_kind = config
+        let mut adapter_kind = config
             .adapter
             .as_deref()
             .map(parse_adapter_kind)
             .transpose()?;
+        // `adapter = "openai"` is the natural provider spelling in user
+        // config, but genai distinguishes the Chat Completions and Responses
+        // wire adapters. Modern GPT-5 models with reasoning + function tools
+        // require Responses on OpenAI's own API. Preserve an explicit Chat
+        // adapter for third-party compatible endpoints, where Responses may
+        // not exist.
+        if adapter_kind == Some(AdapterKind::OpenAI)
+            && model.starts_with("gpt-5")
+            && config
+                .endpoint
+                .as_deref()
+                .is_none_or(is_official_openai_endpoint)
+        {
+            adapter_kind = Some(AdapterKind::OpenAIResp);
+        }
         let api_key = config.api_key.clone();
-        let endpoint = config.endpoint.clone();
+        let endpoint = config.endpoint.as_deref().map(normalize_endpoint_base);
         let mut builder = Client::builder().with_auth_resolver_fn(
             move |_model_iden| -> std::result::Result<Option<AuthData>, genai::resolver::Error> {
                 Ok(Some(match &api_key {
@@ -90,6 +105,32 @@ impl GenaiProvider {
             vision: config.vision_capable,
         })
     }
+}
+
+/// `genai` resolves service paths with URL-join semantics. A base ending in
+/// `/v1` would therefore replace `v1` with `chat/completions`; the directory
+/// form `/v1/` correctly appends it. Normalize here because `/v1` is the common
+/// spelling used by OpenAI-compatible API documentation and config examples.
+fn normalize_endpoint_base(endpoint: &str) -> String {
+    let mut endpoint = endpoint.trim().to_owned();
+    let path_end = endpoint
+        .find(|ch| ['?', '#'].contains(&ch))
+        .unwrap_or(endpoint.len());
+    if !endpoint[..path_end].ends_with('/') {
+        endpoint.insert(path_end, '/');
+    }
+    endpoint
+}
+
+fn is_official_openai_endpoint(endpoint: &str) -> bool {
+    let endpoint = endpoint.trim();
+    let Some(rest) = endpoint
+        .strip_prefix("https://")
+        .or_else(|| endpoint.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    rest.split(['/', '?', '#']).next() == Some("api.openai.com")
 }
 
 #[async_trait]
@@ -339,6 +380,43 @@ mod tests {
                 "anthropic/claude-sonnet-4-5".to_string()
             )
         );
+    }
+
+    #[test]
+    fn endpoint_base_preserves_the_version_path_for_url_joining() {
+        assert_eq!(
+            normalize_endpoint_base("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/"
+        );
+        assert_eq!(
+            normalize_endpoint_base(" https://gateway.example/v1/?region=us "),
+            "https://gateway.example/v1/?region=us"
+        );
+        assert_eq!(
+            normalize_endpoint_base("https://gateway.example/api?region=us"),
+            "https://gateway.example/api/?region=us"
+        );
+    }
+
+    #[test]
+    fn official_openai_gpt5_uses_the_responses_adapter() {
+        let provider = GenaiProvider::from_config(&LlmConfig {
+            adapter: Some("openai".to_string()),
+            model: Some("gpt-5.4-nano".to_string()),
+            endpoint: Some("https://api.openai.com/v1".to_string()),
+            ..LlmConfig::default()
+        })
+        .unwrap();
+        assert_eq!(provider.status().0, "OpenAIResp");
+
+        let compatible_gateway = GenaiProvider::from_config(&LlmConfig {
+            adapter: Some("openai".to_string()),
+            model: Some("gpt-5-compatible".to_string()),
+            endpoint: Some("https://gateway.example/v1".to_string()),
+            ..LlmConfig::default()
+        })
+        .unwrap();
+        assert_eq!(compatible_gateway.status().0, "OpenAI");
     }
 
     #[test]
