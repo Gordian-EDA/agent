@@ -325,18 +325,16 @@ impl SnapshotBuilder {
                 let Ok(pad) = item.to_msg::<Pad>() else {
                     continue;
                 };
-                let center = pad_world(fp, &pad);
+                let terminal = pad_world(fp, &pad);
+                let (center, width, height) = pad_obstacle_geometry(fp, &pad);
                 let layers = pad_layers(&pad, &self.layer_names);
-                let (width, height) = pad_size(&pad);
-                let half = Point2::new(width / 2.0, height / 2.0)
-                    .rotated_half_extents(pad_angle(fp, &pad));
                 let net = pad.net.as_ref().and_then(net_name);
                 self.obstacles.push(Obstacle {
                     kind: format!("pad:{reference}"),
                     layers: layers.clone(),
                     center,
-                    width: half.x * 2.0,
-                    height: half.y * 2.0,
+                    width,
+                    height,
                     connected_to: net.clone().into_iter().collect(),
                 });
                 if let Some(net) = &net {
@@ -344,8 +342,10 @@ impl SnapshotBuilder {
                         .entry(net.clone())
                         .or_default()
                         .push(RoutePoint {
-                            x: center.x,
-                            y: center.y,
+                            // The electrical terminal is the pad/hole anchor,
+                            // not the center of an offset copper shape.
+                            x: terminal.x,
+                            y: terminal.y,
                             layer: layers.first().cloned().unwrap_or_else(LayerRef::top),
                         });
                 }
@@ -843,21 +843,6 @@ fn rotation_swaps_axes(rotation: f64) -> bool {
     matches!(geom::snap_quadrant(rotation) as i32, 90 | 270)
 }
 
-fn pad_size(pad: &Pad) -> (f64, f64) {
-    let Some(stack) = &pad.pad_stack else {
-        return (0.0, 0.0);
-    };
-    let layer = stack
-        .copper_layers
-        .iter()
-        .find(|l| l.size.is_some() && layer_enum(l.layer) == Some(BoardLayer::BlFCu))
-        .or_else(|| stack.copper_layers.iter().find(|l| l.size.is_some()));
-    layer
-        .and_then(|l| l.size.as_ref())
-        .map(|size| (nm_to_mm(size.x_nm), nm_to_mm(size.y_nm)))
-        .unwrap_or((0.0, 0.0))
-}
-
 fn pad_angle(fp: &FootprintInstance, pad: &Pad) -> f64 {
     // PadStack.angle is likewise already board-absolute. Fall back to the
     // parent angle only for older or synthetic payloads that omit it.
@@ -866,6 +851,66 @@ fn pad_angle(fp: &FootprintInstance, pad: &Pad) -> f64 {
         .and_then(|stack| stack.angle.as_ref())
         .map(|angle| angle.value_degrees)
         .unwrap_or_else(|| footprint_angle(fp))
+}
+
+/// Conservative board-space envelope of every copper shape in a pad stack.
+///
+/// The routing model stores one obstacle geometry with a layer set, while KiCad
+/// permits distinct size and center offsets per copper layer. Using their union
+/// on every occupied layer may reserve a little extra space, but it never
+/// under-represents copper or loses an offset shape on another layer.
+fn pad_obstacle_geometry(fp: &FootprintInstance, pad: &Pad) -> (Point2, f64, f64) {
+    let anchor = pad_world(fp, pad);
+    let angle = pad_angle(fp, pad);
+    let Some(stack) = &pad.pad_stack else {
+        return (anchor, 0.0, 0.0);
+    };
+    let mut bounds: Option<Rect> = None;
+    for layer in &stack.copper_layers {
+        let Some(size) = &layer.size else {
+            continue;
+        };
+        let offset = layer
+            .offset
+            .as_ref()
+            .map(point)
+            .unwrap_or(Point2::new(0.0, 0.0))
+            .rotate(angle);
+        let center = Point2::new(anchor.x + offset.x, anchor.y + offset.y);
+        let half = Point2::new(
+            nm_to_mm(size.x_nm).abs() / 2.0,
+            nm_to_mm(size.y_nm).abs() / 2.0,
+        )
+        .rotated_half_extents(angle);
+        let shape = Rect::new(
+            center.x - half.x,
+            center.y - half.y,
+            center.x + half.x,
+            center.y + half.y,
+        );
+        match &mut bounds {
+            Some(bounds) => {
+                bounds.min_x = bounds.min_x.min(shape.min_x);
+                bounds.max_x = bounds.max_x.max(shape.max_x);
+                bounds.min_y = bounds.min_y.min(shape.min_y);
+                bounds.max_y = bounds.max_y.max(shape.max_y);
+            }
+            None => bounds = Some(shape),
+        }
+    }
+    let Some(bounds) = bounds else {
+        return (anchor, 0.0, 0.0);
+    };
+    // Keep the envelope centered on the electrical anchor. Besides making the
+    // obstacle conservative on both sides, this preserves the PartPad offset
+    // recovered by place_problem while still covering every shifted shape.
+    let half_w = (anchor.x - bounds.min_x)
+        .abs()
+        .max((bounds.max_x - anchor.x).abs());
+    let half_h = (anchor.y - bounds.min_y)
+        .abs()
+        .max((bounds.max_y - anchor.y).abs());
+    (anchor, half_w * 2.0, half_h * 2.0)
 }
 
 fn pad_layers(pad: &Pad, layer_names: &[String]) -> Vec<LayerRef> {
@@ -1327,6 +1372,46 @@ mod tests {
         assert!(part.pads[0].offset.near_eq(Point2::new(2.0, 1.0), 1e-9));
         assert!((part.pads[0].width - 4.0).abs() < 1e-9);
         assert!((part.pads[0].height - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pad_geometry_conservatively_covers_per_layer_sizes_and_offsets() {
+        let fp = FootprintInstance {
+            position: Some(v(10.0, 10.0)),
+            ..Default::default()
+        };
+        let pad = Pad {
+            position: Some(v(10.0, 10.0)),
+            pad_stack: Some(PadStack {
+                angle: Some(Angle {
+                    value_degrees: 90.0,
+                }),
+                copper_layers: vec![
+                    PadStackLayer {
+                        layer: BoardLayer::BlFCu as i32,
+                        size: Some(v(2.0, 2.0)),
+                        offset: Some(v(1.0, 0.0)),
+                        ..Default::default()
+                    },
+                    PadStackLayer {
+                        layer: BoardLayer::BlBCu as i32,
+                        size: Some(v(4.0, 2.0)),
+                        offset: Some(v(-1.0, 0.0)),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let (center, width, height) = pad_obstacle_geometry(&fp, &pad);
+
+        assert!(center.near_eq(Point2::new(10.0, 10.0), 1e-9));
+        assert!((width - 2.0).abs() < 1e-9);
+        // F.Cu spans y=8..10 and B.Cu spans y=9..13. Centering the
+        // conservative envelope on the terminal gives y=7..13.
+        assert!((height - 6.0).abs() < 1e-9);
     }
 
     #[test]
