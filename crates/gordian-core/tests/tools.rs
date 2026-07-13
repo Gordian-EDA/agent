@@ -1318,6 +1318,13 @@ fn place_board_failure_suggests_a_larger_bounds() {
         serde_json::json!(false),
         "should not fit in 3x3: {out}"
     );
+    assert_eq!(out["placement_applied"], serde_json::json!(false));
+    assert!(
+        out["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("no positions were written")),
+        "failed placement must be an explicit tool error: {out}"
+    );
     let s = &out["suggested_min_bounds_mm"];
     let (w, h) = (s["w"].as_f64().unwrap(), s["h"].as_f64().unwrap());
     assert!(

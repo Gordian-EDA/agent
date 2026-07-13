@@ -611,6 +611,7 @@ pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 
     let mut out = json!({
+        "placement_applied": result.legal,
         "legal": result.legal,
         "hpwl": result.report.hpwl,
         "overlaps_resolved": result.report.overlaps_resolved,
@@ -620,10 +621,10 @@ pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "placement is legal (no courtyard overlap, all parts in bounds). \
              Call route_board next, or render_board to see it."
         } else {
-            "placement is NOT legal — the board is too tight for these parts. The fix is more \
-             room, not rearrangement: enlarge the board outline or regenerate_board bounds to at least \
-             suggested_min_bounds_mm, regenerate_board again, then re-run place_board. \
-             Locking/nudging parts won't help when the board is simply too small for the courtyards."
+            "placement is NOT legal, so no footprint positions were written and the board remains at \
+             its previous (usually regeneration-seed) positions. To keep the requested board size, \
+             choose smaller appropriate footprints; otherwise regenerate_board with bounds at least \
+             suggested_min_bounds_mm, then run place_board once."
         },
     });
     if let (Value::Object(o), Value::Object(e)) = (&mut out, extra) {
@@ -632,7 +633,35 @@ pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !hint_suggestions.is_empty() {
         out["hint_suggestions"] = Value::Array(hint_suggestions);
     }
+    if !result.legal {
+        out["error"] = Value::String(illegal_placement_error(&out));
+    }
     Ok(out)
+}
+
+fn illegal_placement_error(result: &Value) -> String {
+    let current_w = result
+        .pointer("/current_bounds_mm/w")
+        .and_then(Value::as_f64)
+        .unwrap_or_default();
+    let current_h = result
+        .pointer("/current_bounds_mm/h")
+        .and_then(Value::as_f64)
+        .unwrap_or_default();
+    let suggested_w = result
+        .pointer("/suggested_min_bounds_mm/w")
+        .and_then(Value::as_f64)
+        .unwrap_or(current_w);
+    let suggested_h = result
+        .pointer("/suggested_min_bounds_mm/h")
+        .and_then(Value::as_f64)
+        .unwrap_or(current_h);
+    format!(
+        "placement failed and no positions were written: the placer could not legally pack the \
+         selected footprints in {current_w} x {current_h} mm. Choose smaller appropriate \
+         footprints to preserve that board size, or regenerate with at least \
+         {suggested_w} x {suggested_h} mm, then run place_board once."
+    )
 }
 
 fn write_placement(ctx: &AgentRuntime, moves: &[FootprintMove]) -> std::result::Result<(), String> {
@@ -791,5 +820,17 @@ mod tests {
         );
         assert_eq!(tracks_only["track_count"], json!(2));
         assert_eq!(tracks_only["via_count"], json!(0));
+    }
+
+    #[test]
+    fn illegal_placement_error_says_nothing_was_written_and_gives_both_recoveries() {
+        let message = illegal_placement_error(&json!({
+            "current_bounds_mm": {"w": 45.0, "h": 30.0},
+            "suggested_min_bounds_mm": {"w": 69.0, "h": 46.0},
+        }));
+
+        assert!(message.contains("no positions were written"));
+        assert!(message.contains("smaller appropriate footprints"));
+        assert!(message.contains("69 x 46 mm"));
     }
 }
