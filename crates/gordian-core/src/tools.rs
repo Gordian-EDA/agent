@@ -845,14 +845,20 @@ fn add_footprint_compatibility(
         .as_array_mut()
         .expect("compile_report diagnostics must be an array");
     diagnostics.extend(mismatches.iter().map(|mismatch| {
+        let polarity = mismatch
+            .polarity_mismatch
+            .as_deref()
+            .map(|reason| format!("; polarity mismatch: {reason}"))
+            .unwrap_or_default();
         format!(
             "error[footprint_pin_mismatch]: {} uses symbol {} with footprint {}; \
-             symbol pins absent from footprint: {:?}; footprint pads absent from symbol: {:?}",
+             symbol pins absent from footprint: {:?}; footprint pads absent from symbol: {:?}{}",
             mismatch.reference,
             mismatch.symbol,
             mismatch.footprint,
             mismatch.symbol_pins_absent_from_footprint,
             mismatch.footprint_pads_absent_from_symbol,
+            polarity,
         )
         .into()
     }));
@@ -861,7 +867,7 @@ fn add_footprint_compatibility(
     report["footprint_pin_mismatches"] = serde_json::to_value(mismatches)?;
     report["next_tool"] = json!("edit_design");
     report["next"] = json!(
-        "choose a footprint whose named electrical pad numbers match the symbol pins, then apply_design; unnumbered mechanical pads and repeated pads with a valid shared number are allowed"
+        "choose a footprint whose named electrical pad numbers match the symbol pins and whose capacitor polarity matches the symbol, then apply_design; unnumbered mechanical pads and repeated pads with a valid shared number are allowed; use Device:C_Polarized (pin 1 positive) with polarized CP/C_Elec footprints, and Device:C with ordinary non-polarized capacitor footprints"
     );
     Ok(true)
 }

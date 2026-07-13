@@ -899,6 +899,72 @@ fn create_design_rejects_60_pin_symbol_with_four_pad_footprint() {
 }
 
 #[test]
+fn create_design_rejects_unpolarized_symbol_with_electrolytic_footprint() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let yaml = r#"
+version: 1
+blocks:
+  main:
+    components:
+      C1:
+        part: Device:C
+        footprint: Capacitor_SMD:CP_Elec_8x10.5
+        pins: {1: VBUS, 2: GND}
+"#;
+
+    let out = run_tool("create_design", serde_json::json!({ "yaml": yaml }), &ctx).unwrap();
+
+    assert_eq!(out["ok"], serde_json::json!(false), "{out}");
+    assert_eq!(out["errors"], serde_json::json!(1), "{out}");
+    let mismatch = &out["footprint_pin_mismatches"][0];
+    assert_eq!(mismatch["reference"], serde_json::json!("C1"), "{out}");
+    assert!(
+        mismatch["polarity_mismatch"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("Device:C_Polarized")),
+        "{out}"
+    );
+    assert!(
+        mismatch.get("symbol_pins_absent_from_footprint").is_none(),
+        "matching pad numbers should not be reported as the cause: {out}"
+    );
+    assert!(
+        out["diagnostics"]
+            .as_array()
+            .is_some_and(|diagnostics| diagnostics.iter().any(|diagnostic| diagnostic
+                .as_str()
+                .is_some_and(|diagnostic| diagnostic.contains("positive pad")))),
+        "{out}"
+    );
+}
+
+#[test]
+fn create_design_accepts_polarized_symbol_alias_with_electrolytic_footprint() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let yaml = r#"
+version: 1
+blocks:
+  main:
+    components:
+      C1:
+        part: Device:C_Polarized_Small
+        footprint: Capacitor_SMD:CP_Elec_8x10.5
+        pins: {1: VBUS, 2: GND}
+"#;
+
+    let out = run_tool("create_design", serde_json::json!({ "yaml": yaml }), &ctx).unwrap();
+
+    assert_eq!(out["ok"], serde_json::json!(true), "{out}");
+    assert!(out.get("footprint_pin_mismatches").is_none(), "{out}");
+}
+
+#[test]
 fn edit_and_apply_preview_reject_incompatible_footprint_before_compose() {
     let (ctx, _guard) = fixture_ctx();
     let valid = r#"

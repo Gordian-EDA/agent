@@ -15,6 +15,8 @@ pub(crate) struct FootprintPinMismatch {
     pub(crate) reference: String,
     pub(crate) symbol: String,
     pub(crate) footprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) polarity_mismatch: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) footprint_pads_absent_from_symbol: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -94,11 +96,14 @@ fn assignment_mismatches<'a>(
             symbol.pins.iter().map(|pin| pin.number.as_str()),
             footprint.pads.iter().map(|pad| pad.number.as_str()),
         );
-        if !extra_pads.is_empty() || !missing_pins.is_empty() {
+        let polarity_mismatch =
+            capacitor_polarity_mismatch(assignment.symbol, &footprint_id).map(str::to_owned);
+        if !extra_pads.is_empty() || !missing_pins.is_empty() || polarity_mismatch.is_some() {
             mismatches.push(FootprintPinMismatch {
                 reference: assignment.reference.to_owned(),
                 symbol: assignment.symbol.to_owned(),
                 footprint: footprint_id.to_string(),
+                polarity_mismatch,
                 footprint_pads_absent_from_symbol: extra_pads,
                 symbol_pins_absent_from_footprint: missing_pins,
             });
@@ -131,9 +136,79 @@ fn pad_number_differences<'a>(
     (extra_pads, missing_pins)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapacitorPolarity {
+    Polarized,
+    Unpolarized,
+}
+
+fn capacitor_polarity_mismatch(
+    symbol_id: &str,
+    footprint_id: &FootprintId,
+) -> Option<&'static str> {
+    match (
+        symbol_capacitor_polarity(symbol_id),
+        footprint_capacitor_polarity(footprint_id),
+    ) {
+        (Some(CapacitorPolarity::Unpolarized), Some(CapacitorPolarity::Polarized)) => Some(
+            "unpolarized capacitor symbol cannot express the footprint's positive pad; use a Device:C_Polarized variant (pin 1 positive) or a non-polarized capacitor footprint",
+        ),
+        (Some(CapacitorPolarity::Polarized), Some(CapacitorPolarity::Unpolarized)) => Some(
+            "polarized capacitor symbol is paired with an ordinary non-polarized capacitor footprint; use a Device:C variant or select a polarized CP/C_Elec footprint",
+        ),
+        _ => None,
+    }
+}
+
+fn symbol_capacitor_polarity(symbol_id: &str) -> Option<CapacitorPolarity> {
+    let (library, name) = symbol_id.split_once(':')?;
+    if library != "Device" {
+        return None;
+    }
+    if name.starts_with("C_Polarized") {
+        return Some(CapacitorPolarity::Polarized);
+    }
+    if matches!(name, "C" | "C_Small" | "C_US" | "C_Small_US" | "C_45deg") {
+        return Some(CapacitorPolarity::Unpolarized);
+    }
+    None
+}
+
+fn footprint_capacitor_polarity(footprint_id: &FootprintId) -> Option<CapacitorPolarity> {
+    let library = footprint_id.library().as_str();
+    let name = footprint_id.name();
+    let polarized = match library {
+        "Capacitor_SMD" => name.starts_with("CP_") || name.starts_with("C_Elec_"),
+        "Capacitor_THT" | "Capacitor_Tantalum_SMD" => name.starts_with("CP_"),
+        _ => false,
+    };
+    if polarized {
+        return Some(CapacitorPolarity::Polarized);
+    }
+
+    let unpolarized = match library {
+        // Standard chip-capacitor names start with a numeric package size.
+        // Keeping this narrow avoids guessing about trimmers or vendor parts.
+        "Capacitor_SMD" => name
+            .strip_prefix("C_")
+            .and_then(|suffix| suffix.as_bytes().first())
+            .is_some_and(u8::is_ascii_digit),
+        "Capacitor_THT" => ["C_Axial_", "C_Disc_", "C_Radial_", "C_Rect_"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix)),
+        _ => false,
+    };
+    unpolarized.then_some(CapacitorPolarity::Unpolarized)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::pad_number_differences;
+    use super::{capacitor_polarity_mismatch, pad_number_differences};
+    use kicad_footprint::FootprintId;
+
+    fn footprint(id: &str) -> FootprintId {
+        FootprintId::parse(id).expect("valid test footprint id")
+    }
 
     #[test]
     fn detects_both_directions_of_numbered_pad_mismatch() {
@@ -165,5 +240,80 @@ mod tests {
 
         assert_eq!(extra, ["3"]);
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn rejects_unpolarized_symbol_with_polarized_footprints() {
+        for footprint_id in [
+            "Capacitor_SMD:CP_Elec_8x10.5",
+            "Capacitor_SMD:C_Elec_10x10.2",
+            "Capacitor_THT:CP_Radial_D8.0mm_P3.50mm",
+            "Capacitor_Tantalum_SMD:CP_EIA-3216-18_Kemet-A",
+        ] {
+            let reason = capacitor_polarity_mismatch("Device:C", &footprint(footprint_id));
+            assert!(
+                reason.is_some_and(|reason| reason.contains("Device:C_Polarized")),
+                "expected actionable mismatch for {footprint_id}, got {reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_polarized_symbol_with_ordinary_capacitor_footprints() {
+        for footprint_id in [
+            "Capacitor_SMD:C_0603_1608Metric",
+            "Capacitor_THT:C_Disc_D5.0mm_W2.5mm_P5.00mm",
+        ] {
+            let reason = capacitor_polarity_mismatch(
+                "Device:C_Polarized_Small_US",
+                &footprint(footprint_id),
+            );
+            assert!(
+                reason.is_some_and(|reason| reason.contains("non-polarized")),
+                "expected actionable mismatch for {footprint_id}, got {reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_matching_capacitor_polarity_and_avoids_unknown_guesses() {
+        for symbol_id in [
+            "Device:C_Polarized",
+            "Device:C_Polarized_Small",
+            "Device:C_Polarized_US",
+            "Device:C_Polarized_Small_US",
+        ] {
+            assert_eq!(
+                capacitor_polarity_mismatch(symbol_id, &footprint("Capacitor_SMD:CP_Elec_8x10.5")),
+                None,
+                "known polarized alias {symbol_id} must be accepted"
+            );
+        }
+        for symbol_id in ["Device:C", "Device:C_Small", "Device:C_US"] {
+            assert_eq!(
+                capacitor_polarity_mismatch(
+                    symbol_id,
+                    &footprint("Capacitor_SMD:C_0603_1608Metric")
+                ),
+                None,
+                "ordinary symbol {symbol_id} must accept a ceramic footprint"
+            );
+        }
+        assert_eq!(
+            capacitor_polarity_mismatch(
+                "Device:C_Trim",
+                &footprint("Capacitor_SMD:CP_Elec_8x10.5")
+            ),
+            None,
+            "special capacitor symbols stay outside the narrow rule"
+        );
+        assert_eq!(
+            capacitor_polarity_mismatch(
+                "Device:C_Polarized",
+                &footprint("Vendor:Unknown_Capacitor_0603")
+            ),
+            None,
+            "unknown footprint naming must not be guessed"
+        );
     }
 }
