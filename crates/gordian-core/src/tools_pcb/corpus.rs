@@ -145,6 +145,7 @@ pub fn routed_board_text(
             .iter()
             .map(|part| super::create::SeedPart {
                 reference: part.reference.clone(),
+                value: None,
                 footprint: part.footprint.clone(),
                 pad_nets: part.pad_nets.clone(),
                 locked: part.locked.clone(),

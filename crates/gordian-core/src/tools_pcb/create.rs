@@ -30,6 +30,9 @@ pub(super) struct BoardSeedSpec {
 #[derive(Debug, Clone)]
 pub(super) struct SeedPart {
     pub(super) reference: String,
+    /// Value from the committed schematic netlist. Corpus-only seeds have no
+    /// schematic counterpart and leave this unset to retain the library value.
+    pub(super) value: Option<String>,
     pub(super) footprint: String,
     pub(super) pad_nets: BTreeMap<String, String>,
     pub(super) locked: Option<LockedAt>,
@@ -218,6 +221,7 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         parts.push(SeedPart {
             reference: component.reference.clone(),
+            value: Some(component.value.clone()),
             footprint,
             pad_nets: pad_nets_by_ref
                 .remove(&component.reference)
@@ -378,6 +382,7 @@ pub(super) fn emit_seed_board(
         })?;
         parts.push(SeedFootprint {
             reference: dp.reference.clone(),
+            value: dp.value.clone(),
             lib_id: dp.footprint.clone(),
             source,
             pad_nets: dp.pad_nets.clone(),
@@ -422,6 +427,7 @@ fn add_default_power_pours(rules: &mut SeedRules, parts: &[SeedPart]) {
 #[derive(Debug, Clone)]
 struct SeedFootprint {
     reference: String,
+    value: Option<String>,
     lib_id: String,
     source: String,
     pad_nets: BTreeMap<String, String>,
@@ -814,7 +820,11 @@ fn transform_seed_node(
         | "tags"
         | "descr"
         | "duplicate_pad_numbers_are_jumpers" => Ok(None),
-        "property" => Ok(Some(transform_seed_property(node, &part.reference))),
+        "property" => Ok(Some(transform_seed_property(
+            node,
+            &part.reference,
+            part.value.as_deref(),
+        ))),
         "pad" => Ok(Some(transform_seed_pad(node, part, net_codes, fp_rot)?)),
         _ => Ok(Some(node.to_owned())),
     }
@@ -822,20 +832,48 @@ fn transform_seed_node(
 
 const REF_TEXT_SIZE_MM: f64 = 0.8;
 
-fn transform_seed_property(node: &str, reference: &str) -> String {
+fn transform_seed_property(node: &str, reference: &str, value: Option<&str>) -> String {
     if let Some(rest) = node.strip_prefix("(property \"Reference\" \"")
         && let Some(close) = rest.find('"')
     {
         let body = cap_font_size(&rest[close + 1..], REF_TEXT_SIZE_MM);
         return format!("(property \"Reference\" \"{reference}\"{body}");
     }
-    if node.starts_with("(property \"Value\"")
-        && !node.contains("(hide yes)")
-        && let Some(hidden) = inject_before_close(node, "(hide yes)")
-    {
-        return hidden;
+    if node.starts_with("(property \"Value\"") {
+        let mut transformed = value
+            .and_then(|value| replace_property_value(node, value))
+            .unwrap_or_else(|| node.to_owned());
+        if !transformed.contains("(hide yes)")
+            && let Some(hidden) = inject_before_close(&transformed, "(hide yes)")
+        {
+            transformed = hidden;
+        }
+        return transformed;
     }
     node.to_owned()
+}
+
+fn replace_property_value(node: &str, value: &str) -> Option<String> {
+    let prefix = "(property \"Value\" \"";
+    let rest = node.strip_prefix(prefix)?;
+    let mut escaped = false;
+    let mut close = None;
+    for (idx, ch) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            close = Some(idx);
+            break;
+        }
+    }
+    let close = close?;
+    Some(format!("{prefix}{}{}", sexpr_escape(value), &rest[close..]))
+}
+
+fn sexpr_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn transform_seed_pad(
@@ -1352,6 +1390,7 @@ mod tests {
         pad_nets.insert("1".to_string(), "GND".to_string());
         let parts = vec![SeedFootprint {
             reference: "TP1".to_string(),
+            value: None,
             lib_id: "Test:Pad".to_string(),
             source:
                 "(footprint \"Pad\" (pad \"1\" smd circle (at 0 0) (size 1 1) (layers \"F.Cu\")))"
@@ -1384,6 +1423,65 @@ mod tests {
     }
 
     #[test]
+    fn seed_writer_emits_committed_values_for_default_passive_and_ic() {
+        let temp = tempfile::tempdir().unwrap();
+        let library = temp.path().join("Test.pretty");
+        std::fs::create_dir(&library).unwrap();
+        std::fs::write(
+            library.join("Fixture.kicad_mod"),
+            "(footprint \"Fixture\"\n\
+                 \t(property \"Reference\" \"REF**\"\n\
+                 \t\t(at 0 -2 0)\n\
+                 \t\t(layer \"F.SilkS\")\n\
+                 \t\t(effects (font (size 1 1) (thickness 0.15)))\n\
+                 \t)\n\
+                 \t(property \"Value\" \"Fixture\"\n\
+                 \t\t(at 0 2 0)\n\
+                 \t\t(layer \"F.Fab\")\n\
+                 \t\t(effects (font (size 1 1) (thickness 0.15)))\n\
+                 \t)\n\
+                 \t(pad \"1\" smd circle (at 0 0) (size 1 1) (layers \"F.Cu\"))\n\
+                 )",
+        )
+        .unwrap();
+        let catalog = FootprintCatalog::from_root(temp.path()).unwrap();
+        let part = |reference: &str, value: &str| SeedPart {
+            reference: reference.to_string(),
+            value: Some(value.to_string()),
+            footprint: "Test:Fixture".to_string(),
+            pad_nets: BTreeMap::new(),
+            locked: None,
+        };
+        let spec = BoardSeedSpec {
+            bounds: Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 20.0,
+                max_y: 10.0,
+            },
+            rules: SeedRules::default(),
+            parts: vec![part("R1", "R"), part("R2", "10k"), part("U1", "NE555P")],
+            outline: None,
+        };
+        let board = emit_seed_board(&spec, &catalog).unwrap();
+
+        assert!(board.contains("(property \"Value\" \"R\""));
+        assert!(board.contains("(property \"Value\" \"10k\""));
+        assert!(board.contains("(property \"Value\" \"NE555P\""));
+        assert!(!board.contains("(property \"Value\" \"Fixture\""));
+        assert_eq!(board.matches("(hide yes)").count(), 3);
+    }
+
+    #[test]
+    fn seed_property_value_escapes_schematic_text() {
+        let node = "(property \"Value\" \"library\" (at 0 0 0))";
+        let transformed = transform_seed_property(node, "U1", Some("MPN \\\"A\\\" \\\\ rev"));
+
+        assert!(transformed.contains("(property \"Value\" \"MPN \\\\\\\"A\\\\\\\" \\\\\\\\ rev\""));
+        assert!(transformed.contains("(hide yes)"));
+    }
+
+    #[test]
     fn default_power_pours_are_added_on_dense_stackups() {
         let mut rules = SeedRules {
             layer_count: 6,
@@ -1391,6 +1489,7 @@ mod tests {
         };
         let parts = vec![SeedPart {
             reference: "U1".to_string(),
+            value: None,
             footprint: "Test:U".to_string(),
             pad_nets: BTreeMap::from([
                 ("1".to_string(), "GND".to_string()),
