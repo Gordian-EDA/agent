@@ -718,9 +718,9 @@ impl<P: Provider> Agent<P> {
                 } else if timeout_retry_blocked {
                     (
                         json!({
-                            "error": "identical timed-out tool retry blocked",
+                            "error": "timed-out tool retry blocked at unchanged project state",
                             "tool": call.fn_name,
-                            "note": "the previous invocation may still be running; do not retry identical arguments in this turn — inspect project state or change/simplify the request",
+                            "note": "the previous invocation may still be running; inspect project state or make an authoring change before retrying",
                         })
                         .to_string(),
                         Vec::new(),
@@ -1015,15 +1015,18 @@ fn route_result_is_retry_failure(value: &Value) -> bool {
 }
 
 /// A timed-out `spawn_blocking` task may continue after its join handle is
-/// dropped. Block only an exact same-turn retry; changed arguments and later
-/// user turns remain available for deliberate recovery.
+/// dropped. Applying the same draft through `{}` or explicit YAML is the same
+/// mutation, so block every `apply_design` retry until authoring advances the
+/// state revision. Other tools retain the narrower exact-call guard.
 fn timed_out_retry_blocked(
     timed_out: &[(String, Value, u64)],
     call: &ToolCall,
     state_revision: u64,
 ) -> bool {
     timed_out.iter().any(|(name, arguments, revision)| {
-        name == &call.fn_name && arguments == &call.fn_arguments && *revision == state_revision
+        name == &call.fn_name
+            && *revision == state_revision
+            && (name == "apply_design" || arguments == &call.fn_arguments)
     })
 }
 
@@ -1860,6 +1863,23 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 .unwrap_or("footprint");
             format!("{reference} → {footprint}")
         }
+        "place_board" => {
+            let placed = result
+                .get("positions")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            if result.get("legal").and_then(Value::as_bool) == Some(true) {
+                format!("placed {placed} part(s) (legal)")
+            } else if let (Some(width), Some(height)) = (
+                result.pointer("/suggested_min_bounds_mm/w"),
+                result.pointer("/suggested_min_bounds_mm/h"),
+            ) {
+                format!("placement failed: board too tight (needs at least {width} × {height} mm)")
+            } else {
+                "placement failed: illegal layout".to_string()
+            }
+        }
         _ => "done".to_string(),
     }
 }
@@ -2426,7 +2446,7 @@ mod tests {
     }
 
     #[test]
-    fn timed_out_retry_guard_blocks_only_the_identical_same_turn_call() {
+    fn timed_out_apply_retry_guard_uses_the_project_state_revision() {
         let timed_out = vec![(
             "apply_design".to_string(),
             json!({"yaml": "components: []"}),
@@ -2441,10 +2461,10 @@ mod tests {
 
         assert!(timed_out_retry_blocked(
             &timed_out,
-            &call("apply_design", json!({"yaml": "components: []"})),
+            &call("apply_design", json!({})),
             3,
         ));
-        assert!(!timed_out_retry_blocked(
+        assert!(timed_out_retry_blocked(
             &timed_out,
             &call("apply_design", json!({"yaml": "components: [R1]"})),
             3,
@@ -2469,7 +2489,7 @@ mod tests {
                 revision,
                 false,
                 ToolEffect::Gated,
-                &json!({"error": "identical timed-out tool retry blocked"}),
+                &json!({"error": "timed-out tool retry blocked at unchanged project state"}),
             ),
             revision,
             "a synthetic blocked result was not dispatched"
@@ -2543,7 +2563,7 @@ mod tests {
             "error": "apply_design timed out after 120s; still running"
         })));
         assert!(!tool_result_is_timeout(&json!({
-            "error": "identical timed-out tool retry blocked"
+            "error": "timed-out tool retry blocked at unchanged project state"
         })));
 
         let compose = tool_timeout_message("apply_design", Duration::from_secs(120));
@@ -2609,6 +2629,25 @@ mod tests {
             &json!({ "ok": true, "blocking_findings": 0, "reported_findings": 2 }),
         );
         assert_eq!(s, "DRC clean: 0 blocking findings (2 total reported)");
+        let s = tool_summary(
+            "place_board",
+            &json!({}),
+            &json!({ "legal": true, "positions": [{"reference": "U1"}, {"reference": "R1"}] }),
+        );
+        assert_eq!(s, "placed 2 part(s) (legal)");
+        let s = tool_summary(
+            "place_board",
+            &json!({}),
+            &json!({
+                "legal": false,
+                "positions": [{"reference": "U1"}, {"reference": "R1"}],
+                "suggested_min_bounds_mm": {"w": 52.0, "h": 40.0}
+            }),
+        );
+        assert_eq!(
+            s,
+            "placement failed: board too tight (needs at least 52.0 × 40.0 mm)"
+        );
         let s = tool_summary("read_schematic", &json!({}), &json!({ "error": "boom" }));
         assert_eq!(s, "error: boom");
     }
