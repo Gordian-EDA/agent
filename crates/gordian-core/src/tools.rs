@@ -62,7 +62,7 @@ pub fn tool_defs() -> Vec<Tool> {
     let defs = vec![
             Def {
                 name: "search_symbols".into(),
-                description: "Find symbol `Lib:Name` ids; reuse hits. Built-ins include Device:R/C/LED, power:GND/+3V3, Connector:Conn_01x02_Pin."
+                description: "Find `Lib:Name`; reuse hits. Built-ins: Device:R/C/LED, power:GND/+3V3, Connector:Conn_01x02_Pin..01x06_Pin."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -557,22 +557,16 @@ fn search_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .and_then(Value::as_u64)
         .map(|n| n as usize)
         .unwrap_or(ctx.config().tools.default_search_limit);
+    if let Some((lib_id, pin_count)) = common_connector_symbol_alias(&query) {
+        return Ok(json!({
+            "hits": [{ "lib_id": lib_id, "pin_count": pin_count }],
+            "note": "Connector symbols and physical footprints are separate choices. Use this symbol for the schematic pins; use search_footprints for the physical connector footprint.",
+        }));
+    }
     if let Some((lib_id, pin_count)) = builtin_symbol_alias(&query) {
         return Ok(json!({
             "hits": [{ "lib_id": lib_id, "pin_count": pin_count }],
             "note": "built-in alias/canonical symbol; use it directly and do not repeat this search",
-        }));
-    }
-    if looks_like_pinheader_2pin_symbol_query(&query) {
-        let hits: Vec<Value> = ctx
-            .index()?
-            .search("Conn_01x02", limit)
-            .into_iter()
-            .map(|h| json!({ "lib_id": h.lib_id, "pin_count": h.pin_count }))
-            .collect();
-        return Ok(json!({
-            "hits": hits,
-            "note": "PinHeader_* names are footprints. Use Connector_Generic:Conn_01x02 as the schematic symbol when suitable; use search_footprints for the physical header footprint.",
         }));
     }
 
@@ -600,14 +594,62 @@ fn builtin_symbol_alias(query: &str) -> Option<(&'static str, usize)> {
     }
 }
 
-fn looks_like_pinheader_2pin_symbol_query(query: &str) -> bool {
-    let q = query.to_ascii_lowercase();
-    q.contains("pinheader")
-        && (q.contains("2pin")
-            || q.contains("2 pin")
-            || q.contains("1x02")
-            || q.contains("01x02")
-            || q.contains("2x1"))
+/// Map the small, ubiquitous single-row connector family without asking the
+/// symbol index to rank a broad `connector` search. `PinHeader_*` is accepted
+/// here because models often carry a physical footprint name into symbol
+/// discovery; the result deliberately remains a footprint-agnostic symbol.
+fn common_connector_symbol_alias(query: &str) -> Option<(&'static str, usize)> {
+    let q = query.trim().to_ascii_lowercase();
+    let compact: String = q.chars().filter(char::is_ascii_alphanumeric).collect();
+    let connectorish =
+        compact.contains("connector") || compact.contains("header") || compact.starts_with("conn");
+
+    let pin_count = (2..=6).find(|pin_count| {
+        let padded = format!("{pin_count:02}");
+        let plain = pin_count.to_string();
+        let dimensions = [
+            format!("1x{padded}"),
+            format!("01x{padded}"),
+            format!("1x{plain}"),
+            format!("01x{plain}"),
+            format!("{padded}x1"),
+            format!("{padded}x01"),
+            format!("{plain}x1"),
+            format!("{plain}x01"),
+        ];
+        dimensions
+            .iter()
+            .any(|shape| contains_bounded_number(&compact, shape))
+            || (connectorish
+                && [format!("{padded}pin"), format!("{plain}pin")]
+                    .iter()
+                    .any(|pins| contains_bounded_number(&compact, pins)))
+    })?;
+
+    match pin_count {
+        2 => Some(("Connector:Conn_01x02_Pin", 2)),
+        3 => Some(("Connector:Conn_01x03_Pin", 3)),
+        4 => Some(("Connector:Conn_01x04_Pin", 4)),
+        5 => Some(("Connector:Conn_01x05_Pin", 5)),
+        6 => Some(("Connector:Conn_01x06_Pin", 6)),
+        _ => None,
+    }
+}
+
+/// Avoid treating `1x20` as `1x2`, or `16-pin` as `6-pin`.
+fn contains_bounded_number(haystack: &str, needle: &str) -> bool {
+    haystack.match_indices(needle).any(|(start, matched)| {
+        let before_is_digit = haystack[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch.is_ascii_digit());
+        let end = start + matched.len();
+        let after_is_digit = haystack[end..]
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_digit());
+        !before_is_digit && !after_is_digit
+    })
 }
 
 // ── 2. get_symbol_info ─────────────────────────────────────────────────────

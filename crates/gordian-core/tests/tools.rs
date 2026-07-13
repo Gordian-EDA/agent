@@ -33,6 +33,44 @@ fn search_symbols_tool_finds_stm32() {
 }
 
 #[test]
+fn search_symbols_canonicalizes_common_single_row_connectors() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    for (query, expected, pin_count) in [
+        ("2-pin header", "Connector:Conn_01x02_Pin", 2),
+        (
+            "PinHeader_1x03_P2.54mm_Vertical",
+            "Connector:Conn_01x03_Pin",
+            3,
+        ),
+        ("1x04 connector", "Connector:Conn_01x04_Pin", 4),
+        (
+            "Connector_Generic:Conn_01x05",
+            "Connector:Conn_01x05_Pin",
+            5,
+        ),
+        ("Connector:Conn_01x06_Pin", "Connector:Conn_01x06_Pin", 6),
+    ] {
+        let out = run_tool(
+            "search_symbols",
+            serde_json::json!({ "query": query }),
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(
+            out["hits"],
+            serde_json::json!([{ "lib_id": expected, "pin_count": pin_count }]),
+            "query {query:?}: {out}"
+        );
+        let note = out["note"].as_str().expect("connector guidance note");
+        assert!(note.contains("separate"), "query {query:?}: {out}");
+        assert!(note.contains("search_footprints"), "query {query:?}: {out}");
+    }
+}
+
+#[test]
 fn validate_design_tool_reports_errors_for_bad_part() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
