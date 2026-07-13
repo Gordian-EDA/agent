@@ -34,7 +34,7 @@ use sch_place::item::Item;
 use sch_place::place::{Crossings, PlaceResult};
 
 use sch_floorplan::contract::{
-    KicadEnv, PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer,
+    FAST_PINS, KicadEnv, PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer,
     SchematicPlaceProblem,
 };
 
@@ -60,7 +60,7 @@ impl PlacementEngine for ClusterPlace {
         // Spine is deterministic and route-aware, and solves this topology in one
         // pass. Keep the cluster engine identity in diagnostics because this is an
         // internal fast path, not a user-selected engine change.
-        if tiny_layout_pin_profile(problem.items.iter().map(|item| item.geom.pins.len())) {
+        if spine_fast_path_pin_profile(problem.items.iter().map(|item| item.geom.pins.len())) {
             let mut out = spine_place::SpinePlace.place(env, design, problem, ir);
             out.result.engine = self.name().to_owned();
             return out;
@@ -186,15 +186,27 @@ impl PlacementEngine for ClusterPlace {
     }
 }
 
-/// Tiny sheets with at most one connector/IC-sized anchor do not have enough
-/// placement degrees of freedom to justify anneal's fixed routed-search budget.
-fn tiny_layout_pin_profile(pin_counts: impl Iterator<Item = usize>) -> bool {
+/// Sheets at either end of the small-board complexity range do not justify anneal's
+/// fixed routed-search budget. Tiny sheets have no useful global search space. Dense
+/// agent-sized sheets just below [`FAST_PINS`] are the opposite failure mode: each
+/// routed objective is expensive and the four small-board searches can exceed the tool
+/// timeout (an 11-part NE555 draft spent 105 s in greedy refine alone). Spine is
+/// deterministic and route-aware, and finishes both profiles with bounded work.
+fn spine_fast_path_pin_profile(pin_counts: impl Iterator<Item = usize>) -> bool {
     let counts: Vec<usize> = pin_counts.collect();
-    !counts.is_empty()
+    let pins = counts.iter().sum::<usize>();
+    let tiny = !counts.is_empty()
         && counts.len() <= 6
-        && counts.iter().sum::<usize>() <= 12
-        && counts.iter().all(|&pins| pins <= 4)
-        && counts.iter().filter(|&&pins| pins >= 3).count() <= 1
+        && pins <= 12
+        && counts.iter().all(|&pins| pins <= 6)
+        && counts.iter().filter(|&&pins| pins >= 3).count() <= 1;
+    let dense_interactive = (5..=16).contains(&counts.len())
+        && (24..=FAST_PINS).contains(&pins)
+        && counts.iter().filter(|&&pins| pins >= 3).count() <= 2;
+    if std::env::var_os("CLUSTER_DEBUG").is_some() {
+        eprintln!("[cluster] pin profile {counts:?} total={pins}");
+    }
+    tiny || dense_interactive
 }
 
 fn rail_candidate_wins(
@@ -229,18 +241,44 @@ fn report(engine: &str, items: &[Item], eval: &RoutedEvaluator) -> PlaceResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{rail_candidate_wins, tiny_layout_pin_profile};
+    use super::{rail_candidate_wins, spine_fast_path_pin_profile};
 
     #[test]
     fn tiny_simple_sheet_uses_deterministic_fast_path() {
-        assert!(tiny_layout_pin_profile([3, 2, 2, 1].into_iter()));
-        assert!(tiny_layout_pin_profile([2, 2].into_iter()));
-        assert!(tiny_layout_pin_profile([2, 2, 1, 1, 1].into_iter()));
+        assert!(spine_fast_path_pin_profile([3, 2, 2, 1].into_iter()));
+        assert!(spine_fast_path_pin_profile([2, 2].into_iter()));
+        assert!(spine_fast_path_pin_profile([2, 2, 1, 1, 1].into_iter()));
+        assert!(spine_fast_path_pin_profile([5, 2, 2, 2].into_iter()));
 
-        assert!(!tiny_layout_pin_profile([].into_iter()));
-        assert!(!tiny_layout_pin_profile([3, 2, 2, 2, 2, 2, 1].into_iter()));
-        assert!(!tiny_layout_pin_profile([5, 2, 1].into_iter()));
-        assert!(!tiny_layout_pin_profile([3, 3, 1].into_iter()));
+        assert!(!spine_fast_path_pin_profile([].into_iter()));
+        assert!(!spine_fast_path_pin_profile(
+            [3, 2, 2, 2, 2, 2, 1].into_iter()
+        ));
+        assert!(!spine_fast_path_pin_profile([7, 2, 1].into_iter()));
+        assert!(!spine_fast_path_pin_profile([3, 3, 1].into_iter()));
+    }
+
+    #[test]
+    fn dense_interactive_sheet_uses_deterministic_fast_path() {
+        // The reproduced USB-C input block: one 15-pin connector, one 6-pin
+        // protector and four two-pin parts = 29 routed pins over 6 items.
+        assert!(spine_fast_path_pin_profile([15, 6, 2, 2, 2, 2].into_iter()));
+
+        // The reproduced NE555 sheet: one 8-pin hub, a 3-pin pot and eight
+        // two-pin parts = 27 routed pins over 10 placeable items.
+        assert!(spine_fast_path_pin_profile(
+            [8, 3, 2, 2, 2, 2, 2, 2, 2, 2].into_iter()
+        ));
+
+        // Smaller tuned sheets and genuinely large sheets retain their existing
+        // anneal paths; three-anchor sheets retain hub-pose search quality.
+        assert!(!spine_fast_path_pin_profile([8, 2, 2, 2, 2].into_iter()));
+        assert!(!spine_fast_path_pin_profile(
+            [16, 8, 8, 2, 2, 2, 2, 2, 2, 2].into_iter()
+        ));
+        assert!(!spine_fast_path_pin_profile(
+            [8, 5, 3, 2, 2, 2, 2, 2, 2, 2].into_iter()
+        ));
     }
 
     #[test]
