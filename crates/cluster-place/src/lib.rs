@@ -191,9 +191,9 @@ impl PlacementEngine for ClusterPlace {
 fn tiny_layout_pin_profile(pin_counts: impl Iterator<Item = usize>) -> bool {
     let counts: Vec<usize> = pin_counts.collect();
     !counts.is_empty()
-        && counts.len() <= 4
-        && counts.iter().sum::<usize>() <= 8
-        && counts.iter().all(|&pins| pins <= 3)
+        && counts.len() <= 6
+        && counts.iter().sum::<usize>() <= 12
+        && counts.iter().all(|&pins| pins <= 4)
         && counts.iter().filter(|&&pins| pins >= 3).count() <= 1
 }
 
@@ -235,10 +235,11 @@ mod tests {
     fn tiny_simple_sheet_uses_deterministic_fast_path() {
         assert!(tiny_layout_pin_profile([3, 2, 2, 1].into_iter()));
         assert!(tiny_layout_pin_profile([2, 2].into_iter()));
+        assert!(tiny_layout_pin_profile([2, 2, 1, 1, 1].into_iter()));
 
         assert!(!tiny_layout_pin_profile([].into_iter()));
-        assert!(!tiny_layout_pin_profile([3, 2, 2, 1, 1].into_iter()));
-        assert!(!tiny_layout_pin_profile([4, 2, 1].into_iter()));
+        assert!(!tiny_layout_pin_profile([3, 2, 2, 2, 2, 2, 1].into_iter()));
+        assert!(!tiny_layout_pin_profile([5, 2, 1].into_iter()));
         assert!(!tiny_layout_pin_profile([3, 3, 1].into_iter()));
     }
 
