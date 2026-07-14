@@ -9,7 +9,7 @@
 //! it: footprint blocks with a block-level `(at …)`, top-level
 //! `(segment …)`/`(via …)` copper, and `(net N "NAME")` declarations.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, io::Write, path::Path};
 
 use kicad_ipc::FootprintMove;
 use pcb_model::{LayerRef, RouteSolution, ViaSpan};
@@ -409,6 +409,36 @@ pub fn append_copper(
     Ok(result)
 }
 
+/// Append copper to a board on disk without exposing a partially-written PCB.
+///
+/// The caller must close any live KiCad session before calling this: an open
+/// editor still owns an older in-memory document and could overwrite this file
+/// on a later save. Existing copper is retained because [`append_copper`] only
+/// inserts the supplied solution before the root document close.
+pub fn append_copper_file(
+    path: &Path,
+    solution: &RouteSolution,
+    layer_count: u32,
+    layer_names: &[String],
+) -> Result<(), String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("could not read board {}: {err}", path.display()))?;
+    let updated = append_copper(&text, solution, layer_count, layer_names)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("board path {} has no parent directory", path.display()))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|err| format!("could not create temporary board file: {err}"))?;
+    temp.write_all(updated.as_bytes())
+        .map_err(|err| format!("could not write temporary board file: {err}"))?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|err| format!("could not sync temporary board file: {err}"))?;
+    temp.persist(path)
+        .map_err(|err| format!("could not replace board {}: {}", path.display(), err.error))?;
+    Ok(())
+}
+
 fn validate_route_layers(
     solution: &RouteSolution,
     layer_count: u32,
@@ -578,6 +608,29 @@ mod tests {
         assert!(out.contains("(layers \"F.Cu\" \"B.Cu\")"));
         // still balanced: root close paren last
         assert!(out.trim_end().ends_with(')'));
+    }
+
+    #[test]
+    fn append_copper_file_preserves_existing_copper() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("board.kicad_pcb");
+        std::fs::write(&path, BOARD).unwrap();
+        let solution = RouteSolution {
+            traces: vec![Trace {
+                connection: "VOUT".to_owned(),
+                layer: LayerRef::bottom(),
+                width: 0.25,
+                path: vec![Point2::new(4.0, 5.0), Point2::new(6.0, 5.0)],
+            }],
+            vias: vec![],
+        };
+
+        append_copper_file(&path, &solution, 2, &["F.Cu".to_owned(), "B.Cu".to_owned()]).unwrap();
+
+        let out = std::fs::read_to_string(path).unwrap();
+        assert_eq!(out.matches("(segment").count(), 2, "{out}");
+        assert!(out.contains("(layer \"B.Cu\")"), "{out}");
+        assert!(out.contains("(net 2)"), "{out}");
     }
 
     #[test]
