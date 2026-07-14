@@ -90,7 +90,28 @@ fn reconcile_file_stackup(
         return Ok(());
     }
 
+    let ipc_layer_names = snapshot.layer_names.clone();
     let layer_count = layer_names.len() as u32;
+    snapshot.problem.plane_nets.retain(|_, layer| {
+        let Some(name) = ipc_layer_names.get(*layer as usize) else {
+            return false;
+        };
+        let Some(mapped) = layer_names.iter().position(|candidate| candidate == name) else {
+            return false;
+        };
+        *layer = mapped as u32;
+        true
+    });
+    snapshot.problem.escape_layers.retain(|_, layer| {
+        let Some(name) = ipc_layer_names.get(*layer as usize) else {
+            return false;
+        };
+        let Some(mapped) = layer_names.iter().position(|candidate| candidate == name) else {
+            return false;
+        };
+        *layer = mapped as u32;
+        mapped > 0 && mapped + 1 < layer_names.len()
+    });
     snapshot.layer_names = layer_names;
     snapshot.problem.layer_count = layer_count;
     snapshot.imported.layer_count = layer_count;
@@ -113,15 +134,6 @@ fn reconcile_file_stackup(
         .problem
         .connections
         .retain(|connection| connection.points_to_connect.len() >= 2);
-    snapshot
-        .problem
-        .plane_nets
-        .retain(|_, layer| *layer < layer_count);
-    snapshot
-        .problem
-        .escape_layers
-        .retain(|_, layer| *layer > 0 && *layer + 1 < layer_count);
-
     // Preserve even invalid-layer copper here. route_board uses its presence to
     // clear every existing segment/via before solving. Hiding it would leave a
     // board containing only stale inner-layer copper uncleared.
@@ -202,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn board_file_stackup_removes_stale_ipc_inner_layers() {
+    fn board_file_stackup_remaps_ipc_bottom_plane_and_removes_inner_layers() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("board.kicad_pcb");
         std::fs::write(
@@ -219,7 +231,7 @@ mod tests {
         let stale_inner = LayerRef("inner1".to_owned());
         let mut snapshot = IpcBoardSnapshot {
             problem: RouteProblem {
-                layer_count: 4,
+                layer_count: 32,
                 min_trace_width: 0.2,
                 obstacles: vec![pcb_model::Obstacle {
                     kind: "stale track".to_owned(),
@@ -237,10 +249,10 @@ mod tests {
                 net_widths: BTreeMap::new(),
                 outline: None,
                 escape_layers: BTreeMap::new(),
-                plane_nets: BTreeMap::new(),
+                plane_nets: BTreeMap::from([("GND".to_owned(), 31)]),
             },
             imported: ImportedBoard {
-                layer_count: 4,
+                layer_count: 32,
                 bounds,
                 parts: vec![],
                 placement_keepouts: vec![],
@@ -256,18 +268,17 @@ mod tests {
                 vias: vec![],
             },
             net_codes: BTreeMap::new(),
-            layer_names: vec![
-                "F.Cu".to_owned(),
-                "In1.Cu".to_owned(),
-                "In2.Cu".to_owned(),
-                "B.Cu".to_owned(),
-            ],
+            layer_names: std::iter::once("F.Cu".to_owned())
+                .chain((1..=30).map(|index| format!("In{index}.Cu")))
+                .chain(std::iter::once("B.Cu".to_owned()))
+                .collect(),
         };
 
         reconcile_file_stackup(&path, &mut snapshot).unwrap();
 
         assert_eq!(snapshot.problem.layer_count, 2);
         assert_eq!(snapshot.layer_names, vec!["F.Cu", "B.Cu"]);
+        assert_eq!(snapshot.problem.plane_nets["GND"], 1);
         assert!(snapshot.problem.obstacles.is_empty());
         assert_eq!(
             snapshot.copper.traces.len(),

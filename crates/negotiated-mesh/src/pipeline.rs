@@ -538,17 +538,11 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, Vec<Via>)> {
             .points_to_connect
             .iter()
             .partition(|pt| reaches_plane(pt) || via_fits(pt.point(), &c.name));
-        // Every via-less pad must have a via site CLOSE BY (a 0.5mm-pitch QFN
-        // power pin stubs 1-2mm to its decoupling cap). A far stub would just
-        // re-create the long power trace the fanout exists to remove — such
-        // nets route better as ordinary copper.
-        const STUB_RADIUS_MM: f64 = 5.0;
-        let stub_reachable = |pt: &crate::problem::RoutePoint| {
-            anchors
-                .iter()
-                .any(|v| v.point().dist(pt.point()) <= STUB_RADIUS_MM)
-        };
-        if anchors.is_empty() || !stubbed.iter().all(|pt| stub_reachable(pt)) {
+        // Preserve every legal plane anchor. Fine-pitch pads that cannot take
+        // a via are routed to the nearest anchor; the normal router and DRC
+        // validate those stubs instead of discarding all fanout for one
+        // arbitrary distance threshold.
+        if anchors.is_empty() {
             sub.connections.push(c.clone());
             continue;
         }
@@ -2663,6 +2657,47 @@ mod tests {
         assert!(sub.connections.is_empty());
         assert_eq!(vias.len(), 2);
         assert!(vias.iter().all(|via| via.span == ViaSpan::Through));
+    }
+
+    #[test]
+    fn plane_fanout_keeps_legal_anchors_when_a_pad_needs_a_long_stub() {
+        let mut p = simple_two_point_problem();
+        p.layer_count = 2;
+        p.plane_nets.insert("N".to_owned(), 1);
+        for point in &p.connections[0].points_to_connect {
+            p.obstacles.push(crate::problem::Obstacle {
+                kind: "pad".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: point.point(),
+                width: 0.3,
+                height: 0.6,
+                connected_to: vec!["N".to_owned()],
+            });
+        }
+        let blocked = p.connections[0].points_to_connect[1].point();
+        p.obstacles.push(crate::problem::Obstacle {
+            kind: "pad".to_owned(),
+            layers: vec![LayerRef::top()],
+            center: Point2 {
+                x: blocked.x + 0.4,
+                y: blocked.y,
+            },
+            width: 0.3,
+            height: 0.6,
+            connected_to: vec!["FOREIGN".to_owned()],
+        });
+
+        let (sub, vias) = plane_fanout(&p).expect("legal plane anchor should be preserved");
+
+        assert_eq!(vias.len(), 1);
+        assert_eq!(vias[0].at, p.connections[0].points_to_connect[0].point());
+        assert_eq!(sub.connections.len(), 1);
+        assert!(
+            sub.connections[0].points_to_connect[0]
+                .point()
+                .dist(sub.connections[0].points_to_connect[1].point())
+                > 5.0
+        );
     }
 
     fn top_blocked_two_point_problem() -> RouteProblem {
