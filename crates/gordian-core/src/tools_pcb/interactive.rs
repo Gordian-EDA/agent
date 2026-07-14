@@ -875,17 +875,39 @@ fn validate_manual_solution(
     problem: &RouteProblem,
     solution: &RouteSolution,
 ) -> std::result::Result<(), String> {
+    let baseline = drc_lint::lint::lint(
+        problem,
+        &RouteSolution {
+            traces: Vec::new(),
+            vias: Vec::new(),
+        },
+    );
     let violations = drc_lint::lint::lint(problem, solution);
-    if violations.is_empty() {
+    let mut baseline_counts = BTreeMap::<String, usize>::new();
+    for violation in baseline {
+        let key = serde_json::to_string(&violation).unwrap_or_else(|_| format!("{violation:?}"));
+        *baseline_counts.entry(key).or_default() += 1;
+    }
+    let mut introduced = Vec::new();
+    for violation in violations {
+        let key = serde_json::to_string(&violation).unwrap_or_else(|_| format!("{violation:?}"));
+        let available = baseline_counts.entry(key).or_default();
+        if *available > 0 {
+            *available -= 1;
+        } else {
+            introduced.push(violation);
+        }
+    }
+    if introduced.is_empty() {
         return Ok(());
     }
-    let first = violations
+    let first = introduced
         .first()
         .and_then(|v| serde_json::to_string(v).ok())
         .unwrap_or_else(|| "unknown violation".to_owned());
     Err(format!(
         "route_track validation failed with {} DRC/connectivity violation(s); first: {first}",
-        violations.len()
+        introduced.len()
     ))
 }
 
