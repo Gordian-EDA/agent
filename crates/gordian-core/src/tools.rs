@@ -1442,6 +1442,11 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
     report["draft_written"] = json!(true);
     report["draft_changed"] = json!(prior_draft.as_deref() != Some(yaml.as_str()));
+    report["electrical_design_changed"] = json!(electrical_yaml_changed(
+        prior_draft.as_deref(),
+        &yaml,
+        ctx.provider()
+    ));
     add_draft_next_step(&mut report);
     Ok(report)
 }
@@ -1529,6 +1534,11 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .write_draft(yaml, current_sch_text(ctx).as_deref())?;
         report["draft_written"] = json!(true);
         report["draft_changed"] = json!(prior_draft.as_deref() != Some(yaml));
+        report["electrical_design_changed"] = json!(electrical_yaml_changed(
+            prior_draft.as_deref(),
+            yaml,
+            ctx.provider()
+        ));
         report["mode"] = json!(if draft_exists {
             "full_replace"
         } else {
@@ -1573,15 +1583,61 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         draft.replacen(&*old, &new, 1)
     };
+    let result = compile(&edited, ctx.provider());
+    let prior_result = compile(&draft, ctx.provider());
+    if let Some(prior) = prior_result.design.as_ref()
+        && result.design.is_none()
+    {
+        let mut report = compile_authoring_report(&result, ctx)?;
+        report["ok"] = json!(false);
+        report["error"] =
+            json!("invalid patch would corrupt a valid draft; the existing draft was preserved");
+        report["code"] = json!("invalid_patch_preserved_draft");
+        report["current_design_state"] = design_state_summary(prior);
+        report["current_diagnostics"] =
+            json!(compile_report(&prior_result.diagnostics)["diagnostics"]);
+        report["replacements"] = json!(if replace_all { count } else { 1 });
+        report["draft_changed"] = json!(false);
+        report["electrical_design_changed"] = json!(false);
+        report["next_tool"] = json!("edit_design");
+        report["next"] = json!(
+            "send one complete valid corrected yaml document, or use a smaller patch that keeps the draft valid"
+        );
+        return Ok(report);
+    }
     ctx.workspace()
         .write_draft(&edited, current_sch_text(ctx).as_deref())?;
 
-    let result = compile(&edited, ctx.provider());
     let mut report = compile_authoring_report(&result, ctx)?;
     report["replacements"] = json!(if replace_all { count } else { 1 });
     report["draft_changed"] = json!(edited != draft);
+    report["electrical_design_changed"] = json!(electrical_yaml_changed(
+        Some(&draft),
+        &edited,
+        ctx.provider()
+    ));
     add_draft_next_step(&mut report);
     Ok(report)
+}
+
+/// Formatting, comments, quoting, and mapping order do not invalidate an
+/// expensive semantic review. If either document is malformed, fall back to
+/// byte identity so repair edits still count as progress.
+fn electrical_yaml_changed(
+    prior: Option<&str>,
+    candidate: &str,
+    provider: &circuit_lang::SymbolTable,
+) -> bool {
+    let Some(prior) = prior else {
+        return true;
+    };
+    match (
+        compile(prior, provider).design,
+        compile(candidate, provider).design,
+    ) {
+        (Some(prior), Some(candidate)) => prior != candidate,
+        _ => prior != candidate,
+    }
 }
 
 /// Prevent a speculative empty skeleton from becoming the working draft.

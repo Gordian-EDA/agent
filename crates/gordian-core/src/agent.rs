@@ -1811,17 +1811,30 @@ fn durable_authoring_state(
     diagnostics: Option<AuthoringDiagnosticsState>,
 ) -> DurableAuthoringState {
     DurableAuthoringState {
-        draft_hash: file_content_hash(&runtime.workspace().draft_path()),
+        draft_hash: semantic_draft_hash(runtime),
         schematic_hash: file_content_hash(runtime.sch_path()),
         diagnostics,
     }
 }
 
+fn semantic_draft_hash(runtime: &AgentRuntime) -> Option<u64> {
+    let text = std::fs::read_to_string(runtime.workspace().draft_path()).ok()?;
+    let bytes = circuit_lang::compile(&text, runtime.provider())
+        .design
+        .map(|design| circuit_lang::canon::to_canonical_yaml(&design).into_bytes())
+        .unwrap_or_else(|| text.into_bytes());
+    Some(hash_bytes(bytes))
+}
+
 fn file_content_hash(path: &std::path::Path) -> Option<u64> {
     let bytes = std::fs::read(path).ok()?;
-    Some(bytes.into_iter().fold(0xcbf29ce484222325, |hash, byte| {
+    Some(hash_bytes(bytes))
+}
+
+fn hash_bytes(bytes: impl IntoIterator<Item = u8>) -> u64 {
+    bytes.into_iter().fold(0xcbf29ce484222325, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
-    }))
+    })
 }
 
 fn runtime_supports_live_footprint_moves(runtime: &AgentRuntime) -> bool {
@@ -2203,6 +2216,12 @@ fn authoring_result_changed_draft(value: &Value) -> bool {
     if value.get("error").is_some() || value.get("rejected").and_then(Value::as_bool) == Some(true)
     {
         return false;
+    }
+    if let Some(changed) = value
+        .get("electrical_design_changed")
+        .and_then(Value::as_bool)
+    {
+        return changed;
     }
     if let Some(changed) = value.get("draft_changed").and_then(Value::as_bool) {
         return changed;
@@ -3910,7 +3929,10 @@ mod tests {
 
         runtime
             .workspace()
-            .write_draft("version: 1\nblocks: {}\n", None)
+            .write_draft(
+                "version: 1\nblocks:\n  main:\n    components:\n      R1: {part: Device:R, between: [A, GND]}\n",
+                None,
+            )
             .unwrap();
         let diagnostics = authoring_diagnostics_state(
             "edit_design",
@@ -3924,9 +3946,22 @@ mod tests {
         let changed = durable_authoring_state(&runtime, Some(diagnostics.clone()));
 
         assert_ne!(changed.draft_hash, initial.draft_hash);
-        assert_eq!(changed.diagnostics, Some(diagnostics));
+        assert_eq!(changed.diagnostics, Some(diagnostics.clone()));
         assert_eq!(changed.diagnostics.as_ref().unwrap().errors, Some(1));
         assert_eq!(changed.diagnostics.as_ref().unwrap().warnings, Some(1));
+
+        runtime
+            .workspace()
+            .write_draft(
+                "# comment\nblocks:\n  main:\n    components:\n      R1:\n        between: [A, GND]\n        part: Device:R\nversion: 1\n",
+                None,
+            )
+            .unwrap();
+        let cosmetic = durable_authoring_state(&runtime, Some(diagnostics));
+        assert_eq!(
+            cosmetic.draft_hash, changed.draft_hash,
+            "comments and mapping order are not electrical progress"
+        );
     }
 
     #[test]
@@ -3937,6 +3972,11 @@ mod tests {
             "replacements": 1,
         })));
         assert!(authoring_result_changed_draft(&json!({
+            "draft_changed": true,
+            "draft_written": true,
+        })));
+        assert!(!authoring_result_changed_draft(&json!({
+            "electrical_design_changed": false,
             "draft_changed": true,
             "draft_written": true,
         })));

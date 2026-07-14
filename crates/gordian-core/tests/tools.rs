@@ -230,6 +230,15 @@ fn full_yaml_edit_seeds_a_new_project_and_reports_idempotence() {
     assert_eq!(identical["draft_written"], true, "{identical}");
     assert_eq!(identical["draft_changed"], false, "{identical}");
     assert_eq!(identical["mode"], "full_replace", "{identical}");
+
+    let cosmetic = format!("# formatting-only rewrite\n{TINY_YAML}");
+    let cosmetic_result =
+        run_tool("edit_design", serde_json::json!({ "yaml": cosmetic }), &ctx).unwrap();
+    assert_eq!(cosmetic_result["draft_changed"], true, "{cosmetic_result}");
+    assert_eq!(
+        cosmetic_result["electrical_design_changed"], false,
+        "{cosmetic_result}"
+    );
 }
 
 #[test]
@@ -486,6 +495,38 @@ fn authoring_reports_real_patch_and_create_changes() {
     )
     .unwrap();
     assert_eq!(changed_patch["draft_changed"], true, "{changed_patch}");
+}
+
+#[test]
+fn invalid_patch_preserves_a_valid_draft() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    run_tool(
+        "create_design",
+        serde_json::json!({ "yaml": TINY_YAML }),
+        &ctx,
+    )
+    .unwrap();
+
+    let out = run_tool(
+        "edit_design",
+        serde_json::json!({
+            "old_string": "R1: {part: Device:R",
+            "new_string": "[search needed]        pins:"
+        }),
+        &ctx,
+    )
+    .unwrap();
+
+    assert_eq!(out["code"], "invalid_patch_preserved_draft", "{out}");
+    assert_eq!(out["draft_changed"], false, "{out}");
+    assert_eq!(
+        ctx.workspace().read_draft().unwrap().as_deref(),
+        Some(TINY_YAML),
+        "the last valid design must survive a malformed patch"
+    );
 }
 
 #[test]
