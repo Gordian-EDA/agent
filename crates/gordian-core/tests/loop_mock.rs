@@ -254,7 +254,7 @@ async fn edit_after_commit_is_not_reported_as_applied_until_recommitted() {
 }
 
 #[tokio::test]
-async fn identical_authoring_rewrites_trigger_no_progress_watchdog() {
+async fn identical_authoring_rewrites_do_not_evade_the_commit_nudge() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -280,6 +280,8 @@ async fn identical_authoring_rewrites_trigger_no_progress_watchdog() {
             "edit_design",
             serde_json::json!({"yaml": CLEAN_YAML}),
         ),
+        tool_call("apply", "apply_design", serde_json::json!({})),
+        final_text("committed instead of rewriting again"),
     ];
     let mut agent = agent(ctx, script);
     let mut approvals = AutoApprove::yes();
@@ -293,12 +295,9 @@ async fn identical_authoring_rewrites_trigger_no_progress_watchdog() {
         .await
         .unwrap();
 
-    assert_eq!(
-        outcome.stop_reason,
-        StopReason::NoProgress { completions: 3 }
-    );
-    assert!(!outcome.applied);
-    assert_eq!(outcome.tool_calls_made, 4);
+    assert_eq!(outcome.stop_reason, StopReason::Completed);
+    assert!(outcome.applied);
+    assert_eq!(outcome.tool_calls_made, 5);
 }
 
 #[tokio::test]

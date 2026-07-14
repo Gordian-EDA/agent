@@ -1013,8 +1013,10 @@ impl<P: Provider> Agent<P> {
                     if call.fn_name == "get_board" {
                         board_read_dispatched_this_completion = true;
                     }
+                    let effective_review_call = authoritative_review_call(call, user_msg);
+                    let call_to_run = effective_review_call.as_ref().unwrap_or(call);
                     self.run_tool_call(
-                        call,
+                        call_to_run,
                         gated_commit,
                         approval_required,
                         approvals,
@@ -2102,6 +2104,26 @@ fn fix_prompt(defects: &[String]) -> String {
          high-confidence defects:\n{}\n\nFix each one and re-commit.",
         defects.join("\n")
     )
+}
+
+fn authoritative_review_call(call: &ToolCall, user_msg: &str) -> Option<ToolCall> {
+    if call.fn_name != "review_design" {
+        return None;
+    }
+    let mut effective = call.clone();
+    let model_summary = call
+        .fn_arguments
+        .get("intent")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|intent| !intent.is_empty());
+    let mut intent = format!("Authoritative user request:\n{}", user_msg.trim());
+    if let Some(summary) = model_summary {
+        intent.push_str("\n\nSupplemental model summary:\n");
+        intent.push_str(summary);
+    }
+    effective.fn_arguments["intent"] = json!(intent);
+    Some(effective)
 }
 
 /// Run one KiCAD tool, off-loading the synchronous dispatch onto the
@@ -3810,6 +3832,33 @@ mod tests {
         assert!(version_supports_live_footprint_moves("9.0.3"));
         assert!(version_supports_live_footprint_moves("10.0.0"));
         assert!(version_supports_live_footprint_moves("unknown"));
+    }
+
+    #[test]
+    fn review_intent_always_contains_the_authoritative_user_request() {
+        let call = ToolCall {
+            call_id: "review-1".into(),
+            fn_name: "review_design".into(),
+            fn_arguments: json!({"intent": "check the small signal path"}),
+            thought_signatures: None,
+        };
+
+        let effective = authoritative_review_call(
+            &call,
+            "Use dual supplies and provide six labeled test points",
+        )
+        .unwrap();
+        let intent = effective.fn_arguments["intent"].as_str().unwrap();
+        assert!(intent.contains("Use dual supplies"));
+        assert!(intent.contains("six labeled test points"));
+        assert!(intent.contains("check the small signal path"));
+        assert_eq!(effective.call_id, call.call_id);
+
+        let non_review = ToolCall {
+            fn_name: "validate_design".into(),
+            ..call
+        };
+        assert!(authoritative_review_call(&non_review, "goal").is_none());
     }
 
     #[test]
