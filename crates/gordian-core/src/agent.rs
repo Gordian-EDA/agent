@@ -70,6 +70,12 @@ const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 /// this bounds every other cycle (and therefore cost and context growth).
 const MAX_PROVIDER_REQUESTS_PER_TURN: usize = 32;
 
+/// Reserve enough of a complex turn for the deterministic PCB pipeline instead
+/// of allowing schematic repair chatter to consume the whole global ceiling.
+const MAX_SCHEMATIC_REQUESTS_FOR_PCB: usize = 20;
+const MAX_PCB_STAGE_REQUESTS: usize =
+    MAX_PROVIDER_REQUESTS_PER_TURN - MAX_SCHEMATIC_REQUESTS_FOR_PCB;
+
 /// Stop a model that keeps issuing tools without changing the durable design or
 /// its authoring diagnostics. This is intentionally much lower than the global
 /// request ceiling: three unchanged completions are enough evidence that the
@@ -306,6 +312,41 @@ fn is_schematic_phase_tool(name: &str) -> bool {
             | "get_footprint_info"
             | "assign_footprints"
     )
+}
+
+fn is_pcb_stage_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "regenerate_board"
+            | "place_board"
+            | "route_board"
+            | "check_board"
+            | "export_fab"
+            | "open_board"
+            | "get_board"
+            | "render_board"
+            | "update_board_outline"
+            | "move_parts"
+            | "route_track"
+            | "delete_copper"
+            | "set_net_width"
+    )
+}
+
+fn pcb_stage_history(authoritative_request: &str) -> Vec<ChatMessage> {
+    vec![ChatMessage::user(format!(
+        "Authoritative original request:\n{}\n\n\
+         The schematic stage is now committed, independently reviewed, and ERC-clean. Treat the \
+         saved schematic and draft as final; do not read, edit, validate, review, or re-apply them. \
+         Complete the PCB stage now. First call regenerate_board exactly once with the requested \
+         dimensions, layer count, copper widths, and exact pour count/connection. Once the board \
+         exists, call place_board, route_board, and check_board in that order, one result-aware step \
+         per completion. Do not stop at regeneration or inspect/render before the \
+         first check. If check_board reports blocking findings, make one concrete placement/copper/\
+         outline recovery change and re-check; otherwise report the saved DRC and unrouted counts \
+         honestly.",
+        authoritative_request.trim()
+    ))]
 }
 
 fn is_discovery_tool(name: &str) -> bool {
@@ -561,24 +602,29 @@ impl<P: Provider> Agent<P> {
         approvals: &mut dyn Approvals,
         events: Events<'_>,
     ) -> Result<TurnOutcome> {
-        let outcome = self.run_agent_subturn(user_msg, approvals, events).await?;
+        let outcome = self
+            .run_agent_subturn(user_msg, user_msg, approvals, events)
+            .await?;
         emit(events, AgentEvent::TurnDone);
         Ok(outcome)
     }
 
     async fn run_agent_subturn(
         &mut self,
-        user_msg: &str,
+        instruction: &str,
+        authoritative_intent: &str,
         approvals: &mut dyn Approvals,
         events: Events<'_>,
     ) -> Result<TurnOutcome> {
         repair_history(&mut self.history);
-        self.turn_starts.push(self.history.len());
-        self.history.push(ChatMessage::user(user_msg));
+        let current_turn_start = self.history.len();
+        self.turn_starts.push(current_turn_start);
+        self.history.push(ChatMessage::user(instruction));
 
         let mut applied = false;
         let mut tool_calls_made = 0usize;
-        let precommit_review_required = request_requires_precommit_review(user_msg);
+        let precommit_review_required = request_requires_precommit_review(authoritative_intent);
+        let pcb_work_requested = request_requires_pcb_work(authoritative_intent);
         // `applied` deliberately means "committed in this turn", but bounded
         // stop messages must also recognize a draft that was already synced to
         // the current schematic when a continuation turn began.
@@ -606,6 +652,7 @@ impl<P: Provider> Agent<P> {
         // later mutation unsafe for the rest of this subturn.
         let mut tool_state_revision = 0u64;
         let mut provider_requests = 0usize;
+        let mut stage_provider_requests = 0usize;
         let mut discovery_rounds_used: HashMap<String, usize> = HashMap::new();
         // Last project-state revision at which each repeat-prone read ran.
         // Advancing `tool_state_revision` automatically makes every read
@@ -623,9 +670,15 @@ impl<P: Provider> Agent<P> {
         // defective draft from paying for the same LLM review repeatedly.
         let mut schematic_review_current: Option<Value> = None;
         let mut last_tool_status: Option<String> = None;
+        let mut pcb_only_stage = false;
 
         loop {
-            if provider_requests >= MAX_PROVIDER_REQUESTS_PER_TURN {
+            if request_budget_exhausted(
+                provider_requests,
+                stage_provider_requests,
+                pcb_work_requested,
+                pcb_only_stage,
+            ) {
                 let current_applied = applied && !draft_dirty;
                 let final_text = provider_limit_final_text(
                     None,
@@ -644,6 +697,7 @@ impl<P: Provider> Agent<P> {
                 });
             }
             provider_requests += 1;
+            stage_provider_requests += 1;
 
             self.tool_phase = self.tool_phase.max(ToolPhase::observe(&self.runtime));
             let draft_existed_before_completion = self
@@ -668,6 +722,12 @@ impl<P: Provider> Agent<P> {
             if !runtime_supports_live_footprint_moves(&self.runtime) {
                 defs.retain(|def| !matches!(def.name.as_str(), "move_parts" | "set_net_width"));
             }
+            if pcb_only_stage {
+                defs.retain(|def| is_pcb_stage_tool(def.name.as_str()));
+            }
+            if schematic_review_current.is_some() {
+                defs.retain(|def| def.name.as_str() != "review_design");
+            }
 
             // Drive the provider's stream so assistant prose renders token-by-token
             // (each chunk forwarded as `AssistantDelta`), while the terminal End
@@ -688,7 +748,12 @@ impl<P: Provider> Agent<P> {
                     // so it consumes the same hard request budget as the stream.
                     // If the stream itself used the last slot, preserve any
                     // partial prose and stop without issuing request N+1.
-                    if provider_requests >= MAX_PROVIDER_REQUESTS_PER_TURN {
+                    if request_budget_exhausted(
+                        provider_requests,
+                        stage_provider_requests,
+                        pcb_work_requested,
+                        pcb_only_stage,
+                    ) {
                         if !text.is_empty() {
                             emit(events, AgentEvent::AssistantText(text.clone()));
                             self.history.push(ChatMessage::assistant(text.clone()));
@@ -711,6 +776,7 @@ impl<P: Provider> Agent<P> {
                         });
                     }
                     provider_requests += 1;
+                    stage_provider_requests += 1;
                     let end = self
                         .client
                         .complete(&self.system, &self.history, &defs)
@@ -826,6 +892,7 @@ impl<P: Provider> Agent<P> {
             // comes first may run; the dependent half must wait one completion.
             let mut authoring_dispatched_this_completion = false;
             let mut apply_dispatched_this_completion = false;
+            let mut schematic_stage_ready_this_completion = false;
             let mut non_authoring_state_changed_this_completion = false;
             let mut discovery_calls_dispatched_this_completion: HashMap<String, usize> =
                 HashMap::new();
@@ -879,6 +946,8 @@ impl<P: Provider> Agent<P> {
                     && !schematic_review_clean;
                 let cached_precommit_defects =
                     precommit_review_needed && schematic_review_current.is_some();
+                let cached_review_call =
+                    call.fn_name == "review_design" && schematic_review_current.is_some();
                 let unchanged_apply_blocked = call.fn_name == "apply_design"
                     && !draft_dirty
                     && (commit_attempted_for_current_draft || draft_committed_at_turn_start);
@@ -891,6 +960,7 @@ impl<P: Provider> Agent<P> {
                     && !run_erc_without_schematic
                     && !schematic_review_blocked
                     && !cached_precommit_defects
+                    && !cached_review_call
                     && !unchanged_apply_blocked
                     && !speculative_mutation_blocked
                     && !create_on_existing_draft_blocked;
@@ -906,6 +976,16 @@ impl<P: Provider> Agent<P> {
                         Vec::new(),
                         None,
                     )
+                } else if cached_review_call {
+                    let mut cached = schematic_review_current.clone().unwrap_or_default();
+                    if let Some(object) = cached.as_object_mut() {
+                        object.insert("cached".into(), json!(true));
+                        object.insert(
+                            "note".into(),
+                            json!("Reused the semantic review of this electrically unchanged draft; no provider request was made."),
+                        );
+                    }
+                    (cached.to_string(), Vec::new(), None)
                 } else if cached_precommit_defects {
                     let mut cached = schematic_review_current.clone().unwrap_or_default();
                     if let Some(object) = cached.as_object_mut() {
@@ -1055,11 +1135,12 @@ impl<P: Provider> Agent<P> {
                     let review_call = ToolCall {
                         call_id: format!("{}:precommit-review", call.call_id),
                         fn_name: "review_design".into(),
-                        fn_arguments: json!({"intent": user_msg}),
+                        fn_arguments: json!({"intent": authoritative_intent}),
                         thought_signatures: None,
                     };
                     let effective_review_call =
-                        authoritative_review_call(&review_call, user_msg).unwrap_or(review_call);
+                        authoritative_review_call(&review_call, authoritative_intent)
+                            .unwrap_or(review_call);
                     let (review_content, _, _) = self
                         .run_tool_call(
                             &effective_review_call,
@@ -1113,8 +1194,9 @@ impl<P: Provider> Agent<P> {
                     if call.fn_name == "get_board" {
                         board_read_dispatched_this_completion = true;
                     }
-                    let effective_review_call = authoritative_review_call(call, user_msg);
-                    let call_to_run = effective_review_call.as_ref().unwrap_or(call);
+                    let effective_call = authoritative_review_call(call, authoritative_intent)
+                        .or_else(|| authoritative_regenerate_call(call, authoritative_intent));
+                    let call_to_run = effective_call.as_ref().unwrap_or(call);
                     self.run_tool_call(
                         call_to_run,
                         gated_commit,
@@ -1183,6 +1265,11 @@ impl<P: Provider> Agent<P> {
                     let rejected = parsed.get("rejected").and_then(Value::as_bool) == Some(true);
                     if written {
                         draft_dirty = false;
+                        schematic_stage_ready_this_completion = precommit_review_required
+                            && schematic_review_current
+                                .as_ref()
+                                .is_some_and(review_result_is_clean)
+                            && apply_erc_cleanup_needed(&parsed) == Some(false);
                     }
                     if written || rejected {
                         commit_attempted_for_current_draft = true;
@@ -1220,6 +1307,33 @@ impl<P: Provider> Agent<P> {
             }
             prune_large_tool_arguments(&mut self.history);
             prune_stale_tool_results(&mut self.history);
+
+            // A complex schematic+PCB request otherwise reaches board work with
+            // almost the entire authoring transcript and request budget spent.
+            // Once the saved schematic is independently reviewed and ERC-clean,
+            // replace that protocol-heavy history with a deterministic,
+            // authoritative PCB-stage handoff. Project files are the source of
+            // truth; no lossy LLM summary call is needed.
+            if pcb_work_requested
+                && schematic_stage_ready_this_completion
+                && !pcb_only_stage
+                && !self.runtime.pcb_path().exists()
+            {
+                let before = self.history.len();
+                self.history.truncate(current_turn_start);
+                self.history.extend(pcb_stage_history(authoritative_intent));
+                revision_read_uses.clear();
+                consecutive_no_progress_completions = 0;
+                pcb_only_stage = true;
+                stage_provider_requests = 0;
+                emit(
+                    events,
+                    AgentEvent::Compacted {
+                        messages_before: before,
+                        messages_after: self.history.len(),
+                    },
+                );
+            }
 
             // `spawn_blocking` mutations continue after their async timeout.
             // The dispatch guard above therefore blocks every later mutation
@@ -1341,7 +1455,9 @@ impl<P: Provider> Agent<P> {
         events: Events<'_>,
         max_fix: usize,
     ) -> Result<TurnOutcome> {
-        let mut outcome = self.run_agent_subturn(user_msg, approvals, events).await?;
+        let mut outcome = self
+            .run_agent_subturn(user_msg, intent, approvals, events)
+            .await?;
         // Gate: review only authoring/commit turns. Conversational and read-only
         // turns commit nothing, so there is nothing to independently review.
         if !outcome.applied || outcome.stop_reason != StopReason::Completed {
@@ -1366,7 +1482,9 @@ impl<P: Provider> Agent<P> {
                 break;
             }
             let fix = fix_prompt(&review.defects);
-            outcome = self.run_agent_subturn(&fix, approvals, events).await?;
+            outcome = self
+                .run_agent_subturn(&fix, intent, approvals, events)
+                .await?;
             if outcome.stop_reason != StopReason::Completed {
                 break;
             }
@@ -1713,6 +1831,36 @@ fn request_requires_precommit_review(user_msg: &str) -> bool {
         || request.contains("board")
         || request.contains("production")
         || request.contains("review")
+}
+
+fn request_requires_pcb_work(user_msg: &str) -> bool {
+    let request = user_msg.to_ascii_lowercase();
+    request.contains("pcb")
+        || request.contains("route the board")
+        || request.contains("board routing")
+        || request.contains("board layout")
+        || request.contains("fabrication")
+        || request.contains("gerber")
+}
+
+fn request_budget_exhausted(
+    total_requests: usize,
+    stage_requests: usize,
+    pcb_work_requested: bool,
+    pcb_stage: bool,
+) -> bool {
+    if total_requests >= MAX_PROVIDER_REQUESTS_PER_TURN {
+        return true;
+    }
+    if !pcb_work_requested {
+        return false;
+    }
+    let stage_limit = if pcb_stage {
+        MAX_PCB_STAGE_REQUESTS
+    } else {
+        MAX_SCHEMATIC_REQUESTS_FOR_PCB
+    };
+    stage_requests >= stage_limit
 }
 
 fn review_result_is_clean(value: &Value) -> bool {
@@ -2300,6 +2448,46 @@ fn authoritative_review_call(call: &ToolCall, user_msg: &str) -> Option<ToolCall
         intent.push_str(summary);
     }
     effective.fn_arguments["intent"] = json!(intent);
+    Some(effective)
+}
+
+fn authoritative_regenerate_call(call: &ToolCall, user_msg: &str) -> Option<ToolCall> {
+    if call.fn_name != "regenerate_board" {
+        return None;
+    }
+    let request = user_msg.to_ascii_lowercase();
+    let exact_one_ground_pour = request.contains("exactly one")
+        && request.contains("gnd")
+        && (request.contains("pour") || request.contains("plane"));
+    let explicit_two_layer = request.contains("two-layer") || request.contains("two layer");
+    if !exact_one_ground_pour && !explicit_two_layer {
+        return None;
+    }
+
+    let mut effective = call.clone();
+    if !effective.fn_arguments["rules"].is_object() {
+        effective.fn_arguments["rules"] = json!({});
+    }
+    if explicit_two_layer {
+        effective.fn_arguments["rules"]["layer_count"] = json!(2);
+    }
+    if exact_one_ground_pour {
+        let layer = if request.contains("top pour") || request.contains("top-layer pour") {
+            "top"
+        } else {
+            "bottom"
+        };
+        let connect = if request.contains("solid") {
+            "solid"
+        } else {
+            "thermal"
+        };
+        effective.fn_arguments["rules"]["pours"] = json!([{
+            "net": "GND",
+            "layer": layer,
+            "connect": connect,
+        }]);
+    }
     Some(effective)
 }
 
@@ -3832,6 +4020,49 @@ mod tests {
     }
 
     #[test]
+    fn pcb_requests_reserve_a_bounded_board_stage() {
+        assert!(request_requires_pcb_work(
+            "finish the two-layer PCB and run DRC"
+        ));
+        assert!(request_requires_pcb_work("complete board routing"));
+        assert!(!request_requires_pcb_work(
+            "review this production schematic only"
+        ));
+
+        assert!(!request_budget_exhausted(19, 19, true, false));
+        assert!(request_budget_exhausted(20, 20, true, false));
+        assert!(!request_budget_exhausted(31, 11, true, true));
+        assert!(request_budget_exhausted(32, 12, true, true));
+        assert!(!request_budget_exhausted(31, 31, false, false));
+        assert!(request_budget_exhausted(32, 32, false, false));
+    }
+
+    #[test]
+    fn pcb_stage_checkpoint_is_compact_and_authoritative() {
+        let request = "Build an exact 50x35 mm PCB with exactly one solid GND pour.";
+        let history = pcb_stage_history(request);
+        assert_eq!(history.len(), 1);
+        let text = first_text(&history[0]).unwrap();
+        assert!(text.contains(request));
+        assert!(text.contains("regenerate_board exactly once"));
+        assert!(text.contains("place_board, route_board, and check_board"));
+        assert!(!text.contains("components:"));
+
+        for tool in [
+            "regenerate_board",
+            "place_board",
+            "route_board",
+            "check_board",
+            "move_parts",
+        ] {
+            assert!(is_pcb_stage_tool(tool), "{tool}");
+        }
+        for tool in ["read_schematic", "edit_design", "apply_design", "run_erc"] {
+            assert!(!is_pcb_stage_tool(tool), "{tool}");
+        }
+    }
+
+    #[test]
     fn timed_out_mutation_guard_is_terminal_for_mutations_in_the_subturn() {
         let timed_out = vec![(
             "apply_design".to_string(),
@@ -4097,6 +4328,34 @@ mod tests {
             ..call
         };
         assert!(authoritative_review_call(&non_review, "goal").is_none());
+    }
+
+    #[test]
+    fn explicit_pour_and_layer_constraints_override_regeneration_guesses() {
+        let call = ToolCall {
+            call_id: "regen-1".into(),
+            fn_name: "regenerate_board".into(),
+            fn_arguments: json!({
+                "rules": {
+                    "layer_count": 6,
+                    "pours": [
+                        {"net": "GND", "layer": "top"},
+                        {"net": "GND", "layer": "bottom"}
+                    ]
+                }
+            }),
+            thought_signatures: None,
+        };
+        let effective = authoritative_regenerate_call(
+            &call,
+            "Make a two-layer PCB with exactly one full-board solid GND pour",
+        )
+        .unwrap();
+        assert_eq!(effective.fn_arguments["rules"]["layer_count"], 2);
+        assert_eq!(
+            effective.fn_arguments["rules"]["pours"],
+            json!([{"net": "GND", "layer": "bottom", "connect": "solid"}])
+        );
     }
 
     #[test]
