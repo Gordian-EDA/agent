@@ -391,7 +391,7 @@ fn is_positive_rail_net(net: &str) -> bool {
     circuit_lang::erc::rail_voltage(net).is_some_and(|volts| volts > 0.0)
         || matches!(
             net.trim().to_ascii_uppercase().as_str(),
-            "VCC" | "VDD" | "VBUS" | "VBAT" | "VIN" | "VOUT"
+            "V5" | "VCC" | "VDD" | "VBUS" | "VBAT" | "VIN" | "VOUT"
         )
 }
 
@@ -1486,6 +1486,25 @@ blocks:
         let defects = intent_contract_checks("Include an input TVS", &design);
 
         assert!(defects.is_empty(), "{}", defects.join("\n"));
+    }
+
+    #[test]
+    fn intent_contract_recognizes_decoupling_on_v5() {
+        let provider = circuit_lang::SymbolTable::with_basics();
+        let design = circuit_lang::compile(
+            r#"
+version: 1
+blocks:
+  main:
+    components:
+      C1: {part: Device:C, value: 100nF, pins: {1: V5, 2: GND}}
+"#,
+            &provider,
+        )
+        .design
+        .expect("fixture compiles");
+
+        assert!(intent_contract_checks("local decoupling", &design).is_empty());
     }
 
     #[test]
