@@ -111,10 +111,14 @@ pub async fn review_netlist(
 /// library identifiers named by the request.
 pub(crate) fn intent_contract_checks(intent: &str, design: &circuit_lang::Design) -> Vec<String> {
     let request = intent.to_ascii_lowercase();
-    let components = design
+    let all_components = design
         .blocks
         .values()
         .flat_map(|block| block.components.iter())
+        .collect::<Vec<_>>();
+    let components = all_components
+        .iter()
+        .copied()
         .filter(|(_, component)| matches!(component.origin, circuit_lang::model::Origin::Authored))
         .collect::<Vec<_>>();
     let mut defects = Vec::new();
@@ -133,7 +137,7 @@ pub(crate) fn intent_contract_checks(intent: &str, design: &circuit_lang::Design
         }
     }
 
-    if request.contains("status") {
+    if requires_unconditionally(&request, "status") {
         let has_status_net = design.nets.keys().any(|net| {
             let net = net.to_ascii_lowercase();
             net.contains("status") || net.contains("fault") || net.contains("error") || net == "err"
@@ -156,6 +160,148 @@ pub(crate) fn intent_contract_checks(intent: &str, design: &circuit_lang::Design
                 "intent contract: power-good was requested, but the design has no PG, PGOOD, or POWER_GOOD net"
                     .into(),
             );
+        }
+    }
+
+    if request.contains("i2c")
+        && (request.contains("pull-up")
+            || request.contains("pull up")
+            || request.contains("pullup"))
+        && !has_i2c_pullups(&components)
+    {
+        defects.push(
+            "intent contract: explicit I2C pull-ups were requested, but the design does not have separate resistors pulling both SDA and SCL to a positive supply rail"
+                .into(),
+        );
+    }
+
+    if (request.contains("selectable") || request.contains("configurable"))
+        && request.contains("address")
+        && !has_selectable_address_strap(&components)
+    {
+        defects.push(
+            "intent contract: a selectable address strap was requested, but no jumper/switch/strap component is connected to an address net"
+                .into(),
+        );
+    }
+
+    if request.contains("decoupl") && !has_decoupling(&all_components) {
+        defects.push(
+            "intent contract: decoupling was explicitly requested, but no capacitor is connected between a positive supply rail and ground"
+                .into(),
+        );
+    }
+
+    if request.contains("test point") || request.contains("testpoint") {
+        let requested_nets = requested_test_point_nets(&request);
+        let present_nets = test_point_nets(&components);
+        let missing = requested_nets
+            .iter()
+            .filter(|required| {
+                !present_nets
+                    .iter()
+                    .any(|present| canonical_net_matches(present, required))
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        if present_nets.is_empty() || !missing.is_empty() {
+            let detail = if missing.is_empty() {
+                "no authored test-point component is present".to_string()
+            } else {
+                format!(
+                    "test points are missing for named nets {}",
+                    missing.join(", ")
+                )
+            };
+            defects.push(format!(
+                "intent contract: named test points were requested, but {detail}"
+            ));
+        }
+    }
+
+    if request.contains("regulator")
+        && !components.iter().any(|(_, component)| {
+            let text = component_text(component);
+            text.contains("regulator") || text.contains("buck") || text.contains("ldo")
+        })
+    {
+        defects.push(
+            "intent contract: a regulator was requested, but no authored regulator, buck, or LDO component is present"
+                .into(),
+        );
+    }
+
+    if (request.contains("power led")
+        || request.contains("power-good led")
+        || request.contains("power good led")
+        || request.contains("power indicator"))
+        && !has_power_led(&components)
+    {
+        defects.push(
+            "intent contract: a power LED was requested, but no LED and series resistor form a path between a positive supply rail and ground"
+                .into(),
+        );
+    }
+
+    if (request.contains("reverse-polarity") || request.contains("reverse polarity"))
+        && !has_reverse_protection(&components)
+    {
+        defects.push(
+            "intent contract: reverse-polarity protection was requested, but no authored diode or MOSFET protection element is present between distinct non-ground nets"
+                .into(),
+        );
+    }
+
+    if request.contains("fuse")
+        && !components
+            .iter()
+            .any(|(_, component)| component_text(component).contains("fuse"))
+    {
+        defects.push(
+            "intent contract: an input fuse was requested, but no authored fuse is present".into(),
+        );
+    }
+
+    if request.contains("tvs")
+        && !components
+            .iter()
+            .any(|(_, component)| component_text(component).contains("tvs"))
+    {
+        defects.push("intent contract: input TVS protection was requested, but no authored TVS component is present".into());
+    }
+
+    if request.contains("input protection")
+        && !components.iter().any(|(_, component)| {
+            let text = component_text(component);
+            text.contains("tvs")
+                || text.contains("fuse")
+                || text.contains("protection")
+                || component.part.ends_with(":D")
+                || text.contains("mosfet")
+        })
+    {
+        defects.push(
+            "intent contract: input protection was requested, but no authored fuse, TVS, diode, MOSFET, or protection component is present"
+                .into(),
+        );
+    }
+
+    if request.contains("connector") {
+        let connector_count = components
+            .iter()
+            .filter(|(_, component)| component.part.to_ascii_lowercase().contains("connector"))
+            .count();
+        let required = if (request.contains("input") && request.contains("output"))
+            || request.contains("connectors")
+        {
+            2
+        } else {
+            1
+        };
+        if connector_count < required {
+            defects.push(format!(
+                "intent contract: the request requires {required} connector(s), but only {connector_count} authored connector component(s) are present"
+            ));
         }
     }
 
@@ -187,6 +333,22 @@ pub(crate) fn intent_contract_checks(intent: &str, design: &circuit_lang::Design
     defects
 }
 
+fn requires_unconditionally(request: &str, term: &str) -> bool {
+    request
+        .split(['.', ';', '\n'])
+        .filter(|clause| clause.contains(term))
+        .any(|clause| {
+            ![
+                "if supported",
+                "if available",
+                "when supported",
+                "when available",
+            ]
+            .iter()
+            .any(|conditional| clause.contains(conditional))
+        })
+}
+
 fn component_text(component: &circuit_lang::model::Component) -> String {
     format!(
         "{} {}",
@@ -206,6 +368,190 @@ fn component_nets(component: &circuit_lang::model::Component) -> Vec<&str> {
             circuit_lang::model::PinTarget::NoConnect => None,
         })
         .collect()
+}
+
+fn is_ground_net(net: &str) -> bool {
+    net.eq_ignore_ascii_case("gnd") || net.to_ascii_lowercase().ends_with("gnd")
+}
+
+fn is_positive_rail_net(net: &str) -> bool {
+    circuit_lang::erc::rail_voltage(net).is_some_and(|volts| volts > 0.0)
+        || matches!(
+            net.trim().to_ascii_uppercase().as_str(),
+            "VCC" | "VDD" | "VBUS" | "VBAT" | "VIN" | "VOUT"
+        )
+}
+
+fn has_i2c_pullups(components: &[(&String, &circuit_lang::model::Component)]) -> bool {
+    ["sda", "scl"].iter().all(|signal| {
+        components.iter().any(|(_, component)| {
+            if !component.part.ends_with(":R") {
+                return false;
+            }
+            let nets = component_nets(component);
+            nets.iter()
+                .any(|net| net.to_ascii_lowercase().contains(signal))
+                && nets.iter().any(|net| is_positive_rail_net(net))
+        })
+    })
+}
+
+fn has_selectable_address_strap(components: &[(&String, &circuit_lang::model::Component)]) -> bool {
+    components.iter().any(|(refdes, component)| {
+        let text = component_text(component);
+        let selectable = refdes.to_ascii_uppercase().starts_with("JP")
+            || refdes.to_ascii_uppercase().starts_with("SW")
+            || text.contains("jumper")
+            || text.contains("solderjumper")
+            || text.contains("switch")
+            || text.contains("strap");
+        selectable
+            && component_nets(component).iter().any(|net| {
+                let net = net.to_ascii_lowercase();
+                net.contains("addr")
+                    || net.contains("address")
+                    || matches!(net.as_str(), "a0" | "a1" | "a2")
+            })
+    })
+}
+
+fn requested_test_point_nets(request: &str) -> Vec<&'static str> {
+    let Some((index, marker_len)) = request
+        .find("test points")
+        .map(|index| (index, "test points".len()))
+        .or_else(|| {
+            request
+                .find("testpoints")
+                .map(|index| (index, "testpoints".len()))
+        })
+        .or_else(|| {
+            request
+                .find("test point")
+                .map(|index| (index, "test point".len()))
+        })
+        .or_else(|| {
+            request
+                .find("testpoint")
+                .map(|index| (index, "testpoint".len()))
+        })
+    else {
+        return Vec::new();
+    };
+    let suffix = &request[index + marker_len..];
+    let clause = suffix.split(['.', ';', '\n']).next().unwrap_or(suffix);
+    let clause = clause.trim_start();
+    let named = if let Some(named) = clause.strip_prefix("for ") {
+        named
+    } else if let Some(named) = clause.strip_prefix("on ") {
+        named
+    } else if let Some(named) = clause.strip_prefix(':') {
+        named.trim_start()
+    } else {
+        return Vec::new();
+    };
+    let tokens = named
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '+' | '.' | '_')))
+        .map(|token| token.trim_matches('_'))
+        .collect::<Vec<_>>();
+    let aliases: &[(&str, &[&str])] = &[
+        ("5V", &["5v", "+5v"]),
+        ("3V3", &["3v3", "3.3v", "+3v3", "+3.3v"]),
+        ("GND", &["gnd"]),
+        ("SDA", &["sda"]),
+        ("SCL", &["scl"]),
+        ("VCC", &["vcc"]),
+        ("VDD", &["vdd"]),
+        ("VIN", &["vin"]),
+        ("VOUT", &["vout"]),
+        ("INT", &["int", "irq"]),
+    ];
+    aliases
+        .iter()
+        .filter(|(_, names)| names.iter().any(|name| tokens.contains(name)))
+        .map(|(canonical, _)| *canonical)
+        .collect()
+}
+
+fn test_point_nets(components: &[(&String, &circuit_lang::model::Component)]) -> Vec<String> {
+    components
+        .iter()
+        .filter(|(refdes, component)| {
+            refdes.to_ascii_uppercase().starts_with("TP")
+                || component_text(component).contains("testpoint")
+        })
+        .flat_map(|(_, component)| component_nets(component))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn canonical_net_matches(net: &str, canonical: &str) -> bool {
+    let normalized = net
+        .trim()
+        .trim_start_matches('+')
+        .to_ascii_uppercase()
+        .replace('.', "");
+    match canonical {
+        "5V" => normalized == "5V",
+        "3V3" => normalized == "3V3" || normalized == "33V",
+        "INT" => normalized == "INT" || normalized == "IRQ",
+        other => normalized == other,
+    }
+}
+
+fn has_decoupling(components: &[(&String, &circuit_lang::model::Component)]) -> bool {
+    components.iter().any(|(_, component)| {
+        if !component.part.ends_with(":C") {
+            return false;
+        }
+        let nets = component_nets(component);
+        nets.iter().any(|net| is_ground_net(net))
+            && nets.iter().any(|net| is_positive_rail_net(net))
+    })
+}
+
+fn has_power_led(components: &[(&String, &circuit_lang::model::Component)]) -> bool {
+    components.iter().any(|(_, led)| {
+        if !component_text(led).contains("led") {
+            return false;
+        }
+        let led_nets = component_nets(led);
+        components.iter().any(|(_, resistor)| {
+            if !resistor.part.ends_with(":R") {
+                return false;
+            }
+            let resistor_nets = component_nets(resistor);
+            if !led_nets.iter().any(|net| resistor_nets.contains(net)) {
+                return false;
+            }
+            led_nets
+                .iter()
+                .chain(resistor_nets.iter())
+                .any(|net| is_ground_net(net))
+                && led_nets
+                    .iter()
+                    .chain(resistor_nets.iter())
+                    .any(|net| is_positive_rail_net(net))
+        })
+    })
+}
+
+fn has_reverse_protection(components: &[(&String, &circuit_lang::model::Component)]) -> bool {
+    components.iter().any(|(_, component)| {
+        let text = component_text(component);
+        let candidate = (component.part.ends_with(":D")
+            || component.part.contains(":Q_")
+            || text.contains("diode")
+            || text.contains("mosfet"))
+            && !text.contains("led")
+            && !text.contains("tvs");
+        let non_ground_nets = component_nets(component)
+            .into_iter()
+            .filter(|net| !is_ground_net(net))
+            .collect::<Vec<_>>();
+        candidate
+            && non_ground_nets.len() >= 2
+            && non_ground_nets.windows(2).any(|pair| pair[0] != pair[1])
+    })
 }
 
 fn has_split_termination(components: &[(&String, &circuit_lang::model::Component)]) -> bool {
@@ -968,5 +1314,148 @@ nets:
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn conditional_status_does_not_create_a_false_contract() {
+        let provider = circuit_lang::SymbolTable::with_basics();
+        let netlist = r#"
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: Device:R, value: 10k, between: [SIG, GND]}
+"#;
+        let design = circuit_lang::compile(netlist, &provider)
+            .design
+            .expect("fixture compiles");
+
+        let defects = intent_contract_checks(
+            "Expose a status output if supported/available by the selected device",
+            &design,
+        );
+
+        assert!(defects.is_empty(), "{}", defects.join("\n"));
+        assert!(
+            intent_contract_checks("Expose a status output", &design)
+                .join("\n")
+                .contains("status signal")
+        );
+        assert!(
+            intent_contract_checks("µC status if available", &design).is_empty(),
+            "conditional UTF-8 request must neither panic nor create a contract"
+        );
+    }
+
+    #[test]
+    fn named_test_points_require_each_explicit_canonical_net() {
+        let provider = circuit_lang::SymbolTable::with_basics();
+        let netlist = r#"
+version: 1
+blocks:
+  main:
+    components:
+      TP1: {part: Device:R, value: testpoint, between: [SDA, GND]}
+      TP2: {part: Device:R, value: testpoint, between: [3V3, GND]}
+"#;
+        let design = circuit_lang::compile(netlist, &provider)
+            .design
+            .expect("fixture compiles");
+        let defects = intent_contract_checks(
+            "Provide named test points for SDA, SCL, 3V3, and GND.",
+            &design,
+        )
+        .join("\n");
+
+        assert!(defects.contains("missing for named nets SCL"), "{defects}");
+    }
+
+    #[test]
+    fn intent_contracts_reject_missing_explicit_board_essentials() {
+        let provider = circuit_lang::SymbolTable::with_basics();
+        let netlist = r#"
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: Device:R, value: 10k, between: [SIG, GND]}
+"#;
+        let design = circuit_lang::compile(netlist, &provider)
+            .design
+            .expect("fixture compiles");
+        let defects = intent_contract_checks(
+            "Include I2C pull-ups, a selectable address strap, mandatory decoupling, named test points, a regulator, a power LED, reverse-polarity protection, input TVS and fuse protection, and input/output connectors",
+            &design,
+        )
+        .join("\n");
+
+        for expected in [
+            "I2C pull-ups",
+            "selectable address strap",
+            "decoupling was explicitly requested",
+            "named test points",
+            "a regulator was requested",
+            "a power LED was requested",
+            "reverse-polarity protection",
+            "input fuse",
+            "input TVS",
+            "requires 2 connector(s)",
+        ] {
+            assert!(
+                defects.contains(expected),
+                "missing {expected:?}: {defects}"
+            );
+        }
+    }
+
+    #[test]
+    fn intent_contracts_accept_explicit_board_essentials() {
+        let mut provider = circuit_lang::SymbolTable::with_basics();
+        provider.mock_add(
+            "Connector:Conn_01x02_Pin",
+            vec![
+                ("1", "Pin_1", circuit_lang::PinType::Passive, 1),
+                ("2", "Pin_2", circuit_lang::PinType::Passive, 1),
+            ],
+        );
+        for part in ["Device:D_TVS", "Device:Fuse"] {
+            provider.mock_add(
+                part,
+                vec![
+                    ("1", "1", circuit_lang::PinType::Passive, 1),
+                    ("2", "2", circuit_lang::PinType::Passive, 1),
+                ],
+            );
+        }
+        let netlist = r#"
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: Device:R, value: 4.7k, between: [SDA, 3V3]}
+      R2: {part: Device:R, value: 4.7k, between: [SCL, 3V3]}
+      JP1: {part: Device:R, value: address_strap_jumper, between: [ADDR, GND]}
+      C1: {part: Device:C, value: 100nF, between: [3V3, GND]}
+      TP1: {part: Device:R, value: testpoint, between: [SDA, GND]}
+      TP2: {part: Device:R, value: testpoint, between: [SCL, GND]}
+      U1: {part: Device:R, value: buck_regulator, between: [VIN, 3V3]}
+      D1: {part: Device:D, value: reverse_diode, positive: VIN_RAW, negative: VIN}
+      D2: {part: Device:D_TVS, value: input_TVS, between: [VIN, GND]}
+      F1: {part: Device:Fuse, between: [VIN_CONN, VIN_RAW]}
+      D3: {part: Device:LED, positive: LED_A, negative: GND}
+      R3: {part: Device:R, value: 1k, between: [3V3, LED_A]}
+      J1: {part: Connector:Conn_01x02_Pin, between: [VIN_CONN, GND]}
+      J2: {part: Connector:Conn_01x02_Pin, between: [3V3, GND]}
+"#;
+        let compiled = circuit_lang::compile(netlist, &provider);
+        let design = compiled
+            .design
+            .unwrap_or_else(|| panic!("fixture compiles: {:?}", compiled.diagnostics));
+        let defects = intent_contract_checks(
+            "Include I2C pull-ups, a selectable address strap, mandatory decoupling, named test points for SDA and SCL; include a regulator, a power LED, reverse-polarity protection, input TVS and fuse protection, and input/output connectors",
+            &design,
+        );
+
+        assert!(defects.is_empty(), "{}", defects.join("\n"));
     }
 }
