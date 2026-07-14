@@ -890,6 +890,13 @@ fn validate_manual_solution(
     }
     let mut introduced = Vec::new();
     for violation in violations {
+        // The validation problem contains only the requested manual net. Its
+        // connectivity defects are never acceptable merely because the empty
+        // baseline has the same expected Unconnected finding.
+        if matches!(&violation, drc_lint::DrcViolation::Connectivity { .. }) {
+            introduced.push(violation);
+            continue;
+        }
         let key = serde_json::to_string(&violation).unwrap_or_else(|_| format!("{violation:?}"));
         let available = baseline_counts.entry(key).or_default();
         if *available > 0 {
@@ -1702,6 +1709,27 @@ mod tests {
         let err = manual_route_solution(&problem, &request).unwrap_err();
 
         assert!(err.contains("could not route"), "{err}");
+    }
+
+    #[test]
+    fn manual_route_validation_never_hides_target_connectivity() {
+        let base = route_problem(Vec::new());
+        let problem = single_connection_problem(
+            &base,
+            "SIG",
+            0.2,
+            Point2::new(1.0, 1.0),
+            LayerRef::top(),
+            Point2::new(9.0, 1.0),
+            LayerRef::top(),
+        );
+        let empty = RouteSolution {
+            traces: Vec::new(),
+            vias: Vec::new(),
+        };
+
+        let err = validate_manual_solution(&problem, &empty).unwrap_err();
+        assert!(err.contains("unconnected"), "{err}");
     }
 
     #[test]
