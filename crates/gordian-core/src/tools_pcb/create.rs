@@ -457,9 +457,11 @@ fn seed_net_classes(
     let mut by_width: std::collections::BTreeMap<String, (f64, Vec<String>)> =
         std::collections::BTreeMap::new();
     for net in nets {
+        let canonical = net.strip_prefix('/').unwrap_or(&net);
         let width = rules
             .net_widths
             .get(&net)
+            .or_else(|| rules.net_widths.get(canonical))
             .copied()
             .unwrap_or(rules.min_trace_width);
         let key = if (width - rules.min_trace_width).abs() < geom::EPS {
@@ -636,7 +638,11 @@ impl<'a> SeedBoardWriter<'a> {
 
     fn push_zones(&self, out: &mut String) -> io::Result<()> {
         for (idx, pour) in self.rules.pours.iter().enumerate() {
-            let net_code = self.net_codes.get(&pour.net).copied().ok_or_else(|| {
+            let resolved = self.net_codes.get_key_value(&pour.net).or_else(|| {
+                let hierarchical = format!("/{}", pour.net.trim_start_matches('/'));
+                self.net_codes.get_key_value(&hierarchical)
+            });
+            let (net_name, net_code) = resolved.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
@@ -657,8 +663,8 @@ impl<'a> SeedBoardWriter<'a> {
             };
             self.write_zone(
                 out,
-                net_code,
-                &pour.net,
+                *net_code,
+                net_name,
                 &layer_name,
                 &format!("{idx}"),
                 pour.pad_connection == PourPadConnection::Solid,
@@ -1390,6 +1396,25 @@ mod tests {
         assert_eq!(rules.layer_count, 4);
         assert_eq!(rules.net_widths["GND"], 0.6);
         assert_eq!(rules.net_widths["V3V3"], 0.5);
+    }
+
+    #[test]
+    fn seed_net_classes_match_hierarchical_net_names_to_requested_widths() {
+        let rules = parse_seed_rules(Some(&json!({
+            "net_widths": { "V3V3": 0.5, "GND": 0.6 }
+        })))
+        .unwrap();
+
+        let classes = seed_net_classes(&rules, ["/V3V3".to_string(), "GND".to_string()]);
+
+        assert!(classes.iter().any(|class| {
+            class.trace_width == 0.5 && class.members == vec!["/V3V3".to_string()]
+        }));
+        assert!(
+            classes.iter().any(|class| {
+                class.trace_width == 0.6 && class.members == vec!["GND".to_string()]
+            })
+        );
     }
 
     #[test]
