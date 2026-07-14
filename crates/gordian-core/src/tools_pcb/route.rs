@@ -588,6 +588,7 @@ fn route_attempts_json(attempts: &[RouteEngineAttempt]) -> Value {
 }
 
 pub fn apply_direct_rescue_fallback(rp: &RouteProblem, result: &mut RouteResult) -> bool {
+    const MAX_MULTI_PIN_TERMINALS: usize = 16;
     if result.failed.is_empty() {
         return false;
     }
@@ -614,7 +615,7 @@ pub fn apply_direct_rescue_fallback(rp: &RouteProblem, result: &mut RouteResult)
         }
         let candidate = if conn.points_to_connect.len() == 2 {
             direct_two_pin_candidate(rp, &rescue_solution, conn)
-        } else if (3..=6).contains(&conn.points_to_connect.len()) {
+        } else if (3..=MAX_MULTI_PIN_TERMINALS).contains(&conn.points_to_connect.len()) {
             direct_multi_pin_candidate(rp, &rescue_solution, conn)
         } else {
             None
@@ -2030,30 +2031,20 @@ mod escape_bottleneck_tests {
     }
 
     #[test]
-    fn direct_fallback_rescues_clean_small_multi_pin_net() {
+    fn direct_fallback_rescues_clean_medium_multi_pin_net() {
         let problem = RouteProblem {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],
             connections: vec![pcb_model::Connection {
                 name: "BUS".to_string(),
-                points_to_connect: vec![
-                    pcb_model::RoutePoint {
-                        x: 1.0,
+                points_to_connect: (0..12)
+                    .map(|index| pcb_model::RoutePoint {
+                        x: 1.0 + f64::from(index) * 0.5,
                         y: 1.0,
                         layer: LayerRef::top(),
-                    },
-                    pcb_model::RoutePoint {
-                        x: 5.0,
-                        y: 1.0,
-                        layer: LayerRef::top(),
-                    },
-                    pcb_model::RoutePoint {
-                        x: 1.0,
-                        y: 5.0,
-                        layer: LayerRef::top(),
-                    },
-                ],
+                    })
+                    .collect(),
             }],
             bounds: pcb_model::Rect {
                 min_x: 0.0,
@@ -2080,7 +2071,10 @@ mod escape_bottleneck_tests {
 
         assert!(apply_direct_rescue_fallback(&problem, &mut result));
         assert!(result.failed.is_empty());
-        assert_eq!(result.solution.traces.len(), 2);
+        assert_eq!(
+            lint_summary(&problem, &result.solution, &[], &Default::default()).real,
+            0
+        );
     }
 
     #[test]
