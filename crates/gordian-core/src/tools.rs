@@ -398,7 +398,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "regenerate_board".into(),
-                description: "Seed PCB destructively from committed schematic.".into(),
+                description: "Seed PCB; optional bounds/rules use safe defaults.".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {

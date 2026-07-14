@@ -485,8 +485,10 @@ fn pcb_stage_history(authoritative_request: &str) -> Vec<ChatMessage> {
          The schematic stage is now committed, independently reviewed, and ERC-clean. Treat the \
          saved schematic and draft as final; do not read, edit, validate, review, or re-apply them. \
          Complete the PCB stage now. First call regenerate_board exactly once with the requested \
-         dimensions, layer count, copper widths, and exact pour count/connection. Once the board \
-         exists, call place_board, route_board, and check_board in that order, one result-aware step \
+         dimensions/rules; when the request omits a value, choose reasonable compact values or use \
+         the tool's safe optional defaults instead of asking the user. Only regenerate_board is \
+         exposed until it creates the board; place/route/check appear automatically afterward. Once \
+         the board exists, call place_board, route_board, and check_board in that order, one result-aware step \
          per completion. Do not stop at regeneration or inspect/render before the \
          first check. If check_board reports blocking findings, make one concrete placement/copper/\
          outline recovery change and re-check; otherwise report the saved DRC and unrouted counts \
@@ -4472,6 +4474,8 @@ mod tests {
         let text = first_text(&history[0]).unwrap();
         assert!(text.contains(request));
         assert!(text.contains("regenerate_board exactly once"));
+        assert!(text.contains("safe optional defaults instead of asking the user"));
+        assert!(text.contains("place/route/check appear automatically afterward"));
         assert!(text.contains("place_board, route_board, and check_board"));
         assert!(!text.contains("components:"));
 

@@ -221,5 +221,4 @@ mod tests {
         assert_eq!(groups[0].0, "main");
         assert_eq!(groups[0].1.components.len(), 12);
     }
-
 }
