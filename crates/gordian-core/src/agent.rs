@@ -574,6 +574,7 @@ impl<P: Provider> Agent<P> {
 
         let mut applied = false;
         let mut tool_calls_made = 0usize;
+        let precommit_review_required = request_requires_precommit_review(user_msg);
         // `applied` deliberately means "committed in this turn", but bounded
         // stop messages must also recognize a draft that was already synced to
         // the current schematic when a continuation turn began.
@@ -862,6 +863,12 @@ impl<P: Provider> Agent<P> {
                     schematic_review_current,
                     &call.fn_name,
                 );
+                let precommit_review_blocked = precommit_review_required
+                    && call.fn_name == "apply_design"
+                    && !schematic_review_current;
+                let unchanged_apply_blocked = call.fn_name == "apply_design"
+                    && !draft_dirty
+                    && (commit_attempted_for_current_draft || draft_committed_at_turn_start);
                 let dispatched = !route_retry_blocked
                     && !timeout_retry_blocked
                     && !discovery_budget_blocked
@@ -870,6 +877,8 @@ impl<P: Provider> Agent<P> {
                     && !revision_read_budget_blocked
                     && !run_erc_without_schematic
                     && !schematic_review_blocked
+                    && !precommit_review_blocked
+                    && !unchanged_apply_blocked
                     && !speculative_mutation_blocked
                     && !create_on_existing_draft_blocked;
                 let (mut content, images, image_path) = if timed_out_mutation_blocked {
@@ -879,6 +888,28 @@ impl<P: Provider> Agent<P> {
                             "code": "timed_out_mutation_conflict",
                             "prior_timed_out_tools": timed_out_tool_calls.iter().map(|(name, _, _)| name).collect::<Vec<_>>(),
                             "note": "The prior mutation runs in non-cancellable blocking work and may still finish. No further schematic or PCB mutation is safe in this turn; use read-only inspection if useful, then report the timeout honestly.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if precommit_review_blocked {
+                    (
+                        json!({
+                            "error": "semantic review required before committing this complex design",
+                            "code": "precommit_review_required",
+                            "note": "Call review_design on the complete current draft. The loop will automatically judge it against the authoritative user request. Fix every high-confidence defect and re-review before apply_design.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if unchanged_apply_blocked {
+                    (
+                        json!({
+                            "error": "unchanged committed draft cannot be applied again",
+                            "code": "unchanged_apply_blocked",
+                            "note": "Reuse the existing apply/ERC result. Make a real draft edit before applying again, or continue to the next requested workflow stage.",
                         })
                         .to_string(),
                         Vec::new(),
@@ -1075,8 +1106,8 @@ impl<P: Provider> Agent<P> {
                     // Inline YAML can differ from the draft that was reviewed.
                     schematic_review_current = false;
                 }
-                if dispatched && call.fn_name == "review_design" && parsed.get("error").is_none() {
-                    schematic_review_current = true;
+                if dispatched && call.fn_name == "review_design" {
+                    schematic_review_current = review_result_is_clean(&parsed);
                 }
                 if call.fn_name == "apply_design"
                     && let Some(cleanup_needed) = apply_erc_cleanup_needed(&parsed)
@@ -1598,6 +1629,22 @@ fn schematic_review_required_before_pcb(
     fn_name: &str,
 ) -> bool {
     applied && !review_current && fn_name == "regenerate_board"
+}
+
+fn request_requires_precommit_review(user_msg: &str) -> bool {
+    let request = user_msg.to_ascii_lowercase();
+    request.contains("pcb")
+        || request.contains("board")
+        || request.contains("production")
+        || request.contains("review")
+}
+
+fn review_result_is_clean(value: &Value) -> bool {
+    value.get("error").is_none()
+        && value
+            .get("defects")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
 }
 
 /// A timed-out `spawn_blocking` task may continue after its join handle is
@@ -3638,6 +3685,32 @@ mod tests {
             false,
             "apply_design"
         ));
+    }
+
+    #[test]
+    fn complex_requests_require_a_clean_precommit_review() {
+        assert!(request_requires_precommit_review(
+            "Design a compact two-layer PCB and run DRC"
+        ));
+        assert!(request_requires_precommit_review(
+            "Create a production power supply"
+        ));
+        assert!(!request_requires_precommit_review(
+            "add one 10k resistor between A and GND"
+        ));
+
+        assert!(review_result_is_clean(&json!({
+            "score": 10.0,
+            "defects": []
+        })));
+        assert!(!review_result_is_clean(&json!({
+            "score": 8.0,
+            "defects": ["missing requested fuse"]
+        })));
+        assert!(!review_result_is_clean(&json!({
+            "error": "review failed",
+            "defects": []
+        })));
     }
 
     #[test]
