@@ -37,6 +37,29 @@ fn search_symbols_tool_finds_stm32() {
 }
 
 #[test]
+fn search_symbols_batches_four_labeled_queries() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let out = run_tool(
+        "search_symbols",
+        serde_json::json!({"queries": [
+            {"query": "Device:R", "limit": 1},
+            {"query": "Device:C", "limit": 1},
+            {"query": "2-pin header", "limit": 1},
+            {"query": "power:GND", "limit": 1}
+        ]}),
+        &ctx,
+    )
+    .unwrap();
+    let results = out["results"].as_array().expect("batched results");
+    assert_eq!(results.len(), 4);
+    assert_eq!(results[2]["query"], "2-pin header");
+    assert_eq!(results[2]["hits"][0]["lib_id"], "Connector:Conn_01x02_Pin");
+}
+
+#[test]
 fn search_symbols_canonicalizes_common_single_row_connectors() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
@@ -1849,6 +1872,24 @@ fn search_footprints_finds_vendored_fixture() {
         .find(|h| h["lib_id"] == "Fixtures:R_0603_1608Metric")
         .unwrap();
     assert_eq!(r0603["pad_count"], serde_json::json!(2), "got: {out}");
+}
+
+#[test]
+fn search_footprints_batches_labeled_queries() {
+    let (ctx, _guard) = fixture_ctx();
+    let out = run_tool(
+        "search_footprints",
+        serde_json::json!({"queries": [
+            {"query": "R_0603", "limit": 2},
+            {"query": "SOT23", "limit": 2}
+        ]}),
+        &ctx,
+    )
+    .unwrap();
+    let results = out["results"].as_array().expect("batched results");
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["query"], "R_0603");
+    assert!(!results[0]["hits"].as_array().unwrap().is_empty());
 }
 
 #[test]

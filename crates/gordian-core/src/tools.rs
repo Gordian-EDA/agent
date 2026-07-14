@@ -63,15 +63,28 @@ pub fn tool_defs() -> Vec<Tool> {
     let defs = vec![
             Def {
                 name: "search_symbols".into(),
-                description: "Find `Lib:Name`; reuse hits. Built-ins: Device:R/C/LED, power:GND/+3V3, Connector:Conn_01x02_Pin..01x06_Pin."
+                description: "Find `Lib:Name`; batch up to 4 searches with queries and reuse hits. Built-ins: Device:R/C/LED, power:GND/+3V3, Connector:Conn_01x02_Pin..01x06_Pin."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "query": { "type": "string" },
-                        "limit": { "type": "integer", "description": "Max hits (default 5).", "minimum": 1 }
+                        "limit": { "type": "integer", "description": "Max hits (default 5).", "minimum": 1 },
+                        "queries": {
+                            "type": "array", "minItems": 1, "maxItems": 4,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "query": { "type": "string" },
+                                    "limit": { "type": "integer", "minimum": 1 }
+                                },
+                                "required": ["query"],
+                                "additionalProperties": false
+                            }
+                        }
                     },
-                    "required": ["query"]
+                    "anyOf": [{ "required": ["query"] }, { "required": ["queries"] }],
+                    "additionalProperties": false
                 }),
             },
             Def {
@@ -177,15 +190,28 @@ pub fn tool_defs() -> Vec<Tool> {
             // ── PCB tools (slice 5) ─────────────────────────────────────────
             Def {
                 name: "search_footprints".into(),
-                description: "Find real footprint `Lib:Name` ids before apply_design; reuse hits."
+                description: "Find real footprint `Lib:Name` ids before apply_design; batch up to 4 searches with queries and reuse hits."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "query": { "type": "string" },
-                        "limit": { "type": "integer", "description": "Max hits (default 5).", "minimum": 1 }
+                        "limit": { "type": "integer", "description": "Max hits (default 5).", "minimum": 1 },
+                        "queries": {
+                            "type": "array", "minItems": 1, "maxItems": 4,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "query": { "type": "string" },
+                                    "limit": { "type": "integer", "minimum": 1 }
+                                },
+                                "required": ["query"],
+                                "additionalProperties": false
+                            }
+                        }
                     },
-                    "required": ["query"]
+                    "anyOf": [{ "required": ["query"] }, { "required": ["queries"] }],
+                    "additionalProperties": false
                 }),
             },
             Def {
@@ -628,19 +654,43 @@ pub(crate) fn require_str(input: &Value, key: &str) -> Result<String> {
 // ── 1. search_symbols ──────────────────────────────────────────────────────
 
 fn search_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    if let Some(queries) = input.get("queries") {
+        let queries = queries
+            .as_array()
+            .ok_or_else(|| anyhow!("`queries` must be an array"))?;
+        if queries.is_empty() || queries.len() > 4 {
+            bail!("`queries` must contain 1 to 4 searches");
+        }
+        let mut results = Vec::with_capacity(queries.len());
+        for item in queries {
+            let query = require_str(item, "query")?;
+            let limit = search_limit(item, ctx);
+            let mut result = search_symbols_one(&query, limit, ctx)?;
+            result["query"] = json!(query);
+            results.push(result);
+        }
+        return Ok(json!({ "results": results }));
+    }
     let query = require_str(&input, "query")?;
-    let limit = input
+    search_symbols_one(&query, search_limit(&input, ctx), ctx)
+}
+
+fn search_limit(input: &Value, ctx: &AgentRuntime) -> usize {
+    input
         .get("limit")
         .and_then(Value::as_u64)
         .map(|n| n as usize)
-        .unwrap_or(ctx.config().tools.default_search_limit);
-    if let Some((lib_id, pin_count)) = common_connector_symbol_alias(&query) {
+        .unwrap_or(ctx.config().tools.default_search_limit)
+}
+
+fn search_symbols_one(query: &str, limit: usize, ctx: &AgentRuntime) -> Result<Value> {
+    if let Some((lib_id, pin_count)) = common_connector_symbol_alias(query) {
         return Ok(json!({
             "hits": [{ "lib_id": lib_id, "pin_count": pin_count }],
             "note": "Connector symbols and physical footprints are separate choices. Use this symbol for the schematic pins; use search_footprints for the physical connector footprint.",
         }));
     }
-    if let Some((lib_id, pin_count)) = builtin_symbol_alias(&query) {
+    if let Some((lib_id, pin_count)) = builtin_symbol_alias(query) {
         return Ok(json!({
             "hits": [{ "lib_id": lib_id, "pin_count": pin_count }],
             "note": "built-in alias/canonical symbol; use it directly and do not repeat this search",
@@ -649,7 +699,7 @@ fn search_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
     let hits: Vec<Value> = ctx
         .index()?
-        .search(&query, limit)
+        .search(query, limit)
         .into_iter()
         .map(|h| json!({ "lib_id": h.lib_id, "pin_count": h.pin_count }))
         .collect();
