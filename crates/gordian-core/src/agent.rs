@@ -48,7 +48,7 @@ use crate::llm::{
 
 use crate::AgentRuntime;
 use crate::tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
-use crate::tools::{IMAGE_PATH_KEY, run_tool, tool_defs};
+use crate::tools::{IMAGE_PATH_KEY, repair_components_tool, run_tool, tool_defs};
 
 /// After this many route attempts with failed nets, block further blind PCB
 /// regenerate/place/route retries in the same turn and force an honest report.
@@ -435,7 +435,10 @@ fn constrain_schematic_tools_for_draft_state(
     if review_has_defects {
         defs.retain(|tool| {
             is_discovery_tool(tool.name.as_str())
-                || matches!(tool.name.as_str(), "edit_design" | "assign_footprints")
+                || matches!(
+                    tool.name.as_str(),
+                    "repair_components" | "assign_footprints"
+                )
         });
     } else if draft_known_invalid {
         defs.retain(|tool| {
@@ -444,6 +447,16 @@ fn constrain_schematic_tools_for_draft_state(
         });
     } else if draft_exists && draft_dirty && draft_known_clean {
         defs.retain(|tool| tool.name.as_str() == "apply_design");
+    }
+}
+
+fn offer_component_repair_for_review(defs: &mut Vec<Tool>, review_has_defects: bool) {
+    if review_has_defects
+        && !defs
+            .iter()
+            .any(|tool| tool.name.as_str() == "repair_components")
+    {
+        defs.push(repair_components_tool());
     }
 }
 
@@ -880,6 +893,10 @@ impl<P: Provider> Agent<P> {
                 &revision_reads_used,
                 self.runtime.sch_path().exists(),
             );
+            let review_has_defects = schematic_review_current
+                .as_ref()
+                .is_some_and(|review| !review_result_is_clean(review));
+            offer_component_repair_for_review(&mut defs, review_has_defects);
             if !runtime_supports_live_footprint_moves(&self.runtime) {
                 defs.retain(|def| !matches!(def.name.as_str(), "move_parts" | "set_net_width"));
             }
@@ -902,9 +919,7 @@ impl<P: Provider> Agent<P> {
                     .as_ref()
                     .and_then(|state| state.errors)
                     .is_some_and(|errors| errors > 0),
-                schematic_review_current
-                    .as_ref()
-                    .is_some_and(|review| !review_result_is_clean(review)),
+                review_has_defects,
             );
 
             // Drive the provider's stream so assistant prose renders token-by-token
@@ -1214,7 +1229,7 @@ impl<P: Provider> Agent<P> {
                         object.insert("code".into(), json!("precommit_review_defects"));
                         object.insert(
                             "note".into(),
-                            json!("The unchanged draft still has the cached semantic defects above. Fix them with one complete edit_design call; apply_design cannot proceed until the changed draft passes a fresh review."),
+                            json!("The unchanged draft still has the cached semantic defects above. Fix them with repair_components so omitted valid work is preserved; apply_design cannot proceed until the changed draft passes a fresh review."),
                         );
                     }
                     (cached.to_string(), Vec::new(), None)
@@ -1396,7 +1411,7 @@ impl<P: Provider> Agent<P> {
                             object.insert("code".into(), json!("precommit_review_defects"));
                             object.insert(
                                 "note".into(),
-                                json!("apply_design was deferred. Fix every high-confidence defect with one complete edit_design call, then apply again; the changed draft will be reviewed automatically."),
+                                json!("apply_design was deferred. Fix every high-confidence defect with repair_components, then apply again; the changed draft will be reviewed automatically."),
                             );
                         }
                         (guided.to_string(), Vec::new(), None)
@@ -2181,6 +2196,7 @@ fn authoring_diagnostics_state(name: &str, value: &Value) -> Option<AuthoringDia
         name,
         "create_design"
             | "edit_design"
+            | "repair_components"
             | "assign_footprints"
             | "validate_design"
             | "run_erc"
@@ -2191,8 +2207,10 @@ fn authoring_diagnostics_state(name: &str, value: &Value) -> Option<AuthoringDia
     // Rejected authoring candidates report diagnostics for the candidate, not
     // for the preserved working draft. Never let those errors poison the
     // apply guard for a draft that the tool explicitly left unchanged.
-    if matches!(name, "create_design" | "edit_design" | "assign_footprints")
-        && value.get("draft_written").and_then(Value::as_bool) == Some(false)
+    if matches!(
+        name,
+        "create_design" | "edit_design" | "repair_components" | "assign_footprints"
+    ) && value.get("draft_written").and_then(Value::as_bool) == Some(false)
     {
         return None;
     }
@@ -2574,7 +2592,9 @@ fn tool_effect(name: &str) -> ToolEffect {
         "apply_design" => ToolEffect::Gated,
         // Project-local draft mutations are intentionally ungated: only
         // apply_design can commit them to the schematic.
-        "create_design" | "edit_design" | "assign_footprints" => ToolEffect::Authoring,
+        "create_design" | "edit_design" | "repair_components" | "assign_footprints" => {
+            ToolEffect::Authoring
+        }
         // Immediate project/PCB mutations lack a safe dry-run, so approve the
         // operation and arguments before their first execution.
         "regenerate_board"
@@ -2602,7 +2622,10 @@ fn wants_apply(call: &ToolCall) -> bool {
 /// can ask the agent to find or inspect parts without being forced through two
 /// irrelevant "commit now" model rounds.
 fn is_authoring_for_commit(name: &str) -> bool {
-    matches!(name, "create_design" | "edit_design" | "assign_footprints")
+    matches!(
+        name,
+        "create_design" | "edit_design" | "repair_components" | "assign_footprints"
+    )
 }
 
 fn post_apply_authoring_batch_blocked(name: &str, apply_already_dispatched: bool) -> bool {
@@ -3135,22 +3158,21 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 format!("{errors} errors, {warnings} warnings")
             }
         }
-        "create_design" | "edit_design" => {
+        "create_design" | "edit_design" | "repair_components" => {
             let errors = result.get("errors").and_then(Value::as_u64).unwrap_or(0);
             let warnings = result.get("warnings").and_then(Value::as_u64).unwrap_or(0);
             let omitted = result
                 .get("diagnostics_omitted")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            let mode =
-                result
-                    .get("mode")
-                    .and_then(Value::as_str)
-                    .unwrap_or(if name == "create_design" {
-                        "created"
-                    } else {
-                        "patched"
-                    });
+            let mode = result
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or(match name {
+                    "create_design" => "created",
+                    "repair_components" => "component_repair",
+                    _ => "patched",
+                });
             if omitted > 0 {
                 format!("{mode}: {errors} errors, {warnings} warnings ({omitted} omitted)")
             } else {
@@ -3169,9 +3191,33 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                             .and_then(|review| review.get("defects"))
                     })
                     .and_then(Value::as_array)
-                    .map(Vec::len)
-                    .unwrap_or(0);
-                format!("deferred: semantic review found {defects} defect(s)")
+                    .cloned()
+                    .unwrap_or_default();
+                let detail = defects
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .take(2)
+                    .map(|defect| {
+                        let mut defect = defect.replace(['\n', '\r'], " ");
+                        if let Some((boundary, _)) = defect.char_indices().nth(120) {
+                            defect.truncate(boundary);
+                            defect.push('…');
+                        }
+                        defect
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if detail.is_empty() {
+                    format!(
+                        "deferred: semantic review found {} defect(s)",
+                        defects.len()
+                    )
+                } else {
+                    format!(
+                        "deferred: semantic review found {} defect(s) — {detail}",
+                        defects.len()
+                    )
+                }
             } else if result.get("written").and_then(Value::as_bool) == Some(true) {
                 let errors = result
                     .pointer("/erc/errors")
@@ -4222,6 +4268,7 @@ mod tests {
     fn tool_effect_and_wants_apply_classify_the_gate() {
         assert_eq!(tool_effect("apply_design"), ToolEffect::Gated);
         assert_eq!(tool_effect("edit_design"), ToolEffect::Authoring);
+        assert_eq!(tool_effect("repair_components"), ToolEffect::Authoring);
         assert_eq!(
             tool_effect("update_board_outline"),
             ToolEffect::ApprovalRequired
@@ -4804,7 +4851,10 @@ mod tests {
                 "defects": ["missing regulator"]
             }),
         );
-        assert_eq!(s, "deferred: semantic review found 1 defect(s)");
+        assert_eq!(
+            s,
+            "deferred: semantic review found 1 defect(s) — missing regulator"
+        );
         let s = tool_summary(
             "check_board",
             &json!({}),
@@ -5186,6 +5236,7 @@ mod tests {
                 &HashSet::new(),
                 schematic_exists,
             );
+            offer_component_repair_for_review(&mut defs, defects);
             constrain_schematic_tools_for_draft_state(
                 &mut defs,
                 draft_exists,
@@ -5223,10 +5274,14 @@ mod tests {
         assert!(clean.contains("apply_design"));
 
         let defects = names_after(true, false, true, true, false, true);
-        assert!(defects.contains("edit_design"));
+        assert!(defects.contains("repair_components"));
+        assert!(!defects.contains("edit_design"));
         assert!(defects.contains("assign_footprints"));
         assert!(!defects.contains("project_info"));
         assert!(!defects.contains("apply_design"));
+
+        let ordinary = names_after(true, false, true, false, false, false);
+        assert!(!ordinary.contains("repair_components"));
     }
 
     #[test]

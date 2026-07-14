@@ -698,6 +698,153 @@ fn apply_design_rejects_inline_yaml_without_mutating_the_draft() {
 }
 
 #[test]
+fn repair_components_replaces_a1_a2_with_jp1_without_resending_the_draft() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let yaml = "version: 1\nname: repair\nblocks:\n  main:\n    note: keep me\n    layout: [[A1, A2, R9]]\n    components:\n      A1: {part: Device:R, pins: {1: VIN, 2: MID}}\n      A2: {part: Device:R, pins: {1: MID, 2: GND}}\n      R9: {part: Device:R, value: 10k, pins: {1: VIN, 2: GND}}\n";
+    seed_draft(&ctx, yaml);
+
+    let out = run_tool(
+        "repair_components",
+        serde_json::json!({
+            "remove": ["A1", "A2"],
+            "upsert": {
+                "JP1": {"part": "Device:R", "value": "0R", "pins": {"1": "VIN", "2": "GND"}}
+            }
+        }),
+        &ctx,
+    )
+    .unwrap();
+
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(out["mode"], "component_repair", "{out}");
+    assert_eq!(out["added"], serde_json::json!(["JP1"]), "{out}");
+    assert_eq!(out["removed"], serde_json::json!(["A1", "A2"]), "{out}");
+    let repaired = ctx.workspace().read_draft().unwrap().unwrap();
+    assert!(repaired.contains("note: 'keep me'"), "{repaired}");
+    assert!(repaired.contains("JP1:"), "{repaired}");
+    assert!(repaired.contains("R9:"), "{repaired}");
+    assert!(repaired.contains("layout: [[~, ~, R9]]"), "{repaired}");
+    assert!(!repaired.contains("A1:"), "{repaired}");
+    assert!(!repaired.contains("A2:"), "{repaired}");
+}
+
+#[test]
+fn repair_components_requires_confirmation_and_rejects_cross_block_moves() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let yaml = "version: 1\nblocks:\n  main:\n    components:\n      R1: {part: Device:R, value: 1k, pins: {1: A, 2: GND}}\n  aux:\n    components:\n      U1: {part: Device:R, value: 2k, pins: {1: B, 2: GND}}\n";
+    seed_draft(&ctx, yaml);
+    let before = std::fs::read(ctx.workspace().draft_path()).unwrap();
+
+    let denied = run_tool(
+        "repair_components",
+        serde_json::json!({
+            "upsert": {"R1": {"part": "Device:R", "value": "4.7k", "pins": {"1": "A", "2": "GND"}}}
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        denied["code"],
+        "component_replacement_requires_confirmation"
+    );
+    assert_eq!(std::fs::read(ctx.workspace().draft_path()).unwrap(), before);
+
+    let moved = run_tool(
+        "repair_components",
+        serde_json::json!({
+            "upsert": {"U1": {"part": "Device:R", "value": "3k", "pins": {"1": "B", "2": "GND"}}},
+            "replace_existing": true
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(moved["code"], "component_block_mismatch");
+    assert_eq!(std::fs::read(ctx.workspace().draft_path()).unwrap(), before);
+
+    let replaced = run_tool(
+        "repair_components",
+        serde_json::json!({
+            "upsert": {"R1": {"part": "Device:R", "value": "4.7k", "pins": {"1": "A", "2": "GND"}}},
+            "replace_existing": true
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        replaced["replaced"],
+        serde_json::json!(["R1"]),
+        "{replaced}"
+    );
+    let repaired = ctx.workspace().read_draft().unwrap().unwrap();
+    assert!(repaired.contains("value: 4.7k"), "{repaired}");
+    assert!(repaired.contains("U1:"), "{repaired}");
+}
+
+#[test]
+fn repair_components_preserves_bytes_on_invalid_fragment_or_footprint() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    seed_draft(&ctx, TINY_YAML);
+    let before = std::fs::read(ctx.workspace().draft_path()).unwrap();
+
+    let invalid = run_tool(
+        "repair_components",
+        serde_json::json!({"upsert": {"R2": {"part": "Device:R", "pins": {"3": "A"}}}}),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(invalid["draft_written"], false, "{invalid}");
+    assert_eq!(std::fs::read(ctx.workspace().draft_path()).unwrap(), before);
+
+    let bad_footprint = run_tool(
+        "repair_components",
+        serde_json::json!({
+            "upsert": {"R2": {"part": "Device:R", "footprint": "Missing:Nope", "pins": {"1": "A", "2": "GND"}}}
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        bad_footprint["code"],
+        "invalid_component_repair_preserved_draft"
+    );
+    assert_eq!(std::fs::read(ctx.workspace().draft_path()).unwrap(), before);
+}
+
+#[test]
+fn repair_components_replaces_parent_and_removes_its_synthesized_children() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let yaml = "version: 1\nblocks:\n  main:\n    components:\n      U1: {part: Interface_CAN_LIN:SN65HVD230, decouple: {100nF: 2}, pins: {VCC: VCC, GND: GND}}\n      R1: {part: Device:R, pins: {1: VCC, 2: GND}}\n";
+    seed_draft(&ctx, yaml);
+
+    let out = run_tool(
+        "repair_components",
+        serde_json::json!({
+            "upsert": {"U1": {"part": "Interface_CAN_LIN:SN65HVD230", "pins": {"VCC": "VCC", "GND": "GND"}}},
+            "replace_existing": true
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(out["ok"], true, "{out}");
+    let repaired = ctx.workspace().read_draft().unwrap().unwrap();
+    assert!(!repaired.contains("decouple:"), "{repaired}");
+    assert!(!repaired.contains("100nF"), "{repaired}");
+    assert!(repaired.contains("R1:"), "{repaired}");
+}
+
+#[test]
 fn apply_design_commit_writes_file_and_runs_erc() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");

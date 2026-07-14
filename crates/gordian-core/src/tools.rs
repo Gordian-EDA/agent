@@ -42,7 +42,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use circuit_lang::compile;
-use circuit_lang::model::{Component, Design, PinTarget};
+use circuit_lang::model::{Block, Component, Design, Origin, PinTarget};
 use kicad_cli::{ErcReport, KicadCli};
 use kicad_footprint::FootprintId;
 use sch_io::read::lift;
@@ -504,6 +504,34 @@ pub fn tool_defs() -> Vec<Tool> {
         .collect()
 }
 
+/// On-demand transactional repair surface. It is intentionally absent from
+/// [`tool_defs`]: the agent advertises it only while repairing a valid draft,
+/// avoiding permanent schema cost on discovery and PCB-only turns.
+pub(crate) fn repair_components_tool() -> Tool {
+    Tool::new("repair_components")
+        .with_description(
+            "Atomically add, replace, or remove a few components in one durable-draft block; omitted content is preserved.",
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "block": { "type": "string", "description": "Target block; defaults to main." },
+                "upsert": {
+                    "type": "object",
+                    "description": "Refdes to circuit-language component object.",
+                    "additionalProperties": { "type": "object" }
+                },
+                "remove": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "uniqueItems": true
+                },
+                "replace_existing": { "type": "boolean" }
+            },
+            "additionalProperties": false
+        }))
+}
+
 /// Dispatch a tool by name (synchronous). `input` is the model-supplied JSON
 /// arguments; the returned `Value` is fed back to the model. The [`crate::Agent`]
 /// loop off-loads this onto the blocking pool.
@@ -519,6 +547,7 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "render_schematic" => render_schematic(ctx),
         "create_design" => create_design(input, ctx),
         "edit_design" => edit_design(input, ctx),
+        "repair_components" => repair_components(input, ctx),
         "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
         "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
         "regenerate_board" => crate::tools_pcb::regenerate_board(input, ctx),
@@ -1476,6 +1505,340 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     report["electrical_design_changed"] = json!(electrical_yaml_changed(
         prior_draft.as_deref(),
         &yaml,
+        ctx.provider()
+    ));
+    add_draft_next_step(&mut report);
+    Ok(report)
+}
+
+fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let block_name = input.get("block").and_then(Value::as_str).unwrap_or("main");
+    if block_name.is_empty()
+        || !block_name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Ok(json!({
+            "error": "block must be a non-empty lower_snake name",
+            "code": "invalid_repair_block",
+            "draft_written": false,
+            "draft_changed": false,
+            "mode": "component_repair",
+        }));
+    }
+    let upsert = match input.get("upsert") {
+        None => serde_json::Map::new(),
+        Some(Value::Object(map)) => map.clone(),
+        Some(_) => {
+            return Ok(json!({
+                "error": "upsert must be an object mapping refdes to component objects",
+                "code": "invalid_repair_upsert",
+                "draft_written": false,
+                "draft_changed": false,
+                "mode": "component_repair",
+            }));
+        }
+    };
+    if upsert.values().any(|component| !component.is_object()) {
+        return Ok(json!({
+            "error": "every upsert value must be a component object",
+            "code": "invalid_repair_upsert",
+            "draft_written": false,
+            "draft_changed": false,
+            "mode": "component_repair",
+        }));
+    }
+    let remove = match input.get("remove") {
+        None => Vec::new(),
+        Some(Value::Array(items)) => {
+            let Some(refs) = items.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
+                return Ok(json!({
+                    "error": "remove must contain only refdes strings",
+                    "code": "invalid_repair_remove",
+                    "draft_written": false,
+                    "draft_changed": false,
+                    "mode": "component_repair",
+                }));
+            };
+            refs.into_iter().map(str::to_string).collect::<Vec<_>>()
+        }
+        Some(_) => {
+            return Ok(json!({
+                "error": "remove must be an array of refdes strings",
+                "code": "invalid_repair_remove",
+                "draft_written": false,
+                "draft_changed": false,
+                "mode": "component_repair",
+            }));
+        }
+    };
+    let remove_set = remove
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    if remove_set.len() != remove.len() {
+        return Ok(json!({
+            "error": "remove contains a duplicate refdes",
+            "code": "duplicate_repair_remove",
+            "draft_written": false,
+            "draft_changed": false,
+            "mode": "component_repair",
+        }));
+    }
+    if upsert
+        .keys()
+        .any(|reference| remove_set.contains(reference))
+    {
+        return Ok(json!({
+            "error": "the same refdes cannot be both upserted and removed",
+            "code": "conflicting_repair_operation",
+            "draft_written": false,
+            "draft_changed": false,
+            "mode": "component_repair",
+        }));
+    }
+    if upsert.is_empty() && remove.is_empty() {
+        return Ok(json!({
+            "error": "repair requires at least one upsert or remove refdes",
+            "code": "empty_component_repair",
+            "draft_written": false,
+            "draft_changed": false,
+            "mode": "component_repair",
+        }));
+    }
+    let replace_existing = input
+        .get("replace_existing")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let Some(prior_yaml) = ctx.workspace().read_draft()? else {
+        return Ok(json!({
+            "error": "no durable draft exists; create a complete valid draft before component repair",
+            "code": "repair_requires_draft",
+            "draft_written": false,
+            "draft_changed": false,
+            "mode": "component_repair",
+        }));
+    };
+    let prior_result = compile(&prior_yaml, ctx.provider());
+    let mut prior_report = compile_authoring_report(&prior_result, ctx)?;
+    let Some(prior_design) = prior_result.design.as_ref() else {
+        prior_report["error"] = json!(
+            "the current draft is invalid; component repair cannot safely preserve malformed content"
+        );
+        prior_report["code"] = json!("repair_requires_valid_draft");
+        prior_report["draft_written"] = json!(false);
+        prior_report["draft_changed"] = json!(false);
+        prior_report["mode"] = json!("component_repair");
+        return Ok(prior_report);
+    };
+    if prior_report.get("ok").and_then(Value::as_bool) != Some(true) {
+        prior_report["error"] =
+            json!("the current draft fails authoring validation; repair was not attempted");
+        prior_report["code"] = json!("repair_requires_valid_draft");
+        prior_report["draft_written"] = json!(false);
+        prior_report["draft_changed"] = json!(false);
+        prior_report["mode"] = json!("component_repair");
+        return Ok(prior_report);
+    }
+
+    let fragment_yaml = format!(
+        "version: 1\nblocks:\n  patch:\n    components: {}\n",
+        serde_json::to_string(&upsert)?
+    );
+    let patch_result = compile(&fragment_yaml, ctx.provider());
+    let Some(mut patch_design) = patch_result.design else {
+        let mut report = compile_report(&patch_result.diagnostics);
+        report["error"] = json!("component repair fragment is invalid");
+        report["code"] = json!("invalid_component_repair");
+        report["draft_written"] = json!(false);
+        report["draft_changed"] = json!(false);
+        report["mode"] = json!("component_repair");
+        report["current_design_state"] = design_state_summary(prior_design);
+        return Ok(report);
+    };
+    let patch_block = patch_design
+        .blocks
+        .shift_remove("patch")
+        .expect("repair wrapper always creates patch block");
+    let authored_patch_refs = patch_block
+        .components
+        .iter()
+        .filter_map(|(reference, component)| {
+            matches!(component.origin, Origin::Authored).then_some(reference.as_str())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if authored_patch_refs.len() != upsert.len()
+        || upsert
+            .keys()
+            .any(|reference| !authored_patch_refs.contains(reference.as_str()))
+    {
+        return Ok(json!({
+            "error": "upsert must contain only explicit authored refdes entries",
+            "code": "invalid_component_repair_refs",
+            "draft_written": false,
+            "draft_changed": false,
+            "mode": "component_repair",
+            "current_design_state": design_state_summary(prior_design),
+        }));
+    }
+
+    let existing = prior_design
+        .blocks
+        .iter()
+        .flat_map(|(block, contents)| {
+            contents
+                .components
+                .iter()
+                .map(move |(reference, component)| {
+                    (reference.clone(), (block.clone(), component.origin.clone()))
+                })
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    for reference in &remove {
+        let Some((existing_block, origin)) = existing.get(reference) else {
+            return Ok(json!({
+                "error": format!("remove refdes {reference} does not exist"),
+                "code": "unknown_repair_remove",
+                "draft_written": false,
+                "draft_changed": false,
+                "mode": "component_repair",
+                "current_design_state": design_state_summary(prior_design),
+            }));
+        };
+        if existing_block != block_name {
+            return Ok(json!({
+                "error": format!("{reference} belongs to block {existing_block}, not {block_name}"),
+                "code": "component_block_mismatch",
+                "draft_written": false,
+                "draft_changed": false,
+                "mode": "component_repair",
+                "current_design_state": design_state_summary(prior_design),
+            }));
+        }
+        if !matches!(origin, Origin::Authored) {
+            return Ok(json!({
+                "error": format!("{reference} is synthesized; remove or replace its authored parent instead"),
+                "code": "synthesized_component_repair_forbidden",
+                "draft_written": false,
+                "draft_changed": false,
+                "mode": "component_repair",
+                "current_design_state": design_state_summary(prior_design),
+            }));
+        }
+    }
+
+    let mut added = Vec::new();
+    let mut replaced = Vec::new();
+    for reference in upsert.keys() {
+        match existing.get(reference) {
+            None => added.push(reference.clone()),
+            Some((existing_block, origin)) => {
+                if existing_block != block_name {
+                    return Ok(json!({
+                        "error": format!("{reference} belongs to block {existing_block}; repairs cannot move components across blocks"),
+                        "code": "component_block_mismatch",
+                        "draft_written": false,
+                        "draft_changed": false,
+                        "mode": "component_repair",
+                        "current_design_state": design_state_summary(prior_design),
+                    }));
+                }
+                if !matches!(origin, Origin::Authored) {
+                    return Ok(json!({
+                        "error": format!("{reference} is synthesized; replace its authored parent instead"),
+                        "code": "synthesized_component_repair_forbidden",
+                        "draft_written": false,
+                        "draft_changed": false,
+                        "mode": "component_repair",
+                        "current_design_state": design_state_summary(prior_design),
+                    }));
+                }
+                if !replace_existing {
+                    return Ok(json!({
+                        "error": format!("upsert refdes {reference} already exists; pass replace_existing=true to replace it"),
+                        "code": "component_replacement_requires_confirmation",
+                        "draft_written": false,
+                        "draft_changed": false,
+                        "mode": "component_repair",
+                        "current_design_state": design_state_summary(prior_design),
+                    }));
+                }
+                replaced.push(reference.clone());
+            }
+        }
+    }
+
+    let mut candidate = prior_design.clone();
+    let target = candidate
+        .blocks
+        .entry(block_name.to_string())
+        .or_insert_with(Block::default);
+    for reference in remove.iter().chain(replaced.iter()) {
+        target.components.shift_remove(reference);
+        target.components.retain(|_, component| {
+            !matches!(
+                &component.origin,
+                Origin::Synthesized { parent, .. } if parent == reference
+            )
+        });
+    }
+    for row in &mut target.layout {
+        for cell in row {
+            if cell
+                .as_ref()
+                .is_some_and(|reference| remove_set.contains(reference))
+            {
+                *cell = None;
+            }
+        }
+    }
+    let mut synth_index = 0usize;
+    for (reference, component) in patch_block.components {
+        match &component.origin {
+            Origin::Authored => {
+                target.components.insert(reference, component);
+            }
+            Origin::Synthesized { .. } => {
+                let key = loop {
+                    let key = format!("__repair_synth_{synth_index}");
+                    synth_index += 1;
+                    if !target.components.contains_key(&key) {
+                        break key;
+                    }
+                };
+                target.components.insert(key, component);
+            }
+        }
+    }
+
+    let candidate_yaml = circuit_lang::canon::to_canonical_yaml(&candidate);
+    let candidate_result = compile(&candidate_yaml, ctx.provider());
+    let mut report = compile_authoring_report(&candidate_result, ctx)?;
+    if report.get("ok").and_then(Value::as_bool) != Some(true) {
+        report["error"] = json!(
+            "component repair would make the complete draft invalid; the existing draft was preserved"
+        );
+        report["code"] = json!("invalid_component_repair_preserved_draft");
+        report["draft_written"] = json!(false);
+        report["draft_changed"] = json!(false);
+        report["electrical_design_changed"] = json!(false);
+        report["mode"] = json!("component_repair");
+        report["current_design_state"] = design_state_summary(prior_design);
+        return Ok(report);
+    }
+
+    ctx.workspace()
+        .write_draft(&candidate_yaml, current_sch_text(ctx).as_deref())?;
+    report["mode"] = json!("component_repair");
+    report["added"] = json!(added);
+    report["replaced"] = json!(replaced);
+    report["removed"] = json!(remove);
+    report["draft_written"] = json!(true);
+    report["draft_changed"] = json!(candidate_yaml != prior_yaml);
+    report["electrical_design_changed"] = json!(electrical_yaml_changed(
+        Some(&prior_yaml),
+        &candidate_yaml,
         ctx.provider()
     ));
     add_draft_next_step(&mut report);

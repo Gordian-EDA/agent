@@ -36,7 +36,7 @@ Useful sugar:
 Blocks define the schematic floorplan. Keep related parts together; split blocks above 8-10 components into functional groups (power, MCU, USB, sensors, drivers, connectors, debug). Optional block `layout:` may pin key anchors.
 
 # Efficient workflow
-NEW: write one complete `create_design(yaml)` draft. EDIT: call `read_schematic({source:"draft"})` once, then batch changes in one `edit_design({yaml: full_corrected_yaml})`; use old_string/new_string only for one exact snippet. Authoring tools already return validation: when clean, do not call `validate_design` again. Do not reread YAML you just wrote unless it errors. For PCB work call `review_design(intent)` once; fix its defects.
+NEW: write one complete `create_design(yaml)` draft. EDIT: call `read_schematic` once, then send one complete corrected YAML. If semantic review finds defects, use `repair_components`; it preserves omitted work. Authoring tools already validate: when clean, do not revalidate or reread. For PCB work call `review_design(intent)` once; fix its defects.
 Treat validation warnings as work, not success. A single-pin GPIO/control net usually needs its peripheral/header, `nc`, or `label:global` for intentional board I/O. Expose only requested I/O; mark spare pins `nc`.
 
 Schematic flow:
