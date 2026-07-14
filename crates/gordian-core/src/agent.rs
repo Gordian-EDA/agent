@@ -982,10 +982,9 @@ impl<P: Provider> Agent<P> {
             // though every later call can reason from the first result. Preserve
             // later completions for a deliberately filtered follow-up view.
             let mut board_read_dispatched_this_completion = false;
-            // An apply batched with authoring was planned against the old draft
-            // and cannot have observed the author's validation result. Whichever
-            // comes first may run; the dependent half must wait one completion.
-            let mut authoring_dispatched_this_completion = false;
+            // Ordered edit→apply batches are safe: apply consumes the just-written
+            // working draft and the guards below see its fresh diagnostics.
+            // The inverse order is stale, so no authoring may follow an apply.
             let mut apply_dispatched_this_completion = false;
             let mut schematic_stage_ready_this_completion = false;
             let mut non_authoring_state_changed_this_completion = false;
@@ -1021,9 +1020,8 @@ impl<P: Provider> Agent<P> {
                     && revision_read_uses.get(&call.fn_name) == Some(&tool_state_revision);
                 let run_erc_without_schematic =
                     call.fn_name == "run_erc" && !self.runtime.sch_path().exists();
-                let speculative_mutation_blocked = speculative_apply_authoring_batch_blocked(
+                let post_apply_authoring_blocked = post_apply_authoring_batch_blocked(
                     &call.fn_name,
-                    authoring_dispatched_this_completion,
                     apply_dispatched_this_completion,
                 );
                 let create_on_existing_draft_blocked =
@@ -1063,7 +1061,7 @@ impl<P: Provider> Agent<P> {
                     && !cached_review_call
                     && !known_invalid_apply
                     && !unchanged_apply_blocked
-                    && !speculative_mutation_blocked
+                    && !post_apply_authoring_blocked
                     && !create_on_existing_draft_blocked;
                 let (mut content, images, image_path) = if timed_out_mutation_blocked {
                     (
@@ -1122,13 +1120,13 @@ impl<P: Provider> Agent<P> {
                         Vec::new(),
                         None,
                     )
-                } else if speculative_mutation_blocked {
+                } else if post_apply_authoring_blocked {
                     (
                         json!({
-                            "error": "apply_design cannot be batched with draft authoring in one assistant completion",
-                            "code": "speculative_apply_authoring_batch_blocked",
+                            "error": "draft authoring cannot follow apply_design in the same assistant completion",
+                            "code": "post_apply_authoring_batch_blocked",
                             "tool": call.fn_name,
-                            "note": "The later call was planned from the old draft. Inspect the first call's validation/result, then author or apply in the next completion.",
+                            "note": "The apply already acted on the current draft. Make any subsequent draft edit in the next completion.",
                         })
                         .to_string(),
                         Vec::new(),
@@ -1298,9 +1296,6 @@ impl<P: Provider> Agent<P> {
                         *discovery_calls_dispatched_this_completion
                             .entry(call.fn_name.clone())
                             .or_default() += 1;
-                    }
-                    if is_authoring_for_commit(&call.fn_name) {
-                        authoring_dispatched_this_completion = true;
                     }
                     if call.fn_name == "apply_design" {
                         apply_dispatched_this_completion = true;
@@ -2490,13 +2485,8 @@ fn is_authoring_for_commit(name: &str) -> bool {
     matches!(name, "create_design" | "edit_design" | "assign_footprints")
 }
 
-fn speculative_apply_authoring_batch_blocked(
-    name: &str,
-    authoring_already_dispatched: bool,
-    apply_already_dispatched: bool,
-) -> bool {
-    (name == "apply_design" && authoring_already_dispatched)
-        || (is_authoring_for_commit(name) && apply_already_dispatched)
+fn post_apply_authoring_batch_blocked(name: &str, apply_already_dispatched: bool) -> bool {
+    is_authoring_for_commit(name) && apply_already_dispatched
 }
 
 /// Whether an authoring result actually changed the durable draft. Compile
@@ -4125,27 +4115,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_and_authoring_cannot_share_one_speculative_batch() {
-        assert!(speculative_apply_authoring_batch_blocked(
-            "apply_design",
-            true,
-            false
-        ));
-        assert!(speculative_apply_authoring_batch_blocked(
-            "edit_design",
-            false,
-            true
-        ));
-        assert!(!speculative_apply_authoring_batch_blocked(
-            "edit_design",
-            true,
-            false
-        ));
-        assert!(!speculative_apply_authoring_batch_blocked(
-            "route_board",
-            true,
-            true
-        ));
+    fn apply_may_follow_authoring_but_no_authoring_may_follow_apply() {
+        assert!(!post_apply_authoring_batch_blocked("apply_design", false));
+        assert!(post_apply_authoring_batch_blocked("edit_design", true));
+        assert!(!post_apply_authoring_batch_blocked("edit_design", false));
+        assert!(!post_apply_authoring_batch_blocked("route_board", true));
     }
 
     #[test]
