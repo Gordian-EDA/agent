@@ -8,8 +8,8 @@ use crate::{
     Error, Kicad, footprint_reference,
     proto::kiapi::{
         board::types::{
-            BoardGraphicShape, BoardLayer, FootprintInstance, Net, Pad, PadStack, PadStackShape,
-            Track, Via, ViaType, Zone, zone,
+            BoardGraphicShape, BoardLayer, DrillProperties, FootprintInstance, Net, Pad, PadStack,
+            PadStackShape, Track, Via, ViaType, Zone, zone,
         },
         common::{
             project::NetClass,
@@ -339,7 +339,16 @@ impl SnapshotBuilder {
                 let terminal = pad_world(fp, &pad);
                 let (center, width, height) = pad_obstacle_geometry(fp, &pad);
                 let layers = pad_layers(&pad, &self.layer_names);
-                let net = pad.net.as_ref().and_then(net_name);
+                // Paste/mask-only aperture pads are manufacturing features,
+                // not copper obstacles or electrical terminals.
+                if layers.is_empty() {
+                    continue;
+                }
+                // A drilled mechanical pad can occupy routing space without
+                // providing copper that a net may electrically terminate on.
+                let net = pad_has_copper(&pad)
+                    .then(|| pad.net.as_ref().and_then(net_name))
+                    .flatten();
                 self.obstacles.push(Obstacle {
                     kind: format!("pad:{reference}"),
                     layers: layers.clone(),
@@ -924,6 +933,32 @@ fn pad_obstacle_geometry(fp: &FootprintInstance, pad: &Pad) -> (Point2, f64, f64
             None => bounds = Some(shape),
         }
     }
+    if let Some(size) = stack
+        .drill
+        .as_ref()
+        .and_then(|drill| drill.diameter.as_ref())
+    {
+        let half = Point2::new(
+            nm_to_mm(size.x_nm).abs() / 2.0,
+            nm_to_mm(size.y_nm).abs() / 2.0,
+        )
+        .rotated_half_extents(angle);
+        let shape = Rect::new(
+            anchor.x - half.x,
+            anchor.y - half.y,
+            anchor.x + half.x,
+            anchor.y + half.y,
+        );
+        match &mut bounds {
+            Some(bounds) => {
+                bounds.min_x = bounds.min_x.min(shape.min_x);
+                bounds.max_x = bounds.max_x.max(shape.max_x);
+                bounds.min_y = bounds.min_y.min(shape.min_y);
+                bounds.max_y = bounds.max_y.max(shape.max_y);
+            }
+            None => bounds = Some(shape),
+        }
+    }
     let Some(bounds) = bounds else {
         return (anchor, 0.0, 0.0);
     };
@@ -950,7 +985,11 @@ fn pad_layers(pad: &Pad, layer_names: &[String]) -> Vec<LayerRef> {
         .filter(|l| is_copper(*l))
         .map(|l| layer_ref_for_i32(l, layer_names))
         .collect();
-    if layers.is_empty() {
+    // `copper_layers` carries shape data even for explicit paste-only
+    // apertures. A non-empty `layers` list is authoritative about which board
+    // layers the pad actually occupies; use shape-layer fallback only for
+    // legacy payloads that omit that list.
+    if layers.is_empty() && stack.layers.is_empty() {
         layers = stack
             .copper_layers
             .iter()
@@ -959,12 +998,56 @@ fn pad_layers(pad: &Pad, layer_names: &[String]) -> Vec<LayerRef> {
             .collect();
     }
     if layers.is_empty() {
-        all_layer_refs(layer_names)
+        if let Some(drill) = stack.drill.as_ref().filter(|drill| drill_has_size(drill)) {
+            drill_layers(drill, layer_names)
+        } else if stack.layers.is_empty() && stack.copper_layers.is_empty() {
+            all_layer_refs(layer_names)
+        } else {
+            Vec::new()
+        }
     } else {
         layers.sort_by_key(|l| l.index(layer_names.len() as u32).unwrap_or(u32::MAX));
         layers.dedup();
         layers
     }
+}
+
+fn pad_has_copper(pad: &Pad) -> bool {
+    pad.pad_stack.as_ref().is_none_or(|stack| {
+        if stack.layers.is_empty() {
+            stack
+                .copper_layers
+                .iter()
+                .any(|layer| is_copper(layer.layer))
+                || (stack.copper_layers.is_empty()
+                    && !stack.drill.as_ref().is_some_and(drill_has_size))
+        } else {
+            stack.layers.iter().any(|layer| is_copper(*layer))
+        }
+    })
+}
+
+fn drill_has_size(drill: &DrillProperties) -> bool {
+    drill
+        .diameter
+        .as_ref()
+        .is_some_and(|diameter| diameter.x_nm != 0 || diameter.y_nm != 0)
+}
+
+fn drill_layers(drill: &DrillProperties, layer_names: &[String]) -> Vec<LayerRef> {
+    let (Some(start), Some(end)) = (
+        copper_index(drill.start_layer, layer_names),
+        copper_index(drill.end_layer, layer_names),
+    ) else {
+        return all_layer_refs(layer_names);
+    };
+    let (lo, hi) = (start.min(end), start.max(end));
+    layer_names
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| (lo..=hi).contains(&(*index as u32)))
+        .map(|(_, name)| layer_ref_for(name, layer_names))
+        .collect()
 }
 
 fn via_diameter(via: &Via) -> f64 {
@@ -1438,6 +1521,64 @@ mod tests {
         // F.Cu spans y=8..10 and B.Cu spans y=9..13. Centering the
         // conservative envelope on the terminal gives y=7..13.
         assert!((height - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn paste_only_pad_has_no_copper_layers() {
+        let pad = Pad {
+            pad_stack: Some(PadStack {
+                layers: vec![BoardLayer::BlFPaste as i32],
+                // KiCad may populate an empty drill message even for an
+                // undrilled manufacturing aperture.
+                drill: Some(DrillProperties::default()),
+                copper_layers: vec![PadStackLayer {
+                    // IPC uses a copper-layer shape record to carry the
+                    // aperture geometry even though membership is F.Paste.
+                    layer: BoardLayer::BlFCu as i32,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(pad_layers(&pad, &["F.Cu".to_owned(), "B.Cu".to_owned()]).is_empty());
+    }
+
+    #[test]
+    fn drilled_non_copper_pad_remains_a_mechanical_obstacle() {
+        let fp = FootprintInstance {
+            position: Some(v(10.0, 10.0)),
+            ..Default::default()
+        };
+        let pad = Pad {
+            position: Some(v(10.0, 10.0)),
+            net: Some(Net {
+                name: "SHOULD_NOT_CONNECT".to_owned(),
+                ..Default::default()
+            }),
+            pad_stack: Some(PadStack {
+                layers: vec![BoardLayer::BlFMask as i32, BoardLayer::BlBMask as i32],
+                drill: Some(DrillProperties {
+                    start_layer: BoardLayer::BlFCu as i32,
+                    end_layer: BoardLayer::BlBCu as i32,
+                    diameter: Some(v(3.2, 2.0)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            pad_layers(&pad, &["F.Cu".to_owned(), "B.Cu".to_owned()]),
+            vec![LayerRef::top(), LayerRef::bottom()]
+        );
+        assert!(!pad_has_copper(&pad));
+        let (center, width, height) = pad_obstacle_geometry(&fp, &pad);
+        assert!(center.near_eq(Point2::new(10.0, 10.0), 1e-9));
+        assert!((width - 3.2).abs() < 1e-9);
+        assert!((height - 2.0).abs() < 1e-9);
     }
 
     #[test]
