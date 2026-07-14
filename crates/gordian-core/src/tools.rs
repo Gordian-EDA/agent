@@ -162,7 +162,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "create_design".into(),
-                description: "Create a draft and return validation; overwrite=true replaces one."
+                description: "Create one complete user-requested circuit-YAML draft; never copy the incomplete prompt example. Returns validation; overwrite=true replaces one."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -534,44 +534,50 @@ pub fn tool_defs() -> Vec<Tool> {
 /// [`tool_defs`]: the agent advertises it only while repairing a valid draft,
 /// avoiding permanent schema cost on discovery and PCB-only turns.
 pub(crate) fn repair_components_tool() -> Tool {
+    let component_schema = json!({
+        "type": "object",
+        "properties": {
+            "part": { "type": "string" },
+            "value": { "type": "string" },
+            "footprint": { "type": "string" },
+            "dnp": { "type": "boolean" },
+            "props": { "type": "object", "additionalProperties": { "type": "string" } },
+            "pins": { "type": "object", "description": "Pin name/number to net name or nc.", "additionalProperties": { "type": "string" } },
+            "units": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": { "pins": { "type": "object", "additionalProperties": { "type": "string" } } },
+                    "required": ["pins"],
+                    "additionalProperties": false
+                }
+            },
+            "between": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 },
+            "positive": { "type": "string" },
+            "negative": { "type": "string" },
+            "decouple": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 1 } }
+        },
+        "required": ["part"],
+        "additionalProperties": false
+    });
+    let component_map_schema = json!({
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": component_schema
+    });
     Tool::new("repair_components")
         .with_description(
-            "Atomically repair one durable-draft block. Prefer update for pin rewires/value/footprint changes. Upsert adds components and can replace existing ones with confirmation; omitted metadata and, when no topology field is supplied, existing pins are preserved.",
+            "Atomically repair one durable-draft block. Prefer update for pin rewires/value/footprint changes. Components adds or replaces refs with confirmation; omitted metadata and topology are preserved.",
         )
         .with_schema(json!({
             "type": "object",
             "properties": {
                 "block": { "type": "string", "description": "Target block; defaults to main." },
-                "upsert": {
-                    "type": "object",
-                    "description": "Components to add or replace. `part` is required. For existing refs, omitted value/footprint/dnp/props are preserved; existing pins are preserved when no pins/units/between/positive/negative/decouple topology field is supplied. Example: {\"D1\":{\"part\":\"Device:D\",\"pins\":{\"1\":\"VIN\",\"2\":\"VOUT\"}}}.",
-                    "minProperties": 1,
-                    "additionalProperties": {
-                        "type": "object",
-                        "properties": {
-                            "part": { "type": "string" },
-                            "value": { "type": "string" },
-                            "footprint": { "type": "string" },
-                            "dnp": { "type": "boolean" },
-                            "props": { "type": "object", "additionalProperties": { "type": "string" } },
-                            "pins": { "type": "object", "description": "Pin name/number to net name or nc.", "additionalProperties": { "type": "string" } },
-                            "units": {
-                                "type": "object",
-                                "additionalProperties": {
-                                    "type": "object",
-                                    "properties": { "pins": { "type": "object", "additionalProperties": { "type": "string" } } },
-                                    "required": ["pins"],
-                                    "additionalProperties": false
-                                }
-                            },
-                            "between": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 },
-                            "positive": { "type": "string" },
-                            "negative": { "type": "string" },
-                            "decouple": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 1 } }
-                        },
-                        "required": ["part"],
-                        "additionalProperties": false
-                    }
+                "components": {
+                    "description": "Components to add or replace. `part` is required. Existing metadata is preserved when omitted. Example: {\"D1\":{\"part\":\"Device:D\",\"pins\":{\"1\":\"VIN\",\"2\":\"VOUT\"}}}.",
+                    "type": component_map_schema["type"].clone(),
+                    "minProperties": component_map_schema["minProperties"].clone(),
+                    "additionalProperties": component_map_schema["additionalProperties"].clone()
                 },
                 "update": {
                     "type": "object",
@@ -595,11 +601,11 @@ pub(crate) fn repair_components_tool() -> Tool {
                     "minItems": 1,
                     "uniqueItems": true
                 },
-                "replace_existing": { "type": "boolean", "description": "Confirmation for replacing refs via upsert; false for update/remove." }
+                "replace_existing": { "type": "boolean", "description": "Confirmation for replacing refs via components; false for update/remove." }
             },
             "additionalProperties": false,
             "anyOf": [
-                { "required": ["upsert"], "properties": { "upsert": { "minProperties": 1 } } },
+                { "required": ["components"], "properties": { "components": { "minProperties": 1 } } },
                 { "required": ["update"], "properties": { "update": { "minProperties": 1 } } },
                 { "required": ["remove"], "properties": { "remove": { "minItems": 1 } } }
             ]
@@ -1646,16 +1652,15 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "mode": "component_repair",
         }));
     }
-    // Some providers preserve the natural `components: {R1: ...}` wrapper
-    // even though this focused tool names the operation `upsert`. Accept that
-    // harmless shape at either level; validation below remains atomic.
+    // `components` is the advertised operation. Retain the older `upsert`
+    // spelling for backward compatibility with saved/tool-replay histories.
     let upsert_input = input.get("upsert").or_else(|| input.get("components"));
     let mut upsert = match upsert_input {
         None => serde_json::Map::new(),
         Some(Value::Object(map)) => map.clone(),
         Some(_) => {
             return Ok(json!({
-                "error": "upsert must be an object mapping refdes to component objects",
+                "error": "components must be an object mapping refdes to component objects",
                 "code": "invalid_repair_upsert",
                 "draft_written": false,
                 "draft_changed": false,
@@ -1670,7 +1675,7 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     if upsert.values().any(|component| !component.is_object()) {
         return Ok(json!({
-            "error": "every upsert value must be a component object",
+            "error": "every components value must be a component object",
             "code": "invalid_repair_upsert",
             "draft_written": false,
             "draft_changed": false,
@@ -1793,7 +1798,7 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .any(|reference| update.contains_key(reference))
     {
         return Ok(json!({
-            "error": "the same refdes cannot appear in more than one of upsert, update, or remove",
+            "error": "the same refdes cannot appear in more than one of components, update, or remove",
             "code": "conflicting_repair_operation",
             "draft_written": false,
             "draft_changed": false,
@@ -1803,10 +1808,10 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if upsert.is_empty() && update.is_empty() && remove.is_empty() {
         let available_authored_refs = available_authored_refs(ctx);
         return Ok(json!({
-            "error": "repair requires at least one upsert, update, or remove refdes",
+            "error": "repair requires at least one components, update, or remove refdes",
             "code": "empty_component_repair",
             "available_authored_refs": available_authored_refs,
-            "example": {"upsert": {"C1": {"part": "Device:C", "value": "100nF", "pins": {"1": "+5V", "2": "GND"}}}},
+            "example": {"components": {"C1": {"part": "Device:C", "value": "100nF", "pins": {"1": "+5V", "2": "GND"}}}},
             "draft_written": false,
             "draft_changed": false,
             "mode": "component_repair",
@@ -1863,7 +1868,7 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         report["current_design_state"] = design_state_summary(prior_design);
         report["available_authored_refs"] = json!(available_authored_refs(ctx));
         report["expected_shape"] = json!({
-            "upsert": {"NEW_REF": {"part": "Lib:Symbol", "pins": {"pin": "NET"}}},
+            "components": {"NEW_REF": {"part": "Lib:Symbol", "pins": {"pin": "NET"}}},
             "update": {"EXISTING_REF": {"pins": {"pin": "NET"}}}
         });
         return Ok(report);
@@ -1885,7 +1890,7 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .any(|reference| !authored_patch_refs.contains(reference.as_str()))
     {
         return Ok(json!({
-            "error": "upsert must contain only explicit authored refdes entries",
+            "error": "components must contain only explicit authored refdes entries",
             "code": "invalid_component_repair_refs",
             "draft_written": false,
             "draft_changed": false,
@@ -1967,7 +1972,7 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 }
                 if !replace_existing {
                     return Ok(json!({
-                        "error": format!("upsert refdes {reference} already exists; pass replace_existing=true to replace it"),
+                        "error": format!("components refdes {reference} already exists; pass replace_existing=true to replace it"),
                         "code": "component_replacement_requires_confirmation",
                         "draft_written": false,
                         "draft_changed": false,
@@ -1983,7 +1988,7 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     for reference in update.keys() {
         let Some((existing_block, origin)) = existing.get(reference) else {
             return Ok(json!({
-                "error": format!("update refdes {reference} does not exist; use upsert with a complete component object to add it"),
+                "error": format!("update refdes {reference} does not exist; use components with a complete component object to add it"),
                 "code": "unknown_repair_update",
                 "draft_written": false,
                 "draft_changed": false,
@@ -2438,4 +2443,26 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
     });
     obj[IMAGE_PATH_KEY] = json!(path.display().to_string());
     Ok(obj)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::repair_components_tool;
+
+    #[test]
+    fn natural_components_alias_is_advertised_as_a_nonempty_component_map() {
+        let schema = repair_components_tool().schema.expect("repair schema");
+        let components = &schema["properties"]["components"];
+        assert_eq!(components["type"], "object");
+        assert_eq!(components["minProperties"], 1);
+        assert_eq!(
+            components["additionalProperties"]["required"],
+            serde_json::json!(["part"])
+        );
+        assert!(schema["anyOf"].as_array().is_some_and(|branches| {
+            branches
+                .iter()
+                .any(|branch| branch["required"] == serde_json::json!(["components"]))
+        }));
+    }
 }
