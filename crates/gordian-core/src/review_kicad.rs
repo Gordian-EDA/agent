@@ -388,11 +388,18 @@ fn is_ground_net(net: &str) -> bool {
 }
 
 fn is_positive_rail_net(net: &str) -> bool {
-    circuit_lang::erc::rail_voltage(net).is_some_and(|volts| volts > 0.0)
-        || matches!(
-            net.trim().to_ascii_uppercase().as_str(),
-            "V5" | "VCC" | "VDD" | "VBUS" | "VBAT" | "VIN" | "VOUT"
-        )
+    if circuit_lang::erc::rail_voltage(net).is_some_and(|volts| volts > 0.0) {
+        return true;
+    }
+    let normalized = net.trim().trim_start_matches('+').to_ascii_uppercase();
+    let rail = normalized
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .next()
+        .unwrap_or_default();
+    matches!(
+        rail,
+        "5V" | "3V3" | "V5" | "VCC" | "VDD" | "VBUS" | "VBAT" | "VIN" | "VOUT"
+    )
 }
 
 fn has_i2c_pullups(components: &[(&String, &circuit_lang::model::Component)]) -> bool {
@@ -1489,22 +1496,27 @@ blocks:
     }
 
     #[test]
-    fn intent_contract_recognizes_decoupling_on_v5() {
+    fn intent_contract_recognizes_decoupling_on_named_rail_variants() {
         let provider = circuit_lang::SymbolTable::with_basics();
-        let design = circuit_lang::compile(
-            r#"
+        for rail in ["V5", "V5_PRE", "5V_PROTECTED", "VDD_A"] {
+            let yaml = format!(
+                r#"
 version: 1
 blocks:
   main:
     components:
-      C1: {part: Device:C, value: 100nF, pins: {1: V5, 2: GND}}
-"#,
-            &provider,
-        )
-        .design
-        .expect("fixture compiles");
+      C1: {{part: Device:C, value: 100nF, pins: {{1: {rail}, 2: GND}}}}
+"#
+            );
+            let design = circuit_lang::compile(&yaml, &provider)
+                .design
+                .expect("fixture compiles");
 
-        assert!(intent_contract_checks("local decoupling", &design).is_empty());
+            assert!(
+                intent_contract_checks("local decoupling", &design).is_empty(),
+                "rail {rail} should count as a positive supply"
+            );
+        }
     }
 
     #[test]
