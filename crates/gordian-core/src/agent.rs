@@ -613,7 +613,10 @@ impl<P: Provider> Agent<P> {
         // PCB regeneration should never outrun the semantic schematic check.
         // Authoring invalidates a prior review; a fresh review of that draft
         // unlocks regeneration after it has been committed.
-        let mut schematic_review_current = false;
+        // Cache the semantic review for exactly the current draft. This lets the
+        // loop satisfy an apply request itself and prevents an unchanged,
+        // defective draft from paying for the same LLM review repeatedly.
+        let mut schematic_review_current: Option<Value> = None;
         let mut last_tool_status: Option<String> = None;
 
         loop {
@@ -858,14 +861,19 @@ impl<P: Provider> Agent<P> {
                 );
                 let create_on_existing_draft_blocked =
                     call.fn_name == "create_design" && draft_existed_before_completion;
+                let schematic_review_clean = schematic_review_current
+                    .as_ref()
+                    .is_some_and(review_result_is_clean);
                 let schematic_review_blocked = schematic_review_required_before_pcb(
                     applied,
-                    schematic_review_current,
+                    schematic_review_clean,
                     &call.fn_name,
                 );
-                let precommit_review_blocked = precommit_review_required
+                let precommit_review_needed = precommit_review_required
                     && call.fn_name == "apply_design"
-                    && !schematic_review_current;
+                    && !schematic_review_clean;
+                let cached_precommit_defects =
+                    precommit_review_needed && schematic_review_current.is_some();
                 let unchanged_apply_blocked = call.fn_name == "apply_design"
                     && !draft_dirty
                     && (commit_attempted_for_current_draft || draft_committed_at_turn_start);
@@ -877,7 +885,7 @@ impl<P: Provider> Agent<P> {
                     && !revision_read_budget_blocked
                     && !run_erc_without_schematic
                     && !schematic_review_blocked
-                    && !precommit_review_blocked
+                    && !cached_precommit_defects
                     && !unchanged_apply_blocked
                     && !speculative_mutation_blocked
                     && !create_on_existing_draft_blocked;
@@ -893,17 +901,17 @@ impl<P: Provider> Agent<P> {
                         Vec::new(),
                         None,
                     )
-                } else if precommit_review_blocked {
-                    (
-                        json!({
-                            "error": "semantic review required before committing this complex design",
-                            "code": "precommit_review_required",
-                            "note": "Call review_design on the complete current draft. The loop will automatically judge it against the authoritative user request. Fix every high-confidence defect and re-review before apply_design.",
-                        })
-                        .to_string(),
-                        Vec::new(),
-                        None,
-                    )
+                } else if cached_precommit_defects {
+                    let mut cached = schematic_review_current.clone().unwrap_or_default();
+                    if let Some(object) = cached.as_object_mut() {
+                        object.insert("apply_deferred".into(), json!(true));
+                        object.insert("code".into(), json!("precommit_review_defects"));
+                        object.insert(
+                            "note".into(),
+                            json!("The unchanged draft still has the cached semantic defects above. Fix them with one complete edit_design call; apply_design cannot proceed until the changed draft passes a fresh review."),
+                        );
+                    }
+                    (cached.to_string(), Vec::new(), None)
                 } else if unchanged_apply_blocked {
                     (
                         json!({
@@ -1034,6 +1042,56 @@ impl<P: Provider> Agent<P> {
                         Vec::new(),
                         None,
                     )
+                } else if precommit_review_needed {
+                    // The model already expressed the intent to commit. Fulfil
+                    // the mandatory review as a deterministic preflight rather
+                    // than relying on another completion to choose the tool.
+                    tool_calls_made += 1;
+                    let review_call = ToolCall {
+                        call_id: format!("{}:precommit-review", call.call_id),
+                        fn_name: "review_design".into(),
+                        fn_arguments: json!({"intent": user_msg}),
+                        thought_signatures: None,
+                    };
+                    let effective_review_call =
+                        authoritative_review_call(&review_call, user_msg).unwrap_or(review_call);
+                    let (review_content, _, _) = self
+                        .run_tool_call(
+                            &effective_review_call,
+                            false,
+                            false,
+                            approvals,
+                            &mut applied,
+                            events,
+                        )
+                        .await;
+                    let review = parse_or_null(&review_content);
+                    let review_clean = review_result_is_clean(&review);
+                    schematic_review_current = cacheable_review_result(&review);
+                    if review_clean {
+                        tool_calls_made += 1;
+                        apply_dispatched_this_completion = true;
+                        self.run_tool_call(
+                            call,
+                            gated_commit,
+                            approval_required,
+                            approvals,
+                            &mut applied,
+                            events,
+                        )
+                        .await
+                    } else {
+                        let mut guided = review;
+                        if let Some(object) = guided.as_object_mut() {
+                            object.insert("apply_deferred".into(), json!(true));
+                            object.insert("code".into(), json!("precommit_review_defects"));
+                            object.insert(
+                                "note".into(),
+                                json!("apply_design was deferred. Fix every high-confidence defect with one complete edit_design call, then apply again; the changed draft will be reviewed automatically."),
+                            );
+                        }
+                        (guided.to_string(), Vec::new(), None)
+                    }
                 } else {
                     tool_calls_made += 1;
                     if is_discovery_tool(&call.fn_name) {
@@ -1094,7 +1152,7 @@ impl<P: Provider> Agent<P> {
                     && is_authoring_for_commit(&call.fn_name)
                     && authoring_result_changed_draft(&parsed)
                 {
-                    schematic_review_current = false;
+                    schematic_review_current = None;
                     draft_dirty = true;
                     commit_attempted_for_current_draft = false;
                     last_committed_erc_cleanup_needed = None;
@@ -1105,10 +1163,10 @@ impl<P: Provider> Agent<P> {
                     && parsed.get("written").and_then(Value::as_bool) == Some(true)
                 {
                     // Inline YAML can differ from the draft that was reviewed.
-                    schematic_review_current = false;
+                    schematic_review_current = None;
                 }
                 if dispatched && call.fn_name == "review_design" {
-                    schematic_review_current = review_result_is_clean(&parsed);
+                    schematic_review_current = cacheable_review_result(&parsed);
                 }
                 if call.fn_name == "apply_design"
                     && let Some(cleanup_needed) = apply_erc_cleanup_needed(&parsed)
@@ -1646,6 +1704,10 @@ fn review_result_is_clean(value: &Value) -> bool {
             .get("defects")
             .and_then(Value::as_array)
             .is_some_and(Vec::is_empty)
+}
+
+fn cacheable_review_result(value: &Value) -> Option<Value> {
+    value.get("error").is_none().then(|| value.clone())
 }
 
 /// A timed-out `spawn_blocking` task may continue after its join handle is
@@ -3712,6 +3774,19 @@ mod tests {
             "error": "review failed",
             "defects": []
         })));
+        assert!(
+            cacheable_review_result(&json!({
+                "score": 7.0,
+                "defects": ["missing fuse"]
+            }))
+            .is_some()
+        );
+        assert!(
+            cacheable_review_result(&json!({
+                "error": "review failed"
+            }))
+            .is_none()
+        );
     }
 
     #[test]
