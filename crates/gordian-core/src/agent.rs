@@ -896,6 +896,27 @@ impl<P: Provider> Agent<P> {
 
             // No tool calls → the model wants to stop.
             if tool_calls.is_empty() {
+                // A board-design request that spent its turn researching parts
+                // has not completed merely because the model emitted prose.
+                // Spend the existing single transition nudge here, where it can
+                // still turn verified catalog facts into a draft, instead of
+                // waiting for the unrelated no-progress watchdog.
+                let no_draft_after_discovery = pcb_work_requested
+                    && !discovery_rounds_used.is_empty()
+                    && self
+                        .runtime
+                        .workspace()
+                        .read_draft()
+                        .ok()
+                        .flatten()
+                        .is_none();
+                if no_draft_after_discovery && authoring_transition_nudges_left > 0 {
+                    authoring_transition_nudges_left -= 1;
+                    self.history
+                        .push(ChatMessage::user(AUTHORING_TRANSITION_NUDGE));
+                    continue;
+                }
+
                 // A committed file can still carry actionable ERC findings. Give
                 // the model a bounded chance to batch-fix and re-apply them before
                 // accepting its final prose. Pure library-copy mismatch noise is
@@ -927,7 +948,7 @@ impl<P: Provider> Agent<P> {
                 });
             }
 
-            // Each exact discovery tool gets two completion-level rounds. A
+            // Each exact discovery tool gets one completion-level round. A
             // batch of same-named calls costs one round; exhausting one tool
             // must not block another discovery tool or unrelated calls.
             let discovery_tools_this_completion: HashSet<&str> = tool_calls
@@ -2052,6 +2073,14 @@ fn authoring_diagnostics_state(name: &str, value: &Value) -> Option<AuthoringDia
     ) {
         return None;
     }
+    // Rejected authoring candidates report diagnostics for the candidate, not
+    // for the preserved working draft. Never let those errors poison the
+    // apply guard for a draft that the tool explicitly left unchanged.
+    if matches!(name, "create_design" | "edit_design" | "assign_footprints")
+        && value.get("draft_written").and_then(Value::as_bool) == Some(false)
+    {
+        return None;
+    }
     let state = AuthoringDiagnosticsState {
         design_state: value.get("design_state").cloned(),
         errors: value
@@ -3023,8 +3052,12 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 || result.get("code").and_then(Value::as_str) == Some("precommit_review_defects")
             {
                 let defects = result
-                    .get("review")
-                    .and_then(|review| review.get("defects"))
+                    .get("defects")
+                    .or_else(|| {
+                        result
+                            .get("review")
+                            .and_then(|review| review.get("defects"))
+                    })
                     .and_then(Value::as_array)
                     .map(Vec::len)
                     .unwrap_or(0);
@@ -3683,6 +3716,29 @@ mod tests {
         assert_eq!(outcome.stop_reason, StopReason::Completed);
         assert_eq!(outcome.tool_calls_made, 1);
         assert_eq!(outcome.final_text, "selected the best discovery result");
+    }
+
+    #[tokio::test]
+    async fn board_request_cannot_end_with_research_and_no_draft() {
+        let mut script = discovery_script(1);
+        script.push(final_text("research complete"));
+        script.push(final_text("unable to author"));
+        let client = ScriptedClient::new(script);
+        let mut agent = Agent::new(client, test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn(
+                "design and route a PCB after researching parts",
+                &mut approvals,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.tool_calls_made, 1);
+        assert_eq!(outcome.final_text, "unable to author");
     }
 
     #[tokio::test]
@@ -4355,6 +4411,24 @@ mod tests {
     }
 
     #[test]
+    fn rejected_candidate_diagnostics_do_not_replace_preserved_draft_state() {
+        assert_eq!(
+            authoring_diagnostics_state(
+                "edit_design",
+                &json!({
+                    "code": "invalid_replacement_preserved_draft",
+                    "draft_written": false,
+                    "draft_changed": false,
+                    "errors": 3,
+                    "warnings": 1,
+                    "current_diagnostics": []
+                }),
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn explicit_draft_changed_overrides_legacy_write_markers() {
         assert!(!authoring_result_changed_draft(&json!({
             "draft_changed": false,
@@ -4552,6 +4626,16 @@ mod tests {
             }),
         );
         assert_eq!(s, "deferred: semantic review found 2 defect(s)");
+        let s = tool_summary(
+            "apply_design",
+            &json!({}),
+            &json!({
+                "apply_deferred": true,
+                "code": "precommit_review_defects",
+                "defects": ["missing regulator"]
+            }),
+        );
+        assert_eq!(s, "deferred: semantic review found 1 defect(s)");
         let s = tool_summary(
             "check_board",
             &json!({}),
