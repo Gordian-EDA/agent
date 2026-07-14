@@ -20,7 +20,8 @@ use kicad_ipc::{
     snapshot::IpcBoardSnapshot,
 };
 use pcb_model::{
-    Connection, LayerRef, RoutePoint, RouteProblem, RouteSolution, Router, Trace, Via, ViaSpan,
+    Connection, FailedNet, LayerRef, RoutePoint, RouteProblem, RouteResult, RouteSolution, Router,
+    Trace, Via, ViaSpan,
 };
 
 use crate::AgentRuntime;
@@ -748,6 +749,24 @@ fn route_leg(
         to,
         to_layer.clone(),
     );
+    // Exact-coordinate visibility/dogleg routing avoids manufacturing an
+    // artificial blocked endpoint when a wide pad center snaps into an
+    // occupied grid cell. Fall back to grid A* for genuinely maze-like legs.
+    let mut direct = RouteResult {
+        solution: RouteSolution {
+            traces: Vec::new(),
+            vias: Vec::new(),
+        },
+        failed: vec![FailedNet {
+            connection: net.to_owned(),
+            reason: "manual direct route pending".to_owned(),
+        }],
+        engine: "manual".to_owned(),
+    };
+    if super::route::apply_direct_rescue_fallback(&exact_problem, &mut direct) {
+        validate_manual_solution(&exact_problem, &direct.solution)?;
+        return Ok(direct.solution);
+    }
     let grid_from = snapped_route_point(&exact_problem, from);
     let grid_to = snapped_route_point(&exact_problem, to);
     let grid_problem =
