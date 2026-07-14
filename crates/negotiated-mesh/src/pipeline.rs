@@ -458,8 +458,8 @@ fn route_sequential_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoR
     }
 }
 
-/// Split plane-net connections out of `problem`: a net carried by a solid
-/// inner plane connects by ONE through-via per pad (the plane provides the
+/// Split plane-net connections out of `problem`: a net carried by one solid
+/// full-board copper layer connects by ONE through-via per off-layer pad (the plane provides the
 /// tree), so the trace engines never see it — a 100-pad power net costs
 /// O(pads) instead of a board-wide multi-terminal search. Returns the
 /// engines' subproblem and the fanout vias to merge into its solution, or
@@ -2638,6 +2638,31 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn plane_fanout_stitches_top_pads_to_a_bottom_pour() {
+        let mut p = simple_two_point_problem();
+        p.layer_count = 2;
+        p.plane_nets.insert("N".to_owned(), 1);
+        p.obstacles = p.connections[0]
+            .points_to_connect
+            .iter()
+            .map(|point| crate::problem::Obstacle {
+                kind: "pad".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: point.point(),
+                width: 1.0,
+                height: 1.0,
+                connected_to: vec!["N".to_owned()],
+            })
+            .collect();
+
+        let (sub, vias) = plane_fanout(&p).expect("outer pour connection handled");
+
+        assert!(sub.connections.is_empty());
+        assert_eq!(vias.len(), 2);
+        assert!(vias.iter().all(|via| via.span == ViaSpan::Through));
     }
 
     fn top_blocked_two_point_problem() -> RouteProblem {

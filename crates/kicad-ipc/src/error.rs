@@ -39,4 +39,8 @@ impl Error {
     pub fn is_transport_timeout(&self) -> bool {
         matches!(self, Error::Nng(err) if err.to_string().contains("Timed out"))
     }
+
+    pub fn is_type_mismatch(&self) -> bool {
+        matches!(self, Error::TypeMismatch(_))
+    }
 }

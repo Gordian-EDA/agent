@@ -62,7 +62,7 @@ fn lint_summary(
         // An Unconnected is an EXPECTED gap (not an engine bug) when:
         //  - the net was already reported failed (an honest finisher/global drop), OR
         //  - the net is a copper PLANE net. A plane net is NOT trace-routed — it was
-        //    removed from the routed connections and its pins connect through the inner
+        //    removed from the routed connections and its pins connect through the full-board
         //    plane (emitted at export) plus a per-pad stitching via; any pad whose via
         //    couldn't be placed is already reported as a failed stitch. So the trace-
         //    connectivity oracle, which sees the stitch vias but not the plane copper,
@@ -192,12 +192,13 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     add_terminal_stubs(&rp, &mut result.solution, &failed);
     let original_solution = result.solution.clone();
     let mut pruned_spurs = prune_dangling_spurs_if_safe(&rp, &mut result);
-    let dropped = make_route_honest(&rp, &mut result);
-    let mut split = lint_summary(&rp, &result.solution, &result.failed, &Default::default());
+    let plane_nets = rp.plane_nets.keys().cloned().collect();
+    let dropped = make_route_honest(&rp, &mut result, &plane_nets);
+    let mut split = lint_summary(&rp, &result.solution, &result.failed, &plane_nets);
     if split.real > 0 && pruned_spurs > 0 {
         result.solution = original_solution;
         pruned_spurs = 0;
-        split = lint_summary(&rp, &result.solution, &result.failed, &Default::default());
+        split = lint_summary(&rp, &result.solution, &result.failed, &plane_nets);
     }
     if split.real > 0 {
         return Err(format!(
@@ -279,9 +280,13 @@ fn clear_existing_copper(ctx: &AgentRuntime) -> std::result::Result<(usize, usiz
     Ok((tracks, vias))
 }
 
-fn make_route_honest(rp: &RouteProblem, result: &mut RouteResult) -> Vec<String> {
+fn make_route_honest(
+    rp: &RouteProblem,
+    result: &mut RouteResult,
+    plane_nets: &BTreeSet<String>,
+) -> Vec<String> {
     let mut dropped = Vec::new();
-    for net in drop_unconnected_copper(rp, &mut result.solution) {
+    for net in drop_unconnected_non_plane_copper(rp, &mut result.solution, plane_nets) {
         append_failed(
             result,
             &net,
@@ -311,7 +316,7 @@ fn make_route_honest(rp: &RouteProblem, result: &mut RouteResult) -> Vec<String>
             dropped.push(net);
         }
     }
-    for net in drop_unconnected_copper(rp, &mut result.solution) {
+    for net in drop_unconnected_non_plane_copper(rp, &mut result.solution, plane_nets) {
         append_failed(
             result,
             &net,
@@ -321,6 +326,42 @@ fn make_route_honest(rp: &RouteProblem, result: &mut RouteResult) -> Vec<String>
     }
     dropped.sort();
     dropped.dedup();
+    dropped
+}
+
+fn drop_unconnected_non_plane_copper(
+    rp: &RouteProblem,
+    solution: &mut RouteSolution,
+    plane_nets: &BTreeSet<String>,
+) -> Vec<String> {
+    if plane_nets.is_empty() {
+        return drop_unconnected_copper(rp, solution);
+    }
+    let mut check_problem = rp.clone();
+    check_problem
+        .connections
+        .retain(|connection| !plane_nets.contains(&connection.name));
+    let plane_traces: Vec<_> = solution
+        .traces
+        .iter()
+        .filter(|trace| plane_nets.contains(&trace.connection))
+        .cloned()
+        .collect();
+    let plane_vias: Vec<_> = solution
+        .vias
+        .iter()
+        .filter(|via| plane_nets.contains(&via.connection))
+        .cloned()
+        .collect();
+    solution
+        .traces
+        .retain(|trace| !plane_nets.contains(&trace.connection));
+    solution
+        .vias
+        .retain(|via| !plane_nets.contains(&via.connection));
+    let dropped = drop_unconnected_copper(&check_problem, solution);
+    solution.traces.extend(plane_traces);
+    solution.vias.extend(plane_vias);
     dropped
 }
 
@@ -366,6 +407,13 @@ fn add_terminal_stubs(
         }
         let width = rp.net_width(&conn.name);
         for point in &conn.points_to_connect {
+            if rp.plane_nets.contains_key(&conn.name)
+                && solution.vias.iter().any(|via| {
+                    via.connection == conn.name && via.at.dist(point.point()) < geom::EPS
+                })
+            {
+                continue;
+            }
             let cell_x = cell_center(rp.bounds.min_x, point.x, pitch);
             let cell_y = cell_center(rp.bounds.min_y, point.y, pitch);
             let exact = Point2 {
@@ -390,14 +438,26 @@ fn add_terminal_stubs(
 }
 
 fn prune_dangling_spurs_if_safe(rp: &RouteProblem, result: &mut RouteResult) -> usize {
+    let plane_nets: BTreeSet<_> = rp.plane_nets.keys().cloned().collect();
+    let plane_traces: Vec<_> = result
+        .solution
+        .traces
+        .iter()
+        .filter(|trace| plane_nets.contains(&trace.connection))
+        .cloned()
+        .collect();
+    result
+        .solution
+        .traces
+        .retain(|trace| !plane_nets.contains(&trace.connection));
     let original = result.solution.clone();
     let removed = prune_dangling_spurs(rp, &mut result.solution);
-    if removed > 0
-        && lint_summary(rp, &result.solution, &result.failed, &Default::default()).real > 0
-    {
+    if removed > 0 && lint_summary(rp, &result.solution, &result.failed, &plane_nets).real > 0 {
         result.solution = original;
+        result.solution.traces.extend(plane_traces);
         0
     } else {
+        result.solution.traces.extend(plane_traces);
         removed
     }
 }
@@ -2079,6 +2139,93 @@ mod escape_bottleneck_tests {
             Some((0, 2)),
             "equal-length direct rescue tree edges should prefer same-layer endpoints: {pairs:?}"
         );
+    }
+
+    fn bottom_plane_problem() -> RouteProblem {
+        RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![pcb_model::Connection {
+                name: "GND".to_string(),
+                points_to_connect: vec![
+                    pcb_model::RoutePoint {
+                        x: 1.13,
+                        y: 1.13,
+                        layer: LayerRef::top(),
+                    },
+                    pcb_model::RoutePoint {
+                        x: 4.13,
+                        y: 1.13,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 10.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: BTreeMap::from([("GND".to_string(), 1)]),
+        }
+    }
+
+    #[test]
+    fn plane_fanout_survives_route_honesty_and_spur_pruning() {
+        let problem = bottom_plane_problem();
+        let mut result = RouteResult {
+            engine: "plane-fanout".to_string(),
+            failed: vec![],
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "GND".to_string(),
+                    layer: LayerRef::top(),
+                    width: 0.6,
+                    path: vec![Point2 { x: 1.13, y: 1.13 }, Point2 { x: 1.5, y: 1.5 }],
+                }],
+                vias: vec![Via {
+                    connection: "GND".to_string(),
+                    at: Point2 { x: 1.5, y: 1.5 },
+                    diameter: 0.6,
+                    drill: 0.3,
+                    span: pcb_model::ViaSpan::Through,
+                }],
+            },
+        };
+        let planes = BTreeSet::from(["GND".to_string()]);
+
+        assert_eq!(prune_dangling_spurs_if_safe(&problem, &mut result), 0);
+        assert!(make_route_honest(&problem, &mut result, &planes).is_empty());
+        assert_eq!(result.solution.traces.len(), 1);
+        assert_eq!(result.solution.vias.len(), 1);
+        assert!(result.failed.is_empty());
+    }
+
+    #[test]
+    fn terminal_stubs_do_not_duplicate_a_plane_via_anchor() {
+        let problem = bottom_plane_problem();
+        let mut solution = RouteSolution {
+            traces: vec![],
+            vias: vec![Via {
+                connection: "GND".to_string(),
+                at: Point2 { x: 1.13, y: 1.13 },
+                diameter: 0.6,
+                drill: 0.3,
+                span: pcb_model::ViaSpan::Through,
+            }],
+        };
+
+        add_terminal_stubs(&problem, &mut solution, &BTreeSet::new());
+
+        assert_eq!(solution.traces.len(), 1);
+        assert_eq!(solution.traces[0].path[0], Point2 { x: 4.13, y: 1.13 });
     }
 
     #[test]

@@ -428,10 +428,7 @@ impl SnapshotBuilder {
         {
             let layer_count = self.layer_names.len().max(2) as u32;
             for layer in zone_layers(zone, &self.layer_names) {
-                if let Some(idx) = layer.index(layer_count)
-                    && idx > 0
-                    && idx + 1 < layer_count
-                {
+                if let Some(idx) = layer.index(layer_count) {
                     self.copper_zone_layers
                         .entry(net.clone())
                         .or_default()
@@ -528,6 +525,19 @@ fn observed_plane_nets(
             .get(net)
             .is_some_and(|layers| layers.contains(layer))
     });
+    let connected = connections
+        .iter()
+        .map(|connection| connection.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for (net, layers) in copper_zone_layers {
+        if connected.contains(net.as_str())
+            && !assigned.contains_key(net)
+            && layers.len() == 1
+            && let Some(layer) = layers.iter().next()
+        {
+            assigned.insert(net.clone(), *layer);
+        }
+    }
     assigned
 }
 
@@ -1541,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    fn plane_assignment_requires_a_matching_inner_copper_zone() {
+    fn plane_assignment_requires_a_matching_full_board_copper_zone() {
         let connections = vec![Connection {
             name: "GND".to_owned(),
             points_to_connect: vec![
@@ -1565,10 +1575,16 @@ mod tests {
             observed_plane_nets(4, &connections, &observed),
             BTreeMap::from([("GND".to_owned(), 1)])
         );
+
+        let bottom_pour = BTreeMap::from([("GND".to_owned(), BTreeSet::from([1]))]);
+        assert_eq!(
+            observed_plane_nets(2, &connections, &bottom_pour),
+            BTreeMap::from([("GND".to_owned(), 1)])
+        );
     }
 
     #[test]
-    fn only_board_spanning_inner_zones_can_be_planes() {
+    fn only_board_spanning_zones_can_be_planes() {
         let outline = Polygon::new(vec![
             Point2::new(0.0, 0.0),
             Point2::new(20.0, 0.0),

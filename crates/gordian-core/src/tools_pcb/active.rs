@@ -50,13 +50,16 @@ fn read_snapshot(ctx: &AgentRuntime) -> std::result::Result<IpcBoardSnapshot, St
                 last_ready_err = Some(err);
                 std::thread::sleep(std::time::Duration::from_millis(750));
             }
-            Err(err) if err.is_transport_timeout() => {
+            Err(err) if err.is_transport_timeout() || err.is_type_mismatch() => {
+                let initial = err.to_string();
                 ctx.close_kicad_session();
                 let mut snapshot = ctx
                     .kicad()
                     .with_session(&path, |session| session.kicad().board_snapshot())
                     .map_err(|retry| {
-                        format!("could not read live KiCAD board over IPC: {retry}")
+                        format!(
+                            "could not read live KiCAD board over IPC after reconnect; initial error: {initial}; retry error: {retry}"
+                        )
                     })?;
                 reconcile_file_stackup(&path, &mut snapshot)?;
                 return Ok(snapshot);
@@ -113,7 +116,7 @@ fn reconcile_file_stackup(
     snapshot
         .problem
         .plane_nets
-        .retain(|_, layer| *layer > 0 && *layer + 1 < layer_count);
+        .retain(|_, layer| *layer < layer_count);
     snapshot
         .problem
         .escape_layers
