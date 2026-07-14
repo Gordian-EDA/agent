@@ -504,6 +504,55 @@ fn is_discovery_tool(name: &str) -> bool {
     )
 }
 
+fn is_batchable_discovery_tool(name: &str) -> bool {
+    matches!(name, "search_symbols" | "search_footprints")
+}
+
+fn batchable_discovery_position(call: &ToolCall, calls: &[ToolCall]) -> Option<usize> {
+    is_batchable_discovery_tool(&call.fn_name).then(|| {
+        calls
+            .iter()
+            .filter(|candidate| candidate.fn_name == call.fn_name)
+            .position(|candidate| candidate.call_id == call.call_id)
+            .unwrap_or(0)
+    })
+}
+
+fn coalesced_discovery_call(call: &ToolCall, calls: &[ToolCall]) -> Option<ToolCall> {
+    if !is_batchable_discovery_tool(&call.fn_name) {
+        return None;
+    }
+    let mut queries = Vec::new();
+    for candidate in calls
+        .iter()
+        .filter(|candidate| candidate.fn_name == call.fn_name)
+    {
+        if let Some(batch) = candidate
+            .fn_arguments
+            .get("queries")
+            .and_then(Value::as_array)
+        {
+            queries.extend(batch.iter().filter(|query| query.is_object()).cloned());
+        } else if let Some(query) = candidate.fn_arguments.get("query").and_then(Value::as_str) {
+            let mut item = serde_json::Map::from_iter([("query".to_owned(), json!(query))]);
+            if let Some(limit) = candidate.fn_arguments.get("limit").and_then(Value::as_u64) {
+                item.insert("limit".to_owned(), json!(limit));
+            }
+            queries.push(Value::Object(item));
+        }
+        if queries.len() >= MAX_DISCOVERY_CALLS_PER_COMPLETION {
+            break;
+        }
+    }
+    queries.truncate(MAX_DISCOVERY_CALLS_PER_COMPLETION);
+    (queries.len() > 1).then(|| ToolCall {
+        call_id: call.call_id.clone(),
+        fn_name: call.fn_name.clone(),
+        fn_arguments: json!({"queries": queries}),
+        thought_signatures: call.thought_signatures.clone(),
+    })
+}
+
 fn is_revision_scoped_read(name: &str) -> bool {
     matches!(
         name,
@@ -1136,12 +1185,19 @@ impl<P: Provider> Agent<P> {
                     timed_out_retry_blocked(&timed_out_tool_calls, call, tool_state_revision);
                 let discovery_budget_blocked =
                     discovery_tools_blocked.contains(call.fn_name.as_str());
-                let discovery_batch_budget_blocked = is_discovery_tool(&call.fn_name)
-                    && discovery_calls_dispatched_this_completion
-                        .get(&call.fn_name)
-                        .copied()
-                        .unwrap_or(0)
-                        >= MAX_DISCOVERY_CALLS_PER_COMPLETION;
+                let batchable_position = batchable_discovery_position(call, &tool_calls);
+                let discovery_batch_budget_blocked = batchable_position
+                    .is_some_and(|position| position >= MAX_DISCOVERY_CALLS_PER_COMPLETION)
+                    || (batchable_position.is_none()
+                        && is_discovery_tool(&call.fn_name)
+                        && discovery_calls_dispatched_this_completion
+                            .get(&call.fn_name)
+                            .copied()
+                            .unwrap_or(0)
+                            >= MAX_DISCOVERY_CALLS_PER_COMPLETION);
+                let duplicate_batchable_discovery = batchable_position.is_some_and(|position| {
+                    position > 0 && position < MAX_DISCOVERY_CALLS_PER_COMPLETION
+                });
                 let duplicate_board_read_blocked =
                     call.fn_name == "get_board" && board_read_dispatched_this_completion;
                 let revision_read_budget_blocked = is_revision_scoped_read(&call.fn_name)
@@ -1347,6 +1403,17 @@ impl<P: Provider> Agent<P> {
                         Vec::new(),
                         None,
                     )
+                } else if duplicate_batchable_discovery {
+                    (
+                        json!({
+                            "cached": true,
+                            "tool": call.fn_name,
+                            "note": "This query was coalesced into the first same-tool batch in this completion; reuse that combined result.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
                 } else if discovery_batch_budget_blocked {
                     (
                         json!({
@@ -1454,7 +1521,8 @@ impl<P: Provider> Agent<P> {
                         board_read_dispatched_this_completion = true;
                     }
                     let effective_call = authoritative_review_call(call, authoritative_intent)
-                        .or_else(|| authoritative_regenerate_call(call, authoritative_intent));
+                        .or_else(|| authoritative_regenerate_call(call, authoritative_intent))
+                        .or_else(|| coalesced_discovery_call(call, &tool_calls));
                     let call_to_run = effective_call.as_ref().unwrap_or(call);
                     self.run_tool_call(
                         call_to_run,
@@ -4109,11 +4177,12 @@ mod tests {
 
         assert_eq!(outcome.stop_reason, StopReason::Completed);
         assert_eq!(
-            outcome.tool_calls_made, 6,
-            "the second unchanged project_info call is revision-budgeted"
+            outcome.tool_calls_made, 5,
+            "same-completion symbol searches coalesce and the second unchanged project_info call is revision-budgeted"
         );
 
         let requests = seen.lock().unwrap();
+        assert_eq!(tool_results(&requests[1])["first-b"]["cached"], true);
         let after_third_round = tool_results(&requests[3]);
         assert_eq!(
             after_third_round["third-symbol"]["code"],
@@ -4170,14 +4239,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.stop_reason, StopReason::Completed);
-        assert_eq!(outcome.tool_calls_made, MAX_DISCOVERY_CALLS_PER_COMPLETION);
+        assert_eq!(outcome.tool_calls_made, 1);
         let requests = seen.lock().unwrap();
         let results = tool_results(&requests[1]);
-        for idx in 0..MAX_DISCOVERY_CALLS_PER_COMPLETION {
-            assert_ne!(
-                results[&format!("search-{idx}")]["code"],
-                "discovery_batch_budget_exhausted"
-            );
+        assert_ne!(
+            results["search-0"]["code"],
+            "discovery_batch_budget_exhausted"
+        );
+        for idx in 1..MAX_DISCOVERY_CALLS_PER_COMPLETION {
+            assert_eq!(results[&format!("search-{idx}")]["cached"], true);
         }
         for idx in MAX_DISCOVERY_CALLS_PER_COMPLETION..6 {
             assert_eq!(
@@ -4185,6 +4255,35 @@ mod tests {
                 "discovery_batch_budget_exhausted"
             );
         }
+    }
+
+    #[test]
+    fn same_completion_searches_coalesce_into_one_batch() {
+        let calls = [
+            ToolCall {
+                call_id: "a".into(),
+                fn_name: "search_footprints".into(),
+                fn_arguments: json!({"query": "SOIC-8", "limit": 3}),
+                thought_signatures: None,
+            },
+            ToolCall {
+                call_id: "b".into(),
+                fn_name: "search_footprints".into(),
+                fn_arguments: json!({"query": "SMA diode"}),
+                thought_signatures: None,
+            },
+        ];
+
+        let merged = coalesced_discovery_call(&calls[0], &calls).expect("merged call");
+        assert_eq!(merged.call_id, "a");
+        assert_eq!(
+            merged.fn_arguments,
+            json!({"queries": [
+                {"query": "SOIC-8", "limit": 3},
+                {"query": "SMA diode"}
+            ]})
+        );
+        assert_eq!(batchable_discovery_position(&calls[1], &calls), Some(1));
     }
 
     #[tokio::test]
