@@ -96,7 +96,7 @@ pub fn compose_design(env: &KicadEnv, design: &Design) -> anyhow::Result<EmitOut
         return sch_floorplan::floorplan::emit_strategy(
             env,
             design,
-            crate::tools::schematic_placement_engine_for(design),
+            crate::tools::schematic_placement_engine(),
             None,
         )
         .map_err(|e| anyhow::anyhow!("emit: {e}"));
@@ -107,14 +107,18 @@ pub fn compose_design(env: &KicadEnv, design: &Design) -> anyhow::Result<EmitOut
     let mut layout_warnings = Vec::new();
     let mut crossings = sch_place::place::Crossings::default();
     let mut detected_idioms = Vec::new();
+    let placer = crate::tools::schematic_placement_engine();
     for (gname, block) in groups {
         let mut sub = design.clone();
         sub.blocks = std::iter::once((gname.clone(), block)).collect();
         mark_cross_sheet_ports(&mut sub, &cross_sheet);
-        let placer = crate::tools::schematic_placement_engine_for(&sub);
         eprintln!("  [emit] group '{gname}' with {}", placer.name());
-        let (w, out) = sch_floorplan::floorplan::emit_group(env, &sub, placer)
-            .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
+        let (w, out) = sch_floorplan::floorplan::emit_group(
+            env,
+            &sub,
+            crate::tools::schematic_placement_engine(),
+        )
+        .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
         eprintln!("  [emit] group '{gname}' done");
         layout_warnings.extend(out.layout_warnings);
         crossings.body += out.crossings.body;
@@ -218,32 +222,4 @@ mod tests {
         assert_eq!(groups[0].1.components.len(), 12);
     }
 
-    #[test]
-    fn large_pin_count_uses_bounded_spine_default() {
-        let design_with_pins = |count: usize| {
-            let mut design = Design::default();
-            let mut block = Block::default();
-            let mut component = Component {
-                part: "Connector_Generic:Conn_01x40".to_owned(),
-                ..Component::default()
-            };
-            for pin in 1..=count {
-                component
-                    .pins
-                    .insert(pin.to_string(), PinTarget::Net(format!("N{pin}")));
-            }
-            block.components.insert("J1".to_owned(), component);
-            design.blocks.insert("main".to_owned(), block);
-            design
-        };
-
-        assert_eq!(
-            crate::tools::default_schematic_placement_name(&design_with_pins(34)),
-            "cluster"
-        );
-        assert_eq!(
-            crate::tools::default_schematic_placement_name(&design_with_pins(35)),
-            "spine"
-        );
-    }
 }

@@ -689,10 +689,10 @@ pub fn anneal_place(
         // fast-lane winner is sprawl-optimal but not crossing-optimal. Refine it with a
         // bounded `anneal_items` whose objective is the TRUE routed cost (amplified) — the
         // only faithful crossing signal — which no cheap proxy could capture. Seeded
-        // from the already-good winner, so its capped budget (≤750 routed iters, the
-        // 420k/pins ceiling) is spent polishing, not exploring. Kept ONLY if it wins the
+        // from the already-good winner, so its 80 routed iterations are spent polishing,
+        // not exploring. Kept ONLY if it wins the
         // SAME (breaks, warnings, true-cost) pick, so it can never ship worse. This
-        // trades the ≤5s budget for fewer dense-board crossings, per the user's call.
+        // trades a bounded routed-search budget for fewer dense-board crossings.
         // Score a candidate on its FINALISED geometry. CRUCIAL: the emit runs decongest
         // + align_idiom_clusters + align_led_chains (which e.g. snaps each LED's resistor
         // into a clean leg, tidying a tangled candidate dramatically — c08 53→19) BEFORE
@@ -738,13 +738,20 @@ pub fn anneal_place(
         // sprawl-optimal but not crossing-optimal — and no cheap router-free crossing
         // proxy proved faithful (bbox/trunk-segment all failed). So refine the winner with
         // the TRUE router: a bounded `anneal_items` (amplified routed cost; iter-capped
-        // 80..300 = 30k/pins so even a 173-pin board stays seconds) seeded from it. Kept
+        // at 80 routed iterations) seeded from it. Kept
         // ONLY if it wins on real (finalised) crossings, so it is strictly additive — a
-        // straighter-but-more-crossing result is rejected. Trades the ≤5s budget for fewer
-        // dense-board crossings (user-authorised).
+        // straighter-but-more-crossing result is rejected. Trades bounded time for fewer
+        // dense-board crossings.
         let mut refined = candidates[best].clone();
         let t_ref = std::time::Instant::now();
-        let ref_cap = (30_000 / pins).clamp(80, 300);
+        // Moderate fast-lane sheets are the most expensive routed-objective case:
+        // 30k/pins used to clamp them to the maximum 300 iterations (a 43-pin
+        // production sensor sheet spent 81 s here and timed out during compose).
+        // The selected proxy candidate remains the strict quality floor, so a
+        // shorter refinement can only win when its fully routed result improves.
+        // Keep one bounded budget across the fast lane; reference fixtures never
+        // enter this path because they are at or below FAST_PINS.
+        let ref_cap = 80;
         anneal_items(
             problem,
             &eval,
