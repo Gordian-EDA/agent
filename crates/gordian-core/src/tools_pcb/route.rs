@@ -2,6 +2,8 @@
 //! write-back, and route-result lint/triage.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
+use std::path::Path;
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -170,19 +172,19 @@ pub fn route_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
 }
 
 fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
-    let mut board = super::active::board_problem(ctx)?;
+    let board = super::active::board_problem(ctx)?;
     if is_seed_placement(&board.imported.bounds, &board.imported.parts) {
         return Err("board has only the initial seed-row footprint positions — run place_board before route_board".to_owned());
     }
 
     let existing = (board.copper.traces.len(), board.copper.vias.len());
-    if existing.0 > 0 || existing.1 > 0 {
-        clear_existing_copper(ctx)
-            .map_err(|e| format!("could not clear existing copper before reroute: {e}"))?;
-        board = super::active::board_problem(ctx)?;
-    }
-
     let mut rp = board.problem.clone();
+    // Solve against an in-memory copper-free view. The live/file board keeps
+    // its prior route until the replacement has passed cleanup and lint, so a
+    // timeout or failed solve cannot destroy useful manual/existing copper.
+    if existing.0 > 0 || existing.1 > 0 {
+        remove_existing_copper_obstacles(&mut rp);
+    }
     rp.bounds = super::place::routing_bounds(&rp.bounds, rp.outline.as_ref());
     let (router_problem, terminal_escapes) = prepare_wide_terminal_escapes(&rp);
     let (routing_subproblem, reserved_wide_routes) = reserve_wide_multi_pin_routes(&router_problem);
@@ -216,7 +218,7 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
         ));
     }
 
-    write_route(ctx, &rp, &result.solution, &board.layer_names)
+    replace_route_atomically(ctx, &rp, &result.solution, &board.layer_names, existing)
         .map_err(|e| format!("could not write route to the board: {e}"))?;
 
     let failed: Vec<Value> = result
@@ -270,23 +272,78 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     }))
 }
 
-fn clear_existing_copper(ctx: &AgentRuntime) -> std::result::Result<(usize, usize), String> {
+fn remove_existing_copper_obstacles(problem: &mut RouteProblem) {
+    problem
+        .obstacles
+        .retain(|obstacle| !matches!(obstacle.kind.as_str(), "track" | "via"));
+}
+
+fn replace_route_atomically(
+    ctx: &AgentRuntime,
+    rp: &RouteProblem,
+    solution: &RouteSolution,
+    layer_names: &[String],
+    existing: (usize, usize),
+) -> std::result::Result<(), String> {
+    if existing == (0, 0) {
+        return write_route(ctx, rp, solution, layer_names);
+    }
     let path = ctx.pcb_path();
-    let live = ctx
-        .kicad()
-        .with_session(&path, |session| session.kicad().delete_tracks_and_vias());
-    let Err(live_err) = live else {
-        return live.map_err(|e| e.to_string());
+    let original = std::fs::read(&path).map_err(|error| {
+        format!("could not snapshot existing board before replacement: {error}")
+    })?;
+    let live = ctx.kicad().with_session(&path, |session| {
+        session
+            .kicad()
+            .replace_route_solution(rp, solution, layer_names)
+    });
+    let replace = match live {
+        Ok(_) => Ok(()),
+        Err(live_error) => replace_route_offline(ctx, rp, solution, layer_names)
+            .map_err(|offline| format!("{live_error}; offline fallback failed: {offline}")),
     };
-    // Headless fallback: strip the copper from the board file directly.
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("{live_err}; offline fallback could not read the board: {e}"))?;
-    let (stripped, tracks, vias) = super::patch::strip_copper(&text)
-        .map_err(|e| format!("{live_err}; offline fallback failed: {e}"))?;
-    std::fs::write(&path, stripped)
-        .map_err(|e| format!("{live_err}; offline fallback could not write the board: {e}"))?;
+    if let Err(error) = replace {
+        ctx.close_kicad_session();
+        write_board_atomically(&path, &original).map_err(|restore| {
+            format!("{error}; restoring the prior board also failed: {restore}")
+        })?;
+        return Err(format!(
+            "{error}; restored the prior board without changing its copper"
+        ));
+    }
+    Ok(())
+}
+
+fn replace_route_offline(
+    ctx: &AgentRuntime,
+    rp: &RouteProblem,
+    solution: &RouteSolution,
+    layer_names: &[String],
+) -> std::result::Result<(), String> {
     ctx.close_kicad_session();
-    Ok((tracks, vias))
+    let path = ctx.pcb_path();
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("could not read the board: {error}"))?;
+    let (stripped, _, _) = super::patch::strip_copper(&text)?;
+    let replacement =
+        super::patch::append_copper(&stripped, solution, rp.layer_count, layer_names)?;
+    write_board_atomically(&path, replacement.as_bytes())
+        .map_err(|error| format!("could not write the board: {error}"))
+}
+
+fn write_board_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let permissions = std::fs::metadata(path).ok().map(|meta| meta.permissions());
+    let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
+    replacement.write_all(contents)?;
+    replacement.as_file_mut().sync_all()?;
+    if let Some(permissions) = permissions {
+        std::fs::set_permissions(replacement.path(), permissions)?;
+    }
+    replacement
+        .persist(path)
+        .map(|_| ())
+        .map_err(|error| error.error)
 }
 
 fn make_route_honest(
@@ -1765,6 +1822,42 @@ mod escape_bottleneck_tests {
         assert!(!reserved.traces.is_empty());
         assert!(reserved.traces.iter().all(|trace| trace.width == 0.5));
         assert!(lint(&problem, &reserved).is_empty());
+    }
+
+    #[test]
+    fn reroute_problem_drops_only_prior_track_and_via_obstacles() {
+        let mut problem = power_v5_problem();
+        for kind in ["track", "via", "keepout"] {
+            problem.obstacles.push(pcb_model::Obstacle {
+                kind: kind.to_owned(),
+                layers: vec![LayerRef::top()],
+                center: Point2 { x: 1.0, y: 1.0 },
+                width: 0.5,
+                height: 0.5,
+                connected_to: Vec::new(),
+            });
+        }
+
+        remove_existing_copper_obstacles(&mut problem);
+
+        assert!(
+            !problem
+                .obstacles
+                .iter()
+                .any(|obstacle| matches!(obstacle.kind.as_str(), "track" | "via"))
+        );
+        assert!(
+            problem
+                .obstacles
+                .iter()
+                .any(|obstacle| obstacle.kind == "keepout")
+        );
+        assert!(
+            problem
+                .obstacles
+                .iter()
+                .any(|obstacle| obstacle.kind.starts_with("pad:"))
+        );
     }
 
     #[test]

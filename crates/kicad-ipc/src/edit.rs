@@ -114,6 +114,34 @@ impl Kicad {
         self.commit("route board", |k| k.create_items(items))?;
         self.save()
     }
+
+    /// Replace every track/via with a routed solution in one KiCAD commit.
+    /// If creating the replacement fails, KiCAD drops the whole transaction
+    /// and retains the prior copper.
+    pub fn replace_route_solution(
+        &mut self,
+        problem: &RouteProblem,
+        solution: &RouteSolution,
+        layer_names: &[String],
+    ) -> Result<(usize, usize), Error> {
+        let mut old_items = self.get_items(&[KiCadObjectType::KotPcbTrace])?;
+        let tracks = old_items.len();
+        let vias = self.get_items(&[KiCadObjectType::KotPcbVia])?;
+        let via_count = vias.len();
+        old_items.extend(vias);
+        let nets: BTreeMap<String, Net> = self
+            .net_list()?
+            .into_iter()
+            .map(|net| (net.name.clone(), net))
+            .collect();
+        let new_items = route_solution_items(problem, solution, layer_names, &nets)?;
+        self.commit("replace route", |k| {
+            k.delete_packed_items(&old_items)?;
+            k.create_items(new_items)
+        })?;
+        self.save()?;
+        Ok((tracks, via_count))
+    }
 }
 
 fn moved_footprint(
