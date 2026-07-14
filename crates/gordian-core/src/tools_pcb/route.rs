@@ -408,9 +408,15 @@ fn add_terminal_stubs(
         let width = rp.net_width(&conn.name);
         for point in &conn.points_to_connect {
             if rp.plane_nets.contains_key(&conn.name)
-                && solution.vias.iter().any(|via| {
+                && (solution.vias.iter().any(|via| {
                     via.connection == conn.name && via.at.dist(point.point()) < geom::EPS
-                })
+                }) || solution.traces.iter().any(|trace| {
+                    trace.connection == conn.name
+                        && trace
+                            .path
+                            .first()
+                            .is_some_and(|at| at.dist(point.point()) < geom::EPS)
+                }))
             {
                 continue;
             }

@@ -462,9 +462,9 @@ fn route_sequential_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoR
 /// full-board copper layer connects by ONE through-via per off-layer pad (the plane provides the
 /// tree), so the trace engines never see it — a 100-pad power net costs
 /// O(pads) instead of a board-wide multi-terminal search. Returns the
-/// engines' subproblem and the fanout vias to merge into its solution, or
+/// engines' subproblem and the fanout copper to merge into its solution, or
 /// None when the problem has no routable plane connections.
-fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, Vec<Via>)> {
+fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, RouteSolution)> {
     if problem.plane_nets.is_empty() {
         return None;
     }
@@ -478,9 +478,10 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, Vec<Via>)> {
     }
     let mut sub = problem.clone();
     sub.connections = rest;
-    // A via only lands where its barrel clears FOREIGN copper (a 0.6mm via
-    // does not fit on a 0.5mm-pitch QFN pin). Pads that can't take a via keep
-    // a short stub connection to the net's nearest via site instead.
+    // A via only lands where its barrel clears foreign copper. Fine-pitch pads
+    // use a short minimum-width neck-down to a nearby site; every candidate is
+    // accepted only when the ordinary geometry oracle clears the combined
+    // stub, via, outline, holes, keepouts, and earlier fanout copper.
     let via_r = problem.via_diameter / 2.0;
     let via_fits = |at: Point2, net: &str| {
         problem.obstacles.iter().all(|ob| {
@@ -499,14 +500,19 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, Vec<Via>)> {
             gap >= via_r + problem.clearance
         })
     };
-    let all_layers: Vec<LayerRef> = {
-        let n = problem.layer_count.max(2);
-        std::iter::once(LayerRef::top())
-            .chain((1..=n.saturating_sub(2)).map(|i| LayerRef(format!("inner{i}"))))
-            .chain(std::iter::once(LayerRef::bottom()))
-            .collect()
+    const SITE_STEP_MM: f64 = 0.1;
+    const SITE_RADIUS_MM: f64 = 5.0;
+    let steps = (SITE_RADIUS_MM / SITE_STEP_MM) as i32;
+    let mut offsets: Vec<_> = (-steps..=steps)
+        .flat_map(|dx| (-steps..=steps).map(move |dy| (dx, dy)))
+        .filter(|(dx, dy)| *dx != 0 || *dy != 0)
+        .collect();
+    offsets.sort_by_key(|(dx, dy)| (dx * dx + dy * dy, *dx, *dy));
+
+    let mut fanout = RouteSolution {
+        traces: Vec::new(),
+        vias: Vec::new(),
     };
-    let mut vias: Vec<Via> = Vec::new();
     let mut handled_plane_connection = false;
     for c in &plane_conns {
         let plane_layer = problem.plane_nets[&c.name];
@@ -534,70 +540,90 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, Vec<Via>)> {
                     && (pt.y - ob.center.y).abs() <= ob.height / 2.0 + geom::EPS
             })
         };
-        let (anchors, stubbed): (Vec<_>, Vec<_>) = c
-            .points_to_connect
-            .iter()
-            .partition(|pt| reaches_plane(pt) || via_fits(pt.point(), &c.name));
-        // Preserve every legal plane anchor. Fine-pitch pads that cannot take
-        // a via are routed to the nearest anchor; the normal router and DRC
-        // validate those stubs instead of discarding all fanout for one
-        // arbitrary distance threshold.
-        if anchors.is_empty() {
-            sub.connections.push(c.clone());
-            continue;
-        }
-        handled_plane_connection = true;
-        for pt in anchors.iter().filter(|pt| !reaches_plane(pt)) {
-            vias.push(Via {
+        let mut planned = RouteSolution {
+            traces: Vec::new(),
+            vias: Vec::new(),
+        };
+        let mut complete = true;
+        for pt in &c.points_to_connect {
+            if reaches_plane(pt) {
+                continue;
+            }
+            let direct = pt.point();
+            let candidates = std::iter::once(direct).chain(offsets.iter().map(|(dx, dy)| Point2 {
+                x: direct.x + f64::from(*dx) * SITE_STEP_MM,
+                y: direct.y + f64::from(*dy) * SITE_STEP_MM,
+            }));
+            let site = candidates.into_iter().find(|candidate| {
+                if !via_fits(*candidate, &c.name) {
+                    return false;
+                }
+                let mut proposed = fanout.clone();
+                proposed.traces.extend(planned.traces.clone());
+                proposed.vias.extend(planned.vias.clone());
+                if candidate.dist(direct) > geom::EPS {
+                    proposed.traces.push(Trace {
+                        connection: c.name.clone(),
+                        layer: pt.layer.clone(),
+                        width: problem.min_trace_width,
+                        path: vec![direct, *candidate],
+                    });
+                }
+                proposed.vias.push(Via {
+                    connection: c.name.clone(),
+                    at: *candidate,
+                    diameter: problem.via_diameter,
+                    drill: problem.via_drill,
+                    span: ViaSpan::Through,
+                });
+                router::geometry_violations(problem, &proposed) == 0
+            });
+            let Some(site) = site else {
+                complete = false;
+                break;
+            };
+            if site.dist(direct) > geom::EPS {
+                planned.traces.push(Trace {
+                    connection: c.name.clone(),
+                    layer: pt.layer.clone(),
+                    width: problem.min_trace_width,
+                    path: vec![direct, site],
+                });
+            }
+            planned.vias.push(Via {
                 connection: c.name.clone(),
-                at: pt.point(),
+                at: site,
                 diameter: problem.via_diameter,
                 drill: problem.via_drill,
                 span: ViaSpan::Through,
             });
         }
-        for pt in stubbed {
-            let nearest = anchors
-                .iter()
-                .min_by(|a, b| {
-                    a.point()
-                        .dist(pt.point())
-                        .total_cmp(&b.point().dist(pt.point()))
-                })
-                .expect("anchors is non-empty");
-            sub.connections.push(crate::problem::Connection {
-                name: c.name.clone(),
-                points_to_connect: vec![pt.clone(), (*nearest).clone()],
-            });
+        if !complete {
+            sub.connections.push(c.clone());
+            continue;
         }
+        handled_plane_connection = true;
+        fanout.traces.extend(planned.traces);
+        fanout.vias.extend(planned.vias);
     }
     if !handled_plane_connection {
         return None;
     }
-    // The signal engines must SEE the fanout barrels, or they route straight
-    // through the via sites.
-    for via in &vias {
-        sub.obstacles.push(Obstacle {
-            kind: "rect".to_owned(),
-            layers: all_layers.clone(),
-            center: via.at,
-            width: via.diameter,
-            height: via.diameter,
-            connected_to: vec![via.connection.clone()],
-        });
-    }
-    Some((sub, vias))
+    // Signal engines must see both neck-downs and barrels.
+    sub.obstacles.extend(copper_obstacles(problem, &fanout));
+    Some((sub, fanout))
 }
 
 fn with_plane_fanout(
     problem: &RouteProblem,
     route: impl Fn(&RouteProblem) -> RouteAutoRun,
 ) -> RouteAutoRun {
-    let Some((sub, vias)) = plane_fanout(problem) else {
+    let Some((sub, fanout)) = plane_fanout(problem) else {
         return route(problem);
     };
     let mut run = route(&sub);
-    run.result.solution.vias.extend(vias);
+    run.result.solution.traces.extend(fanout.traces);
+    run.result.solution.vias.extend(fanout.vias);
     run
 }
 
@@ -2618,20 +2644,11 @@ mod tests {
             },
         ];
 
-        let (sub, vias) = plane_fanout(&p).expect("plane connection handled");
+        let (sub, fanout) = plane_fanout(&p).expect("plane connection handled");
         assert!(sub.connections.is_empty());
-        assert_eq!(vias.len(), 1);
-        assert_eq!(vias[0].at, Point2 { x: 18.0, y: 5.0 });
-        assert!(
-            crate::connectivity::check(
-                &p,
-                &RouteSolution {
-                    traces: vec![],
-                    vias
-                }
-            )
-            .is_empty()
-        );
+        assert_eq!(fanout.vias.len(), 1);
+        assert_eq!(fanout.vias[0].at, Point2 { x: 18.0, y: 5.0 });
+        assert!(crate::connectivity::check(&p, &fanout).is_empty());
     }
 
     #[test]
@@ -2652,15 +2669,15 @@ mod tests {
             })
             .collect();
 
-        let (sub, vias) = plane_fanout(&p).expect("outer pour connection handled");
+        let (sub, fanout) = plane_fanout(&p).expect("outer pour connection handled");
 
         assert!(sub.connections.is_empty());
-        assert_eq!(vias.len(), 2);
-        assert!(vias.iter().all(|via| via.span == ViaSpan::Through));
+        assert_eq!(fanout.vias.len(), 2);
+        assert!(fanout.vias.iter().all(|via| via.span == ViaSpan::Through));
     }
 
     #[test]
-    fn plane_fanout_keeps_legal_anchors_when_a_pad_needs_a_long_stub() {
+    fn plane_fanout_neckdowns_a_blocked_pad_to_a_nearby_via() {
         let mut p = simple_two_point_problem();
         p.layer_count = 2;
         p.plane_nets.insert("N".to_owned(), 1);
@@ -2679,25 +2696,22 @@ mod tests {
             kind: "pad".to_owned(),
             layers: vec![LayerRef::top()],
             center: Point2 {
-                x: blocked.x + 0.4,
+                x: blocked.x + 0.45,
                 y: blocked.y,
             },
-            width: 0.3,
-            height: 0.6,
+            width: 0.1,
+            height: 0.1,
             connected_to: vec!["FOREIGN".to_owned()],
         });
 
-        let (sub, vias) = plane_fanout(&p).expect("legal plane anchor should be preserved");
+        let (sub, fanout) = plane_fanout(&p).expect("blocked pad should get a legal neck-down");
 
-        assert_eq!(vias.len(), 1);
-        assert_eq!(vias[0].at, p.connections[0].points_to_connect[0].point());
-        assert_eq!(sub.connections.len(), 1);
-        assert!(
-            sub.connections[0].points_to_connect[0]
-                .point()
-                .dist(sub.connections[0].points_to_connect[1].point())
-                > 5.0
-        );
+        assert!(sub.connections.is_empty());
+        assert_eq!(fanout.vias.len(), 2);
+        assert_eq!(fanout.traces.len(), 1);
+        assert_eq!(fanout.traces[0].width, p.min_trace_width);
+        assert_eq!(router::geometry_violations(&p, &fanout), 0);
+        assert!(fanout.traces[0].path[0].dist(fanout.traces[0].path[1]) <= 5.0);
     }
 
     fn top_blocked_two_point_problem() -> RouteProblem {
