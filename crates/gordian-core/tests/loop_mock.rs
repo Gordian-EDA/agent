@@ -10,7 +10,7 @@
 use gordian_core::AgentRuntime;
 use gordian_core::prompts::system_prompt;
 use gordian_core::testing::{ScriptedClient, final_text, tool_call};
-use gordian_core::{Agent, AutoApprove};
+use gordian_core::{Agent, AutoApprove, StopReason};
 
 /// Build an agent over a [`AgentRuntime`] and a scripted client.
 fn agent(ctx: AgentRuntime, completions: Vec<gordian_core::StreamEnd>) -> Agent<ScriptedClient> {
@@ -250,6 +250,54 @@ async fn edit_after_commit_is_not_reported_as_applied_until_recommitted() {
         "latest draft must be committed: {outcome:?}"
     );
     assert_eq!(outcome.final_text, "recommitted");
+    assert_eq!(outcome.tool_calls_made, 4);
+}
+
+#[tokio::test]
+async fn identical_authoring_rewrites_trigger_no_progress_watchdog() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let script = vec![
+        tool_call(
+            "create",
+            "create_design",
+            serde_json::json!({"yaml": CLEAN_YAML}),
+        ),
+        tool_call(
+            "same-1",
+            "edit_design",
+            serde_json::json!({"yaml": CLEAN_YAML}),
+        ),
+        tool_call(
+            "same-2",
+            "edit_design",
+            serde_json::json!({"yaml": CLEAN_YAML}),
+        ),
+        tool_call(
+            "same-3",
+            "edit_design",
+            serde_json::json!({"yaml": CLEAN_YAML}),
+        ),
+    ];
+    let mut agent = agent(ctx, script);
+    let mut approvals = AutoApprove::yes();
+
+    let outcome = agent
+        .run_turn(
+            "author the design without rewriting it forever",
+            &mut approvals,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome.stop_reason,
+        StopReason::NoProgress { completions: 3 }
+    );
+    assert!(!outcome.applied);
     assert_eq!(outcome.tool_calls_made, 4);
 }
 

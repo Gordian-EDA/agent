@@ -304,6 +304,9 @@ impl Shell {
                             TurnEndReason::ProviderRequestLimit { requests }
                         }
                         StopReason::MutationTimedOut => TurnEndReason::MutationTimedOut,
+                        StopReason::NoProgress { completions } => {
+                            TurnEndReason::NoProgress { completions }
+                        }
                     },
                     Err(e) => TurnEndReason::Error(format!("{e:#}")),
                 }

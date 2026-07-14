@@ -87,6 +87,8 @@ pub enum TurnEndReason {
     ProviderRequestLimit { requests: usize },
     /// A project mutation timed out and may still be running in the background.
     MutationTimedOut,
+    /// Repeated model completions made no durable project progress.
+    NoProgress { completions: usize },
     /// The user pressed Esc to abort the turn.
     Interrupted,
     /// The turn failed (provider/network/tool error); carries the message.

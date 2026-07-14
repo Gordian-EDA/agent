@@ -254,6 +254,12 @@ impl App {
                     "Worked for {elapsed} — stopped after a project mutation timed out (it may still be finishing)"
                 ),
             )),
+            TurnEndReason::NoProgress { completions } => Some(Entry::notice(
+                NoticeLevel::Error,
+                format!(
+                    "Worked for {elapsed} — stopped after {completions} model completions made no durable progress"
+                ),
+            )),
             TurnEndReason::Interrupted => Some(Entry::notice(
                 NoticeLevel::Plain,
                 format!("Worked for {elapsed}"),

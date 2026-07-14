@@ -70,6 +70,12 @@ const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 /// this bounds every other cycle (and therefore cost and context growth).
 const MAX_PROVIDER_REQUESTS_PER_TURN: usize = 32;
 
+/// Stop a model that keeps issuing tools without changing the durable design or
+/// its authoring diagnostics. This is intentionally much lower than the global
+/// request ceiling: three unchanged completions are enough evidence that the
+/// current repair strategy is stuck.
+const MAX_CONSECUTIVE_NO_PROGRESS_COMPLETIONS: usize = 3;
+
 /// Cap each kind of catalog exploration before the model must reuse its best
 /// prior hits. One assistant completion may batch several same-kind discovery
 /// calls and still costs that tool only one round.
@@ -355,6 +361,26 @@ pub enum StopReason {
     /// same subturn are unsafe, so the loop reported the incomplete state
     /// without spending more provider requests on impossible recovery.
     MutationTimedOut,
+    /// The model repeatedly used tools without changing durable project state
+    /// or the latest authoring diagnostics.
+    NoProgress {
+        /// Consecutive non-discovery completions that made no progress.
+        completions: usize,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct AuthoringDiagnosticsState {
+    design_state: Option<Value>,
+    errors: Option<u64>,
+    warnings: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct DurableAuthoringState {
+    draft_hash: Option<u64>,
+    schematic_hash: Option<u64>,
+    diagnostics: Option<AuthoringDiagnosticsState>,
 }
 
 /// The result of one [`Agent::run_turn`].
@@ -562,6 +588,10 @@ impl<P: Provider> Agent<P> {
         // Advancing `tool_state_revision` automatically makes every read
         // available again without clearing or losing the audit trail.
         let mut revision_read_uses: HashMap<String, u64> = HashMap::new();
+        let mut latest_authoring_diagnostics: Option<AuthoringDiagnosticsState> = None;
+        let mut last_durable_authoring_state =
+            durable_authoring_state(&self.runtime, latest_authoring_diagnostics.clone());
+        let mut consecutive_no_progress_completions = 0usize;
         // PCB regeneration should never outrun the semantic schematic check.
         // Authoring invalidates a prior review; a fresh review of that draft
         // unlocks regeneration after it has been committed.
@@ -767,6 +797,7 @@ impl<P: Provider> Agent<P> {
             // comes first may run; the dependent half must wait one completion.
             let mut authoring_dispatched_this_completion = false;
             let mut apply_dispatched_this_completion = false;
+            let mut non_authoring_state_changed_this_completion = false;
             for call in &tool_calls {
                 let effect = tool_effect(&call.fn_name);
                 let gated_commit = effect == ToolEffect::Gated && wants_apply(call);
@@ -962,6 +993,7 @@ impl<P: Provider> Agent<P> {
                 if dispatched && is_revision_scoped_read(&call.fn_name) {
                     revision_read_uses.insert(call.fn_name.clone(), tool_state_revision);
                 }
+                let prior_tool_state_revision = tool_state_revision;
                 tool_state_revision = next_tool_state_revision(
                     tool_state_revision,
                     dispatched,
@@ -969,6 +1001,15 @@ impl<P: Provider> Agent<P> {
                     &call.fn_name,
                     &parsed,
                 );
+                if tool_state_revision != prior_tool_state_revision
+                    && !is_authoring_for_commit(&call.fn_name)
+                    && call.fn_name != "apply_design"
+                {
+                    non_authoring_state_changed_this_completion = true;
+                }
+                if let Some(diagnostics) = authoring_diagnostics_state(&call.fn_name, &parsed) {
+                    latest_authoring_diagnostics = Some(diagnostics);
+                }
                 if dispatched && is_authoring_for_commit(&call.fn_name) {
                     schematic_review_current = false;
                     if authoring_result_changed_draft(&parsed) {
@@ -1056,6 +1097,45 @@ impl<P: Provider> Agent<P> {
                     tool_calls_made,
                     stop_reason: StopReason::MutationTimedOut,
                 });
+            }
+
+            // Discovery is bounded separately and legitimately needs a couple
+            // of unchanged-state rounds. It neither accrues nor clears this
+            // watchdog. Every other tool completion must change durable
+            // authoring state/diagnostics (or a PCB mutation revision).
+            let discovery_only = tool_calls
+                .iter()
+                .all(|call| is_discovery_tool(&call.fn_name));
+            if !discovery_only {
+                let durable_state =
+                    durable_authoring_state(&self.runtime, latest_authoring_diagnostics.clone());
+                if non_authoring_state_changed_this_completion
+                    || durable_state != last_durable_authoring_state
+                {
+                    last_durable_authoring_state = durable_state;
+                    consecutive_no_progress_completions = 0;
+                } else {
+                    consecutive_no_progress_completions += 1;
+                }
+                if consecutive_no_progress_completions >= MAX_CONSECUTIVE_NO_PROGRESS_COMPLETIONS {
+                    let current_applied = applied && !draft_dirty;
+                    let final_text = no_progress_final_text(
+                        consecutive_no_progress_completions,
+                        current_applied,
+                        tool_calls_made,
+                        last_tool_status.as_deref(),
+                        latest_authoring_diagnostics.as_ref(),
+                    );
+                    emit(events, AgentEvent::AssistantText(final_text.clone()));
+                    return Ok(TurnOutcome {
+                        applied: current_applied,
+                        final_text,
+                        tool_calls_made,
+                        stop_reason: StopReason::NoProgress {
+                            completions: consecutive_no_progress_completions,
+                        },
+                    });
+                }
             }
         }
     }
@@ -1286,6 +1366,35 @@ fn mutation_timeout_final_text(
     )
 }
 
+fn no_progress_final_text(
+    completions: usize,
+    applied: bool,
+    tool_calls_made: usize,
+    last_tool_status: Option<&str>,
+    diagnostics: Option<&AuthoringDiagnosticsState>,
+) -> String {
+    let committed = if applied {
+        " The current draft is committed."
+    } else {
+        " The current draft is not committed."
+    };
+    let diagnostic = diagnostics
+        .map(|state| {
+            format!(
+                " Latest authoring diagnostics: {} error(s), {} warning(s).",
+                state.errors.unwrap_or(0),
+                state.warnings.unwrap_or(0)
+            )
+        })
+        .unwrap_or_default();
+    let last_tool = last_tool_status
+        .map(|status| format!(" Last tool result: {status}."))
+        .unwrap_or_default();
+    format!(
+        "Stopped after {completions} consecutive model completions made no durable design or diagnostic progress ({tool_calls_made} tool calls).{committed}{diagnostic}{last_tool} The current repair strategy is stuck; inspect the reported blocker before retrying a materially different change."
+    )
+}
+
 /// Parse a tool result back into JSON (Null on a malformed result), for the UI
 /// one-liner.
 fn parse_or_null(result_json: &str) -> Value {
@@ -1478,6 +1587,51 @@ fn next_tool_state_revision(
     } else {
         current
     }
+}
+
+fn authoring_diagnostics_state(name: &str, value: &Value) -> Option<AuthoringDiagnosticsState> {
+    if !matches!(
+        name,
+        "create_design"
+            | "edit_design"
+            | "assign_footprints"
+            | "validate_design"
+            | "run_erc"
+            | "apply_design"
+    ) {
+        return None;
+    }
+    let state = AuthoringDiagnosticsState {
+        design_state: value.get("design_state").cloned(),
+        errors: value
+            .get("errors")
+            .and_then(Value::as_u64)
+            .or_else(|| value.pointer("/erc/errors").and_then(Value::as_u64)),
+        warnings: value
+            .get("warnings")
+            .and_then(Value::as_u64)
+            .or_else(|| value.pointer("/erc/warnings").and_then(Value::as_u64)),
+    };
+    (state.design_state.is_some() || state.errors.is_some() || state.warnings.is_some())
+        .then_some(state)
+}
+
+fn durable_authoring_state(
+    runtime: &AgentRuntime,
+    diagnostics: Option<AuthoringDiagnosticsState>,
+) -> DurableAuthoringState {
+    DurableAuthoringState {
+        draft_hash: file_content_hash(&runtime.workspace().draft_path()),
+        schematic_hash: file_content_hash(runtime.sch_path()),
+        diagnostics,
+    }
+}
+
+fn file_content_hash(path: &std::path::Path) -> Option<u64> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(bytes.into_iter().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    }))
 }
 
 /// Return whether a committed apply has ERC findings the model can act on.
@@ -1842,6 +1996,9 @@ fn authoring_result_changed_draft(value: &Value) -> bool {
     if value.get("error").is_some() || value.get("rejected").and_then(Value::as_bool) == Some(true)
     {
         return false;
+    }
+    if let Some(changed) = value.get("draft_changed").and_then(Value::as_bool) {
+        return changed;
     }
     value.get("draft_written").and_then(Value::as_bool) == Some(true)
         || value
@@ -2621,9 +2778,15 @@ mod tests {
     use futures::stream;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn project_info_script(rounds: usize) -> Vec<StreamEnd> {
+    fn discovery_script(rounds: usize) -> Vec<StreamEnd> {
         (0..rounds)
-            .map(|round| tool_call(&format!("project-info-{round}"), "project_info", json!({})))
+            .map(|round| {
+                tool_call(
+                    &format!("symbol-search-{round}"),
+                    "search_symbols",
+                    json!({"query": "resistor"}),
+                )
+            })
             .collect()
     }
 
@@ -2703,8 +2866,8 @@ mod tests {
             self.fallback_requests.fetch_add(1, Ordering::SeqCst);
             Ok(tool_call(
                 &format!("fallback-{request}"),
-                "project_info",
-                json!({}),
+                "search_symbols",
+                json!({"query": "resistor"}),
             ))
         }
 
@@ -2716,7 +2879,7 @@ mod tests {
         ) -> Result<EventStream<'a>> {
             let request = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
             if request == 1 {
-                let end = tool_call("initial", "project_info", json!({}));
+                let end = tool_call("initial", "search_symbols", json!({"query": "resistor"}));
                 return Ok(stream::once(async move { Ok(ChatStreamEvent::End(end)) }).boxed());
             }
             Ok(stream::empty().boxed())
@@ -2752,8 +2915,8 @@ mod tests {
         );
         assert_eq!(fallback_requests.load(Ordering::SeqCst), 15);
         assert_eq!(
-            outcome.tool_calls_made, 1,
-            "unchanged project_info calls are blocked after the first dispatch"
+            outcome.tool_calls_made, 2,
+            "discovery calls dispatch for their two-round budget"
         );
     }
 
@@ -2819,7 +2982,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_request_limit_terminates_an_endless_tool_cycle() {
-        let client = ScriptedClient::new(project_info_script(MAX_PROVIDER_REQUESTS_PER_TURN));
+        let client = ScriptedClient::new(discovery_script(MAX_PROVIDER_REQUESTS_PER_TURN));
         let mut agent = Agent::new(client, test_runtime(), "system");
         let mut approvals = AutoApprove::no();
 
@@ -2835,17 +2998,64 @@ mod tests {
             }
         );
         assert_eq!(
-            outcome.tool_calls_made, 1,
-            "stale unadvertised project_info calls do not redispatch"
+            outcome.tool_calls_made, 2,
+            "discovery calls dispatch for their two-round budget"
         );
         assert!(!outcome.applied);
         assert!(outcome.final_text.contains("request safety limit"));
-        assert!(outcome.final_text.contains("project_info"));
+        assert!(outcome.final_text.contains("search_symbols"));
+    }
+
+    #[tokio::test]
+    async fn unchanged_non_discovery_cycle_stops_after_three_completions() {
+        let script = vec![
+            tool_call("project-1", "project_info", json!({})),
+            tool_call("project-2", "project_info", json!({})),
+            tool_call("project-3", "project_info", json!({})),
+        ];
+        let client = ScriptedClient::new(script);
+        let mut agent = Agent::new(client, test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn(
+                "keep inspecting without changing anything",
+                &mut approvals,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::NoProgress { completions: 3 }
+        );
+        assert_eq!(outcome.tool_calls_made, 1);
+        assert!(outcome.final_text.contains("no durable design"));
+        assert!(outcome.final_text.contains("not committed"));
+    }
+
+    #[tokio::test]
+    async fn discovery_only_completions_do_not_trip_no_progress_watchdog() {
+        let mut script = discovery_script(4);
+        script.push(final_text("selected the best discovery result"));
+        let client = ScriptedClient::new(script);
+        let mut agent = Agent::new(client, test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn("research parts before authoring", &mut approvals, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.tool_calls_made, 2);
+        assert_eq!(outcome.final_text, "selected the best discovery result");
     }
 
     #[tokio::test]
     async fn provider_request_limit_allows_a_final_reply_on_the_last_request() {
-        let mut script = project_info_script(MAX_PROVIDER_REQUESTS_PER_TURN - 1);
+        let mut script = discovery_script(MAX_PROVIDER_REQUESTS_PER_TURN - 1);
         script.push(final_text("done at the boundary"));
         let client = ScriptedClient::new(script);
         let mut agent = Agent::new(client, test_runtime(), "system");
@@ -2859,8 +3069,8 @@ mod tests {
         assert_eq!(outcome.stop_reason, StopReason::Completed);
         assert_eq!(outcome.final_text, "done at the boundary");
         assert_eq!(
-            outcome.tool_calls_made, 1,
-            "only the first unchanged project_info call dispatches"
+            outcome.tool_calls_made, 2,
+            "discovery calls dispatch for their two-round budget"
         );
     }
 
@@ -3339,6 +3549,46 @@ mod tests {
             revision,
             "a not-ready apply did not mutate project state"
         );
+    }
+
+    #[test]
+    fn durable_authoring_state_tracks_hash_and_compact_diagnostics() {
+        let runtime = test_runtime();
+        let initial = durable_authoring_state(&runtime, None);
+        assert_eq!(initial.draft_hash, None);
+
+        runtime
+            .workspace()
+            .write_draft("version: 1\nblocks: {}\n", None)
+            .unwrap();
+        let diagnostics = authoring_diagnostics_state(
+            "edit_design",
+            &json!({
+                "design_state": {"component_count": 0, "refdes": []},
+                "errors": 1,
+                "warnings": 1,
+            }),
+        )
+        .unwrap();
+        let changed = durable_authoring_state(&runtime, Some(diagnostics.clone()));
+
+        assert_ne!(changed.draft_hash, initial.draft_hash);
+        assert_eq!(changed.diagnostics, Some(diagnostics));
+        assert_eq!(changed.diagnostics.as_ref().unwrap().errors, Some(1));
+        assert_eq!(changed.diagnostics.as_ref().unwrap().warnings, Some(1));
+    }
+
+    #[test]
+    fn explicit_draft_changed_overrides_legacy_write_markers() {
+        assert!(!authoring_result_changed_draft(&json!({
+            "draft_changed": false,
+            "draft_written": true,
+            "replacements": 1,
+        })));
+        assert!(authoring_result_changed_draft(&json!({
+            "draft_changed": true,
+            "draft_written": true,
+        })));
     }
 
     #[test]
