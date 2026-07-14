@@ -31,7 +31,7 @@
 //! UI supplies its own.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -76,6 +76,85 @@ const MAX_SCHEMATIC_REQUESTS_FOR_PCB: usize = 20;
 const MAX_PCB_STAGE_REQUESTS: usize =
     MAX_PROVIDER_REQUESTS_PER_TURN - MAX_SCHEMATIC_REQUESTS_FOR_PCB;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MeteredUsage {
+    input: u64,
+    output: u64,
+    cache_write: u64,
+    cache_read: u64,
+}
+
+impl MeteredUsage {
+    fn add_end(&mut self, end: &StreamEnd) {
+        let (input, output, cache_write, cache_read) = token_usage(end);
+        self.input = self.input.saturating_add(input);
+        self.output = self.output.saturating_add(output);
+        self.cache_write = self.cache_write.saturating_add(cache_write);
+        self.cache_read = self.cache_read.saturating_add(cache_read);
+    }
+}
+
+struct MeteredProvider<P> {
+    inner: P,
+    pending: Arc<Mutex<MeteredUsage>>,
+}
+
+impl<P> MeteredProvider<P> {
+    fn new(inner: P) -> Self {
+        Self {
+            inner,
+            pending: Arc::new(Mutex::new(MeteredUsage::default())),
+        }
+    }
+
+    fn take_usage(&self) -> MeteredUsage {
+        std::mem::take(&mut *self.pending.lock().expect("usage meter poisoned"))
+    }
+}
+
+#[async_trait]
+impl<P: Provider> Provider for MeteredProvider<P> {
+    fn status(&self) -> (String, String) {
+        self.inner.status()
+    }
+
+    fn vision(&self) -> bool {
+        self.inner.vision()
+    }
+
+    async fn complete(
+        &self,
+        system: &str,
+        messages: &[ChatMessage],
+        tools: &[Tool],
+    ) -> Result<StreamEnd> {
+        let end = self.inner.complete(system, messages, tools).await?;
+        self.pending
+            .lock()
+            .expect("usage meter poisoned")
+            .add_end(&end);
+        Ok(end)
+    }
+
+    async fn stream<'a>(
+        &'a self,
+        system: &'a str,
+        messages: &'a [ChatMessage],
+        tools: &'a [Tool],
+    ) -> Result<EventStream<'a>> {
+        let pending = Arc::clone(&self.pending);
+        let stream = self.inner.stream(system, messages, tools).await?;
+        Ok(stream
+            .map(move |event| {
+                if let Ok(ChatStreamEvent::End(end)) = &event {
+                    pending.lock().expect("usage meter poisoned").add_end(end);
+                }
+                event
+            })
+            .boxed())
+    }
+}
+
 /// Stop a model that keeps issuing tools without changing the durable design or
 /// its authoring diagnostics. This is intentionally much lower than the global
 /// request ceiling: three unchanged completions are enough evidence that the
@@ -85,7 +164,7 @@ const MAX_CONSECUTIVE_NO_PROGRESS_COMPLETIONS: usize = 3;
 /// Cap each kind of catalog exploration before the model must reuse its best
 /// prior hits. One assistant completion may batch several same-kind discovery
 /// calls and still costs that tool only one round.
-const MAX_DISCOVERY_ROUNDS_PER_SUBTURN: usize = 2;
+const MAX_DISCOVERY_ROUNDS_PER_SUBTURN: usize = 1;
 
 /// A model can batch dozens of near-duplicate catalog queries into one
 /// completion. Bound the actually dispatched fan-out so one speculative batch
@@ -460,7 +539,7 @@ pub struct TurnOutcome {
 /// [`GenaiProvider`]) only so the deterministic, no-network tests can drive the
 /// loop with a scripted client; production is always `Agent<GenaiProvider>`.
 pub struct Agent<P: Provider = GenaiProvider> {
-    client: P,
+    client: MeteredProvider<P>,
     runtime: Arc<AgentRuntime>,
     /// The KiCAD system prompt (the LLM's standing instructions).
     system: String,
@@ -481,7 +560,7 @@ impl<P: Provider> Agent<P> {
     pub fn new(client: P, ctx: AgentRuntime, system: impl Into<String>) -> Self {
         let tool_phase = ToolPhase::observe(&ctx);
         Self {
-            client,
+            client: MeteredProvider::new(client),
             runtime: Arc::new(ctx),
             system: system.into(),
             history: Vec::new(),
@@ -494,6 +573,21 @@ impl<P: Provider> Agent<P> {
     /// after a turn).
     pub fn ctx(&self) -> &AgentRuntime {
         &self.runtime
+    }
+
+    fn emit_pending_usage(&self, events: Events<'_>) {
+        let usage = self.client.take_usage();
+        if usage != MeteredUsage::default() {
+            emit(
+                events,
+                AgentEvent::Usage {
+                    input_tokens: usage.input,
+                    output_tokens: usage.output,
+                    cache_write_tokens: usage.cache_write,
+                    cache_read_tokens: usage.cache_read,
+                },
+            );
+        }
     }
 
     /// Drop the entire conversation history (a fresh start; project files
@@ -557,17 +651,7 @@ impl<P: Provider> Agent<P> {
             .client
             .complete(COMPACTION_SYSTEM, &messages, &[])
             .await?;
-        let (input_tokens, output_tokens, cache_write_tokens, cache_read_tokens) =
-            token_usage(&end);
-        emit(
-            events,
-            AgentEvent::Usage {
-                input_tokens,
-                output_tokens,
-                cache_write_tokens,
-                cache_read_tokens,
-            },
-        );
+        self.emit_pending_usage(events);
 
         let summary = completed_text(&end).trim().to_string();
         if summary.is_empty() {
@@ -788,18 +872,8 @@ impl<P: Provider> Agent<P> {
                     (final_text, end)
                 }
             };
-            let (input_tokens, output_tokens, cache_write_tokens, cache_read_tokens) =
-                token_usage(&end);
             let tool_calls = end.captured_into_tool_calls().unwrap_or_default();
-            emit(
-                events,
-                AgentEvent::Usage {
-                    input_tokens,
-                    output_tokens,
-                    cache_write_tokens,
-                    cache_read_tokens,
-                },
-            );
+            self.emit_pending_usage(events);
 
             // Finalize the streamed prose so non-streaming consumers and the
             // transcript see the whole assistant text once.
@@ -948,6 +1022,11 @@ impl<P: Provider> Agent<P> {
                     precommit_review_needed && schematic_review_current.is_some();
                 let cached_review_call =
                     call.fn_name == "review_design" && schematic_review_current.is_some();
+                let known_invalid_apply = call.fn_name == "apply_design"
+                    && latest_authoring_diagnostics
+                        .as_ref()
+                        .and_then(|state| state.errors)
+                        .is_some_and(|errors| errors > 0);
                 let unchanged_apply_blocked = call.fn_name == "apply_design"
                     && !draft_dirty
                     && (commit_attempted_for_current_draft || draft_committed_at_turn_start);
@@ -961,6 +1040,7 @@ impl<P: Provider> Agent<P> {
                     && !schematic_review_blocked
                     && !cached_precommit_defects
                     && !cached_review_call
+                    && !known_invalid_apply
                     && !unchanged_apply_blocked
                     && !speculative_mutation_blocked
                     && !create_on_existing_draft_blocked;
@@ -971,6 +1051,19 @@ impl<P: Provider> Agent<P> {
                             "code": "timed_out_mutation_conflict",
                             "prior_timed_out_tools": timed_out_tool_calls.iter().map(|(name, _, _)| name).collect::<Vec<_>>(),
                             "note": "The prior mutation runs in non-cancellable blocking work and may still finish. No further schematic or PCB mutation is safe in this turn; use read-only inspection if useful, then report the timeout honestly.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if known_invalid_apply {
+                    (
+                        json!({
+                            "error": "apply_design deferred because the latest authoring result is invalid",
+                            "code": "known_invalid_draft",
+                            "errors": latest_authoring_diagnostics.as_ref().and_then(|state| state.errors),
+                            "warnings": latest_authoring_diagnostics.as_ref().and_then(|state| state.warnings),
+                            "note": "Fix the exact latest diagnostics with one complete edit_design call. Do not spend a semantic review or apply attempt on a draft already known to be invalid.",
                         })
                         .to_string(),
                         Vec::new(),
@@ -1207,6 +1300,7 @@ impl<P: Provider> Agent<P> {
                     )
                     .await
                 };
+                self.emit_pending_usage(events);
                 let parsed = parse_or_null(&content);
                 if tool_result_is_timeout(&parsed) {
                     timed_out_tool_calls.push((
@@ -1468,8 +1562,10 @@ impl<P: Provider> Agent<P> {
             emit(events, AgentEvent::ReviewStarted { round });
             let Some(review) = review_committed_kicad(&self.runtime, intent, &self.client).await
             else {
+                self.emit_pending_usage(events);
                 break;
             };
+            self.emit_pending_usage(events);
             emit(
                 events,
                 AgentEvent::Reviewed {
@@ -2923,7 +3019,17 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             }
         }
         "apply_design" => {
-            if result.get("written").and_then(Value::as_bool) == Some(true) {
+            if result.get("apply_deferred").and_then(Value::as_bool) == Some(true)
+                || result.get("code").and_then(Value::as_str) == Some("precommit_review_defects")
+            {
+                let defects = result
+                    .get("review")
+                    .and_then(|review| review.get("defects"))
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                format!("deferred: semantic review found {defects} defect(s)")
+            } else if result.get("written").and_then(Value::as_bool) == Some(true) {
                 let errors = result
                     .pointer("/erc/errors")
                     .and_then(Value::as_u64)
@@ -3252,6 +3358,36 @@ mod tests {
             .collect()
     }
 
+    #[tokio::test]
+    async fn provider_meter_captures_complete_and_stream_usage() {
+        let end = || StreamEnd {
+            captured_usage: Some(crate::llm::Usage {
+                prompt_tokens: Some(120),
+                completion_tokens: Some(7),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let complete = MeteredProvider::new(ScriptedClient::new(vec![end()]));
+        complete.complete("", &[], &[]).await.unwrap();
+        assert_eq!(
+            complete.take_usage(),
+            MeteredUsage {
+                input: 120,
+                output: 7,
+                ..Default::default()
+            }
+        );
+
+        let streamed = MeteredProvider::new(ScriptedClient::new(vec![end()]));
+        crate::llm::drain_stream(streamed.stream("", &[], &[]).await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(streamed.take_usage().input, 120);
+        assert_eq!(streamed.take_usage(), MeteredUsage::default());
+    }
+
     fn batched_tool_calls(calls: &[(&str, &str, Value)]) -> StreamEnd {
         StreamEnd {
             captured_content: Some(MessageContent::from_tool_calls(
@@ -3377,8 +3513,8 @@ mod tests {
         );
         assert_eq!(fallback_requests.load(Ordering::SeqCst), 15);
         assert_eq!(
-            outcome.tool_calls_made, 2,
-            "discovery calls dispatch for their two-round budget"
+            outcome.tool_calls_made, 1,
+            "discovery calls dispatch for their one-round budget"
         );
     }
 
@@ -3460,8 +3596,8 @@ mod tests {
             }
         );
         assert_eq!(
-            outcome.tool_calls_made, 2,
-            "discovery calls dispatch for their two-round budget"
+            outcome.tool_calls_made, 1,
+            "discovery calls dispatch for their one-round budget"
         );
         assert!(!outcome.applied);
         assert!(outcome.final_text.contains("request safety limit"));
@@ -3545,7 +3681,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.stop_reason, StopReason::Completed);
-        assert_eq!(outcome.tool_calls_made, 2);
+        assert_eq!(outcome.tool_calls_made, 1);
         assert_eq!(outcome.final_text, "selected the best discovery result");
     }
 
@@ -3565,8 +3701,8 @@ mod tests {
         assert_eq!(outcome.stop_reason, StopReason::Completed);
         assert_eq!(outcome.final_text, "done at the boundary");
         assert_eq!(
-            outcome.tool_calls_made, 2,
-            "discovery calls dispatch for their two-round budget"
+            outcome.tool_calls_made, 1,
+            "discovery calls dispatch for their one-round budget"
         );
     }
 
@@ -3645,7 +3781,7 @@ mod tests {
 
         assert_eq!(outcome.stop_reason, StopReason::Completed);
         assert_eq!(
-            outcome.tool_calls_made, 10,
+            outcome.tool_calls_made, 6,
             "the second unchanged project_info call is revision-budgeted"
         );
 
@@ -4407,6 +4543,16 @@ mod tests {
         );
         assert_eq!(s, "not ready: 2 errors, 1 warnings");
         let s = tool_summary(
+            "apply_design",
+            &json!({}),
+            &json!({
+                "apply_deferred": true,
+                "code": "precommit_review_defects",
+                "review": { "defects": [{}, {}] }
+            }),
+        );
+        assert_eq!(s, "deferred: semantic review found 2 defect(s)");
+        let s = tool_summary(
             "check_board",
             &json!({}),
             &json!({ "ok": true, "blocking_findings": 0, "reported_findings": 2 }),
@@ -4784,7 +4930,7 @@ mod tests {
             "search_symbols".to_string(),
             MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
         );
-        rounds.insert("get_symbol_info".to_string(), 1);
+        rounds.insert("get_symbol_info".to_string(), 0);
 
         let names =
             tool_defs_for_phase(ToolPhase::Schematic, &rounds, false, &HashSet::new(), true)
