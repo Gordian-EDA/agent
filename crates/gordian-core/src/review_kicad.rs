@@ -269,7 +269,7 @@ pub(crate) fn intent_contract_checks(intent: &str, design: &circuit_lang::Design
     if request.contains("tvs")
         && !components
             .iter()
-            .any(|(_, component)| component_text(component).contains("tvs"))
+            .any(|(_, component)| is_tvs_component(component))
     {
         defects.push("intent contract: input TVS protection was requested, but no authored TVS component is present".into());
     }
@@ -277,7 +277,7 @@ pub(crate) fn intent_contract_checks(intent: &str, design: &circuit_lang::Design
     if request.contains("input protection")
         && !components.iter().any(|(_, component)| {
             let text = component_text(component);
-            text.contains("tvs")
+            is_tvs_component(component)
                 || text.contains("fuse")
                 || text.contains("protection")
                 || component.part.ends_with(":D")
@@ -361,6 +361,15 @@ fn component_text(component: &circuit_lang::model::Component) -> String {
     )
     .to_ascii_lowercase()
     .replace(['-', ' '], "")
+}
+
+fn is_tvs_component(component: &circuit_lang::model::Component) -> bool {
+    let text = component_text(component);
+    [
+        "tvs", "smaj", "smbj", "smcj", "p4sma", "p6smb", "p6ke", "1.5ke", "esd",
+    ]
+    .iter()
+    .any(|family| text.contains(family))
 }
 
 fn component_nets(component: &circuit_lang::model::Component) -> Vec<&str> {
@@ -547,7 +556,7 @@ fn has_reverse_protection(components: &[(&String, &circuit_lang::model::Componen
             || text.contains("diode")
             || text.contains("mosfet"))
             && !text.contains("led")
-            && !text.contains("tvs");
+            && !is_tvs_component(component);
         let non_ground_nets = component_nets(component)
             .into_iter()
             .filter(|net| !is_ground_net(net))
@@ -1448,6 +1457,35 @@ blocks:
                 "missing {expected:?}: {defects}"
             );
         }
+    }
+
+    #[test]
+    fn intent_contract_recognizes_standard_avalanche_tvs_families() {
+        let mut provider = circuit_lang::SymbolTable::with_basics();
+        provider.mock_add(
+            "Diode:SMAJ15A",
+            vec![
+                ("1", "K", circuit_lang::PinType::Passive, 1),
+                ("2", "A", circuit_lang::PinType::Passive, 1),
+            ],
+        );
+        let compiled = circuit_lang::compile(
+            r#"
+version: 1
+blocks:
+  main:
+    components:
+      D1: {part: Diode:SMAJ15A, pins: {"1": VIN, "2": GND}}
+"#,
+            &provider,
+        );
+        let design = compiled
+            .design
+            .unwrap_or_else(|| panic!("fixture compiles: {:?}", compiled.diagnostics));
+
+        let defects = intent_contract_checks("Include an input TVS", &design);
+
+        assert!(defects.is_empty(), "{}", defects.join("\n"));
     }
 
     #[test]

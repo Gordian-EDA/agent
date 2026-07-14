@@ -510,7 +510,7 @@ pub fn tool_defs() -> Vec<Tool> {
 pub(crate) fn repair_components_tool() -> Tool {
     Tool::new("repair_components")
         .with_description(
-            "Atomically repair one durable-draft block. Prefer update for pin rewires/value/footprint changes; use upsert only for complete components. Omitted component fields are preserved only by update.",
+            "Atomically repair one durable-draft block. Prefer update for pin rewires/value/footprint changes. Upsert adds components and can replace existing ones with confirmation; omitted metadata and, when no topology field is supplied, existing pins are preserved.",
         )
         .with_schema(json!({
             "type": "object",
@@ -518,7 +518,7 @@ pub(crate) fn repair_components_tool() -> Tool {
                 "block": { "type": "string", "description": "Target block; defaults to main." },
                 "upsert": {
                     "type": "object",
-                    "description": "Complete replacement components; each entry must include part and every intended field/pin. Send {} when unused.",
+                    "description": "Components to add or replace. `part` is required. For existing refs, omitted value/footprint/dnp/props are preserved; existing pins are preserved when no pins/units/between/positive/negative/decouple topology field is supplied. Send {} when unused.",
                     "additionalProperties": {
                         "type": "object",
                         "properties": {
@@ -1965,9 +1965,39 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     }
     let mut synth_index = 0usize;
-    for (reference, component) in patch_block.components {
+    for (reference, mut component) in patch_block.components {
         match &component.origin {
             Origin::Authored => {
+                if let Some(previous) = prior_design
+                    .blocks
+                    .get(block_name)
+                    .and_then(|block| block.components.get(&reference))
+                {
+                    let fields = upsert[&reference]
+                        .as_object()
+                        .expect("upsert values were validated as objects");
+                    if !fields.contains_key("value") {
+                        component.value.clone_from(&previous.value);
+                    }
+                    if !fields.contains_key("footprint") {
+                        component.footprint.clone_from(&previous.footprint);
+                    }
+                    if !fields.contains_key("dnp") {
+                        component.dnp = previous.dnp;
+                    }
+                    if !fields.contains_key("props") {
+                        component.props.clone_from(&previous.props);
+                    }
+                    let supplies_topology = [
+                        "pins", "units", "between", "positive", "negative", "decouple",
+                    ]
+                    .iter()
+                    .any(|field| fields.contains_key(*field));
+                    if !supplies_topology {
+                        component.pins.clone_from(&previous.pins);
+                        component.units.clone_from(&previous.units);
+                    }
+                }
                 target.components.insert(reference, component);
             }
             Origin::Synthesized { .. } => {

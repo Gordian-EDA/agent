@@ -737,7 +737,7 @@ fn repair_components_requires_confirmation_and_rejects_cross_block_moves() {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
-    let yaml = "version: 1\nblocks:\n  main:\n    components:\n      R1: {part: Device:R, value: 1k, pins: {1: A, 2: GND}}\n  aux:\n    components:\n      U1: {part: Device:R, value: 2k, pins: {1: B, 2: GND}}\n";
+    let yaml = "version: 1\nblocks:\n  main:\n    components:\n      R1: {part: Device:R, value: 1k, footprint: Resistor_SMD:R_0603_1608Metric, dnp: true, props: {role: load}, pins: {1: A, 2: GND}}\n  aux:\n    components:\n      U1: {part: Device:R, value: 2k, pins: {1: B, 2: GND}}\n";
     seed_draft(&ctx, yaml);
     let before = std::fs::read(ctx.workspace().draft_path()).unwrap();
 
@@ -770,7 +770,7 @@ fn repair_components_requires_confirmation_and_rejects_cross_block_moves() {
     let replaced = run_tool(
         "repair_components",
         serde_json::json!({
-            "upsert": {"R1": {"part": "Device:R", "value": "4.7k", "pins": {"1": "A", "2": "GND"}}},
+            "upsert": {"R1": {"part": "Device:R", "value": "4.7k"}},
             "replace_existing": true
         }),
         &ctx,
@@ -783,6 +783,13 @@ fn repair_components_requires_confirmation_and_rejects_cross_block_moves() {
     );
     let repaired = ctx.workspace().read_draft().unwrap().unwrap();
     assert!(repaired.contains("value: 4.7k"), "{repaired}");
+    assert!(
+        repaired.contains("footprint: Resistor_SMD:R_0603_1608Metric"),
+        "{repaired}"
+    );
+    assert!(repaired.contains("dnp: true"), "{repaired}");
+    assert!(repaired.contains("role: load"), "{repaired}");
+    assert!(repaired.contains("pins: {1: A, 2: GND}"), "{repaired}");
     assert!(repaired.contains("U1:"), "{repaired}");
 }
 
