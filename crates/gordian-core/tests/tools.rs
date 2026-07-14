@@ -869,13 +869,11 @@ fn defs_lists_all_tools() {
             assert_eq!(schema["additionalProperties"], false);
         }
         if def.name.to_string() == "edit_design" {
-            assert_eq!(schema["oneOf"].as_array().map(Vec::len), Some(2));
             assert_eq!(schema["additionalProperties"], false);
-            assert_eq!(schema["oneOf"][0]["required"], serde_json::json!(["yaml"]));
-            assert_eq!(
-                schema["oneOf"][1]["required"],
-                serde_json::json!(["old_string", "new_string"])
-            );
+            assert_eq!(schema["required"], serde_json::json!(["yaml"]));
+            let props = schema["properties"].as_object().expect("properties object");
+            assert!(!props.contains_key("old_string"));
+            assert!(!props.contains_key("new_string"));
         }
         if def.name.to_string() == "route_track" {
             let props = schema["properties"].as_object().expect("properties object");
