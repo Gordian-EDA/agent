@@ -817,14 +817,26 @@ impl<P: Provider> Agent<P> {
         let mut schematic_review_current: Option<Value> = None;
         let mut last_tool_status: Option<String> = None;
         let mut pcb_only_stage = false;
+        let mut reserved_clean_apply_used = false;
 
         loop {
-            if request_budget_exhausted(
+            let request_budget_is_exhausted = request_budget_exhausted(
                 provider_requests,
                 stage_provider_requests,
                 pcb_work_requested,
                 pcb_only_stage,
-            ) {
+            );
+            let may_use_reserved_clean_apply = request_budget_is_exhausted
+                && !reserved_clean_apply_used
+                && clean_draft_needs_reserved_apply(
+                    pcb_work_requested,
+                    pcb_only_stage,
+                    draft_dirty,
+                    commit_attempted_for_current_draft,
+                    latest_authoring_diagnostics.as_ref(),
+                    schematic_review_current.as_ref(),
+                );
+            if request_budget_is_exhausted && !may_use_reserved_clean_apply {
                 let current_applied = applied && !draft_dirty;
                 let final_text = provider_limit_final_text(
                     None,
@@ -841,6 +853,9 @@ impl<P: Provider> Agent<P> {
                         requests: provider_requests,
                     },
                 });
+            }
+            if may_use_reserved_clean_apply {
+                reserved_clean_apply_used = true;
             }
             provider_requests += 1;
             stage_provider_requests += 1;
@@ -2058,6 +2073,22 @@ fn request_budget_exhausted(
         MAX_SCHEMATIC_REQUESTS_FOR_PCB
     };
     stage_requests >= stage_limit
+}
+
+fn clean_draft_needs_reserved_apply(
+    pcb_work_requested: bool,
+    pcb_stage: bool,
+    draft_dirty: bool,
+    commit_attempted: bool,
+    diagnostics: Option<&AuthoringDiagnosticsState>,
+    current_review: Option<&Value>,
+) -> bool {
+    pcb_work_requested
+        && !pcb_stage
+        && draft_dirty
+        && !commit_attempted
+        && diagnostics.and_then(|state| state.errors) == Some(0)
+        && current_review.is_none()
 }
 
 fn review_result_is_clean(value: &Value) -> bool {
@@ -4332,6 +4363,39 @@ mod tests {
         assert!(request_budget_exhausted(32, 12, true, true));
         assert!(!request_budget_exhausted(31, 31, false, false));
         assert!(request_budget_exhausted(32, 32, false, false));
+    }
+
+    #[test]
+    fn clean_draft_gets_one_reserved_apply_opportunity() {
+        let clean = AuthoringDiagnosticsState {
+            design_state: None,
+            errors: Some(0),
+            warnings: Some(2),
+        };
+        assert!(clean_draft_needs_reserved_apply(
+            true,
+            false,
+            true,
+            false,
+            Some(&clean),
+            None,
+        ));
+        assert!(!clean_draft_needs_reserved_apply(
+            true,
+            false,
+            true,
+            false,
+            Some(&clean),
+            Some(&json!({"defects": ["missing footprint"]})),
+        ));
+        assert!(!clean_draft_needs_reserved_apply(
+            false,
+            false,
+            true,
+            false,
+            Some(&clean),
+            None,
+        ));
     }
 
     #[test]
