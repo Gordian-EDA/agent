@@ -86,6 +86,11 @@ const MAX_DISCOVERY_ROUNDS_PER_SUBTURN: usize = 2;
 /// cannot flood history with hundreds of low-value hits.
 const MAX_DISCOVERY_CALLS_PER_COMPLETION: usize = 4;
 
+/// One explicit transition from catalog exploration to concrete authoring.
+/// Without it, weak models can consume their bounded searches and then inspect
+/// the still-empty project until the no-progress watchdog fires.
+const MAX_AUTHORING_TRANSITION_NUDGES: usize = 1;
+
 /// The human mutation gate. The loop calls [`Approvals::approve`] with either a
 /// dry-run preview or a structured immediate-operation proposal; returning
 /// `false` prevents the mutation.
@@ -582,6 +587,7 @@ impl<P: Provider> Agent<P> {
         let mut commit_attempted_for_current_draft = false;
         // Bounded re-prompts that push a stalled model past a premature stop.
         let mut nudges_left = MAX_COMMIT_NUDGES;
+        let mut authoring_transition_nudges_left = MAX_AUTHORING_TRANSITION_NUDGES;
         let mut erc_cleanup_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut last_committed_erc_cleanup_needed: Option<bool> = None;
         let mut pcb_recovery = PcbRecoveryState::default();
@@ -1171,6 +1177,21 @@ impl<P: Provider> Agent<P> {
                         nudges_left -= 1;
                         consecutive_no_progress_completions = 0;
                         self.history.push(ChatMessage::user(COMMIT_NUDGE));
+                        continue;
+                    }
+                    let no_draft_after_discovery = !discovery_rounds_used.is_empty()
+                        && self
+                            .runtime
+                            .workspace()
+                            .read_draft()
+                            .ok()
+                            .flatten()
+                            .is_none();
+                    if no_draft_after_discovery && authoring_transition_nudges_left > 0 {
+                        authoring_transition_nudges_left -= 1;
+                        consecutive_no_progress_completions = 0;
+                        self.history
+                            .push(ChatMessage::user(AUTHORING_TRANSITION_NUDGE));
                         continue;
                     }
                     let current_applied = applied && !draft_dirty;
@@ -2091,6 +2112,11 @@ fn authoring_result_changed_draft(value: &Value) -> bool {
 const COMMIT_NUDGE: &str = "Your latest draft changes are not committed. Finish the complete \
      schematic with `edit_design` if needed, then call `apply_design` to submit \
      this exact current draft for approval before ending your turn.";
+
+const AUTHORING_TRANSITION_NUDGE: &str = "Catalog discovery is complete and there is still no \
+     draft. Your next action must be `edit_design` with one COMPLETE, non-empty full `yaml` \
+     document implementing the requested circuit from the verified parts. Do not inspect the \
+     empty project, render, apply, or resume broad searches before authoring.";
 
 /// The re-prompt sent after a commit whose ERC report contains actionable
 /// findings. The result immediately before this message contains the exact

@@ -332,6 +332,45 @@ async fn clean_draft_stall_is_nudged_to_commit_before_watchdog_stop() {
 }
 
 #[tokio::test]
+async fn discovery_stall_is_nudged_into_full_authoring_once() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let script = vec![
+        tool_call(
+            "discover",
+            "search_symbols",
+            serde_json::json!({"query": "resistor"}),
+        ),
+        tool_call("inspect-1", "project_info", serde_json::json!({})),
+        tool_call("inspect-2", "project_info", serde_json::json!({})),
+        tool_call("inspect-3", "project_info", serde_json::json!({})),
+        tool_call(
+            "author",
+            "edit_design",
+            serde_json::json!({"yaml": CLEAN_YAML}),
+        ),
+        tool_call("apply", "apply_design", serde_json::json!({})),
+        final_text("authored after the bounded transition nudge"),
+    ];
+    let mut agent = agent(ctx, script);
+    let mut approvals = AutoApprove::yes();
+
+    let outcome = agent
+        .run_turn("discover, then author the circuit", &mut approvals, None)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.stop_reason, StopReason::Completed);
+    assert!(outcome.applied);
+    assert_eq!(
+        outcome.final_text,
+        "authored after the bounded transition nudge"
+    );
+}
+
+#[tokio::test]
 async fn stall_nudge_is_bounded_and_gives_up() {
     // A model that simply will NOT commit (drafts, then stops repeatedly) must
     // not loop forever: at most MAX_COMMIT_NUDGES (2) re-prompts, then the turn
