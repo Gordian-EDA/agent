@@ -636,6 +636,53 @@ fn reserve_wide_multi_pin_routes(rp: &RouteProblem) -> (RouteProblem, RouteSolut
         engine: "wide-net-reservation".to_owned(),
     };
     apply_direct_rescue_fallback(rp, &mut reservation);
+    // L/Z visibility candidates are intentionally cheap but cannot invent a
+    // shared Steiner trunk. Give each still-failed wide net an isolated grid
+    // tree before ordinary signals are present, reserving earlier wide copper
+    // between attempts.
+    let remaining = reservation
+        .failed
+        .iter()
+        .map(|failed| failed.connection.clone())
+        .collect::<Vec<_>>();
+    for name in remaining {
+        let Some(connection) = rp
+            .connections
+            .iter()
+            .find(|connection| connection.name == name)
+            .cloned()
+        else {
+            continue;
+        };
+        if let Some(candidate) = wide_shared_trunk_candidate(rp, &reservation.solution, &connection)
+        {
+            reservation.solution = candidate;
+            reservation
+                .failed
+                .retain(|failed| failed.connection != name);
+            continue;
+        }
+        let mut isolated = rp.clone();
+        isolated.connections = vec![connection];
+        isolated
+            .obstacles
+            .extend(copper_obstacles(rp, &reservation.solution));
+        let router = grid_astar::router::GridAStarRouter;
+        let candidate = pcb_model::Router::route(&router, &isolated);
+        if candidate.failed.is_empty()
+            && grid_astar::router::geometry_violations(&isolated, &candidate.solution) == 0
+            && direct_candidate_is_clean(&isolated, &candidate.solution, &name)
+        {
+            reservation
+                .solution
+                .traces
+                .extend(candidate.solution.traces);
+            reservation.solution.vias.extend(candidate.solution.vias);
+            reservation
+                .failed
+                .retain(|failed| failed.connection != name);
+        }
+    }
     let still_failed: BTreeSet<_> = reservation
         .failed
         .iter()
@@ -654,6 +701,181 @@ fn reserve_wide_multi_pin_routes(rp: &RouteProblem) -> (RouteProblem, RouteSolut
         .obstacles
         .extend(copper_obstacles(rp, &reservation.solution));
     (subproblem, reservation.solution)
+}
+
+fn wide_shared_trunk_candidate(
+    rp: &RouteProblem,
+    solution: &RouteSolution,
+    conn: &pcb_model::Connection,
+) -> Option<RouteSolution> {
+    let first_layer = conn.points_to_connect.first()?.layer.clone();
+    if conn
+        .points_to_connect
+        .iter()
+        .any(|point| !same_layer_ref(&point.layer, &first_layer, rp.layer_count))
+    {
+        return None;
+    }
+    let width = rp.net_width(&conn.name);
+    let inset = (rp.clearance + width + 0.5).max(1.0);
+    let mut xs = vec![rp.bounds.min_x + inset, rp.bounds.max_x - inset];
+    let mut ys = vec![rp.bounds.min_y + inset, rp.bounds.max_y - inset];
+    for obstacle in &rp.obstacles {
+        if !obstacle
+            .layers
+            .iter()
+            .any(|layer| same_layer_ref(layer, &first_layer, rp.layer_count))
+        {
+            continue;
+        }
+        let dx = obstacle.width / 2.0 + rp.clearance + width;
+        let dy = obstacle.height / 2.0 + rp.clearance + width;
+        xs.extend([obstacle.center.x - dx, obstacle.center.x + dx]);
+        ys.extend([obstacle.center.y - dy, obstacle.center.y + dy]);
+    }
+    xs.retain(|x| *x >= rp.bounds.min_x + inset && *x <= rp.bounds.max_x - inset);
+    ys.retain(|y| *y >= rp.bounds.min_y + inset && *y <= rp.bounds.max_y - inset);
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    xs.dedup_by(|a, b| (*a - *b).abs() < 0.05);
+    ys.dedup_by(|a, b| (*a - *b).abs() < 0.05);
+    limit_trunk_axes(&mut xs, (rp.bounds.min_x + rp.bounds.max_x) / 2.0);
+    limit_trunk_axes(&mut ys, (rp.bounds.min_y + rp.bounds.max_y) / 2.0);
+
+    let points: Vec<_> = conn
+        .points_to_connect
+        .iter()
+        .map(|point| point.point())
+        .collect();
+    let min_x = points
+        .iter()
+        .map(|point| point.x)
+        .fold(f64::INFINITY, f64::min);
+    let max_x = points
+        .iter()
+        .map(|point| point.x)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_y = points
+        .iter()
+        .map(|point| point.y)
+        .fold(f64::INFINITY, f64::min);
+    let max_y = points
+        .iter()
+        .map(|point| point.y)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    for y in ys {
+        let mut candidate = solution.clone();
+        candidate.traces.push(Trace {
+            connection: conn.name.clone(),
+            layer: first_layer.clone(),
+            width,
+            path: vec![Point2 { x: min_x, y }, Point2 { x: max_x, y }],
+        });
+        let mut complete = true;
+        for point in &points {
+            if (point.y - y).abs() <= geom::EPS {
+                continue;
+            }
+            let mut access_xs = points
+                .iter()
+                .map(|candidate| candidate.x)
+                .collect::<Vec<_>>();
+            access_xs.sort_by(|a, b| {
+                (a - point.x)
+                    .abs()
+                    .partial_cmp(&(b - point.x).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            access_xs.dedup_by(|a, b| (*a - *b).abs() < geom::EPS);
+            let branch = access_xs.into_iter().find_map(|x| {
+                let mut proposed = candidate.clone();
+                proposed.traces.push(Trace {
+                    connection: conn.name.clone(),
+                    layer: first_layer.clone(),
+                    width,
+                    path: vec![*point, Point2 { x, y: point.y }, Point2 { x, y }],
+                });
+                simplify_candidate_paths(&mut proposed);
+                let clean = direct_candidate_is_geometry_clean(rp, &proposed, &conn.name);
+                clean.then_some(proposed)
+            });
+            let Some(proposed) = branch else {
+                complete = false;
+                break;
+            };
+            candidate = proposed;
+        }
+        if complete && direct_candidate_is_clean(rp, &candidate, &conn.name) {
+            return Some(candidate);
+        }
+    }
+    for x in xs {
+        let mut candidate = solution.clone();
+        candidate.traces.push(Trace {
+            connection: conn.name.clone(),
+            layer: first_layer.clone(),
+            width,
+            path: vec![Point2 { x, y: min_y }, Point2 { x, y: max_y }],
+        });
+        let mut complete = true;
+        for point in &points {
+            if (point.x - x).abs() <= geom::EPS {
+                continue;
+            }
+            let mut access_ys = points
+                .iter()
+                .map(|candidate| candidate.y)
+                .collect::<Vec<_>>();
+            access_ys.sort_by(|a, b| {
+                (a - point.y)
+                    .abs()
+                    .partial_cmp(&(b - point.y).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            access_ys.dedup_by(|a, b| (*a - *b).abs() < geom::EPS);
+            let branch = access_ys.into_iter().find_map(|y| {
+                let mut proposed = candidate.clone();
+                proposed.traces.push(Trace {
+                    connection: conn.name.clone(),
+                    layer: first_layer.clone(),
+                    width,
+                    path: vec![*point, Point2 { x: point.x, y }, Point2 { x, y }],
+                });
+                simplify_candidate_paths(&mut proposed);
+                direct_candidate_is_geometry_clean(rp, &proposed, &conn.name).then_some(proposed)
+            });
+            let Some(proposed) = branch else {
+                complete = false;
+                break;
+            };
+            candidate = proposed;
+        }
+        if complete && direct_candidate_is_clean(rp, &candidate, &conn.name) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn limit_trunk_axes(axes: &mut Vec<f64>, center: f64) {
+    const MAX_TRUNK_AXES: usize = 64;
+    if axes.len() <= MAX_TRUNK_AXES {
+        return;
+    }
+    let first = axes[0];
+    let last = axes[axes.len() - 1];
+    axes.sort_by(|a, b| {
+        (a - center)
+            .abs()
+            .partial_cmp(&(b - center).abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    axes.truncate(MAX_TRUNK_AXES - 2);
+    axes.extend([first, last]);
+    axes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    axes.dedup_by(|a, b| (*a - *b).abs() < 0.05);
 }
 
 pub fn apply_direct_rescue_fallback(rp: &RouteProblem, result: &mut RouteResult) -> bool {
@@ -1454,6 +1676,97 @@ mod escape_bottleneck_tests {
         }
     }
 
+    fn power_v5_problem() -> RouteProblem {
+        let terminals = [
+            (13.025, 23.5, 1.15, 2.7, false),
+            (16.0, 8.0, 3.0, 3.0, true),
+            (18.325, 11.5, 0.8, 0.95, false),
+            (35.5, 24.29, 2.6, 2.6, true),
+            (17.24, 17.0, 6.4, 5.8, false),
+        ];
+        let mut obstacles = terminals
+            .iter()
+            .enumerate()
+            .map(
+                |(index, &(x, y, width, height, through))| pcb_model::Obstacle {
+                    kind: format!("pad:V5-{index}"),
+                    layers: if through {
+                        vec![LayerRef::top(), LayerRef::bottom()]
+                    } else {
+                        vec![LayerRef::top()]
+                    },
+                    center: Point2 { x, y },
+                    width,
+                    height,
+                    connected_to: vec!["V5".to_owned()],
+                },
+            )
+            .collect::<Vec<_>>();
+        for (index, (net, x, y, width, height)) in [
+            ("LED", 16.675, 11.5, 0.8, 0.95),
+            ("GND", 23.54, 19.28, 2.2, 1.2),
+            ("VIN_PROT", 23.54, 14.72, 2.2, 1.2),
+            ("GND", 15.975, 23.5, 1.15, 2.7),
+            ("GND", 30.5, 24.29, 2.6, 2.6),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            obstacles.push(pcb_model::Obstacle {
+                kind: format!("pad:X-{index}"),
+                layers: vec![LayerRef::top()],
+                center: Point2 { x, y },
+                width,
+                height,
+                connected_to: vec![net.to_owned()],
+            });
+        }
+        RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles,
+            connections: vec![pcb_model::Connection {
+                name: "V5".to_owned(),
+                points_to_connect: terminals
+                    .iter()
+                    .map(|&(x, y, _, _, _)| pcb_model::RoutePoint {
+                        x,
+                        y,
+                        layer: LayerRef::top(),
+                    })
+                    .collect(),
+            }],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 45.0,
+                max_y: 30.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: [("V5".to_owned(), 0.5)].into_iter().collect(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: [("GND".to_owned(), 1)].into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn live_power_wide_net_reserves_an_isolated_grid_tree() {
+        let problem = power_v5_problem();
+        let (routing_problem, escapes) = prepare_wide_terminal_escapes(&problem);
+        assert!(escapes.traces.is_empty(), "all V5 pads accept full width");
+        let (subproblem, reserved) = reserve_wide_multi_pin_routes(&routing_problem);
+        assert!(
+            subproblem.connections.is_empty(),
+            "V5 must be reserved first"
+        );
+        assert!(!reserved.traces.is_empty());
+        assert!(reserved.traces.iter().all(|trace| trace.width == 0.5));
+        assert!(lint(&problem, &reserved).is_empty());
+    }
+
     #[test]
     fn live_sensor_wide_net_escapes_and_routes_as_a_clean_tree() {
         let original = sensor_v3v3_problem();
@@ -1467,70 +1780,27 @@ mod escape_bottleneck_tests {
         assert!(subproblem.connections.is_empty());
         assert!(!reserved.traces.is_empty());
 
+        // Exercise the production merge order: reserved full-width copper,
+        // then terminal neckdowns, then the shared cleanup pass.
         let mut result = RouteResult {
-            solution: RouteSolution {
-                traces: vec![
-                    Trace {
-                        connection: "GND".to_owned(),
-                        layer: LayerRef::top(),
-                        width: 0.2,
-                        path: vec![
-                            Point2 {
-                                x: 17.975,
-                                y: 23.975,
-                            },
-                            Point2 {
-                                x: 17.975,
-                                y: 24.075,
-                            },
-                        ],
-                    },
-                    Trace {
-                        connection: "GND".to_owned(),
-                        layer: LayerRef::top(),
-                        width: 0.2,
-                        path: vec![
-                            Point2 {
-                                x: 20.025,
-                                y: 23.325,
-                            },
-                            Point2 { x: 19.0, y: 23.325 },
-                        ],
-                    },
-                ],
-                vias: vec![
-                    Via {
-                        connection: "GND".to_owned(),
-                        at: Point2 {
-                            x: 17.975,
-                            y: 24.075,
-                        },
-                        diameter: 0.6,
-                        drill: 0.3,
-                        span: ViaSpan::Through,
-                    },
-                    Via {
-                        connection: "GND".to_owned(),
-                        at: Point2 { x: 19.0, y: 23.325 },
-                        diameter: 0.6,
-                        drill: 0.3,
-                        span: ViaSpan::Through,
-                    },
-                ],
-            },
-            failed: failed(&["/V3V3"]),
+            solution: reserved,
+            failed: Vec::new(),
             engine: "fixture".to_owned(),
         };
-        assert!(apply_direct_rescue_fallback(&routing_problem, &mut result));
         result.solution.traces.extend(escapes.traces);
         result.solution.vias.extend(escapes.vias);
         postroute_cleanup(&original, &mut result.solution);
-        assert!(
-            lint(&original, &result.solution)
-                .into_iter()
-                .all(|violation| geometry_violation_nets(&violation).is_empty()),
-            "live geometry must remain clean"
-        );
+        assert!(lint(&original, &result.solution).is_empty());
+        let neckdowns = result
+            .solution
+            .traces
+            .iter()
+            .filter(|trace| (trace.width - 0.2).abs() < geom::EPS)
+            .collect::<Vec<_>>();
+        assert_eq!(neckdowns.len(), 3);
+        assert!(neckdowns.iter().all(|trace| {
+            trace.path.len() == 2 && (trace.path[0].dist(trace.path[1]) - 0.1).abs() < geom::EPS
+        }));
         assert!(result.failed.is_empty());
     }
 
