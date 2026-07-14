@@ -10,6 +10,7 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
     let mut net_parts: indexmap::IndexMap<&str, Vec<String>> = indexmap::IndexMap::new();
     let mut net_power_inputs: indexmap::IndexMap<String, Vec<String>> = indexmap::IndexMap::new();
     let mut net_power_sources: indexmap::IndexMap<String, Vec<String>> = indexmap::IndexMap::new();
+    let mut passive_fuse_links: Vec<(String, String, String)> = Vec::new();
     // Net-sanity: nets carrying a crystal/oscillator pin, and nets carrying a
     // reset/boot control pin. A net with BOTH shorts the oscillator to reset —
     // almost always a mis-wire (an OSC_OUT net the model named after a reset pin).
@@ -43,6 +44,10 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
                 diags.push(e);
                 continue; // pin checks impossible without the symbol
             };
+
+            if let Some((a, b)) = passive_series_fuse_nets(comp, &meta) {
+                passive_fuse_links.push((a, b, refdes.clone()));
+            }
 
             // Resolve each map key to physical pins: exact number, else name.
             let mut covered: std::collections::HashMap<&str, &str> = Default::default(); // number -> key
@@ -173,6 +178,34 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
 
     let allow = |code: &str| d.lint_allow.contains(code);
 
+    // A connector or regulator can legitimately feed a named rail through a
+    // fuse. Passive fuse symbols do not declare a power-output pin, so carry
+    // source status across their two terminals explicitly. Keep this confined
+    // to exact fuse symbol classes whose library metadata is two passive pins;
+    // resistors, beads, and other arbitrary series parts must not suppress the
+    // warning. Iterating also handles the uncommon but valid series-fuse chain.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (a, b, refdes) in &passive_fuse_links {
+            let a_sourced = net_power_sources.contains_key(a);
+            let b_sourced = net_power_sources.contains_key(b);
+            if a_sourced && !b_sourced {
+                net_power_sources
+                    .entry(b.clone())
+                    .or_default()
+                    .push(format!("{refdes} (through fuse from {a})"));
+                changed = true;
+            } else if b_sourced && !a_sourced {
+                net_power_sources
+                    .entry(a.clone())
+                    .or_default()
+                    .push(format!("{refdes} (through fuse from {b})"));
+                changed = true;
+            }
+        }
+    }
+
     if !allow("control-passive-island") {
         for (net, parts) in &net_parts {
             let attrs = d.nets.get(*net);
@@ -290,6 +323,52 @@ fn is_connector_part(part: &str) -> bool {
     part.starts_with("Connector:")
 }
 
+/// Return the two nets joined by an ordinary passive fuse symbol.
+///
+/// Match the exact symbol class, then verify the resolved library metadata and
+/// authored connections. This intentionally excludes fuzzy names such as
+/// `FuseHolder` and non-passive/polarized fuse symbols (whose power-output pin
+/// already participates in normal source detection).
+fn passive_series_fuse_nets(
+    comp: &Component,
+    meta: &crate::provider::SymbolMeta,
+) -> Option<(String, String)> {
+    if !matches!(
+        comp.part.as_str(),
+        "Device:Fuse" | "Device:Fuse_Small" | "Device:Polyfuse" | "Device:Polyfuse_Small"
+    ) {
+        return None;
+    }
+
+    let mut physical_pins: indexmap::IndexMap<&str, &crate::provider::PinMeta> =
+        indexmap::IndexMap::new();
+    for pin in &meta.pins {
+        physical_pins.entry(pin.number.as_str()).or_insert(pin);
+    }
+    if physical_pins.len() != 2
+        || physical_pins
+            .values()
+            .any(|pin| pin.etype != PinType::Passive)
+    {
+        return None;
+    }
+
+    let mut nets = Vec::with_capacity(2);
+    for pin in physical_pins.values() {
+        let target = comp
+            .pins
+            .iter()
+            .chain(comp.units.values().flatten())
+            .find(|(key, _)| *key == &pin.number || *key == &pin.name)
+            .map(|(_, target)| target)?;
+        let PinTarget::Net(net) = target else {
+            return None;
+        };
+        nets.push(net.clone());
+    }
+    (nets[0] != nets[1]).then(|| (nets[0].clone(), nets[1].clone()))
+}
+
 fn is_power_like_net_name(net: &str) -> bool {
     let u = net.to_ascii_uppercase();
     u == "VIN"
@@ -349,6 +428,10 @@ mod tests {
         p.mock_add(
             "Connector:Conn_01x02_Pin",
             vec![("1", "Pin_1", Passive, 1), ("2", "Pin_2", Passive, 1)],
+        );
+        p.mock_add(
+            "Device:Polyfuse",
+            vec![("1", "~", Passive, 1), ("2", "~", Passive, 1)],
         );
         p
     }
@@ -543,6 +626,80 @@ nets:
         assert!(
             !diags.0.iter().any(|d| d.code == "unsourced-power-net"),
             "sourced rails must not warn: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn connector_power_propagates_through_passive_polyfuse() {
+        let diags = run("
+version: 1
+blocks:
+  main:
+    components:
+      J1: {part: Connector:Conn_01x02_Pin, pins: {1: VBUS, 2: GND}}
+      F1: {part: Device:Polyfuse, between: [VBUS, VIN]}
+      U1: {part: M:REG, pins: {IN: VIN, OUT: 3V3, GND: GND}}
+nets:
+  VBUS: {class: power}
+  VIN: {class: power}
+  3V3: {class: power}
+  GND: {class: power}
+");
+        assert!(
+            !diags
+                .0
+                .iter()
+                .any(|d| { d.code == "unsourced-power-net" && d.message.contains("`VIN`") }),
+            "connector-fed VIN behind a polyfuse is sourced: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn passive_polyfuse_does_not_source_a_floating_input_rail() {
+        let diags = run("
+version: 1
+blocks:
+  main:
+    components:
+      F1: {part: Device:Polyfuse, between: [VBUS, VIN]}
+      U1: {part: M:REG, pins: {IN: VIN, OUT: 3V3, GND: GND}}
+nets:
+  VBUS: {class: power}
+  VIN: {class: power}
+  3V3: {class: power}
+  GND: {class: power}
+");
+        assert!(
+            diags
+                .0
+                .iter()
+                .any(|d| { d.code == "unsourced-power-net" && d.message.contains("`VIN`") }),
+            "a fuse without an upstream source must not hide floating VIN: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn arbitrary_series_resistor_does_not_propagate_power_source() {
+        let diags = run("
+version: 1
+blocks:
+  main:
+    components:
+      J1: {part: Connector:Conn_01x02_Pin, pins: {1: VBUS, 2: GND}}
+      R1: {part: R, between: [VBUS, VIN]}
+      U1: {part: M:REG, pins: {IN: VIN, OUT: 3V3, GND: GND}}
+nets:
+  VBUS: {class: power}
+  VIN: {class: power}
+  3V3: {class: power}
+  GND: {class: power}
+");
+        assert!(
+            diags
+                .0
+                .iter()
+                .any(|d| { d.code == "unsourced-power-net" && d.message.contains("`VIN`") }),
+            "non-fuse series passives must not mark VIN sourced: {diags:?}"
         );
     }
 
