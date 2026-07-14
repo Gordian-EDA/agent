@@ -169,18 +169,181 @@ fn empty_design_is_never_ready_or_written() {
 
     let created = run_tool("create_design", serde_json::json!({"yaml": empty}), &ctx).unwrap();
     assert_eq!(created["ok"], false, "{created}");
+    assert_eq!(created["draft_written"], false, "{created}");
+    assert_eq!(created["draft_changed"], false, "{created}");
     assert!(created.to_string().contains("empty_design"), "{created}");
+    assert!(
+        !ctx.workspace().draft_path().exists(),
+        "an empty create must not leave a draft file"
+    );
 
     let preview = run_tool("apply_design", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(preview["ok"], false, "{preview}");
+    assert!(
+        preview["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("no draft"))
+    );
     assert!(preview.get("would_write").is_none(), "{preview}");
 
     let committed = run_tool("apply_design", serde_json::json!({"__commit": true}), &ctx).unwrap();
-    assert_eq!(committed["ok"], false, "{committed}");
+    assert!(
+        committed["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("no draft"))
+    );
     assert!(committed.get("written").is_none(), "{committed}");
     assert!(
         !ctx.sch_path().exists(),
         "empty schematic must not be written"
+    );
+}
+
+#[test]
+fn full_yaml_edit_seeds_a_new_project_and_reports_idempotence() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    assert_eq!(ctx.workspace().read_draft().unwrap(), None);
+
+    let seeded = run_tool(
+        "edit_design",
+        serde_json::json!({ "yaml": TINY_YAML }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(seeded["ok"], true, "{seeded}");
+    assert_eq!(seeded["draft_written"], true, "{seeded}");
+    assert_eq!(seeded["draft_changed"], true, "{seeded}");
+    assert_eq!(seeded["mode"], "full_create", "{seeded}");
+    assert_eq!(
+        ctx.workspace().read_draft().unwrap().as_deref(),
+        Some(TINY_YAML)
+    );
+
+    let identical = run_tool(
+        "edit_design",
+        serde_json::json!({ "yaml": TINY_YAML }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(identical["draft_written"], true, "{identical}");
+    assert_eq!(identical["draft_changed"], false, "{identical}");
+    assert_eq!(identical["mode"], "full_replace", "{identical}");
+}
+
+#[test]
+fn empty_full_edits_and_overwrites_preserve_the_prior_draft() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let empty = "version: 1\nblocks: {main: {components: {}}}";
+
+    let rejected_initial =
+        run_tool("edit_design", serde_json::json!({ "yaml": empty }), &ctx).unwrap();
+    assert_eq!(
+        rejected_initial["draft_written"], false,
+        "{rejected_initial}"
+    );
+    assert_eq!(
+        rejected_initial["draft_changed"], false,
+        "{rejected_initial}"
+    );
+    assert_eq!(
+        rejected_initial["mode"], "full_create",
+        "{rejected_initial}"
+    );
+    assert!(!ctx.workspace().draft_path().exists());
+
+    let seeded = run_tool(
+        "edit_design",
+        serde_json::json!({ "yaml": TINY_YAML }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(seeded["draft_written"], true, "{seeded}");
+
+    for (tool, input) in [
+        ("edit_design", serde_json::json!({ "yaml": empty })),
+        (
+            "create_design",
+            serde_json::json!({ "yaml": empty, "overwrite": true }),
+        ),
+    ] {
+        let rejected = run_tool(tool, input, &ctx).unwrap();
+        assert_eq!(rejected["draft_written"], false, "{tool}: {rejected}");
+        assert_eq!(rejected["draft_changed"], false, "{tool}: {rejected}");
+        assert!(
+            rejected["next"]
+                .as_str()
+                .is_some_and(|next| next.contains("existing draft was preserved")),
+            "{tool}: {rejected}"
+        );
+        assert_eq!(
+            ctx.workspace().read_draft().unwrap().as_deref(),
+            Some(TINY_YAML)
+        );
+    }
+}
+
+#[test]
+fn authoring_reports_real_patch_and_create_changes() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let created = run_tool(
+        "create_design",
+        serde_json::json!({ "yaml": TINY_YAML }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(created["draft_changed"], true, "{created}");
+
+    let recreated = run_tool(
+        "create_design",
+        serde_json::json!({ "yaml": TINY_YAML, "overwrite": true }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(recreated["draft_written"], true, "{recreated}");
+    assert_eq!(recreated["draft_changed"], false, "{recreated}");
+
+    let no_op_patch = run_tool(
+        "edit_design",
+        serde_json::json!({ "old_string": "Device:R", "new_string": "Device:R" }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(no_op_patch["replacements"], 1, "{no_op_patch}");
+    assert_eq!(no_op_patch["draft_changed"], false, "{no_op_patch}");
+
+    let changed_patch = run_tool(
+        "edit_design",
+        serde_json::json!({ "old_string": "R1", "new_string": "R2" }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(changed_patch["draft_changed"], true, "{changed_patch}");
+}
+
+#[test]
+fn nonempty_invalid_full_edit_still_persists_for_repair() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let invalid = "version: 1\nblocks: {main: {components: {U1: {part: No:Such}}}}";
+
+    let out = run_tool("edit_design", serde_json::json!({ "yaml": invalid }), &ctx).unwrap();
+
+    assert_eq!(out["ok"], false, "{out}");
+    assert_eq!(out["draft_written"], true, "{out}");
+    assert_eq!(out["draft_changed"], true, "{out}");
+    assert_eq!(
+        ctx.workspace().read_draft().unwrap().as_deref(),
+        Some(invalid)
     );
 }
 

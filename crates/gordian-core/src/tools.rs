@@ -162,12 +162,12 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "edit_design".into(),
-                description: "Edit draft and return validation: full yaml, or one exact old_string/new_string patch."
+                description: "Create/replace draft from full yaml; patch mode needs an existing draft."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "yaml": { "type": "string", "description": "Full replacement." },
+                        "yaml": { "type": "string", "description": "Full create/replacement." },
                         "old_string": { "type": "string" },
                         "new_string": { "type": "string" },
                         "replace_all": { "type": "boolean" }
@@ -901,11 +901,7 @@ fn design_state_summary(design: &Design) -> Value {
 /// schematic. Treating it as clean lets an early/speculative `apply_design`
 /// replace a real project with an empty sheet while still reporting ERC 0/0.
 fn add_empty_design_error(report: &mut Value, design: &Design) -> bool {
-    if design
-        .blocks
-        .values()
-        .any(|block| !block.components.is_empty())
-    {
+    if !design_is_empty(design) {
         return false;
     }
 
@@ -923,6 +919,13 @@ fn add_empty_design_error(report: &mut Value, design: &Design) -> bool {
         "replace the empty draft with the complete circuit; an empty schematic cannot be applied"
     );
     true
+}
+
+fn design_is_empty(design: &Design) -> bool {
+    design
+        .blocks
+        .values()
+        .all(|block| block.components.is_empty())
 }
 
 /// Returns `true` when at least one incompatible assignment was found.
@@ -1412,39 +1415,64 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .get("overwrite")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if ctx.workspace().read_draft()?.is_some() && !overwrite {
+    let prior_draft = ctx.workspace().read_draft()?;
+    let draft_exists = prior_draft.is_some();
+    if draft_exists && !overwrite {
         return Ok(json!({
             "error": "a draft already exists — pass overwrite=true to replace it, \
                       or use edit_design to modify it",
+            "draft_changed": false,
         }));
+    }
+    let result = compile(&yaml, ctx.provider());
+    let mut report = compile_authoring_report(&result, ctx)?;
+    if reject_empty_draft_candidate(&mut report, &result, draft_exists, yaml.trim().is_empty()) {
+        return Ok(report);
     }
     ctx.workspace()
         .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
-    let result = compile(&yaml, ctx.provider());
-    let mut report = compile_authoring_report(&result, ctx)?;
     report["draft_written"] = json!(true);
+    report["draft_changed"] = json!(prior_draft.as_deref() != Some(yaml.as_str()));
     add_draft_next_step(&mut report);
     Ok(report)
 }
 
 fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let full_yaml = input.get("yaml").and_then(Value::as_str);
-    let Some(draft) = ctx.workspace().read_draft()? else {
-        return Ok(json!({
-            "error": "no draft exists — call read_schematic({source:\"draft\"}) (seeds a draft from the \
-                      current schematic) or create_design first",
-        }));
-    };
     if let Some(yaml) = full_yaml {
-        ctx.workspace()
-            .write_draft(yaml, current_sch_text(ctx).as_deref())?;
+        let prior_draft = ctx.workspace().read_draft()?;
+        let draft_exists = prior_draft.is_some();
         let result = compile(yaml, ctx.provider());
         let mut report = compile_authoring_report(&result, ctx)?;
+        if reject_empty_draft_candidate(&mut report, &result, draft_exists, yaml.trim().is_empty())
+        {
+            report["mode"] = json!(if draft_exists {
+                "full_replace"
+            } else {
+                "full_create"
+            });
+            return Ok(report);
+        }
+        ctx.workspace()
+            .write_draft(yaml, current_sch_text(ctx).as_deref())?;
         report["draft_written"] = json!(true);
-        report["mode"] = json!("full_replace");
+        report["draft_changed"] = json!(prior_draft.as_deref() != Some(yaml));
+        report["mode"] = json!(if draft_exists {
+            "full_replace"
+        } else {
+            "full_create"
+        });
         add_draft_next_step(&mut report);
         return Ok(report);
     }
+
+    let Some(draft) = ctx.workspace().read_draft()? else {
+        return Ok(json!({
+            "error": "no draft exists — patch mode requires one; pass a complete yaml to edit_design \
+                      to create it, or call read_schematic({source:\"draft\"}) to seed from the current schematic",
+            "draft_changed": false,
+        }));
+    };
 
     let old = require_str(&input, "old_string")?;
     let new = require_str(&input, "new_string")?;
@@ -1479,8 +1507,46 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let result = compile(&edited, ctx.provider());
     let mut report = compile_authoring_report(&result, ctx)?;
     report["replacements"] = json!(if replace_all { count } else { 1 });
+    report["draft_changed"] = json!(edited != draft);
     add_draft_next_step(&mut report);
     Ok(report)
+}
+
+/// Prevent a speculative empty skeleton from becoming the working draft.
+/// Invalid but non-empty candidates remain writable so the model can repair
+/// them iteratively; a successfully compiled zero-component design (or blank
+/// input) has no useful repair anchor and must not replace prior work.
+fn reject_empty_draft_candidate(
+    report: &mut Value,
+    result: &circuit_lang::CompileResult,
+    draft_exists: bool,
+    blank_input: bool,
+) -> bool {
+    let empty_design = result.design.as_ref().is_some_and(design_is_empty);
+    if !blank_input && !empty_design {
+        return false;
+    }
+
+    if blank_input && !empty_design {
+        let errors = report.get("errors").and_then(Value::as_u64).unwrap_or(0) + 1;
+        report["ok"] = json!(false);
+        report["errors"] = json!(errors);
+        report["diagnostics"]
+            .as_array_mut()
+            .expect("compile_report diagnostics must be an array")
+            .push(json!(
+                "error[empty_design]: the draft has no components; author the complete requested circuit before saving it"
+            ));
+    }
+    report["draft_written"] = json!(false);
+    report["draft_changed"] = json!(false);
+    report["next_tool"] = json!("edit_design");
+    report["next"] = json!(if draft_exists {
+        "the empty candidate was rejected and the existing draft was preserved; send one complete non-empty replacement with edit_design({yaml: ...})"
+    } else {
+        "the empty candidate was rejected and no draft was written; send the complete non-empty circuit with edit_design({yaml: ...})"
+    });
+    true
 }
 
 fn add_draft_next_step(report: &mut Value) {
