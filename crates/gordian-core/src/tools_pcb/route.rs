@@ -147,7 +147,7 @@ fn escape_bottleneck(
         let c = p
             .pads
             .iter()
-            .filter_map(|(_, net)| net.as_deref())
+            .filter_map(|pad| pad.net.as_deref())
             .filter(|net| failed_nets.contains(net))
             .count();
         if c > 0 {
@@ -1174,6 +1174,7 @@ fn is_seed_placement(bounds: &pcb_model::Rect, parts: &[ImportedPart]) -> bool {
 #[cfg(test)]
 mod escape_bottleneck_tests {
     use super::*;
+    use kicad_ipc::snapshot::ImportedPad;
 
     fn part(reference: &str, footprint: &str, nets: &[(&str, &str)]) -> ImportedPart {
         ImportedPart {
@@ -1184,7 +1185,12 @@ mod escape_bottleneck_tests {
             locked: false,
             pads: nets
                 .iter()
-                .map(|(p, n)| (p.to_string(), Some(n.to_string())))
+                .map(|(p, n)| ImportedPad {
+                    number: p.to_string(),
+                    net: Some(n.to_string()),
+                    at: Point2 { x: 0.0, y: 0.0 },
+                    layers: vec![LayerRef::top()],
+                })
                 .collect(),
         }
     }

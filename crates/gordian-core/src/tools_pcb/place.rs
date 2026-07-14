@@ -6,7 +6,10 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use kicad_footprint::{Footprint, FootprintId, FootprintPad, PadTechnology};
-use kicad_ipc::{FootprintMove, snapshot::IpcBoardSnapshot};
+use kicad_ipc::{
+    FootprintMove,
+    snapshot::{ImportedPad, IpcBoardSnapshot},
+};
 use pcb_model::place::PartPad;
 use pcb_model::{LayerRef, ViaSpan};
 use pcb_place::placement::{
@@ -161,7 +164,7 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "x": part.at.x,
                 "y": part.at.y,
                 "rotation": part.rotation,
-                "pad_count": part.pads.iter().filter(|(_, net)| net.is_some()).count(),
+                "pad_count": part.pads.iter().filter(|pad| pad.net.is_some()).count(),
             })
         })
         .collect();
@@ -195,6 +198,13 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         board_json["copper"] = copper_json(&board, &input);
     }
+    if let Some(net) = input
+        .get("net")
+        .and_then(Value::as_str)
+        .filter(|net| !net.is_empty())
+    {
+        board_json["terminals"] = terminals_json(&board, net);
+    }
 
     Ok(json!({
         "board": board_json,
@@ -207,6 +217,35 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "routed": routed,
         },
     }))
+}
+
+const MAX_FILTERED_TERMINALS: usize = 128;
+
+fn terminals_json(board: &IpcBoardSnapshot, net: &str) -> Value {
+    let matching = board.imported.parts.iter().flat_map(|part| {
+        part.pads
+            .iter()
+            .filter_map(move |pad| (pad.net.as_deref() == Some(net)).then_some((part, pad)))
+    });
+    let total = matching.clone().count();
+    let items: Vec<Value> = matching
+        .take(MAX_FILTERED_TERMINALS)
+        .map(|(part, pad)| {
+            json!({
+                "ref": part.reference,
+                "pad": pad.number,
+                "net": net,
+                "x": pad.at.x,
+                "y": pad.at.y,
+                "layers": pad.layers.iter().map(|layer| layer_name(layer, board.problem.layer_count)).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    json!({
+        "items": items,
+        "count": total,
+        "truncated": total > MAX_FILTERED_TERMINALS,
+    })
 }
 
 fn copper_json(board: &IpcBoardSnapshot, input: &Value) -> Value {
@@ -344,8 +383,8 @@ fn via_span_indices(span: &ViaSpan, layer_count: u32) -> Vec<u32> {
 fn snapshot_net_pin_counts(board: &IpcBoardSnapshot) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for part in &board.imported.parts {
-        for (_, net) in &part.pads {
-            if let Some(net) = net {
+        for pad in &part.pads {
+            if let Some(net) = &pad.net {
                 *counts.entry(net.clone()).or_insert(0) += 1;
             }
         }
@@ -399,9 +438,13 @@ pub(super) fn place_problem_from_snapshot(
     })
 }
 
-fn pad_net_map(pads: &[(String, Option<String>)]) -> BTreeMap<String, String> {
+fn pad_net_map(pads: &[ImportedPad]) -> BTreeMap<String, String> {
     pads.iter()
-        .filter_map(|(pad, net)| net.as_ref().map(|net| (pad.clone(), net.clone())))
+        .filter_map(|pad| {
+            pad.net
+                .as_ref()
+                .map(|net| (pad.number.clone(), net.clone()))
+        })
         .collect()
 }
 
@@ -696,7 +739,7 @@ mod tests {
     use geom::Point2;
     use kicad_env::KicadEnv;
     use kicad_footprint::{FootprintCatalog, PadTechnology};
-    use kicad_ipc::snapshot::{ImportedBoard, IpcBoardSnapshot};
+    use kicad_ipc::snapshot::{ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot};
     use pcb_model::{RouteProblem, RouteSolution, Trace, Via};
 
     #[test]
@@ -827,6 +870,75 @@ mod tests {
         );
         assert_eq!(tracks_only["track_count"], json!(2));
         assert_eq!(tracks_only["via_count"], json!(0));
+    }
+
+    #[test]
+    fn filtered_terminals_report_electrical_pad_anchors() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 20.0,
+                max_y: 20.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+        let board = IpcBoardSnapshot {
+            imported: ImportedBoard {
+                layer_count: 2,
+                bounds: problem.bounds,
+                parts: vec![ImportedPart {
+                    reference: "U1".to_owned(),
+                    lib_id: "Package:Test".to_owned(),
+                    at: Point2::new(10.0, 10.0),
+                    rotation: 0,
+                    locked: false,
+                    pads: vec![
+                        ImportedPad {
+                            number: "A4".to_owned(),
+                            net: Some("VBUS".to_owned()),
+                            at: Point2::new(8.75, 9.5),
+                            layers: vec![LayerRef::top()],
+                        },
+                        ImportedPad {
+                            number: "A6".to_owned(),
+                            net: Some("D+".to_owned()),
+                            at: Point2::new(8.75, 10.0),
+                            layers: vec![LayerRef::top()],
+                        },
+                    ],
+                }],
+                placement_keepouts: vec![],
+                keepout_count: 0,
+            },
+            problem,
+            copper: RouteSolution {
+                traces: vec![],
+                vias: vec![],
+            },
+            net_codes: Default::default(),
+            layer_names: vec!["F.Cu".to_owned(), "B.Cu".to_owned()],
+        };
+
+        let out = terminals_json(&board, "VBUS");
+
+        assert_eq!(out["count"], json!(1));
+        assert_eq!(out["truncated"], json!(false));
+        assert_eq!(out["items"][0]["ref"], json!("U1"));
+        assert_eq!(out["items"][0]["pad"], json!("A4"));
+        assert_eq!(out["items"][0]["x"], json!(8.75));
+        assert_eq!(out["items"][0]["y"], json!(9.5));
+        assert_eq!(out["items"][0]["layers"], json!(["F.Cu"]));
     }
 
     #[test]

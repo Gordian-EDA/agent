@@ -67,7 +67,17 @@ pub struct ImportedPart {
     pub at: Point2,
     pub rotation: i32,
     pub locked: bool,
-    pub pads: Vec<(String, Option<String>)>,
+    pub pads: Vec<ImportedPad>,
+}
+
+/// A footprint terminal recovered from the live board.
+#[derive(Debug, Clone)]
+pub struct ImportedPad {
+    pub number: String,
+    pub net: Option<String>,
+    /// Electrical anchor in board coordinates (not an offset copper-shape center).
+    pub at: Point2,
+    pub layers: Vec<LayerRef>,
 }
 
 impl IpcBoardSnapshot {
@@ -108,7 +118,7 @@ impl IpcBoardSnapshot {
                             number: part
                                 .pads
                                 .get(idx)
-                                .map(|(n, _)| n.clone())
+                                .map(|pad| pad.number.clone())
                                 .unwrap_or_else(|| (idx + 1).to_string()),
                             offset: Point2 {
                                 x: ob.center.x - part.at.x,
@@ -350,7 +360,12 @@ impl SnapshotBuilder {
                             layer: layers.first().cloned().unwrap_or_else(LayerRef::top),
                         });
                 }
-                pads.push((pad.number, net));
+                pads.push(ImportedPad {
+                    number: pad.number,
+                    net,
+                    at: terminal,
+                    layers,
+                });
             }
         }
         self.parts.push(ImportedPart {

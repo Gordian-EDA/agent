@@ -442,7 +442,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "get_board".into(),
-                description: "Return live board state; optionally filtered copper geometry."
+                description: "Return board state. A net filter adds pad centers; include_copper adds copper."
                     .into(),
                 input_schema: json!({
                     "type": "object",
