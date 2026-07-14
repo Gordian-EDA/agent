@@ -63,13 +63,13 @@ pub fn tool_defs() -> Vec<Tool> {
     let defs = vec![
             Def {
                 name: "search_symbols".into(),
-                description: "Find `Lib:Name`; batch up to 4 searches with queries and reuse hits. Built-ins: Device:R/C/LED, power:GND/+3V3, Connector:Conn_01x02_Pin..01x06_Pin."
+                description: "Find symbol `Lib:Name`; batch up to 4 queries. Common parts are built in."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "query": { "type": "string" },
-                        "limit": { "type": "integer", "description": "Max hits (default 5).", "minimum": 1 },
+                        "limit": { "type": "integer", "minimum": 1 },
                         "queries": {
                             "type": "array", "minItems": 1, "maxItems": 4,
                             "items": {
@@ -162,7 +162,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "create_design".into(),
-                description: "Create one complete user-requested circuit-YAML draft; never copy the incomplete prompt example. Returns validation; overwrite=true replaces one."
+                description: "Create complete circuit-YAML; never copy the example."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -190,13 +190,13 @@ pub fn tool_defs() -> Vec<Tool> {
             // ── PCB tools (slice 5) ─────────────────────────────────────────
             Def {
                 name: "search_footprints".into(),
-                description: "Find real footprint `Lib:Name` ids before apply_design; batch up to 4 searches with queries and reuse hits."
+                description: "Find real footprint `Lib:Name` ids; batch up to 4 queries."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "query": { "type": "string" },
-                        "limit": { "type": "integer", "description": "Max hits (default 5).", "minimum": 1 },
+                        "limit": { "type": "integer", "minimum": 1 },
                         "queries": {
                             "type": "array", "minItems": 1, "maxItems": 4,
                             "items": {
@@ -265,7 +265,6 @@ pub fn tool_defs() -> Vec<Tool> {
                     "properties": {
                         "moves": {
                             "type": "array",
-                            "description": "Sequential moves; one movement mode per item.",
                             "minItems": 1,
                             "items": {
                                 "type": "object",
@@ -273,25 +272,23 @@ pub fn tool_defs() -> Vec<Tool> {
                                     "reference": { "type": "string" },
                                     "to": {
                                         "type": "array",
-                                        "description": "Absolute [x,y] mm.",
                                         "items": { "type": "number" },
                                         "minItems": 2,
                                         "maxItems": 2
                                     },
                                     "by": {
                                         "type": "array",
-                                        "description": "Relative [dx,dy] mm.",
                                         "items": { "type": "number" },
                                         "minItems": 2,
                                         "maxItems": 2
                                     },
-                                    "near": { "type": "string", "description": "Target refdes." },
+                                    "near": { "type": "string" },
                                     "side": { "type": "string", "enum": ["left", "right", "above", "below"] },
                                     "edge": { "type": "string", "enum": ["left", "right", "top", "bottom"] },
-                                    "gap": { "type": "number", "description": "near/edge gap, mm." },
-                                    "rotation": { "type": "number", "description": "Absolute degrees." },
-                                    "horizontal_offset": { "type": "number", "description": "mm; +right." },
-                                    "vertical_offset": { "type": "number", "description": "mm; +down." }
+                                    "gap": { "type": "number" },
+                                    "rotation": { "type": "number" },
+                                    "horizontal_offset": { "type": "number" },
+                                    "vertical_offset": { "type": "number" }
                                 },
                                 "required": ["reference"]
                             }
@@ -312,22 +309,19 @@ pub fn tool_defs() -> Vec<Tool> {
                             "items": {"type":"number"},
                             "minItems": 2,
                             "maxItems": 2,
-                            "description": "Start [x,y] mm."
                         },
                         "to": {
                             "type": "array",
                             "items": {"type":"number"},
                             "minItems": 2,
                             "maxItems": 2,
-                            "description": "End [x,y] mm."
                         },
                         "net": { "type": "string" },
                         "from_layer": { "type": "string", "description": "F.Cu/B.Cu/In1.Cu/top/bottom; default F.Cu." },
-                        "to_layer": { "type": "string", "description": "Same forms; default from_layer." },
-                        "width": { "type": "number", "description": "mm; default net width." },
+                        "to_layer": { "type": "string" },
+                        "width": { "type": "number" },
                         "vias": {
                             "type": "array",
-                            "description": "Anchors changing current layer to to_layer.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -430,7 +424,6 @@ pub fn tool_defs() -> Vec<Tool> {
                     "properties": {
                         "bounds": {
                             "type": "object",
-                            "description": "Outline rectangle, mm.",
                             "properties": {
                                 "min_x": { "type": "number" }, "max_x": { "type": "number" },
                                 "min_y": { "type": "number" }, "max_y": { "type": "number" }
@@ -438,7 +431,6 @@ pub fn tool_defs() -> Vec<Tool> {
                         },
                         "rules": {
                             "type": "object",
-                            "description": "Copper rules (mm). Pours: top/bottom/innerN; 6+ layers default GND/V3V3.",
                             "properties": {
                                 "layer_count": { "type": "integer", "enum": [2, 4, 6, 8] },
                                 "clearance": { "type": "number" },
@@ -455,8 +447,8 @@ pub fn tool_defs() -> Vec<Tool> {
                                         "type": "object",
                                         "properties": {
                                             "net": { "type": "string" },
-                                            "layer": { "type": "string", "description": "top, bottom, or innerN" },
-                                            "connect": { "type": "string", "enum": ["thermal", "solid"], "description": "Pad attachment; default thermal." }
+                                            "layer": { "type": "string" },
+                                            "connect": { "type": "string", "enum": ["thermal", "solid"] }
                                         },
                                         "required": ["net", "layer"]
                                     }
