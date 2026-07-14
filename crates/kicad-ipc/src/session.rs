@@ -192,9 +192,48 @@ impl Session {
                 return Err(err);
             }
         };
-        if let Err(err) = kicad.open_board_path(board) {
-            cleanup_launch(&mut child, xvfb);
-            return Err(err);
+        // The API socket becomes reachable before pcbnew necessarily registers
+        // the requested document. Poll that second readiness boundary instead
+        // of turning a normal startup race into a spurious `NoBoard` failure.
+        let document_deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match kicad.open_board_path(board) {
+                Ok(()) => break,
+                Err(err)
+                    if matches!(err, Error::NoBoard)
+                        || err.is_transient_api_ready_error()
+                        || err.is_transport_timeout() =>
+                {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            cleanup_launch(&mut child, xvfb);
+                            return Err(Error::Spawn(format!(
+                                "pcbnew exited with {status} before opening {}",
+                                board.display()
+                            )));
+                        }
+                        Ok(None) => {}
+                        Err(wait_err) => {
+                            cleanup_launch(&mut child, xvfb);
+                            return Err(Error::Spawn(format!(
+                                "checking pcbnew readiness: {wait_err}"
+                            )));
+                        }
+                    }
+                    if Instant::now() >= document_deadline {
+                        cleanup_launch(&mut child, xvfb);
+                        return Err(Error::Spawn(format!(
+                            "timed out waiting for pcbnew to open {}: {err}",
+                            board.display()
+                        )));
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(err) => {
+                    cleanup_launch(&mut child, xvfb);
+                    return Err(err);
+                }
+            }
         }
         kicad.use_default_timeouts();
         std::thread::sleep(Duration::from_millis(1_500));
