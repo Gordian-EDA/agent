@@ -81,6 +81,11 @@ const MAX_CONSECUTIVE_NO_PROGRESS_COMPLETIONS: usize = 3;
 /// calls and still costs that tool only one round.
 const MAX_DISCOVERY_ROUNDS_PER_SUBTURN: usize = 2;
 
+/// A model can batch dozens of near-duplicate catalog queries into one
+/// completion. Bound the actually dispatched fan-out so one speculative batch
+/// cannot flood history with hundreds of low-value hits.
+const MAX_DISCOVERY_CALLS_PER_COMPLETION: usize = 4;
+
 /// The human mutation gate. The loop calls [`Approvals::approve`] with either a
 /// dry-run preview or a structured immediate-operation proposal; returning
 /// `false` prevents the mutation.
@@ -646,9 +651,7 @@ impl<P: Provider> Agent<P> {
                 self.runtime.sch_path().exists(),
             );
             if !runtime_supports_live_footprint_moves(&self.runtime) {
-                defs.retain(|def| {
-                    !matches!(def.name.as_str(), "move_parts" | "set_net_width")
-                });
+                defs.retain(|def| !matches!(def.name.as_str(), "move_parts" | "set_net_width"));
             }
 
             // Drive the provider's stream so assistant prose renders token-by-token
@@ -809,6 +812,8 @@ impl<P: Provider> Agent<P> {
             let mut authoring_dispatched_this_completion = false;
             let mut apply_dispatched_this_completion = false;
             let mut non_authoring_state_changed_this_completion = false;
+            let mut discovery_calls_dispatched_this_completion: HashMap<String, usize> =
+                HashMap::new();
             for call in &tool_calls {
                 let effect = tool_effect(&call.fn_name);
                 let gated_commit = effect == ToolEffect::Gated && wants_apply(call);
@@ -827,6 +832,12 @@ impl<P: Provider> Agent<P> {
                     timed_out_retry_blocked(&timed_out_tool_calls, call, tool_state_revision);
                 let discovery_budget_blocked =
                     discovery_tools_blocked.contains(call.fn_name.as_str());
+                let discovery_batch_budget_blocked = is_discovery_tool(&call.fn_name)
+                    && discovery_calls_dispatched_this_completion
+                        .get(&call.fn_name)
+                        .copied()
+                        .unwrap_or(0)
+                        >= MAX_DISCOVERY_CALLS_PER_COMPLETION;
                 let duplicate_board_read_blocked =
                     call.fn_name == "get_board" && board_read_dispatched_this_completion;
                 let revision_read_budget_blocked = is_revision_scoped_read(&call.fn_name)
@@ -848,6 +859,7 @@ impl<P: Provider> Agent<P> {
                 let dispatched = !route_retry_blocked
                     && !timeout_retry_blocked
                     && !discovery_budget_blocked
+                    && !discovery_batch_budget_blocked
                     && !duplicate_board_read_blocked
                     && !revision_read_budget_blocked
                     && !run_erc_without_schematic
@@ -948,6 +960,19 @@ impl<P: Provider> Agent<P> {
                         Vec::new(),
                         None,
                     )
+                } else if discovery_batch_budget_blocked {
+                    (
+                        json!({
+                            "error": "discovery call batch budget exhausted",
+                            "code": "discovery_batch_budget_exhausted",
+                            "tool": call.fn_name,
+                            "calls_allowed_per_completion": MAX_DISCOVERY_CALLS_PER_COMPLETION,
+                            "note": "Reuse the catalog hits already returned by this completion. Continue authoring, or make one materially different follow-up search in the next completion.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
                 } else if timeout_retry_blocked {
                     (
                         json!({
@@ -974,6 +999,11 @@ impl<P: Provider> Agent<P> {
                     )
                 } else {
                     tool_calls_made += 1;
+                    if is_discovery_tool(&call.fn_name) {
+                        *discovery_calls_dispatched_this_completion
+                            .entry(call.fn_name.clone())
+                            .or_default() += 1;
+                    }
                     if is_authoring_for_commit(&call.fn_name) {
                         authoring_dispatched_this_completion = true;
                     }
@@ -1129,6 +1159,18 @@ impl<P: Provider> Agent<P> {
                     consecutive_no_progress_completions += 1;
                 }
                 if consecutive_no_progress_completions >= MAX_CONSECUTIVE_NO_PROGRESS_COMPLETIONS {
+                    let clean_draft_waiting_for_commit = draft_dirty
+                        && !commit_attempted_for_current_draft
+                        && latest_authoring_diagnostics
+                            .as_ref()
+                            .and_then(|state| state.errors)
+                            == Some(0);
+                    if clean_draft_waiting_for_commit && nudges_left > 0 {
+                        nudges_left -= 1;
+                        consecutive_no_progress_completions = 0;
+                        self.history.push(ChatMessage::user(COMMIT_NUDGE));
+                        continue;
+                    }
                     let current_applied = applied && !draft_dirty;
                     let final_text = no_progress_final_text(
                         consecutive_no_progress_completions,
@@ -3245,6 +3287,52 @@ mod tests {
             after_fifth_round["project-after-all"]["code"], "discovery_budget_exhausted",
             "a non-discovery call in the same completion must dispatch"
         );
+    }
+
+    #[tokio::test]
+    async fn one_completion_cannot_flood_history_with_discovery_calls() {
+        let calls = (0..6)
+            .map(|idx| {
+                (
+                    format!("search-{idx}"),
+                    "search_symbols".to_owned(),
+                    json!({"query": format!("part-{idx}")}),
+                )
+            })
+            .collect::<Vec<_>>();
+        let borrowed = calls
+            .iter()
+            .map(|(id, name, args)| (id.as_str(), name.as_str(), args.clone()))
+            .collect::<Vec<_>>();
+        let script = vec![
+            batched_tool_calls(&borrowed),
+            final_text("continued with bounded catalog results"),
+        ];
+        let (client, seen) = ScriptedClient::recording(script);
+        let mut agent = Agent::new(client, test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn("search efficiently", &mut approvals, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.tool_calls_made, MAX_DISCOVERY_CALLS_PER_COMPLETION);
+        let requests = seen.lock().unwrap();
+        let results = tool_results(&requests[1]);
+        for idx in 0..MAX_DISCOVERY_CALLS_PER_COMPLETION {
+            assert_ne!(
+                results[&format!("search-{idx}")]["code"],
+                "discovery_batch_budget_exhausted"
+            );
+        }
+        for idx in MAX_DISCOVERY_CALLS_PER_COMPLETION..6 {
+            assert_eq!(
+                results[&format!("search-{idx}")]["code"],
+                "discovery_batch_budget_exhausted"
+            );
+        }
     }
 
     #[tokio::test]
