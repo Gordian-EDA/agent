@@ -162,7 +162,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "edit_design".into(),
-                description: "Full YAML; part loss needs allow_component_removal. Patch to delete."
+                description: "Choose exactly one mode: full replacement with `yaml`, or exact text patch with both `old_string` and `new_string`. Part loss in full replacement needs allow_component_removal."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -172,7 +172,21 @@ pub fn tool_defs() -> Vec<Tool> {
                         "old_string": { "type": "string" },
                         "new_string": { "type": "string" },
                         "replace_all": { "type": "boolean" }
-                    }
+                    },
+                    "oneOf": [
+                        {
+                            "required": ["yaml"],
+                            "not": {"anyOf": [
+                                {"required": ["old_string"]},
+                                {"required": ["new_string"]}
+                            ]}
+                        },
+                        {
+                            "required": ["old_string", "new_string"],
+                            "not": {"required": ["yaml"]}
+                        }
+                    ],
+                    "additionalProperties": false
                 }),
             },
             // ── PCB tools (slice 5) ─────────────────────────────────────────
