@@ -12,8 +12,9 @@ use kicad_ipc::snapshot::ImportedPart;
 use negotiated_mesh::copper::copper_obstacles;
 use negotiated_mesh::pathing::{GlobalRouteResult, global_route};
 use negotiated_mesh::pipeline::{
-    RouteEngineAttempt, prepare_wide_terminal_escapes, route_auto_with_diagnostics,
-    route_mesh_with_diagnostics, route_sequential_with_diagnostics, select_best,
+    RouteEngineAttempt, postroute_cleanup, prepare_wide_terminal_escapes,
+    route_auto_with_diagnostics, route_mesh_with_diagnostics, route_sequential_with_diagnostics,
+    select_best,
 };
 use pcb_model::{
     FailedNet, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult, RouteSolution, Trace,
@@ -197,6 +198,7 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     let dropped_failed = drop_failed_net_copper(&mut result);
     let failed = failed_connections(&result);
     add_terminal_stubs(&routing_subproblem, &mut result.solution, &failed);
+    postroute_cleanup(&rp, &mut result.solution);
     let original_solution = result.solution.clone();
     let mut pruned_spurs = prune_dangling_spurs_if_safe(&rp, &mut result);
     let plane_nets = rp.plane_nets.keys().cloned().collect();
@@ -1522,6 +1524,7 @@ mod escape_bottleneck_tests {
         assert!(apply_direct_rescue_fallback(&routing_problem, &mut result));
         result.solution.traces.extend(escapes.traces);
         result.solution.vias.extend(escapes.vias);
+        postroute_cleanup(&original, &mut result.solution);
         assert!(
             lint(&original, &result.solution)
                 .into_iter()

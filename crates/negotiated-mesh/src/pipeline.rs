@@ -1787,7 +1787,7 @@ fn adaptive_rescue_order_with_metrics(
 /// Freerouter-style postroute cleanup for selected copper: drop redundant vias,
 /// merge degree-2 same-net trace fragments, then pull local trace corners tight
 /// when the exact DRC/connectivity oracle says the shortcut is equivalent.
-fn postroute_cleanup(problem: &RouteProblem, solution: &mut RouteSolution) {
+pub fn postroute_cleanup(problem: &RouteProblem, solution: &mut RouteSolution) {
     drop_redundant_thruhole_vias(problem, solution);
     crate::via_cleanup::normalize_redundant_vias(problem, solution);
     drop_dangling_vias(problem, solution);
