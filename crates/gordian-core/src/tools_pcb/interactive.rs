@@ -433,28 +433,21 @@ fn rotation_swaps_extents(from: f64, to: f64) -> bool {
 
 /// Route a single live-board connection with grid-A* obstacle avoidance.
 pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let path = ctx.pcb_path();
-    let prepared = ctx.kicad().with_session(&path, |session| {
-        // KiCad 9.0.2 can apply CreateItems but time out before acknowledging
-        // the commit, leaving route_track unable to tell whether retrying would
-        // duplicate copper. Use IPC only for the read, then commit offline.
-        let snapshot = session.kicad().board_snapshot()?;
-        let request = match parse_route_track_request(&input, &snapshot.problem) {
-            Ok(request) => request,
-            Err(err) => return Ok(Err(err)),
-        };
-        let (problem, solution) = match manual_route_solution(&snapshot.problem, &request) {
-            Ok(route) => route,
-            Err(err) => return Ok(Err(err)),
-        };
-        Ok(Ok((problem, solution, request, snapshot.layer_names)))
+    // KiCad 9.0.2 can apply CreateItems but time out before acknowledging the
+    // commit, leaving route_track unable to tell whether retrying would
+    // duplicate copper. Use the resilient, read-only snapshot path (including
+    // its timeout reconnect) and then commit offline.
+    let prepared = super::active::board_problem(ctx).and_then(|snapshot| {
+        let request = parse_route_track_request(&input, &snapshot.problem)?;
+        let (problem, solution) = manual_route_solution(&snapshot.problem, &request)?;
+        Ok((problem, solution, request, snapshot.layer_names))
     });
     // The managed pcbnew process must not retain stale in-memory board state
     // while the file is replaced. Close on every result, including parse and
     // routing failures, so the next board tool reopens the current file.
     ctx.close_kicad_session();
     match prepared {
-        Ok(Ok((problem, solution, request, layer_names))) => {
+        Ok((problem, solution, request, layer_names)) => {
             if let Err(err) =
                 super::route::write_route_offline(ctx, &problem, &solution, &layer_names)
             {
@@ -464,8 +457,7 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
             Ok(route_track_output(&problem, &solution, &request))
         }
-        Ok(Err(err)) => Ok(json!({ "error": err })),
-        Err(e) => Ok(json!({ "error": e.to_string() })),
+        Err(err) => Ok(json!({ "error": err })),
     }
 }
 
