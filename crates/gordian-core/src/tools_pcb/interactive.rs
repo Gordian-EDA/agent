@@ -48,6 +48,10 @@ pub fn open_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
 pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
     match ctx.kicad().with_session(&path, |session| {
+        // KiCad 9.0.0–9.0.2 cannot safely update footprint instances. Check
+        // that capability before the much heavier multi-request snapshot so an
+        // unsupported installation fails promptly instead of looking wedged.
+        session.kicad().ensure_footprint_update_supported()?;
         let snapshot = session.kicad().board_snapshot()?;
         let mut board = MoveBoard::from_snapshot(&snapshot);
         let plan = match resolve_move_parts(&input, &mut board) {

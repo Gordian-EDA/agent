@@ -564,6 +564,12 @@ impl<P: Provider> Agent<P> {
 
         let mut applied = false;
         let mut tool_calls_made = 0usize;
+        // `applied` deliberately means "committed in this turn", but bounded
+        // stop messages must also recognize a draft that was already synced to
+        // the current schematic when a continuation turn began.
+        let draft_committed_at_turn_start = std::fs::read_to_string(self.runtime.sch_path())
+            .ok()
+            .is_some_and(|sch| !self.runtime.workspace().draft_is_stale(Some(&sch)));
         // A commit earlier in the turn does not make later draft edits committed.
         // Track the current draft separately so a partial post-commit rewrite
         // cannot be reported as shipped merely because `applied` is sticky.
@@ -603,7 +609,7 @@ impl<P: Provider> Agent<P> {
                 let current_applied = applied && !draft_dirty;
                 let final_text = provider_limit_final_text(
                     None,
-                    current_applied,
+                    !draft_dirty && (applied || draft_committed_at_turn_start),
                     tool_calls_made,
                     last_tool_status.as_deref(),
                 );
@@ -632,13 +638,16 @@ impl<P: Provider> Agent<P> {
                 .filter(|(_, revision)| **revision == tool_state_revision)
                 .map(|(name, _)| name.clone())
                 .collect::<HashSet<_>>();
-            let defs = tool_defs_for_phase(
+            let mut defs = tool_defs_for_phase(
                 self.tool_phase,
                 &discovery_rounds_used,
                 draft_existed_before_completion,
                 &revision_reads_used,
                 self.runtime.sch_path().exists(),
             );
+            if !runtime_supports_live_footprint_moves(&self.runtime) {
+                defs.retain(|def| def.name.as_str() != "move_parts");
+            }
 
             // Drive the provider's stream so assistant prose renders token-by-token
             // (each chunk forwarded as `AssistantDelta`), while the terminal End
@@ -667,7 +676,7 @@ impl<P: Provider> Agent<P> {
                         let current_applied = applied && !draft_dirty;
                         let final_text = provider_limit_final_text(
                             (!text.trim().is_empty()).then_some(text.as_str()),
-                            current_applied,
+                            !draft_dirty && (applied || draft_committed_at_turn_start),
                             tool_calls_made,
                             last_tool_status.as_deref(),
                         );
@@ -1086,7 +1095,7 @@ impl<P: Provider> Agent<P> {
                 let current_applied = applied && !draft_dirty;
                 let final_text = mutation_timeout_final_text(
                     tool,
-                    current_applied,
+                    !draft_dirty && (applied || draft_committed_at_turn_start),
                     tool_calls_made,
                     last_tool_status.as_deref(),
                 );
@@ -1121,7 +1130,7 @@ impl<P: Provider> Agent<P> {
                     let current_applied = applied && !draft_dirty;
                     let final_text = no_progress_final_text(
                         consecutive_no_progress_completions,
-                        current_applied,
+                        !draft_dirty && (applied || draft_committed_at_turn_start),
                         tool_calls_made,
                         last_tool_status.as_deref(),
                         latest_authoring_diagnostics.as_ref(),
@@ -1636,6 +1645,23 @@ fn file_content_hash(path: &std::path::Path) -> Option<u64> {
     Some(bytes.into_iter().fold(0xcbf29ce484222325, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
     }))
+}
+
+fn runtime_supports_live_footprint_moves(runtime: &AgentRuntime) -> bool {
+    version_supports_live_footprint_moves(&runtime.env().cli_version)
+}
+
+fn version_supports_live_footprint_moves(version: &str) -> bool {
+    let mut parts = version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u32>().ok());
+    let Some(major) = parts.next() else {
+        return true;
+    };
+    let minor = parts.next().unwrap_or(0);
+    let patch = parts.next().unwrap_or(0);
+    kicad_ipc::footprint_update_supported(major, minor, patch)
 }
 
 /// Return whether a committed apply has ERC findings the model can act on.
@@ -3040,6 +3066,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn continuation_watchdog_reports_an_already_synced_draft_as_committed() {
+        let runtime = test_runtime();
+        let schematic = "already committed schematic";
+        std::fs::write(runtime.sch_path(), schematic).unwrap();
+        runtime
+            .workspace()
+            .write_draft("version: 1\nname: existing\n", Some(schematic))
+            .unwrap();
+        let script = vec![
+            tool_call("project-1", "project_info", json!({})),
+            tool_call("project-2", "project_info", json!({})),
+            tool_call("project-3", "project_info", json!({})),
+        ];
+        let client = ScriptedClient::new(script);
+        let mut agent = Agent::new(client, runtime, "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn("inspect the existing project", &mut approvals, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::NoProgress { completions: 3 }
+        );
+        assert!(
+            !outcome.applied,
+            "the schematic was committed before this turn"
+        );
+        assert!(outcome.final_text.contains("current draft is committed"));
+    }
+
+    #[tokio::test]
     async fn discovery_only_completions_do_not_trip_no_progress_watchdog() {
         let mut script = discovery_script(4);
         script.push(final_text("selected the best discovery result"));
@@ -3651,6 +3711,15 @@ mod tests {
         let session = tool_timeout_message("route_board", Duration::from_secs(180));
         assert!(session.contains("KiCad dialogs"));
         assert!(session.contains("inspect project state"));
+    }
+
+    #[test]
+    fn unstable_kicad_versions_hide_live_footprint_moves() {
+        assert!(!version_supports_live_footprint_moves("9.0.2"));
+        assert!(!version_supports_live_footprint_moves("9.0.2+dfsg-1"));
+        assert!(version_supports_live_footprint_moves("9.0.3"));
+        assert!(version_supports_live_footprint_moves("10.0.0"));
+        assert!(version_supports_live_footprint_moves("unknown"));
     }
 
     #[test]

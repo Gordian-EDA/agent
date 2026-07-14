@@ -21,7 +21,7 @@ pub mod proto {
 pub mod session;
 pub mod snapshot;
 
-pub use client::Kicad;
+pub use client::{Kicad, footprint_update_supported};
 pub use edit::{FootprintMove, footprint_reference};
 pub use error::Error;
 pub use session::{Session, SessionManager};

@@ -158,7 +158,9 @@ impl Kicad {
         Ok((v.major, v.minor, v.patch, v.full_version))
     }
 
-    pub(crate) fn ensure_footprint_update_supported(&mut self) -> Result<(), Error> {
+    /// Fail before reading or editing board geometry when this KiCad version's
+    /// `FootprintInstance` updates are known to be unstable.
+    pub fn ensure_footprint_update_supported(&mut self) -> Result<(), Error> {
         let (major, minor, patch, full) = self.version()?;
         if !footprint_update_supported(major, minor, patch) {
             return Err(Error::Unsupported(format!(
@@ -170,7 +172,8 @@ impl Kicad {
     }
 }
 
-pub(crate) fn footprint_update_supported(major: u32, minor: u32, patch: u32) -> bool {
+/// Whether this KiCad release safely supports IPC footprint updates.
+pub fn footprint_update_supported(major: u32, minor: u32, patch: u32) -> bool {
     !(major == 9 && minor == 0 && patch <= 2)
 }
 
