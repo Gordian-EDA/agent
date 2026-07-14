@@ -1560,7 +1560,11 @@ fn tool_result_is_timeout(value: &Value) -> bool {
     value
         .get("error")
         .and_then(Value::as_str)
-        .is_some_and(|error| error.contains(" timed out after "))
+        .is_some_and(|error| {
+            let error = error.to_ascii_lowercase();
+            error.contains(" timed out after ")
+                || (error.contains("transport") && error.contains("timed out"))
+        })
 }
 
 fn next_tool_state_revision(
@@ -3632,6 +3636,9 @@ mod tests {
     fn timeout_detection_and_advice_are_tool_specific() {
         assert!(tool_result_is_timeout(&json!({
             "error": "apply_design timed out after 120s; still running"
+        })));
+        assert!(tool_result_is_timeout(&json!({
+            "error": "nng transport: Timed out"
         })));
         assert!(!tool_result_is_timeout(&json!({
             "error": "timed-out tool retry blocked at unchanged project state"
