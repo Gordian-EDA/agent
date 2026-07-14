@@ -1237,15 +1237,47 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(out)
 }
 
-pub(crate) fn schematic_placement_engine() -> Box<dyn sch_floorplan::contract::PlacementEngine> {
-    // The cluster engine is the DEFAULT: it runs the annealer, then a strictly-additive
+const SPINE_FALLBACK_PINS: usize = 34;
+
+pub(crate) fn default_schematic_placement_name(design: &Design) -> &'static str {
+    let pin_targets = design
+        .blocks
+        .values()
+        .flat_map(|block| block.components.values())
+        .map(|component| {
+            component.pins.len()
+                + component
+                    .units
+                    .values()
+                    .map(indexmap::IndexMap::len)
+                    .sum::<usize>()
+        })
+        .sum::<usize>();
+    if pin_targets > SPINE_FALLBACK_PINS {
+        "spine"
+    } else {
+        "cluster"
+    }
+}
+
+pub(crate) fn schematic_placement_engine_for(
+    design: &Design,
+) -> Box<dyn sch_floorplan::contract::PlacementEngine> {
+    // The cluster engine is the default for compact sheets: it runs the annealer, then a strictly-additive
     // pose+floorplanner pass (and the "modules between rails" idiom on power-IC arrays) that
     // PARETO-DOMINATES it. Full-dataset validation: of 40 liftable boards, 13 de-sprawl (the
     // gate-driver array 0cdac −84%) and ZERO regress on warnings/crossings/sprawl — it can only
-    // revert to the anneal result, never ship worse. `SCH_ENGINE=anneal` opts back to the bare SA.
-    match std::env::var("SCH_ENGINE").as_deref() {
-        Ok("anneal") | Ok("sa") => Box::new(anneal_place::Anneal),
-        Ok("spine") => Box::new(spine_place::SpinePlace),
+    // revert to the anneal result, never ship worse. Above the routed-search reference
+    // ceiling, use the bounded spine placer: cluster/anneal can spend minutes routing
+    // every search move, while spine retains deterministic legal output. An explicit
+    // `SCH_ENGINE` always wins for A/B and corpus work.
+    match std::env::var("SCH_ENGINE")
+        .ok()
+        .as_deref()
+        .unwrap_or_else(|| default_schematic_placement_name(design))
+    {
+        "anneal" | "sa" => Box::new(anneal_place::Anneal),
+        "spine" => Box::new(spine_place::SpinePlace),
         _ => Box::new(cluster_place::ClusterPlace),
     }
 }
