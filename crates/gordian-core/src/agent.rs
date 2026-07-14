@@ -1096,6 +1096,7 @@ impl<P: Provider> Agent<P> {
             let mut apply_dispatched_this_completion = false;
             let mut schematic_stage_ready_this_completion = false;
             let mut non_authoring_state_changed_this_completion = false;
+            let mut semantic_review_advanced_this_completion = false;
             let mut discovery_calls_dispatched_this_completion: HashMap<String, usize> =
                 HashMap::new();
             for call in &tool_calls {
@@ -1373,7 +1374,9 @@ impl<P: Provider> Agent<P> {
                         .await;
                     let review = parse_or_null(&review_content);
                     let review_clean = review_result_is_clean(&review);
-                    schematic_review_current = cacheable_review_result(&review);
+                    let cacheable_review = cacheable_review_result(&review);
+                    semantic_review_advanced_this_completion = cacheable_review.is_some();
+                    schematic_review_current = cacheable_review;
                     if review_clean {
                         tool_calls_made += 1;
                         apply_dispatched_this_completion = true;
@@ -1578,6 +1581,7 @@ impl<P: Provider> Agent<P> {
                 let durable_state =
                     durable_authoring_state(&self.runtime, latest_authoring_diagnostics.clone());
                 if non_authoring_state_changed_this_completion
+                    || semantic_review_advanced_this_completion
                     || durable_state != last_durable_authoring_state
                 {
                     last_durable_authoring_state = durable_state;
