@@ -44,6 +44,7 @@ use serde_json::{Value, json};
 use circuit_lang::compile;
 use circuit_lang::model::{Component, Design, PinTarget};
 use kicad_cli::{ErcReport, KicadCli};
+use kicad_footprint::FootprintId;
 use sch_io::read::lift;
 
 use crate::{AgentRuntime, Tool};
@@ -943,16 +944,51 @@ fn add_footprint_compatibility(
     design: &Design,
     ctx: &AgentRuntime,
 ) -> Result<bool> {
+    let catalog = ctx.footprint_catalog()?;
+    let mut lookup_errors = Vec::new();
+    for block in design.blocks.values() {
+        for (reference, component) in &block.components {
+            let Some(footprint) = component.footprint.as_deref() else {
+                continue;
+            };
+            let id = match FootprintId::parse(footprint) {
+                Ok(id) => id,
+                Err(error) => {
+                    lookup_errors.push(format!(
+                        "error[invalid_footprint]: {reference} uses invalid footprint id `{footprint}`: {error}"
+                    ));
+                    continue;
+                }
+            };
+            if let Err(error) = catalog.footprint(&id) {
+                let detail = if error.is_not_found() {
+                    let suggestions = catalog
+                        .suggest(&id)
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("unknown footprint `{footprint}`; suggestions: {suggestions}")
+                } else {
+                    format!("footprint `{footprint}` could not be read: {error}")
+                };
+                lookup_errors.push(format!(
+                    "error[unknown_footprint]: {reference} uses {detail}"
+                ));
+            }
+        }
+    }
     let mismatches = crate::footprint_compat::design_pin_mismatches(ctx, design)?;
-    if mismatches.is_empty() {
+    if lookup_errors.is_empty() && mismatches.is_empty() {
         return Ok(false);
     }
 
     let errors = report.get("errors").and_then(Value::as_u64).unwrap_or(0)
-        + u64::try_from(mismatches.len()).unwrap_or(u64::MAX);
+        + u64::try_from(lookup_errors.len() + mismatches.len()).unwrap_or(u64::MAX);
     let diagnostics = report["diagnostics"]
         .as_array_mut()
         .expect("compile_report diagnostics must be an array");
+    diagnostics.extend(lookup_errors.iter().cloned().map(Value::String));
     diagnostics.extend(mismatches.iter().map(|mismatch| {
         let polarity = mismatch
             .polarity_mismatch
@@ -976,7 +1012,7 @@ fn add_footprint_compatibility(
     report["footprint_pin_mismatches"] = serde_json::to_value(mismatches)?;
     report["next_tool"] = json!("edit_design");
     report["next"] = json!(
-        "choose a footprint whose named electrical pad numbers match the symbol pins and whose capacitor polarity matches the symbol, then apply_design; unnumbered mechanical pads and repeated pads with a valid shared number are allowed; use Device:C_Polarized (pin 1 positive) with polarized CP/C_Elec footprints, and Device:C with ordinary non-polarized capacitor footprints"
+        "choose an existing Library:Footprint whose named electrical pad numbers match the symbol pins and whose capacitor polarity matches the symbol, then apply_design; use search_footprints/get_footprint_info instead of guessing names; unnumbered mechanical pads and repeated pads with a valid shared number are allowed; use Device:C_Polarized (pin 1 positive) with polarized CP/C_Elec footprints, and Device:C with ordinary non-polarized capacitor footprints"
     );
     Ok(true)
 }

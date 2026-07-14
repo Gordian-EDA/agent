@@ -530,6 +530,33 @@ fn invalid_patch_preserves_a_valid_draft() {
 }
 
 #[test]
+fn authoring_rejects_guessed_or_unknown_footprint_ids() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    for footprint in [
+        "not_a_library_id",
+        "Resistor_SMD:Definitely_Not_A_Real_Package",
+    ] {
+        let yaml = format!(
+            "version: 1\nblocks: {{main: {{components: {{R1: {{part: Device:R, footprint: '{footprint}', pins: {{1: A, 2: GND}}}}}}}}}}"
+        );
+        let out = run_tool(
+            "edit_design",
+            serde_json::json!({ "yaml": yaml, "allow_component_removal": true }),
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(out["ok"], false, "{out}");
+        assert!(
+            out.to_string().contains("footprint"),
+            "the guessed assignment must be diagnosed: {out}"
+        );
+    }
+}
+
+#[test]
 fn nonempty_invalid_full_edit_still_persists_for_repair() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
