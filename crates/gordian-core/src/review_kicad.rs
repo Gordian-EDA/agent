@@ -410,7 +410,7 @@ fn has_selectable_address_strap(components: &[(&String, &circuit_lang::model::Co
                 let net = net.to_ascii_lowercase();
                 net.contains("addr")
                     || net.contains("address")
-                    || matches!(net.as_str(), "a0" | "a1" | "a2")
+                    || matches!(net.as_str(), "a0" | "a1" | "a2" | "sdo")
             })
     })
 }
@@ -1457,5 +1457,31 @@ blocks:
         );
 
         assert!(defects.is_empty(), "{}", defects.join("\n"));
+    }
+
+    #[test]
+    fn bme_sdo_jumper_satisfies_selectable_address_contract() {
+        let mut provider = circuit_lang::SymbolTable::with_basics();
+        provider.mock_add(
+            "Connector:Conn_01x02_Pin",
+            vec![
+                ("1", "Pin_1", circuit_lang::PinType::Passive, 1),
+                ("2", "Pin_2", circuit_lang::PinType::Passive, 1),
+            ],
+        );
+        let design = circuit_lang::compile(
+            r#"
+version: 1
+blocks:
+  main:
+    components:
+      JP1: {part: Connector:Conn_01x02_Pin, pins: {1: SDO, 2: GND}}
+"#,
+            &provider,
+        )
+        .design
+        .expect("fixture compiles");
+
+        assert!(intent_contract_checks("include a selectable address strap", &design).is_empty());
     }
 }
