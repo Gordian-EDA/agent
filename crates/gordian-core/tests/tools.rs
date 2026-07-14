@@ -14,6 +14,10 @@ use kicad_env::KicadEnv;
 const TINY_YAML: &str =
     "version: 1\nblocks: {main: {components: {R1: {part: Device:R, pins: {1: A, 2: GND}}}}}";
 
+fn seed_draft(ctx: &AgentRuntime, yaml: &str) {
+    ctx.workspace().write_draft(yaml, None).unwrap();
+}
+
 #[test]
 fn search_symbols_tool_finds_stm32() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
@@ -142,17 +146,13 @@ fn apply_preview_and_commit_include_design_state() {
         "net_names": ["A", "GND"],
     });
 
-    let preview = run_tool(
-        "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML }),
-        &ctx,
-    )
-    .unwrap();
+    seed_draft(&ctx, TINY_YAML);
+    let preview = run_tool("apply_design", serde_json::json!({}), &ctx).unwrap();
     assert_eq!(preview["design_state"], expected, "{preview}");
 
     let committed = run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
+        serde_json::json!({ "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -656,12 +656,8 @@ fn apply_design_dry_run_returns_diff_without_writing() {
     };
     assert!(!ctx.sch_path().exists(), "fixture starts with no schematic");
 
-    let out = run_tool(
-        "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML }),
-        &ctx,
-    )
-    .unwrap();
+    seed_draft(&ctx, TINY_YAML);
+    let out = run_tool("apply_design", serde_json::json!({}), &ctx).unwrap();
 
     assert_eq!(out["ok"], serde_json::json!(true), "got: {out}");
     assert_eq!(out["would_write"], serde_json::json!(true), "got: {out}");
@@ -679,6 +675,29 @@ fn apply_design_dry_run_returns_diff_without_writing() {
 }
 
 #[test]
+fn apply_design_rejects_inline_yaml_without_mutating_the_draft() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    seed_draft(&ctx, TINY_YAML);
+
+    let out = run_tool(
+        "apply_design",
+        serde_json::json!({ "yaml": "version: 1\nblocks: {}" }),
+        &ctx,
+    )
+    .unwrap();
+
+    assert_eq!(out["code"], "inline_apply_yaml_removed", "{out}");
+    assert_eq!(
+        ctx.workspace().read_draft().unwrap().as_deref(),
+        Some(TINY_YAML)
+    );
+    assert!(!ctx.sch_path().exists(), "inline apply must not write");
+}
+
+#[test]
 fn apply_design_commit_writes_file_and_runs_erc() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
@@ -686,9 +705,10 @@ fn apply_design_commit_writes_file_and_runs_erc() {
     };
     assert!(!ctx.sch_path().exists(), "fixture starts with no schematic");
 
+    seed_draft(&ctx, TINY_YAML);
     let out = run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
+        serde_json::json!({ "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -737,9 +757,10 @@ fn apply_design_reports_a_written_commit_when_post_write_erc_cannot_run() {
     )
     .unwrap();
 
+    seed_draft(&ctx, TINY_YAML);
     let out = run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
+        serde_json::json!({ "__commit": true }),
         &ctx,
     )
     .expect("post-write ERC failure must remain a structured committed result");
@@ -844,7 +865,8 @@ fn defs_lists_all_tools() {
         );
         if def.name.to_string() == "apply_design" {
             let props = schema["properties"].as_object().expect("properties object");
-            assert!(props.contains_key("yaml"));
+            assert!(props.is_empty(), "apply accepts only the durable draft");
+            assert_eq!(schema["additionalProperties"], false);
         }
         if def.name.to_string() == "route_track" {
             let props = schema["properties"].as_object().expect("properties object");
@@ -889,9 +911,10 @@ fn project_info_reports_paths_and_state() {
         serde_json::json!(ctx.project_dir().display().to_string())
     );
     // After a commit the same tool reports the file as present.
+    seed_draft(&ctx, TINY_YAML);
     run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
+        serde_json::json!({ "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -950,9 +973,10 @@ fn read_schematic_lifts_an_external_file_by_absolute_path() {
     };
     // Write a real schematic into the project, then read it back as if it were
     // an arbitrary external path.
+    seed_draft(&ctx, TINY_YAML);
     run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
+        serde_json::json!({ "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -970,9 +994,10 @@ fn read_schematic_resolves_relative_to_the_project_dir() {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
+    seed_draft(&ctx, TINY_YAML);
     run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
+        serde_json::json!({ "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -1025,9 +1050,10 @@ fn apply_design_commit_reports_the_written_path() {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
+    seed_draft(&ctx, TINY_YAML);
     let out = run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
+        serde_json::json!({ "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -1111,7 +1137,7 @@ blocks:
     assert_eq!(out["ok"], serde_json::json!(true));
     assert_eq!(out["mode"], serde_json::json!("full_replace"));
 
-    // apply_design with NO yaml applies the draft when the gate's commit phase invokes it.
+    // apply_design applies the durable draft when the gate's commit phase invokes it.
     let out = run_tool("apply_design", serde_json::json!({"__commit": true}), &ctx).unwrap();
     assert_eq!(out["written"], serde_json::json!(true));
 
@@ -1142,13 +1168,12 @@ blocks:
       R1: {part: Device:R, value: 1k, between: [N1, GND]}
       PWR1: {part: power:GND, pins: {1: GND}}
 ";
-    // Write a schematic with explicit yaml (no draft involved).
-    run_tool(
-        "apply_design",
-        serde_json::json!({"yaml": yaml, "__commit": true}),
-        &ctx,
-    )
-    .unwrap();
+    // Write a schematic, then remove its draft to exercise lift-and-seed.
+    seed_draft(&ctx, yaml);
+    run_tool("apply_design", serde_json::json!({"__commit": true}), &ctx).unwrap();
+    let draft_path = ctx.workspace().draft_path();
+    std::fs::remove_file(&draft_path).unwrap();
+    std::fs::remove_file(draft_path.parent().unwrap().join("draft.meta.json")).unwrap();
 
     // read_schematic(draft) lifts AND seeds the draft.
     let out = run_tool(
@@ -1206,9 +1231,10 @@ blocks:
       R1: {part: Device:R, value: 1k, between: [N1, GND]}
       PWR1: {part: power:GND, pins: {1: GND}}
 ";
+    seed_draft(&ctx, yaml);
     let applied = run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": yaml, "__commit": true }),
+        serde_json::json!({ "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -1240,9 +1266,10 @@ blocks:
       PWR1: {part: power:GND, pins: {1: GND}}
 ";
     // Commit so a prior schematic exists for the re-apply below.
+    seed_draft(&ctx, yaml);
     let out = run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": yaml, "__commit": true }),
+        serde_json::json!({ "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -1256,7 +1283,7 @@ blocks:
     assert_eq!(out["layout_warnings"].as_array().unwrap().len(), 0);
 
     // Dry-run path also carries them.
-    let dry = run_tool("apply_design", serde_json::json!({ "yaml": yaml }), &ctx).unwrap();
+    let dry = run_tool("apply_design", serde_json::json!({}), &ctx).unwrap();
     assert!(
         dry["layout_warnings"].is_array(),
         "dry-run layout_warnings: {dry}"
@@ -1534,30 +1561,23 @@ fn create_design_does_not_replace_an_unreadable_draft() {
 }
 
 #[test]
-fn apply_design_reports_a_written_commit_when_the_draft_is_unreadable() {
+fn apply_design_does_not_write_when_the_draft_is_unreadable() {
     let (ctx, _guard) = fixture_ctx();
     let invalid = [0xff, 0xfe];
     std::fs::write(ctx.workspace().draft_path(), invalid).unwrap();
 
-    let out = run_tool(
+    let err = run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
+        serde_json::json!({ "__commit": true }),
         &ctx,
     )
-    .expect("a post-write draft error must remain a structured committed result");
+    .expect_err("an unreadable authoritative draft must block the write");
 
     assert!(
-        ctx.sch_path().is_file(),
-        "the schematic write occurred: {out}"
+        err.to_string().contains("UTF-8"),
+        "unexpected error: {err:#}"
     );
-    assert_eq!(out["written"], serde_json::json!(true), "{out}");
-    assert_eq!(out["ok"], serde_json::json!(false), "{out}");
-    assert!(
-        out["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("reading applied draft")),
-        "{out}"
-    );
+    assert!(!ctx.sch_path().exists(), "no schematic may be written");
     assert_eq!(
         std::fs::read(ctx.workspace().draft_path()).unwrap(),
         invalid
@@ -1744,9 +1764,10 @@ fn regenerate_board_rejects_unapplied_draft_footprints() {
         return;
     };
 
+    seed_draft(&ctx, TINY_YAML);
     let written = run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
+        serde_json::json!({ "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -2450,9 +2471,10 @@ R1: {part: 'Device:R', footprint: 'Resistor_SMD:R_0603_1608Metric', pins: {1: VC
 R2: {part: 'Device:R', footprint: 'Resistor_SMD:R_0603_1608Metric', pins: {1: S, 2: GND}}, \
 C1: {part: 'Device:C', footprint: 'Capacitor_SMD:C_0603_1608Metric', pins: {1: VCC, 2: GND}}, \
 C2: {part: 'Device:C', footprint: 'Capacitor_SMD:C_0603_1608Metric', pins: {1: VCC, 2: GND}}}}}";
+    seed_draft(&ctx, yaml);
     let applied = run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": yaml, "__commit": true }),
+        serde_json::json!({ "__commit": true }),
         &ctx,
     )
     .unwrap();

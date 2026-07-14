@@ -32,12 +32,8 @@ async fn live_layout_review_smoke() {
         \x20     U1: {part: Device:R, pins: {1: VCC, 2: GND}}\n\
         \x20     C1: {part: Device:C, pins: {1: VCC, 2: GND}}\n\
         \x20     C2: {part: Device:C, pins: {1: VCC, 2: GND}}\n";
-    let out = run_tool(
-        "apply_design",
-        json!({ "yaml": yaml, "__commit": true }),
-        &ctx,
-    )
-    .unwrap();
+    ctx.workspace().write_draft(yaml, None).unwrap();
+    let out = run_tool("apply_design", json!({ "__commit": true }), &ctx).unwrap();
     assert_eq!(
         out.get("written").and_then(Value::as_bool),
         Some(true),
@@ -49,7 +45,7 @@ async fn live_layout_review_smoke() {
     let (tx, mut rx) = unbounded_channel();
     agent
         .run_turn_reviewed(
-            &format!("Re-apply this exact design with apply_design, no change:\n{yaml}"),
+            "Re-apply the current durable draft with apply_design, no change.",
             "a decoupled supply rail",
             &mut approvals,
             Some(&tx),

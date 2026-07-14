@@ -99,13 +99,12 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "apply_design".into(),
-                description: "Compile/render, approve/write the schematic, and run ERC. Omit yaml for draft."
+                description: "Compile/render, approve/write the current durable draft, and run ERC. Author changes with edit_design first."
                     .into(),
                 input_schema: json!({
                     "type": "object",
-                    "properties": {
-                        "yaml": { "type": "string", "description": "Optional; defaults to draft." }
-                    }
+                    "properties": {},
+                    "additionalProperties": false
                 }),
             },
             Def {
@@ -1022,29 +1021,27 @@ fn add_footprint_compatibility(
 fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if input.get("commit").is_some() {
         return Ok(json!({
-            "error": "`commit` has been removed from apply_design; call apply_design({yaml?}) through the approval gate",
+            "error": "`commit` has been removed from apply_design; call apply_design({}) through the approval gate",
         }));
     }
-    let explicit_yaml = input
-        .get("yaml")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let yaml = match explicit_yaml.clone() {
-        Some(y) => y,
-        None => match ctx.workspace().read_draft()? {
-            Some(d) => d,
-            None => {
-                return Ok(json!({
-                    "error": "no yaml given and no draft exists — pass yaml, or \
-                              create a draft via read_schematic({source:\"draft\"})/create_design",
-                }));
-            }
-        },
+    if input.get("yaml").is_some() {
+        return Ok(json!({
+            "error": "inline YAML has been removed from apply_design",
+            "code": "inline_apply_yaml_removed",
+            "note": "Author the complete durable draft with edit_design({yaml}), then call apply_design({}).",
+        }));
+    }
+    let yaml = match ctx.workspace().read_draft()? {
+        Some(draft) => draft,
+        None => {
+            return Ok(json!({
+                "error": "no draft exists — create the complete draft with edit_design({yaml}) before apply_design({})",
+            }));
+        }
     };
-    let stale = explicit_yaml.is_none()
-        && ctx
-            .workspace()
-            .draft_is_stale(current_sch_text(ctx).as_deref());
+    let stale = ctx
+        .workspace()
+        .draft_is_stale(current_sch_text(ctx).as_deref());
 
     let commit = input
         .get("__commit")
@@ -1104,7 +1101,6 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
     // Record the hash of the just-written schematic (current_sch_text reads the
     // file we wrote above) so the applied draft is no longer flagged stale.
-    // No-op when no draft exists (an explicit-yaml apply must not create one).
     // Once the schematic write succeeds, later failures must be returned as an
     // honest `written: true` result. Returning `Err` would make the agent report
     // that nothing committed and potentially retry an already-applied change.

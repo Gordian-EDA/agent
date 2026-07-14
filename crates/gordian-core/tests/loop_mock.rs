@@ -41,7 +41,7 @@ blocks:\n\
 \x20     R1: {part: R, value: 12k, between: [A, GND]}\n\
 \x20     R2: {part: R, value: 12k, between: [A, GND]}\n";
 
-/// The shared script: (1) search_symbols, (2) apply_design, (3) done.
+/// The shared script: (1) search, (2) author draft, (3) apply, (4) done.
 fn script() -> Vec<gordian_core::StreamEnd> {
     vec![
         tool_call(
@@ -51,9 +51,10 @@ fn script() -> Vec<gordian_core::StreamEnd> {
         ),
         tool_call(
             "tu_2",
-            "apply_design",
+            "edit_design",
             serde_json::json!({ "yaml": CLEAN_YAML }),
         ),
+        tool_call("tu_3", "apply_design", serde_json::json!({})),
         final_text("done"),
     ]
 }
@@ -150,11 +151,7 @@ async fn stall_after_draft_authoring_is_nudged_until_it_commits() {
             serde_json::json!({ "yaml": CLEAN_YAML }),
         ),
         final_text("I created the draft."), // stalls without committing
-        tool_call(
-            "tu_2",
-            "apply_design",
-            serde_json::json!({ "yaml": CLEAN_YAML }),
-        ),
+        tool_call("tu_2", "apply_design", serde_json::json!({})),
         final_text("done"),
     ];
     let mut agent = agent(ctx, script);

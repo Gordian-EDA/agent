@@ -1397,14 +1397,6 @@ impl<P: Provider> Agent<P> {
                     commit_attempted_for_current_draft = false;
                     last_committed_erc_cleanup_needed = None;
                 }
-                if dispatched
-                    && call.fn_name == "apply_design"
-                    && call.fn_arguments.get("yaml").is_some()
-                    && parsed.get("written").and_then(Value::as_bool) == Some(true)
-                {
-                    // Inline YAML can differ from the draft that was reviewed.
-                    schematic_review_current = None;
-                }
                 if dispatched && call.fn_name == "review_design" {
                     schematic_review_current = cacheable_review_result(&parsed);
                 }
@@ -4273,11 +4265,7 @@ mod tests {
 
     #[test]
     fn timed_out_mutation_guard_is_terminal_for_mutations_in_the_subturn() {
-        let timed_out = vec![(
-            "apply_design".to_string(),
-            json!({"yaml": "components: []"}),
-            3,
-        )];
+        let timed_out = vec![("apply_design".to_string(), json!({}), 3)];
         let call = |name: &str, arguments: Value| ToolCall {
             call_id: "retry".into(),
             fn_name: name.into(),
@@ -4292,7 +4280,7 @@ mod tests {
         ));
         assert!(timed_out_retry_blocked(
             &timed_out,
-            &call("apply_design", json!({"yaml": "components: [R1]"})),
+            &call("apply_design", json!({})),
             3,
         ));
         assert!(!timed_out_retry_blocked(
@@ -4302,7 +4290,7 @@ mod tests {
         ));
         assert!(timed_out_retry_blocked(
             &timed_out,
-            &call("apply_design", json!({"yaml": "components: []"})),
+            &call("apply_design", json!({})),
             4,
         ));
         assert!(timed_out_retry_blocked(
