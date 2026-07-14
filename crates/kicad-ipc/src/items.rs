@@ -53,21 +53,12 @@ impl Kicad {
 
     /// All track segments on the board.
     pub fn tracks(&mut self) -> Result<Vec<Track>, Error> {
-        self.get_items(&[KiCadObjectType::KotPcbTrace])?
-            .into_iter()
-            .map(|a| {
-                a.to_msg::<Track>()
-                    .map_err(|_| Error::TypeMismatch("Track"))
-            })
-            .collect()
+        decode_tracks(self.get_items(&[KiCadObjectType::KotPcbTrace])?)
     }
 
     /// All vias on the board.
     pub fn vias(&mut self) -> Result<Vec<Via>, Error> {
-        self.get_items(&[KiCadObjectType::KotPcbVia])?
-            .into_iter()
-            .map(|a| a.to_msg::<Via>().map_err(|_| Error::TypeMismatch("Via")))
-            .collect()
+        decode_vias(self.get_items(&[KiCadObjectType::KotPcbVia])?)
     }
 
     /// All zones on the board.
@@ -217,6 +208,38 @@ impl Kicad {
     }
 }
 
+// KiCad 9.0.2 can return both copper item siblings for a request filtered to
+// either PCB_TRACE or PCB_VIA. Keep accepting the requested type, ignore only
+// the known sibling, and retain the mismatch error for every other payload.
+fn decode_tracks(items: Vec<prost_types::Any>) -> Result<Vec<Track>, Error> {
+    items
+        .into_iter()
+        .filter_map(|item| {
+            if item.type_url == <Via as prost::Name>::type_url() {
+                None
+            } else {
+                Some(
+                    item.to_msg::<Track>()
+                        .map_err(|_| Error::TypeMismatch("Track")),
+                )
+            }
+        })
+        .collect()
+}
+
+fn decode_vias(items: Vec<prost_types::Any>) -> Result<Vec<Via>, Error> {
+    items
+        .into_iter()
+        .filter_map(|item| {
+            if item.type_url == <Track as prost::Name>::type_url() {
+                None
+            } else {
+                Some(item.to_msg::<Via>().map_err(|_| Error::TypeMismatch("Via")))
+            }
+        })
+        .collect()
+}
+
 /// Turn a per-item `ItemStatus` into an error unless it is `ISC_OK`.
 fn check_item_status(
     status: &Option<proto::kiapi::common::commands::ItemStatus>,
@@ -242,9 +265,12 @@ fn item_id_from_any(any: &prost_types::Any) -> Option<Kiid> {
 
 #[cfg(test)]
 mod tests {
-    use super::item_id_from_any;
-    use crate::proto::kiapi::board::types::{Track, Via, Zone};
+    use super::{decode_tracks, decode_vias, item_id_from_any};
     use crate::proto::kiapi::common::types::Kiid;
+    use crate::{
+        Error,
+        proto::kiapi::board::types::{Track, Via, Zone},
+    };
 
     #[test]
     fn extracts_item_id_from_packed_track() {
@@ -274,6 +300,35 @@ mod tests {
         let id = item_id_from_any(&any).expect("via id");
 
         assert_eq!(id.value, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    }
+
+    #[test]
+    fn copper_item_decoders_skip_only_the_known_sibling_type() {
+        let track = Track::default();
+        let via = Via::default();
+        let mixed = || {
+            vec![
+                prost_types::Any::from_msg(&track).unwrap(),
+                prost_types::Any::from_msg(&via).unwrap(),
+            ]
+        };
+
+        assert_eq!(decode_tracks(mixed()).unwrap().len(), 1);
+        assert_eq!(decode_vias(mixed()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn copper_item_decoders_reject_unknown_payload_types() {
+        let zone = prost_types::Any::from_msg(&Zone::default()).unwrap();
+
+        assert!(matches!(
+            decode_tracks(vec![zone.clone()]),
+            Err(Error::TypeMismatch("Track"))
+        ));
+        assert!(matches!(
+            decode_vias(vec![zone]),
+            Err(Error::TypeMismatch("Via"))
+        ));
     }
 
     #[test]
