@@ -1090,13 +1090,14 @@ impl<P: Provider> Agent<P> {
                 if let Some(diagnostics) = authoring_diagnostics_state(&call.fn_name, &parsed) {
                     latest_authoring_diagnostics = Some(diagnostics);
                 }
-                if dispatched && is_authoring_for_commit(&call.fn_name) {
+                if dispatched
+                    && is_authoring_for_commit(&call.fn_name)
+                    && authoring_result_changed_draft(&parsed)
+                {
                     schematic_review_current = false;
-                    if authoring_result_changed_draft(&parsed) {
-                        draft_dirty = true;
-                        commit_attempted_for_current_draft = false;
-                        last_committed_erc_cleanup_needed = None;
-                    }
+                    draft_dirty = true;
+                    commit_attempted_for_current_draft = false;
+                    last_committed_erc_cleanup_needed = None;
                 }
                 if dispatched
                     && call.fn_name == "apply_design"
