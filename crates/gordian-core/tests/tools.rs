@@ -755,7 +755,7 @@ fn repair_components_replaces_a1_a2_with_jp1_without_resending_the_draft() {
 }
 
 #[test]
-fn repair_components_requires_confirmation_and_rejects_cross_block_moves() {
+fn repair_components_requires_confirmation_only_for_part_changes() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -767,7 +767,7 @@ fn repair_components_requires_confirmation_and_rejects_cross_block_moves() {
     let denied = run_tool(
         "repair_components",
         serde_json::json!({
-            "upsert": {"R1": {"part": "Device:R", "value": "4.7k", "pins": {"1": "A", "2": "GND"}}}
+            "components": {"R1": {"part": "Device:C", "value": "1uF", "pins": {"1": "A", "2": "GND"}}}
         }),
         &ctx,
     )
@@ -793,8 +793,7 @@ fn repair_components_requires_confirmation_and_rejects_cross_block_moves() {
     let replaced = run_tool(
         "repair_components",
         serde_json::json!({
-            "upsert": {"R1": {"part": "Device:R", "value": "4.7k"}},
-            "replace_existing": true
+            "components": {"R1": {"part": "Device:R", "value": "4.7k"}}
         }),
         &ctx,
     )

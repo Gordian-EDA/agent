@@ -593,7 +593,7 @@ pub(crate) fn repair_components_tool() -> Tool {
                     "minItems": 1,
                     "uniqueItems": true
                 },
-                "replace_existing": { "type": "boolean", "description": "Confirmation for replacing refs via components; false for update/remove." }
+                "replace_existing": { "type": "boolean", "description": "Required only when components changes an existing ref's symbol part." }
             },
             "additionalProperties": false,
             "anyOf": [
@@ -1962,9 +1962,11 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                         "current_design_state": design_state_summary(prior_design),
                     }));
                 }
-                if !replace_existing {
+                let previous = &prior_design.blocks[existing_block].components[reference];
+                let replacement = &patch_block.components[reference];
+                if !replace_existing && previous.part != replacement.part {
                     return Ok(json!({
-                        "error": format!("components refdes {reference} already exists; pass replace_existing=true to replace it"),
+                        "error": format!("components changes {reference} from {} to {}; pass replace_existing=true to confirm the symbol change", previous.part, replacement.part),
                         "code": "component_replacement_requires_confirmation",
                         "draft_written": false,
                         "draft_changed": false,
