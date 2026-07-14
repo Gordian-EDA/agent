@@ -518,7 +518,8 @@ pub(crate) fn repair_components_tool() -> Tool {
                 "block": { "type": "string", "description": "Target block; defaults to main." },
                 "upsert": {
                     "type": "object",
-                    "description": "Components to add or replace. `part` is required. For existing refs, omitted value/footprint/dnp/props are preserved; existing pins are preserved when no pins/units/between/positive/negative/decouple topology field is supplied. Send {} when unused.",
+                    "description": "Components to add or replace. `part` is required. For existing refs, omitted value/footprint/dnp/props are preserved; existing pins are preserved when no pins/units/between/positive/negative/decouple topology field is supplied. Example: {\"D1\":{\"part\":\"Device:D\",\"pins\":{\"1\":\"VIN\",\"2\":\"VOUT\"}}}.",
+                    "minProperties": 1,
                     "additionalProperties": {
                         "type": "object",
                         "properties": {
@@ -558,17 +559,24 @@ pub(crate) fn repair_components_tool() -> Tool {
                         },
                         "minProperties": 1,
                         "additionalProperties": false
-                    }
+                    },
+                    "minProperties": 1
                 },
                 "remove": {
                     "type": "array",
-                    "description": "Explicit authored refs to remove; send [] when unused.",
+                    "description": "One or more explicit authored refs to remove. Example: [\"R7\"].",
                     "items": { "type": "string" },
+                    "minItems": 1,
                     "uniqueItems": true
                 },
                 "replace_existing": { "type": "boolean", "description": "Confirmation for replacing refs via upsert; false for update/remove." }
             },
-            "additionalProperties": false
+            "additionalProperties": false,
+            "anyOf": [
+                { "required": ["upsert"], "properties": { "upsert": { "minProperties": 1 } } },
+                { "required": ["update"], "properties": { "update": { "minProperties": 1 } } },
+                { "required": ["remove"], "properties": { "remove": { "minItems": 1 } } }
+            ]
         }))
 }
 

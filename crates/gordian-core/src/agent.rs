@@ -577,6 +577,7 @@ struct AuthoringDiagnosticsState {
     design_state: Option<Value>,
     errors: Option<u64>,
     warnings: Option<u64>,
+    fingerprint: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1111,6 +1112,7 @@ impl<P: Provider> Agent<P> {
             // working draft and the guards below see its fresh diagnostics.
             // The inverse order is stale, so no authoring may follow an apply.
             let mut apply_dispatched_this_completion = false;
+            let mut authoring_dispatched_this_completion = false;
             let mut schematic_stage_ready_this_completion = false;
             let mut non_authoring_state_changed_this_completion = false;
             let mut semantic_review_advanced_this_completion = false;
@@ -1150,6 +1152,10 @@ impl<P: Provider> Agent<P> {
                     &call.fn_name,
                     apply_dispatched_this_completion,
                 );
+                let authoring_batch_dependency_blocked = authoring_batch_dependency_blocked(
+                    &call.fn_name,
+                    authoring_dispatched_this_completion,
+                );
                 let create_on_existing_draft_blocked =
                     call.fn_name == "create_design" && draft_existed_before_completion;
                 let schematic_review_clean = schematic_review_current
@@ -1188,6 +1194,7 @@ impl<P: Provider> Agent<P> {
                     && !known_invalid_apply
                     && !unchanged_apply_blocked
                     && !post_apply_authoring_blocked
+                    && !authoring_batch_dependency_blocked
                     && !create_on_existing_draft_blocked;
                 let (mut content, images, image_path) = if timed_out_mutation_blocked {
                     (
@@ -1253,6 +1260,18 @@ impl<P: Provider> Agent<P> {
                             "code": "post_apply_authoring_batch_blocked",
                             "tool": call.fn_name,
                             "note": "The apply already acted on the current draft. Make any subsequent draft edit in the next completion.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if authoring_batch_dependency_blocked {
+                    (
+                        json!({
+                            "error": "dependent draft mutation deferred until the prior result is available",
+                            "code": "authoring_batch_dependency",
+                            "tool": call.fn_name,
+                            "note": "Only the first create/edit/repair/footprint mutation in an assistant completion is executed. Inspect its result, then issue one complete next mutation in the following completion.",
                         })
                         .to_string(),
                         Vec::new(),
@@ -1428,6 +1447,9 @@ impl<P: Provider> Agent<P> {
                     if call.fn_name == "apply_design" {
                         apply_dispatched_this_completion = true;
                     }
+                    if is_authoring_for_commit(&call.fn_name) {
+                        authoring_dispatched_this_completion = true;
+                    }
                     if call.fn_name == "get_board" {
                         board_read_dispatched_this_completion = true;
                     }
@@ -1599,7 +1621,7 @@ impl<P: Provider> Agent<P> {
                     durable_authoring_state(&self.runtime, latest_authoring_diagnostics.clone());
                 if non_authoring_state_changed_this_completion
                     || semantic_review_advanced_this_completion
-                    || durable_state != last_durable_authoring_state
+                    || durable_authoring_progressed(&last_durable_authoring_state, &durable_state)
                 {
                     last_durable_authoring_state = durable_state;
                     consecutive_no_progress_completions = 0;
@@ -2226,6 +2248,10 @@ fn authoring_diagnostics_state(name: &str, value: &Value) -> Option<AuthoringDia
             .get("warnings")
             .and_then(Value::as_u64)
             .or_else(|| value.pointer("/erc/warnings").and_then(Value::as_u64)),
+        fingerprint: value
+            .get("diagnostics")
+            .and_then(|diagnostics| serde_json::to_vec(diagnostics).ok())
+            .map(hash_bytes),
     };
     (state.design_state.is_some() || state.errors.is_some() || state.warnings.is_some())
         .then_some(state)
@@ -2240,6 +2266,29 @@ fn durable_authoring_state(
         schematic_hash: file_content_hash(runtime.sch_path()),
         diagnostics,
     }
+}
+
+fn durable_authoring_progressed(
+    previous: &DurableAuthoringState,
+    current: &DurableAuthoringState,
+) -> bool {
+    if previous.schematic_hash != current.schematic_hash {
+        return true;
+    }
+    let previous_errors = previous.diagnostics.as_ref().and_then(|state| state.errors);
+    let current_errors = current.diagnostics.as_ref().and_then(|state| state.errors);
+    if current_errors.is_some_and(|errors| errors > 0) {
+        return previous_errors != current_errors
+            || previous
+                .diagnostics
+                .as_ref()
+                .and_then(|state| state.fingerprint)
+                != current
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|state| state.fingerprint);
+    }
+    previous.draft_hash != current.draft_hash || previous.diagnostics != current.diagnostics
 }
 
 fn semantic_draft_hash(runtime: &AgentRuntime) -> Option<u64> {
@@ -2632,6 +2681,10 @@ fn is_authoring_for_commit(name: &str) -> bool {
 
 fn post_apply_authoring_batch_blocked(name: &str, apply_already_dispatched: bool) -> bool {
     is_authoring_for_commit(name) && apply_already_dispatched
+}
+
+fn authoring_batch_dependency_blocked(name: &str, authoring_already_dispatched: bool) -> bool {
+    is_authoring_for_commit(name) && authoring_already_dispatched
 }
 
 /// Whether an authoring result actually changed the durable draft. Compile
@@ -4439,6 +4492,7 @@ mod tests {
             design_state: None,
             errors: Some(0),
             warnings: Some(2),
+            fingerprint: None,
         };
         assert!(clean_draft_needs_reserved_apply(
             true,
@@ -4643,6 +4697,38 @@ mod tests {
             cosmetic.draft_hash, changed.draft_hash,
             "comments and mapping order are not electrical progress"
         );
+    }
+
+    #[test]
+    fn invalid_draft_bytes_are_not_progress_without_new_diagnostics() {
+        let invalid = |draft_hash, errors, fingerprint| DurableAuthoringState {
+            draft_hash: Some(draft_hash),
+            schematic_hash: None,
+            diagnostics: Some(AuthoringDiagnosticsState {
+                design_state: None,
+                errors: Some(errors),
+                warnings: Some(0),
+                fingerprint: Some(fingerprint),
+            }),
+        };
+        let first = invalid(1, 2, 10);
+        assert!(!durable_authoring_progressed(&first, &invalid(2, 2, 10)));
+        assert!(durable_authoring_progressed(&first, &invalid(2, 1, 10)));
+        assert!(durable_authoring_progressed(&first, &invalid(2, 2, 11)));
+    }
+
+    #[test]
+    fn only_one_dependent_authoring_mutation_dispatches_per_completion() {
+        assert!(!authoring_batch_dependency_blocked("edit_design", false));
+        assert!(authoring_batch_dependency_blocked(
+            "repair_components",
+            true
+        ));
+        assert!(authoring_batch_dependency_blocked(
+            "assign_footprints",
+            true
+        ));
+        assert!(!authoring_batch_dependency_blocked("apply_design", true));
     }
 
     #[test]
