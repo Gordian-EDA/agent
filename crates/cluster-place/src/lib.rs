@@ -209,7 +209,7 @@ fn spine_fast_path_pin_profile<'a>(pin_profiles: impl Iterator<Item = (&'a str, 
         && counts.len() <= 8
         && pins <= FAST_PINS
         && counts.iter().filter(|&&pins| pins >= 3).count() <= 1;
-    let dense_interactive = (5..=16).contains(&counts.len())
+    let dense_interactive = (5..=24).contains(&counts.len())
         && (24..=FAST_PINS).contains(&pins)
         && counts.iter().filter(|&&pins| pins >= 3).count() <= 2;
     // A dual-op-amp symbol expands into three unit items that all inherit the
@@ -327,6 +327,10 @@ mod tests {
         // two-pin parts = 27 routed pins over 10 placeable items.
         assert!(profile([8, 3, 2, 2, 2, 2, 2, 2, 2, 2]));
         assert!(profile([8, 8, 8, 2, 2, 2]));
+        // A protected CAN node with one transceiver, ten two-pin protection/
+        // passive parts, and six one-pin test points. Routed annealing this
+        // simple 34-pin star exceeded the interactive apply timeout.
+        assert!(profile([8, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1]));
 
         // Genuinely large sheets retain their existing anneal path; three-anchor
         // sheets retain hub-pose search quality.
