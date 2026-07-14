@@ -740,6 +740,15 @@ fn route_leg(
     to: Point2,
     to_layer: LayerRef,
 ) -> std::result::Result<RouteSolution, String> {
+    // A via-only stitch has zero-length legs on either side of its explicit
+    // anchor. Treat those as already connected on that layer; asking a router
+    // to solve a point-to-itself connection reports a misleading dropped net.
+    if from.near_eq(to, geom::EPS) && from_layer == to_layer {
+        return Ok(RouteSolution {
+            traces: Vec::new(),
+            vias: Vec::new(),
+        });
+    }
     let exact_problem = single_connection_problem(
         base,
         net,
@@ -1686,6 +1695,30 @@ mod tests {
             .find(|via| via.at.near_eq(Point2::new(5.0, 1.0), 1e-9))
             .expect("explicit via at requested coordinate");
         assert_eq!(via.span, ViaSpan::Through);
+    }
+
+    #[test]
+    fn manual_route_supports_a_via_only_stitch() {
+        let problem = route_problem(vec![]);
+        let request = parse_route_track_request(
+            &json!({
+                "from": [5.0, 1.0],
+                "to": [5.0, 1.0],
+                "net": "GND",
+                "from_layer": "F.Cu",
+                "to_layer": "B.Cu",
+                "vias": [{ "at": [5.0, 1.0], "to_layer": "B.Cu" }]
+            }),
+            &problem,
+        )
+        .unwrap();
+
+        let (routed_problem, solution) = manual_route_solution(&problem, &request).unwrap();
+
+        assert!(drc_lint::lint::lint(&routed_problem, &solution).is_empty());
+        assert!(solution.traces.is_empty());
+        assert_eq!(solution.vias.len(), 1);
+        assert_eq!(solution.vias[0].span, ViaSpan::Through);
     }
 
     #[test]
