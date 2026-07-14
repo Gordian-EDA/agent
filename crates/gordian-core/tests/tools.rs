@@ -233,6 +233,166 @@ fn full_yaml_edit_seeds_a_new_project_and_reports_idempotence() {
 }
 
 #[test]
+fn full_yaml_edit_rejects_silent_component_loss() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let substantial = r#"
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: Device:R, pins: {1: A, 2: B}}
+      R2: {part: Device:R, pins: {1: B, 2: GND}}
+      R3: {part: Device:R, pins: {1: A, 2: GND}}
+"#;
+    run_tool(
+        "edit_design",
+        serde_json::json!({ "yaml": substantial }),
+        &ctx,
+    )
+    .unwrap();
+
+    let rejected = run_tool(
+        "edit_design",
+        serde_json::json!({ "yaml": TINY_YAML }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        rejected["code"], "component_removal_requires_confirmation",
+        "{rejected}"
+    );
+    assert_eq!(rejected["current_component_count"], 3, "{rejected}");
+    assert_eq!(rejected["candidate_component_count"], 1, "{rejected}");
+    assert_eq!(rejected["draft_written"], false, "{rejected}");
+    assert_eq!(rejected["draft_changed"], false, "{rejected}");
+    assert_eq!(rejected["ok"], false, "{rejected}");
+    assert_eq!(rejected["warnings"], 2, "{rejected}");
+    assert_eq!(
+        rejected["diagnostics"].as_array().map(Vec::len),
+        Some(2),
+        "candidate diagnostics must survive the transactional rejection: {rejected}"
+    );
+    assert_eq!(
+        rejected["current_design_state"]["component_count"], 3,
+        "{rejected}"
+    );
+    assert_eq!(
+        rejected["current_diagnostics"],
+        serde_json::json!([]),
+        "{rejected}"
+    );
+    assert_eq!(
+        ctx.workspace().read_draft().unwrap().as_deref(),
+        Some(substantial),
+        "rejection must preserve the prior bytes"
+    );
+}
+
+#[test]
+fn full_yaml_edit_allows_confirmed_component_loss_and_same_count_repairs() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let pair = r#"version: 1
+blocks: {main: {components: {
+  R1: {part: Device:R, pins: {1: A, 2: B}},
+  R2: {part: Device:R, pins: {1: B, 2: GND}}
+}}}"#;
+    let repaired_pair = pair.replace("R2:", "R3:");
+    run_tool("edit_design", serde_json::json!({ "yaml": pair }), &ctx).unwrap();
+
+    let repaired = run_tool(
+        "edit_design",
+        serde_json::json!({ "yaml": repaired_pair }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(repaired["draft_written"], true, "{repaired}");
+    assert_eq!(repaired["draft_changed"], true, "{repaired}");
+
+    let reduced = run_tool(
+        "edit_design",
+        serde_json::json!({
+            "yaml": TINY_YAML,
+            "allow_component_removal": true,
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(reduced["draft_written"], true, "{reduced}");
+    assert_eq!(reduced["draft_changed"], true, "{reduced}");
+    assert_eq!(
+        ctx.workspace().read_draft().unwrap().as_deref(),
+        Some(TINY_YAML)
+    );
+}
+
+#[test]
+fn full_yaml_edit_can_repair_an_invalid_prior_draft() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let invalid = "version: 1\nblocks: {main: {components: {U1: {part: No:Such}}}}";
+    ctx.workspace().write_draft(invalid, None).unwrap();
+
+    let repaired = run_tool(
+        "edit_design",
+        serde_json::json!({ "yaml": TINY_YAML }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(repaired["ok"], true, "{repaired}");
+    assert_eq!(repaired["draft_written"], true, "{repaired}");
+    assert_eq!(repaired["draft_changed"], true, "{repaired}");
+    assert_eq!(
+        ctx.workspace().read_draft().unwrap().as_deref(),
+        Some(TINY_YAML)
+    );
+}
+
+#[test]
+fn invalid_full_yaml_replacement_preserves_a_valid_prior_draft() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    run_tool(
+        "edit_design",
+        serde_json::json!({ "yaml": TINY_YAML }),
+        &ctx,
+    )
+    .unwrap();
+    let invalid = "version: 1\nblocks: {main: {components: {U1: {part: No:Such}}}}";
+
+    let rejected = run_tool("edit_design", serde_json::json!({ "yaml": invalid }), &ctx).unwrap();
+    assert_eq!(
+        rejected["code"], "invalid_replacement_preserved_draft",
+        "{rejected}"
+    );
+    assert_eq!(rejected["draft_written"], false, "{rejected}");
+    assert_eq!(rejected["draft_changed"], false, "{rejected}");
+    assert!(
+        rejected["diagnostics"]
+            .as_array()
+            .is_some_and(|diagnostics| !diagnostics.is_empty()),
+        "candidate diagnostics must be returned: {rejected}"
+    );
+    assert_eq!(
+        rejected["current_design_state"]["component_count"], 1,
+        "{rejected}"
+    );
+    assert_eq!(
+        ctx.workspace().read_draft().unwrap().as_deref(),
+        Some(TINY_YAML)
+    );
+}
+
+#[test]
 fn empty_full_edits_and_overwrites_preserve_the_prior_draft() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");

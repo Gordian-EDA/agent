@@ -162,12 +162,13 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "edit_design".into(),
-                description: "Create/replace draft from full yaml; patch mode needs an existing draft."
+                description: "Full YAML; part loss needs allow_component_removal. Patch to delete."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "yaml": { "type": "string", "description": "Full create/replacement." },
+                        "yaml": { "type": "string" },
+                        "allow_component_removal": { "type": "boolean" },
                         "old_string": { "type": "string" },
                         "new_string": { "type": "string" },
                         "replace_all": { "type": "boolean" }
@@ -928,6 +929,14 @@ fn design_is_empty(design: &Design) -> bool {
         .all(|block| block.components.is_empty())
 }
 
+fn design_component_count(design: &Design) -> usize {
+    design
+        .blocks
+        .values()
+        .map(|block| block.components.len())
+        .sum()
+}
+
 /// Returns `true` when at least one incompatible assignment was found.
 fn add_footprint_compatibility(
     report: &mut Value,
@@ -1452,6 +1461,69 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "full_create"
             });
             return Ok(report);
+        }
+        let prior_result = prior_draft
+            .as_deref()
+            .map(|draft| compile(draft, ctx.provider()));
+        if let Some(prior) = prior_result
+            .as_ref()
+            .and_then(|compiled| compiled.design.as_ref())
+            && result.design.is_none()
+        {
+            report["ok"] = json!(false);
+            report["error"] = json!(
+                "invalid full replacement would discard a valid draft; the existing draft was preserved"
+            );
+            report["code"] = json!("invalid_replacement_preserved_draft");
+            report["current_design_state"] = design_state_summary(prior);
+            report["current_diagnostics"] = json!(
+                compile_report(&prior_result.as_ref().expect("checked above").diagnostics)["diagnostics"]
+            );
+            report["draft_written"] = json!(false);
+            report["draft_changed"] = json!(false);
+            report["mode"] = json!("full_replace");
+            report["next_tool"] = json!("edit_design");
+            report["next"] = json!(
+                "fix the candidate diagnostics and resend the complete yaml, or use a precise patch against the preserved draft"
+            );
+            return Ok(report);
+        }
+        let allow_component_removal = input
+            .get("allow_component_removal")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !allow_component_removal
+            && let (Some(prior), Some(candidate)) = (
+                prior_result
+                    .as_ref()
+                    .and_then(|compiled| compiled.design.as_ref()),
+                result.design.as_ref(),
+            )
+        {
+            let current_count = design_component_count(prior);
+            let candidate_count = design_component_count(candidate);
+            if candidate_count < current_count {
+                report["ok"] = json!(false);
+                report["error"] = json!(format!(
+                    "full replacement would remove {} component(s)",
+                    current_count - candidate_count
+                ));
+                report["code"] = json!("component_removal_requires_confirmation");
+                report["current_component_count"] = json!(current_count);
+                report["candidate_component_count"] = json!(candidate_count);
+                report["current_design_state"] = design_state_summary(prior);
+                report["current_diagnostics"] = json!(
+                    compile_report(&prior_result.as_ref().expect("checked above").diagnostics)["diagnostics"]
+                );
+                report["draft_written"] = json!(false);
+                report["draft_changed"] = json!(false);
+                report["mode"] = json!("full_replace");
+                report["next_tool"] = json!("edit_design");
+                report["next"] = json!(
+                    "the existing draft was preserved; use a precise patch to delete components, or resend the complete yaml with allow_component_removal=true"
+                );
+                return Ok(report);
+            }
         }
         ctx.workspace()
             .write_draft(yaml, current_sch_text(ctx).as_deref())?;
