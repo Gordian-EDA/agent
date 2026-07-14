@@ -87,6 +87,79 @@ fn validate_design_tool_reports_errors_for_bad_part() {
 }
 
 #[test]
+fn authoring_results_include_compact_sorted_design_state() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let yaml = r#"
+version: 1
+blocks:
+  z:
+    components:
+      R2: {part: Device:R, pins: {1: ZETA, 2: GND}}
+  a:
+    components:
+      C1: {part: Device:C, pins: {1: ALPHA, 2: GND}}
+      R1: {part: Device:R, pins: {1: ALPHA, 2: ZETA}}
+"#;
+    let expected = serde_json::json!({
+        "component_count": 3,
+        "refdes": ["C1", "R1", "R2"],
+        "net_count": 3,
+        "net_names": ["ALPHA", "GND", "ZETA"],
+    });
+
+    let created = run_tool("create_design", serde_json::json!({ "yaml": yaml }), &ctx).unwrap();
+    assert_eq!(created["design_state"], expected, "{created}");
+
+    let validated = run_tool("validate_design", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(validated["design_state"], expected, "{validated}");
+
+    let edited = run_tool(
+        "edit_design",
+        serde_json::json!({ "old_string": "R2:", "new_string": "R3:" }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        edited["design_state"]["refdes"],
+        serde_json::json!(["C1", "R1", "R3"]),
+        "{edited}"
+    );
+}
+
+#[test]
+fn apply_preview_and_commit_include_design_state() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let expected = serde_json::json!({
+        "component_count": 1,
+        "refdes": ["R1"],
+        "net_count": 2,
+        "net_names": ["A", "GND"],
+    });
+
+    let preview = run_tool(
+        "apply_design",
+        serde_json::json!({ "yaml": TINY_YAML }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(preview["design_state"], expected, "{preview}");
+
+    let committed = run_tool(
+        "apply_design",
+        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(committed["design_state"], expected, "{committed}");
+}
+
+#[test]
 fn empty_design_is_never_ready_or_written() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");

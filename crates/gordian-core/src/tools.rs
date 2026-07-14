@@ -823,12 +823,78 @@ fn compile_authoring_report(
 ) -> Result<Value> {
     let mut report = compile_report(&result.diagnostics);
     if let Some(design) = &result.design {
+        report["design_state"] = design_state_summary(design);
         if add_empty_design_error(&mut report, design) {
             return Ok(report);
         }
         add_footprint_compatibility(&mut report, design, ctx)?;
     }
     Ok(report)
+}
+
+/// Compact, deterministic state returned after every successful compile.
+///
+/// Authoring tools already have the kernel design in hand, so surfacing its
+/// identity here saves the model from rereading the full YAML merely to recall
+/// what it just created or edited. Names are sorted across blocks and bounded
+/// to keep large schematics from turning routine validation into a large tool
+/// result; the total counts and omitted counts preserve the complete shape.
+fn design_state_summary(design: &Design) -> Value {
+    use std::collections::BTreeSet;
+
+    const MAX_NAMES: usize = 32;
+
+    let mut refdes: Vec<&str> = design
+        .blocks
+        .values()
+        .flat_map(|block| block.components.keys().map(String::as_str))
+        .collect();
+    refdes.sort_unstable();
+
+    // `Design::nets` stores authored net attributes, not necessarily every net
+    // named by a component pin. Include both sources so this reflects actual
+    // connectivity even when the YAML has no top-level `nets` section.
+    let mut nets: BTreeSet<&str> = design.nets.keys().map(String::as_str).collect();
+    for component in design
+        .blocks
+        .values()
+        .flat_map(|block| block.components.values())
+    {
+        nets.extend(component.pins.values().filter_map(|target| match target {
+            PinTarget::Net(net) => Some(net.as_str()),
+            PinTarget::NoConnect => None,
+        }));
+        nets.extend(
+            component
+                .units
+                .values()
+                .flat_map(|pins| pins.values())
+                .filter_map(|target| match target {
+                    PinTarget::Net(net) => Some(net.as_str()),
+                    PinTarget::NoConnect => None,
+                }),
+        );
+    }
+    let mut net_names: Vec<&str> = nets.into_iter().collect();
+
+    let component_count = refdes.len();
+    let net_count = net_names.len();
+    refdes.truncate(MAX_NAMES);
+    net_names.truncate(MAX_NAMES);
+
+    let mut state = json!({
+        "component_count": component_count,
+        "refdes": refdes,
+        "net_count": net_count,
+        "net_names": net_names,
+    });
+    if component_count > MAX_NAMES {
+        state["refdes_omitted"] = json!(component_count - MAX_NAMES);
+    }
+    if net_count > MAX_NAMES {
+        state["net_names_omitted"] = json!(net_count - MAX_NAMES);
+    }
+    state
 }
 
 /// A syntactically valid document with no components is not an authored
@@ -945,6 +1011,8 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         report["ok"] = json!(false);
         return Ok(report);
     };
+    let design_state = design_state_summary(&design);
+    report["design_state"] = design_state.clone();
     if add_empty_design_error(&mut report, &design) {
         return Ok(report);
     }
@@ -974,6 +1042,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "would_write": true,
             "stale_draft_warning": stale,
             "diff": diff,
+            "design_state": design_state,
             "layout_mode": "composed",
             "rendered_len": composed.sch.len(),
             "layout_warnings": composed.layout_warnings,
@@ -1008,6 +1077,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "path": ctx.sch_path().display().to_string(),
         "stale_draft_warning": stale,
         "diff": diff,
+        "design_state": design_state,
         "layout_mode": "composed",
         "layout_warnings": composed.layout_warnings,
         "wire_through_body": composed.crossings.body + composed.crossings.ic,
