@@ -59,16 +59,19 @@ async fn main() -> anyhow::Result<()> {
     // Stream the tool calls so the run is visible while it works.
     let (tx, mut rx) = mpsc::unbounded_channel();
     let printer = tokio::spawn(async move {
-        let (mut tin, mut tout, mut cache_write, mut cache_read) = (0u64, 0u64, 0u64, 0u64);
+        let (mut requests, mut tin, mut tout, mut cache_write, mut cache_read) =
+            (0u64, 0u64, 0u64, 0u64, 0u64);
         while let Some(ev) = rx.recv().await {
             match ev {
                 gordian_core::AgentEvent::Usage {
+                    provider_requests,
                     input_tokens,
                     output_tokens,
                     cache_write_tokens,
                     cache_read_tokens,
                     ..
                 } => {
+                    requests += provider_requests;
                     tin += input_tokens;
                     tout += output_tokens;
                     cache_write += cache_write_tokens;
@@ -84,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
                 _ => {}
             }
         }
-        (tin, tout, cache_write, cache_read)
+        (requests, tin, tout, cache_write, cache_read)
     });
 
     let mut approvals = AutoApprove::yes();
@@ -94,10 +97,10 @@ async fn main() -> anyhow::Result<()> {
     }
     agent.ctx().close_kicad_session();
     drop(tx);
-    let (tin, tout, cache_write, cache_read) = printer.await.unwrap_or((0, 0, 0, 0));
+    let (requests, tin, tout, cache_write, cache_read) = printer.await.unwrap_or((0, 0, 0, 0, 0));
 
     eprintln!(
-        "\n--- outcome ---\napplied={} tool_calls={} stop={:?} tokens(in={tin} out={tout} cache_write={cache_write} cache_read={cache_read})",
+        "\n--- outcome ---\napplied={} tool_calls={} stop={:?} provider_requests={requests} tokens(in={tin} out={tout} cache_write={cache_write} cache_read={cache_read})",
         outcome.applied, outcome.tool_calls_made, outcome.stop_reason
     );
     eprintln!("final reply:\n{}\n", outcome.final_text.trim());

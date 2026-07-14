@@ -233,6 +233,7 @@ fn parse_agent_args(args: &[String]) -> Result<AgentInvocation> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct UsageTotals {
+    provider_requests: u64,
     input_tokens: u64,
     output_tokens: u64,
     cache_write_tokens: u64,
@@ -266,17 +267,19 @@ impl AgentDebugLog {
             }
             AgentEvent::Applied { summary } => Some(format!("applied: {summary}")),
             AgentEvent::Usage {
+                provider_requests,
                 input_tokens,
                 output_tokens,
                 cache_write_tokens,
                 cache_read_tokens,
             } => {
+                self.usage.provider_requests += provider_requests;
                 self.usage.input_tokens += input_tokens;
                 self.usage.output_tokens += output_tokens;
                 self.usage.cache_write_tokens += cache_write_tokens;
                 self.usage.cache_read_tokens += cache_read_tokens;
                 Some(format!(
-                    "usage: in={input_tokens} out={output_tokens} \
+                    "usage: provider_requests={provider_requests} in={input_tokens} out={output_tokens} \
                      cache_write={cache_write_tokens} cache_read={cache_read_tokens}"
                 ))
             }
@@ -412,6 +415,10 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     println!("tool calls made: {}", outcome.tool_calls_made);
     println!("applied (wrote schematic): {}", outcome.applied);
     println!("stop reason: {:?}", outcome.stop_reason);
+    println!(
+        "provider requests: {} (all model invocations; separate from the agent main-request safety budget)",
+        usage.provider_requests
+    );
     println!(
         "tokens: input {} output {} cache_write {} cache_read {}",
         usage.input_tokens, usage.output_tokens, usage.cache_write_tokens, usage.cache_read_tokens
@@ -579,17 +586,19 @@ mod tests {
         );
         assert_eq!(
             log.observe(&AgentEvent::Usage {
+                provider_requests: 1,
                 input_tokens: 100,
                 output_tokens: 20,
                 cache_write_tokens: 30,
                 cache_read_tokens: 40,
             }),
-            Some("usage: in=100 out=20 cache_write=30 cache_read=40".into())
+            Some("usage: provider_requests=1 in=100 out=20 cache_write=30 cache_read=40".into())
         );
 
         assert_eq!(
             log.usage,
             UsageTotals {
+                provider_requests: 1,
                 input_tokens: 100,
                 output_tokens: 20,
                 cache_write_tokens: 30,

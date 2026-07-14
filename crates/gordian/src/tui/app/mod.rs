@@ -648,6 +648,7 @@ mod tests {
         let mut a = app();
         // Cold first call: 800 of the 1000 input was a cache write.
         a.update(Msg::Agent(AgentEvent::Usage {
+            provider_requests: 1,
             input_tokens: 1000,
             output_tokens: 200,
             cache_write_tokens: 800,
@@ -655,10 +656,19 @@ mod tests {
         }));
         // Warm second call: reads the 800 back, 700 fresh input.
         a.update(Msg::Agent(AgentEvent::Usage {
+            provider_requests: 1,
             input_tokens: 1500,
             output_tokens: 300,
             cache_write_tokens: 0,
             cache_read_tokens: 800,
+        }));
+        // A failed provider invocation is still counted but has no token report.
+        a.update(Msg::Agent(AgentEvent::Usage {
+            provider_requests: 1,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
         }));
         assert_eq!(a.status.ctx_tokens, 1800, "latest call defines the context");
         let l = &a.status.ledger;
@@ -670,6 +680,7 @@ mod tests {
         assert_eq!(l.output, 500);
         assert_eq!(l.cache_write, 800);
         assert_eq!(l.cache_read, 800);
+        assert_eq!(l.provider_requests, 3);
         assert_eq!(l.input_tokens(), 1000 + 1500);
     }
 

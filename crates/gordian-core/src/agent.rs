@@ -3526,16 +3526,20 @@ mod tests {
                 .is_err()
         );
 
-        assert!(received.try_iter().any(|event| matches!(
-            event,
-            AgentEvent::Usage {
-                provider_requests: 1,
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_write_tokens: 0,
-                cache_read_tokens: 0,
-            }
-        )));
+        let mut saw_failed_request_usage = false;
+        while let Ok(event) = received.try_recv() {
+            saw_failed_request_usage |= matches!(
+                event,
+                AgentEvent::Usage {
+                    provider_requests: 1,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                }
+            );
+        }
+        assert!(saw_failed_request_usage);
     }
 
     fn batched_tool_calls(calls: &[(&str, &str, Value)]) -> StreamEnd {

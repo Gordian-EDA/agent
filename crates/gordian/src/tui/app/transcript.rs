@@ -213,14 +213,20 @@ impl App {
                 ));
             }
             AgentEvent::Usage {
+                provider_requests,
                 input_tokens,
                 output_tokens,
                 cache_write_tokens,
                 cache_read_tokens,
             } => {
                 // What the next request will roughly resend is this whole call.
-                self.status.ctx_tokens = input_tokens + output_tokens;
+                // A failed invocation has no token report; count its request
+                // without erasing the last known live context size.
+                if input_tokens > 0 || output_tokens > 0 {
+                    self.status.ctx_tokens = input_tokens + output_tokens;
+                }
                 self.status.ledger.record(
+                    provider_requests,
                     input_tokens,
                     output_tokens,
                     cache_write_tokens,

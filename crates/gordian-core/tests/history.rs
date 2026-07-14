@@ -227,11 +227,13 @@ async fn usage_tokens_flow_through_completions() {
     let mut saw_usage = false;
     while let Ok(ev) = rx.try_recv() {
         if let AgentEvent::Usage {
+            provider_requests,
             input_tokens,
             output_tokens,
             ..
         } = ev
         {
+            assert_eq!(provider_requests, 1);
             assert_eq!((input_tokens, output_tokens), (1234, 56));
             saw_usage = true;
         }

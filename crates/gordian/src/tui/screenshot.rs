@@ -295,12 +295,14 @@ fn seed_conversation(app: &mut App) {
     // a cold first call (cache write) then a warm one (cache read) — the cached
     // prefix is exactly the prompt-caching win the HUD is meant to surface.
     app.update(Msg::Agent(AgentEvent::Usage {
+        provider_requests: 1,
         input_tokens: 8_200,
         output_tokens: 900,
         cache_write_tokens: 6_400,
         cache_read_tokens: 0,
     }));
     app.update(Msg::Agent(AgentEvent::Usage {
+        provider_requests: 1,
         input_tokens: 9_100,
         output_tokens: 1_400,
         cache_write_tokens: 0,

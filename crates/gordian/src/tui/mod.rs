@@ -392,7 +392,8 @@ impl Shell {
                     .map(|c| format!("${c:.2}"))
                     .unwrap_or_else(|| "—".into());
                 format!(
-                    "tokens: ctx {} · session {} in / {} out · {} cached · {cost}",
+                    "provider requests: {} (all model invocations) · tokens: ctx {} · session {} in / {} out · {} cached · {cost}",
+                    l.provider_requests,
                     s.ctx_tokens,
                     l.input_tokens(),
                     l.output,

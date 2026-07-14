@@ -116,6 +116,9 @@ pub fn price_of(model: &str) -> Option<Price> {
 /// the three input-side fields sum to the prompt size of every call.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Ledger {
+    /// Actual provider invocations across main turns, reviews, compactions,
+    /// recoveries, and failed calls.
+    pub provider_requests: u64,
     /// Full-price prompt tokens (excludes cache reads/writes).
     pub input: u64,
     pub output: u64,
@@ -131,11 +134,13 @@ impl Ledger {
     /// `input_tokens − cache_read − cache_write`.
     pub fn record(
         &mut self,
+        provider_requests: u64,
         input_tokens: u64,
         output_tokens: u64,
         cache_write: u64,
         cache_read: u64,
     ) {
+        self.provider_requests += provider_requests;
         self.input += input_tokens
             .saturating_sub(cache_read)
             .saturating_sub(cache_write);
@@ -186,11 +191,11 @@ mod tests {
     fn ledger_accumulates_and_splits_out_the_cached_prefix() {
         let mut l = Ledger::default();
         // Turn 1: cold prompt, writes 800 to cache; 1000 input (incl. the 800 write).
-        l.record(1000, 100, 800, 0);
+        l.record(1, 1000, 100, 800, 0);
         // Turn 2: warm — reads back the 800, only 250 fresh input.
-        l.record(1050, 120, 0, 800);
+        l.record(1, 1050, 120, 0, 800);
         // Turn 3: more cache reads.
-        l.record(1200, 80, 0, 1000);
+        l.record(1, 1200, 80, 0, 1000);
 
         assert_eq!(
             l.input,
@@ -200,6 +205,7 @@ mod tests {
         assert_eq!(l.output, 300);
         assert_eq!(l.cache_write, 800);
         assert_eq!(l.cache_read, 1800);
+        assert_eq!(l.provider_requests, 3);
         assert_eq!(l.input_tokens(), 1000 + 1050 + 1200);
     }
 
@@ -207,13 +213,13 @@ mod tests {
     fn cost_bills_cache_reads_cheaper_than_full_input() {
         // Opus 4.8: $5/$25 input/output, $0.50 cached-input, $6.25 cache-write.
         let mut l = Ledger::default();
-        l.record(1_000_000, 1_000_000, 0, 0); // 1M full input + 1M output
+        l.record(1, 1_000_000, 1_000_000, 0, 0); // 1M full input + 1M output
         let full = l.cost("claude-opus-4-8").unwrap();
         assert!((full - 30.0).abs() < 1e-9, "5 + 25 = $30, got {full}");
 
         // Same 1M of prompt, but served from cache: billed at $0.50, not $5.
         let mut cached = Ledger::default();
-        cached.record(1_000_000, 1_000_000, 0, 1_000_000);
+        cached.record(1, 1_000_000, 1_000_000, 0, 1_000_000);
         let with_cache = cached.cost("claude-opus-4-8").unwrap();
         assert!(
             (with_cache - 25.5).abs() < 1e-9,
@@ -226,14 +232,14 @@ mod tests {
 
         // A cache write costs 1.25× input: 1M write → $6.25 on top of output.
         let mut wrote = Ledger::default();
-        wrote.record(1_000_000, 0, 1_000_000, 0);
+        wrote.record(1, 1_000_000, 0, 1_000_000, 0);
         assert!((wrote.cost("claude-opus-4-8").unwrap() - 6.25).abs() < 1e-9);
     }
 
     #[test]
     fn unknown_model_has_no_cost() {
         let mut l = Ledger::default();
-        l.record(1000, 100, 0, 0);
+        l.record(1, 1000, 100, 0, 0);
         assert_eq!(l.cost("gpt-4o"), None);
     }
 }

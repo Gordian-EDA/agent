@@ -407,6 +407,7 @@ mod tests {
         }
         a.update(Msg::Submit);
         a.update(Msg::Agent(AgentEvent::Usage {
+            provider_requests: 1,
             input_tokens: 100,
             output_tokens: 1200,
             cache_write_tokens: 0,
@@ -566,6 +567,7 @@ mod tests {
     fn status_bar_shows_the_cost_hud_after_usage() {
         let mut a = app(); // bedrock opus-4-5 → priced at $5/$25 per 1M
         a.update(Msg::Agent(AgentEvent::Usage {
+            provider_requests: 1,
             input_tokens: 23_000,
             output_tokens: 400,
             cache_write_tokens: 0,
@@ -577,6 +579,10 @@ mod tests {
         assert!(
             text.contains("in 23.0k / out 400"),
             "input/output token split:\n{text}"
+        );
+        assert!(
+            text.contains("1 provider req"),
+            "actual provider request count:\n{text}"
         );
         assert!(
             !text.contains("23.4k tok"),
@@ -602,6 +608,7 @@ mod tests {
             true,
         ));
         a.update(Msg::Agent(AgentEvent::Usage {
+            provider_requests: 1,
             input_tokens: 10_000,
             output_tokens: 500,
             cache_write_tokens: 0,
@@ -770,6 +777,7 @@ mod tests {
     fn status_bar_ellipsizes_instead_of_colliding_with_hints() {
         let mut a = app();
         a.update(Msg::Agent(AgentEvent::Usage {
+            provider_requests: 1,
             input_tokens: 19_000,
             output_tokens: 200,
             cache_write_tokens: 0,
@@ -796,6 +804,7 @@ mod tests {
     fn status_hud_collapses_fields_when_the_bar_is_narrow() {
         let mut a = app();
         a.update(Msg::Agent(AgentEvent::Usage {
+            provider_requests: 1,
             input_tokens: 23_000,
             output_tokens: 400,
             cache_write_tokens: 0,

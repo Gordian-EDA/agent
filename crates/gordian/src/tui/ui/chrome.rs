@@ -149,6 +149,9 @@ fn status_left(app: &App, avail: usize) -> String {
     if s.applied_count > 0 {
         fields.push(format!("{} applied", s.applied_count));
     }
+    if l.provider_requests > 0 {
+        fields.push(format!("{} provider req", l.provider_requests));
+    }
     if l.input_tokens() > 0 || l.output > 0 {
         fields.push(format!(
             "in {} / out {}",
