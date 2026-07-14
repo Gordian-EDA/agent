@@ -91,6 +91,10 @@ const MAX_DISCOVERY_CALLS_PER_COMPLETION: usize = 4;
 /// the still-empty project until the no-progress watchdog fires.
 const MAX_AUTHORING_TRANSITION_NUDGES: usize = 1;
 
+/// One focused repair chance when a model has produced a substantive but
+/// invalid draft and then starts inspecting instead of fixing diagnostics.
+const MAX_INVALID_DRAFT_REPAIR_NUDGES: usize = 1;
+
 /// The human mutation gate. The loop calls [`Approvals::approve`] with either a
 /// dry-run preview or a structured immediate-operation proposal; returning
 /// `false` prevents the mutation.
@@ -589,6 +593,7 @@ impl<P: Provider> Agent<P> {
         // Bounded re-prompts that push a stalled model past a premature stop.
         let mut nudges_left = MAX_COMMIT_NUDGES;
         let mut authoring_transition_nudges_left = MAX_AUTHORING_TRANSITION_NUDGES;
+        let mut invalid_draft_repair_nudges_left = MAX_INVALID_DRAFT_REPAIR_NUDGES;
         let mut erc_cleanup_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut last_committed_erc_cleanup_needed: Option<bool> = None;
         let mut pcb_recovery = PcbRecoveryState::default();
@@ -1282,6 +1287,18 @@ impl<P: Provider> Agent<P> {
                         consecutive_no_progress_completions = 0;
                         self.history
                             .push(ChatMessage::user(AUTHORING_TRANSITION_NUDGE));
+                        continue;
+                    }
+                    let invalid_draft_waiting_for_repair = draft_dirty
+                        && latest_authoring_diagnostics
+                            .as_ref()
+                            .and_then(|state| state.errors)
+                            .is_some_and(|errors| errors > 0);
+                    if invalid_draft_waiting_for_repair && invalid_draft_repair_nudges_left > 0 {
+                        invalid_draft_repair_nudges_left -= 1;
+                        consecutive_no_progress_completions = 0;
+                        self.history
+                            .push(ChatMessage::user(INVALID_DRAFT_REPAIR_NUDGE));
                         continue;
                     }
                     let current_applied = applied && !draft_dirty;
@@ -2246,6 +2263,11 @@ const AUTHORING_TRANSITION_NUDGE: &str = "Catalog discovery is complete and ther
      draft. Your next action must be `edit_design` with one COMPLETE, non-empty full `yaml` \
      document implementing the requested circuit from the verified parts. Do not inspect the \
      empty project, render, apply, or resume broad searches before authoring.";
+
+const INVALID_DRAFT_REPAIR_NUDGE: &str = "The current draft is substantive but still invalid. \
+     Your next action must be one `edit_design` call with a COMPLETE corrected `yaml` document \
+     that preserves every valid component and fixes the exact latest diagnostics. Do not read, \
+     render, validate, apply, or search first; authoring already returns fresh validation.";
 
 /// The re-prompt sent after a commit whose ERC report contains actionable
 /// findings. The result immediately before this message contains the exact
