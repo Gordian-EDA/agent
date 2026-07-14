@@ -1609,6 +1609,28 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(report)
 }
 
+fn available_authored_refs(ctx: &AgentRuntime) -> Vec<String> {
+    let Some(design) = ctx
+        .workspace()
+        .read_draft()
+        .ok()
+        .flatten()
+        .and_then(|yaml| compile(&yaml, ctx.provider()).design)
+    else {
+        return Vec::new();
+    };
+    let mut refs = design
+        .blocks
+        .values()
+        .flat_map(|block| block.components.iter())
+        .filter_map(|(reference, component)| {
+            matches!(component.origin, Origin::Authored).then_some(reference.clone())
+        })
+        .collect::<Vec<_>>();
+    refs.sort();
+    refs
+}
+
 fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let block_name = input.get("block").and_then(Value::as_str).unwrap_or("main");
     if block_name.is_empty()
@@ -1624,7 +1646,11 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "mode": "component_repair",
         }));
     }
-    let upsert = match input.get("upsert") {
+    // Some providers preserve the natural `components: {R1: ...}` wrapper
+    // even though this focused tool names the operation `upsert`. Accept that
+    // harmless shape at either level; validation below remains atomic.
+    let upsert_input = input.get("upsert").or_else(|| input.get("components"));
+    let mut upsert = match upsert_input {
         None => serde_json::Map::new(),
         Some(Value::Object(map)) => map.clone(),
         Some(_) => {
@@ -1637,6 +1663,11 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }));
         }
     };
+    if upsert.len() == 1
+        && let Some(Value::Object(components)) = upsert.get("components")
+    {
+        upsert = components.clone();
+    }
     if upsert.values().any(|component| !component.is_object()) {
         return Ok(json!({
             "error": "every upsert value must be a component object",
@@ -1770,9 +1801,12 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     }
     if upsert.is_empty() && update.is_empty() && remove.is_empty() {
+        let available_authored_refs = available_authored_refs(ctx);
         return Ok(json!({
             "error": "repair requires at least one upsert, update, or remove refdes",
             "code": "empty_component_repair",
+            "available_authored_refs": available_authored_refs,
+            "example": {"upsert": {"C1": {"part": "Device:C", "value": "100nF", "pins": {"1": "+5V", "2": "GND"}}}},
             "draft_written": false,
             "draft_changed": false,
             "mode": "component_repair",
@@ -1827,6 +1861,11 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         report["draft_changed"] = json!(false);
         report["mode"] = json!("component_repair");
         report["current_design_state"] = design_state_summary(prior_design);
+        report["available_authored_refs"] = json!(available_authored_refs(ctx));
+        report["expected_shape"] = json!({
+            "upsert": {"NEW_REF": {"part": "Lib:Symbol", "pins": {"pin": "NET"}}},
+            "update": {"EXISTING_REF": {"pins": {"pin": "NET"}}}
+        });
         return Ok(report);
     };
     let patch_block = patch_design

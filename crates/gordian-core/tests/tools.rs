@@ -887,6 +887,35 @@ fn repair_components_updates_d1_and_tp1_without_complete_component_objects() {
 }
 
 #[test]
+fn repair_components_accepts_common_components_wrappers() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    seed_draft(&ctx, TINY_YAML);
+
+    let top_level = run_tool(
+        "repair_components",
+        serde_json::json!({"components": {
+            "C1": {"part": "Device:C", "pins": {"1": "VIN", "2": "GND"}}
+        }}),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(top_level["ok"], true, "{top_level}");
+
+    let nested = run_tool(
+        "repair_components",
+        serde_json::json!({"upsert": {"components": {
+            "R2": {"part": "Device:R", "pins": {"1": "VIN", "2": "GND"}}
+        }}}),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(nested["ok"], true, "{nested}");
+}
+
+#[test]
 fn repair_components_update_failures_and_overlaps_preserve_exact_bytes() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
