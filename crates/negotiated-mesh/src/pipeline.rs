@@ -614,6 +614,138 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, RouteSolution)>
     Some((sub, fanout))
 }
 
+/// Neck wide nets down at fine-pitch pads before detailed routing.
+///
+/// The transformed terminal sits at the end of a short full-width landing, so
+/// every router can use the requested net width without trying to place that
+/// width between adjacent pads.  Escape copper is validated cumulatively and
+/// exposed as obstacles to later routing stages.  A net is transformed only
+/// when every narrow terminal on that net has a legal escape.
+pub fn prepare_wide_terminal_escapes(problem: &RouteProblem) -> (RouteProblem, RouteSolution) {
+    const SITE_STEP_MM: f64 = 0.1;
+    const SITE_RADIUS_MM: f64 = 1.5;
+    const LANDING_MM: f64 = 0.1;
+
+    let steps = (SITE_RADIUS_MM / SITE_STEP_MM) as i32;
+    let mut offsets: Vec<_> = (-steps..=steps)
+        .flat_map(|dx| (-steps..=steps).map(move |dy| (dx, dy)))
+        .filter(|(dx, dy)| *dx != 0 || *dy != 0)
+        .collect();
+    offsets.sort_by_key(|(dx, dy)| (dx * dx + dy * dy, *dx, *dy));
+
+    let mut transformed = problem.clone();
+    let mut escapes = RouteSolution {
+        traces: Vec::new(),
+        vias: Vec::new(),
+    };
+
+    for (conn_index, conn) in problem.connections.iter().enumerate() {
+        let width = problem.net_width(&conn.name);
+        if width <= problem.min_trace_width + geom::EPS
+            || problem.plane_nets.contains_key(&conn.name)
+        {
+            continue;
+        }
+
+        let narrow: Vec<usize> = conn
+            .points_to_connect
+            .iter()
+            .enumerate()
+            .filter_map(|(index, terminal)| {
+                problem
+                    .obstacles
+                    .iter()
+                    .any(|ob| {
+                        ob.kind.starts_with("pad:")
+                            && ob.connected_to.iter().any(|net| net == &conn.name)
+                            && ob.layers.iter().any(|layer| layer == &terminal.layer)
+                            && (terminal.x - ob.center.x).abs() <= ob.width / 2.0 + geom::EPS
+                            && (terminal.y - ob.center.y).abs() <= ob.height / 2.0 + geom::EPS
+                            && ob.width.min(ob.height) < width - geom::EPS
+                    })
+                    .then_some(index)
+            })
+            .collect();
+        if narrow.is_empty() {
+            continue;
+        }
+
+        let mut planned = RouteSolution {
+            traces: Vec::new(),
+            vias: Vec::new(),
+        };
+        let mut replacements = Vec::with_capacity(narrow.len());
+        let mut complete = true;
+        for terminal_index in narrow {
+            let terminal = &conn.points_to_connect[terminal_index];
+            let origin = terminal.point();
+            let found = offsets.iter().find_map(|(dx, dy)| {
+                let vx = f64::from(*dx) * SITE_STEP_MM;
+                let vy = f64::from(*dy) * SITE_STEP_MM;
+                let distance = (vx * vx + vy * vy).sqrt();
+                let ux = vx / distance;
+                let uy = vy / distance;
+                let landing_start = Point2 {
+                    x: origin.x + vx,
+                    y: origin.y + vy,
+                };
+                let endpoint = Point2 {
+                    x: landing_start.x + ux * LANDING_MM,
+                    y: landing_start.y + uy * LANDING_MM,
+                };
+                let mut proposed = escapes.clone();
+                proposed.traces.extend(planned.traces.clone());
+                proposed.traces.push(Trace {
+                    connection: conn.name.clone(),
+                    layer: terminal.layer.clone(),
+                    width: problem.min_trace_width,
+                    path: vec![origin, landing_start],
+                });
+                proposed.traces.push(Trace {
+                    connection: conn.name.clone(),
+                    layer: terminal.layer.clone(),
+                    width,
+                    path: vec![landing_start, endpoint],
+                });
+                (router::geometry_violations(problem, &proposed) == 0)
+                    .then_some((landing_start, endpoint))
+            });
+            let Some((landing_start, endpoint)) = found else {
+                complete = false;
+                break;
+            };
+            planned.traces.push(Trace {
+                connection: conn.name.clone(),
+                layer: terminal.layer.clone(),
+                width: problem.min_trace_width,
+                path: vec![origin, landing_start],
+            });
+            planned.traces.push(Trace {
+                connection: conn.name.clone(),
+                layer: terminal.layer.clone(),
+                width,
+                path: vec![landing_start, endpoint],
+            });
+            replacements.push((terminal_index, endpoint));
+        }
+        if !complete {
+            continue;
+        }
+        for (terminal_index, endpoint) in replacements {
+            let terminal =
+                &mut transformed.connections[conn_index].points_to_connect[terminal_index];
+            terminal.x = endpoint.x;
+            terminal.y = endpoint.y;
+        }
+        escapes.traces.extend(planned.traces);
+    }
+
+    transformed
+        .obstacles
+        .extend(copper_obstacles(problem, &escapes));
+    (transformed, escapes)
+}
+
 fn with_plane_fanout(
     problem: &RouteProblem,
     route: impl Fn(&RouteProblem) -> RouteAutoRun,
@@ -2712,6 +2844,84 @@ mod tests {
         assert_eq!(fanout.traces[0].width, p.min_trace_width);
         assert_eq!(router::geometry_violations(&p, &fanout), 0);
         assert!(fanout.traces[0].path[0].dist(fanout.traces[0].path[1]) <= 5.0);
+    }
+
+    #[test]
+    fn wide_terminal_escape_necks_down_narrow_pad_and_reserves_copper() {
+        let mut p = simple_two_point_problem();
+        p.net_widths.insert("N".to_owned(), 0.5);
+        p.obstacles = vec![
+            crate::problem::Obstacle {
+                kind: "pad:U1".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: p.connections[0].points_to_connect[0].point(),
+                width: 0.5,
+                height: 0.35,
+                connected_to: vec!["N".to_owned()],
+            },
+            crate::problem::Obstacle {
+                kind: "pad:J1".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: p.connections[0].points_to_connect[1].point(),
+                width: 1.0,
+                height: 1.0,
+                connected_to: vec!["N".to_owned()],
+            },
+        ];
+        let original = p.connections[0].points_to_connect[0].point();
+
+        let (transformed, escapes) = prepare_wide_terminal_escapes(&p);
+
+        assert_eq!(escapes.traces.len(), 2);
+        assert_eq!(escapes.traces[0].width, p.min_trace_width);
+        assert_eq!(escapes.traces[1].width, 0.5);
+        assert_ne!(
+            transformed.connections[0].points_to_connect[0].point(),
+            original
+        );
+        assert_eq!(router::geometry_violations(&p, &escapes), 0);
+        assert!(
+            transformed
+                .obstacles
+                .iter()
+                .any(|ob| { ob.kind == "route-trace" && ob.connected_to == ["N".to_owned()] })
+        );
+    }
+
+    #[test]
+    fn wide_terminal_escape_is_atomic_when_a_pad_is_enclosed() {
+        let mut p = simple_two_point_problem();
+        p.net_widths.insert("N".to_owned(), 0.5);
+        let origin = p.connections[0].points_to_connect[0].point();
+        p.obstacles.push(crate::problem::Obstacle {
+            kind: "pad:U1".to_owned(),
+            layers: vec![LayerRef::top()],
+            center: origin,
+            width: 0.5,
+            height: 0.35,
+            connected_to: vec!["N".to_owned()],
+        });
+        for (x, y, width, height) in [
+            (origin.x - 0.7, origin.y, 0.4, 2.0),
+            (origin.x + 0.7, origin.y, 0.4, 2.0),
+            (origin.x, origin.y - 0.7, 2.0, 0.4),
+            (origin.x, origin.y + 0.7, 2.0, 0.4),
+        ] {
+            p.obstacles.push(crate::problem::Obstacle {
+                kind: "pad:X".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: Point2 { x, y },
+                width,
+                height,
+                connected_to: vec!["OTHER".to_owned()],
+            });
+        }
+
+        let (transformed, escapes) = prepare_wide_terminal_escapes(&p);
+
+        assert!(escapes.traces.is_empty());
+        assert_eq!(transformed.connections, p.connections);
+        assert_eq!(transformed.obstacles, p.obstacles);
     }
 
     fn top_blocked_two_point_problem() -> RouteProblem {

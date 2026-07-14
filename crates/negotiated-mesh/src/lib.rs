@@ -16,7 +16,7 @@ pub use grid_astar::{astar, grid, router};
 pub use pcb_model as problem;
 
 pub mod channel;
-pub(crate) mod copper;
+pub mod copper;
 pub mod crossing;
 pub mod detail;
 pub mod direct;

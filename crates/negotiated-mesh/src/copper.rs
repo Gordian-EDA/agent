@@ -2,7 +2,7 @@ use crate::problem::{
     LayerRef, Obstacle, Point2, RouteProblem, RouteSolution, Trace, Via, ViaSpan,
 };
 
-pub(crate) fn copper_obstacles(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Obstacle> {
+pub fn copper_obstacles(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Obstacle> {
     let mut obstacles = Vec::new();
     for trace in &solution.traces {
         obstacles.extend(trace_obstacles(problem, trace));
