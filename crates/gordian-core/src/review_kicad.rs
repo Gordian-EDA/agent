@@ -105,6 +105,148 @@ pub async fn review_netlist(
     .await
 }
 
+/// Deterministic checks for explicit, machine-verifiable intent contracts that
+/// a small semantic reviewer can otherwise overlook. These do not guess part
+/// suitability; they only reject objectively absent structures or malformed
+/// library identifiers named by the request.
+pub(crate) fn intent_contract_checks(intent: &str, design: &circuit_lang::Design) -> Vec<String> {
+    let request = intent.to_ascii_lowercase();
+    let components = design
+        .blocks
+        .values()
+        .flat_map(|block| block.components.iter())
+        .filter(|(_, component)| matches!(component.origin, circuit_lang::model::Origin::Authored))
+        .collect::<Vec<_>>();
+    let mut defects = Vec::new();
+
+    if request.contains("common-mode choke") || request.contains("common mode choke") {
+        let has_choke = components.iter().any(|(_, component)| {
+            component_text(component).contains("choke")
+                || component_text(component).contains("commonmode")
+                || component_text(component).contains("common_mode")
+        });
+        if !has_choke {
+            defects.push(
+                "intent contract: the request requires a CAN common-mode choke, but no authored component part/value identifies a choke; separate generic inductors do not satisfy this contract"
+                    .into(),
+            );
+        }
+    }
+
+    if request.contains("status") {
+        let has_status_net = design.nets.keys().any(|net| {
+            let net = net.to_ascii_lowercase();
+            net.contains("status") || net.contains("fault") || net.contains("error") || net == "err"
+        });
+        if !has_status_net {
+            defects.push(
+                "intent contract: a status signal/header was requested, but the design has no STATUS, FAULT, ERROR, or ERR net; labeling an unrelated reference or logic net as status is not a status output"
+                    .into(),
+            );
+        }
+    }
+
+    if request.contains("power-good") || request.contains("power good") {
+        let has_power_good = design.nets.keys().any(|net| {
+            let net = net.to_ascii_lowercase();
+            net.contains("pgood") || net.contains("power_good") || net == "pg"
+        });
+        if !has_power_good {
+            defects.push(
+                "intent contract: power-good was requested, but the design has no PG, PGOOD, or POWER_GOOD net"
+                    .into(),
+            );
+        }
+    }
+
+    if request.contains("split termination") && !has_split_termination(&components) {
+        defects.push(
+            "intent contract: split termination was requested, but the design does not contain two approximately 60-ohm resistors sharing a center net with a capacitor from that center net to ground"
+                .into(),
+        );
+    }
+
+    if request.contains("exact") && request.contains("footprint") {
+        let invalid = components
+            .iter()
+            .filter(|(_, component)| !component.part.starts_with("power:"))
+            .filter_map(|(refdes, component)| match component.footprint.as_deref() {
+                Some(footprint) if footprint.split_once(':').is_some() => None,
+                Some(footprint) => Some(format!("{refdes}={footprint}")),
+                None => Some(format!("{refdes}=missing")),
+            })
+            .collect::<Vec<_>>();
+        if !invalid.is_empty() {
+            defects.push(format!(
+                "intent contract: exact library-qualified footprints were requested, but these authored components lack a `Library:Footprint` identifier: {}",
+                invalid.join(", ")
+            ));
+        }
+    }
+
+    defects
+}
+
+fn component_text(component: &circuit_lang::model::Component) -> String {
+    format!(
+        "{} {}",
+        component.part,
+        component.value.as_deref().unwrap_or_default()
+    )
+    .to_ascii_lowercase()
+    .replace(['-', ' '], "")
+}
+
+fn component_nets(component: &circuit_lang::model::Component) -> Vec<&str> {
+    component
+        .pins
+        .values()
+        .filter_map(|target| match target {
+            circuit_lang::model::PinTarget::Net(net) => Some(net.as_str()),
+            circuit_lang::model::PinTarget::NoConnect => None,
+        })
+        .collect()
+}
+
+fn has_split_termination(components: &[(&String, &circuit_lang::model::Component)]) -> bool {
+    let legs = components
+        .iter()
+        .filter(|(_, component)| component.part.ends_with(":R"))
+        .filter(|(_, component)| {
+            component
+                .value
+                .as_deref()
+                .and_then(circuit_lang::erc::parse_value)
+                .is_some_and(|ohms| (55.0..=65.0).contains(&ohms))
+        })
+        .map(|(_, component)| component_nets(component))
+        .filter(|nets| nets.len() == 2)
+        .collect::<Vec<_>>();
+
+    for (index, left) in legs.iter().enumerate() {
+        for right in &legs[index + 1..] {
+            let Some(center) = left
+                .iter()
+                .find(|net| right.contains(net) && !net.eq_ignore_ascii_case("gnd"))
+            else {
+                continue;
+            };
+            let center_is_bypassed = components.iter().any(|(_, component)| {
+                if !component.part.ends_with(":C") {
+                    return false;
+                }
+                let nets = component_nets(component);
+                nets.iter().any(|net| net == center)
+                    && nets.iter().any(|net| net.eq_ignore_ascii_case("gnd"))
+            });
+            if center_is_bypassed {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Add deterministic facts from the compiled design and KiCAD symbol table to the
 /// subject the LLM sees. This keeps the reviewer anchored to actual pin/function/net
 /// data for active parts, package power pins, and synthesized support parts.
@@ -759,6 +901,72 @@ blocks:
             QUICK_LENSES
                 .iter()
                 .any(|lens| lens.contains("distinct in/out pins and nets"))
+        );
+    }
+
+    #[test]
+    fn intent_contracts_reject_superficial_can_substitutes() {
+        let provider = circuit_lang::SymbolTable::with_basics();
+        let netlist = r#"
+version: 1
+blocks:
+  main:
+    components:
+      L1: {part: Device:L, value: 47uH, footprint: Inductor_SMD_L_0603, between: [CANH, CANH_INT]}
+      L2: {part: Device:L, value: 47uH, footprint: Inductor_SMD:L_0603, between: [CANL, CANL_INT]}
+      R5: {part: Device:R, value: 60, footprint: Resistor_SMD:R_0603, between: [CANH_INT, MID]}
+      R6: {part: Device:R, value: 60, footprint: Resistor_SMD:R_0603, between: [MID, CANL_INT]}
+nets:
+  CANH: {}
+  CANL: {}
+  CANH_INT: {}
+  CANL_INT: {}
+  MID: {}
+  VREF: {}
+"#;
+        let design = circuit_lang::compile(netlist, &provider)
+            .design
+            .expect("fixture compiles");
+        let defects = intent_contract_checks(
+            "include a common-mode choke, TX/RX/status header, split termination, and exact footprints",
+            &design,
+        );
+        let joined = defects.join("\n");
+        assert!(joined.contains("common-mode choke"), "{joined}");
+        assert!(joined.contains("status signal"), "{joined}");
+        assert!(joined.contains("center net to ground"), "{joined}");
+        assert!(joined.contains("L1=Inductor_SMD_L_0603"), "{joined}");
+    }
+
+    #[test]
+    fn intent_contracts_accept_concrete_can_structures() {
+        let provider = circuit_lang::SymbolTable::with_basics();
+        let netlist = r#"
+version: 1
+blocks:
+  main:
+    components:
+      L1: {part: Device:L, value: CAN_common-mode_choke, footprint: Filter:Choke_CommonMode, between: [CANH, CANH_INT]}
+      R5: {part: Device:R, value: 60, footprint: Resistor_SMD:R_0603, between: [CANH_INT, MID]}
+      R6: {part: Device:R, value: 60, footprint: Resistor_SMD:R_0603, between: [MID, CANL_INT]}
+      C1: {part: Device:C, value: 4.7nF, footprint: Capacitor_SMD:C_0603, between: [MID, GND]}
+nets:
+  CANH: {}
+  CANH_INT: {}
+  CANL_INT: {}
+  MID: {}
+  GND: {}
+  STATUS: {}
+"#;
+        let design = circuit_lang::compile(netlist, &provider)
+            .design
+            .expect("fixture compiles");
+        assert!(
+            intent_contract_checks(
+                "include a common-mode choke, status header, split termination, and exact footprints",
+                &design,
+            )
+            .is_empty()
         );
     }
 }

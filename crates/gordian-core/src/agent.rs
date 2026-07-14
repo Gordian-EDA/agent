@@ -2499,6 +2499,7 @@ async fn review_netlist_with_erc(
             &design,
             ctx.provider(),
         ));
+        deterministic.extend(crate::review_kicad::intent_contract_checks(intent, &design));
         for d in deterministic {
             if !defects.iter().any(|e| crate::review::same_defect(e, &d)) {
                 defects.push(d);
