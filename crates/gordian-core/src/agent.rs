@@ -393,6 +393,37 @@ fn is_schematic_phase_tool(name: &str) -> bool {
     )
 }
 
+fn constrain_schematic_tools_for_draft_state(
+    defs: &mut Vec<Tool>,
+    draft_exists: bool,
+    schematic_exists: bool,
+    draft_known_invalid: bool,
+    review_has_defects: bool,
+) {
+    if !draft_exists && !schematic_exists {
+        defs.retain(|tool| {
+            !matches!(
+                tool.name.as_str(),
+                "validate_design"
+                    | "apply_design"
+                    | "review_design"
+                    | "read_schematic"
+                    | "render_schematic"
+                    | "assign_footprints"
+            )
+        });
+    }
+    if draft_known_invalid {
+        defs.retain(|tool| !matches!(tool.name.as_str(), "apply_design" | "review_design"));
+    }
+    if review_has_defects {
+        defs.retain(|tool| {
+            is_discovery_tool(tool.name.as_str())
+                || matches!(tool.name.as_str(), "edit_design" | "assign_footprints")
+        });
+    }
+}
+
 fn is_pcb_stage_tool(name: &str) -> bool {
     matches!(
         name,
@@ -812,6 +843,18 @@ impl<P: Provider> Agent<P> {
             if schematic_review_current.is_some() {
                 defs.retain(|def| def.name.as_str() != "review_design");
             }
+            constrain_schematic_tools_for_draft_state(
+                &mut defs,
+                draft_existed_before_completion,
+                self.runtime.sch_path().exists(),
+                latest_authoring_diagnostics
+                    .as_ref()
+                    .and_then(|state| state.errors)
+                    .is_some_and(|errors| errors > 0),
+                schematic_review_current
+                    .as_ref()
+                    .is_some_and(|review| !review_result_is_clean(review)),
+            );
 
             // Drive the provider's stream so assistant prose renders token-by-token
             // (each chunk forwarded as `AssistantDelta`), while the terminal End
@@ -4979,6 +5022,52 @@ mod tests {
             seed_bytes < active_bytes / 2,
             "{seed_bytes} vs {active_bytes}"
         );
+    }
+
+    #[test]
+    fn draft_state_hides_tools_that_can_only_fail_or_repeat_defects() {
+        let names_after = |draft_exists, schematic_exists, invalid, defects| {
+            let mut defs = tool_defs_for_phase(
+                ToolPhase::Schematic,
+                &HashMap::new(),
+                draft_exists,
+                &HashSet::new(),
+                schematic_exists,
+            );
+            constrain_schematic_tools_for_draft_state(
+                &mut defs,
+                draft_exists,
+                schematic_exists,
+                invalid,
+                defects,
+            );
+            defs.into_iter()
+                .map(|tool| tool.name.as_str().to_owned())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+
+        let fresh = names_after(false, false, false, false);
+        assert!(fresh.contains("edit_design"));
+        for absent in [
+            "validate_design",
+            "apply_design",
+            "review_design",
+            "read_schematic",
+            "render_schematic",
+            "assign_footprints",
+        ] {
+            assert!(!fresh.contains(absent), "{absent}");
+        }
+
+        let invalid = names_after(true, false, true, false);
+        assert!(invalid.contains("edit_design"));
+        assert!(!invalid.contains("apply_design"));
+
+        let defects = names_after(true, false, false, true);
+        assert!(defects.contains("edit_design"));
+        assert!(defects.contains("assign_footprints"));
+        assert!(!defects.contains("project_info"));
+        assert!(!defects.contains("apply_design"));
     }
 
     #[test]
