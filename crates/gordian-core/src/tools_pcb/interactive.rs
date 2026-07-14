@@ -884,6 +884,11 @@ fn validate_manual_solution(
     problem: &RouteProblem,
     solution: &RouteSolution,
 ) -> std::result::Result<(), String> {
+    let target_net = problem
+        .connections
+        .first()
+        .map(|connection| connection.name.as_str())
+        .unwrap_or_default();
     let baseline = drc_lint::lint::lint(
         problem,
         &RouteSolution {
@@ -899,10 +904,18 @@ fn validate_manual_solution(
     }
     let mut introduced = Vec::new();
     for violation in violations {
-        // The validation problem contains only the requested manual net. Its
-        // connectivity defects are never acceptable merely because the empty
-        // baseline has the same expected Unconnected finding.
-        if matches!(&violation, drc_lint::DrcViolation::Connectivity { .. }) {
+        // The validation problem contains only the requested manual connection.
+        // Its own Unconnected defect is never acceptable merely because the
+        // empty baseline has the same expected finding. Other connectivity
+        // findings (for example two intentional solder-jumper pads represented
+        // as preexisting obstacles) remain baseline-subtractable. A new
+        // cross-net merge still has no baseline match and is rejected below.
+        if matches!(
+            &violation,
+            drc_lint::DrcViolation::Connectivity {
+                violation: drc_lint::connectivity::Violation::Unconnected { connection, .. }
+            } if connection == target_net
+        ) {
             introduced.push(violation);
             continue;
         }
@@ -1763,6 +1776,50 @@ mod tests {
 
         let err = validate_manual_solution(&problem, &empty).unwrap_err();
         assert!(err.contains("unconnected"), "{err}");
+    }
+
+    #[test]
+    fn manual_route_validation_subtracts_unrelated_baseline_connectivity() {
+        let mut a = obstacle(Point2::new(5.0, 4.0), 1.0, 1.0, vec![LayerRef::top()]);
+        a.kind = "pad:JP1".to_owned();
+        a.connected_to = vec!["CANH".to_owned()];
+        let mut b = a.clone();
+        b.connected_to = vec!["CAN_TERM".to_owned()];
+        let base = route_problem(vec![a, b]);
+        let problem = single_connection_problem(
+            &base,
+            "GND",
+            0.2,
+            Point2::new(1.0, 1.0),
+            LayerRef::top(),
+            Point2::new(9.0, 1.0),
+            LayerRef::top(),
+        );
+        let solution = RouteSolution {
+            traces: vec![Trace {
+                connection: "GND".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![Point2::new(1.0, 1.0), Point2::new(9.0, 1.0)],
+            }],
+            vias: Vec::new(),
+        };
+        let empty = RouteSolution {
+            traces: Vec::new(),
+            vias: Vec::new(),
+        };
+        assert!(
+            drc_lint::lint::lint(&problem, &empty)
+                .iter()
+                .any(|finding| matches!(
+                    finding,
+                    drc_lint::DrcViolation::Connectivity {
+                        violation: drc_lint::connectivity::Violation::CrossNetMerge { .. }
+                    }
+                ))
+        );
+
+        validate_manual_solution(&problem, &solution).unwrap();
     }
 
     #[test]
