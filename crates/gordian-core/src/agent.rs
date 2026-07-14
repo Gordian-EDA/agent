@@ -646,7 +646,9 @@ impl<P: Provider> Agent<P> {
                 self.runtime.sch_path().exists(),
             );
             if !runtime_supports_live_footprint_moves(&self.runtime) {
-                defs.retain(|def| def.name.as_str() != "move_parts");
+                defs.retain(|def| {
+                    !matches!(def.name.as_str(), "move_parts" | "set_net_width")
+                });
             }
 
             // Drive the provider's stream so assistant prose renders token-by-token
