@@ -6,7 +6,7 @@ use super::geometry::{
     EDGE_BAND, PLACE_GRID, PLACEMENT_GRID, courtyard_margin, rotated_copper_bbox,
     rotated_courtyard_half,
 };
-use super::hints::apply_grid_hints;
+use super::hints::{apply_grid_hints, unified_fanout_place};
 use super::legalize::is_legal;
 use super::model::{
     Edge, GroupHint, LockedAt, Part, PartPad, PlaceProblem, PlacementHints, Rect, derive_nets,
@@ -2544,6 +2544,83 @@ fn fanout_keeps_crystal_cluster_near_dense_ic() {
             "{reference} should stay in the inner oscillator cluster near U1, dist {dist:.1}"
         );
     }
+}
+
+#[test]
+fn fanout_does_not_promote_high_pad_edge_connector_to_central_ic() {
+    let mut parts = vec![dense_anchor("U1", 24), ic_anchor("U2", 4, "V3V3")];
+    for i in 0..3 {
+        parts.push(r0603(
+            &format!("R{}", i + 1),
+            Some(&format!("S{i}")),
+            Some(&format!("USB_OUT{i}")),
+        ));
+    }
+    let mut problem = PlaceProblem {
+        bounds: board(60.0, 40.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts,
+        outline: None,
+    };
+    let hints = PlacementHints {
+        edge_seek: vec!["U1".to_owned()],
+        ..PlacementHints::default()
+    };
+
+    assert!(
+        !unified_fanout_place(&mut problem, &hints),
+        "a USB receptacle marked edge-seeking must not become the central IC"
+    );
+    assert!(problem.parts.iter().all(|part| part.locked.is_none()));
+}
+
+#[test]
+fn fanout_chooses_dense_ic_over_larger_edge_connector() {
+    let mut parts = vec![dense_anchor("U1", 24), dense_anchor("U2", 20)];
+    for i in 0..3 {
+        parts.push(r0603(
+            &format!("R{}", i + 1),
+            Some(&format!("S{i}")),
+            Some(&format!("IC_OUT{i}")),
+        ));
+    }
+    // The two dense parts use the same synthetic S* net names; keep the USB
+    // receptacle electrically distinct so only U2 owns the three series parts.
+    for pad in &mut parts[0].pads {
+        pad.net = pad.net.as_ref().map(|net| format!("USB_{net}"));
+    }
+    let mut problem = PlaceProblem {
+        bounds: board(80.0, 60.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts,
+        outline: None,
+    };
+    let hints = PlacementHints {
+        edge_seek: vec!["U1".to_owned()],
+        ..PlacementHints::default()
+    };
+
+    assert!(unified_fanout_place(&mut problem, &hints));
+    let ic_lock = problem.parts[1].locked.as_ref().expect("U2 central lock");
+    let connector_lock = problem.parts[0].locked.as_ref().expect("U1 edge lock");
+    let board_center = Point2 { x: 40.0, y: 30.0 };
+    assert!(
+        ic_lock.at.dist(board_center) < 8.0,
+        "U2 should own the central hub position, got {:?}",
+        ic_lock.at
+    );
+    assert!(
+        connector_lock.at.dist(board_center) > ic_lock.at.dist(board_center) + 3.0,
+        "U1 should remain outside central U2, got U1={:?}, U2={:?}",
+        connector_lock.at,
+        ic_lock.at
+    );
 }
 
 // ── grid hint: tight footprint-sized pitch, centred ─────────────────────

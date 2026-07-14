@@ -398,7 +398,7 @@ impl Placer for FanoutPlacer {
     fn place(&self, problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
         // Stage 1 — structured fan-out fast-path.
         let mut p = problem.clone();
-        let fanned = std::env::var("NO_UNIFIED").is_err() && unified_fanout_place(&mut p);
+        let fanned = std::env::var("NO_UNIFIED").is_err() && unified_fanout_place(&mut p, hints);
         if std::env::var("FANOUT_DEBUG").is_ok() {
             eprintln!("[fanout] fanned={fanned}");
         }

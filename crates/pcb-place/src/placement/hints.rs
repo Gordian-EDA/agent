@@ -640,15 +640,27 @@ fn is_powerish_net(net: &str) -> bool {
 /// placer the lock-then-legalize path couldn't be: escapes route radially (short,
 /// parallel, non-crossing) and the board is compact. Returns false (no-op) when
 /// there's no clear dominant fine-pitch IC or the agent already pinned parts.
-pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
+pub fn unified_fanout_place(problem: &mut PlaceProblem, hints: &PlacementHints) -> bool {
     let n = problem.parts.len();
     if problem.parts.iter().any(|p| p.locked.is_some()) {
         return false; // respect any agent-pinned layout
     }
     let original = problem.clone();
     let original_bounds = problem.bounds;
+    // Edge-seeking parts are connectors/mechanical interfaces even when their
+    // reference uses an IC-like prefix (some libraries assign USB receptacles U1).
+    // Never let a high-pad-count edge connector steal the central fan-out role.
+    let is_edge_part = |i: usize| {
+        let reference = &problem.parts[i].reference;
+        hints.edge_seek.iter().any(|r| r == reference)
+            || hints.corner_seek.iter().any(|r| r == reference)
+            || hints
+                .groups
+                .iter()
+                .any(|group| group.edge.is_some() && group.members.iter().any(|r| r == reference))
+    };
     let Some(ic) = (0..n)
-        .filter(|&i| problem.parts[i].pads.len() >= 16)
+        .filter(|&i| problem.parts[i].pads.len() >= 16 && !is_edge_part(i))
         .max_by_key(|&i| problem.parts[i].pads.len())
     else {
         return false;
@@ -657,10 +669,11 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
     // decoupling cap to decoupling_pairs — exclude J/P/H refs so connectors go to the
     // edge frame, not the inner cap ring.
     let is_connector = |i: usize| {
-        matches!(
-            problem.parts[i].reference.chars().next(),
-            Some('J') | Some('P') | Some('H')
-        )
+        is_edge_part(i)
+            || matches!(
+                problem.parts[i].reference.chars().next(),
+                Some('J') | Some('P') | Some('H')
+            )
     };
     let caps: Vec<usize> = decoupling_pairs(problem)
         .iter()
@@ -711,8 +724,7 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
         if used.contains(&i) {
             continue;
         }
-        let r = &problem.parts[i].reference;
-        if r.starts_with('J') || r.starts_with('P') || r.starts_with('H') {
+        if is_connector(i) {
             connectors.push(i);
         } else {
             others.push(i);
