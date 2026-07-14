@@ -75,6 +75,14 @@ pub fn rail_voltage(net: &str) -> Option<f64> {
     {
         return Some(0.0);
     }
+    // Common net-label spelling with a leading voltage-domain marker:
+    // V3V3 / V1V8. Do not generalize V5 or VIN5, which remain ambiguous.
+    if let Some(rest) = n.strip_prefix('V')
+        && rest.contains('V')
+        && let Some(volts) = rail_voltage(rest)
+    {
+        return Some(volts);
+    }
     // d.dV (e.g. 3.3V); else dVd (e.g. 3V3, 1V8 — V is the decimal point) is handled below.
     if let Some(p) = n.strip_suffix('V')
         && let Ok(v) = p.parse::<f64>()
@@ -846,6 +854,7 @@ mod tests {
         assert_eq!(rail_voltage("GND"), Some(0.0));
         assert_eq!(rail_voltage("V12"), Some(1.2)); // SoC core-rail convention
         assert_eq!(rail_voltage("V33"), Some(3.3));
+        assert_eq!(rail_voltage("V3V3"), Some(3.3));
         assert_eq!(rail_voltage("VOUT"), None); // ambiguous → skip
         assert_eq!(rail_voltage("VCC"), None);
         assert_eq!(rail_voltage("V5"), None); // single digit → ambiguous
@@ -1134,7 +1143,7 @@ blocks:
   main:
     components:
       LED1: {part: Device:LED, pins: {1: LED_ANODE, 2: GND}}
-      R3: {part: Device:R, value: 1k, pins: {1: 3V3, 2: LED_ANODE}}
+      R3: {part: Device:R, value: 1k, pins: {1: V3V3, 2: LED_ANODE}}
 ",
         );
         assert!(
