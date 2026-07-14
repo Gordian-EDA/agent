@@ -53,6 +53,10 @@ VDDA, VSSA, or VBAT to a rail, treat that netlist fact as intentional unless the
 netlist explicitly exposes an unpowered pin. Do not claim a pin number/function
 unless the netlist itself contains that numbered pin or exact pin name.
 
+For a series diode, conventional current flows from anode (A) to cathode (K).
+KiCad `Device:D` is pin 1=K and pin 2=A, so raw positive input on pin 2/A and the
+protected output on pin 1/K is correct reverse-polarity protection; do not reverse it.
+
 Reason briefly by IC/net, then emit only a JSON verdict after `FINAL_JSON:`:
 {"score":0-10,"summary":"one line","defects":[{"severity":"critical|major|minor","confidence":"high|medium|low","refdes":"U1","issue":"short","why":"electrical reason","evidence":"exact netlist field(s) proving the fault"}]}"#;
 
@@ -613,7 +617,7 @@ pub(crate) fn annotate_netlist_for_review(
                 continue;
             }
             let power = power_pin_facts(comp, provider);
-            let explicit = explicit_ic_pin_facts(comp, provider);
+            let explicit = explicit_pin_facts(comp, provider);
             let decouple = decoupling.get(refdes.as_str());
             if power.is_empty() && explicit.is_empty() && decouple.is_none() {
                 continue;
@@ -840,10 +844,11 @@ fn power_pin_facts(
 ///
 /// The committed-schematic lift keys every pin by number, which is electrically
 /// exact but strips the function names the reviewer needs for topology reasoning.
-/// Keep the annotation compact and IC-focused: passive/connective symbols never
-/// enter because they have no active pin type, and power-input facts already ride
-/// in [`power_pin_facts`] (including required pins absent from the YAML).
-fn explicit_ic_pin_facts(
+/// Keep the annotation compact and function-focused: ordinary passive/connective
+/// symbols stay out, while polarized two-pin parts retain the A/K or +/- facts
+/// needed to prevent unsafe polarity guesses. Power-input facts already ride in
+/// [`power_pin_facts`] (including required pins absent from the YAML).
+fn explicit_pin_facts(
     comp: &circuit_lang::model::Component,
     provider: &circuit_lang::SymbolTable,
 ) -> Vec<String> {
@@ -856,8 +861,17 @@ fn explicit_ic_pin_facts(
         .pins
         .iter()
         .any(|pin| is_positive_supply_function(&pin.name) || is_ground_function(&pin.name));
-    if meta.pins.len() <= 2
-        || (meta.pins.iter().all(|pin| pin.etype == PinType::Passive) && !has_semantic_rail_pin)
+    let is_polarized_two_pin = meta.pins.len() == 2
+        && meta.pins.iter().any(|pin| {
+            matches!(
+                pin.name.trim().to_ascii_uppercase().as_str(),
+                "A" | "K" | "ANODE" | "CATHODE" | "+" | "-"
+            )
+        });
+    if (meta.pins.len() <= 2 && !is_polarized_two_pin)
+        || (meta.pins.iter().all(|pin| pin.etype == PinType::Passive)
+            && !has_semantic_rail_pin
+            && !is_polarized_two_pin)
     {
         return Vec::new();
     }
@@ -1093,6 +1107,34 @@ blocks:
         assert!(subject.contains("7/~ -> VOUT"), "{subject}");
         assert!(subject.contains("4/V- -> GND"), "{subject}");
         assert!(subject.contains("8/V+ -> +5V"), "{subject}");
+    }
+
+    #[test]
+    fn review_subject_resolves_numeric_diode_polarity() {
+        let mut provider = circuit_lang::SymbolTable::with_basics();
+        provider.mock_add(
+            "Device:D",
+            vec![
+                ("1", "K", circuit_lang::PinType::Passive, 1),
+                ("2", "A", circuit_lang::PinType::Passive, 1),
+            ],
+        );
+        let netlist = r#"
+version: 1
+blocks:
+  main:
+    components:
+      D1: {part: Device:D, pins: {"1": VPROT, "2": VIN}}
+"#;
+        let compiled = circuit_lang::compile(netlist, &provider);
+        let design = compiled.design.expect("test design compiles");
+
+        let subject = annotate_netlist_for_review(netlist, &design, &provider);
+
+        assert!(subject.contains("D1 Device:D"), "{subject}");
+        assert!(subject.contains("1/K [passive] -> VPROT"), "{subject}");
+        assert!(subject.contains("2/A [passive] -> VIN"), "{subject}");
+        assert!(NETLIST_REVIEW_SYSTEM.contains("input on pin 2/A"));
     }
 
     #[test]

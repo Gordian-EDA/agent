@@ -3102,7 +3102,20 @@ fn take_images(value: &mut Value) -> (Vec<Binary>, Option<String>) {
 /// collapsed tool-call card in the UI. Reads the structured JSON result.
 fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
     if let Some(err) = result.get("error").and_then(Value::as_str) {
-        return format!("error: {err}");
+        let diagnostic = result
+            .get("diagnostics")
+            .and_then(Value::as_array)
+            .and_then(|items| items.iter().find_map(Value::as_str));
+        return diagnostic.map_or_else(
+            || format!("error: {}", compact_summary_text(err, 160)),
+            |diagnostic| {
+                format!(
+                    "error: {} — {}",
+                    compact_summary_text(err, 120),
+                    compact_summary_text(diagnostic, 160)
+                )
+            },
+        );
     }
     if result.get("rejected").and_then(Value::as_bool) == Some(true) {
         return "rejected".to_string();
@@ -3196,15 +3209,8 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 let detail = defects
                     .iter()
                     .filter_map(Value::as_str)
-                    .take(2)
-                    .map(|defect| {
-                        let mut defect = defect.replace(['\n', '\r'], " ");
-                        if let Some((boundary, _)) = defect.char_indices().nth(120) {
-                            defect.truncate(boundary);
-                            defect.push('…');
-                        }
-                        defect
-                    })
+                    .take(3)
+                    .map(|defect| compact_summary_text(defect, 100))
                     .collect::<Vec<_>>()
                     .join("; ");
                 if detail.is_empty() {
@@ -3356,6 +3362,15 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
         }
         _ => "done".to_string(),
     }
+}
+
+fn compact_summary_text(text: &str, max_chars: usize) -> String {
+    let mut text = text.replace(['\n', '\r'], " ");
+    if let Some((boundary, _)) = text.char_indices().nth(max_chars) {
+        text.truncate(boundary);
+        text.push('…');
+    }
+    text
 }
 
 /// A deliberately small system prompt for the one-shot compaction request. The
@@ -4802,6 +4817,18 @@ mod tests {
 
     #[test]
     fn tool_summary_reads_structured_results() {
+        let s = tool_summary(
+            "repair_components",
+            &json!({}),
+            &json!({
+                "error": "component repair fragment is invalid",
+                "diagnostics": ["error[missing_part]: D1 needs a complete part\nfield"]
+            }),
+        );
+        assert_eq!(
+            s,
+            "error: component repair fragment is invalid — error[missing_part]: D1 needs a complete part field"
+        );
         let s = tool_summary(
             "search_symbols",
             &json!({ "query": "STM32" }),

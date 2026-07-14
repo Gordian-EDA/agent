@@ -820,6 +820,89 @@ fn repair_components_preserves_bytes_on_invalid_fragment_or_footprint() {
 }
 
 #[test]
+fn repair_components_updates_d1_and_tp1_without_complete_component_objects() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let yaml = "version: 1\nblocks:\n  main:\n    components:\n      D1: {part: Device:D, value: OLD, props: {role: clamp}, pins: {A: GND, K: VCC}}\n      TP1: {part: Connector:TestPoint, pins: {1: GND}}\n      R9: {part: Device:R, value: 10k, pins: {1: VCC, 2: GND}}\n";
+    seed_draft(&ctx, yaml);
+
+    let out = run_tool(
+        "repair_components",
+        serde_json::json!({
+            "upsert": {},
+            "update": {
+                "D1": {"pins": {"A": "VCC", "K": "GND"}, "value": "1N4148"},
+                "TP1": {"pins": {"1": "VCC"}}
+            },
+            "remove": [],
+            "replace_existing": false
+        }),
+        &ctx,
+    )
+    .unwrap();
+
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(out["updated"], serde_json::json!(["D1", "TP1"]), "{out}");
+    let repaired = ctx.workspace().read_draft().unwrap().unwrap();
+    assert!(repaired.contains("value: 1N4148"), "{repaired}");
+    assert!(repaired.contains("props: {role: clamp}"), "{repaired}");
+    assert!(repaired.contains("pins: {A: VCC, K: GND}"), "{repaired}");
+    assert!(
+        repaired.contains("TP1: {part: Connector:TestPoint, pins: {1: VCC}}"),
+        "{repaired}"
+    );
+    assert!(repaired.contains("R9:"), "{repaired}");
+}
+
+#[test]
+fn repair_components_update_failures_and_overlaps_preserve_exact_bytes() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let yaml = "version: 1\nblocks: {main: {components: {D1: {part: Device:D, pins: {1: VCC, 2: GND}}, TP1: {part: Connector:TestPoint, pins: {1: VCC}}}}}";
+    seed_draft(&ctx, yaml);
+    let before = std::fs::read(ctx.workspace().draft_path()).unwrap();
+
+    let alias = run_tool(
+        "repair_components",
+        serde_json::json!({"update": {"D1": {"pins": {"A": "VCC", "K": "GND"}}}}),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(alias["code"], "unknown_repair_pin_key", "{alias}");
+    assert_eq!(alias["unknown_pin_keys"], serde_json::json!(["A", "K"]));
+    assert_eq!(alias["valid_pin_keys"], serde_json::json!(["1", "2"]));
+    assert_eq!(std::fs::read(ctx.workspace().draft_path()).unwrap(), before);
+
+    for input in [
+        serde_json::json!({
+            "upsert": {}, "update": {"D1": {"pins": {"BAD": "SIG"}}},
+            "remove": [], "replace_existing": false
+        }),
+        serde_json::json!({
+            "upsert": {}, "update": {"D1": {"footprint": "Missing:Nope"}},
+            "remove": [], "replace_existing": false
+        }),
+        serde_json::json!({
+            "upsert": {"D1": {"part": "Device:D", "pins": {"A": "VCC", "K": "GND"}}},
+            "update": {"D1": {"value": "1N4148"}},
+            "remove": [], "replace_existing": true
+        }),
+        serde_json::json!({
+            "upsert": {}, "update": {"TP1": {"pins": {"1": "GND"}}},
+            "remove": ["TP1"], "replace_existing": false
+        }),
+    ] {
+        let out = run_tool("repair_components", input, &ctx).unwrap();
+        assert_eq!(out["draft_written"], false, "{out}");
+        assert_eq!(std::fs::read(ctx.workspace().draft_path()).unwrap(), before);
+    }
+}
+
+#[test]
 fn repair_components_replaces_parent_and_removes_its_synthesized_children() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");

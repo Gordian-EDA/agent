@@ -510,7 +510,7 @@ pub fn tool_defs() -> Vec<Tool> {
 pub(crate) fn repair_components_tool() -> Tool {
     Tool::new("repair_components")
         .with_description(
-            "Atomically add, replace, or remove a few components in one durable-draft block; omitted content is preserved.",
+            "Atomically repair one durable-draft block. Prefer update for pin rewires/value/footprint changes; use upsert only for complete components. Omitted component fields are preserved only by update.",
         )
         .with_schema(json!({
             "type": "object",
@@ -518,15 +518,55 @@ pub(crate) fn repair_components_tool() -> Tool {
                 "block": { "type": "string", "description": "Target block; defaults to main." },
                 "upsert": {
                     "type": "object",
-                    "description": "Refdes to circuit-language component object.",
-                    "additionalProperties": { "type": "object" }
+                    "description": "Complete replacement components; each entry must include part and every intended field/pin. Send {} when unused.",
+                    "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                            "part": { "type": "string" },
+                            "value": { "type": "string" },
+                            "footprint": { "type": "string" },
+                            "dnp": { "type": "boolean" },
+                            "props": { "type": "object", "additionalProperties": { "type": "string" } },
+                            "pins": { "type": "object", "description": "Pin name/number to net name or nc.", "additionalProperties": { "type": "string" } },
+                            "units": {
+                                "type": "object",
+                                "additionalProperties": {
+                                    "type": "object",
+                                    "properties": { "pins": { "type": "object", "additionalProperties": { "type": "string" } } },
+                                    "required": ["pins"],
+                                    "additionalProperties": false
+                                }
+                            },
+                            "between": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 },
+                            "positive": { "type": "string" },
+                            "negative": { "type": "string" },
+                            "decouple": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 1 } }
+                        },
+                        "required": ["part"],
+                        "additionalProperties": false
+                    }
+                },
+                "update": {
+                    "type": "object",
+                    "description": "Partial updates for existing authored refs; omitted fields/pins are preserved. Pin updates must use an exact existing pin key from the draft. Example: {\"D1\":{\"pins\":{\"1\":\"VIN\",\"2\":\"VPROT\"},\"footprint\":\"Diode_SMD:D_SOD-123\"},\"TP1\":{\"pins\":{\"1\":\"VPROT\"}}}.",
+                    "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                            "pins": { "type": "object", "description": "Merge targets for exact pin keys already present on this component in the draft; values are a net name or nc.", "additionalProperties": { "type": "string" }, "minProperties": 1 },
+                            "value": { "type": "string" },
+                            "footprint": { "type": "string" }
+                        },
+                        "minProperties": 1,
+                        "additionalProperties": false
+                    }
                 },
                 "remove": {
                     "type": "array",
+                    "description": "Explicit authored refs to remove; send [] when unused.",
                     "items": { "type": "string" },
                     "uniqueItems": true
                 },
-                "replace_existing": { "type": "boolean" }
+                "replace_existing": { "type": "boolean", "description": "Confirmation for replacing refs via upsert; false for update/remove." }
             },
             "additionalProperties": false
         }))
@@ -1548,6 +1588,76 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "mode": "component_repair",
         }));
     }
+    let update = match input.get("update") {
+        None => serde_json::Map::new(),
+        Some(Value::Object(map)) => map.clone(),
+        Some(_) => {
+            return Ok(json!({
+                "error": "update must be an object mapping existing refdes to partial updates",
+                "code": "invalid_repair_update",
+                "draft_written": false,
+                "draft_changed": false,
+                "mode": "component_repair",
+            }));
+        }
+    };
+    for (reference, fields) in &update {
+        let Some(fields) = fields.as_object() else {
+            return Ok(json!({
+                "error": format!("update for {reference} must be an object"),
+                "code": "invalid_repair_update",
+                "draft_written": false,
+                "draft_changed": false,
+                "mode": "component_repair",
+            }));
+        };
+        if fields.is_empty()
+            || fields
+                .keys()
+                .any(|field| !matches!(field.as_str(), "pins" | "value" | "footprint"))
+        {
+            return Ok(json!({
+                "error": format!("update for {reference} needs at least one of pins, value, or footprint and no other fields"),
+                "code": "invalid_repair_update",
+                "draft_written": false,
+                "draft_changed": false,
+                "mode": "component_repair",
+            }));
+        }
+        if fields.get("value").is_some_and(|value| !value.is_string())
+            || fields
+                .get("footprint")
+                .is_some_and(|footprint| !footprint.is_string())
+        {
+            return Ok(json!({
+                "error": format!("value and footprint updates for {reference} must be strings"),
+                "code": "invalid_repair_update",
+                "draft_written": false,
+                "draft_changed": false,
+                "mode": "component_repair",
+            }));
+        }
+        if let Some(pins) = fields.get("pins") {
+            let Some(pins) = pins.as_object() else {
+                return Ok(json!({
+                    "error": format!("pins update for {reference} must be an object"),
+                    "code": "invalid_repair_update",
+                    "draft_written": false,
+                    "draft_changed": false,
+                    "mode": "component_repair",
+                }));
+            };
+            if pins.is_empty() || pins.values().any(|target| !target.is_string()) {
+                return Ok(json!({
+                    "error": format!("pins update for {reference} must map at least one pin to a net string or nc"),
+                    "code": "invalid_repair_update",
+                    "draft_written": false,
+                    "draft_changed": false,
+                    "mode": "component_repair",
+                }));
+            }
+        }
+    }
     let remove = match input.get("remove") {
         None => Vec::new(),
         Some(Value::Array(items)) => {
@@ -1587,19 +1697,23 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     if upsert
         .keys()
+        .chain(update.keys())
         .any(|reference| remove_set.contains(reference))
+        || upsert
+            .keys()
+            .any(|reference| update.contains_key(reference))
     {
         return Ok(json!({
-            "error": "the same refdes cannot be both upserted and removed",
+            "error": "the same refdes cannot appear in more than one of upsert, update, or remove",
             "code": "conflicting_repair_operation",
             "draft_written": false,
             "draft_changed": false,
             "mode": "component_repair",
         }));
     }
-    if upsert.is_empty() && remove.is_empty() {
+    if upsert.is_empty() && update.is_empty() && remove.is_empty() {
         return Ok(json!({
-            "error": "repair requires at least one upsert or remove refdes",
+            "error": "repair requires at least one upsert, update, or remove refdes",
             "code": "empty_component_repair",
             "draft_written": false,
             "draft_changed": false,
@@ -1768,6 +1882,63 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
         }
     }
+    let mut updated = Vec::new();
+    for reference in update.keys() {
+        let Some((existing_block, origin)) = existing.get(reference) else {
+            return Ok(json!({
+                "error": format!("update refdes {reference} does not exist; use upsert with a complete component object to add it"),
+                "code": "unknown_repair_update",
+                "draft_written": false,
+                "draft_changed": false,
+                "mode": "component_repair",
+                "current_design_state": design_state_summary(prior_design),
+            }));
+        };
+        if existing_block != block_name {
+            return Ok(json!({
+                "error": format!("{reference} belongs to block {existing_block}, not {block_name}"),
+                "code": "component_block_mismatch",
+                "draft_written": false,
+                "draft_changed": false,
+                "mode": "component_repair",
+                "current_design_state": design_state_summary(prior_design),
+            }));
+        }
+        if !matches!(origin, Origin::Authored) {
+            return Ok(json!({
+                "error": format!("{reference} is synthesized; update its authored parent instead"),
+                "code": "synthesized_component_repair_forbidden",
+                "draft_written": false,
+                "draft_changed": false,
+                "mode": "component_repair",
+                "current_design_state": design_state_summary(prior_design),
+            }));
+        }
+        let component = &prior_design.blocks[existing_block].components[reference];
+        if let Some(pins) = update[reference].get("pins").and_then(Value::as_object) {
+            let unknown = pins
+                .keys()
+                .filter(|pin| !component.pins.contains_key(*pin))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !unknown.is_empty() {
+                let mut valid = component.pins.keys().cloned().collect::<Vec<_>>();
+                valid.sort();
+                return Ok(json!({
+                    "error": format!("update for {reference} uses pin key(s) not present in the current draft: {}", unknown.join(", ")),
+                    "code": "unknown_repair_pin_key",
+                    "reference": reference,
+                    "unknown_pin_keys": unknown,
+                    "valid_pin_keys": valid,
+                    "draft_written": false,
+                    "draft_changed": false,
+                    "mode": "component_repair",
+                    "current_design_state": design_state_summary(prior_design),
+                }));
+            }
+        }
+        updated.push(reference.clone());
+    }
 
     let mut candidate = prior_design.clone();
     let target = candidate
@@ -1811,6 +1982,34 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
         }
     }
+    for (reference, fields) in &update {
+        let component = target
+            .components
+            .get_mut(reference)
+            .expect("update refs were preflighted in the target block");
+        let fields = fields
+            .as_object()
+            .expect("update values were validated as objects");
+        if let Some(value) = fields.get("value").and_then(Value::as_str) {
+            component.value = Some(value.to_string());
+        }
+        if let Some(footprint) = fields.get("footprint").and_then(Value::as_str) {
+            component.footprint = Some(footprint.to_string());
+        }
+        if let Some(pins) = fields.get("pins").and_then(Value::as_object) {
+            for (pin, target) in pins {
+                let target = target
+                    .as_str()
+                    .expect("pin targets were validated as strings");
+                let target = if target.eq_ignore_ascii_case("nc") {
+                    PinTarget::NoConnect
+                } else {
+                    PinTarget::Net(target.to_string())
+                };
+                component.pins.insert(pin.clone(), target);
+            }
+        }
+    }
 
     let candidate_yaml = circuit_lang::canon::to_canonical_yaml(&candidate);
     let candidate_result = compile(&candidate_yaml, ctx.provider());
@@ -1833,6 +2032,7 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     report["mode"] = json!("component_repair");
     report["added"] = json!(added);
     report["replaced"] = json!(replaced);
+    report["updated"] = json!(updated);
     report["removed"] = json!(remove);
     report["draft_written"] = json!(true);
     report["draft_changed"] = json!(candidate_yaml != prior_yaml);
