@@ -225,6 +225,8 @@ fn tool_defs_for_phase(
     phase: ToolPhase,
     discovery_rounds_used: &HashMap<String, usize>,
     draft_exists: bool,
+    revision_reads_used: &HashSet<String>,
+    schematic_exists: bool,
 ) -> Vec<Tool> {
     tool_defs()
         .into_iter()
@@ -247,6 +249,14 @@ fn tool_defs_for_phase(
         // overwrite encourages the model to restart from a partial reconstruction
         // and discard already-correct work.
         .filter(|tool| !draft_exists || tool.name.as_str() != "create_design")
+        // Unchanged-state reads are single-use at a project revision. Removing
+        // exhausted schemas prevents another provider round from being spent on
+        // a result already present in history; dispatch retains the same guard
+        // for stale calls returned by a provider.
+        .filter(|tool| !revision_reads_used.contains(tool.name.as_str()))
+        // ERC is meaningful only for a committed schematic. Authoring tools
+        // already validate drafts, and apply_design runs ERC after writing.
+        .filter(|tool| schematic_exists || tool.name.as_str() != "run_erc")
         .filter(|tool| match phase {
             ToolPhase::BoardActive => true,
             ToolPhase::BoardSeed => {
@@ -282,6 +292,13 @@ fn is_discovery_tool(name: &str) -> bool {
     matches!(
         name,
         "search_symbols" | "get_symbol_info" | "search_footprints" | "get_footprint_info"
+    )
+}
+
+fn is_revision_scoped_read(name: &str) -> bool {
+    matches!(
+        name,
+        "read_schematic" | "project_info" | "run_erc" | "validate_design" | "render_schematic"
     )
 }
 
@@ -541,6 +558,10 @@ impl<P: Provider> Agent<P> {
         let mut tool_state_revision = 0u64;
         let mut provider_requests = 0usize;
         let mut discovery_rounds_used: HashMap<String, usize> = HashMap::new();
+        // Last project-state revision at which each repeat-prone read ran.
+        // Advancing `tool_state_revision` automatically makes every read
+        // available again without clearing or losing the audit trail.
+        let mut revision_read_uses: HashMap<String, u64> = HashMap::new();
         // PCB regeneration should never outrun the semantic schematic check.
         // Authoring invalidates a prior review; a fresh review of that draft
         // unlocks regeneration after it has been committed.
@@ -576,10 +597,17 @@ impl<P: Provider> Agent<P> {
                 .ok()
                 .flatten()
                 .is_some();
+            let revision_reads_used = revision_read_uses
+                .iter()
+                .filter(|(_, revision)| **revision == tool_state_revision)
+                .map(|(name, _)| name.clone())
+                .collect::<HashSet<_>>();
             let defs = tool_defs_for_phase(
                 self.tool_phase,
                 &discovery_rounds_used,
                 draft_existed_before_completion,
+                &revision_reads_used,
+                self.runtime.sch_path().exists(),
             );
 
             // Drive the provider's stream so assistant prose renders token-by-token
@@ -759,6 +787,10 @@ impl<P: Provider> Agent<P> {
                     discovery_tools_blocked.contains(call.fn_name.as_str());
                 let duplicate_board_read_blocked =
                     call.fn_name == "get_board" && board_read_dispatched_this_completion;
+                let revision_read_budget_blocked = is_revision_scoped_read(&call.fn_name)
+                    && revision_read_uses.get(&call.fn_name) == Some(&tool_state_revision);
+                let run_erc_without_schematic =
+                    call.fn_name == "run_erc" && !self.runtime.sch_path().exists();
                 let speculative_mutation_blocked = speculative_apply_authoring_batch_blocked(
                     &call.fn_name,
                     authoring_dispatched_this_completion,
@@ -775,6 +807,8 @@ impl<P: Provider> Agent<P> {
                     && !timeout_retry_blocked
                     && !discovery_budget_blocked
                     && !duplicate_board_read_blocked
+                    && !revision_read_budget_blocked
+                    && !run_erc_without_schematic
                     && !schematic_review_blocked
                     && !speculative_mutation_blocked
                     && !create_on_existing_draft_blocked;
@@ -808,6 +842,30 @@ impl<P: Provider> Agent<P> {
                             "error": "create_design cannot replace an existing draft in an agent turn",
                             "code": "existing_draft_requires_edit",
                             "note": "Preserve the current work: use edit_design with one full corrected YAML document. Do not restart from a partial reconstruction.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if run_erc_without_schematic {
+                    (
+                        json!({
+                            "error": "run_erc requires a committed schematic",
+                            "code": "committed_schematic_required",
+                            "note": "Validate the draft through create_design/edit_design, then call apply_design. The successful apply runs ERC automatically.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if revision_read_budget_blocked {
+                    (
+                        json!({
+                            "error": "read tool already used at the unchanged project revision",
+                            "code": "unchanged_state_read_budget_exhausted",
+                            "tool": call.fn_name,
+                            "project_revision": tool_state_revision,
+                            "note": "Reuse the result already in history. This tool becomes available again after a successful schematic or PCB mutation changes project state.",
                         })
                         .to_string(),
                         Vec::new(),
@@ -901,8 +959,16 @@ impl<P: Provider> Agent<P> {
                         tool_state_revision,
                     ));
                 }
-                tool_state_revision =
-                    next_tool_state_revision(tool_state_revision, dispatched, effect, &parsed);
+                if dispatched && is_revision_scoped_read(&call.fn_name) {
+                    revision_read_uses.insert(call.fn_name.clone(), tool_state_revision);
+                }
+                tool_state_revision = next_tool_state_revision(
+                    tool_state_revision,
+                    dispatched,
+                    effect,
+                    &call.fn_name,
+                    &parsed,
+                );
                 if dispatched && is_authoring_for_commit(&call.fn_name) {
                     schematic_review_current = false;
                     if authoring_result_changed_draft(&parsed) {
@@ -1392,14 +1458,22 @@ fn next_tool_state_revision(
     current: u64,
     dispatched: bool,
     effect: ToolEffect,
+    name: &str,
     result: &Value,
 ) -> u64 {
-    if dispatched
-        && effect != ToolEffect::ReadOnly
-        && result.get("error").is_none()
-        && result.get("rejected").and_then(Value::as_bool) != Some(true)
-        && !tool_result_is_timeout(result)
-    {
+    let changed = match effect {
+        ToolEffect::ReadOnly => false,
+        ToolEffect::Authoring => authoring_result_changed_draft(result),
+        ToolEffect::Gated => {
+            name == "apply_design" && result.get("written").and_then(Value::as_bool) == Some(true)
+        }
+        ToolEffect::ApprovalRequired => {
+            result.get("error").is_none()
+                && result.get("rejected").and_then(Value::as_bool) != Some(true)
+                && !tool_result_is_timeout(result)
+        }
+    };
+    if dispatched && changed {
         current.saturating_add(1)
     } else {
         current
@@ -2677,7 +2751,10 @@ mod tests {
             "the missing-End fallback must not become request N+1"
         );
         assert_eq!(fallback_requests.load(Ordering::SeqCst), 15);
-        assert_eq!(outcome.tool_calls_made, 16);
+        assert_eq!(
+            outcome.tool_calls_made, 1,
+            "unchanged project_info calls are blocked after the first dispatch"
+        );
     }
 
     #[tokio::test]
@@ -2757,7 +2834,10 @@ mod tests {
                 requests: MAX_PROVIDER_REQUESTS_PER_TURN
             }
         );
-        assert_eq!(outcome.tool_calls_made, MAX_PROVIDER_REQUESTS_PER_TURN);
+        assert_eq!(
+            outcome.tool_calls_made, 1,
+            "stale unadvertised project_info calls do not redispatch"
+        );
         assert!(!outcome.applied);
         assert!(outcome.final_text.contains("request safety limit"));
         assert!(outcome.final_text.contains("project_info"));
@@ -2778,7 +2858,10 @@ mod tests {
 
         assert_eq!(outcome.stop_reason, StopReason::Completed);
         assert_eq!(outcome.final_text, "done at the boundary");
-        assert_eq!(outcome.tool_calls_made, MAX_PROVIDER_REQUESTS_PER_TURN - 1);
+        assert_eq!(
+            outcome.tool_calls_made, 1,
+            "only the first unchanged project_info call dispatches"
+        );
     }
 
     #[tokio::test]
@@ -2855,7 +2938,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.stop_reason, StopReason::Completed);
-        assert_eq!(outcome.tool_calls_made, 11);
+        assert_eq!(
+            outcome.tool_calls_made, 10,
+            "the second unchanged project_info call is revision-budgeted"
+        );
 
         let requests = seen.lock().unwrap();
         let after_third_round = tool_results(&requests[3]);
@@ -2939,6 +3025,48 @@ mod tests {
             "no board exists yet — run regenerate_board first",
             "the per-completion guard must reset for a later model response"
         );
+    }
+
+    #[tokio::test]
+    async fn unchanged_read_is_blocked_then_reset_by_successful_mutation() {
+        let runtime = test_runtime();
+        std::fs::write(
+            runtime.pcb_path(),
+            include_str!("../tests/fixtures/two_res.kicad_pcb"),
+        )
+        .unwrap();
+        let script = vec![
+            tool_call("project-first", "project_info", json!({})),
+            tool_call("project-stale", "project_info", json!({})),
+            tool_call(
+                "outline-change",
+                "update_board_outline",
+                json!({
+                    "bounds": {"min_x": 2.0, "max_x": 18.0, "min_y": 3.0, "max_y": 15.0}
+                }),
+            ),
+            tool_call("project-after-change", "project_info", json!({})),
+            final_text("used each project snapshot once"),
+        ];
+        let (client, seen) = ScriptedClient::recording(script);
+        let mut agent = Agent::new(client, runtime, "system");
+        let mut approvals = AutoApprove::yes();
+
+        let outcome = agent
+            .run_turn("inspect, mutate, then inspect again", &mut approvals, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.tool_calls_made, 3);
+        let requests = seen.lock().unwrap();
+        let blocked = tool_results(&requests[2]);
+        assert_eq!(
+            blocked["project-stale"]["code"],
+            "unchanged_state_read_budget_exhausted"
+        );
+        let after_change = tool_results(&requests[4]);
+        assert!(after_change["project-after-change"]["sch_path"].is_string());
     }
 
     #[tokio::test]
@@ -3028,6 +3156,27 @@ mod tests {
         }
         for name in ["project_info", "read_schematic", "create_design"] {
             assert!(!is_discovery_tool(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn revision_scoped_read_classification_is_narrow() {
+        for name in [
+            "read_schematic",
+            "project_info",
+            "run_erc",
+            "validate_design",
+            "render_schematic",
+        ] {
+            assert!(is_revision_scoped_read(name), "{name}");
+        }
+        for name in [
+            "get_board",
+            "review_design",
+            "search_symbols",
+            "apply_design",
+        ] {
+            assert!(!is_revision_scoped_read(name), "{name}");
         }
     }
 
@@ -3141,6 +3290,7 @@ mod tests {
                 revision,
                 false,
                 ToolEffect::Gated,
+                "apply_design",
                 &json!({"error": "timed-out tool retry blocked at unchanged project state"}),
             ),
             revision,
@@ -3151,6 +3301,7 @@ mod tests {
                 revision,
                 true,
                 ToolEffect::Gated,
+                "apply_design",
                 &json!({"error": "apply_design timed out after 120s; still running"}),
             ),
             revision,
@@ -3161,14 +3312,32 @@ mod tests {
                 revision,
                 true,
                 ToolEffect::Gated,
+                "apply_design",
                 &json!({"rejected": true}),
             ),
             revision,
             "a rejected gate did not mutate project state"
         );
         assert_eq!(
-            next_tool_state_revision(revision, true, ToolEffect::Authoring, &json!({"ok": true}),),
+            next_tool_state_revision(
+                revision,
+                true,
+                ToolEffect::Authoring,
+                "edit_design",
+                &json!({"ok": true, "draft_written": true}),
+            ),
             revision + 1
+        );
+        assert_eq!(
+            next_tool_state_revision(
+                revision,
+                true,
+                ToolEffect::Gated,
+                "apply_design",
+                &json!({"ok": false, "errors": 1}),
+            ),
+            revision,
+            "a not-ready apply did not mutate project state"
         );
     }
 
@@ -3585,9 +3754,27 @@ mod tests {
 
     #[test]
     fn tool_schemas_expand_with_project_phase() {
-        let schematic = tool_defs_for_phase(ToolPhase::Schematic, &HashMap::new(), false);
-        let seed = tool_defs_for_phase(ToolPhase::BoardSeed, &HashMap::new(), false);
-        let active = tool_defs_for_phase(ToolPhase::BoardActive, &HashMap::new(), false);
+        let schematic = tool_defs_for_phase(
+            ToolPhase::Schematic,
+            &HashMap::new(),
+            false,
+            &HashSet::new(),
+            true,
+        );
+        let seed = tool_defs_for_phase(
+            ToolPhase::BoardSeed,
+            &HashMap::new(),
+            false,
+            &HashSet::new(),
+            true,
+        );
+        let active = tool_defs_for_phase(
+            ToolPhase::BoardActive,
+            &HashMap::new(),
+            false,
+            &HashSet::new(),
+            true,
+        );
         let names = |tools: &[Tool]| {
             tools
                 .iter()
@@ -3637,10 +3824,11 @@ mod tests {
         );
         rounds.insert("get_symbol_info".to_string(), 1);
 
-        let names = tool_defs_for_phase(ToolPhase::Schematic, &rounds, false)
-            .into_iter()
-            .map(|tool| tool.name.as_str().to_owned())
-            .collect::<std::collections::BTreeSet<_>>();
+        let names =
+            tool_defs_for_phase(ToolPhase::Schematic, &rounds, false, &HashSet::new(), true)
+                .into_iter()
+                .map(|tool| tool.name.as_str().to_owned())
+                .collect::<std::collections::BTreeSet<_>>();
 
         assert!(!names.contains("search_symbols"));
         assert!(
@@ -3654,14 +3842,58 @@ mod tests {
 
     #[test]
     fn existing_draft_hides_one_shot_create_tool() {
-        let names = tool_defs_for_phase(ToolPhase::Schematic, &HashMap::new(), true)
-            .into_iter()
-            .map(|tool| tool.name.as_str().to_owned())
-            .collect::<std::collections::BTreeSet<_>>();
+        let names = tool_defs_for_phase(
+            ToolPhase::Schematic,
+            &HashMap::new(),
+            true,
+            &HashSet::new(),
+            true,
+        )
+        .into_iter()
+        .map(|tool| tool.name.as_str().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
 
         assert!(!names.contains("create_design"));
         assert!(names.contains("edit_design"));
         assert!(names.contains("apply_design"));
+    }
+
+    #[test]
+    fn used_revision_reads_and_precommit_erc_are_not_advertised() {
+        let used = [
+            "read_schematic",
+            "project_info",
+            "run_erc",
+            "validate_design",
+            "render_schematic",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+        let exhausted =
+            tool_defs_for_phase(ToolPhase::BoardActive, &HashMap::new(), true, &used, true)
+                .into_iter()
+                .map(|tool| tool.name.as_str().to_owned())
+                .collect::<HashSet<_>>();
+        for name in &used {
+            assert!(!exhausted.contains(name), "{name}");
+        }
+        assert!(exhausted.contains("review_design"));
+        assert!(exhausted.contains("get_board"));
+
+        let before_commit = tool_defs_for_phase(
+            ToolPhase::Schematic,
+            &HashMap::new(),
+            false,
+            &HashSet::new(),
+            false,
+        )
+        .into_iter()
+        .map(|tool| tool.name.as_str().to_owned())
+        .collect::<HashSet<_>>();
+        assert!(!before_commit.contains("run_erc"));
+        assert!(before_commit.contains("validate_design"));
+        assert!(before_commit.contains("review_design"));
     }
 
     #[test]
