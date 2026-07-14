@@ -78,6 +78,7 @@ const MAX_PCB_STAGE_REQUESTS: usize =
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct MeteredUsage {
+    provider_requests: u64,
     input: u64,
     output: u64,
     cache_write: u64,
@@ -85,6 +86,10 @@ struct MeteredUsage {
 }
 
 impl MeteredUsage {
+    fn add_request(&mut self) {
+        self.provider_requests = self.provider_requests.saturating_add(1);
+    }
+
     fn add_end(&mut self, end: &StreamEnd) {
         let (input, output, cache_write, cache_read) = token_usage(end);
         self.input = self.input.saturating_add(input);
@@ -128,6 +133,10 @@ impl<P: Provider> Provider for MeteredProvider<P> {
         messages: &[ChatMessage],
         tools: &[Tool],
     ) -> Result<StreamEnd> {
+        self.pending
+            .lock()
+            .expect("usage meter poisoned")
+            .add_request();
         let end = self.inner.complete(system, messages, tools).await?;
         self.pending
             .lock()
@@ -142,6 +151,10 @@ impl<P: Provider> Provider for MeteredProvider<P> {
         messages: &'a [ChatMessage],
         tools: &'a [Tool],
     ) -> Result<EventStream<'a>> {
+        self.pending
+            .lock()
+            .expect("usage meter poisoned")
+            .add_request();
         let pending = Arc::clone(&self.pending);
         let stream = self.inner.stream(system, messages, tools).await?;
         Ok(stream
@@ -244,11 +257,15 @@ pub enum AgentEvent {
     /// An approved gated write committed; `summary` is the domain's one-line
     /// post-write digest (e.g. ERC counts).
     Applied { summary: String },
-    /// Provider-reported token usage for one model call. `input_tokens` is the
-    /// full prompt size (system + history + tools) — i.e. the live context — and
-    /// *includes* `cache_write_tokens` and `cache_read_tokens`. The cache counts
-    /// let a UI bill the cached prefix at the cheaper rate and surface caching.
+    /// Provider invocation and token usage accumulated since the last telemetry
+    /// flush. Usually this represents one call; concurrent review lenses can be
+    /// aggregated. `input_tokens` includes `cache_write_tokens` and
+    /// `cache_read_tokens`, letting consumers bill cached prefixes correctly.
     Usage {
+        /// Actual provider invocations represented by this event. This includes
+        /// main-loop, review, compaction, recovery, and failed invocations and
+        /// is deliberately separate from the main-loop request safety budget.
+        provider_requests: u64,
         input_tokens: u64,
         output_tokens: u64,
         cache_write_tokens: u64,
@@ -397,6 +414,8 @@ fn constrain_schematic_tools_for_draft_state(
     defs: &mut Vec<Tool>,
     draft_exists: bool,
     schematic_exists: bool,
+    draft_dirty: bool,
+    draft_known_clean: bool,
     draft_known_invalid: bool,
     review_has_defects: bool,
 ) {
@@ -413,14 +432,18 @@ fn constrain_schematic_tools_for_draft_state(
             )
         });
     }
-    if draft_known_invalid {
-        defs.retain(|tool| !matches!(tool.name.as_str(), "apply_design" | "review_design"));
-    }
     if review_has_defects {
         defs.retain(|tool| {
             is_discovery_tool(tool.name.as_str())
                 || matches!(tool.name.as_str(), "edit_design" | "assign_footprints")
         });
+    } else if draft_known_invalid {
+        defs.retain(|tool| {
+            is_discovery_tool(tool.name.as_str())
+                || matches!(tool.name.as_str(), "edit_design" | "assign_footprints")
+        });
+    } else if draft_exists && draft_dirty && draft_known_clean {
+        defs.retain(|tool| tool.name.as_str() == "apply_design");
     }
 }
 
@@ -612,6 +635,7 @@ impl<P: Provider> Agent<P> {
             emit(
                 events,
                 AgentEvent::Usage {
+                    provider_requests: usage.provider_requests,
                     input_tokens: usage.input,
                     output_tokens: usage.output,
                     cache_write_tokens: usage.cache_write,
@@ -678,10 +702,17 @@ impl<P: Provider> Agent<P> {
         // also portable: providers such as Bedrock reject tool-use history when
         // no matching tool config is present.
         let messages = compaction_messages(&self.history);
-        let end = self
+        let end = match self
             .client
             .complete(COMPACTION_SYSTEM, &messages, &[])
-            .await?;
+            .await
+        {
+            Ok(end) => end,
+            Err(error) => {
+                self.emit_pending_usage(events);
+                return Err(error);
+            }
+        };
         self.emit_pending_usage(events);
 
         let summary = completed_text(&end).trim().to_string();
@@ -847,6 +878,11 @@ impl<P: Provider> Agent<P> {
                 &mut defs,
                 draft_existed_before_completion,
                 self.runtime.sch_path().exists(),
+                draft_dirty,
+                latest_authoring_diagnostics
+                    .as_ref()
+                    .and_then(|state| state.errors)
+                    == Some(0),
                 latest_authoring_diagnostics
                     .as_ref()
                     .and_then(|state| state.errors)
@@ -861,13 +897,20 @@ impl<P: Provider> Agent<P> {
             // event carries the assembled tool calls + usage. A non-streaming
             // backend's default `stream` yields one chunk then the End, so the loop
             // is unchanged for it.
-            let streamed = stream_completion(
-                self.client
-                    .stream(&self.system, &self.history, &defs)
-                    .await?,
-                events,
-            )
-            .await?;
+            let stream = match self.client.stream(&self.system, &self.history, &defs).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    self.emit_pending_usage(events);
+                    return Err(error);
+                }
+            };
+            let streamed = match stream_completion(stream, events).await {
+                Ok(streamed) => streamed,
+                Err(error) => {
+                    self.emit_pending_usage(events);
+                    return Err(error);
+                }
+            };
             let (text, end) = match streamed {
                 StreamCompletion::End { text, end } => (text, end),
                 StreamCompletion::MissingEnd { text } => {
@@ -904,10 +947,17 @@ impl<P: Provider> Agent<P> {
                     }
                     provider_requests += 1;
                     stage_provider_requests += 1;
-                    let end = self
+                    let end = match self
                         .client
                         .complete(&self.system, &self.history, &defs)
-                        .await?;
+                        .await
+                    {
+                        Ok(end) => end,
+                        Err(error) => {
+                            self.emit_pending_usage(events);
+                            return Err(error);
+                        }
+                    };
                     let final_text = match completed_text(&end) {
                         t if !t.is_empty() => t,
                         _ => text,
@@ -3432,6 +3482,7 @@ mod tests {
         assert_eq!(
             complete.take_usage(),
             MeteredUsage {
+                provider_requests: 1,
                 input: 120,
                 output: 7,
                 ..Default::default()
@@ -3442,8 +3493,49 @@ mod tests {
         crate::llm::drain_stream(streamed.stream("", &[], &[]).await.unwrap())
             .await
             .unwrap();
-        assert_eq!(streamed.take_usage().input, 120);
+        assert_eq!(
+            streamed.take_usage(),
+            MeteredUsage {
+                provider_requests: 1,
+                input: 120,
+                output: 7,
+                ..Default::default()
+            }
+        );
         assert_eq!(streamed.take_usage(), MeteredUsage::default());
+
+        let failed_complete = MeteredProvider::new(ScriptedClient::new(vec![]));
+        assert!(failed_complete.complete("", &[], &[]).await.is_err());
+        assert_eq!(failed_complete.take_usage().provider_requests, 1);
+
+        let failed_stream = MeteredProvider::new(ScriptedClient::new(vec![]));
+        assert!(failed_stream.stream("", &[], &[]).await.is_err());
+        assert_eq!(failed_stream.take_usage().provider_requests, 1);
+    }
+
+    #[tokio::test]
+    async fn failed_provider_call_still_emits_request_usage() {
+        let mut agent = Agent::new(ScriptedClient::new(vec![]), test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+
+        assert!(
+            agent
+                .run_turn("fail once", &mut approvals, Some(&events))
+                .await
+                .is_err()
+        );
+
+        assert!(received.try_iter().any(|event| matches!(
+            event,
+            AgentEvent::Usage {
+                provider_requests: 1,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_write_tokens: 0,
+                cache_read_tokens: 0,
+            }
+        )));
     }
 
     fn batched_tool_calls(calls: &[(&str, &str, Value)]) -> StreamEnd {
@@ -5014,7 +5106,7 @@ mod tests {
 
     #[test]
     fn draft_state_hides_tools_that_can_only_fail_or_repeat_defects() {
-        let names_after = |draft_exists, schematic_exists, invalid, defects| {
+        let names_after = |draft_exists, schematic_exists, dirty, clean, invalid, defects| {
             let mut defs = tool_defs_for_phase(
                 ToolPhase::Schematic,
                 &HashMap::new(),
@@ -5026,6 +5118,8 @@ mod tests {
                 &mut defs,
                 draft_exists,
                 schematic_exists,
+                dirty,
+                clean,
                 invalid,
                 defects,
             );
@@ -5034,7 +5128,7 @@ mod tests {
                 .collect::<std::collections::BTreeSet<_>>()
         };
 
-        let fresh = names_after(false, false, false, false);
+        let fresh = names_after(false, false, false, false, false, false);
         assert!(fresh.contains("edit_design"));
         for absent in [
             "validate_design",
@@ -5047,11 +5141,16 @@ mod tests {
             assert!(!fresh.contains(absent), "{absent}");
         }
 
-        let invalid = names_after(true, false, true, false);
+        let invalid = names_after(true, false, true, false, true, false);
         assert!(invalid.contains("edit_design"));
         assert!(!invalid.contains("apply_design"));
+        assert!(!invalid.contains("project_info"));
 
-        let defects = names_after(true, false, false, true);
+        let clean = names_after(true, false, true, true, false, false);
+        assert_eq!(clean.len(), 1);
+        assert!(clean.contains("apply_design"));
+
+        let defects = names_after(true, false, true, true, false, true);
         assert!(defects.contains("edit_design"));
         assert!(defects.contains("assign_footprints"));
         assert!(!defects.contains("project_info"));
