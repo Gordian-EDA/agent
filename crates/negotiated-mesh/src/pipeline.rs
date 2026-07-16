@@ -798,11 +798,39 @@ fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
     // scoring, and diagnostic recording. Any nets it cannot route remain honest
     // failures rather than triggering another portfolio.
     if auto_route_requires_bounded_pass(problem) {
+        let mut best = None;
+        let mut attempts = Vec::with_capacity(6);
+        let direct = DirectLineRouter;
+        let layer_hop = LayerHopRouter;
+        let via_escape = ViaEscapeRouter;
+        let pattern = PatternRouter;
+        let channel = ChannelRouter;
+        let specialists: [&dyn Router; 5] = [&direct, &layer_hop, &via_escape, &pattern, &channel];
+        for engine in specialists {
+            if !engine.can_route(problem) {
+                continue;
+            }
+            let started = Instant::now();
+            let result = engine.route(problem);
+            let elapsed_ms = started.elapsed().as_millis();
+            let _ = consider_candidate_recording(
+                problem,
+                &mut best,
+                result,
+                Some(&mut attempts),
+                elapsed_ms,
+            );
+            if route_best_is_clean_via_free(&best) {
+                return RouteAutoRun {
+                    result: best.expect("bounded specialist populated best").0,
+                    attempts,
+                    global: None,
+                };
+            }
+        }
         let started = Instant::now();
         let result = router::route_orthogonal_single_pass(problem);
         let elapsed_ms = started.elapsed().as_millis();
-        let mut best = None;
-        let mut attempts = Vec::with_capacity(1);
         let _ = consider_candidate_recording(
             problem,
             &mut best,
@@ -811,7 +839,7 @@ fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
             elapsed_ms,
         );
         return RouteAutoRun {
-            result: best.expect("bounded grid candidate just populated best").0,
+            result: best.expect("bounded candidate just populated best").0,
             attempts,
             global: None,
         };
@@ -3448,7 +3476,7 @@ mod tests {
     }
 
     #[test]
-    fn large_auto_route_records_exactly_one_bounded_attempt() {
+    fn large_auto_route_uses_only_the_bounded_cheap_portfolio() {
         let mut p = simple_two_point_problem();
         p.connections = (0..=AUTO_BOUNDED_MAX_CONNECTIONS)
             .map(|index| {
@@ -3466,11 +3494,15 @@ mod tests {
 
         let run = route_auto_with_diagnostics(&p);
 
-        assert_eq!(run.attempts.len(), 1);
-        assert_eq!(run.attempts[0].engine, router::ENGINE);
-        assert_eq!(run.result.engine, router::ENGINE);
-        assert_eq!(run.result.failed, run.attempts[0].failed);
-        assert_eq!(run.attempts[0].geometry_violations, 0);
+        assert!((1..=6).contains(&run.attempts.len()));
+        assert!(run
+            .attempts
+            .iter()
+            .all(|attempt| attempt.geometry_violations == 0));
+        assert!(run
+            .attempts
+            .iter()
+            .any(|attempt| attempt.engine == run.result.engine));
         assert!(run.global.is_none());
     }
 
