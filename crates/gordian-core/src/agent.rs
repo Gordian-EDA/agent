@@ -3206,9 +3206,10 @@ const AUTHORING_TRANSITION_NUDGE: &str = "Catalog discovery is complete and ther
      empty project, render, apply, or resume broad searches before authoring.";
 
 const INVALID_DRAFT_REPAIR_NUDGE: &str = "The current draft is substantive but still invalid. \
-     Your next action must be one `edit_design` call with a COMPLETE corrected `yaml` document \
-     that preserves every valid component and fixes the exact latest diagnostics. Do not read, \
-     render, validate, apply, or search first; authoring already returns fresh validation.";
+     Fix the exact latest diagnostics now: use one `repair_components` batch for localized \
+     component/refdes/pin/footprint defects, or one COMPLETE `edit_design` only when the broad \
+     document structure is wrong. Do not read, render, validate, apply, or search first; \
+     authoring already returns fresh validation.";
 
 /// The re-prompt sent after a commit whose ERC report contains actionable
 /// findings. The result immediately before this message contains the exact
@@ -5347,6 +5348,12 @@ mod tests {
             explicit_minimum_physical_components("Use a dense 24-bit design on a 45 mm board"),
             None
         );
+    }
+
+    #[test]
+    fn invalid_draft_nudge_prefers_transactional_local_repair() {
+        assert!(INVALID_DRAFT_REPAIR_NUDGE.contains("`repair_components` batch"));
+        assert!(INVALID_DRAFT_REPAIR_NUDGE.contains("COMPLETE `edit_design` only"));
     }
 
     #[test]
