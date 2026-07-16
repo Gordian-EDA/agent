@@ -12,10 +12,15 @@ use gordian_core::tools::run_tool;
 use kicad_env::KicadEnv;
 use serde_json::{Value, json};
 
-fn step(ctx: &AgentRuntime, name: &str, input: Value) -> anyhow::Result<Value> {
+fn attempt(ctx: &AgentRuntime, name: &str, input: Value) -> anyhow::Result<Value> {
     let started = Instant::now();
     let value = run_tool(name, input, ctx).with_context(|| format!("running {name}"))?;
     println!("{name}: {:.3}s", started.elapsed().as_secs_f64());
+    Ok(value)
+}
+
+fn step(ctx: &AgentRuntime, name: &str, input: Value) -> anyhow::Result<Value> {
+    let value = attempt(ctx, name, input)?;
     if value.get("error").is_some() || value.get("ok") == Some(&Value::Bool(false)) {
         bail!("{name} failed: {value}");
     }
@@ -67,7 +72,20 @@ fn main() -> anyhow::Result<()> {
     if regenerated["part_count"].as_u64().unwrap_or(0) < minimum_parts {
         bail!("board has too few parts: {regenerated}");
     }
-    let placed = step(&ctx, "place_board", json!({}))?;
+    let mut placed = attempt(&ctx, "place_board", json!({}))?;
+    if placed["legal"] != Value::Bool(true)
+        && let (Some(width), Some(height)) = (
+            placed["suggested_min_bounds_mm"]["w"].as_f64(),
+            placed["suggested_min_bounds_mm"]["h"].as_f64(),
+        )
+    {
+        step(
+            &ctx,
+            "regenerate_board",
+            json!({"bounds": [0.0, 0.0, width, height]}),
+        )?;
+        placed = attempt(&ctx, "place_board", json!({}))?;
+    }
     if placed["legal"] != Value::Bool(true) {
         bail!("placement is illegal: {placed}");
     }
