@@ -1,6 +1,7 @@
 //! `render_board` - render the live KiCad board to a PNG for the model and user.
 
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use kicad_cli::KicadCli;
@@ -10,12 +11,23 @@ use serde_json::{Value, json};
 use crate::AgentRuntime;
 
 const BOARD_RENDER_LAYERS: &str = "F.Cu,B.Cu,F.SilkS,B.SilkS";
+const BOARD_FRONT_DETAIL_LAYERS: &str = "F.Cu,F.SilkS";
+const BOARD_BACK_DETAIL_LAYERS: &str = "B.Cu,B.SilkS";
 const BOARD_RENDER_BG: &str = "#050b12";
 const BOARD_OUTLINE_INNER: &str = "#00e5ff";
 const BOARD_AXIS: &str = "#f8fafc";
 const BOARD_AXIS_GRID: &str = "#94a3b8";
 const BOARD_AXIS_X: &str = "#fb7185";
 const BOARD_AXIS_Y: &str = "#60a5fa";
+const DENSE_BOARD_PARTS: usize = 40;
+const REFERENCE_TEXT_HEIGHT_MM: f64 = 0.8;
+const TARGET_REFERENCE_HEIGHT_PX: f64 = 10.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RenderPlan {
+    overview_px: u32,
+    detail_px: Option<u32>,
+}
 
 /// Render the board to a PNG using KiCad's own PCB SVG exporter, save under
 /// `.gordian/renders/`, and attach via `IMAGE_PATH_KEY`.
@@ -31,12 +43,8 @@ pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let tmp = tempfile::tempdir().context("temp dir for PCB SVG export")?;
     let svg_path = tmp.path().join("board.svg");
-    let svg_path = match KicadCli::new(ctx.env()).export_pcb_svg(
-        &pcb_path,
-        &svg_path,
-        BOARD_RENDER_LAYERS,
-        false,
-    ) {
+    let cli = KicadCli::new(ctx.env());
+    let svg_path = match cli.export_pcb_svg(&pcb_path, &svg_path, BOARD_RENDER_LAYERS, false) {
         Ok(path) => path,
         Err(err) => {
             return Ok(json!({
@@ -48,22 +56,138 @@ pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .with_context(|| format!("reading PCB SVG {}", svg_path.display()))?;
     let svg = add_visual_overlays(&svg, board.problem.outline.as_ref(), &board.imported.bounds);
 
-    let png = crate::render::svg_to_png(&svg, ctx.config().tools.render_max_px)?;
+    let plan = render_plan(
+        board.imported.parts.len(),
+        &board.imported.bounds,
+        ctx.config().tools.render_max_px,
+    );
+    let png = crate::render::svg_to_png(&svg, plan.overview_px)?;
     let path = ctx.workspace().write_render(&png)?;
+
+    let mut detail_paths = serde_json::Map::new();
+    let mut detail_errors = Vec::new();
+    if let Some(detail_px) = plan.detail_px {
+        for (side, layers, mirror) in [
+            ("front", BOARD_FRONT_DETAIL_LAYERS, false),
+            ("back", BOARD_BACK_DETAIL_LAYERS, true),
+        ] {
+            match render_side_detail(
+                &cli,
+                &pcb_path,
+                tmp.path(),
+                side,
+                layers,
+                mirror,
+                detail_px,
+                ctx,
+            ) {
+                Ok(detail_path) => {
+                    detail_paths.insert(
+                        side.to_owned(),
+                        Value::String(detail_path.display().to_string()),
+                    );
+                }
+                Err(err) => detail_errors.push(format!("{side}: {err}")),
+            }
+        }
+    }
 
     let mut obj = json!({
         "ok": true,
         "png_path": path.display().to_string(),
+        "overview_px": plan.overview_px,
+        "detail_paths": detail_paths,
         "note": format!(
             "Board rendered from KiCad's PCB SVG export and attached. \
              Layers: {BOARD_RENDER_LAYERS}. The PNG has an explicit dark background, \
              the board outline is overlaid in cyan, and coordinate axes/ticks \
              are drawn in board millimetres for vision readability. \
-             PNG also saved to png_path for the user to open."
+             PNG also saved to png_path for the user to open. Dense/large boards also \
+             return uncluttered front and mirrored-back detail_paths."
         ),
     });
+    if !detail_errors.is_empty() {
+        obj["detail_errors"] = json!(detail_errors);
+    }
     obj[crate::tools::IMAGE_PATH_KEY] = json!(path.display().to_string());
     Ok(obj)
+}
+
+fn render_plan(part_count: usize, bounds: &Rect, configured_max_px: u32) -> RenderPlan {
+    let base = configured_max_px.max(1);
+    let board_w = (bounds.max_x - bounds.min_x).max(0.0);
+    let board_h = (bounds.max_y - bounds.min_y).max(0.0);
+    let board_long = board_w.max(board_h);
+    let needs_detail = part_count >= DENSE_BOARD_PARTS
+        || estimated_reference_pixels(board_long, base) < TARGET_REFERENCE_HEIGHT_PX;
+    if !needs_detail {
+        return RenderPlan {
+            overview_px: base,
+            detail_px: None,
+        };
+    }
+
+    // At most double the caller's normal render budget. This keeps memory bounded
+    // while making the common 1600 px configuration produce a 3200 px inspection
+    // artifact for a dense 200 mm board (roughly 10 px-high 0.8 mm references).
+    let margins = overlay_margins(board_long);
+    let overview_long =
+        (board_w + margins.left + margins.right).max(board_h + margins.top + margins.bottom);
+    let required = ((overview_long / REFERENCE_TEXT_HEIGHT_MM) * TARGET_REFERENCE_HEIGHT_PX)
+        .ceil()
+        .max(base as f64) as u32;
+    let detail_px = required.min(base.saturating_mul(2)).max(base);
+    RenderPlan {
+        overview_px: detail_px,
+        detail_px: Some(detail_px),
+    }
+}
+
+fn estimated_reference_pixels(board_long_mm: f64, long_edge_px: u32) -> f64 {
+    if board_long_mm <= 0.0 {
+        return f64::INFINITY;
+    }
+    REFERENCE_TEXT_HEIGHT_MM * long_edge_px as f64 / board_long_mm
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_side_detail(
+    cli: &KicadCli,
+    pcb_path: &Path,
+    tmp_dir: &Path,
+    side: &str,
+    layers: &str,
+    mirror: bool,
+    max_px: u32,
+    ctx: &AgentRuntime,
+) -> Result<PathBuf> {
+    let svg_path = tmp_dir.join(format!("board-{side}.svg"));
+    let svg_path = cli
+        .export_pcb_svg(pcb_path, &svg_path, layers, mirror)
+        .with_context(|| format!("exporting {side} PCB detail SVG"))?;
+    let svg = std::fs::read_to_string(&svg_path)
+        .with_context(|| format!("reading {side} PCB detail SVG {}", svg_path.display()))?;
+    let svg = add_dark_background(&svg).unwrap_or(svg);
+    let png = crate::render::svg_to_png(&svg, max_px)
+        .with_context(|| format!("rasterizing {side} PCB detail"))?;
+    ctx.workspace()
+        .write_render(&png)
+        .with_context(|| format!("writing {side} PCB detail"))
+}
+
+fn add_dark_background(svg: &str) -> Option<String> {
+    let (_, _, viewbox) = find_viewbox(svg)?;
+    let background = format!(
+        "\n  <rect id=\"gordian-render-background\" x=\"{:.4}\" y=\"{:.4}\" width=\"{:.4}\" height=\"{:.4}\" fill=\"{}\"/>\n",
+        viewbox.x, viewbox.y, viewbox.w, viewbox.h, BOARD_RENDER_BG
+    );
+    let svg_tag_start = svg.find("<svg")?;
+    let svg_tag_end = svg[svg_tag_start..].find('>')? + svg_tag_start + 1;
+    let mut out = String::with_capacity(svg.len() + background.len());
+    out.push_str(&svg[..svg_tag_end]);
+    out.push_str(&background);
+    out.push_str(&svg[svg_tag_end..]);
+    Some(out)
 }
 
 fn add_visual_overlays(svg: &str, outline: Option<&Polygon>, bounds: &Rect) -> String {
@@ -402,6 +526,50 @@ mod tests {
     const SVG_80X70_SIZED: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="80mm" height="70mm" viewBox="0 0 80 70">
 <rect x="0" y="0" width="80" height="70"/>
 </svg>"#;
+
+    #[test]
+    fn sparse_small_board_keeps_the_configured_overview_only() {
+        let plan = render_plan(12, &Rect::new(0.0, 0.0, 80.0, 70.0), 1600);
+
+        assert_eq!(
+            plan,
+            RenderPlan {
+                overview_px: 1600,
+                detail_px: None,
+            }
+        );
+    }
+
+    #[test]
+    fn dense_or_physically_large_boards_get_bounded_readable_details() {
+        let dense = render_plan(40, &Rect::new(0.0, 0.0, 80.0, 70.0), 1600);
+        assert_eq!(dense.detail_px, Some(1600));
+
+        let large = render_plan(12, &Rect::new(0.0, 0.0, 200.0, 120.0), 1600);
+        let detail_px = large.detail_px.expect("large board detail render");
+        assert!(detail_px > 1600 && detail_px <= 3200, "{large:?}");
+        assert_eq!(large.overview_px, detail_px);
+
+        let margins = overlay_margins(200.0);
+        let overview_long =
+            (200.0 + margins.left + margins.right).max(120.0 + margins.top + margins.bottom);
+        assert!(
+            estimated_reference_pixels(overview_long, large.overview_px)
+                >= TARGET_REFERENCE_HEIGHT_PX - 0.01
+        );
+    }
+
+    #[test]
+    fn side_detail_background_preserves_the_original_viewbox() {
+        let svg = add_dark_background(SVG).expect("valid SVG");
+
+        assert!(svg.contains("viewBox=\"0 0 20 10\""));
+        assert!(svg.contains("id=\"gordian-render-background\""));
+        assert!(svg.contains("x=\"0.0000\" y=\"0.0000\" width=\"20.0000\" height=\"10.0000\""));
+        assert!(
+            svg.find("gordian-render-background").unwrap() < svg.find("<rect x=\"0\"").unwrap()
+        );
+    }
 
     #[test]
     fn board_render_overlay_adds_coordinate_rulers() {
