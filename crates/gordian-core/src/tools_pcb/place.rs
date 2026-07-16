@@ -574,6 +574,12 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .filter(|g| g.edge.is_some())
         .flat_map(|g| g.members.iter().map(String::as_str))
         .collect();
+    let explicitly_regioned: std::collections::BTreeSet<&str> = hints
+        .groups
+        .iter()
+        .filter(|g| g.region.is_some())
+        .flat_map(|g| g.members.iter().map(String::as_str))
+        .collect();
     for p in &board.imported.parts {
         if explicitly_edged.contains(p.reference.as_str()) {
             continue;
@@ -583,6 +589,13 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         // or blocked by a part — falls back to the perimeter, not the interior).
         // Other connectors/headers edge-seek (a cable/enclosure reaches the edge).
         if is_mounting_hole(&p.lib_id) {
+            // An authored region is more deliberate than the generic corner
+            // heuristic (for example, a 5 mm centre leaves useful edge stock
+            // around an M3 pad). Preserve it instead of snapping to the
+            // courtyard-tight mathematical corner.
+            if explicitly_regioned.contains(p.reference.as_str()) {
+                continue;
+            }
             if !hints.corner_seek.contains(&p.reference) {
                 hints.corner_seek.push(p.reference.clone());
             }
