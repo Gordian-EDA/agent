@@ -86,22 +86,23 @@ fn reconcile_file_stackup(
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("could not read board layer table: {err}"))?;
     let layer_names = super::patch::board_copper_layer_names(&text)?;
-    if snapshot.layer_names == layer_names {
-        return Ok(());
-    }
-
     let ipc_layer_names = snapshot.layer_names.clone();
     let layer_count = layer_names.len() as u32;
-    snapshot.problem.plane_nets.retain(|_, layer| {
-        let Some(name) = ipc_layer_names.get(*layer as usize) else {
-            return false;
-        };
-        let Some(mapped) = layer_names.iter().position(|candidate| candidate == name) else {
-            return false;
-        };
-        *layer = mapped as u32;
-        true
-    });
+    if ipc_layer_names != layer_names {
+        snapshot.problem.plane_nets.retain(|_, layer| {
+            let Some(name) = ipc_layer_names.get(*layer as usize) else {
+                return false;
+            };
+            let Some(mapped) = layer_names.iter().position(|candidate| candidate == name) else {
+                return false;
+            };
+            *layer = mapped as u32;
+            true
+        });
+    }
+    for (net, layer) in super::patch::board_file_plane_nets(&text)? {
+        snapshot.problem.plane_nets.insert(net, layer);
+    }
     snapshot.problem.escape_layers.retain(|_, layer| {
         let Some(name) = ipc_layer_names.get(*layer as usize) else {
             return false;

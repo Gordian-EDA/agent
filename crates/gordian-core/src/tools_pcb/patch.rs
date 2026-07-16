@@ -130,6 +130,79 @@ pub(super) fn board_copper_layer_names(text: &str) -> Result<Vec<String>, String
     Ok(names)
 }
 
+/// Full-board rectangular copper zones, as authoritative plane-net assignments.
+/// Gordian's seed writer emits its planes in exactly this form; requiring the
+/// zone rectangle to cover the Edge.Cuts rectangle avoids promoting local pours.
+pub(super) fn board_file_plane_nets(text: &str) -> Result<BTreeMap<String, u32>, String> {
+    let layers = board_copper_layer_names(text)?;
+    let (body_start, body_end) = root_body(text)?;
+    let top = child_nodes(text, body_start, body_end);
+    let outline = top
+        .iter()
+        .find(|node| {
+            node_head(text, node) == "gr_rect"
+                && text[node.start..node.end].contains("(layer \"Edge.Cuts\")")
+        })
+        .and_then(|node| {
+            let children = child_nodes(text, node.start + 1, node.end - 1);
+            let start = children.iter().find(|n| node_head(text, n) == "start")?;
+            let end = children.iter().find(|n| node_head(text, n) == "end")?;
+            let (x0, y0, _) = parse_at(text, start)?;
+            let (x1, y1, _) = parse_at(text, end)?;
+            Some((x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)))
+        });
+    let Some((min_x, min_y, max_x, max_y)) = outline else {
+        return Ok(BTreeMap::new());
+    };
+    let mut planes = BTreeMap::new();
+    for zone in top.iter().filter(|node| node_head(text, node) == "zone") {
+        let block = &text[zone.start..zone.end];
+        let Some(net) = quoted_field(block, "net_name") else {
+            continue;
+        };
+        let Some(layer) = quoted_field(block, "layer") else {
+            continue;
+        };
+        let Some(layer_idx) = layers.iter().position(|name| name == layer) else {
+            continue;
+        };
+        let Some(polygon) = child_nodes(text, zone.start + 1, zone.end - 1)
+            .into_iter()
+            .find(|node| node_head(text, node) == "polygon")
+        else {
+            continue;
+        };
+        let points: Vec<_> = child_nodes(text, polygon.start + 1, polygon.end - 1)
+            .into_iter()
+            .flat_map(|node| child_nodes(text, node.start + 1, node.end - 1))
+            .filter(|node| node_head(text, node) == "xy")
+            .filter_map(|node| parse_at(text, &node).map(|(x, y, _)| (x, y)))
+            .collect();
+        let corners = [
+            (min_x, min_y),
+            (max_x, min_y),
+            (max_x, max_y),
+            (min_x, max_y),
+        ];
+        if points.len() == 4
+            && corners.iter().all(|&(cx, cy)| {
+                points
+                    .iter()
+                    .any(|&(x, y)| (x - cx).abs() <= 1e-6 && (y - cy).abs() <= 1e-6)
+            })
+        {
+            planes.entry(net.to_owned()).or_insert(layer_idx as u32);
+        }
+    }
+    Ok(planes)
+}
+
+fn quoted_field<'a>(block: &'a str, head: &str) -> Option<&'a str> {
+    let prefix = format!("({head} \"");
+    let rest = block.split_once(&prefix)?.1;
+    Some(rest.split_once('"')?.0)
+}
+
 /// `(property "Reference" "R1" …)` value inside a footprint body, if any.
 fn footprint_reference(text: &str, fp: &Node) -> Option<String> {
     let body = &text[fp.start + 1..fp.end - 1];
@@ -653,6 +726,23 @@ mod tests {
         assert_eq!(
             board_copper_layer_names(&board).unwrap(),
             vec!["F.Cu", "B.Cu"]
+        );
+    }
+
+    #[test]
+    fn full_board_zone_is_an_authoritative_plane_but_local_pour_is_not() {
+        let board = r#"(kicad_pcb
+            (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) (2 "B.Cu" signal))
+            (gr_rect (start 0 0) (end 20 10) (layer "Edge.Cuts"))
+            (zone (net 1) (net_name "GND") (layer "In1.Cu")
+                (polygon (pts (xy 0 0) (xy 20 0) (xy 20 10) (xy 0 10))))
+            (zone (net 2) (net_name "+3V3") (layer "In2.Cu")
+                (polygon (pts (xy 2 2) (xy 18 2) (xy 18 8) (xy 2 8))))
+        )"#;
+
+        assert_eq!(
+            board_file_plane_nets(board).unwrap(),
+            BTreeMap::from([("GND".to_owned(), 1)])
         );
     }
 
