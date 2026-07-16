@@ -765,6 +765,12 @@ fn add_817_array_hints(
     problem: &PlaceProblem,
     hints: &mut PlacementHints,
 ) -> Option<Opto817Requirements> {
+    let authored_regioned = hints
+        .groups
+        .iter()
+        .filter(|group| group.region.is_some())
+        .flat_map(|group| group.members.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
     let channels = opto817_channels(design, board);
     if channels.len() < 8 {
         return None;
@@ -851,6 +857,9 @@ fn add_817_array_hints(
             logic_aux_connectors.push(imported.reference.clone());
         }
     }
+    field_connectors.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
+    logic_connectors.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
+    logic_aux_connectors.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
 
     let margin = problem.clearance.max(0.5) + 0.75;
     let bounds = problem.bounds;
@@ -904,47 +913,12 @@ fn add_817_array_hints(
         bounds.max_x - margin,
         (center.y - opto_h / 2.0 - margin).max(bounds.min_y + margin),
     );
-    let connector_top = Rect::new(
-        center_region.min_x,
-        top.min_y,
-        center_region.max_x,
-        top.max_y,
-    );
     let bottom = Rect::new(
         bounds.min_x + margin,
         (center.y + opto_h / 2.0 + margin).min(bounds.max_y - margin),
         bounds.max_x - margin,
         bounds.max_y - margin,
     );
-    let aux_height = logic_aux_connectors
-        .iter()
-        .filter_map(|reference| {
-            problem
-                .parts
-                .iter()
-                .find(|part| &part.reference == reference)
-        })
-        .map(|part| pcb_model::place::rotated_courtyard_half(part, 90.0).1 * 2.0)
-        .fold(0.0, f64::max);
-    // Rail-only service/power headers belong on the logic side, but not on the
-    // same centreline as the long signal headers. Reserve a strip immediately
-    // below the opto barrier and begin the south-header region after it. The
-    // extra margin accounts for both courtyards' placement clearance.
-    let aux_bottom = if logic_aux_connectors.is_empty() {
-        bottom
-    } else {
-        Rect::new(
-            bottom.min_x,
-            bottom.min_y,
-            bottom.max_x,
-            (bottom.min_y + aux_height + margin).min(bottom.max_y),
-        )
-    };
-    let header_bottom = if logic_aux_connectors.is_empty() {
-        bottom
-    } else {
-        Rect::new(bottom.min_x, aux_bottom.max_y, bottom.max_x, bottom.max_y)
-    };
     let connector_refs = field_connectors
         .iter()
         .chain(&logic_connectors)
@@ -972,6 +946,56 @@ fn add_817_array_hints(
             logic_parts.push(imported.reference.clone());
         }
     }
+    field_parts.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
+    logic_parts.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
+
+    // The field series parts share the opto x cells in one row. This removes
+    // the last force/anneal degree of freedom and keeps each input fanout local.
+    let field_strip = Rect::new(
+        center_region.min_x,
+        top.max_y - array_h,
+        center_region.max_x,
+        top.max_y,
+    );
+    let connector_top = Rect::new(
+        center_region.min_x,
+        top.min_y,
+        center_region.max_x,
+        field_strip.min_y,
+    );
+    let logic_height = logic_parts
+        .iter()
+        .filter_map(|reference| {
+            problem
+                .parts
+                .iter()
+                .find(|part| &part.reference == reference)
+        })
+        .map(|part| part.courtyard_h)
+        .fold(0.0, f64::max);
+    let logic_strip = Rect::new(
+        bottom.min_x,
+        bottom.min_y,
+        bottom.max_x,
+        (bottom.min_y + logic_height + margin).min(bottom.max_y),
+    );
+    let aux_height = logic_aux_connectors
+        .iter()
+        .filter_map(|reference| {
+            problem
+                .parts
+                .iter()
+                .find(|part| &part.reference == reference)
+        })
+        .map(|part| pcb_model::place::rotated_courtyard_half(part, 90.0).1 * 2.0)
+        .fold(0.0, f64::max);
+    let aux_bottom = Rect::new(
+        bottom.min_x,
+        logic_strip.max_y,
+        bottom.max_x,
+        (logic_strip.max_y + aux_height + margin).min(bottom.max_y),
+    );
+    let header_bottom = Rect::new(bottom.min_x, aux_bottom.max_y, bottom.max_x, bottom.max_y);
     let mut add_group = |name: &str,
                          members: Vec<String>,
                          region: Rect,
@@ -1014,8 +1038,56 @@ fn add_817_array_hints(
         true,
         Some(90.0),
     );
-    add_group("field domain", field_parts, top, None, false, None);
-    add_group("logic domain", logic_parts, bottom, None, false, None);
+    add_group("field domain", field_parts, field_strip, None, true, None);
+    add_group("logic domain", logic_parts, logic_strip, None, true, None);
+
+    // Finish the specialized floorplan by pinning un-authored mounting holes to
+    // deterministic, maximally separated corners. Authored locks/regions win.
+    let mut holes = board
+        .imported
+        .parts
+        .iter()
+        .filter(|part| {
+            is_mounting_hole(&part.lib_id)
+                && !part.locked
+                && !authored_regioned.contains(&part.reference)
+        })
+        .map(|part| part.reference.clone())
+        .collect::<Vec<_>>();
+    holes.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
+    let corners = [(false, false), (true, true), (true, false), (false, true)];
+    for (reference, (right, bottom_edge)) in holes.into_iter().take(4).zip(corners) {
+        let part = problem
+            .parts
+            .iter()
+            .find(|part| part.reference == reference)
+            .expect("imported mounting hole has placement part");
+        let center = geom::Point2::new(
+            if right {
+                bounds.max_x - part.courtyard_w / 2.0 - EDGE_CLEAR_MM
+            } else {
+                bounds.min_x + part.courtyard_w / 2.0 + EDGE_CLEAR_MM
+            },
+            if bottom_edge {
+                bounds.max_y - part.courtyard_h / 2.0 - EDGE_CLEAR_MM
+            } else {
+                bounds.min_y + part.courtyard_h / 2.0 + EDGE_CLEAR_MM
+            },
+        );
+        add_group(
+            &format!("817 mounting {reference}"),
+            vec![reference],
+            Rect::new(
+                center.x - 0.5,
+                center.y - 0.5,
+                center.x + 0.5,
+                center.y + 0.5,
+            ),
+            None,
+            true,
+            None,
+        );
+    }
 
     // A single row is electrically meaningful: every isolator straddles the
     // same continuous copper-free corridor. Reject a smaller board explicitly
@@ -1191,7 +1263,21 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // The stages, the $NO_UNIFIED override, and the legality fallback all live in (and
     // are documented on) the single visible entry pcb_place::place_board. The agent
     // overrides any of this with the interactive geometry tools (move_parts/route_track).
-    let result = pcb_place::placement::place_board(&problem, &hints);
+    // A fully prescribed 817 floorplan has no optimization choices. Bypass the
+    // multi-candidate routing oracle when every part is locked by the structured
+    // grids; this makes placement independent of RNG/hash order and completes in
+    // one legality pass. Any incomplete specialization keeps the generic path.
+    let result = if opto817_requirements.is_some() {
+        let mut prescribed = problem.clone();
+        pcb_place::placement::apply_grid_hints(&mut prescribed, &hints);
+        if prescribed.parts.iter().all(|part| part.locked.is_some()) {
+            pcb_place::placement::place(&prescribed, &PlacementHints::default())
+        } else {
+            pcb_place::placement::place_board(&problem, &hints)
+        }
+    } else {
+        pcb_place::placement::place_board(&problem, &hints)
+    };
 
     if result.legal {
         let locked_refs: std::collections::BTreeSet<&str> = board
@@ -1778,7 +1864,35 @@ mod tests {
         assert_eq!(strong.members, ["JLOG1", "JLOG2"]);
         assert_eq!(auxiliary.members, ["JPWR"]);
 
+        let mut shuffled_board = board.clone();
+        shuffled_board.imported.parts.reverse();
+        let mut shuffled_problem = problem.clone();
+        shuffled_problem.parts.reverse();
+        let mut shuffled_hints = PlacementHints::default();
+        add_817_array_hints(
+            &design,
+            &shuffled_board,
+            &shuffled_problem,
+            &mut shuffled_hints,
+        )
+        .expect("order-independent 817 plan");
         pcb_place::placement::apply_grid_hints(&mut problem, &hints);
+        pcb_place::placement::apply_grid_hints(&mut shuffled_problem, &shuffled_hints);
+        assert!(problem.parts.iter().all(|part| part.locked.is_some()));
+        assert!(
+            shuffled_problem
+                .parts
+                .iter()
+                .all(|part| part.locked.is_some())
+        );
+        let locked_by_ref = |problem: &PlaceProblem| {
+            problem
+                .parts
+                .iter()
+                .map(|part| (part.reference.clone(), part.locked.clone().unwrap()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(locked_by_ref(&problem), locked_by_ref(&shuffled_problem));
         let connector = |reference: &str| {
             problem
                 .parts
@@ -1824,11 +1938,32 @@ mod tests {
             );
         }
 
-        let result = pcb_place::placement::place_board(&problem, &hints);
+        let started = std::time::Instant::now();
+        let result = pcb_place::placement::place(&problem, &PlacementHints::default());
         assert!(
             result.legal,
             "117x60 specialized placement should be legal: {:?}",
             placement_overlap_pairs(&problem, &result)
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let shuffled_result =
+            pcb_place::placement::place(&shuffled_problem, &PlacementHints::default());
+        assert!(shuffled_result.legal);
+        let positions_by_ref = |result: &PlaceResult| {
+            result
+                .placements
+                .iter()
+                .map(|placement| {
+                    (
+                        placement.reference.clone(),
+                        (placement.at.x, placement.at.y, placement.rotation),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            positions_by_ref(&result),
+            positions_by_ref(&shuffled_result)
         );
     }
 
