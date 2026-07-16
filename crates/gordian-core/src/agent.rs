@@ -983,9 +983,9 @@ impl<P: Provider> Agent<P> {
                 &revision_reads_used,
                 self.runtime.sch_path().exists(),
             );
-            if !draft_existed_before_completion
-                && request_supplies_multiple_library_ids(authoritative_intent)
-            {
+            let exact_ids_skip_discovery = !draft_existed_before_completion
+                && request_supplies_multiple_library_ids(authoritative_intent);
+            if exact_ids_skip_discovery {
                 defs.retain(|tool| !is_discovery_tool(tool.name.as_str()));
             }
             let review_has_defects = schematic_review_current
@@ -1263,6 +1263,8 @@ impl<P: Provider> Agent<P> {
                 );
                 let route_retry_blocked =
                     route_retry_blocked(pcb_recovery.failed_route_attempts, &call.fn_name);
+                let exact_id_discovery_blocked =
+                    exact_ids_skip_discovery && is_discovery_tool(&call.fn_name);
                 let timed_out_mutation_blocked =
                     timed_out_mutation_blocked(&timed_out_tool_calls, &call.fn_name);
                 let timeout_retry_blocked =
@@ -1346,6 +1348,7 @@ impl<P: Provider> Agent<P> {
                     && !draft_dirty
                     && (commit_attempted_for_current_draft || draft_committed_at_turn_start);
                 let dispatched = !route_retry_blocked
+                    && !exact_id_discovery_blocked
                     && !timeout_retry_blocked
                     && !discovery_budget_blocked
                     && !discovery_batch_budget_blocked
@@ -1363,7 +1366,21 @@ impl<P: Provider> Agent<P> {
                     && !full_design_repair_blocked
                     && !component_shortfall_tool_blocked
                     && minimum_component_guard.is_none();
-                let (mut content, images, image_path) = if timed_out_mutation_blocked {
+                let (mut content, images, image_path) = if exact_id_discovery_blocked {
+                    (
+                        json!({
+                            "ok": false,
+                            "error": "discovery is unnecessary because the request already supplies multiple exact library IDs",
+                            "code": "exact_ids_skip_discovery",
+                            "tool": call.fn_name,
+                            "next_tool": "create_design",
+                            "note": "Author the complete requested design directly with the supplied IDs.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if timed_out_mutation_blocked {
                     (
                         json!({
                             "error": "project mutation blocked after a timed-out mutation",
@@ -6040,6 +6057,49 @@ mod tests {
         assert!(!request_supplies_multiple_library_ids(
             "See https://example.com/a:b at 12:30"
         ));
+        assert!(request_supplies_multiple_library_ids(
+            "Use Isolator:PC817 with Package_DIP:DIP-4_W7.62mm, canonical \
+             Resistor_SMD:R_0603_1608Metric and LED_SMD:LED_0603_1608Metric footprints"
+        ));
+    }
+
+    #[tokio::test]
+    async fn exact_id_requests_block_stale_discovery_calls() {
+        let (client, seen) = ScriptedClient::recording(vec![
+            tool_call(
+                "stale-search",
+                "search_symbols",
+                json!({"query": "resistor"}),
+            ),
+            final_text("done"),
+        ]);
+        let mut agent = Agent::new(client, test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn(
+                "Compare Device:R, Device:C, and Device:LED without discovery",
+                &mut approvals,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.tool_calls_made, 0);
+        let requests = seen.lock().unwrap();
+        let blocked = requests[1]
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .find_map(|part| match part {
+                ContentPart::ToolResponse(response) => {
+                    serde_json::from_str::<Value>(&response.content).ok()
+                }
+                _ => None,
+            })
+            .expect("the stale call is returned as structured JSON");
+        assert_eq!(blocked["code"], "exact_ids_skip_discovery");
+        assert_eq!(blocked["tool"], "search_symbols");
     }
 
     #[test]
