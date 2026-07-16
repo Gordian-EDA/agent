@@ -467,7 +467,11 @@ fn detect_pc817_channel_bank(
                     (
                         items[channel.led].refdes.clone(),
                         Cell {
-                            col: base_col + 3,
+                            // Keep the LED one track to the right of its
+                            // vertical supply resistor. A shared column leaves
+                            // KiCad's generated rail value directly on top of
+                            // the next channel's LED body.
+                            col: base_col + 4,
                             row: signal_row,
                             // KiCad's LED pin 1 is K and pin 2 is A.  Pointing
                             // pin 1 down puts A beneath RLED and K on OUT.

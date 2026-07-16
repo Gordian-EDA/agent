@@ -96,6 +96,12 @@ pub fn plan(items: &[Item], scene: &Scene) -> Vec<BandPlan> {
     let mut bands: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
     for (sn, node) in scene.nodes.iter().enumerate() {
         let Some(a) = node.anchor else { continue };
+        // An inferred idiom may share a scene node with a connector or other
+        // grammar anchor. Moving that node would silently break the frozen
+        // cell contract after Spine has re-seated it.
+        if node.places.iter().any(|place| items[place.item].frozen) {
+            continue;
+        }
         if let Some(key) = band_key(&items[a].part, &same_part_counts) {
             if wired[sn] && !key.starts_with("part:") {
                 continue;

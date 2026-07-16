@@ -15,7 +15,7 @@ use kicad_symbol::{PinDir as SymPinDir, SymbolMeta, find_pin};
 
 use sch_floorplan::contract::{
     PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
-    body_overlap_count, decongest, infer_ir, normalize,
+    apply_cells, assign_cells, body_overlap_count, decongest, infer_ir, normalize,
 };
 use sch_place::ir::LayoutIr;
 use sch_place::place::PlaceResult;
@@ -56,6 +56,9 @@ impl PlacementEngine for SpinePlace {
             return anneal_place::Anneal.place(env, design, problem, Some(authored));
         }
         let ir = ir.unwrap_or_else(|| infer_ir(env, design));
+        for item in &mut problem.items {
+            item.frozen = ir.frozen.contains(&item.refdes);
+        }
 
         // Two-pass label fixpoint: pass 1 reserves optimistically (wire-first).
         // If warnings remain, pass 2 re-forms with the nets that ACTUALLY
@@ -115,6 +118,38 @@ impl SpinePlace {
         labeled: Option<std::collections::BTreeSet<String>>,
     ) -> PlacementOutput {
         let t0 = std::time::Instant::now();
+        // Spine owns the free-form grammar, but inferred frozen idioms are a
+        // physical layout contract just like they are in the anneal engine.
+        // Cache their canonical cell poses and re-seat them after each grammar
+        // variant; decongestion then moves only loose bystanders out of the way.
+        let canonical_frozen = {
+            let mut canonical = problem
+                .items
+                .iter()
+                .filter(|item| item.frozen)
+                .cloned()
+                .collect::<Vec<_>>();
+            let cells = assign_cells(&canonical, &ir);
+            apply_cells(&mut canonical, &cells);
+            normalize(&mut canonical);
+            let poses = canonical
+                .into_iter()
+                .map(|item| (item.refdes, (item.at, item.angle)))
+                .collect::<BTreeMap<_, _>>();
+            problem
+                .items
+                .iter()
+                .map(|item| poses.get(&item.refdes).copied())
+                .collect::<Vec<_>>()
+        };
+        let seat_frozen = |items: &mut [sch_place::item::Item]| {
+            for (item, pose) in items.iter_mut().zip(&canonical_frozen) {
+                if let Some((at, angle)) = pose {
+                    item.at = *at;
+                    item.angle = *angle;
+                }
+            }
+        };
 
         // ── Parse: net classes, chain contraction, anchor set.
         let classes = classify_nets(&problem.inc, &ir);
@@ -311,6 +346,7 @@ impl SpinePlace {
                 placed[i] = true;
             }
             debug_assert!(placed.iter().all(|&p| p), "orphan sweep must place all");
+            seat_frozen(items);
 
             // Crystal clusters re-seat canonically (opt-in; kept only if it
             // doesn't ADD body overlaps — dual-crystal boards collide).
@@ -340,6 +376,7 @@ impl SpinePlace {
                 }
                 let mut placed2 = vec![false; items.len()];
                 commit(&staggered, items, &mut placed2);
+                seat_frozen(items);
                 decongest(items);
                 normalize(items);
                 breaks = eval.truthfulness_breaks(items);
@@ -510,6 +547,7 @@ impl SpinePlace {
                     }
                 }
                 crate::compact::pack_nodes(it, &groups, &problem_inc, &classes);
+                seat_frozen(it);
                 decongest(it);
                 normalize(it);
                 eval.truthfulness_breaks(it)

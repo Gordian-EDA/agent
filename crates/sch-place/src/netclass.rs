@@ -6,7 +6,13 @@
 /// Ground-like net name heuristic.
 pub fn is_ground(net: &str) -> bool {
     let u = net.to_ascii_uppercase();
-    u == "GND" || u == "GNDD" || u == "AGND" || u == "DGND" || u == "VSS" || u.starts_with("GND")
+    u == "GND"
+        || u == "GNDD"
+        || u == "AGND"
+        || u == "DGND"
+        || u == "VSS"
+        || u.starts_with("GND")
+        || u.ends_with("_GND")
 }
 
 /// A voltage-rail token: optional `+`/`-`, then a number with `V` as the decimal/unit
@@ -26,6 +32,20 @@ fn is_voltage_token(u: &str) -> bool {
     }
     s.chars()
         .all(|c| c.is_ascii_digit() || c == '.' || c == 'V')
+}
+
+/// Alternate voltage-rail spelling used by generated and legacy netlists:
+/// `V5`, `V24`, or `V3V3`. Keep this as strict as [`is_voltage_token`] so names
+/// such as `V5_SENSE` remain ordinary signals.
+fn is_v_prefix_voltage_token(u: &str) -> bool {
+    let Some(s) = u.strip_prefix('V') else {
+        return false;
+    };
+    !s.is_empty()
+        && s.starts_with(|c: char| c.is_ascii_digit())
+        && s.chars().filter(|&c| c == 'V').count() <= 1
+        && s.chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == 'V')
 }
 
 /// Whether a net NAME is conventionally a power/ground rail. Used to infer rails on
@@ -69,7 +89,7 @@ pub fn is_power_net(net: &str) -> bool {
     {
         return true;
     }
-    is_voltage_token(&u)
+    is_voltage_token(&u) || is_v_prefix_voltage_token(&u)
 }
 
 /// A NEGATIVE supply rail (`VEE`, `V-`, `-12V`, `-5V`). A bulk/decoupling cap with one
@@ -111,5 +131,31 @@ pub fn pin_side(at: ::geom::Point2) -> PinSide {
         PinSide::North // symbol-local +y is up; the pin points up = top side
     } else {
         PinSide::South
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_ground, is_power_net};
+
+    #[test]
+    fn recognizes_strict_v_prefix_voltage_rails() {
+        for net in ["V5", "V24", "V3V3"] {
+            assert!(is_power_net(net), "{net}");
+        }
+        for net in ["V", "V5_SENSE", "VREF", "V24_ENABLE"] {
+            assert!(!is_power_net(net), "{net}");
+        }
+    }
+
+    #[test]
+    fn recognizes_named_ground_domains_without_matching_signal_suffixes() {
+        for net in ["FIELD_GND", "LOGIC_GND", "CHASSIS_GND"] {
+            assert!(is_ground(net), "{net}");
+            assert!(is_power_net(net), "{net}");
+        }
+        for net in ["SIGNAL_GND_SENSE", "GROUND_FAULT", "NOT_GNDED"] {
+            assert!(!is_ground(net), "{net}");
+        }
     }
 }
