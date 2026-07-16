@@ -2990,7 +2990,12 @@ fn explicit_minimum_physical_components(intent: &str) -> Option<usize> {
         let mut noun_index = noun_index;
         while tokens
             .get(noun_index)
-            .is_some_and(|token| matches!(token.as_str(), "physical" | "pcb" | "board" | "mounted"))
+            .is_some_and(|token| {
+                matches!(
+                    token.as_str(),
+                    "distinct" | "explicit" | "fitted" | "physical" | "pcb" | "board" | "mounted"
+                )
+            })
         {
             noun_index += 1;
         }
@@ -5364,6 +5369,12 @@ mod tests {
             Some(45)
         );
         assert_eq!(
+            explicit_minimum_physical_components(
+                "Author at least 48 distinct physical component entries with real symbols"
+            ),
+            Some(48)
+        );
+        assert_eq!(
             explicit_minimum_physical_components("Make a 40+ parts board"),
             Some(40)
         );
@@ -5437,6 +5448,13 @@ blocks:
         assert_eq!(blocked["candidate_physical_components"], 1);
         assert_eq!(blocked["shortfall"], 44);
         assert_eq!(blocked["draft_written"], false);
+        let distinct_floor = undersized_full_draft_result(
+            "Author at least 48 distinct physical component entries with real symbols",
+            &call,
+        )
+        .expect("qualified physical minimum must guard the full draft");
+        assert_eq!(distinct_floor["required_minimum"], 48);
+        assert_eq!(distinct_floor["candidate_physical_components"], 1);
         let mut edit_call = call.clone();
         edit_call.fn_name = "edit_design".into();
         assert_eq!(
