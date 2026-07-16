@@ -923,6 +923,105 @@ fn add_817_array_hints(
         .chain(&logic_aux_connectors)
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
+    let eligible_channel_part = |part: &kicad_ipc::snapshot::ImportedPart| {
+        !opto_refs.contains(&part.reference)
+            && !connector_refs.contains(&part.reference)
+            && !is_mounting_hole(&part.lib_id)
+            && !part.locked
+    };
+    let mut net_fanout = BTreeMap::<String, usize>::new();
+    for imported in board.imported.parts.iter().filter(|part| eligible_channel_part(part)) {
+        let nets = part_nets(imported)
+            .into_iter()
+            .map(|net| net.trim_start_matches('/').to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        for net in nets {
+            *net_fanout.entry(net).or_default() += 1;
+        }
+    }
+    let mut channel_field_groups = Vec::with_capacity(channels.len());
+    let mut channel_logic_groups = Vec::with_capacity(channels.len());
+    let mut channel_assigned = std::collections::BTreeSet::new();
+    for channel in &channels {
+        let mut field = board
+            .imported
+            .parts
+            .iter()
+            .filter(|part| eligible_channel_part(part))
+            .filter(|part| {
+                channels
+                    .iter()
+                    .filter(|candidate| {
+                        part_nets(part)
+                            .iter()
+                            .any(|net| same_net(net, &candidate.input_nets[0]))
+                    })
+                    .count()
+                    == 1
+            })
+            .filter(|part| {
+                part_nets(part)
+                    .iter()
+                    .any(|net| same_net(net, &channel.input_nets[0]))
+            })
+            .map(|part| part.reference.clone())
+            .collect::<Vec<_>>();
+        let direct_logic = board
+            .imported
+            .parts
+            .iter()
+            .filter(|part| eligible_channel_part(part))
+            .filter(|part| {
+                channels
+                    .iter()
+                    .filter(|candidate| {
+                        part_nets(part)
+                            .iter()
+                            .any(|net| same_net(net, &candidate.output_net))
+                    })
+                    .count()
+                    == 1
+            })
+            .filter(|part| {
+                part_nets(part)
+                    .iter()
+                    .any(|net| same_net(net, &channel.output_net))
+            })
+            .collect::<Vec<_>>();
+        let expansion_nets = direct_logic
+            .iter()
+            .flat_map(|part| part_nets(part))
+            .map(|net| net.trim_start_matches('/').to_owned())
+            .filter(|net| !same_net(net, &channel.output_net))
+            .filter(|net| !is_ground_net(net))
+            .filter(|net| net_fanout.get(net).copied().unwrap_or(usize::MAX) <= 3)
+            .collect::<std::collections::BTreeSet<_>>();
+        let direct_refs = direct_logic
+            .iter()
+            .map(|part| part.reference.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut logic = board
+            .imported
+            .parts
+            .iter()
+            .filter(|part| eligible_channel_part(part))
+            .filter(|part| {
+                direct_refs.contains(part.reference.as_str())
+                    || part_nets(part).iter().any(|net| {
+                        expansion_nets.contains(net.trim_start_matches('/'))
+                    })
+            })
+            .map(|part| part.reference.clone())
+            .collect::<Vec<_>>();
+        field.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
+        logic.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
+        field.dedup();
+        logic.dedup();
+        logic.retain(|reference| !field.contains(reference));
+        channel_assigned.extend(field.iter().chain(&logic).cloned());
+        channel_field_groups.push(field);
+        channel_logic_groups.push(logic);
+    }
     let mut field_parts = Vec::new();
     let mut logic_parts = Vec::new();
     for imported in &board.imported.parts {
@@ -930,6 +1029,7 @@ fn add_817_array_hints(
             || connector_refs.contains(&imported.reference)
             || is_mounting_hole(&imported.lib_id)
             || imported.locked
+            || channel_assigned.contains(&imported.reference)
         {
             continue;
         }
@@ -984,11 +1084,31 @@ fn add_817_array_hints(
     };
     let wide_logic_height = part_height(&logic_wide_parts);
     let logic_height = part_height(&logic_small_parts);
-    let wide_logic_strip = Rect::new(
+    let channel_logic_height = channel_logic_groups
+        .iter()
+        .flatten()
+        .filter_map(|reference| {
+            problem
+                .parts
+                .iter()
+                .find(|part| &part.reference == reference)
+        })
+        .map(|part| part.courtyard_h)
+        .fold(0.0, f64::max)
+        + margin;
+    let channel_logic_strip = Rect::new(
         bottom.min_x,
         bottom.min_y,
         bottom.max_x,
-        (bottom.min_y + wide_logic_height + (!logic_wide_parts.is_empty() as u8 as f64) * margin)
+        (bottom.min_y + channel_logic_height).min(bottom.max_y),
+    );
+    let wide_logic_strip = Rect::new(
+        bottom.min_x,
+        channel_logic_strip.max_y,
+        bottom.max_x,
+        (channel_logic_strip.max_y
+            + wide_logic_height
+            + (!logic_wide_parts.is_empty() as u8 as f64) * margin)
             .min(bottom.max_y),
     );
     let logic_strip = Rect::new(
@@ -1059,6 +1179,36 @@ fn add_817_array_hints(
         true,
         Some(90.0),
     );
+    for (index, members) in channel_field_groups.into_iter().enumerate() {
+        add_group(
+            &format!("817 field channel {}", index + 1),
+            members,
+            Rect::new(
+                center_region.min_x + index as f64 * pitch_x,
+                field_strip.min_y,
+                center_region.min_x + (index + 1) as f64 * pitch_x,
+                field_strip.max_y,
+            ),
+            None,
+            true,
+            None,
+        );
+    }
+    for (index, members) in channel_logic_groups.into_iter().enumerate() {
+        add_group(
+            &format!("817 logic channel {}", index + 1),
+            members,
+            Rect::new(
+                center_region.min_x + index as f64 * pitch_x,
+                channel_logic_strip.min_y,
+                center_region.min_x + (index + 1) as f64 * pitch_x,
+                channel_logic_strip.max_y,
+            ),
+            None,
+            true,
+            None,
+        );
+    }
     add_group("field domain", field_parts, field_strip, None, true, None);
     add_group(
         "logic wide domain",
@@ -1817,7 +1967,7 @@ mod tests {
             hints
                 .groups
                 .iter()
-                .find(|group| group.name == "field domain")
+                .find(|group| group.name == "817 field channel 1")
                 .unwrap()
                 .members
                 .contains(&"R1".into())
@@ -1888,6 +2038,79 @@ mod tests {
         let mut hints = PlacementHints::default();
 
         assert!(add_817_array_hints(&design, &board, &problem, &mut hints).is_some());
+    }
+
+    #[test]
+    fn opto817_plan_clusters_one_hop_passives_by_channel() {
+        let (design, mut board, mut problem) = opto817_fixture(8, false);
+        for index in 1..=8 {
+            for (reference, lib_id, nets) in [
+                (
+                    format!("RIN{index}"),
+                    "Resistor_SMD:R",
+                    vec![format!("FIELD{index}_LED"), format!("IN{index}")],
+                ),
+                (
+                    format!("RPU{index}"),
+                    "Resistor_SMD:R",
+                    vec![format!("OUT{index}"), "+5V".into()],
+                ),
+                (
+                    format!("DLED{index}"),
+                    "LED_SMD:LED",
+                    vec![format!("OUT{index}"), format!("LED_A{index}")],
+                ),
+                (
+                    format!("RLED{index}"),
+                    "Resistor_SMD:R",
+                    vec![format!("LED_A{index}"), "+5V".into()],
+                ),
+            ] {
+                let imported = imported_part(
+                    &reference,
+                    lib_id,
+                    nets.into_iter()
+                        .enumerate()
+                        .map(|(pad, net)| ((pad + 1).to_string(), net))
+                        .collect(),
+                );
+                problem.parts.push(placement_part(&imported, false));
+                board.imported.parts.push(imported);
+            }
+        }
+        let mut hints = PlacementHints::default();
+
+        add_817_array_hints(&design, &board, &problem, &mut hints)
+            .expect("verified bank with passives");
+
+        for index in 1..=8 {
+            let field = hints
+                .groups
+                .iter()
+                .find(|group| group.name == format!("817 field channel {index}"))
+                .expect("per-channel input group");
+            let expected_field = if index == 1 {
+                vec!["R1".to_owned(), "RIN1".to_owned()]
+            } else {
+                vec![format!("RIN{index}")]
+            };
+            assert_eq!(field.members, expected_field);
+            let logic = hints
+                .groups
+                .iter()
+                .find(|group| group.name == format!("817 logic channel {index}"))
+                .expect("per-channel output group");
+            assert_eq!(
+                logic.members.iter().cloned().collect::<std::collections::BTreeSet<_>>(),
+                [
+                    format!("DLED{index}"),
+                    format!("RLED{index}"),
+                    format!("RPU{index}"),
+                ]
+                .into_iter()
+                .collect()
+            );
+        }
     }
 
     #[test]
