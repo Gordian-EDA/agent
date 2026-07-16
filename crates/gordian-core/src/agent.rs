@@ -2325,6 +2325,14 @@ fn request_requires_pcb_work(user_msg: &str) -> bool {
         || request.contains("gerber")
 }
 
+fn request_requires_fabrication(user_msg: &str) -> bool {
+    let request = user_msg.to_ascii_lowercase();
+    request.contains("fabrication")
+        || request.contains("fab bundle")
+        || request.contains("gerber")
+        || request.contains("board house")
+}
+
 fn request_budget_exhausted(
     total_requests: usize,
     stage_requests: usize,
@@ -3040,7 +3048,15 @@ fn explicit_minimum_physical_components(intent: &str) -> Option<usize> {
             .is_some_and(|token| {
                 matches!(
                     token.as_str(),
-                    "distinct" | "explicit" | "fitted" | "physical" | "pcb" | "board" | "mounted"
+                    "distinct"
+                        | "explicit"
+                        | "fitted"
+                        | "meaningful"
+                        | "physical"
+                        | "real"
+                        | "pcb"
+                        | "board"
+                        | "mounted"
                 )
             })
         {
@@ -3065,6 +3081,18 @@ fn explicit_minimum_physical_components(intent: &str) -> Option<usize> {
             && let Some(required) = component_floor(index, index + 2)
         {
             floors.push(required);
+        }
+        if tokens.get(index).is_some_and(|token| token == "exactly")
+            && let Some(required) = component_floor(index + 1, index + 2)
+        {
+            floors.push(required);
+        }
+        if tokens.get(index).is_some_and(|token| token == "minimum") {
+            let has_of = tokens.get(index + 1).is_some_and(|token| token == "of");
+            let number_index = index + usize::from(has_of) + 1;
+            if let Some(required) = component_floor(number_index, number_index + 1) {
+                floors.push(required);
+            }
         }
     }
     floors.into_iter().max()
@@ -5625,6 +5653,16 @@ mod tests {
             Some(45)
         );
         assert_eq!(
+            explicit_minimum_physical_components(
+                "Keep the physical BOM strictly between 40 and 44 parts; target exactly 40 meaningful parts"
+            ),
+            Some(40)
+        );
+        assert_eq!(
+            explicit_minimum_physical_components("Require a minimum of 42 real physical parts"),
+            Some(42)
+        );
+        assert_eq!(
             explicit_minimum_physical_components("Use a dense 24-bit design on a 45 mm board"),
             None
         );
@@ -5695,6 +5733,20 @@ blocks:
         .expect("qualified physical minimum must guard the full draft");
         assert_eq!(distinct_floor["required_minimum"], 48);
         assert_eq!(distinct_floor["candidate_physical_components"], 1);
+        let dummy = ToolCall {
+            call_id: "run17-dummy".into(),
+            fn_name: "edit_design".into(),
+            fn_arguments: json!({"yaml": "version: 1\nname: dummy"}),
+            thought_signatures: None,
+        };
+        let run17_floor = undersized_full_draft_result(
+            "Keep the physical BOM strictly between 40 and 44 parts; target exactly 40 meaningful parts",
+            &dummy,
+        )
+        .expect("Run17's exact target must reject an empty diagnostic anchor");
+        assert_eq!(run17_floor["required_minimum"], 40);
+        assert_eq!(run17_floor["candidate_physical_components"], 0);
+        assert_eq!(run17_floor["draft_written"], false);
         let mut edit_call = call.clone();
         edit_call.fn_name = "edit_design".into();
         assert_eq!(

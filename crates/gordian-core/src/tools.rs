@@ -2434,9 +2434,10 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             let candidate_validation = compile_report(&result.diagnostics);
             report["ok"] = json!(false);
             report["error"] = json!(
-                "full replacement regressed an invalid draft; the better repair anchor was preserved"
+                "full replacement regressed an invalid draft; the better repair anchor was preserved. Top-level diagnostic examples describe the rejected candidate; preserved-draft diagnostics are in current_validation"
             );
             report["code"] = json!("invalid_replacement_regressed_draft");
+            report["diagnostics_scope"] = json!("rejected_candidate");
             report["current_validation"] = current_validation;
             report["candidate_validation"] = candidate_validation;
             report["draft_written"] = json!(false);
@@ -2888,6 +2889,8 @@ blocks:
         assert_eq!(report["code"], "invalid_replacement_regressed_draft");
         assert_eq!(report["current_validation"]["errors"], 2);
         assert_eq!(report["candidate_validation"]["errors"], 3);
+        assert_eq!(report["diagnostics_scope"], "rejected_candidate");
+        assert!(report["error"].as_str().unwrap().contains("current_validation"));
         assert_eq!(report["draft_written"], false);
         assert_eq!(report["draft_changed"], false);
         assert_eq!(runtime.workspace().read_draft().unwrap().unwrap(), prior);
