@@ -255,7 +255,7 @@ fn footprint_assignments(input: &Value) -> anyhow::Result<Vec<FootprintAssignmen
         .collect()
 }
 
-fn patch_footprint(
+pub(crate) fn patch_footprint(
     draft: &str,
     reference: &str,
     footprint: &str,

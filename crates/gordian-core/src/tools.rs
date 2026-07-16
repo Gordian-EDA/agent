@@ -1771,6 +1771,123 @@ fn add_footprint_part_normalizations(report: &mut Value, normalizations: Vec<Val
     }
 }
 
+/// Conservative physical defaults for dense, implementation-oriented drafts.
+/// These are canonical package families with predictable symbol/pad mappings;
+/// less universal choices (ICs, polarized capacitors, switches, and terminal
+/// blocks) deliberately remain explicit author decisions.
+fn common_default_footprint(part: &str) -> Option<String> {
+    let fixed = match part {
+        "Device:R" => "Resistor_SMD:R_0603_1608Metric",
+        "Device:C" => "Capacitor_SMD:C_0603_1608Metric",
+        "Device:D" => "Diode_SMD:D_SOD-123",
+        "Device:LED" => "LED_SMD:LED_0603_1608Metric",
+        "Transistor_FET:Q_NMOS_DGS" => "Package_TO_SOT_SMD:SOT-23",
+        "Mechanical:MountingHole" => "MountingHole:MountingHole_3.2mm_M3",
+        _ => {
+            let (columns, pins) = if let Some(pins) = part
+                .strip_prefix("Connector_Generic:Conn_01x")
+                .or_else(|| {
+                    part.strip_prefix("Connector:Conn_01x")
+                        .and_then(|pins| pins.strip_suffix("_Pin"))
+                }) {
+                (1, pins)
+            } else if let Some(pins) = part
+                .strip_prefix("Connector_Generic:Conn_02x")
+                .and_then(|pins| pins.strip_suffix("_Odd_Even"))
+            {
+                (2, pins)
+            } else {
+                return None;
+            };
+            let rows = pins.parse::<usize>().ok()?;
+            if rows == 0 || rows > 40 {
+                return None;
+            }
+            return Some(format!(
+                "Connector_PinHeader_2.54mm:PinHeader_{columns}x{rows:02}_P2.54mm_Vertical"
+            ));
+        }
+    };
+    Some(fixed.to_owned())
+}
+
+/// Fill conventional footprints only when a draft is large enough that it is
+/// clearly intended for physical implementation. Sparse examples and early
+/// sketches retain their useful footprint-free behavior.
+fn normalize_dense_default_footprints(
+    yaml: &str,
+    ctx: &AgentRuntime,
+) -> Result<(String, Vec<Value>)> {
+    const DENSE_PHYSICAL_COMPONENTS: usize = 40;
+
+    let Some(surface) = circuit_lang::parse::parse_str(yaml).0 else {
+        return Ok((yaml.to_owned(), Vec::new()));
+    };
+    let physical_count = surface
+        .blocks
+        .values()
+        .flat_map(|block| block.components.values())
+        .filter(|component| {
+            !component.dnp
+                && !component.part.starts_with("power:")
+                && !component.part.starts_with("label:")
+        })
+        .count();
+    if physical_count < DENSE_PHYSICAL_COMPONENTS {
+        return Ok((yaml.to_owned(), Vec::new()));
+    }
+
+    let catalog = ctx.footprint_catalog()?;
+    let mut assignments = Vec::new();
+    for block in surface.blocks.values() {
+        for (reference, component) in &block.components {
+            if component.dnp
+                || component.footprint.is_some()
+                || component.part.starts_with("power:")
+                || component.part.starts_with("label:")
+            {
+                continue;
+            }
+            let Some(footprint) = common_default_footprint(&component.part) else {
+                continue;
+            };
+            let Ok(id) = FootprintId::parse(&footprint) else {
+                continue;
+            };
+            if catalog.footprint(&id).is_err() {
+                continue;
+            }
+            assignments.push((reference.clone(), component.part.clone(), footprint));
+        }
+    }
+
+    let mut normalized = yaml.to_owned();
+    let mut report = Vec::new();
+    for (reference, part, footprint) in assignments {
+        normalized = crate::tools_pcb::patch_footprint(&normalized, &reference, &footprint)
+            .map_err(anyhow::Error::msg)?
+            .0;
+        report.push(json!({
+            "reference": reference,
+            "part": part,
+            "assigned_footprint": footprint,
+        }));
+    }
+    Ok((normalized, report))
+}
+
+fn add_default_footprint_normalizations(report: &mut Value, normalizations: Vec<Value>) {
+    if !normalizations.is_empty() {
+        const MAX_EXAMPLES: usize = 8;
+        let count = normalizations.len();
+        report["assigned_default_footprints"] = json!({
+            "count": count,
+            "examples": normalizations.into_iter().take(MAX_EXAMPLES).collect::<Vec<_>>(),
+            "omitted": count.saturating_sub(MAX_EXAMPLES),
+        });
+    }
+}
+
 /// Repair a narrow but costly authoring slip: models sometimes turn a rail name
 /// into a logical power-symbol reference by appending an instance number (for
 /// example `V3V3` -> `V3V31`).  That is not a legal KiCad refdes, and one such
@@ -1932,10 +2049,13 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let (yaml, power_reference_normalizations) = normalize_invalid_power_references(&yaml);
     let (yaml, normalizations) = normalize_misplaced_footprint_parts(&yaml, ctx)?;
+    let (yaml, default_footprint_normalizations) =
+        normalize_dense_default_footprints(&yaml, ctx)?;
     let result = compile(&yaml, ctx.provider());
     let mut report = compile_authoring_report(&result, ctx)?;
     add_power_reference_normalizations(&mut report, power_reference_normalizations);
     add_footprint_part_normalizations(&mut report, normalizations);
+    add_default_footprint_normalizations(&mut report, default_footprint_normalizations);
     if reject_empty_draft_candidate(&mut report, &result, draft_exists, yaml.trim().is_empty()) {
         return Ok(report);
     }
@@ -2525,10 +2645,13 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let draft_exists = prior_draft.is_some();
         let (yaml, power_reference_normalizations) = normalize_invalid_power_references(yaml);
         let (yaml, normalizations) = normalize_misplaced_footprint_parts(&yaml, ctx)?;
+        let (yaml, default_footprint_normalizations) =
+            normalize_dense_default_footprints(&yaml, ctx)?;
         let result = compile(&yaml, ctx.provider());
         let mut report = compile_authoring_report(&result, ctx)?;
         add_power_reference_normalizations(&mut report, power_reference_normalizations);
         add_footprint_part_normalizations(&mut report, normalizations);
+        add_default_footprint_normalizations(&mut report, default_footprint_normalizations);
         if reject_empty_draft_candidate(&mut report, &result, draft_exists, yaml.trim().is_empty())
         {
             report["mode"] = json!(if draft_exists {
@@ -2831,11 +2954,74 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        compile_report, create_design, edit_design, invalid_compile_quality_regressed,
+        common_default_footprint, compile_report, create_design, edit_design,
+        invalid_compile_quality_regressed, normalize_dense_default_footprints,
         normalize_invalid_power_references, normalize_misplaced_footprint_parts,
         repair_components, repair_components_tool, require_search_query,
         symbol_for_misplaced_footprint, tool_defs,
     };
+
+    #[test]
+    fn common_defaults_cover_only_canonical_package_families() {
+        assert_eq!(
+            common_default_footprint("Device:R").as_deref(),
+            Some("Resistor_SMD:R_0603_1608Metric")
+        );
+        assert_eq!(
+            common_default_footprint("Connector_Generic:Conn_02x05_Odd_Even").as_deref(),
+            Some("Connector_PinHeader_2.54mm:PinHeader_2x05_P2.54mm_Vertical")
+        );
+        assert_eq!(
+            common_default_footprint("Connector:Conn_01x03_Pin").as_deref(),
+            Some("Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical")
+        );
+        assert_eq!(common_default_footprint("Device:C_Polarized"), None);
+        assert_eq!(common_default_footprint("Amplifier_Operational:LM358"), None);
+    }
+
+    #[test]
+    fn dense_defaulting_fills_missing_footprints_but_preserves_explicit_choices() {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../kicad-footprint/tests/fixtures/footprints/R_0603_1608Metric.kicad_mod");
+        let footprints = tempfile::tempdir().unwrap();
+        let pretty = footprints.path().join("Resistor_SMD.pretty");
+        std::fs::create_dir_all(&pretty).unwrap();
+        std::fs::copy(source, pretty.join("R_0603_1608Metric.kicad_mod")).unwrap();
+        let runtime =
+            AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf()).unwrap();
+
+        let components = (1..=40)
+            .map(|n| {
+                if n == 1 {
+                    format!(
+                        "      R1: {{part: Device:R, footprint: Custom:R1, between: [N1, GND]}}"
+                    )
+                } else {
+                    format!("      R{n}: {{part: Device:R, between: [N{n}, GND]}}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let yaml = format!("version: 1\nblocks:\n  main:\n    components:\n{components}\n");
+
+        let (normalized, changes) =
+            normalize_dense_default_footprints(&yaml, &runtime).unwrap();
+
+        assert_eq!(changes.len(), 39);
+        assert!(normalized.contains("R1: {part: Device:R, footprint: Custom:R1"));
+        assert!(normalized.contains(
+            "R40: {part: Device:R, between: [N40, GND], footprint: \"Resistor_SMD:R_0603_1608Metric\"}"
+        ));
+
+        let sparse = yaml.replace(
+            "      R40: {part: Device:R, between: [N40, GND]}\n",
+            "",
+        );
+        let (sparse, sparse_changes) =
+            normalize_dense_default_footprints(&sparse, &runtime).unwrap();
+        assert!(sparse_changes.is_empty());
+        assert!(!sparse.contains("R_0603_1608Metric\"}"));
+    }
 
     #[test]
     fn invalid_power_symbol_references_are_normalized_without_touching_physical_refs() {
