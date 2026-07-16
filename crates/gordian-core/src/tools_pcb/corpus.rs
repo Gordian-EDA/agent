@@ -519,17 +519,27 @@ struct RawGroupHint {
     #[serde(default)]
     grid: bool,
     #[serde(default)]
+    rotation: Option<f64>,
+    #[serde(default)]
     surround: Option<String>,
 }
 
 impl RawGroupHint {
     fn into_group(self) -> std::result::Result<GroupHint, String> {
+        if let Some(rotation) = self.rotation
+            && ![0.0, 90.0, 180.0, 270.0].contains(&rotation)
+        {
+            return Err(format!(
+                "invalid placement rotation `{rotation}`; expected 0, 90, 180, or 270"
+            ));
+        }
         Ok(GroupHint {
             name: self.name,
             members: self.members,
             region: self.region.map(RawRect::into_rect),
             edge: self.edge.as_deref().map(parse_edge).transpose()?,
             grid: self.grid,
+            rotation: self.rotation,
             surround: self.surround,
         })
     }

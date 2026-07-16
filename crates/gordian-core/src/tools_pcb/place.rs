@@ -13,7 +13,7 @@ use kicad_ipc::{
 use pcb_model::place::PartPad;
 use pcb_model::{LayerRef, ViaSpan};
 use pcb_place::placement::{
-    EdgeDatum, LockedAt, Part, PlaceProblem, Placement, PlacementHints, Rect,
+    EdgeDatum, LockedAt, Part, PlaceProblem, PlaceResult, Placement, PlacementHints, Rect,
 };
 
 use crate::AgentRuntime;
@@ -480,6 +480,40 @@ fn placement_json(p: &Placement) -> Value {
     })
 }
 
+fn placement_overlap_pairs(problem: &PlaceProblem, result: &PlaceResult) -> Vec<Value> {
+    let margin = pcb_model::place::courtyard_margin(problem.clearance) / 2.0;
+    let positions: BTreeMap<_, _> = result
+        .placements
+        .iter()
+        .map(|placement| (placement.reference.as_str(), placement))
+        .collect();
+    let mut overlaps = Vec::new();
+    for (i, a) in problem.parts.iter().enumerate() {
+        let Some(pa) = positions.get(a.reference.as_str()) else {
+            continue;
+        };
+        let ah = pcb_model::place::rotated_courtyard_half(a, pa.rotation);
+        let ar = Rect::from_center_half(pa.at, ah).inflate(margin);
+        for b in problem.parts.iter().skip(i + 1) {
+            let Some(pb) = positions.get(b.reference.as_str()) else {
+                continue;
+            };
+            let bh = pcb_model::place::rotated_courtyard_half(b, pb.rotation);
+            let br = Rect::from_center_half(pb.at, bh).inflate(margin);
+            let (x, y) = ar.axis_penetration(&br);
+            if x > geom::EPS && y > geom::EPS {
+                overlaps.push(json!({
+                    "a": a.reference,
+                    "b": b.reference,
+                    "overlap_x_mm": (x * 100.0).round() / 100.0,
+                    "overlap_y_mm": (y * 100.0).round() / 100.0,
+                }));
+            }
+        }
+    }
+    overlaps
+}
+
 // ── place_board ──────────────────────────────────────────────────────────────
 
 /// Whether a part is a board-edge part (connector / header / terminal block /
@@ -546,7 +580,18 @@ fn placement_hints_from_input(mut input: Value) -> std::result::Result<Placement
             }
         }
     }
-    serde_json::from_value(input).map_err(|e| format!("invalid placement hints: {e}"))
+    let hints: PlacementHints =
+        serde_json::from_value(input).map_err(|e| format!("invalid placement hints: {e}"))?;
+    if let Some(rotation) = hints.groups.iter().find_map(|group| {
+        group
+            .rotation
+            .filter(|rotation| ![0.0, 90.0, 180.0, 270.0].contains(rotation))
+    }) {
+        return Err(format!(
+            "invalid placement hints: grid rotation {rotation} must be 0, 90, 180, or 270"
+        ));
+    }
+    Ok(hints)
 }
 
 pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -713,6 +758,7 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         sw = sw.max(max_w + 2.0);
         sh = sh.max(max_h + 2.0);
         extra = json!({
+            "overlap_pairs": placement_overlap_pairs(&problem, &result),
             "parts_courtyard_area_mm2": (total_area * 10.0).round() / 10.0,
             "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
             "suggested_min_bounds_mm": { "w": sw.ceil(), "h": sh.ceil() },
@@ -811,6 +857,7 @@ mod tests {
                 "region": { "min_x": 2.0, "min_y": 3.0, "max_x": 18.0, "max_y": 12.0 },
                 "edge": "w",
                 "grid": true,
+                "rotation": 180,
                 "surround": "U1"
             }],
             "edge_seek": ["J1"],
@@ -826,12 +873,19 @@ mod tests {
         assert_eq!(group.region, Some(Rect::new(2.0, 3.0, 18.0, 12.0)));
         assert_eq!(group.edge, Some(pcb_place::placement::Edge::W));
         assert!(group.grid);
+        assert_eq!(group.rotation, Some(180.0));
         assert_eq!(group.surround.as_deref(), Some("U1"));
     }
 
     #[test]
     fn placement_tool_rejects_unknown_or_mixed_case_hints() {
         assert!(placement_hints_from_input(json!({ "scatter": ["R1"] })).is_err());
+        assert!(
+            placement_hints_from_input(json!({
+                "groups": [{"name": "bad", "members": ["R1"], "grid": true, "rotation": 45}]
+            }))
+            .is_err()
+        );
         assert!(
             placement_hints_from_input(json!({
                 "edge_seek": ["J1"],

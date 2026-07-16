@@ -60,14 +60,15 @@ pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
         // cannot pull an off-board one back).
         let (px, py) = (rw / cols as f64, rh / rows as f64);
         let b = &problem.bounds;
+        let rotation = g.rotation.unwrap_or(0.0);
         for (k, &i) in idxs.iter().enumerate() {
             let (c, r) = (k % cols, k / cols);
             let mut at = Point2 {
                 x: region.min_x + (c as f64 + 0.5) * px,
                 y: region.min_y + (r as f64 + 0.5) * py,
             };
-            at = b.clamp_center_for_half(at, rotated_courtyard_half(&problem.parts[i], 0.0));
-            problem.parts[i].locked = Some(LockedAt { at, rotation: 0.0 });
+            at = b.clamp_center_for_half(at, rotated_courtyard_half(&problem.parts[i], rotation));
+            problem.parts[i].locked = Some(LockedAt { at, rotation });
         }
     }
 }

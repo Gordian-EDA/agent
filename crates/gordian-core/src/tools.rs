@@ -501,6 +501,7 @@ pub fn tool_defs() -> Vec<Tool> {
                                     },
                                     "edge": { "type": "string", "enum": ["n", "s", "e", "w"] },
                                     "grid": { "type": "boolean" },
+                                    "rotation": { "type": "number", "enum": [0, 90, 180, 270] },
                                     "surround": { "type": "string", "description": "Anchor reference to surround." }
                                 },
                                 "required": ["name", "members"],

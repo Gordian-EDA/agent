@@ -1176,6 +1176,12 @@ fn defs_lists_all_tools() {
             assert!(props.contains_key("at"));
             assert!(props.contains_key("kinds"));
         }
+        if def.name.to_string() == "place_board" {
+            assert_eq!(
+                schema["properties"]["groups"]["items"]["properties"]["rotation"]["enum"],
+                serde_json::json!([0, 90, 180, 270])
+            );
+        }
     }
 }
 

@@ -2522,6 +2522,7 @@ fn group_with_region_lands_members_inside() {
             region: Some(region),
             edge: None,
             grid: false,
+            rotation: None,
             surround: None,
         }],
         ..Default::default()
@@ -2783,6 +2784,7 @@ fn grid_hint_spreads_members_within_region() {
             region: Some(region),
             edge: None,
             grid: true,
+            rotation: None,
             surround: None,
         }],
         ..Default::default()
@@ -2835,6 +2837,7 @@ fn grid_hint_clamps_oversize_array_into_bounds_at_board_corner() {
             region: Some(region),
             edge: None,
             grid: true,
+            rotation: Some(90.0),
             surround: None,
         }],
         ..Default::default()
@@ -2845,6 +2848,7 @@ fn grid_hint_clamps_oversize_array_into_bounds_at_board_corner() {
     let b = &hinted.bounds;
     for p in &hinted.parts {
         let l = p.locked.as_ref().expect("grid member must be locked");
+        assert_eq!(l.rotation, 90.0, "grid rotation must lock every member");
         let (hw, hh) = rotated_courtyard_half(p, l.rotation);
         assert!(
             l.at.x - hw >= b.min_x - 1e-9 && l.at.x + hw <= b.max_x + 1e-9,
@@ -2910,6 +2914,7 @@ fn edge_affinity_part_touches_edge_band() {
             region: None,
             edge: Some(Edge::W),
             grid: false,
+            rotation: None,
             surround: None,
         }],
         ..Default::default()
@@ -3954,6 +3959,7 @@ fn oracle_placement_is_byte_identical_to_pinned_snapshot() {
             region: None,
             edge: Some(Edge::W),
             grid: false,
+            rotation: None,
             surround: None,
         }],
         edge_seek: vec!["J1".into()],

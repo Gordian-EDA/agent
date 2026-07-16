@@ -198,6 +198,9 @@ pub struct GroupHint {
     /// general annealer's scatter. Requires `region`; ignored without it.
     #[serde(default)]
     pub grid: bool,
+    /// Optional quadrant rotation applied to every locked grid member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f64>,
     /// Ring the members tightly around the perimeter of this target part (by
     /// reference) — the decoupling-cap pattern: caps hug their IC instead of
     /// scattering. The target must be LOCKED (the agent fixes the IC first) so its
@@ -1424,6 +1427,7 @@ mod tests {
                 region: Some(Rect::new(0.5, 0.5, 2.0, 2.0)),
                 edge: Some(Edge::N),
                 grid: false,
+                rotation: None,
                 surround: None,
             }],
             ..PlacementHints::default()
