@@ -618,20 +618,29 @@ pub fn place_board(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResul
     FanoutPlacer.place(problem, hints)
 }
 
-/// Move each `corner_seek` part to its nearest board CORNER that leaves the
-/// placement legal (greedy, nearest-first; a corner already taken by another
-/// such part or overlapping a component is skipped). A no-op when there are no
-/// corner-seek parts. Safe on any placement: corner-seek parts (mounting holes)
-/// have no nets, so this cannot change connectivity or routing.
-fn seat_corner_seek_parts(problem: &PlaceProblem, hints: &PlacementHints, best: &mut PlaceResult) {
+/// Move up to four `corner_seek` parts to a maximum-cardinality set of distinct,
+/// legal board corners. The assignment is solved as a set instead of greedily:
+/// one hole's old edge-seek position must not make another hole falsely reject a
+/// corner that becomes free once both holes move. Among equally complete legal
+/// assignments, prefer the least total movement and then corner order.
+///
+/// Safe on any placement: corner-seek parts (mounting holes) have no nets, so this
+/// cannot change connectivity or routing.
+pub(crate) fn seat_corner_seek_parts(
+    problem: &PlaceProblem,
+    hints: &PlacementHints,
+    best: &mut PlaceResult,
+) {
     if !best.legal {
         return;
     }
-    let corner_idx: Vec<usize> = hints
+    let mut corner_idx: Vec<usize> = hints
         .corner_seek
         .iter()
         .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
         .collect();
+    corner_idx.sort_by(|&a, &b| problem.parts[a].reference.cmp(&problem.parts[b].reference));
+    corner_idx.dedup();
     if corner_idx.is_empty() {
         return;
     }
@@ -650,48 +659,151 @@ fn seat_corner_seek_parts(problem: &PlaceProblem, hints: &PlacementHints, best: 
         .map(|(p, &r)| rotated_copper_bbox(p, r))
         .collect();
     let mut pos: Vec<Point2> = best.placements.iter().map(|p| p.at).collect();
-    let b = &problem.bounds;
-    let corners = [
-        (b.min_x, b.min_y),
-        (b.max_x, b.min_y),
-        (b.min_x, b.max_y),
-        (b.max_x, b.max_y),
-    ];
-    let mut used = [false; 4];
-    for &i in &corner_idx {
-        let h = half[i];
-        // Inset each corner by this part's half so it sits fully on-board.
-        let inset = |c: (f64, f64)| Point2 {
-            x: if c.0 == b.min_x {
-                b.min_x + h.0
-            } else {
-                b.max_x - h.0
-            },
-            y: if c.1 == b.min_y {
-                b.min_y + h.1
-            } else {
-                b.max_y - h.1
-            },
-        };
-        let mut order: Vec<usize> = (0..4).collect();
-        let d = |c: (f64, f64)| (pos[i].x - c.0).powi(2) + (pos[i].y - c.1).powi(2);
-        order.sort_by(|&a, &c| d(corners[a]).partial_cmp(&d(corners[c])).unwrap());
-        let saved = pos[i];
-        for &ci in &order {
-            if used[ci] {
-                continue;
-            }
-            pos[i] = inset(corners[ci]);
-            if is_legal(problem, &half, &copper_bbox, margin, &pos) {
-                used[ci] = true;
-                break;
-            }
-            pos[i] = saved;
-        }
+    // The exhaustive assignment is tiny (at most 5^4 including "leave in place").
+    // More than four corner seekers cannot all occupy distinct corners, so keep the
+    // first four stable refdes eligible and leave the remainder at their legal seats.
+    corner_idx.truncate(4);
+    let original = pos.clone();
+    let targets: Vec<[Point2; 4]> = corner_idx
+        .iter()
+        .map(|&i| {
+            let envelope =
+                part_placement_bounds_envelope(&problem.parts[i], half[i], copper_bbox[i]);
+            let b = &problem.bounds;
+            let left = b.min_x - envelope.min_x;
+            let right = b.max_x - envelope.max_x;
+            let top = b.min_y - envelope.min_y;
+            let bottom = b.max_y - envelope.max_y;
+            [
+                Point2 { x: left, y: top },
+                Point2 { x: right, y: top },
+                Point2 { x: left, y: bottom },
+                Point2 {
+                    x: right,
+                    y: bottom,
+                },
+            ]
+        })
+        .collect();
+    let mut assignment = vec![None; corner_idx.len()];
+    let mut winner: Option<CornerAssignment> = None;
+    search_corner_assignments(
+        problem,
+        &half,
+        &copper_bbox,
+        margin,
+        &corner_idx,
+        &targets,
+        &original,
+        &mut pos,
+        &mut assignment,
+        0,
+        0,
+        &mut winner,
+    );
+    if let Some(winner) = winner {
+        pos = winner.positions;
     }
     for (p, np) in best.placements.iter_mut().zip(&pos) {
         p.at = *np;
     }
+}
+
+struct CornerAssignment {
+    seated: usize,
+    movement: f64,
+    choices: Vec<Option<usize>>,
+    positions: Vec<Point2>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_corner_assignments(
+    problem: &PlaceProblem,
+    half: &[(f64, f64)],
+    copper_bbox: &[Rect],
+    margin: f64,
+    corner_idx: &[usize],
+    targets: &[[Point2; 4]],
+    original: &[Point2],
+    pos: &mut [Point2],
+    assignment: &mut [Option<usize>],
+    depth: usize,
+    used: u8,
+    winner: &mut Option<CornerAssignment>,
+) {
+    if depth == corner_idx.len() {
+        if !is_legal(problem, half, copper_bbox, margin, pos) {
+            return;
+        }
+        let seated = assignment.iter().flatten().count();
+        let movement: f64 = assignment
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, choice)| {
+                choice.map(|_| {
+                    original[corner_idx[slot]]
+                        .dist(pos[corner_idx[slot]])
+                        .powi(2)
+                })
+            })
+            .sum();
+        let better = winner.as_ref().is_none_or(|best| {
+            seated > best.seated
+                || (seated == best.seated
+                    && (movement < best.movement - 1e-9
+                        || ((movement - best.movement).abs() <= 1e-9
+                            && &*assignment < best.choices.as_slice())))
+        });
+        if better {
+            *winner = Some(CornerAssignment {
+                seated,
+                movement,
+                choices: assignment.to_vec(),
+                positions: pos.to_vec(),
+            });
+        }
+        return;
+    }
+
+    let part = corner_idx[depth];
+    for corner in 0..4 {
+        let bit = 1 << corner;
+        if used & bit != 0 {
+            continue;
+        }
+        assignment[depth] = Some(corner);
+        pos[part] = targets[depth][corner];
+        search_corner_assignments(
+            problem,
+            half,
+            copper_bbox,
+            margin,
+            corner_idx,
+            targets,
+            original,
+            pos,
+            assignment,
+            depth + 1,
+            used | bit,
+            winner,
+        );
+    }
+    assignment[depth] = None;
+    pos[part] = original[part];
+    search_corner_assignments(
+        problem,
+        half,
+        copper_bbox,
+        margin,
+        corner_idx,
+        targets,
+        original,
+        pos,
+        assignment,
+        depth + 1,
+        used,
+        winner,
+    );
 }
 
 /// Place `problem`'s parts under `hints`, deterministically.

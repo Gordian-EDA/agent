@@ -22,8 +22,8 @@ use super::route::{
     ratline_crossing_position_candidates, ratline_crossing_position_candidates_from_edges,
     ratline_obstruction_position_candidates, ratline_obstruction_position_candidates_from_edges,
     ratline_tree_edge_list, route_rank_key, route_rank_key_better, route_rank_key_clean_via_free,
-    should_try_full_grid_ranker_fallback, swap_pair_order, to_route_problem,
-    unique_position_candidates,
+    seat_corner_seek_parts, should_try_full_grid_ranker_fallback, swap_pair_order,
+    to_route_problem, unique_position_candidates,
 };
 use crate::connectivity;
 use crate::problem::place::{Placer, RouteRanker, compute_hpwl, compute_hpwl_with_rotations};
@@ -143,6 +143,39 @@ fn sorted_points(points: Vec<Point2>) -> Vec<(i64, i64)> {
     out
 }
 
+fn mechanical(reference: &str, size: f64) -> Part {
+    Part {
+        reference: reference.to_owned(),
+        courtyard_w: size,
+        courtyard_h: size,
+        pads: Vec::new(),
+        edge_datum: None,
+        locked: None,
+    }
+}
+
+fn placed_result(problem: &PlaceProblem, positions: &[Point2]) -> super::model::PlaceResult {
+    super::model::PlaceResult {
+        placements: problem
+            .parts
+            .iter()
+            .zip(positions)
+            .map(|(part, &at)| super::model::Placement {
+                reference: part.reference.clone(),
+                at,
+                rotation: 0.0,
+            })
+            .collect(),
+        legal: true,
+        report: super::model::PlaceReport {
+            overlaps_resolved: 0,
+            out_of_bounds_clamps: 0,
+            hpwl: 0.0,
+            layout_cost: 0.0,
+        },
+    }
+}
+
 // ── empty hints: legal + deterministic ──────────────────────────────────
 
 #[test]
@@ -222,6 +255,99 @@ fn placement_keepout_does_not_override_a_locked_footprint() {
     assert!(
         !result.legal,
         "a conflicting user lock must be reported, not silently moved"
+    );
+}
+
+#[test]
+fn corner_seek_assigns_two_holes_together_instead_of_greedy_dead_end() {
+    let problem = PlaceProblem {
+        bounds: board(30.0, 20.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![
+            mechanical("H1", 2.0),
+            mechanical("H2", 6.0),
+            mechanical("B1", 2.0),
+            mechanical("B2", 2.0),
+            mechanical("B3", 2.0),
+        ],
+        outline: None,
+    };
+    // H1 prefers top-left. H2 fits only top-left: the three blockers overlap
+    // H2's other large corner seats but leave those same corners usable by H1.
+    // A greedy H1-first pass strands H2; a joint assignment seats both.
+    let mut result = placed_result(
+        &problem,
+        &[
+            Point2 { x: 8.0, y: 4.0 },
+            Point2 { x: 15.0, y: 10.0 },
+            Point2 { x: 23.0, y: 3.0 },
+            Point2 { x: 7.0, y: 17.0 },
+            Point2 { x: 23.0, y: 17.0 },
+        ],
+    );
+    let hints = PlacementHints {
+        corner_seek: vec!["H1".into(), "H2".into()],
+        ..PlacementHints::default()
+    };
+
+    seat_corner_seek_parts(&problem, &hints, &mut result);
+
+    let h1 = result.placements[0].at;
+    let h2 = result.placements[1].at;
+    assert_eq!(h2, Point2 { x: 3.0, y: 3.0 });
+    assert_ne!(h1, Point2 { x: 8.0, y: 4.0 });
+    assert!(
+        [
+            Point2 { x: 1.0, y: 1.0 },
+            Point2 { x: 29.0, y: 1.0 },
+            Point2 { x: 1.0, y: 19.0 },
+            Point2 { x: 29.0, y: 19.0 },
+        ]
+        .contains(&h1)
+    );
+    assert!(result.legal);
+}
+
+#[test]
+fn corner_seek_places_four_holes_at_four_distinct_true_corners() {
+    let problem = PlaceProblem {
+        bounds: board(75.0, 55.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: (1..=4)
+            .map(|number| mechanical(&format!("H{number}"), 7.4))
+            .collect(),
+        outline: None,
+    };
+    let mut result = placed_result(
+        &problem,
+        &[
+            Point2 { x: 3.7, y: 11.0 },
+            Point2 { x: 31.5, y: 3.7 },
+            Point2 { x: 45.0, y: 30.0 },
+            Point2 { x: 60.0, y: 40.0 },
+        ],
+    );
+    let hints = PlacementHints {
+        corner_seek: vec!["H4".into(), "H2".into(), "H1".into(), "H3".into()],
+        ..PlacementHints::default()
+    };
+
+    seat_corner_seek_parts(&problem, &hints, &mut result);
+
+    assert_eq!(
+        sorted_points(result.placements.iter().map(|p| p.at).collect()),
+        sorted_points(vec![
+            Point2 { x: 3.7, y: 3.7 },
+            Point2 { x: 71.3, y: 3.7 },
+            Point2 { x: 3.7, y: 51.3 },
+            Point2 { x: 71.3, y: 51.3 },
+        ])
     );
 }
 
