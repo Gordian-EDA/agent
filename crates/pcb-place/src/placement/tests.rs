@@ -351,6 +351,124 @@ fn corner_seek_places_four_holes_at_four_distinct_true_corners() {
     );
 }
 
+#[test]
+fn corner_seek_spreads_one_to_four_holes_stably() {
+    let corners = [
+        Point2 { x: 1.0, y: 1.0 },
+        Point2 { x: 29.0, y: 1.0 },
+        Point2 { x: 1.0, y: 19.0 },
+        Point2 { x: 29.0, y: 19.0 },
+    ];
+    for count in 1..=4 {
+        let problem = PlaceProblem {
+            bounds: board(30.0, 20.0),
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: (1..=count)
+                .map(|number| mechanical(&format!("H{number}"), 2.0))
+                .collect(),
+            outline: None,
+        };
+        let starts = (0..count)
+            .map(|number| Point2 {
+                x: 5.0 + number as f64 * 3.0,
+                y: 15.0,
+            })
+            .collect::<Vec<_>>();
+        let ascending = (1..=count)
+            .map(|number| format!("H{number}"))
+            .collect::<Vec<_>>();
+        let mut descending = ascending.clone();
+        descending.reverse();
+        let mut forward = placed_result(&problem, &starts);
+        let mut reverse = forward.clone();
+        seat_corner_seek_parts(
+            &problem,
+            &PlacementHints {
+                corner_seek: ascending,
+                ..PlacementHints::default()
+            },
+            &mut forward,
+        );
+        seat_corner_seek_parts(
+            &problem,
+            &PlacementHints {
+                corner_seek: descending,
+                ..PlacementHints::default()
+            },
+            &mut reverse,
+        );
+
+        let positions = forward
+            .placements
+            .iter()
+            .map(|placement| placement.at)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            positions,
+            reverse.placements.iter().map(|p| p.at).collect::<Vec<_>>()
+        );
+        assert!(positions.iter().all(|position| corners.contains(position)));
+        assert!(
+            sorted_points(positions.clone())
+                .windows(2)
+                .all(|pair| pair[0] != pair[1])
+        );
+        if count == 2 {
+            let indices = positions
+                .iter()
+                .map(|position| {
+                    corners
+                        .iter()
+                        .position(|corner| corner == position)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(indices[0] ^ indices[1], 3, "two holes must use a diagonal");
+        }
+    }
+}
+
+#[test]
+fn corner_seek_preserves_authored_locks_and_regions() {
+    let authored = Point2 { x: 8.0, y: 7.0 };
+    let mut locked = mechanical("H1", 2.0);
+    locked.locked = Some(LockedAt {
+        at: authored,
+        rotation: 0.0,
+    });
+    let problem = PlaceProblem {
+        bounds: board(30.0, 20.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![locked, mechanical("H2", 2.0)],
+        outline: None,
+    };
+    let mut result = placed_result(&problem, &[authored, Point2 { x: 15.0, y: 10.0 }]);
+    let hints = PlacementHints {
+        groups: vec![GroupHint {
+            name: "authored hole region".into(),
+            members: vec!["H2".into()],
+            region: Some(Rect::new(12.0, 8.0, 18.0, 12.0)),
+            edge: None,
+            grid: false,
+            rotation: None,
+            surround: None,
+        }],
+        corner_seek: vec!["H1".into(), "H2".into()],
+        ..PlacementHints::default()
+    };
+
+    seat_corner_seek_parts(&problem, &hints, &mut result);
+
+    assert_eq!(result.placements[0].at, authored);
+    assert_eq!(result.placements[1].at, Point2 { x: 15.0, y: 10.0 });
+}
+
 // ── series co-placement detection ───────────────────────────────────────
 
 /// An anchor with `npads` pads, pad `Pi` on net `Si` (so each is a 1-pin net

@@ -626,7 +626,8 @@ pub fn place_board(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResul
 /// legal board corners. The assignment is solved as a set instead of greedily:
 /// one hole's old edge-seek position must not make another hole falsely reject a
 /// corner that becomes free once both holes move. Among equally complete legal
-/// assignments, prefer the least total movement and then corner order.
+/// assignments, maximize pairwise corner separation (two holes choose a
+/// diagonal), then prefer the least total movement and stable corner order.
 ///
 /// Safe on any placement: corner-seek parts (mounting holes) have no nets, so this
 /// cannot change connectivity or routing.
@@ -638,10 +639,20 @@ pub(crate) fn seat_corner_seek_parts(
     if !best.legal {
         return;
     }
+    let regioned = hints
+        .groups
+        .iter()
+        .filter(|group| group.region.is_some())
+        .flat_map(|group| group.members.iter().map(String::as_str))
+        .collect::<std::collections::BTreeSet<_>>();
     let mut corner_idx: Vec<usize> = hints
         .corner_seek
         .iter()
         .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
+        .filter(|&i| {
+            problem.parts[i].locked.is_none()
+                && !regioned.contains(problem.parts[i].reference.as_str())
+        })
         .collect();
     corner_idx.sort_by(|&a, &b| problem.parts[a].reference.cmp(&problem.parts[b].reference));
     corner_idx.dedup();
@@ -715,6 +726,7 @@ pub(crate) fn seat_corner_seek_parts(
 
 struct CornerAssignment {
     seated: usize,
+    separation: u32,
     movement: f64,
     choices: Vec<Option<usize>>,
     positions: Vec<Point2>,
@@ -740,6 +752,13 @@ fn search_corner_assignments(
             return;
         }
         let seated = assignment.iter().flatten().count();
+        let choices = assignment.iter().flatten().copied().collect::<Vec<_>>();
+        let separation = choices
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &a)| choices.iter().skip(i + 1).map(move |&b| (a, b)))
+            .map(|(a, b)| if a ^ b == 3 { 2 } else { 1 })
+            .sum();
         let movement: f64 = assignment
             .iter()
             .enumerate()
@@ -754,13 +773,16 @@ fn search_corner_assignments(
         let better = winner.as_ref().is_none_or(|best| {
             seated > best.seated
                 || (seated == best.seated
-                    && (movement < best.movement - 1e-9
-                        || ((movement - best.movement).abs() <= 1e-9
-                            && &*assignment < best.choices.as_slice())))
+                    && (separation > best.separation
+                        || (separation == best.separation
+                            && (movement < best.movement - 1e-9
+                                || ((movement - best.movement).abs() <= 1e-9
+                                    && &*assignment < best.choices.as_slice())))))
         });
         if better {
             *winner = Some(CornerAssignment {
                 seated,
+                separation,
                 movement,
                 choices: assignment.to_vec(),
                 positions: pos.to_vec(),
