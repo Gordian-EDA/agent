@@ -95,10 +95,7 @@ pub(crate) fn resolve_pins(
     geom.pins
         .iter()
         .map(|pg| {
-            let target = comp
-                .pins
-                .get(&pg.number)
-                .or_else(|| comp.pins.get(&pg.name));
+            let target = resolve_pin_target(comp, pg);
             let net = match target {
                 Some(PinTarget::Net(n)) => Some(n.clone()),
                 _ => None,
@@ -106,6 +103,126 @@ pub(crate) fn resolve_pins(
             (pg.number.clone(), pg.name.clone(), net)
         })
         .collect()
+}
+
+fn resolve_pin_target<'a>(
+    comp: &'a Component,
+    pin: &kicad_symbol::geometry::PinGeom,
+) -> Option<&'a PinTarget> {
+    comp.pins
+        .get(&pin.number)
+        .or_else(|| comp.pins.get(&pin.name))
+        .or_else(|| {
+            comp.units.iter().find_map(|(unit, pins)| {
+                (authored_unit_number(unit) == Some(pin.unit))
+                    .then(|| pins.get(&pin.number).or_else(|| pins.get(&pin.name)))
+                    .flatten()
+            })
+        })
+}
+
+/// Circuit YAML names symbol units `A`, `B`, ... while KiCad geometry numbers
+/// them 1, 2, ... . Numeric unit keys are accepted too for generated designs.
+fn authored_unit_number(name: &str) -> Option<u8> {
+    let name = name.trim();
+    if let Ok(unit) = name.parse::<u8>() {
+        return (unit > 0).then_some(unit);
+    }
+    let mut chars = name.chars();
+    let unit = chars.next()?.to_ascii_uppercase();
+    if chars.next().is_none() && unit.is_ascii_uppercase() {
+        Some(unit as u8 - b'A' + 1)
+    } else {
+        None
+    }
+}
+
+fn used_symbol_units(comp: &Component, geom: &SymbolGeometry) -> Vec<u8> {
+    let mut units: Vec<u8> = geom
+        .pins
+        .iter()
+        .filter(|pin| resolve_pin_target(comp, pin).is_some())
+        .map(|pin| pin.unit.max(1))
+        .collect();
+    units.sort_unstable();
+    units.dedup();
+    if units.is_empty() {
+        units.push(1);
+    }
+    units
+}
+
+#[cfg(test)]
+mod resolve_pin_tests {
+    use super::*;
+    use kicad_symbol::geometry::PinGeom;
+
+    fn pin(number: &str, name: &str, unit: u8) -> PinGeom {
+        PinGeom {
+            number: number.to_owned(),
+            name: name.to_owned(),
+            at: [0.0, 0.0].into(),
+            angle: 0.0,
+            length: 2.54,
+            unit,
+        }
+    }
+
+    #[test]
+    fn resolves_authored_multi_unit_pins_on_their_kicad_units() {
+        let mut comp = Component {
+            part: "Amplifier_Operational:LM324".to_owned(),
+            ..Component::default()
+        };
+        comp.pins
+            .insert("4".to_owned(), PinTarget::Net("VCC".to_owned()));
+        comp.units
+            .entry("A".to_owned())
+            .or_default()
+            .insert("OUT".to_owned(), PinTarget::Net("OUT_A".to_owned()));
+        comp.units
+            .entry("B".to_owned())
+            .or_default()
+            .insert("OUT".to_owned(), PinTarget::Net("OUT_B".to_owned()));
+        comp.units
+            .entry("B".to_owned())
+            .or_default()
+            .insert("7".to_owned(), PinTarget::NoConnect);
+        let geom = SymbolGeometry {
+            lib_id: comp.part.clone(),
+            pins: vec![
+                pin("1", "OUT", 1),
+                pin("5", "OUT", 2),
+                pin("7", "-", 2),
+                pin("4", "V+", 5),
+            ],
+            raw_definition: String::new(),
+        };
+
+        assert_eq!(
+            resolve_pins(&comp, &geom),
+            vec![
+                ("1".to_owned(), "OUT".to_owned(), Some("OUT_A".to_owned())),
+                ("5".to_owned(), "OUT".to_owned(), Some("OUT_B".to_owned())),
+                ("7".to_owned(), "-".to_owned(), None),
+                ("4".to_owned(), "V+".to_owned(), Some("VCC".to_owned())),
+            ]
+        );
+        assert_eq!(
+            used_symbol_units(&comp, &geom),
+            [1, 2, 5],
+            "an explicitly no-connected unit must still be placed"
+        );
+    }
+
+    #[test]
+    fn authored_unit_letters_and_numbers_map_to_kicad_units() {
+        assert_eq!(authored_unit_number("A"), Some(1));
+        assert_eq!(authored_unit_number("d"), Some(4));
+        assert_eq!(authored_unit_number("5"), Some(5));
+        assert_eq!(authored_unit_number("0"), None);
+        assert_eq!(authored_unit_number("Unit A"), None);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -543,17 +660,7 @@ pub(crate) fn gather(env: &KicadEnv, design: &Design) -> io::Result<Vec<Item>> {
             // to the old behaviour. Without this, only unit 1's pins ever reach the
             // netlist (the power pins and unit B silently vanish).
             let pin_unit: Vec<u8> = geom.pins.iter().map(|p| p.unit.max(1)).collect();
-            let mut units: Vec<u8> = pin_unit
-                .iter()
-                .zip(pins.iter())
-                .filter(|pair| pair.1.2.is_some())
-                .map(|pair| *pair.0)
-                .collect();
-            units.sort_unstable();
-            units.dedup();
-            if units.is_empty() {
-                units.push(1);
-            }
+            let units = used_symbol_units(comp, &geom);
             for (k, &u) in units.iter().enumerate() {
                 let unit_pins: Vec<(String, String, Option<String>)> = pins
                     .iter()
