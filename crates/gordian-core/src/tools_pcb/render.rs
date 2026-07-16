@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use kicad_cli::KicadCli;
-use pcb_model::{Polygon, Rect};
+use pcb_model::{Point2, Polygon, Rect};
 use serde_json::{Value, json};
 
 use crate::AgentRuntime;
@@ -32,14 +32,37 @@ struct RenderPlan {
 /// Render the board to a PNG using KiCad's own PCB SVG exporter, save under
 /// `.gordian/renders/`, and attach via `IMAGE_PATH_KEY`.
 pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let board = match super::active::board_problem(ctx) {
-        Ok(board) => board,
-        Err(err) => return Ok(json!({ "error": err })),
-    };
-
-    let pcb_path = match super::active::save_live_board(ctx) {
-        Ok(path) => path,
-        Err(err) => return Ok(json!({ "error": err })),
+    let pcb_path = ctx.pcb_path();
+    if !pcb_path.exists() {
+        return Ok(json!({
+            "error": "no board exists yet — run regenerate_board first"
+        }));
+    }
+    // Mutating board tools save every successful operation. If this process already
+    // owns a live session, flush it without opening or launching anything; otherwise
+    // the on-disk board is immediately authoritative. This avoids the old render-only
+    // board_snapshot + save path, which could launch pcbnew and spend tens of seconds
+    // before the sub-second `kicad-cli` export even began.
+    if ctx.kicad().save_if_open().is_err() {
+        ctx.close_kicad_session();
+    }
+    let source = match board_render_source(&pcb_path) {
+        Ok(source) => source,
+        Err(file_err) => match super::active::board_problem(ctx) {
+            Ok(board) => BoardRenderSource {
+                bounds: board.imported.bounds,
+                outline: board.problem.outline,
+                part_count: board.imported.parts.len(),
+                provenance: "live_kicad_fallback",
+            },
+            Err(live_err) => {
+                return Ok(json!({
+                    "error": format!(
+                        "{file_err}; live KiCad geometry fallback also failed: {live_err}"
+                    )
+                }));
+            }
+        },
     };
     let tmp = tempfile::tempdir().context("temp dir for PCB SVG export")?;
     let svg_path = tmp.path().join("board.svg");
@@ -54,11 +77,11 @@ pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let svg = std::fs::read_to_string(&svg_path)
         .with_context(|| format!("reading PCB SVG {}", svg_path.display()))?;
-    let svg = add_visual_overlays(&svg, board.problem.outline.as_ref(), &board.imported.bounds);
+    let svg = add_visual_overlays(&svg, source.outline.as_ref(), &source.bounds);
 
     let plan = render_plan(
-        board.imported.parts.len(),
-        &board.imported.bounds,
+        source.part_count,
+        &source.bounds,
         ctx.config().tools.render_max_px,
     );
     let png = crate::render::svg_to_png(&svg, plan.overview_px)?;
@@ -97,8 +120,9 @@ pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "png_path": path.display().to_string(),
         "overview_px": plan.overview_px,
         "detail_paths": detail_paths,
+        "source": source.provenance,
         "note": format!(
-            "Board rendered from KiCad's PCB SVG export and attached. \
+            "Board rendered directly from the saved .kicad_pcb using KiCad's PCB SVG export and attached. \
              Layers: {BOARD_RENDER_LAYERS}. The PNG has an explicit dark background, \
              the board outline is overlaid in cyan, and coordinate axes/ticks \
              are drawn in board millimetres for vision readability. \
@@ -111,6 +135,254 @@ pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     obj[crate::tools::IMAGE_PATH_KEY] = json!(path.display().to_string());
     Ok(obj)
+}
+
+#[derive(Debug)]
+struct BoardRenderSource {
+    bounds: Rect,
+    outline: Option<Polygon>,
+    part_count: usize,
+    provenance: &'static str,
+}
+
+/// Read only the geometry render needs from the authoritative board file. This
+/// intentionally does not construct a routing snapshot: footprint count and the
+/// outer Edge.Cuts rectangle/polygon are enough to retain overview sizing, axes,
+/// outline overlays, and the dense-board front/back detail decision.
+fn board_render_source(path: &Path) -> std::result::Result<BoardRenderSource, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("could not read saved board {}: {err}", path.display()))?;
+    parse_board_render_source(&text).map_err(|err| {
+        format!(
+            "could not read render geometry from {}: {err}",
+            path.display()
+        )
+    })
+}
+
+#[derive(Clone, Copy)]
+struct BoardNode {
+    start: usize,
+    end: usize,
+}
+
+fn parse_board_render_source(text: &str) -> std::result::Result<BoardRenderSource, String> {
+    let root_start = text.find("(kicad_pcb").ok_or("not a kicad_pcb document")?;
+    let root = balanced_node(text, root_start).ok_or("unbalanced kicad_pcb document")?;
+    let nodes = child_board_nodes(text, root.start + 1, root.end - 1);
+    let part_count = nodes
+        .iter()
+        .filter(|node| board_node_head(text, node) == "footprint")
+        .count();
+    let edge_nodes: Vec<_> = nodes
+        .iter()
+        .filter(|node| {
+            let head = board_node_head(text, node);
+            matches!(head, "gr_rect" | "gr_line" | "gr_poly")
+                && text[node.start..node.end].contains("(layer \"Edge.Cuts\")")
+        })
+        .copied()
+        .collect();
+    if edge_nodes.is_empty() {
+        return Err("board has no supported outer Edge.Cuts geometry".to_owned());
+    }
+
+    if edge_nodes.len() == 1 {
+        let node = edge_nodes[0];
+        let block = &text[node.start..node.end];
+        match board_node_head(text, &node) {
+            "gr_rect" => {
+                let start =
+                    board_sexpr_point(block, "start").ok_or("Edge.Cuts rectangle has no start")?;
+                let end =
+                    board_sexpr_point(block, "end").ok_or("Edge.Cuts rectangle has no end")?;
+                let bounds = Rect::new(
+                    start.x.min(end.x),
+                    start.y.min(end.y),
+                    start.x.max(end.x),
+                    start.y.max(end.y),
+                );
+                if bounds.max_x <= bounds.min_x || bounds.max_y <= bounds.min_y {
+                    return Err("Edge.Cuts rectangle has empty bounds".to_owned());
+                }
+                return Ok(BoardRenderSource {
+                    bounds,
+                    outline: None,
+                    part_count,
+                    provenance: "saved_board_file",
+                });
+            }
+            "gr_poly" => {
+                let points = board_poly_points(block)?;
+                let outline = Polygon::new(points)
+                    .map_err(|err| format!("invalid Edge.Cuts polygon: {err}"))?;
+                return Ok(BoardRenderSource {
+                    bounds: outline.bbox(),
+                    outline: Some(outline),
+                    part_count,
+                    provenance: "saved_board_file",
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let mut segments = Vec::with_capacity(edge_nodes.len());
+    for node in edge_nodes {
+        let block = &text[node.start..node.end];
+        if board_node_head(text, &node) != "gr_line" {
+            return Err(
+                "mixed or curved Edge.Cuts need a saved rectangular/line/polygon outline"
+                    .to_owned(),
+            );
+        }
+        let start = board_sexpr_point(block, "start").ok_or("Edge.Cuts line has no start")?;
+        let end = board_sexpr_point(block, "end").ok_or("Edge.Cuts line has no end")?;
+        segments.push((start, end));
+    }
+    let outline = Polygon::new(stitch_board_outline(segments)?)
+        .map_err(|err| format!("invalid Edge.Cuts line polygon: {err}"))?;
+    Ok(BoardRenderSource {
+        bounds: outline.bbox(),
+        outline: Some(outline),
+        part_count,
+        provenance: "saved_board_file",
+    })
+}
+
+fn balanced_node(text: &str, start: usize) -> Option<BoardNode> {
+    let bytes = text.as_bytes();
+    if bytes.get(start) != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, byte) in bytes[start..].iter().copied().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(BoardNode {
+                        start,
+                        end: start + offset + 1,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn child_board_nodes(text: &str, start: usize, end: usize) -> Vec<BoardNode> {
+    let mut nodes = Vec::new();
+    let mut cursor = start;
+    while cursor < end {
+        let Some(relative) = text[cursor..end].find('(') else {
+            break;
+        };
+        let node_start = cursor + relative;
+        let Some(node) = balanced_node(text, node_start) else {
+            break;
+        };
+        cursor = node.end;
+        nodes.push(node);
+    }
+    nodes
+}
+
+fn board_node_head<'a>(text: &'a str, node: &BoardNode) -> &'a str {
+    text[node.start + 1..node.end]
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == '(' || ch == ')')
+        .find(|token| !token.is_empty())
+        .unwrap_or("")
+}
+
+fn board_sexpr_point(block: &str, key: &str) -> Option<Point2> {
+    let marker = format!("({key} ");
+    let rest = block.split_once(&marker)?.1;
+    let mut values = rest
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == ')')
+        .filter(|value| !value.is_empty());
+    Some(Point2::new(
+        values.next()?.parse().ok()?,
+        values.next()?.parse().ok()?,
+    ))
+}
+
+fn board_poly_points(block: &str) -> std::result::Result<Vec<Point2>, String> {
+    let pts_start = block
+        .find("(pts")
+        .ok_or("Edge.Cuts polygon has no points")?;
+    let pts = balanced_node(block, pts_start).ok_or("unbalanced Edge.Cuts polygon points")?;
+    let mut points = Vec::new();
+    for node in child_board_nodes(block, pts.start + 1, pts.end - 1) {
+        if board_node_head(block, &node) != "xy" {
+            continue;
+        }
+        let body = &block[node.start + 1..node.end - 1];
+        let mut values = body.split_ascii_whitespace().skip(1);
+        let x = values
+            .next()
+            .and_then(|value| value.parse().ok())
+            .ok_or("invalid Edge.Cuts polygon x")?;
+        let y = values
+            .next()
+            .and_then(|value| value.parse().ok())
+            .ok_or("invalid Edge.Cuts polygon y")?;
+        points.push(Point2::new(x, y));
+    }
+    if points.len() < 3 {
+        return Err("Edge.Cuts polygon needs at least three points".to_owned());
+    }
+    Ok(points)
+}
+
+fn stitch_board_outline(
+    mut segments: Vec<(Point2, Point2)>,
+) -> std::result::Result<Vec<Point2>, String> {
+    if segments.len() < 3 {
+        return Err("Edge.Cuts line outline needs at least three segments".to_owned());
+    }
+    let (first, mut current) = segments.remove(0);
+    let mut points = vec![first];
+    while !segments.is_empty() {
+        points.push(current);
+        let Some((index, reverse)) = segments.iter().enumerate().find_map(|(index, &(a, b))| {
+            if board_points_match(a, current) {
+                Some((index, false))
+            } else if board_points_match(b, current) {
+                Some((index, true))
+            } else {
+                None
+            }
+        }) else {
+            return Err("Edge.Cuts line segments do not form one closed outline".to_owned());
+        };
+        let (a, b) = segments.remove(index);
+        current = if reverse { a } else { b };
+    }
+    if !board_points_match(current, first) {
+        return Err("Edge.Cuts line outline is not closed".to_owned());
+    }
+    Ok(points)
+}
+
+fn board_points_match(a: Point2, b: Point2) -> bool {
+    (a.x - b.x).abs() <= 1e-6 && (a.y - b.y).abs() <= 1e-6
 }
 
 fn render_plan(part_count: usize, bounds: &Rect, configured_max_px: u32) -> RenderPlan {
@@ -526,6 +798,55 @@ mod tests {
     const SVG_80X70_SIZED: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="80mm" height="70mm" viewBox="0 0 80 70">
 <rect x="0" y="0" width="80" height="70"/>
 </svg>"#;
+
+    #[test]
+    fn saved_rect_board_source_preserves_bounds_and_dense_detail_count() {
+        let footprints = (0..40)
+            .map(|index| {
+                format!("(footprint \"Part:{index}\" (property \"Reference\" \"R{index}\"))")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let board = format!(
+            "(kicad_pcb\n{footprints}\n\
+             (gr_rect (start 10 20) (end 85 75) (layer \"Edge.Cuts\"))\n)"
+        );
+
+        let source = parse_board_render_source(&board).expect("saved board geometry");
+
+        assert_eq!(source.bounds, Rect::new(10.0, 20.0, 85.0, 75.0));
+        assert!(source.outline.is_none());
+        assert_eq!(source.part_count, 40);
+        assert!(
+            render_plan(source.part_count, &source.bounds, 1600)
+                .detail_px
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn saved_line_board_source_stitches_shuffled_polygon_outline() {
+        let board = r#"(kicad_pcb
+            (footprint "A" (fp_line (start 0 0) (end 1 1)))
+            (gr_line (start 50 55) (end 10 48) (layer "Edge.Cuts"))
+            (gr_line (start 10 20) (end 50 20) (layer "Edge.Cuts"))
+            (gr_line (start 10 48) (end 10 20) (layer "Edge.Cuts"))
+            (gr_line (start 50 20) (end 50 55) (layer "Edge.Cuts"))
+        )"#;
+
+        let source = parse_board_render_source(board).expect("line outline");
+
+        assert_eq!(
+            source.part_count, 1,
+            "nested footprint graphics are not parts"
+        );
+        assert_eq!(source.bounds, Rect::new(10.0, 20.0, 50.0, 55.0));
+        let outline = source.outline.expect("non-rectangular polygon retained");
+        assert_eq!(outline.points().len(), 4);
+        let overlaid = add_visual_overlays(SVG, Some(&outline), &source.bounds);
+        assert!(overlaid.contains("id=\"gordian-accessible-edge-cuts\""));
+        assert!(overlaid.contains("40.0000,35.0000"));
+    }
 
     #[test]
     fn sparse_small_board_keeps_the_configured_overview_only() {
