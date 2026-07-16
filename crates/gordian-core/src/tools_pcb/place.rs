@@ -1128,7 +1128,7 @@ fn add_817_array_hints(
     };
     let wide_logic_height = part_height(&logic_wide_parts);
     let logic_height = part_height(&logic_small_parts);
-    let channel_logic_height = channel_logic_groups
+    let channel_logic_part_height = channel_logic_groups
         .iter()
         .flatten()
         .filter_map(|reference| {
@@ -1138,9 +1138,17 @@ fn add_817_array_hints(
                 .find(|part| &part.reference == reference)
         })
         .map(|part| part.courtyard_h)
-        .fold(0.0, f64::max)
-        * 2.0
-        + margin * 2.0;
+        .fold(0.0, f64::max);
+    // Three small support parts in a short, wide channel cell tile as two
+    // columns. Their courtyards remain legal, but the long DLED/RLED reference
+    // fields nearly touch across adjacent channels. A taller cell makes the
+    // regular-grid aspect calculation choose one column and three rows, giving
+    // each reference its own horizontal lane without special-casing refdes.
+    let channel_logic_height = if channel_logic_part_height > 0.0 {
+        (channel_logic_part_height * 2.0 + margin * 2.0).max(pitch_x * 1.5)
+    } else {
+        0.0
+    };
     let channel_logic_strip = Rect::new(
         bottom.min_x,
         bottom.min_y,
@@ -2222,6 +2230,11 @@ mod tests {
                 ]
                 .into_iter()
                 .collect()
+            );
+            let region = logic.region.expect("channel group has a grid region");
+            assert!(
+                region.max_y - region.min_y >= (region.max_x - region.min_x) * 1.5 - 1e-9,
+                "three support references need separate horizontal lanes"
             );
         }
     }
