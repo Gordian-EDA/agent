@@ -1245,6 +1245,7 @@ impl<P: Provider> Agent<P> {
             let mut schematic_stage_ready_this_completion = false;
             let mut non_authoring_state_changed_this_completion = false;
             let mut semantic_review_advanced_this_completion = false;
+            let mut pcb_finish_completed_this_completion = false;
             let mut discovery_calls_dispatched_this_completion: HashMap<String, usize> =
                 HashMap::new();
             for call in &tool_calls {
@@ -1766,6 +1767,49 @@ impl<P: Provider> Agent<P> {
                         image_path,
                     },
                 );
+                if dispatched
+                    && pcb_only_stage
+                    && request_requires_fabrication(authoritative_intent)
+                    && call.fn_name == "regenerate_board"
+                    && regenerate_board_succeeded(&parsed)
+                {
+                    let pipeline = self
+                        .run_pcb_finish_pipeline(approvals, &mut pcb_recovery, events)
+                        .await;
+                    tool_calls_made += pipeline.stages.len();
+                    for stage in &pipeline.stages {
+                        let stage_result = parse_or_null(&stage.content);
+                        if tool_result_is_timeout(&stage_result) {
+                            timed_out_tool_calls.push((
+                                stage.name.to_string(),
+                                json!({}),
+                                tool_state_revision,
+                            ));
+                        }
+                        let prior_revision = tool_state_revision;
+                        tool_state_revision = next_tool_state_revision(
+                            tool_state_revision,
+                            true,
+                            tool_effect(stage.name),
+                            stage.name,
+                            &stage_result,
+                        );
+                        if tool_state_revision != prior_revision {
+                            non_authoring_state_changed_this_completion = true;
+                        }
+                        let stage_summary = tool_summary(stage.name, &json!({}), &stage_result);
+                        last_tool_status = Some(format!("{}: {stage_summary}", stage.name));
+                    }
+                    for stage in &pipeline.stages {
+                        result_images.extend(stage.images.iter().cloned().map(ContentPart::Binary));
+                    }
+                    let mut result = parse_or_null(&content);
+                    if let Some(object) = result.as_object_mut() {
+                        object.insert("automatic_pcb_finish".into(), pipeline.report());
+                        content = result.to_string();
+                    }
+                    pcb_finish_completed_this_completion = pipeline.completed;
+                }
                 tool_responses.push(ToolResponse::new(call.call_id.clone(), content));
                 result_images.extend(images.into_iter().map(ContentPart::Binary));
             }
@@ -1786,6 +1830,17 @@ impl<P: Provider> Agent<P> {
             }
             prune_large_tool_arguments(&mut self.history);
             prune_stale_tool_results(&mut self.history);
+
+            if pcb_finish_completed_this_completion {
+                let final_text = "PCB placement, routing, DRC, renders, and fabrication export completed successfully.".to_string();
+                emit(events, AgentEvent::AssistantText(final_text.clone()));
+                return Ok(TurnOutcome {
+                    applied: applied && !draft_dirty,
+                    final_text,
+                    tool_calls_made,
+                    stop_reason: StopReason::Completed,
+                });
+            }
 
             // A complex schematic+PCB request otherwise reaches board work with
             // almost the entire authoring transcript and request budget spent.
@@ -1980,6 +2035,69 @@ impl<P: Provider> Agent<P> {
     /// preview-capable gated commit is routed through preview → approval →
     /// commit; an immediate mutation is approved before its single normal run.
     /// Every other call runs once in [`RunMode::Normal`].
+    async fn run_pcb_finish_pipeline(
+        &self,
+        approvals: &mut dyn Approvals,
+        pcb_recovery: &mut PcbRecoveryState,
+        events: Events<'_>,
+    ) -> PcbFinishRun {
+        if !approvals.approve(&pcb_finish_pipeline_approval()).await {
+            return PcbFinishRun {
+                approved: false,
+                completed: false,
+                stages: Vec::new(),
+            };
+        }
+
+        let mut stages = Vec::new();
+        for name in PCB_FINISH_PIPELINE_STEPS {
+            emit(
+                events,
+                AgentEvent::ToolStarted {
+                    name: name.to_string(),
+                },
+            );
+            let outcome = into_outcome(run_blocking(&self.runtime, name, json!({})).await, None);
+            let mut content = tool_result_text(&outcome.value);
+            let parsed = parse_or_null(&content);
+            if pcb_recovery.observe_tool_result(name, &parsed, true) {
+                content = add_route_retry_guidance(
+                    &content,
+                    pcb_recovery.failed_route_attempts,
+                    pcb_recovery.retry_note(),
+                );
+            }
+            let parsed = parse_or_null(&content);
+            let summary = tool_summary(name, &json!({}), &parsed);
+            emit(
+                events,
+                AgentEvent::ToolFinished {
+                    name: name.to_string(),
+                    summary,
+                    image_path: outcome.image_path.clone(),
+                },
+            );
+            let succeeded = pcb_finish_stage_succeeded(name, &parsed);
+            stages.push(PcbFinishStage {
+                name,
+                content,
+                images: outcome.images,
+            });
+            if !succeeded {
+                break;
+            }
+        }
+        let completed = stages.len() == PCB_FINISH_PIPELINE_STEPS.len()
+            && stages.last().is_some_and(|stage| {
+                pcb_finish_stage_succeeded(stage.name, &parse_or_null(&stage.content))
+            });
+        PcbFinishRun {
+            approved: true,
+            completed,
+            stages,
+        }
+    }
+
     async fn run_tool_call(
         &self,
         call: &ToolCall,
@@ -2191,6 +2309,81 @@ fn operation_approval(call: &ToolCall) -> Value {
         "arguments": call.fn_arguments,
         "note": "This operation can mutate project files or the live KiCAD board and has no dry-run preview.",
     })
+}
+
+const PCB_FINISH_PIPELINE_STEPS: [&str; 5] = [
+    "place_board",
+    "route_board",
+    "check_board",
+    "render_board",
+    "export_fab",
+];
+
+fn pcb_finish_pipeline_approval() -> Value {
+    json!({
+        "approval_kind": "operation",
+        "operation": "finish_pcb_pipeline",
+        "steps": PCB_FINISH_PIPELINE_STEPS,
+        "note": "Run the fixed post-regeneration PCB sequence. It stops before every later step when placement, routing, or DRC is not clean.",
+    })
+}
+
+fn regenerate_board_succeeded(value: &Value) -> bool {
+    value.get("ok").and_then(Value::as_bool) == Some(true)
+        && value.get("error").is_none()
+        && value.get("rejected").and_then(Value::as_bool) != Some(true)
+        && value.get("executed").and_then(Value::as_bool) != Some(false)
+}
+
+fn pcb_finish_stage_succeeded(name: &str, value: &Value) -> bool {
+    if value.get("error").is_some()
+        || value.get("rejected").and_then(Value::as_bool) == Some(true)
+        || value.get("executed").and_then(Value::as_bool) == Some(false)
+    {
+        return false;
+    }
+    match name {
+        "place_board" => value.get("legal").and_then(Value::as_bool) == Some(true),
+        "route_board" => value
+            .get("failed")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty),
+        "check_board" => check_board_is_clean(value),
+        "render_board" | "export_fab" => value.get("ok").and_then(Value::as_bool) == Some(true),
+        _ => false,
+    }
+}
+
+struct PcbFinishStage {
+    name: &'static str,
+    content: String,
+    images: Vec<Binary>,
+}
+
+struct PcbFinishRun {
+    approved: bool,
+    completed: bool,
+    stages: Vec<PcbFinishStage>,
+}
+
+impl PcbFinishRun {
+    fn report(&self) -> Value {
+        json!({
+            "approved": self.approved,
+            "completed": self.completed,
+            "stages": self.stages.iter().map(|stage| json!({
+                "tool": stage.name,
+                "result": parse_or_null(&stage.content),
+            })).collect::<Vec<_>>(),
+            "note": if self.completed {
+                "The deterministic PCB finish pipeline completed without another provider request."
+            } else if self.approved {
+                "The deterministic PCB finish pipeline stopped at the first unsuccessful stage; inspect that stage result before recovery."
+            } else {
+                "The user rejected the deterministic PCB finish pipeline; no downstream stage ran."
+            },
+        })
+    }
 }
 
 fn route_result_is_retry_failure(value: &Value) -> bool {
@@ -5438,6 +5631,82 @@ mod tests {
         for tool in ["read_schematic", "edit_design", "apply_design", "run_erc"] {
             assert!(!is_pcb_stage_tool(tool), "{tool}");
         }
+    }
+
+    fn scripted_pcb_finish_order(results: &[Value]) -> Vec<&'static str> {
+        let mut dispatched = Vec::new();
+        for (name, result) in PCB_FINISH_PIPELINE_STEPS.iter().zip(results) {
+            dispatched.push(*name);
+            if !pcb_finish_stage_succeeded(name, result) {
+                break;
+            }
+        }
+        dispatched
+    }
+
+    #[test]
+    fn scripted_pcb_finish_success_is_ordered_without_provider_work() {
+        let results = vec![
+            json!({"ok": true, "legal": true}),
+            json!({"ok": true, "failed": []}),
+            json!({"ok": true, "blocking_findings": 0}),
+            json!({"ok": true, "png_path": "/tmp/board.png"}),
+            json!({"ok": true, "file_count": 16}),
+        ];
+
+        assert_eq!(
+            scripted_pcb_finish_order(&results),
+            PCB_FINISH_PIPELINE_STEPS
+        );
+        assert!(
+            PCB_FINISH_PIPELINE_STEPS
+                .iter()
+                .all(|name| *name != "review_design")
+        );
+        assert_eq!(
+            pcb_finish_pipeline_approval()["steps"],
+            json!(PCB_FINISH_PIPELINE_STEPS)
+        );
+    }
+
+    #[test]
+    fn scripted_pcb_finish_fails_fast_on_dirty_route_or_drc() {
+        let dirty_route = vec![
+            json!({"ok": true, "legal": true}),
+            json!({"ok": true, "failed": [{"net": "SDA"}]}),
+            json!({"ok": true, "blocking_findings": 0}),
+        ];
+        assert_eq!(
+            scripted_pcb_finish_order(&dirty_route),
+            ["place_board", "route_board"]
+        );
+
+        let dirty_drc = vec![
+            json!({"ok": true, "legal": true}),
+            json!({"ok": true, "failed": []}),
+            json!({"ok": false, "blocking_findings": 2}),
+            json!({"ok": true}),
+        ];
+        assert_eq!(
+            scripted_pcb_finish_order(&dirty_drc),
+            ["place_board", "route_board", "check_board"]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_pcb_finish_pipeline_executes_no_stage() {
+        let agent = Agent::new(ScriptedClient::new(vec![]), test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+        let mut recovery = PcbRecoveryState::default();
+
+        let run = agent
+            .run_pcb_finish_pipeline(&mut approvals, &mut recovery, None)
+            .await;
+
+        assert!(!run.approved);
+        assert!(!run.completed);
+        assert!(run.stages.is_empty());
+        assert_eq!(run.report()["stages"], json!([]));
     }
 
     #[test]
