@@ -1771,6 +1771,116 @@ fn add_footprint_part_normalizations(report: &mut Value, normalizations: Vec<Val
     }
 }
 
+/// Repair a narrow but costly authoring slip: models sometimes turn a rail name
+/// into a logical power-symbol reference by appending an instance number (for
+/// example `V3V3` -> `V3V31`).  That is not a legal KiCad refdes, and one such
+/// key otherwise invalidates an entire large replacement document.  Power
+/// symbols have no user-significant physical reference, so give only invalid
+/// `power:*` entries a deterministic, collision-free `PWRn` reference before
+/// compilation.  Physical component references remain strict.
+fn normalize_invalid_power_references(yaml: &str) -> (String, Vec<Value>) {
+    let (surface, diagnostics) = circuit_lang::parse::parse_str(yaml);
+    let Some(surface) = surface else {
+        return (yaml.to_owned(), Vec::new());
+    };
+
+    let mut used = surface
+        .blocks
+        .values()
+        .flat_map(|block| block.components.keys().cloned())
+        .collect::<std::collections::HashSet<_>>();
+    let mut next_power = 1usize;
+    let mut edits = Vec::new();
+    for diagnostic in diagnostics.0.iter().filter(|d| d.code == "bad-refdes") {
+        let Some(span) = diagnostic.span else { continue };
+        let Some(reference) = diagnostic
+            .message
+            .split('`')
+            .nth(1)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let is_power = surface.blocks.values().any(|block| {
+            block
+                .components
+                .get(&reference)
+                .is_some_and(|component| component.part.starts_with("power:"))
+        });
+        if !is_power {
+            continue;
+        }
+        let replacement = loop {
+            let candidate = format!("PWR{next_power}");
+            next_power += 1;
+            if used.insert(candidate.clone()) {
+                break candidate;
+            }
+        };
+        edits.push((span, reference, replacement));
+    }
+
+    // Work from the end of the document so earlier source coordinates remain
+    // valid. Diagnostics point at the component-map key, including in flow YAML.
+    edits.sort_by_key(|(span, _, _)| (std::cmp::Reverse(span.line), std::cmp::Reverse(span.col)));
+    let mut normalized = yaml.to_owned();
+    let mut report = Vec::new();
+    for (span, reference, replacement) in edits {
+        let Some(line_start) = normalized
+            .split_inclusive('\n')
+            .take(span.line.saturating_sub(1))
+            .map(str::len)
+            .reduce(|a, b| a + b)
+            .or_else(|| (span.line == 1).then_some(0))
+        else {
+            continue;
+        };
+        let line_end = normalized[line_start..]
+            .find('\n')
+            .map(|offset| line_start + offset)
+            .unwrap_or(normalized.len());
+        let line = &normalized[line_start..line_end];
+        let Some(column_offset) = line
+            .char_indices()
+            .nth(span.col.saturating_sub(1))
+            .map(|(offset, _)| offset)
+            .or_else(|| (span.col == line.chars().count() + 1).then_some(line.len()))
+        else {
+            continue;
+        };
+        let start = line_start + column_offset;
+        let suffix = &normalized[start..line_end];
+        let literals = [
+            reference.clone(),
+            format!("'{reference}'"),
+            format!("\"{reference}\""),
+        ];
+        let Some(literal) = literals.into_iter().find(|literal| {
+            suffix.starts_with(literal)
+                && suffix[literal.len()..].trim_start().starts_with(':')
+        }) else {
+            continue;
+        };
+        normalized.replace_range(start..start + literal.len(), &replacement);
+        report.push(json!({
+            "original_reference": reference,
+            "normalized_reference": replacement,
+            "part_kind": "logical_power_symbol",
+        }));
+    }
+    report.reverse();
+    (normalized, report)
+}
+
+fn add_power_reference_normalizations(report: &mut Value, normalizations: Vec<Value>) {
+    if !normalizations.is_empty() {
+        report["normalized_power_references"] = json!({
+            "count": normalizations.len(),
+            "items": normalizations,
+        });
+    }
+}
+
 fn normalize_misplaced_footprint_component_map(
     components: &mut serde_json::Map<String, Value>,
     ctx: &AgentRuntime,
@@ -1820,9 +1930,11 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "draft_changed": false,
         }));
     }
+    let (yaml, power_reference_normalizations) = normalize_invalid_power_references(&yaml);
     let (yaml, normalizations) = normalize_misplaced_footprint_parts(&yaml, ctx)?;
     let result = compile(&yaml, ctx.provider());
     let mut report = compile_authoring_report(&result, ctx)?;
+    add_power_reference_normalizations(&mut report, power_reference_normalizations);
     add_footprint_part_normalizations(&mut report, normalizations);
     if reject_empty_draft_candidate(&mut report, &result, draft_exists, yaml.trim().is_empty()) {
         return Ok(report);
@@ -2411,9 +2523,11 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Some(yaml) = full_yaml {
         let prior_draft = ctx.workspace().read_draft()?;
         let draft_exists = prior_draft.is_some();
-        let (yaml, normalizations) = normalize_misplaced_footprint_parts(yaml, ctx)?;
+        let (yaml, power_reference_normalizations) = normalize_invalid_power_references(yaml);
+        let (yaml, normalizations) = normalize_misplaced_footprint_parts(&yaml, ctx)?;
         let result = compile(&yaml, ctx.provider());
         let mut report = compile_authoring_report(&result, ctx)?;
+        add_power_reference_normalizations(&mut report, power_reference_normalizations);
         add_footprint_part_normalizations(&mut report, normalizations);
         if reject_empty_draft_candidate(&mut report, &result, draft_exists, yaml.trim().is_empty())
         {
@@ -2536,8 +2650,20 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     };
 
-    let old = require_str(&input, "old_string")?;
-    let new = require_str(&input, "new_string")?;
+    let (Some(old), Some(new)) = (
+        input.get("old_string").and_then(Value::as_str),
+        input.get("new_string").and_then(Value::as_str),
+    ) else {
+        return Ok(json!({
+            "ok": false,
+            "error": "edit_design requires one complete corrected YAML document in `yaml`; an incomplete old_string/new_string patch cannot be applied safely",
+            "code": "edit_design_full_yaml_required",
+            "draft_changed": false,
+            "electrical_design_changed": false,
+            "next_tool": "edit_design",
+            "next": "resend the complete current draft with the correction applied as edit_design({yaml: ...})",
+        }));
+    };
     let replace_all = input
         .get("replace_all")
         .and_then(Value::as_bool)
@@ -2706,9 +2832,80 @@ mod tests {
 
     use super::{
         compile_report, create_design, edit_design, invalid_compile_quality_regressed,
-        normalize_misplaced_footprint_parts, repair_components, repair_components_tool,
-        require_search_query, symbol_for_misplaced_footprint, tool_defs,
+        normalize_invalid_power_references, normalize_misplaced_footprint_parts,
+        repair_components, repair_components_tool, require_search_query,
+        symbol_for_misplaced_footprint, tool_defs,
     };
+
+    #[test]
+    fn invalid_power_symbol_references_are_normalized_without_touching_physical_refs() {
+        let yaml = r#"
+version: 1
+blocks:
+  power:
+    components:
+      PWR1: {part: power:GND, pins: {1: GND}}
+      V3V31: {part: power:+3V3, pins: {1: V3V3}}
+      "V1V81": {part: power:+1V8, pins: {1: V1V8}}
+      R_BAD1: {part: Device:R, between: [V3V3, V1V8]}
+"#;
+
+        let (normalized, changes) = normalize_invalid_power_references(yaml);
+
+        assert!(normalized.contains("PWR2: {part: power:+3V3"), "{normalized}");
+        assert!(normalized.contains("PWR3: {part: power:+1V8"), "{normalized}");
+        assert!(normalized.contains("R_BAD1: {part: Device:R"), "{normalized}");
+        assert_eq!(changes.len(), 2);
+        let (_, diagnostics) = circuit_lang::parse::parse_str(&normalized);
+        let bad = diagnostics
+            .0
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "bad-refdes")
+            .collect::<Vec<_>>();
+        assert_eq!(bad.len(), 1, "{diagnostics:?}");
+        assert!(bad[0].message.contains("R_BAD1"));
+    }
+
+    #[test]
+    fn malformed_legacy_edit_returns_a_structured_full_yaml_retry() {
+        let footprints = tempfile::tempdir().unwrap();
+        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
+            .expect("test runtime");
+        let draft = "version: 1\nblocks: {main: {components: {R1: {part: Device:R, between: [A, B]}}}}\n";
+        runtime.workspace().write_draft(draft, None).unwrap();
+
+        let report = edit_design(json!({"new_string": "4.7k"}), &runtime).unwrap();
+
+        assert_eq!(report["code"], "edit_design_full_yaml_required");
+        assert_eq!(report["draft_changed"], false);
+        assert_eq!(report["next_tool"], "edit_design");
+        assert_eq!(runtime.workspace().read_draft().unwrap().unwrap(), draft);
+    }
+
+    #[test]
+    fn full_edit_persists_candidate_after_power_reference_recovery() {
+        let footprints = tempfile::tempdir().unwrap();
+        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
+            .expect("test runtime");
+        let prior = "version: 1\nblocks: {main: {components: {R1: {part: Device:R, between: [A, B]}}}}\n";
+        runtime.workspace().write_draft(prior, None).unwrap();
+        let candidate = r#"
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: Device:R, between: [A, B]}
+      V3V31: {part: power:+3V3, pins: {1: V3V3}}
+"#;
+
+        let report = edit_design(json!({"yaml": candidate}), &runtime).unwrap();
+
+        assert_eq!(report["draft_written"], true, "{report}");
+        assert_eq!(report["normalized_power_references"]["count"], 1);
+        let draft = runtime.workspace().read_draft().unwrap().unwrap();
+        assert!(draft.contains("PWR1: {part: power:+3V3"), "{draft}");
+        assert!(!draft.contains("V3V31:"), "{draft}");
+    }
 
     #[test]
     fn misplaced_footprint_inference_is_limited_to_safe_families() {
