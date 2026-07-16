@@ -18,7 +18,12 @@ use kicad_env::KicadEnv;
 pub fn schematic_png(env: &KicadEnv, sch: &Path, max_px: u32) -> Result<Vec<u8>> {
     let tmp = tempfile::tempdir().context("temp dir for schematic SVG export")?;
     let svg_path = KicadCli::new(env)
-        .export_svg(sch, tmp.path())
+        // The in-loop critic needs circuit detail, not the drawing sheet. On a
+        // large custom page, fitting the full border/title block into ~1600 px
+        // makes KiCad's thin wire strokes sub-pixel in resvg: junction dots stay
+        // visible while their wires appear to vanish. Cropping to schematic
+        // content matches the standalone render path and keeps nets legible.
+        .export_svg_opts(sch, tmp.path(), true)
         .context("exporting schematic SVG")?;
     let svg = std::fs::read_to_string(&svg_path).context("reading exported SVG")?;
     svg_to_png(&svg, max_px)
