@@ -111,8 +111,23 @@ pub(super) fn detect_idioms(
         .collect();
     let get = |rd: &str| idx.get(rd).copied();
 
-    let mut out: Vec<Idiom> = Vec::new();
-    let mut claimed: BTreeSet<usize> = BTreeSet::new();
+    // A repeated PC817 bank is one visual idiom per channel, not a shelf of ICs
+    // followed by separate resistor/LED banks.  Recognize the topology (rather
+    // than relying on generated refdes prefixes) and reserve a compact,
+    // left-to-right channel row:
+    //
+    //   input -- RIN -- PC817 -- OUT --+-- RPU -- V+
+    //                                  +-- LED -- RLED -- V+
+    //
+    // The passive supply legs occupy the row immediately above their channel.
+    // Requiring at least two complete channels keeps this deliberately bounded:
+    // a lone optocoupler continues through the generic placement path.
+    let mut out = detect_pc817_channel_bank(items, rails, anchor_col, anchor_row);
+    let mut claimed: BTreeSet<usize> = out
+        .iter()
+        .flat_map(|idiom| idiom.cells.iter())
+        .filter_map(|(rd, _)| get(rd))
+        .collect();
     for m in &matches {
         let Some(ai) = get(&m.anchor) else { continue };
         match m.pattern {
@@ -306,4 +321,170 @@ pub(super) fn detect_idioms(
         }
     }
     out
+}
+
+#[derive(Debug)]
+struct Pc817Channel {
+    opto: usize,
+    rin: usize,
+    rpu: usize,
+    rled: usize,
+    led: usize,
+}
+
+fn detect_pc817_channel_bank(
+    items: &[Item],
+    rails: &BTreeMap<String, Band>,
+    anchor_col: &BTreeMap<usize, i32>,
+    anchor_row: &BTreeMap<usize, i32>,
+) -> Vec<Idiom> {
+    let pin_net = |i: usize, number: &str| {
+        items[i]
+            .pins
+            .iter()
+            .find(|(n, _, _)| n == number)
+            .and_then(|(_, _, net)| net.as_deref())
+    };
+    let nets = |i: usize| {
+        items[i]
+            .pins
+            .iter()
+            .filter_map(|(_, _, net)| net.as_deref())
+            .collect::<Vec<_>>()
+    };
+    let has_net = |i: usize, wanted: &str| nets(i).contains(&wanted);
+    let other_net = |i: usize, known: &str| {
+        nets(i).into_iter().find(|net| *net != known)
+    };
+    let is_positive_rail = |net: &str| rails.contains_key(net) && !is_ground(net);
+    let is_resistor = |i: usize| items[i].part == "Device:R";
+    let is_led = |i: usize| {
+        items[i].part == "Device:LED" || items[i].part.starts_with("Device:LED_")
+    };
+
+    let mut channels = Vec::new();
+    for (opto, item) in items.iter().enumerate() {
+        let compact = item.part.to_ascii_uppercase().replace(['-', '_'], "");
+        if !(compact.contains("PC817") || compact.contains("LTV817")) {
+            continue;
+        }
+        let (Some(input), Some(output)) = (pin_net(opto, "1"), pin_net(opto, "4")) else {
+            continue;
+        };
+
+        let rin = (0..items.len()).find(|&i| {
+            i != opto
+                && is_resistor(i)
+                && has_net(i, input)
+                && other_net(i, input).is_some_and(|net| !rails.contains_key(net))
+        });
+        let rpu = (0..items.len()).find(|&i| {
+            is_resistor(i)
+                && has_net(i, output)
+                && other_net(i, output).is_some_and(is_positive_rail)
+        });
+        let led = (0..items.len()).find(|&i| is_led(i) && has_net(i, output));
+        let Some(led) = led else { continue };
+        let Some(led_anode) = other_net(led, output) else {
+            continue;
+        };
+        let rled = (0..items.len()).find(|&i| {
+            is_resistor(i)
+                && has_net(i, led_anode)
+                && other_net(i, led_anode).is_some_and(is_positive_rail)
+        });
+        let (Some(rin), Some(rpu), Some(rled)) = (rin, rpu, rled) else {
+            continue;
+        };
+        channels.push(Pc817Channel {
+            opto,
+            rin,
+            rpu,
+            rled,
+            led,
+        });
+    }
+
+    if channels.len() < 2 {
+        return Vec::new();
+    }
+    channels.sort_by(|a, b| natural_refdes_cmp(&items[a.opto].refdes, &items[b.opto].refdes));
+    let base_col = channels
+        .iter()
+        .filter_map(|c| anchor_col.get(&c.opto))
+        .copied()
+        .min()
+        .unwrap_or(0);
+    let base_row = channels
+        .iter()
+        .filter_map(|c| anchor_row.get(&c.opto))
+        .copied()
+        .min()
+        .unwrap_or(0);
+
+    channels
+        .into_iter()
+        .enumerate()
+        .map(|(index, channel)| {
+            let supply_row = base_row + index as i32 * 2;
+            let signal_row = supply_row + 1;
+            Idiom {
+                kind: "pc817_channel",
+                anchor: channel.opto,
+                cells: vec![
+                    (
+                        items[channel.rin].refdes.clone(),
+                        Cell {
+                            col: base_col,
+                            row: signal_row,
+                            orient: Orient::Right,
+                        },
+                    ),
+                    (
+                        items[channel.opto].refdes.clone(),
+                        Cell {
+                            col: base_col + 1,
+                            row: signal_row,
+                            orient: Orient::Right,
+                        },
+                    ),
+                    (
+                        items[channel.rpu].refdes.clone(),
+                        Cell {
+                            col: base_col + 2,
+                            row: supply_row,
+                            orient: Orient::Down,
+                        },
+                    ),
+                    (
+                        items[channel.rled].refdes.clone(),
+                        Cell {
+                            col: base_col + 3,
+                            row: supply_row,
+                            orient: Orient::Down,
+                        },
+                    ),
+                    (
+                        items[channel.led].refdes.clone(),
+                        Cell {
+                            col: base_col + 3,
+                            row: signal_row,
+                            // KiCad's LED pin 1 is K and pin 2 is A.  Pointing
+                            // pin 1 down puts A beneath RLED and K on OUT.
+                            orient: Orient::Up,
+                        },
+                    ),
+                ],
+                freeze: true,
+            }
+        })
+        .collect()
+}
+
+fn natural_refdes_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    fn split(s: &str) -> (&str, u32) {
+        let cut = s.find(|c: char| c.is_ascii_digit()).unwrap_or(s.len());
+        (&s[..cut], s[cut..].parse::<u32>().unwrap_or(u32::MAX))
+    }
+    split(a).cmp(&split(b)).then_with(|| a.cmp(b))
 }

@@ -26,6 +26,16 @@ fn compile_fixture(provider: &SymbolTable, name: &str) -> circuit_lang::Design {
     result.design.expect("design")
 }
 
+fn compile_source(provider: &SymbolTable, name: &str, src: &str) -> circuit_lang::Design {
+    let result = circuit_lang::compile(src, provider);
+    assert!(
+        !result.diagnostics.has_errors(),
+        "{name}: {:#?}",
+        result.diagnostics
+    );
+    result.design.expect("design")
+}
+
 #[test]
 fn infer_ir_recognizes_crystal_and_decoupling_idioms() {
     if !validation_corpus_available() {
@@ -130,4 +140,73 @@ fn decoupling_bank_survives_a_shared_rail_to_a_second_ic() {
         "the full bank survives the shared rail (>=3 caps): {:?}",
         deco.parts
     );
+}
+
+#[test]
+fn repeated_pc817_channels_are_frozen_as_signal_flow_rows() {
+    let Some(env) = KicadEnv::detect() else {
+        eprintln!("no KiCAD environment; skipping PC817 channel-layout test");
+        return;
+    };
+    let provider = SymbolTable::from_env(&env);
+    let design = compile_source(
+        &provider,
+        "pc817-bank",
+        r#"
+version: 1
+name: pc817-bank
+blocks:
+  isolation:
+    components:
+      P1: {part: power:+5V, pins: {1: +5V}}
+      P2: {part: power:GND, pins: {1: FIELD_GND}}
+      P3: {part: power:GND, pins: {1: LOGIC_GND}}
+      RIN1: {part: Device:R, value: 4.7k, pins: {1: IN1, 2: OPTO_IN1}}
+      U1: {part: Isolator:PC817, pins: {1: OPTO_IN1, 2: FIELD_GND, 3: LOGIC_GND, 4: OUT1}}
+      RPU1: {part: Device:R, value: 10k, pins: {1: +5V, 2: OUT1}}
+      RLED1: {part: Device:R, value: 1k, pins: {1: +5V, 2: LED_A1}}
+      DLED1: {part: Device:LED, pins: {A: LED_A1, K: OUT1}}
+      RIN2: {part: Device:R, value: 4.7k, pins: {1: IN2, 2: OPTO_IN2}}
+      U2: {part: Isolator:PC817, pins: {1: OPTO_IN2, 2: FIELD_GND, 3: LOGIC_GND, 4: OUT2}}
+      RPU2: {part: Device:R, value: 10k, pins: {1: +5V, 2: OUT2}}
+      RLED2: {part: Device:R, value: 1k, pins: {1: +5V, 2: LED_A2}}
+      DLED2: {part: Device:LED, pins: {A: LED_A2, K: OUT2}}
+"#,
+    );
+    let ir = floorplan::infer_ir(&env, &design);
+
+    let channels: Vec<_> = ir
+        .idioms
+        .iter()
+        .filter(|idiom| idiom.kind == "pc817_channel")
+        .collect();
+    assert_eq!(channels.len(), 2, "one recognized idiom per complete channel");
+    assert_eq!(channels[0].anchor, "U1");
+    assert_eq!(channels[1].anchor, "U2");
+    for (n, channel) in channels.iter().enumerate() {
+        let n = n + 1;
+        let expected = [
+            format!("RIN{n}"),
+            format!("U{n}"),
+            format!("RPU{n}"),
+            format!("RLED{n}"),
+            format!("DLED{n}"),
+        ];
+        assert_eq!(channel.parts, expected);
+        assert!(expected.iter().all(|rd| ir.frozen.contains(rd)));
+    }
+
+    let u1 = ir.place["U1"];
+    let u2 = ir.place["U2"];
+    assert_eq!(u1.col, u2.col, "opto bodies form one aligned column");
+    assert!(u1.row < u2.row, "channel numbers flow top to bottom");
+    assert_eq!(ir.place["RIN1"].row, u1.row);
+    assert!(ir.place["RIN1"].col < u1.col);
+    assert_eq!(ir.place["RPU1"].row, u1.row - 1);
+    assert_eq!(ir.place["RLED1"].row, u1.row - 1);
+    assert_eq!(ir.place["DLED1"].row, u1.row);
+    assert_eq!(ir.place["RIN1"].orient, floorplan::Orient::Right);
+    assert_eq!(ir.place["RPU1"].orient, floorplan::Orient::Down);
+    assert_eq!(ir.place["RLED1"].orient, floorplan::Orient::Down);
+    assert_eq!(ir.place["DLED1"].orient, floorplan::Orient::Up);
 }
