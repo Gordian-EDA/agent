@@ -9,7 +9,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use drc_lint::connectivity::Violation as ConnViolation;
-use drc_lint::lint::{DrcViolation, drop_unconnected_copper, lint};
+use drc_lint::lint::{DrcViolation, lint};
 use kicad_ipc::snapshot::ImportedPart;
 use negotiated_mesh::copper::copper_obstacles;
 use negotiated_mesh::pathing::GlobalRouteResult;
@@ -55,6 +55,15 @@ fn lint_summary(
     failed: &[FailedNet],
     plane_nets: &std::collections::BTreeSet<String>,
 ) -> LintSplit {
+    let violations = lint(rp, solution);
+    lint_summary_from_violations(&violations, failed, plane_nets)
+}
+
+fn lint_summary_from_violations(
+    violations: &[DrcViolation],
+    failed: &[FailedNet],
+    plane_nets: &std::collections::BTreeSet<String>,
+) -> LintSplit {
     let failed_nets: std::collections::BTreeSet<&str> =
         failed.iter().map(|f| f.connection.as_str()).collect();
 
@@ -62,7 +71,7 @@ fn lint_summary(
     let mut real = 0usize;
     let mut expected_gaps = 0usize;
 
-    for v in lint(rp, solution) {
+    for v in violations {
         // An Unconnected is an EXPECTED gap (not an engine bug) when:
         //  - the net was already reported failed (an honest finisher/global drop), OR
         //  - the net is a copper PLANE net. A plane net is NOT trace-routed — it was
@@ -74,7 +83,7 @@ fn lint_summary(
         //    (which has the plane) is the authority on real plane connectivity.
         if let DrcViolation::Connectivity {
             violation: ConnViolation::Unconnected { connection, .. },
-        } = &v
+        } = v
             && (failed_nets.contains(connection.as_str()) || plane_nets.contains(connection))
         {
             expected_gaps += 1;
@@ -189,9 +198,14 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     let (router_problem, terminal_escapes) = prepare_wide_terminal_escapes(&rp);
     let (routing_subproblem, reserved_wide_routes) = reserve_wide_multi_pin_routes(&router_problem);
     let routed = route_with_engine(&routing_subproblem, ctx.config().engines.pcb_router);
+    let router_postroute_cleaned = routed.postroute_cleaned;
     let global_diagnostics = routed.global;
     let router_attempts = routed.attempts;
     let mut result = routed.result;
+    let has_auxiliary_copper = !reserved_wide_routes.traces.is_empty()
+        || !reserved_wide_routes.vias.is_empty()
+        || !terminal_escapes.traces.is_empty()
+        || !terminal_escapes.vias.is_empty();
     result.solution.traces.extend(reserved_wide_routes.traces);
     result.solution.vias.extend(reserved_wide_routes.vias);
     result.solution.traces.extend(terminal_escapes.traces);
@@ -200,16 +214,25 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     let dropped_failed = drop_failed_net_copper(&mut result);
     let failed = failed_connections(&result);
     add_terminal_stubs(&routing_subproblem, &mut result.solution, &failed);
-    postroute_cleanup(&rp, &mut result.solution);
+    // Auto/Astar/Mesh candidates already passed this exact cleanup before
+    // selection. Terminal stubs are simple pad-to-grid joins and the strict
+    // final oracle validates them; rerunning the full lint-guarded cleanup here
+    // is redundant unless raw auxiliary copper was merged or the explicitly
+    // selected sequential engine has not run shared cleanup yet.
+    if has_auxiliary_copper || !router_postroute_cleaned {
+        postroute_cleanup(&rp, &mut result.solution);
+    }
     let original_solution = result.solution.clone();
     let mut pruned_spurs = prune_dangling_spurs_if_safe(&rp, &mut result);
     let plane_nets = rp.plane_nets.keys().cloned().collect();
-    let dropped = make_route_honest(&rp, &mut result, &plane_nets);
-    let mut split = lint_summary(&rp, &result.solution, &result.failed, &plane_nets);
+    let (dropped, mut final_violations) =
+        make_route_honest_with_report(&rp, &mut result, &plane_nets);
+    let mut split = lint_summary_from_violations(&final_violations, &result.failed, &plane_nets);
     if split.real > 0 && pruned_spurs > 0 {
         result.solution = original_solution;
         pruned_spurs = 0;
-        split = lint_summary(&rp, &result.solution, &result.failed, &plane_nets);
+        final_violations = lint(&rp, &result.solution);
+        split = lint_summary_from_violations(&final_violations, &result.failed, &plane_nets);
     }
     if split.real > 0 {
         return Err(format!(
@@ -343,13 +366,19 @@ fn write_board_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         .map_err(|error| error.error)
 }
 
-fn make_route_honest(
+fn make_route_honest_with_report(
     rp: &RouteProblem,
     result: &mut RouteResult,
     plane_nets: &BTreeSet<String>,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<DrcViolation>) {
     let mut dropped = Vec::new();
-    for net in drop_unconnected_non_plane_copper(rp, &mut result.solution, plane_nets) {
+    let mut violations = lint(rp, &result.solution);
+    let disconnected = disconnected_non_plane_nets(&violations, plane_nets);
+    let had_disconnected = !disconnected.is_empty();
+    if had_disconnected {
+        drop_solution_nets(&mut result.solution, &disconnected);
+    }
+    for net in disconnected {
         append_failed(
             result,
             &net,
@@ -357,7 +386,10 @@ fn make_route_honest(
         );
         dropped.push(net);
     }
-    let violating: BTreeSet<String> = lint(rp, &result.solution)
+    if had_disconnected {
+        violations = lint(rp, &result.solution);
+    }
+    let violating: BTreeSet<String> = violations
         .iter()
         .flat_map(geometry_violation_nets)
         .collect();
@@ -378,8 +410,14 @@ fn make_route_honest(
             );
             dropped.push(net);
         }
+        violations = lint(rp, &result.solution);
     }
-    for net in drop_unconnected_non_plane_copper(rp, &mut result.solution, plane_nets) {
+    let disconnected_after_geometry = disconnected_non_plane_nets(&violations, plane_nets);
+    let had_disconnected_after_geometry = !disconnected_after_geometry.is_empty();
+    if had_disconnected_after_geometry {
+        drop_solution_nets(&mut result.solution, &disconnected_after_geometry);
+    }
+    for net in disconnected_after_geometry {
         append_failed(
             result,
             &net,
@@ -387,45 +425,51 @@ fn make_route_honest(
         );
         dropped.push(net);
     }
+    if had_disconnected_after_geometry {
+        violations = lint(rp, &result.solution);
+    }
     dropped.sort();
     dropped.dedup();
-    dropped
+    (dropped, violations)
 }
 
-fn drop_unconnected_non_plane_copper(
+#[cfg(test)]
+fn make_route_honest(
     rp: &RouteProblem,
-    solution: &mut RouteSolution,
+    result: &mut RouteResult,
     plane_nets: &BTreeSet<String>,
 ) -> Vec<String> {
-    if plane_nets.is_empty() {
-        return drop_unconnected_copper(rp, solution);
+    make_route_honest_with_report(rp, result, plane_nets).0
+}
+
+fn disconnected_non_plane_nets(
+    violations: &[DrcViolation],
+    plane_nets: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut disconnected = BTreeSet::new();
+    for violation in violations {
+        match violation {
+            DrcViolation::Connectivity {
+                violation: ConnViolation::Unconnected { connection, .. },
+            } if !plane_nets.contains(connection) => {
+                disconnected.insert(connection.clone());
+            }
+            DrcViolation::Connectivity {
+                violation: ConnViolation::CrossNetMerge { a, b },
+            } if !plane_nets.contains(a) && !plane_nets.contains(b) => {
+                disconnected.extend([a.clone(), b.clone()]);
+            }
+            _ => {}
+        }
     }
-    let mut check_problem = rp.clone();
-    check_problem
-        .connections
-        .retain(|connection| !plane_nets.contains(&connection.name));
-    let plane_traces: Vec<_> = solution
-        .traces
-        .iter()
-        .filter(|trace| plane_nets.contains(&trace.connection))
-        .cloned()
-        .collect();
-    let plane_vias: Vec<_> = solution
-        .vias
-        .iter()
-        .filter(|via| plane_nets.contains(&via.connection))
-        .cloned()
-        .collect();
+    disconnected
+}
+
+fn drop_solution_nets(solution: &mut RouteSolution, nets: &BTreeSet<String>) {
     solution
         .traces
-        .retain(|trace| !plane_nets.contains(&trace.connection));
-    solution
-        .vias
-        .retain(|via| !plane_nets.contains(&via.connection));
-    let dropped = drop_unconnected_copper(&check_problem, solution);
-    solution.traces.extend(plane_traces);
-    solution.vias.extend(plane_vias);
-    dropped
+        .retain(|trace| !nets.contains(&trace.connection));
+    solution.vias.retain(|via| !nets.contains(&via.connection));
 }
 
 fn failed_connections(result: &RouteResult) -> BTreeSet<String> {
@@ -568,6 +612,7 @@ struct RouteRun {
     result: RouteResult,
     attempts: Vec<RouteEngineAttempt>,
     global: Option<GlobalRouteResult>,
+    postroute_cleaned: bool,
 }
 
 fn route_with_engine(rp: &RouteProblem, engine: PcbRouterEngine) -> RouteRun {
@@ -578,6 +623,7 @@ fn route_with_engine(rp: &RouteProblem, engine: PcbRouterEngine) -> RouteRun {
                 result: run.result,
                 attempts: run.attempts,
                 global: run.global,
+                postroute_cleaned: true,
             }
         }
         PcbRouterEngine::Astar => {
@@ -587,6 +633,7 @@ fn route_with_engine(rp: &RouteProblem, engine: PcbRouterEngine) -> RouteRun {
                 attempts: vec![route_engine_attempt(rp, &result)],
                 result,
                 global: None,
+                postroute_cleaned: true,
             }
         }
         PcbRouterEngine::Mesh => {
@@ -595,6 +642,7 @@ fn route_with_engine(rp: &RouteProblem, engine: PcbRouterEngine) -> RouteRun {
                 result: run.result,
                 attempts: run.attempts,
                 global: run.global,
+                postroute_cleaned: true,
             }
         }
         PcbRouterEngine::Sequential => {
@@ -603,6 +651,7 @@ fn route_with_engine(rp: &RouteProblem, engine: PcbRouterEngine) -> RouteRun {
                 result: run.result,
                 attempts: run.attempts,
                 global: run.global,
+                postroute_cleaned: false,
             }
         }
     }
