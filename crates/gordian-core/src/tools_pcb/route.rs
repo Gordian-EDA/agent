@@ -978,6 +978,14 @@ pub fn apply_direct_rescue_fallback(rp: &RouteProblem, result: &mut RouteResult)
     if applied.is_empty() {
         return false;
     }
+    // Geometry was checked incrementally against every foreign board item.
+    // Prove the intended topology with one small connectivity problem per
+    // rescued net instead of rebuilding the whole-board O(n²) connectivity
+    // graph. The route pipeline still runs its unchanged full-board oracle
+    // before writeback; this gate keeps rescue itself atomic and connected.
+    if !direct_rescued_connections_are_clean(rp, &rescue_solution, &applied) {
+        return false;
+    }
     result.solution = rescue_solution;
     result.failed.retain(|f| !applied.contains(&f.connection));
     if result.engine != "direct-rescue" {
@@ -997,7 +1005,7 @@ fn direct_two_pin_candidate(
         for path in direct_candidate_paths(rp, solution, &conn.name, &layer, a, b) {
             let mut candidate = direct_candidate_solution(rp, solution, conn, layer.clone(), path);
             simplify_candidate_paths(&mut candidate);
-            if direct_candidate_is_clean(rp, &candidate, &conn.name) {
+            if direct_candidate_is_geometry_clean(rp, &candidate, &conn.name) {
                 return Some(candidate);
             }
         }
@@ -1081,7 +1089,7 @@ fn direct_multi_pin_candidate(
             in_tree[joined] = true;
             candidate = next_candidate;
         }
-        if ok && direct_candidate_is_clean(rp, &candidate, &conn.name) {
+        if ok && direct_candidate_is_geometry_clean(rp, &candidate, &conn.name) {
             return Some(candidate);
         }
     }
@@ -1397,18 +1405,215 @@ fn direct_candidate_is_clean(
     true
 }
 
+fn direct_rescued_connections_are_clean(
+    rp: &RouteProblem,
+    solution: &RouteSolution,
+    rescued: &BTreeSet<String>,
+) -> bool {
+    for connection in rescued {
+        let mut net_problem = rp.clone();
+        net_problem
+            .connections
+            .retain(|candidate| candidate.name == *connection);
+        net_problem.obstacles.retain(|obstacle| {
+            obstacle
+                .connected_to
+                .iter()
+                .any(|owner| owner == connection)
+        });
+        let net_solution = RouteSolution {
+            traces: solution
+                .traces
+                .iter()
+                .filter(|trace| trace.connection == *connection)
+                .cloned()
+                .collect(),
+            vias: solution
+                .vias
+                .iter()
+                .filter(|via| via.connection == *connection)
+                .cloned()
+                .collect(),
+        };
+        if !drc_lint::connectivity::check(&net_problem, &net_solution).is_empty() {
+            return false;
+        }
+    }
+    true
+}
+
 fn direct_candidate_is_geometry_clean(
     rp: &RouteProblem,
     solution: &RouteSolution,
     connection: &str,
 ) -> bool {
-    for violation in lint(rp, solution) {
-        match violation {
-            DrcViolation::Connectivity {
-                violation: ConnViolation::CrossNetMerge { ref a, ref b },
-            } if a == connection || b == connection => return false,
-            DrcViolation::Connectivity { .. } => {}
-            _ => return false,
+    // Rescue starts after failed-net copper has been removed, so every item
+    // owned by `connection` is candidate copper and every differently-owned
+    // item is established board copper. Use the exact segment/rectangle/disc
+    // distance primitives here instead of the full DRC suite: connectivity is
+    // quadratic in all board elements and adds no information while exploring
+    // an incomplete candidate. `direct_candidate_is_clean` remains the final
+    // authority before a complete rescue is accepted.
+    let target_traces = solution
+        .traces
+        .iter()
+        .filter(|trace| trace.connection == connection)
+        .collect::<Vec<_>>();
+    let target_vias = solution
+        .vias
+        .iter()
+        .filter(|via| via.connection == connection)
+        .collect::<Vec<_>>();
+
+    for trace in &target_traces {
+        if trace.width + geom::EPS < rp.min_trace_width
+            || trace.layer.index(rp.layer_count).is_none()
+        {
+            return false;
+        }
+        let half_width = trace.width / 2.0;
+        for points in trace.path.windows(2) {
+            let segment = geom::Segment::new(points[0], points[1]);
+            if rp.bounds.disc_overshoot(points[0], half_width) > geom::EPS
+                || rp.bounds.disc_overshoot(points[1], half_width) > geom::EPS
+                || rp.outline.as_ref().is_some_and(|outline| {
+                    outline.segment_dist_to_edge(segment) + geom::EPS < 0.5 + half_width
+                })
+            {
+                return false;
+            }
+            for obstacle in &rp.obstacles {
+                if obstacle
+                    .connected_to
+                    .iter()
+                    .any(|owner| owner == connection)
+                    || !obstacle
+                        .layers
+                        .iter()
+                        .any(|layer| same_layer_ref(layer, &trace.layer, rp.layer_count))
+                {
+                    continue;
+                }
+                let rect = geom::Rect::from_center_half(
+                    obstacle.center,
+                    (obstacle.width / 2.0, obstacle.height / 2.0),
+                );
+                if segment.dist_to_rect(&rect) - half_width + geom::EPS < rp.clearance {
+                    return false;
+                }
+            }
+            // Connectivity also treats route terminals as zero-size copper
+            // anchors. Real boards normally have a matching pad obstacle, but
+            // include the anchor explicitly so reduced final connectivity can
+            // never hide a cross-net touch on synthetic/partial problems.
+            for other in rp
+                .connections
+                .iter()
+                .filter(|other| other.name != connection)
+            {
+                for point in &other.points_to_connect {
+                    if same_layer_ref(&point.layer, &trace.layer, rp.layer_count)
+                        && segment.dist_to_point(point.point()) - half_width + geom::EPS
+                            < rp.clearance
+                    {
+                        return false;
+                    }
+                }
+            }
+            for other in solution
+                .traces
+                .iter()
+                .filter(|other| other.connection != connection)
+            {
+                if !same_layer_ref(&other.layer, &trace.layer, rp.layer_count) {
+                    continue;
+                }
+                for other_points in other.path.windows(2) {
+                    let other_segment = geom::Segment::new(other_points[0], other_points[1]);
+                    if segment.dist_to_segment(other_segment) - half_width - other.width / 2.0
+                        + geom::EPS
+                        < rp.clearance
+                    {
+                        return false;
+                    }
+                }
+            }
+            for via in solution
+                .vias
+                .iter()
+                .filter(|via| via.connection != connection)
+            {
+                if segment.dist_to_point(via.at) - half_width - via.diameter / 2.0 + geom::EPS
+                    < rp.clearance
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    for via in target_vias {
+        let radius = via.diameter / 2.0;
+        let via_segment = geom::Segment::new(via.at, via.at);
+        if via.diameter + geom::EPS < rp.via_diameter
+            || rp.bounds.disc_overshoot(via.at, radius) > geom::EPS
+            || rp.outline.as_ref().is_some_and(|outline| {
+                outline.segment_dist_to_edge(via_segment) + geom::EPS < 0.5 + radius
+            })
+        {
+            return false;
+        }
+        for obstacle in &rp.obstacles {
+            if obstacle
+                .connected_to
+                .iter()
+                .any(|owner| owner == connection)
+            {
+                continue;
+            }
+            let rect = geom::Rect::from_center_half(
+                obstacle.center,
+                (obstacle.width / 2.0, obstacle.height / 2.0),
+            );
+            if rect.dist_to_point(via.at) - radius + geom::EPS < rp.clearance {
+                return false;
+            }
+        }
+        for other in rp
+            .connections
+            .iter()
+            .filter(|other| other.name != connection)
+        {
+            if other
+                .points_to_connect
+                .iter()
+                .any(|point| via.at.dist(point.point()) - radius + geom::EPS < rp.clearance)
+            {
+                return false;
+            }
+        }
+        for trace in solution
+            .traces
+            .iter()
+            .filter(|trace| trace.connection != connection)
+        {
+            for points in trace.path.windows(2) {
+                let segment = geom::Segment::new(points[0], points[1]);
+                if segment.dist_to_point(via.at) - trace.width / 2.0 - radius + geom::EPS
+                    < rp.clearance
+                {
+                    return false;
+                }
+            }
+        }
+        for other in solution
+            .vias
+            .iter()
+            .filter(|other| other.connection != connection)
+        {
+            if via.at.dist(other.at) - radius - other.diameter / 2.0 + geom::EPS < rp.clearance {
+                return false;
+            }
         }
     }
     true
@@ -2189,6 +2394,10 @@ mod escape_bottleneck_tests {
         assert!(apply_direct_rescue_fallback(&problem, &mut result));
         assert!(result.failed.is_empty());
         assert_eq!(result.solution.traces.len(), MAX_DIRECT_RESCUE_FAILED_NETS);
+        assert!(
+            lint(&problem, &result.solution).is_empty(),
+            "every committed rescue must still pass the complete geometry and connectivity oracle"
+        );
     }
 
     #[test]
@@ -2200,6 +2409,50 @@ mod escape_bottleneck_tests {
         assert_eq!(
             serde_json::to_vec(&result).expect("serialize result after skipped rescue"),
             before
+        );
+    }
+
+    #[test]
+    fn direct_rescue_geometry_screen_rejects_out_of_bounds_atomically() {
+        let (mut problem, mut result) = direct_rescue_limit_fixture(1);
+        problem.bounds.min_x = 1.0;
+        problem.bounds.max_x = 5.0;
+        let before = serde_json::to_vec(&result).expect("serialize fixture result");
+
+        // The centreline is unobstructed, but its half-width leaves the
+        // deliberately tight bounds. Geometry rejection must remain atomic.
+        assert!(!apply_direct_rescue_fallback(&problem, &mut result));
+        assert_eq!(
+            serde_json::to_vec(&result).expect("serialize rejected rescue result"),
+            before,
+            "a failed final oracle must not partially commit candidate copper"
+        );
+    }
+
+    #[test]
+    fn direct_rescue_geometry_screen_rejects_cross_net_terminal_contact() {
+        let (mut problem, _) = direct_rescue_limit_fixture(1);
+        problem.connections.push(pcb_model::Connection {
+            name: "OTHER".to_owned(),
+            points_to_connect: vec![pcb_model::RoutePoint {
+                x: 3.0,
+                y: 1.0,
+                layer: LayerRef::top(),
+            }],
+        });
+        let candidate = RouteSolution {
+            traces: vec![Trace {
+                connection: "SIG0".to_owned(),
+                layer: LayerRef::top(),
+                width: problem.min_trace_width,
+                path: vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 5.0, y: 1.0 }],
+            }],
+            vias: Vec::new(),
+        };
+
+        assert!(
+            !direct_candidate_is_geometry_clean(&problem, &candidate, "SIG0"),
+            "candidate selection must reject contact with foreign terminal copper before net-local connectivity validation"
         );
     }
 
@@ -2579,6 +2832,20 @@ mod escape_bottleneck_tests {
             failed: failed(&["SIG"]),
             engine: "naive".to_string(),
         };
+
+        let blocked_candidate = RouteSolution {
+            traces: vec![Trace {
+                connection: "SIG".to_owned(),
+                layer: LayerRef::top(),
+                width: problem.min_trace_width,
+                path: vec![Point2 { x: 0.0, y: 0.0 }, Point2 { x: 4.0, y: 0.0 }],
+            }],
+            vias: Vec::new(),
+        };
+        assert!(
+            !direct_candidate_is_geometry_clean(&problem, &blocked_candidate, "SIG"),
+            "the exploration oracle must reject trace-obstacle clearance faults before full connectivity lint"
+        );
 
         assert!(!apply_direct_rescue_fallback(&problem, &mut result));
         assert_eq!(result.failed.len(), 1);
