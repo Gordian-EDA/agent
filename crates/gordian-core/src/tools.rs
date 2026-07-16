@@ -516,8 +516,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "route_board".into(),
-                description: "Auto-route board; return metrics, diagnostic failure records, and exact unique failed-connection counts."
-                    .into(),
+                description: "Auto-route board; reports exact failed connections.".into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
