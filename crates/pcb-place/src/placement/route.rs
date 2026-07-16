@@ -475,7 +475,11 @@ impl Placer for FanoutPlacer {
             }
             return place_best(&base, hints);
         }
-        place_best(&p, hints)
+        let result = place_best(&p, hints);
+        if std::env::var("FANOUT_DEBUG").is_ok() && !result.legal {
+            debug_overlaps(&p, &result);
+        }
+        result
     }
 }
 
