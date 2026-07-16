@@ -147,7 +147,7 @@ pub(crate) fn intent_contract_checks(intent: &str, design: &circuit_lang::Design
         }
     }
 
-    if requires_unconditionally(&request, "status") {
+    if requires_status_signal(&request) {
         let has_status_net = design.nets.keys().any(|net| {
             let net = net.to_ascii_lowercase();
             net.contains("status") || net.contains("fault") || net.contains("error") || net == "err"
@@ -343,10 +343,15 @@ pub(crate) fn intent_contract_checks(intent: &str, design: &circuit_lang::Design
     defects
 }
 
-fn requires_unconditionally(request: &str, term: &str) -> bool {
+fn requires_status_signal(request: &str) -> bool {
     request
         .split(['.', ';', '\n'])
-        .filter(|clause| clause.contains(term))
+        .filter(|clause| clause.contains("status"))
+        .filter(|clause| {
+            ["status signal", "status output", "status header", "status pin"]
+                .iter()
+                .any(|term| clause.contains(term))
+        })
         .any(|clause| {
             ![
                 "if supported",
@@ -1402,6 +1407,14 @@ blocks:
         );
 
         assert!(defects.is_empty(), "{}", defects.join("\n"));
+        assert!(
+            intent_contract_checks(
+                "Add a green status LED with a 2.2k series resistor per channel",
+                &design,
+            )
+            .is_empty(),
+            "an indicator LED is not a separate status interface contract"
+        );
         assert!(
             intent_contract_checks("Expose a status output", &design)
                 .join("\n")
