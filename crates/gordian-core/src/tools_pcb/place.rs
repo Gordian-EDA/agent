@@ -628,10 +628,8 @@ fn same_net(a: &str, b: &str) -> bool {
 }
 
 fn is_ground_net(net: &str) -> bool {
-    matches!(
-        net.trim_start_matches('/').to_ascii_uppercase().as_str(),
-        "GND" | "AGND" | "DGND" | "PGND"
-    )
+    let net = net.trim_start_matches('/').to_ascii_uppercase();
+    matches!(net.as_str(), "GND" | "AGND" | "DGND" | "PGND") || net.ends_with("_GND")
 }
 
 fn is_817(part: &str) -> bool {
@@ -1865,6 +1863,31 @@ mod tests {
             assert!(add_817_array_hints(&design, &board, &problem, &mut hints).is_none());
             assert!(hints.groups.is_empty());
         }
+    }
+
+    #[test]
+    fn opto817_plan_accepts_explicit_logic_ground_domain_names() {
+        let (mut design, mut board, problem) = opto817_fixture(8, false);
+        for component in design.blocks["channels"].components.values_mut() {
+            component
+                .pins
+                .insert("3".into(), circuit_lang::model::PinTarget::Net("LOGIC_GND".into()));
+        }
+        for imported in board
+            .imported
+            .parts
+            .iter_mut()
+            .filter(|part| part.reference.starts_with('U'))
+        {
+            imported
+                .pads
+                .iter_mut()
+                .filter(|pad| pad.number == "3")
+                .for_each(|pad| pad.net = Some("LOGIC_GND".into()));
+        }
+        let mut hints = PlacementHints::default();
+
+        assert!(add_817_array_hints(&design, &board, &problem, &mut hints).is_some());
     }
 
     #[test]
