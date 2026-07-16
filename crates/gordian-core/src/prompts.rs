@@ -22,7 +22,7 @@ entire request. Never copy documentation as the component list:
       components:
         <REFDES>: { part: <REAL_KICAD_LIB:SYMBOL>, pins: { <PIN>: <NET> } }
 
-Component keys are plain refdes matching `[A-Z]+[0-9]+` (`R1`, not `C_VCAP1`). `part:` is a real KiCAD `Lib:Name`. R/C/L/D/LED aliases are built in; search other parts with `search_symbols` and reuse hits. For ICs, use `get_symbol_info` to verify ratings and inspect ambiguous/power pins.
+Component keys match `[A-Z]+[0-9]+` (`R1`, not `C_VCAP1`). `part:` is a real KiCAD `Lib:Name`; R/C/L/D/LED aliases are built in. Use `search_symbols` for other parts. Never meet a numeric minimum with dummy/repeated filler; every part must implement the requested topology.
 `pins:` maps pin name or quoted pin number to a net; use numbers when names repeat. Unlisted pins become no-connect except power-INPUT pins, which must be wired. Net names should be UPPER_SNAKE.
 
 Useful sugar:
@@ -101,6 +101,7 @@ mod tests {
         assert!(!p.contains("name: syntax_fragment_only"));
         assert!(p.contains("incomplete/missing topology"));
         assert!(p.contains("`edit_design` with COMPLETE YAML"));
+        assert!(p.contains("Never meet a numeric minimum with dummy"));
     }
 
     #[test]
