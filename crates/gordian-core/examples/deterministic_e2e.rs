@@ -110,6 +110,8 @@ fn main() -> anyhow::Result<()> {
         &ctx,
         "place_board",
         json!({
+            // Pin only mechanical/interface constraints and the two functional
+            // anchors. The placer needs freedom to optimize the other 33 parts.
             "groups": [
                 {
                     "name": "mount_nw",
@@ -142,31 +144,6 @@ fn main() -> anyhow::Result<()> {
                     "grid": true
                 },
                 {
-                    "name": "power_bulk",
-                    "members": ["C1"],
-                    "region": {"min_x": 51.9, "min_y": 15.9, "max_x": 52.1, "max_y": 16.1},
-                    "grid": true
-                },
-                {
-                    "name": "power_bulk_neg",
-                    "members": ["C7"],
-                    "region": {"min_x": 53.325, "min_y": 19.9, "max_x": 53.525, "max_y": 20.1},
-                    "grid": true
-                },
-                {
-                    "name": "u1_decoupling_pos",
-                    "members": ["C2"],
-                    "region": {"min_x": 44.35, "min_y": 28.9, "max_x": 44.55, "max_y": 29.1},
-                    "grid": true,
-                    "rotation": 180
-                },
-                {
-                    "name": "u1_decoupling_neg",
-                    "members": ["C6"],
-                    "region": {"min_x": 55.45, "min_y": 32.9, "max_x": 55.65, "max_y": 33.1},
-                    "grid": true
-                },
-                {
                     "name": "input",
                     "members": ["J2"],
                     "region": {"min_x": 1.6, "min_y": 28.0, "max_x": 1.9, "max_y": 35.0},
@@ -185,75 +162,9 @@ fn main() -> anyhow::Result<()> {
                     "grid": true
                 },
                 {
-                    "name": "preamp_bulk_pos",
-                    "members": ["C8"],
-                    "region": {"min_x": 11.9, "min_y": 23.9, "max_x": 12.1, "max_y": 24.1},
-                    "grid": true
-                },
-                {
-                    "name": "preamp_bulk_neg",
-                    "members": ["C9"],
-                    "region": {"min_x": 11.9, "min_y": 37.9, "max_x": 12.1, "max_y": 38.1},
-                    "grid": true
-                },
-                {
-                    "name": "u2_decoupling_pos",
-                    "members": ["C10"],
-                    "region": {"min_x": 20.45, "min_y": 30.3, "max_x": 20.65, "max_y": 30.5},
-                    "grid": true
-                },
-                {
-                    "name": "u2_decoupling_neg",
-                    "members": ["C11"],
-                    "region": {"min_x": 12.4, "min_y": 34.7, "max_x": 12.6, "max_y": 34.9},
-                    "grid": true
-                },
-                {
-                    "name": "preamp_input",
-                    "members": ["R1", "R2"],
-                    "region": {"min_x": 7.0, "min_y": 27.0, "max_x": 11.0, "max_y": 36.0},
-                    "grid": true
-                },
-                {
-                    "name": "preamp_feedback",
-                    "members": ["R3", "C3", "C4", "C5"],
-                    "region": {"min_x": 19.0, "min_y": 25.0, "max_x": 26.0, "max_y": 37.0},
-                    "grid": true
-                },
-                {
                     "name": "filter_anchor",
                     "members": ["U1"],
                     "region": {"min_x": 49.9, "min_y": 30.9, "max_x": 50.1, "max_y": 31.1},
-                    "grid": true
-                },
-                {
-                    "name": "filter_network_west",
-                    "members": ["C12", "C13", "R4", "R5", "R6", "R7"],
-                    "region": {"min_x": 39.0, "min_y": 23.0, "max_x": 46.0, "max_y": 39.0},
-                    "grid": true
-                },
-                {
-                    "name": "filter_network_east",
-                    "members": ["R8", "R11", "C15", "C16", "R12", "R13"],
-                    "region": {"min_x": 54.0, "min_y": 23.0, "max_x": 61.0, "max_y": 39.0},
-                    "grid": true
-                },
-                {
-                    "name": "offset_passives",
-                    "members": ["C14", "R9", "R10"],
-                    "region": {"min_x": 58.0, "min_y": 40.0, "max_x": 62.0, "max_y": 48.0},
-                    "grid": true
-                },
-                {
-                    "name": "offset_pot",
-                    "members": ["RV1"],
-                    "region": {"min_x": 65.9, "min_y": 45.9, "max_x": 66.1, "max_y": 46.1},
-                    "grid": true
-                },
-                {
-                    "name": "postamp",
-                    "members": ["R14", "RV2", "R15"],
-                    "region": {"min_x": 42.0, "min_y": 44.0, "max_x": 55.0, "max_y": 52.0},
                     "grid": true
                 }
             ],
@@ -270,6 +181,15 @@ fn main() -> anyhow::Result<()> {
         .is_some_and(|failed| !failed.is_empty())
     {
         bail!("routing left failed nets: {routing}");
+    }
+    let vias = routing["metrics"]["vias"].as_u64().unwrap_or(u64::MAX);
+    let wirelength = routing["metrics"]["wirelength"]
+        .as_f64()
+        .unwrap_or(f64::INFINITY);
+    if vias >= 43 || wirelength >= 693.646 {
+        bail!(
+            "routing quality regressed beyond the former all-locked placement baseline: {routing}"
+        );
     }
     let checked = run_step(&ctx, "check_board", json!({}))?;
     if checked["drc_clean"] != Value::Bool(true)
