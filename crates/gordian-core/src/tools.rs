@@ -591,12 +591,12 @@ pub(crate) fn repair_components_tool() -> Tool {
     });
     Tool::new("repair_components")
         .with_description(
-            "Repair localized defects in one substantive durable-draft block. NOT for an incomplete/missing circuit; use edit_design with complete YAML for that. Prefer update for existing refs. Components is only a direct refdes map for additions/replacements.",
+            "Repair localized defects across a substantive durable draft in one batch. Existing refs are routed to their current blocks automatically. NOT for an incomplete/missing circuit; use edit_design with complete YAML for that. Prefer update for existing refs. Components is only a direct refdes map for additions/replacements.",
         )
         .with_schema(json!({
             "type": "object",
             "properties": {
-                "block": { "type": "string", "description": "Target block; defaults to main." },
+                "block": { "type": "string", "description": "Destination block for new refs; defaults to main. Existing refs are repaired in their current blocks, so one update/remove/components batch may span blocks." },
                 "components": {
                     "description": "DIRECT refdes-to-component map for additions/replacements; no version/blocks/main/components wrapper. `part` is required. Existing metadata is preserved when omitted. Example: {\"D1\":{\"part\":\"Device:D\",\"pins\":{\"1\":\"VIN\",\"2\":\"VOUT\"}}}.",
                     "type": component_map_schema["type"].clone(),
@@ -2362,7 +2362,7 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         })
         .collect::<std::collections::HashMap<_, _>>();
     for reference in &remove {
-        let Some((existing_block, origin)) = existing.get(reference) else {
+        let Some((_existing_block, origin)) = existing.get(reference) else {
             return Ok(json!({
                 "error": format!("remove refdes {reference} does not exist"),
                 "code": "unknown_repair_remove",
@@ -2372,16 +2372,6 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "current_design_state": design_state_summary(prior_design),
             }));
         };
-        if existing_block != block_name {
-            return Ok(json!({
-                "error": format!("{reference} belongs to block {existing_block}, not {block_name}"),
-                "code": "component_block_mismatch",
-                "draft_written": false,
-                "draft_changed": false,
-                "mode": "component_repair",
-                "current_design_state": design_state_summary(prior_design),
-            }));
-        }
         if !matches!(origin, Origin::Authored) {
             return Ok(json!({
                 "error": format!("{reference} is synthesized; remove or replace its authored parent instead"),
@@ -2400,16 +2390,6 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         match existing.get(reference) {
             None => added.push(reference.clone()),
             Some((existing_block, origin)) => {
-                if existing_block != block_name {
-                    return Ok(json!({
-                        "error": format!("{reference} belongs to block {existing_block}; repairs cannot move components across blocks"),
-                        "code": "component_block_mismatch",
-                        "draft_written": false,
-                        "draft_changed": false,
-                        "mode": "component_repair",
-                        "current_design_state": design_state_summary(prior_design),
-                    }));
-                }
                 if !matches!(origin, Origin::Authored) {
                     return Ok(json!({
                         "error": format!("{reference} is synthesized; replace its authored parent instead"),
@@ -2448,16 +2428,6 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "current_design_state": design_state_summary(prior_design),
             }));
         };
-        if existing_block != block_name {
-            return Ok(json!({
-                "error": format!("{reference} belongs to block {existing_block}, not {block_name}"),
-                "code": "component_block_mismatch",
-                "draft_written": false,
-                "draft_changed": false,
-                "mode": "component_repair",
-                "current_design_state": design_state_summary(prior_design),
-            }));
-        }
         if !matches!(origin, Origin::Authored) {
             return Ok(json!({
                 "error": format!("{reference} is synthesized; update its authored parent instead"),
@@ -2495,11 +2465,15 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 
     let mut candidate = prior_design.clone();
-    let target = candidate
-        .blocks
-        .entry(block_name.to_string())
-        .or_insert_with(Block::default);
     for reference in remove.iter().chain(replaced.iter()) {
+        let owning_block = &existing
+            .get(reference)
+            .expect("removed and replaced refs were preflighted")
+            .0;
+        let target = candidate
+            .blocks
+            .get_mut(owning_block)
+            .expect("owning block exists in candidate");
         target.components.shift_remove(reference);
         target.components.retain(|_, component| {
             !matches!(
@@ -2508,23 +2482,36 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             )
         });
     }
-    for row in &mut target.layout {
-        for cell in row {
-            if cell
-                .as_ref()
-                .is_some_and(|reference| remove_set.contains(reference))
-            {
-                *cell = None;
+    for reference in &remove {
+        let owning_block = &existing
+            .get(reference)
+            .expect("removed refs were preflighted")
+            .0;
+        if let Some(target) = candidate.blocks.get_mut(owning_block) {
+            for row in &mut target.layout {
+                for cell in row {
+                    if cell.as_ref() == Some(reference) {
+                        *cell = None;
+                    }
+                }
             }
         }
     }
     let mut synth_index = 0usize;
     for (reference, mut component) in patch_block.components {
+        let parent_reference = match &component.origin {
+            Origin::Authored => reference.as_str(),
+            Origin::Synthesized { parent, .. } => parent.as_str(),
+        };
+        let destination_block = existing
+            .get(parent_reference)
+            .map(|(block, _)| block.as_str())
+            .unwrap_or(block_name);
         match &component.origin {
             Origin::Authored => {
                 if let Some(previous) = prior_design
                     .blocks
-                    .get(block_name)
+                    .get(destination_block)
                     .and_then(|block| block.components.get(&reference))
                 {
                     let fields = upsert[&reference]
@@ -2552,9 +2539,17 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                         component.units.clone_from(&previous.units);
                     }
                 }
+                let target = candidate
+                    .blocks
+                    .entry(destination_block.to_string())
+                    .or_insert_with(Block::default);
                 target.components.insert(reference, component);
             }
             Origin::Synthesized { .. } => {
+                let target = candidate
+                    .blocks
+                    .entry(destination_block.to_string())
+                    .or_insert_with(Block::default);
                 let key = loop {
                     let key = format!("__repair_synth_{synth_index}");
                     synth_index += 1;
@@ -2567,7 +2562,14 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     }
     for (reference, fields) in &update {
-        let component = target
+        let owning_block = &existing
+            .get(reference)
+            .expect("update refs were preflighted")
+            .0;
+        let component = candidate
+            .blocks
+            .get_mut(owning_block)
+            .expect("owning block exists in candidate")
             .components
             .get_mut(reference)
             .expect("update refs were preflighted in the target block");
@@ -2954,7 +2956,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        common_default_footprint, compile_report, create_design, edit_design,
+        common_default_footprint, compile, compile_report, create_design, edit_design,
         invalid_compile_quality_regressed, normalize_dense_default_footprints,
         normalize_invalid_power_references, normalize_misplaced_footprint_parts,
         repair_components, repair_components_tool, require_search_query,
@@ -3318,6 +3320,50 @@ blocks:
     }
 
     #[test]
+    fn repair_routes_existing_refs_across_blocks_in_one_batch() {
+        let footprints = tempfile::tempdir().unwrap();
+        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
+            .expect("test runtime");
+        let prior = r#"version: 1
+blocks:
+  bank_1:
+    components:
+      R1: {part: Device:R, value: old-1, between: [A, B]}
+  bank_2:
+    components:
+      R2: {part: Device:R, value: old-2, between: [A, B]}
+"#;
+        runtime.workspace().write_draft(prior, None).unwrap();
+
+        // A stale destination block must not reject or misroute existing refs.
+        let report = repair_components(
+            json!({
+                "block": "main",
+                "update": {
+                    "R1": {"value": "new-1"},
+                    "R2": {"value": "new-2"}
+                }
+            }),
+            &runtime,
+        )
+        .unwrap();
+
+        assert_eq!(report["draft_written"], true, "{report}");
+        assert_eq!(report["updated"], json!(["R1", "R2"]), "{report}");
+        let repaired = runtime.workspace().read_draft().unwrap().unwrap();
+        let design = compile(&repaired, runtime.provider()).design.unwrap();
+        assert_eq!(
+            design.blocks["bank_1"].components["R1"].value.as_deref(),
+            Some("new-1")
+        );
+        assert_eq!(
+            design.blocks["bank_2"].components["R2"].value.as_deref(),
+            Some("new-2")
+        );
+        assert!(!design.blocks.contains_key("main"));
+    }
+
+    #[test]
     fn non_improving_or_regressing_invalid_repair_preserves_draft() {
         let footprints = tempfile::tempdir().unwrap();
         let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
@@ -3477,6 +3523,12 @@ blocks:
                 .as_str()
                 .unwrap()
                 .contains("Use this—not components")
+        );
+        assert!(
+            schema["properties"]["block"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("one update/remove/components batch may span blocks")
         );
     }
 
