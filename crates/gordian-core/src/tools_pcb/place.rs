@@ -1095,7 +1095,8 @@ fn add_817_array_hints(
         })
         .map(|part| part.courtyard_h)
         .fold(0.0, f64::max)
-        + margin;
+        * 2.0
+        + margin * 2.0;
     let channel_logic_strip = Rect::new(
         bottom.min_x,
         bottom.min_y,
