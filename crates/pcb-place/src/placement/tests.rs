@@ -14,7 +14,7 @@ use super::model::{
 use super::pairs::series_pairs;
 use super::route::{
     EdgeLockedPlacer, GridAstarRanker, PlaceOpts, better_place_result,
-    edge_seek_position_candidates, net_centroid_position_candidates,
+    edge_seek_position_candidates, fanout_fast_path_accepts, net_centroid_position_candidates,
     obstructing_part_position_candidates, obstructing_part_position_candidates_from_edges, place,
     place_board, place_variant, placement_ranker_uses_bounded_pass,
     placement_ranker_uses_layout_only, polish_positions, polish_rotations, polish_swaps,
@@ -3355,6 +3355,27 @@ fn grid_ranker_faulty_proxy_still_skips_large_full_grid_fallback() {
     assert!(
         !should_try_full_grid_ranker_fallback(&large, faulty_orthogonal),
         "faulty fallback expansion should remain bounded for placement-oracle runtime"
+    );
+}
+
+#[test]
+fn fanout_fast_path_requires_bounded_clean_via_free_route_evidence() {
+    let bounded = ranker_gate_problem(20); // 40 terminals: bounded routing still applies.
+    assert!(fanout_fast_path_accepts(&bounded, (0, 0, 0, 0, 1)));
+    assert!(
+        !fanout_fast_path_accepts(&bounded, (1, 0, 1, 0, 1)),
+        "an unrouted fanout must retain the fallback portfolio"
+    );
+    assert!(
+        !fanout_fast_path_accepts(&bounded, (0, 0, 0, 1, 1)),
+        "a via-dependent fanout must retain the fallback portfolio"
+    );
+
+    let layout_only = ranker_gate_problem(25); // 50 terminals: no bounded route proof.
+    assert!(placement_ranker_uses_layout_only(&layout_only));
+    assert!(
+        !fanout_fast_path_accepts(&layout_only, (0, 0, 0, 0, 0)),
+        "the layout-only sentinel must never masquerade as a clean route"
     );
 }
 

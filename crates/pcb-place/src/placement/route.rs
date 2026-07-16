@@ -417,9 +417,29 @@ impl Placer for FanoutPlacer {
             if result.legal {
                 let mut base = problem.clone();
                 apply_grid_hints(&mut base, hints);
+                // A legal fanout that a single strict orthogonal pass routes cleanly
+                // without vias is already a strong result. Return it directly instead
+                // of multiplying routing work across the full 2-5 candidate placement
+                // portfolio. The gate is deliberately unavailable above the ranker's
+                // bounded terminal ceiling: those boards use layout-only ranking, which
+                // must never be mistaken for evidence of a clean route. Explicit grid
+                // hints also keep the portfolio comparison because `base` then encodes
+                // authored placement intent that fanout may not preserve.
+                let result_rank = (base == *problem)
+                    .then(|| bounded_fanout_rank(problem, &result))
+                    .flatten();
+                if result_rank.as_ref().is_some_and(|(_, strong)| *strong) {
+                    if std::env::var("FANOUT_DEBUG").is_ok() {
+                        eprintln!("[fanout] accepted bounded clean via-free fast path");
+                    }
+                    return result;
+                }
+
                 let (fallback, fallback_key) = place_best_with_rank_key(&base, hints);
                 let winner = if base == *problem {
-                    let result_key = place_rank_key(problem, &result);
+                    let result_key = result_rank
+                        .map(|(key, _)| key)
+                        .unwrap_or_else(|| place_rank_key(problem, &result));
                     better_place_result_with_keys(result, result_key, fallback, fallback_key)
                 } else {
                     better_place_result(problem, result, fallback)
@@ -457,6 +477,43 @@ impl Placer for FanoutPlacer {
         }
         place_best(&p, hints)
     }
+}
+
+/// Rank one legal fanout with exactly one strict orthogonal routing pass.
+///
+/// `None` means the problem exceeds the placement ranker's bounded-routing ceiling;
+/// its normal rank would be layout-only and therefore cannot prove route quality.
+fn bounded_fanout_rank(
+    problem: &PlaceProblem,
+    result: &PlaceResult,
+) -> Option<(PlacementRankKey, bool)> {
+    if !result.legal {
+        return None;
+    }
+    let rp = to_route_problem(problem, &result.placements);
+    if placement_ranker_uses_layout_only(&rp) {
+        return None;
+    }
+    let route_key = route_rank_key(&rp, &crate::router::route_orthogonal_single_pass(&rp));
+    let strong = fanout_fast_path_accepts(&rp, route_key);
+    Some((
+        (
+            route_key,
+            0,
+            (result.report.layout_cost * 1000.0) as u64,
+            (result.report.hpwl * 1000.0) as u64,
+        ),
+        strong,
+    ))
+}
+
+/// A fanout is strong enough to bypass the fallback portfolio only when the
+/// bounded pass is real (not layout-only), clean, and via-free.
+pub(crate) fn fanout_fast_path_accepts(
+    problem: &RouteProblem,
+    route_key: (usize, usize, usize, usize, u64),
+) -> bool {
+    !placement_ranker_uses_layout_only(problem) && route_rank_key_clean_via_free(route_key)
 }
 
 fn place_rank_key(problem: &PlaceProblem, result: &PlaceResult) -> PlacementRankKey {
