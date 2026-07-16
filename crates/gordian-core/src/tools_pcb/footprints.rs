@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use kicad_footprint::{FootprintId, SearchQuery};
 
 use crate::AgentRuntime;
-use crate::tools::{compile_report, current_sch_text, require_str};
+use crate::tools::{compile_report, current_sch_text, require_search_query, require_str};
 
 pub fn search_footprints(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Value> {
     if let Some(queries) = input.get("queries") {
@@ -19,7 +19,7 @@ pub fn search_footprints(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Val
         }
         let mut results = Vec::with_capacity(queries.len());
         for item in queries {
-            let query = require_str(item, "query")?;
+            let query = require_search_query(item)?;
             let limit = footprint_search_limit(item, ctx);
             let mut result = search_footprints_one(&query, limit, ctx)?;
             result["query"] = json!(query);
@@ -27,7 +27,7 @@ pub fn search_footprints(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Val
         }
         return Ok(json!({ "results": results }));
     }
-    let query = require_str(&input, "query")?;
+    let query = require_search_query(&input)?;
     search_footprints_one(&query, footprint_search_limit(&input, ctx), ctx)
 }
 

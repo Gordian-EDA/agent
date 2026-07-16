@@ -681,6 +681,14 @@ pub(crate) fn require_str(input: &Value, key: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("missing required string field `{key}`"))
 }
 
+pub(crate) fn require_search_query(input: &Value) -> Result<String> {
+    let query = require_str(input, "query")?;
+    if query.trim().is_empty() {
+        bail!("search query must contain non-whitespace text");
+    }
+    Ok(query)
+}
+
 // ── 1. search_symbols ──────────────────────────────────────────────────────
 
 fn search_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -693,7 +701,7 @@ fn search_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         let mut results = Vec::with_capacity(queries.len());
         for item in queries {
-            let query = require_str(item, "query")?;
+            let query = require_search_query(item)?;
             let limit = search_limit(item, ctx);
             let mut result = search_symbols_one(&query, limit, ctx)?;
             result["query"] = json!(query);
@@ -701,7 +709,7 @@ fn search_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         return Ok(json!({ "results": results }));
     }
-    let query = require_str(&input, "query")?;
+    let query = require_search_query(&input)?;
     search_symbols_one(&query, search_limit(&input, ctx), ctx)
 }
 
@@ -2698,7 +2706,7 @@ mod tests {
     use super::{
         compile_report, create_design, edit_design, invalid_compile_quality_regressed,
         normalize_misplaced_footprint_parts, repair_components, repair_components_tool,
-        symbol_for_misplaced_footprint, tool_defs,
+        require_search_query, symbol_for_misplaced_footprint, tool_defs,
     };
 
     #[test]
@@ -3122,5 +3130,13 @@ blocks:
                 "{name}"
             );
         }
+        for query in ["", "   ", "\t\n"] {
+            let error = require_search_query(&json!({"query": query})).unwrap_err();
+            assert!(error.to_string().contains("non-whitespace"), "{error:#}");
+        }
+        assert_eq!(
+            require_search_query(&json!({"query": "  USB-C  "})).unwrap(),
+            "  USB-C  "
+        );
     }
 }

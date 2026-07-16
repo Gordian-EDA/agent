@@ -7,7 +7,7 @@ use crate::provider::SymbolTable;
 use crate::surface::*;
 use indexmap::IndexMap;
 
-/// Closed alias table — exactly these five.
+/// Closed alias table for terse built-ins plus one common KiCad library slip.
 fn alias(part: &str) -> String {
     match part {
         "R" => "Device:R".into(),
@@ -15,8 +15,35 @@ fn alias(part: &str) -> String {
         "L" => "Device:L".into(),
         "D" => "Device:D".into(),
         "LED" => "Device:LED".into(),
+        // KiCad's pushbutton symbol lives in Switch, not Device. This exact
+        // mistaken library-qualified spelling is common and unambiguous.
+        "Device:SW_Push" => "Switch:SW_Push".into(),
         other => other.into(),
     }
+}
+
+/// Recover the schema-level slip `pins: {positive: ..., negative: ...}` for the
+/// two standard polarized aliases. The net-to-polarity meaning is explicit, so
+/// this does not guess orientation or mask a genuine electrical reversal.
+fn lift_misplaced_polarity_fields(sc: &mut SurfaceComponent) {
+    let part = alias(&sc.part);
+    if !matches!(part.as_str(), "Device:D" | "Device:LED")
+        || sc.between.is_some()
+        || sc.positive.is_some()
+        || sc.negative.is_some()
+        || sc.pins.len() != 2
+    {
+        return;
+    }
+    let Some(positive) = sc.pins.shift_remove("positive") else {
+        return;
+    };
+    let Some(negative) = sc.pins.shift_remove("negative") else {
+        sc.pins.insert("positive".into(), positive);
+        return;
+    };
+    sc.positive = Some(positive);
+    sc.negative = Some(negative);
 }
 
 pub fn desugar(s: &SurfaceDesign, provider: &SymbolTable) -> (Design, Diagnostics) {
@@ -61,6 +88,7 @@ pub fn desugar(s: &SurfaceDesign, provider: &SymbolTable) -> (Design, Diagnostic
                 continue;
             }
             let mut sc = sc.clone();
+            lift_misplaced_polarity_fields(&mut sc);
             apply_two_pin(refdes, &mut sc, provider, &mut diags); // Task 7
             let comp = Component {
                 part: alias(&sc.part),
@@ -889,6 +917,12 @@ blocks:
     }
 
     #[test]
+    fn common_pushbutton_library_slip_is_canonicalized() {
+        assert_eq!(alias("Device:SW_Push"), "Switch:SW_Push");
+        assert_eq!(alias("Device:SW_SPST"), "Device:SW_SPST");
+    }
+
+    #[test]
     fn class_power_marks_net_as_power_rail() {
         let (d, diags) = run("
 version: 1
@@ -1002,6 +1036,64 @@ blocks:
         let d1 = &d.blocks["main"].components["D1"];
         assert_eq!(d1.pins["2"], PinTarget::Net("VPLUS".into())); // anode A = pin 2
         assert_eq!(d1.pins["1"], PinTarget::Net("SIG".into())); // cathode K = pin 1
+    }
+
+    #[test]
+    fn misplaced_polarity_pin_fields_are_lifted_without_guessing_orientation() {
+        // This exact shape appeared in a live draft. `positive` still means
+        // anode and `negative` cathode; only their nesting was wrong.
+        let (d, diags) = run("
+version: 1
+blocks:
+  main:
+    components:
+      D1: {part: Device:LED, pins: {positive: STATUS, negative: GND}}
+");
+        assert!(!diags.has_errors(), "{diags:?}");
+        let led = &d.blocks["main"].components["D1"];
+        assert_eq!(led.pins["2"], PinTarget::Net("STATUS".into()));
+        assert_eq!(led.pins["1"], PinTarget::Net("GND".into()));
+        assert!(!led.pins.contains_key("positive"));
+        assert!(!led.pins.contains_key("negative"));
+    }
+
+    #[test]
+    fn polarity_lift_refuses_partial_or_conflicting_shapes() {
+        let (mut partial, _) = crate::parse::parse_str(
+            "
+version: 1
+blocks: {main: {components: {D1: {part: Device:LED, pins: {positive: STATUS, 1: GND}}}}}
+",
+        );
+        let partial = partial
+            .as_mut()
+            .unwrap()
+            .blocks
+            .get_mut("main")
+            .unwrap()
+            .components
+            .get_mut("D1")
+            .unwrap();
+        let before = partial.clone();
+        lift_misplaced_polarity_fields(partial);
+        assert_eq!(*partial, before);
+
+        let (mut explicit, _) = crate::parse::parse_str("
+version: 1
+blocks: {main: {components: {D1: {part: Device:LED, positive: STATUS, negative: GND, pins: {1: OTHER}}}}}
+");
+        let explicit = explicit
+            .as_mut()
+            .unwrap()
+            .blocks
+            .get_mut("main")
+            .unwrap()
+            .components
+            .get_mut("D1")
+            .unwrap();
+        let before = explicit.clone();
+        lift_misplaced_polarity_fields(explicit);
+        assert_eq!(*explicit, before);
     }
 
     #[test]
