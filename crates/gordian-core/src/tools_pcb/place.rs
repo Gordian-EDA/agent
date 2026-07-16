@@ -934,19 +934,9 @@ fn add_817_array_hints(
         )
     };
     let header_bottom = if logic_aux_connectors.is_empty() {
-        Rect::new(
-            center_region.min_x,
-            bottom.min_y,
-            center_region.max_x,
-            bottom.max_y,
-        )
+        bottom
     } else {
-        Rect::new(
-            center_region.min_x,
-            aux_bottom.max_y,
-            center_region.max_x,
-            bottom.max_y,
-        )
+        Rect::new(bottom.min_x, aux_bottom.max_y, bottom.max_x, bottom.max_y)
     };
     let connector_refs = field_connectors
         .iter()
@@ -1658,12 +1648,43 @@ mod tests {
     }
 
     #[test]
-    fn strong_headers_align_to_half_banks_and_clear_aux_power() {
+    fn field_headers_align_to_half_banks_while_wide_logic_headers_stay_legal() {
         let (design, mut board, mut problem) = opto817_fixture(16, false);
         let bounds = Rect::new(0.0, 0.0, 117.0, 60.0);
         board.imported.bounds = bounds;
         board.problem.bounds = bounds;
         problem.bounds = bounds;
+
+        let field_header = |reference: &str, channels: std::ops::RangeInclusive<usize>| {
+            imported_part(
+                reference,
+                "Connector_PinHeader:PinHeader_2x08",
+                channels
+                    .flat_map(|channel| {
+                        [format!("FIELD{channel}_LED"), format!("FIELD{channel}_RET")]
+                    })
+                    .enumerate()
+                    .map(|(index, net)| ((index + 1).to_string(), net))
+                    .collect(),
+            )
+        };
+        let field1 = field_header("JF1", 1..=8);
+        let field2 = field_header("JF2", 9..=16);
+        let field_index = board
+            .imported
+            .parts
+            .iter()
+            .position(|part| part.reference == "JF1")
+            .unwrap();
+        board.imported.parts[field_index] = field1.clone();
+        board.imported.parts.push(field2.clone());
+        let field_part = problem
+            .parts
+            .iter_mut()
+            .find(|part| part.reference == "JF1")
+            .unwrap();
+        *field_part = placement_part(&field1, false);
+        problem.parts.push(placement_part(&field2, false));
 
         let logic_index = board
             .imported
@@ -1697,10 +1718,10 @@ mod tests {
             .unwrap();
         first_part.reference = "JLOG1".into();
         first_part.courtyard_w = 5.0;
-        first_part.courtyard_h = 46.0;
+        first_part.courtyard_h = 49.5;
         let mut second_part = placement_part(&second, false);
         second_part.courtyard_w = 5.0;
-        second_part.courtyard_h = 46.0;
+        second_part.courtyard_h = 49.5;
         problem.parts.push(second_part);
         problem.parts.push(placement_part(&power, false));
 
@@ -1716,6 +1737,12 @@ mod tests {
             .iter()
             .find(|group| group.name == "logic auxiliary connectors")
             .unwrap();
+        let field = hints
+            .groups
+            .iter()
+            .find(|group| group.name == "field connectors")
+            .unwrap();
+        assert_eq!(field.members, ["JF1", "JF2"]);
         assert_eq!(strong.members, ["JLOG1", "JLOG2"]);
         assert_eq!(auxiliary.members, ["JPWR"]);
 
@@ -1727,6 +1754,7 @@ mod tests {
                 .find(|part| part.reference == reference)
                 .unwrap()
         };
+        let (jf1, jf2) = (connector("JF1"), connector("JF2"));
         let (jlog1, jlog2, jpwr) = (connector("JLOG1"), connector("JLOG2"), connector("JPWR"));
         let channels = opto817_channels(&design, &board);
         let bank_centroid = |channels: &[Opto817Channel]| {
@@ -1738,10 +1766,12 @@ mod tests {
         };
         let left_bank = bank_centroid(&channels[..8]);
         let right_bank = bank_centroid(&channels[8..]);
-        assert!((jlog1.locked.as_ref().unwrap().at.x - left_bank).abs() < 1e-9);
-        assert!((jlog2.locked.as_ref().unwrap().at.x - right_bank).abs() < 1e-9);
+        assert!((jf1.locked.as_ref().unwrap().at.x - left_bank).abs() < 1e-9);
+        assert!((jf2.locked.as_ref().unwrap().at.x - right_bank).abs() < 1e-9);
         assert!((left_bank - 33.5).abs() < 1e-9);
         assert!((right_bank - 83.5).abs() < 1e-9);
+        assert!((jlog1.locked.as_ref().unwrap().at.x - 29.875).abs() < 1e-9);
+        assert!((jlog2.locked.as_ref().unwrap().at.x - 87.125).abs() < 1e-9);
         assert!((jpwr.locked.as_ref().unwrap().at.x - 58.5).abs() < 1e-9);
         assert!(jpwr.locked.as_ref().unwrap().at.y < jlog1.locked.as_ref().unwrap().at.y);
         let placed_rect = |part: &Part| {
