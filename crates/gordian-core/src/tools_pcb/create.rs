@@ -541,6 +541,7 @@ impl<'a> SeedBoardWriter<'a> {
         self.push_nets(&mut out);
         self.push_net_classes(&mut out);
         self.push_edge_cuts(&mut out);
+        self.push_opto_isolation_corridor(&mut out);
         self.push_zones(&mut out)?;
         for part in self.parts {
             out.push_str(&self.emit_footprint(part)?);
@@ -633,6 +634,56 @@ impl<'a> SeedBoardWriter<'a> {
             "\t(gr_rect\n\t\t(start {x0} {y0})\n\t\t(end {x1} {y1})\n\
              \t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n\
              \t\t(fill no)\n\t\t(layer \"Edge.Cuts\")\n\t\t(uuid \"{uuid}\")\n\t)\n"
+        );
+    }
+
+    /// A dense 817 input bank is an isolation boundary, not merely a repeated component row.
+    /// Preserve that boundary in the native board file so KiCad refill, interactive routing,
+    /// and the IPC router all see the same copper-free corridor.  Pads and footprints remain
+    /// allowed because each optocoupler intentionally bridges the rule area.
+    fn push_opto_isolation_corridor(&self, out: &mut String) {
+        if self.parts.iter().filter(|part| is_817_family(part)).count() < 8 {
+            return;
+        }
+
+        const HALF_WIDTH: f64 = 1.0;
+        let x0 = fmt_num(self.bounds.min_x);
+        let x1 = fmt_num(self.bounds.max_x);
+        let center_y = (self.bounds.min_y + self.bounds.max_y) / 2.0;
+        let y0 = fmt_num(center_y - HALF_WIDTH);
+        let y1 = fmt_num(center_y + HALF_WIDTH);
+        let uuid = seed_uuid(&format!("opto-isolation:{x0}:{y0}:{x1}:{y1}"));
+        let _ = write!(
+            out,
+            "\t(zone\n\
+             \t\t(net 0)\n\
+             \t\t(net_name \"\")\n\
+             \t\t(layers \"*.Cu\")\n\
+             \t\t(uuid \"{uuid}\")\n\
+             \t\t(name \"OPTO_ISOLATION_CORRIDOR\")\n\
+             \t\t(hatch edge 0.5)\n\
+             \t\t(connect_pads\n\
+             \t\t\t(clearance 0)\n\
+             \t\t)\n\
+             \t\t(min_thickness 0.25)\n\
+             \t\t(filled_areas_thickness no)\n\
+             \t\t(keepout\n\
+             \t\t\t(tracks not_allowed)\n\
+             \t\t\t(vias not_allowed)\n\
+             \t\t\t(pads allowed)\n\
+             \t\t\t(copperpour not_allowed)\n\
+             \t\t\t(footprints allowed)\n\
+             \t\t)\n\
+             \t\t(fill\n\
+             \t\t\t(thermal_gap 0.3)\n\
+             \t\t\t(thermal_bridge_width 0.3)\n\
+             \t\t)\n\
+             \t\t(polygon\n\
+             \t\t\t(pts\n\
+             \t\t\t\t(xy {x0} {y0}) (xy {x1} {y0}) (xy {x1} {y1}) (xy {x0} {y1})\n\
+             \t\t\t)\n\
+             \t\t)\n\
+             \t)\n"
         );
     }
 
@@ -767,6 +818,22 @@ impl<'a> SeedBoardWriter<'a> {
     fn emit_footprint(&self, part: &SeedFootprint) -> io::Result<String> {
         emit_seed_footprint(part, &self.net_codes)
     }
+}
+
+fn is_817_family(part: &SeedFootprint) -> bool {
+    if !part.reference.starts_with('U') {
+        return false;
+    }
+    let Some(value) = part.value.as_deref() else {
+        return false;
+    };
+    let identity = value.rsplit(':').next().unwrap_or(value);
+    let compact: String = identity
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_uppercase)
+        .collect();
+    compact.starts_with("PC817") || compact.starts_with("LTV817")
 }
 
 fn seed_net_codes(parts: &[SeedFootprint]) -> BTreeMap<String, i32> {
@@ -1573,6 +1640,67 @@ mod tests {
         assert!(board.contains("\n\t\t(layer \"B.Cu\")\n"));
         assert!(board.contains("\n\t\t(connect_pads yes\n"));
         assert!(board.contains("(xy 0 0) (xy 20 0) (xy 20 10) (xy 0 10)"));
+    }
+
+    #[test]
+    fn seed_writer_emits_all_copper_corridor_for_dense_817_bank() {
+        let source =
+            "(footprint \"SO4\" (pad \"1\" smd circle (at 0 0) (size 1 1) (layers \"F.Cu\")))";
+        let parts: Vec<_> = (1..=8)
+            .map(|index| SeedFootprint {
+                reference: format!("U{index}"),
+                value: Some(if index % 2 == 0 { "LTV-817" } else { "PC817C" }.to_string()),
+                lib_id: "Package_SO:SO-4".to_string(),
+                source: source.to_string(),
+                pad_nets: BTreeMap::new(),
+                at: Point2 { x: 0.0, y: 0.0 },
+                rotation: 0.0,
+                locked: false,
+            })
+            .collect();
+        let bounds = Rect::new(0.0, 0.0, 90.0, 58.0);
+
+        let board = SeedBoardWriter::new(&parts, &bounds, &SeedRules::default(), None)
+            .emit()
+            .unwrap();
+
+        assert_eq!(
+            board.matches("(name \"OPTO_ISOLATION_CORRIDOR\")").count(),
+            1
+        );
+        assert!(board.contains("\n\t\t(layers \"*.Cu\")\n"));
+        assert!(board.contains("\n\t\t\t(tracks not_allowed)\n"));
+        assert!(board.contains("\n\t\t\t(vias not_allowed)\n"));
+        assert!(board.contains("\n\t\t\t(pads allowed)\n"));
+        assert!(board.contains("\n\t\t\t(copperpour not_allowed)\n"));
+        assert!(board.contains("\n\t\t\t(footprints allowed)\n"));
+        assert!(board.contains("(xy 0 28) (xy 90 28) (xy 90 30) (xy 0 30)"));
+    }
+
+    #[test]
+    fn seed_writer_leaves_smaller_or_unrelated_banks_unchanged() {
+        let source =
+            "(footprint \"SO4\" (pad \"1\" smd circle (at 0 0) (size 1 1) (layers \"F.Cu\")))";
+        let parts: Vec<_> = (1..=8)
+            .map(|index| SeedFootprint {
+                reference: format!("U{index}"),
+                value: Some(if index == 8 { "PC818" } else { "PC817" }.to_string()),
+                lib_id: "Package_SO:SO-4".to_string(),
+                source: source.to_string(),
+                pad_nets: BTreeMap::new(),
+                at: Point2 { x: 0.0, y: 0.0 },
+                rotation: 0.0,
+                locked: false,
+            })
+            .collect();
+        let bounds = Rect::new(0.0, 0.0, 90.0, 58.0);
+
+        let board = SeedBoardWriter::new(&parts, &bounds, &SeedRules::default(), None)
+            .emit()
+            .unwrap();
+
+        assert!(!board.contains("OPTO_ISOLATION_CORRIDOR"));
+        assert!(!board.contains("(layers \"*.Cu\")"));
     }
 
     #[test]
