@@ -23,11 +23,40 @@ pub fn schematic_png(env: &KicadEnv, sch: &Path, max_px: u32) -> Result<Vec<u8>>
         .export_svg_opts(sch, tmp.path(), true)
         .context("exporting schematic SVG")?;
     let svg = std::fs::read_to_string(&svg_path).context("reading exported SVG")?;
+    let svg = thicken_schematic_wires(&svg);
     // `--exclude-drawing-sheet` removes the border but KiCad retains the full
     // page viewBox. At 1600 px its standard wire stroke is just under one pixel
     // and resvg drops many horizontal/vertical wires. 2400 px is the smallest
     // size at which the production OpenMyo fixture remains reliably legible.
     svg_to_png(&svg, max_px.max(2400))
+}
+
+/// KiCad exports default schematic wires as 0.1524 mm green strokes. Resvg can
+/// drop those axis-aligned strokes when they land below one output pixel even
+/// though other schematic geometry remains visible. Match the 0.254 mm symbol
+/// stroke so wires survive rasterization and subsequent vision-image resizing.
+fn thicken_schematic_wires(svg: &str) -> String {
+    let thickened = svg.replace(
+        "stroke:#009600; stroke-width:0.1524;",
+        "stroke:#009600; stroke-width:0.2540;",
+    );
+    let marker = "<g style=\"fill:none; \n+stroke:#009600; stroke-width:0.2540;";
+    let Some(group_start) = thickened.find(marker) else {
+        return thickened;
+    };
+    let Some(relative_end) = thickened[group_start..].find("</g>") else {
+        return thickened;
+    };
+    let group_end = group_start + relative_end;
+    let mut explicit = thickened[..group_start].to_owned();
+    explicit.push_str(
+        &thickened[group_start..group_end].replace(
+            "<path d=",
+            "<path style=\"fill:none;stroke:#009600;stroke-width:0.2540\" d=",
+        ),
+    );
+    explicit.push_str(&thickened[group_end..]);
+    explicit
 }
 
 /// Render `svg` to PNG bytes, scaling so the long edge is `max_px` pixels.
@@ -70,5 +99,22 @@ mod tests {
     #[test]
     fn rejects_malformed_svg() {
         assert!(svg_to_png("not svg at all", 200).is_err());
+    }
+
+    #[test]
+    fn thickens_kicad_default_wire_strokes_only() {
+        let svg = "stroke:#009600; stroke-width:0.1524; stroke:#840000; stroke-width:0.1524;";
+        let adjusted = thicken_schematic_wires(svg);
+        assert!(adjusted.contains("stroke:#009600; stroke-width:0.2540;"));
+        assert!(adjusted.contains("stroke:#840000; stroke-width:0.1524;"));
+    }
+
+    #[test]
+    fn gives_kicad_wire_paths_explicit_strokes_for_resvg() {
+        let svg = "before<g style=\"fill:none; \n+stroke:#009600; stroke-width:0.1524; rest\"><path d=\"M0 0 L1 1\" /></g>after";
+        let adjusted = thicken_schematic_wires(svg);
+        assert!(adjusted.contains(
+            "<path style=\"fill:none;stroke:#009600;stroke-width:0.2540\" d=\"M0 0 L1 1\" />"
+        ));
     }
 }
