@@ -725,21 +725,22 @@ fn intersects(nets: &[&str], domain: &std::collections::BTreeSet<String>) -> usi
 /// Pick the quadrant rotation that puts the actual pads carrying pins 1/2 above
 /// the actual pads carrying pins 3/4. The footprint library, not a hard-coded
 /// SO-4 orientation, owns this decision.
+fn opto_pad_bank_centroid_y(part: &Part, nets: &[&str], rotation: f64) -> Option<f64> {
+    let points = part
+        .pads
+        .iter()
+        .filter(|pad| {
+            pad.net
+                .as_deref()
+                .is_some_and(|net| nets.iter().any(|candidate| same_net(net, candidate)))
+        })
+        .map(|pad| pad.offset.rotate(rotation))
+        .collect::<Vec<_>>();
+    (!points.is_empty())
+        .then(|| points.iter().map(|point| point.y).sum::<f64>() / points.len() as f64)
+}
+
 fn opto_input_above_rotation(part: &Part, channel: &Opto817Channel) -> Option<f64> {
-    let centroid = |nets: &[&str], rotation: f64| {
-        let points = part
-            .pads
-            .iter()
-            .filter(|pad| {
-                pad.net
-                    .as_deref()
-                    .is_some_and(|net| nets.iter().any(|candidate| same_net(net, candidate)))
-            })
-            .map(|pad| pad.offset.rotate(rotation))
-            .collect::<Vec<_>>();
-        (!points.is_empty())
-            .then(|| points.iter().map(|point| point.y).sum::<f64>() / points.len() as f64)
-    };
     let input = [&*channel.input_nets[0], &*channel.input_nets[1]];
     let output = [&*channel.emitter_net, &*channel.output_net];
     [0.0, 90.0, 180.0, 270.0]
@@ -747,11 +748,26 @@ fn opto_input_above_rotation(part: &Part, channel: &Opto817Channel) -> Option<f6
         .filter_map(|rotation| {
             Some((
                 rotation,
-                centroid(&output, rotation)? - centroid(&input, rotation)?,
+                opto_pad_bank_centroid_y(part, &output, rotation)?
+                    - opto_pad_bank_centroid_y(part, &input, rotation)?,
             ))
         })
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(rotation, _)| rotation)
+}
+
+fn opto_bridge_midpoint_y(
+    part: &Part,
+    channel: &Opto817Channel,
+    rotation: f64,
+) -> Option<f64> {
+    let input = [&*channel.input_nets[0], &*channel.input_nets[1]];
+    let output = [&*channel.emitter_net, &*channel.output_net];
+    Some(
+        (opto_pad_bank_centroid_y(part, &input, rotation)?
+            + opto_pad_bank_centroid_y(part, &output, rotation)?)
+            / 2.0,
+    )
 }
 
 /// Add the narrow, deterministic physical grammar for a repeated 817 isolation
@@ -790,6 +806,17 @@ fn add_817_array_hints(
             .find(|part| part.reference == channel.reference)
             .and_then(|part| opto_input_above_rotation(part, channel))
             != Some(rotation)
+    }) {
+        return None;
+    }
+    let bridge_midpoint_y = opto_bridge_midpoint_y(first_part, &channels[0], rotation)?;
+    if channels.iter().any(|channel| {
+        problem
+            .parts
+            .iter()
+            .find(|part| part.reference == channel.reference)
+            .and_then(|part| opto_bridge_midpoint_y(part, channel, rotation))
+            .is_none_or(|midpoint| (midpoint - bridge_midpoint_y).abs() > geom::EPS)
     }) {
         return None;
     }
@@ -888,9 +915,9 @@ fn add_817_array_hints(
     );
     let center_region = Rect::new(
         center.x - array_w / 2.0,
-        center.y - array_h / 2.0,
+        center.y - bridge_midpoint_y - array_h / 2.0,
         center.x + array_w / 2.0,
-        center.y + array_h / 2.0,
+        center.y - bridge_midpoint_y + array_h / 2.0,
     );
     hints.groups.push(GroupHint {
         name: "817 isolation array".into(),
@@ -2063,6 +2090,49 @@ mod tests {
         let mut hints = PlacementHints::default();
 
         assert!(add_817_array_hints(&design, &board, &problem, &mut hints).is_some());
+    }
+
+    #[test]
+    fn opto817_plan_aligns_asymmetric_footprint_gap_to_board_center() {
+        let (design, board, mut problem) = opto817_fixture(8, false);
+        for part in problem
+            .parts
+            .iter_mut()
+            .filter(|part| part.reference.starts_with('U'))
+        {
+            for pad in &mut part.pads {
+                pad.offset = match pad.number.as_str() {
+                    "1" => Point2::new(0.0, 0.0),
+                    "2" => Point2::new(2.54, 0.0),
+                    "3" => Point2::new(2.54, 7.62),
+                    "4" => Point2::new(0.0, 7.62),
+                    _ => unreachable!(),
+                };
+            }
+        }
+        let mut hints = PlacementHints::default();
+
+        add_817_array_hints(&design, &board, &problem, &mut hints)
+            .expect("asymmetric DIP bank");
+
+        let array = hints
+            .groups
+            .iter()
+            .find(|group| group.name == "817 isolation array")
+            .unwrap();
+        let rotation = array.rotation.unwrap();
+        let channel = &opto817_channels(&design, &board)[0];
+        let part = problem
+            .parts
+            .iter()
+            .find(|part| part.reference == channel.reference)
+            .unwrap();
+        let bridge_offset = opto_bridge_midpoint_y(part, channel, rotation).unwrap();
+        assert!((array.region.unwrap().center().y + bridge_offset
+            - problem.bounds.center().y)
+            .abs()
+            < 1e-9);
+        assert!(bridge_offset.abs() > 1.0, "fixture must exercise offset origin");
     }
 
     #[test]
