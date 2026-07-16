@@ -443,15 +443,18 @@ fn constrain_schematic_tools_for_draft_state(
     } else if draft_known_invalid {
         defs.retain(|tool| {
             is_discovery_tool(tool.name.as_str())
-                || matches!(tool.name.as_str(), "edit_design" | "assign_footprints")
+                || matches!(
+                    tool.name.as_str(),
+                    "edit_design" | "repair_components" | "assign_footprints"
+                )
         });
     } else if draft_exists && draft_dirty && draft_known_clean {
         defs.retain(|tool| tool.name.as_str() == "apply_design");
     }
 }
 
-fn offer_component_repair_for_review(defs: &mut Vec<Tool>, review_has_defects: bool) {
-    if review_has_defects
+fn offer_component_repair(defs: &mut Vec<Tool>, should_offer: bool) {
+    if should_offer
         && !defs
             .iter()
             .any(|tool| tool.name.as_str() == "repair_components")
@@ -952,9 +955,13 @@ impl<P: Provider> Agent<P> {
             let review_needs_full_edit = schematic_review_current
                 .as_ref()
                 .is_some_and(review_requires_full_design_edit);
-            offer_component_repair_for_review(
+            let draft_known_invalid = latest_authoring_diagnostics
+                .as_ref()
+                .and_then(|state| state.errors)
+                .is_some_and(|errors| errors > 0);
+            offer_component_repair(
                 &mut defs,
-                review_has_defects && !review_needs_full_edit,
+                draft_known_invalid || (review_has_defects && !review_needs_full_edit),
             );
             if !runtime_supports_live_footprint_moves(&self.runtime) {
                 defs.retain(|def| !matches!(def.name.as_str(), "move_parts" | "set_net_width"));
@@ -974,10 +981,7 @@ impl<P: Provider> Agent<P> {
                     .as_ref()
                     .and_then(|state| state.errors)
                     == Some(0),
-                latest_authoring_diagnostics
-                    .as_ref()
-                    .and_then(|state| state.errors)
-                    .is_some_and(|errors| errors > 0),
+                draft_known_invalid,
                 review_has_defects,
             );
             if let Some(focus) = &component_shortfall_focus {
@@ -6243,7 +6247,7 @@ blocks:
                 &HashSet::new(),
                 schematic_exists,
             );
-            offer_component_repair_for_review(&mut defs, defects);
+            offer_component_repair(&mut defs, defects || invalid);
             constrain_schematic_tools_for_draft_state(
                 &mut defs,
                 draft_exists,
@@ -6273,6 +6277,8 @@ blocks:
 
         let invalid = names_after(true, false, true, false, true, false);
         assert!(invalid.contains("edit_design"));
+        assert!(invalid.contains("repair_components"));
+        assert!(invalid.contains("assign_footprints"));
         assert!(!invalid.contains("apply_design"));
         assert!(!invalid.contains("project_info"));
 

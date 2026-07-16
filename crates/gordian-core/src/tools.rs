@@ -1134,24 +1134,32 @@ fn invalid_compile_quality_regressed(
     prior: &circuit_lang::Diagnostics,
     candidate: &circuit_lang::Diagnostics,
 ) -> bool {
+    let prior = compile_diagnostic_quality(prior);
+    let candidate = compile_diagnostic_quality(candidate);
+    prior.0 > 0 && candidate > prior
+}
+
+fn compile_diagnostic_quality(diagnostics: &circuit_lang::Diagnostics) -> (usize, usize) {
     use circuit_lang::Severity;
 
-    let quality = |diagnostics: &circuit_lang::Diagnostics| {
-        let errors = diagnostics
-            .0
-            .iter()
-            .filter(|diagnostic| diagnostic.severity == Severity::Error)
-            .count();
-        let warnings = diagnostics
-            .0
-            .iter()
-            .filter(|diagnostic| diagnostic.severity == Severity::Warning)
-            .count();
-        (errors, warnings)
-    };
-    let prior = quality(prior);
-    let candidate = quality(candidate);
-    prior.0 > 0 && candidate > prior
+    let errors = diagnostics
+        .0
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .count();
+    let warnings = diagnostics
+        .0
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Warning)
+        .count();
+    (errors, warnings)
+}
+
+fn authoring_report_quality(report: &Value) -> (u64, u64) {
+    (
+        report.get("errors").and_then(Value::as_u64).unwrap_or(0),
+        report.get("warnings").and_then(Value::as_u64).unwrap_or(0),
+    )
 }
 
 /// Returns `true` when at least one incompatible assignment was found.
@@ -1928,16 +1936,6 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         prior_report["mode"] = json!("component_repair");
         return Ok(prior_report);
     };
-    if prior_report.get("ok").and_then(Value::as_bool) != Some(true) {
-        prior_report["error"] =
-            json!("the current draft fails authoring validation; repair was not attempted");
-        prior_report["code"] = json!("repair_requires_valid_draft");
-        prior_report["draft_written"] = json!(false);
-        prior_report["draft_changed"] = json!(false);
-        prior_report["mode"] = json!("component_repair");
-        return Ok(prior_report);
-    }
-
     let fragment_yaml = format!(
         "version: 1\nblocks:\n  patch:\n    components: {}\n",
         serde_json::to_string(&upsert)?
@@ -2233,11 +2231,19 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let candidate_yaml = circuit_lang::canon::to_canonical_yaml(&candidate);
     let candidate_result = compile(&candidate_yaml, ctx.provider());
     let mut report = compile_authoring_report(&candidate_result, ctx)?;
-    if report.get("ok").and_then(Value::as_bool) != Some(true) {
+    let candidate_is_clean = report.get("ok").and_then(Value::as_bool) == Some(true);
+    let prior_is_invalid = prior_report.get("ok").and_then(Value::as_bool) != Some(true);
+    let candidate_strictly_improves = prior_is_invalid
+        && authoring_report_quality(&report) < authoring_report_quality(&prior_report);
+    if !candidate_is_clean && !candidate_strictly_improves {
+        let current_validation = prior_report.clone();
+        let candidate_validation = report.clone();
         report["error"] = json!(
-            "component repair would make the complete draft invalid; the existing draft was preserved"
+            "component repair did not improve the complete draft's validation; the existing draft was preserved"
         );
         report["code"] = json!("invalid_component_repair_preserved_draft");
+        report["current_validation"] = current_validation;
+        report["candidate_validation"] = candidate_validation;
         report["draft_written"] = json!(false);
         report["draft_changed"] = json!(false);
         report["electrical_design_changed"] = json!(false);
@@ -2560,8 +2566,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        compile_report, edit_design, invalid_compile_quality_regressed, repair_components_tool,
-        tool_defs,
+        compile_report, edit_design, invalid_compile_quality_regressed, repair_components,
+        repair_components_tool, tool_defs,
     };
 
     fn invalid_refdes_draft(count: usize) -> String {
@@ -2612,6 +2618,64 @@ mod tests {
         assert_eq!(report["errors"], 2);
         assert_eq!(report["draft_written"], true);
         assert_eq!(runtime.workspace().read_draft().unwrap().unwrap(), better);
+    }
+
+    #[test]
+    fn improving_footprint_repair_of_parseable_invalid_draft_is_written() {
+        let footprints = tempfile::tempdir().unwrap();
+        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
+            .expect("test runtime");
+        let prior = "version: 1\nblocks: {main: {components: {R1: {part: Device:R, footprint: Missing:One, between: [A, B]}, R2: {part: Device:R, footprint: Missing:Two, between: [A, B]}}}}\n";
+        runtime.workspace().write_draft(&prior, None).unwrap();
+
+        let report = repair_components(json!({"remove": ["R1"]}), &runtime).unwrap();
+
+        assert_eq!(report["errors"], 1, "{report}");
+        assert_eq!(report["draft_written"], true, "{report}");
+        let repaired = runtime.workspace().read_draft().unwrap().unwrap();
+        assert!(!repaired.contains("R1:"), "{repaired}");
+        assert!(repaired.contains("R2:"), "{repaired}");
+    }
+
+    #[test]
+    fn non_improving_or_regressing_invalid_repair_preserves_draft() {
+        let footprints = tempfile::tempdir().unwrap();
+        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
+            .expect("test runtime");
+        let prior = "version: 1\nblocks: {main: {components: {R1: {part: Device:R, footprint: Missing:One, between: [A, B]}}}}\n";
+
+        for input in [
+            json!({"update": {"R1": {"value": "changed"}}}),
+            json!({"components": {"R2": {"part": "Device:R", "footprint": "Missing:Two", "between": ["A", "B"]}}}),
+        ] {
+            runtime.workspace().write_draft(&prior, None).unwrap();
+
+            let report = repair_components(input, &runtime).unwrap();
+
+            assert_eq!(
+                report["code"], "invalid_component_repair_preserved_draft",
+                "{report}"
+            );
+            assert_eq!(report["current_validation"]["errors"], 1, "{report}");
+            assert!(report["candidate_validation"]["errors"].is_number());
+            assert_eq!(report["draft_written"], false, "{report}");
+            assert_eq!(runtime.workspace().read_draft().unwrap().unwrap(), prior);
+        }
+    }
+
+    #[test]
+    fn repair_of_malformed_draft_without_design_remains_blocked() {
+        let footprints = tempfile::tempdir().unwrap();
+        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
+            .expect("test runtime");
+        let prior = "version: [\n";
+        runtime.workspace().write_draft(prior, None).unwrap();
+
+        let report = repair_components(json!({"remove": ["R1"]}), &runtime).unwrap();
+
+        assert_eq!(report["code"], "repair_requires_valid_draft", "{report}");
+        assert_eq!(report["draft_written"], false, "{report}");
+        assert_eq!(runtime.workspace().read_draft().unwrap().unwrap(), prior);
     }
 
     #[test]
