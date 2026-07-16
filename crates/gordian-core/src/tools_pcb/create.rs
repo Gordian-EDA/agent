@@ -961,8 +961,128 @@ fn emit_seed_footprint(
             push_reindented(&mut out, &transformed);
         }
     }
+    if let Some(function) = connector_function_property(inner, part) {
+        push_reindented(&mut out, &function);
+    }
     out.push_str("\t)\n");
     Ok(out)
+}
+
+/// Add a concise functional label to connector silkscreen without changing the
+/// canonical Value field used by KiCad/BOM tooling.  The library's Value field
+/// already occupies a deliberate text location outside the footprint body, so
+/// reusing its geometry avoids inventing an unbounded board-space coordinate and
+/// keeps the label attached when placement rotates or moves the connector.
+fn connector_function_property(inner: &str, part: &SeedFootprint) -> Option<String> {
+    // Tiny two/three-pin headers are commonly tucked beside support passives;
+    // their library value position is not a dependable free silk lane.  Larger
+    // interface headers are edge-biased by placement and have room for a legend.
+    if !part.reference.starts_with('J') || part.pad_nets.len() < 4 {
+        return None;
+    }
+    let summary = connector_net_summary(&part.pad_nets)?;
+    let value = top_level_nodes(inner)
+        .into_iter()
+        .find(|node| node.starts_with("(property \"Value\""))?;
+    if !value.contains("(layer \"F.Fab\")") && !value.contains("(layer \"F.SilkS\")") {
+        return None;
+    }
+
+    let mut property = replace_property_name_and_value(value, "Function", &summary)?;
+    property = property.replace("(layer \"F.Fab\")", "(layer \"F.SilkS\")");
+    property = property.replace("(hide yes)", "");
+    Some(cap_font_size(&property, REF_TEXT_SIZE_MM))
+}
+
+fn replace_property_name_and_value(node: &str, name: &str, value: &str) -> Option<String> {
+    let rest = node.strip_prefix("(property \"")?;
+    let name_close = rest.find('"')?;
+    let rest = rest[name_close + 1..].strip_prefix(" \"")?;
+    let mut escaped = false;
+    let mut value_close = None;
+    for (idx, ch) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            value_close = Some(idx);
+            break;
+        }
+    }
+    let value_close = value_close?;
+    Some(format!(
+        "(property \"{}\" \"{}{}",
+        sexpr_escape(name),
+        sexpr_escape(value),
+        &rest[value_close..]
+    ))
+}
+
+/// Collapse common numbered connector buses (`IN1` ... `IN8`) while retaining
+/// named power/domain nets.  Labels that cannot be made compact are omitted;
+/// an overlong silk legend is worse than the reference-only baseline.
+fn connector_net_summary(pad_nets: &BTreeMap<String, String>) -> Option<String> {
+    let mut nets: Vec<String> = pad_nets
+        .values()
+        .map(|net| net.trim_start_matches('/').to_owned())
+        .filter(|net| !net.is_empty() && !net.starts_with("Net-("))
+        .collect();
+    nets.sort();
+    nets.dedup();
+    if nets.is_empty() {
+        return None;
+    }
+
+    let mut numbered = BTreeMap::<String, Vec<u32>>::new();
+    let mut plain = Vec::new();
+    for net in nets {
+        if let Some((prefix, number)) = split_numeric_suffix(&net) {
+            numbered.entry(prefix.to_owned()).or_default().push(number);
+        } else {
+            plain.push(net);
+        }
+    }
+    for numbers in numbered.values_mut() {
+        numbers.sort_unstable();
+        numbers.dedup();
+    }
+
+    let mut labels = plain;
+    for (prefix, numbers) in numbered {
+        let consecutive = numbers
+            .windows(2)
+            .all(|pair| pair[1] == pair[0].saturating_add(1));
+        if numbers.len() >= 3 && consecutive {
+            labels.push(format!(
+                "{prefix}{}..{}",
+                numbers[0],
+                numbers[numbers.len() - 1]
+            ));
+        } else {
+            labels.extend(
+                numbers
+                    .into_iter()
+                    .map(|number| format!("{prefix}{number}")),
+            );
+        }
+    }
+    labels.sort();
+    let summary = labels.join("/");
+    (!summary.is_empty() && summary.chars().count() <= 28).then_some(summary)
+}
+
+fn split_numeric_suffix(net: &str) -> Option<(&str, u32)> {
+    let suffix_start = net
+        .char_indices()
+        .rev()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .map(|(idx, _)| idx)
+        .last()?;
+    let (prefix, suffix) = net.split_at(suffix_start);
+    (!prefix.is_empty())
+        .then(|| suffix.parse::<u32>().ok().map(|number| (prefix, number)))
+        .flatten()
 }
 
 fn transform_seed_node(
@@ -1984,6 +2104,119 @@ mod tests {
         assert!(board.contains("(property \"Value\" \"NE555P\""));
         assert!(!board.contains("(property \"Value\" \"Fixture\""));
         assert_eq!(board.matches("(hide yes)").count(), 3);
+    }
+
+    #[test]
+    fn connector_net_summary_compacts_numbered_buses_and_keeps_domains() {
+        let mut nets = BTreeMap::from([
+            ("1".to_string(), "/IN1".to_string()),
+            ("9".to_string(), "FIELD_GND".to_string()),
+        ]);
+        for pin in 2..=8 {
+            nets.insert(pin.to_string(), format!("IN{pin}"));
+        }
+
+        assert_eq!(
+            connector_net_summary(&nets).as_deref(),
+            Some("FIELD_GND/IN1..8")
+        );
+        assert_eq!(split_numeric_suffix("OUT12"), Some(("OUT", 12)));
+        assert_eq!(split_numeric_suffix("V5"), Some(("V", 5)));
+        assert_eq!(split_numeric_suffix("GND"), None);
+
+        nets.insert("1".to_string(), "Net-(J1-Pin_1)".to_string());
+        assert_eq!(
+            connector_net_summary(&nets).as_deref(),
+            Some("FIELD_GND/IN2..8")
+        );
+    }
+
+    #[test]
+    fn seed_writer_adds_function_silk_to_connectors_without_changing_value() {
+        let source = "(footprint \"Header\"\n\
+            \t(property \"Reference\" \"REF**\"\n\
+            \t\t(at 0 -2 0)\n\
+            \t\t(layer \"F.SilkS\")\n\
+            \t\t(effects (font (size 1 1) (thickness 0.15)))\n\
+            \t)\n\
+            \t(property \"Value\" \"Header\"\n\
+            \t\t(at 0 4 0)\n\
+            \t\t(layer \"F.Fab\")\n\
+            \t\t(effects (font (size 1 1) (thickness 0.15)))\n\
+            \t)\n\
+            \t(pad \"1\" thru_hole circle (at 0 0) (size 1 1) (layers \"*.Cu\"))\n\
+            \t(pad \"2\" thru_hole circle (at 0 2.54) (size 1 1) (layers \"*.Cu\"))\n\
+            )";
+        let part = SeedFootprint {
+            reference: "J1".to_string(),
+            value: Some("Conn_01x02".to_string()),
+            lib_id: "Test:Header".to_string(),
+            source: source.to_string(),
+            pad_nets: BTreeMap::from([
+                ("1".to_string(), "CAN_H".to_string()),
+                ("2".to_string(), "CAN_L".to_string()),
+                ("3".to_string(), "CAN_H".to_string()),
+                ("4".to_string(), "CAN_L".to_string()),
+            ]),
+            at: Point2 { x: 5.0, y: 5.0 },
+            rotation: 90.0,
+            locked: false,
+        };
+        let board = SeedBoardWriter::new(
+            &[part],
+            &Rect::new(0.0, 0.0, 20.0, 10.0),
+            &SeedRules::default(),
+            None,
+        )
+        .emit()
+        .unwrap();
+
+        assert!(board.contains("(property \"Value\" \"Conn_01x02\""));
+        assert!(board.contains("(property \"Function\" \"CAN_H/CAN_L\""));
+        assert!(board.contains("(property \"Function\" \"CAN_H/CAN_L\"\n\t\t\t(at 0 4 0)"));
+        assert_eq!(
+            board
+                .matches("(property \"Function\" \"CAN_H/CAN_L\"")
+                .count(),
+            1
+        );
+        let function = board
+            .split("(property \"Function\"")
+            .nth(1)
+            .expect("function property");
+        assert!(function.contains("(layer \"F.SilkS\")"));
+    }
+
+    #[test]
+    fn connector_function_silk_omits_non_connectors_and_overlong_legends() {
+        let inner = "\n\
+            (property \"Value\" \"Header\"\n\
+            \t(at 0 4 0)\n\
+            \t(layer \"F.Fab\")\n\
+            )\n";
+        let mut part = SeedFootprint {
+            reference: "U1".to_string(),
+            value: Some("IC".to_string()),
+            lib_id: "Test:Header".to_string(),
+            source: format!("(footprint \"Header\"{inner})"),
+            pad_nets: BTreeMap::from([
+                ("1".to_string(), "A".to_string()),
+                ("2".to_string(), "B".to_string()),
+            ]),
+            at: Point2 { x: 0.0, y: 0.0 },
+            rotation: 0.0,
+            locked: false,
+        };
+        assert!(connector_function_property(inner, &part).is_none());
+
+        part.reference = "J1".to_string();
+        part.pad_nets = BTreeMap::from([
+            ("1".to_string(), "UNABBREVIATED_SIGNAL_ALPHA".to_string()),
+            ("2".to_string(), "UNABBREVIATED_SIGNAL_BETA".to_string()),
+            ("3".to_string(), "UNABBREVIATED_SIGNAL_ALPHA".to_string()),
+            ("4".to_string(), "UNABBREVIATED_SIGNAL_BETA".to_string()),
+        ]);
+        assert!(connector_function_property(inner, &part).is_none());
     }
 
     #[test]
