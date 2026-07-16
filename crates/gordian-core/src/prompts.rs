@@ -22,7 +22,7 @@ entire request. Never copy documentation as the component list:
       components:
         <REFDES>: { part: <REAL_KICAD_LIB:SYMBOL>, pins: { <PIN>: <NET> } }
 
-Component keys match `[A-Z]+[0-9]+` (`R1`, not `C_VCAP1`). `part:` is a real KiCAD `Lib:Name`; R/C/L/D/LED aliases are built in. Use `search_symbols` for unknown parts. Never invent IC pins; unlisted pins auto-NC. Never meet a numeric minimum with dummy/repeated filler.
+Keys match `[A-Z]+[0-9]+` (`R1`, not `C_VCAP1`). `part:` is a KiCAD `Lib:Name`; built-ins: R/C/L/D/LED. Unknown parts: `search_symbols`. Never invent IC pins; others auto-NC. Physical floors count explicit fitted entries—not power/labels, DNP, or `decouple`; never pad.
 `pins:` maps pin name or quoted pin number to a net; use numbers when names repeat. Unlisted pins become no-connect except power-INPUT pins, which must be wired. Net names should be UPPER_SNAKE.
 
 Useful sugar:
@@ -101,7 +101,8 @@ mod tests {
         assert!(!p.contains("name: syntax_fragment_only"));
         assert!(p.contains("incomplete/missing topology"));
         assert!(p.contains("`edit_design` with COMPLETE YAML"));
-        assert!(p.contains("Never meet a numeric minimum with dummy"));
+        assert!(p.contains("Physical floors count explicit fitted entries"));
+        assert!(p.contains("not power/labels, DNP, or `decouple`"));
         assert!(p.contains("never search them"));
         assert!(p.contains("never issue empty queries"));
         assert!(p.contains("polarized LED/diode"));
