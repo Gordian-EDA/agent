@@ -609,6 +609,13 @@ struct Opto817Requirements {
     height: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PlacementSizeEstimate {
+    width: f64,
+    height: f64,
+    total_area: f64,
+}
+
 fn pin_net(component: &circuit_lang::model::Component, pin: &str) -> Option<String> {
     match component.pins.get(pin) {
         Some(circuit_lang::model::PinTarget::Net(net)) => Some(net.clone()),
@@ -1028,6 +1035,7 @@ fn add_817_array_hints(
 fn undersized_817_result(problem: &PlaceProblem, required: Opto817Requirements) -> Value {
     let current_w = (problem.bounds.max_x - problem.bounds.min_x).max(0.0);
     let current_h = (problem.bounds.max_y - problem.bounds.min_y).max(0.0);
+    let estimate = placement_size_estimate(problem, required.width, required.height, true);
     let mut out = json!({
         "placement_applied": false,
         "legal": false,
@@ -1040,13 +1048,60 @@ fn undersized_817_result(problem: &PlaceProblem, required: Opto817Requirements) 
             "h": (current_h * 10.0).round() / 10.0,
         },
         "suggested_min_bounds_mm": {
-            "w": required.width.max(current_w).ceil(),
-            "h": required.height.max(current_h).ceil(),
+            "w": estimate.width.ceil(),
+            "h": estimate.height.ceil(),
         },
+        "parts_courtyard_area_mm2": (estimate.total_area * 10.0).round() / 10.0,
         "note": "placement is NOT legal, so no footprint positions were written and the board remains at its previous positions. The verified 817 isolation bank requires one continuous single-row barrier; regenerate_board with at least suggested_min_bounds_mm, then run place_board once.",
     });
     out["error"] = Value::String(illegal_placement_error(&out));
     out
+}
+
+/// Estimate a one-retry board size from packing area and the largest footprint.
+/// The 817 plan requests a landscape result because its continuous horizontal
+/// isolation row is the dominant shape; generic failures preserve the caller's
+/// aspect ratio exactly as before.
+fn placement_size_estimate(
+    problem: &PlaceProblem,
+    minimum_width: f64,
+    minimum_height: f64,
+    landscape: bool,
+) -> PlacementSizeEstimate {
+    let total_area: f64 = problem
+        .parts
+        .iter()
+        .map(|part| part.courtyard_w * part.courtyard_h)
+        .sum();
+    let max_w = problem
+        .parts
+        .iter()
+        .map(|part| part.courtyard_w)
+        .fold(0.0, f64::max);
+    let max_h = problem
+        .parts
+        .iter()
+        .map(|part| part.courtyard_h)
+        .fold(0.0, f64::max);
+    let current_w = (problem.bounds.max_x - problem.bounds.min_x).max(0.1);
+    let current_h = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
+    // ~2x courtyard area reserves packing and routing space. Growing at least
+    // 1.3x beyond a failed/current outline prevents identical retry loops.
+    let min_area = (total_area * 2.0).max(current_w * current_h * 1.3);
+    let aspect = if landscape {
+        2.0
+    } else {
+        current_w / current_h
+    };
+    let mut height = (min_area / aspect).sqrt();
+    let mut width = aspect * height;
+    width = width.max(current_w).max(max_w + 2.0).max(minimum_width);
+    height = height.max(current_h).max(max_h + 2.0).max(minimum_height);
+    PlacementSizeEstimate {
+        width,
+        height,
+        total_area,
+    }
 }
 
 pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -1202,39 +1257,14 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // courtyard area (with packing + routing overhead) and the largest single part.
     let mut extra = json!({});
     if !result.legal {
-        let total_area: f64 = problem
-            .parts
-            .iter()
-            .map(|p| p.courtyard_w * p.courtyard_h)
-            .sum();
-        let max_w = problem
-            .parts
-            .iter()
-            .map(|p| p.courtyard_w)
-            .fold(0.0, f64::max);
-        let max_h = problem
-            .parts
-            .iter()
-            .map(|p| p.courtyard_h)
-            .fold(0.0, f64::max);
+        let estimate = placement_size_estimate(&problem, 0.0, 0.0, false);
         let cw = (problem.bounds.max_x - problem.bounds.min_x).max(0.1);
         let ch = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
-        // ~2x the courtyard area leaves room for spacing, refdes gaps, and routing;
-        // but ALSO grow 1.3x past the current bounds, so if the caller already gave
-        // generous-but-still-failing bounds (large parts the legalizer can't
-        // separate) each retry with the suggestion converges instead of looping.
-        // Keep the caller's aspect ratio; never below the biggest part + a margin.
-        let min_area = (total_area * 2.0).max(cw * ch * 1.3);
-        let aspect = cw / ch;
-        let mut sh = (min_area / aspect).sqrt();
-        let mut sw = aspect * sh;
-        sw = sw.max(max_w + 2.0);
-        sh = sh.max(max_h + 2.0);
         extra = json!({
             "overlap_pairs": placement_overlap_pairs(&problem, &result),
-            "parts_courtyard_area_mm2": (total_area * 10.0).round() / 10.0,
+            "parts_courtyard_area_mm2": (estimate.total_area * 10.0).round() / 10.0,
             "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
-            "suggested_min_bounds_mm": { "w": sw.ceil(), "h": sh.ceil() },
+            "suggested_min_bounds_mm": { "w": estimate.width.ceil(), "h": estimate.height.ceil() },
         });
     }
 
@@ -1524,7 +1554,9 @@ mod tests {
         let (design, board, problem) = opto817_fixture(8, false);
         let mut hints = PlacementHints::default();
 
-        assert!(add_817_array_hints(&design, &board, &problem, &mut hints).is_some());
+        let required = add_817_array_hints(&design, &board, &problem, &mut hints).unwrap();
+        assert!(required.width <= problem.bounds.max_x - problem.bounds.min_x);
+        assert!(required.height <= problem.bounds.max_y - problem.bounds.min_y);
 
         let array = hints
             .groups
@@ -2158,6 +2190,53 @@ mod tests {
         assert!(message.contains("no positions were written"));
         assert!(message.contains("smaller appropriate footprints"));
         assert!(message.contains("69 x 46 mm"));
+    }
+
+    #[test]
+    fn run19_like_resize_estimate_jumps_from_50x40_to_one_step_legal_bounds() {
+        let starts = [
+            Point2::new(23.0, 12.0),
+            Point2::new(97.0, 12.0),
+            Point2::new(23.0, 48.0),
+            Point2::new(97.0, 48.0),
+        ];
+        let parts = starts
+            .iter()
+            .enumerate()
+            .map(|(index, &at)| Part {
+                reference: format!("BANK{index}"),
+                courtyard_w: 45.0,
+                courtyard_h: 20.0,
+                pads: vec![],
+                edge_datum: None,
+                locked: Some(LockedAt { at, rotation: 0.0 }),
+            })
+            .collect();
+        let mut problem = PlaceProblem {
+            bounds: Rect::new(0.0, 0.0, 50.0, 40.0),
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            parts,
+            keepouts: vec![],
+            outline: None,
+        };
+
+        let required = Opto817Requirements {
+            width: 88.1,
+            height: 23.8,
+        };
+        let estimate = placement_size_estimate(&problem, required.width, required.height, true);
+        assert_eq!(estimate.width.ceil(), 120.0);
+        assert_eq!(estimate.height.ceil(), 60.0);
+        let rejected = undersized_817_result(&problem, required);
+        assert_eq!(
+            rejected["suggested_min_bounds_mm"],
+            json!({"w": 120.0, "h": 60.0})
+        );
+        problem.bounds = Rect::new(0.0, 0.0, estimate.width.ceil(), estimate.height.ceil());
+        let second_call = pcb_place::placement::place_board(&problem, &PlacementHints::default());
+        assert!(second_call.legal);
     }
 
     #[test]
