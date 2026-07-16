@@ -1747,7 +1747,13 @@ impl<P: Provider> Agent<P> {
                     last_committed_erc_cleanup_needed = None;
                 }
                 if dispatched && call.fn_name == "review_design" {
-                    schematic_review_current = cacheable_review_result(&parsed);
+                    let cacheable_review = cacheable_review_result(&parsed);
+                    // A first semantic verdict advances the diagnostic state even
+                    // though it does not mutate project files. Give the model a
+                    // completion to act on newly discovered defects; repeated
+                    // reviews at the same revision remain blocked above.
+                    semantic_review_advanced_this_completion |= cacheable_review.is_some();
+                    schematic_review_current = cacheable_review;
                 }
                 if call.fn_name == "apply_design"
                     && let Some(cleanup_needed) = apply_erc_cleanup_needed(&parsed)
