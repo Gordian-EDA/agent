@@ -2,8 +2,9 @@
 //!
 //! Pure-Rust via `resvg` — no system rasterizer needed. KiCAD plots text as
 //! stroked polylines, so an empty fontdb renders correctly. The long edge is
-//! capped at `max_px` (callers pass ~1600: under Bedrock's request limits and
-//! near Claude's 1568 px vision sweet spot).
+//! normally capped at `max_px`. Schematics use a 2400 px readability floor:
+//! KiCad's 0.254 mm wire strokes otherwise rasterize below one pixel on a large
+//! custom sheet and disappear while their junction dots remain visible.
 
 use std::path::Path;
 
@@ -18,15 +19,15 @@ use kicad_env::KicadEnv;
 pub fn schematic_png(env: &KicadEnv, sch: &Path, max_px: u32) -> Result<Vec<u8>> {
     let tmp = tempfile::tempdir().context("temp dir for schematic SVG export")?;
     let svg_path = KicadCli::new(env)
-        // The in-loop critic needs circuit detail, not the drawing sheet. On a
-        // large custom page, fitting the full border/title block into ~1600 px
-        // makes KiCad's thin wire strokes sub-pixel in resvg: junction dots stay
-        // visible while their wires appear to vanish. Cropping to schematic
-        // content matches the standalone render path and keeps nets legible.
+        // The in-loop critic needs circuit detail, not the drawing sheet.
         .export_svg_opts(sch, tmp.path(), true)
         .context("exporting schematic SVG")?;
     let svg = std::fs::read_to_string(&svg_path).context("reading exported SVG")?;
-    svg_to_png(&svg, max_px)
+    // `--exclude-drawing-sheet` removes the border but KiCad retains the full
+    // page viewBox. At 1600 px its standard wire stroke is just under one pixel
+    // and resvg drops many horizontal/vertical wires. 2400 px is the smallest
+    // size at which the production OpenMyo fixture remains reliably legible.
+    svg_to_png(&svg, max_px.max(2400))
 }
 
 /// Render `svg` to PNG bytes, scaling so the long edge is `max_px` pixels.
