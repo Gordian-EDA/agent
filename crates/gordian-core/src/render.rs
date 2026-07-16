@@ -40,8 +40,17 @@ fn thicken_schematic_wires(svg: &str) -> String {
         "stroke:#009600; stroke-width:0.1524;",
         "stroke:#009600; stroke-width:0.2540;",
     );
-    let marker = "<g style=\"fill:none; \n+stroke:#009600; stroke-width:0.2540;";
-    let Some(group_start) = thickened.find(marker) else {
+    // KiCad 9.0.3 may emit the entire schematic-wire layer as `stroke:none`
+    // even though its paths are the real committed wires. Older exports put
+    // the green stroke on the group. In either form give each path an explicit
+    // stroke: resvg then cannot lose it through absent/broken inheritance.
+    let marker = [
+        "<g style=\"fill:none; stroke:none;\">",
+        "<g style=\"fill:none; \nstroke:#009600; stroke-width:0.2540;",
+    ]
+    .into_iter()
+    .find_map(|marker| thickened.find(marker));
+    let Some(group_start) = marker else {
         return thickened;
     };
     let Some(relative_end) = thickened[group_start..].find("</g>") else {
@@ -49,12 +58,10 @@ fn thicken_schematic_wires(svg: &str) -> String {
     };
     let group_end = group_start + relative_end;
     let mut explicit = thickened[..group_start].to_owned();
-    explicit.push_str(
-        &thickened[group_start..group_end].replace(
-            "<path d=",
-            "<path style=\"fill:none;stroke:#009600;stroke-width:0.2540\" d=",
-        ),
-    );
+    explicit.push_str(&thickened[group_start..group_end].replace(
+        "<path d=",
+        "<path style=\"fill:none;stroke:#009600;stroke-width:0.2540\" d=",
+    ));
     explicit.push_str(&thickened[group_end..]);
     explicit
 }
@@ -111,10 +118,19 @@ mod tests {
 
     #[test]
     fn gives_kicad_wire_paths_explicit_strokes_for_resvg() {
-        let svg = "before<g style=\"fill:none; \n+stroke:#009600; stroke-width:0.1524; rest\"><path d=\"M0 0 L1 1\" /></g>after";
+        let svg = "before<g style=\"fill:none; \nstroke:#009600; stroke-width:0.1524; rest\"><path d=\"M0 0 L1 1\" /></g>after";
         let adjusted = thicken_schematic_wires(svg);
         assert!(adjusted.contains(
             "<path style=\"fill:none;stroke:#009600;stroke-width:0.2540\" d=\"M0 0 L1 1\" />"
+        ));
+    }
+
+    #[test]
+    fn restores_current_kicad_invisible_wire_group() {
+        let svg = "before<g style=\"fill:none; stroke:none;\"><path d=\"M36.83 77.47 L49.53 77.47\" /></g>after";
+        let adjusted = thicken_schematic_wires(svg);
+        assert!(adjusted.contains(
+            "<path style=\"fill:none;stroke:#009600;stroke-width:0.2540\" d=\"M36.83 77.47 L49.53 77.47\" />"
         ));
     }
 }
