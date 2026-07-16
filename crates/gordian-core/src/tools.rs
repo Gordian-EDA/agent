@@ -1771,6 +1771,107 @@ fn add_footprint_part_normalizations(report: &mut Value, normalizations: Vec<Val
     }
 }
 
+/// Exact, common shorthand names that KiCad does not ship. Keep this list
+/// deliberately narrow: package aliases are safe for these two-pin passives,
+/// but active-device aliases can silently change pin mappings.
+fn common_footprint_alias(footprint: &str) -> Option<&'static str> {
+    match footprint {
+        "Resistor_SMD:R_0603" => Some("Resistor_SMD:R_0603_1608Metric"),
+        "Capacitor_SMD:C_0603" => Some("Capacitor_SMD:C_0603_1608Metric"),
+        "LED_SMD:LED_0603" => Some("LED_SMD:LED_0603_1608Metric"),
+        "Diode_SMD:SOD-123" => Some("Diode_SMD:D_SOD-123"),
+        _ => None,
+    }
+}
+
+fn verified_common_footprint_alias(
+    footprint: &str,
+    catalog: &kicad_footprint::FootprintCatalog,
+) -> Option<&'static str> {
+    let canonical = common_footprint_alias(footprint)?;
+    let id = FootprintId::parse(canonical).ok()?;
+    catalog.footprint(&id).ok()?;
+    Some(canonical)
+}
+
+fn normalize_common_footprint_aliases(
+    yaml: &str,
+    ctx: &AgentRuntime,
+) -> Result<(String, Vec<Value>)> {
+    let Some(surface) = circuit_lang::parse::parse_str(yaml).0 else {
+        return Ok((yaml.to_owned(), Vec::new()));
+    };
+    let catalog = ctx.footprint_catalog()?;
+    let mut replacements = Vec::new();
+    for block in surface.blocks.values() {
+        for (reference, component) in &block.components {
+            let Some(original) = component.footprint.as_deref() else {
+                continue;
+            };
+            let Some(canonical) = verified_common_footprint_alias(original, catalog) else {
+                continue;
+            };
+            replacements.push((reference.clone(), original.to_owned(), canonical));
+        }
+    }
+
+    let mut normalized = yaml.to_owned();
+    let mut report = Vec::new();
+    for (reference, original, canonical) in replacements {
+        normalized = crate::tools_pcb::patch_footprint(&normalized, &reference, canonical)
+            .map_err(anyhow::Error::msg)?
+            .0;
+        report.push(json!({
+            "reference": reference,
+            "original_footprint": original,
+            "canonical_footprint": canonical,
+        }));
+    }
+    Ok((normalized, report))
+}
+
+fn normalize_common_footprint_aliases_in_component_map(
+    components: &mut serde_json::Map<String, Value>,
+    ctx: &AgentRuntime,
+) -> Result<Vec<Value>> {
+    let catalog = ctx.footprint_catalog()?;
+    let mut report = Vec::new();
+    for (reference, component) in components {
+        let Some(fields) = component.as_object_mut() else {
+            continue;
+        };
+        let Some(original) = fields
+            .get("footprint")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let Some(canonical) = verified_common_footprint_alias(&original, catalog) else {
+            continue;
+        };
+        fields.insert("footprint".into(), json!(canonical));
+        report.push(json!({
+            "reference": reference,
+            "original_footprint": original,
+            "canonical_footprint": canonical,
+        }));
+    }
+    Ok(report)
+}
+
+fn add_footprint_alias_normalizations(report: &mut Value, normalizations: Vec<Value>) {
+    if !normalizations.is_empty() {
+        const MAX_EXAMPLES: usize = 8;
+        let count = normalizations.len();
+        report["normalized_footprint_aliases"] = json!({
+            "count": count,
+            "examples": normalizations.into_iter().take(MAX_EXAMPLES).collect::<Vec<_>>(),
+            "omitted": count.saturating_sub(MAX_EXAMPLES),
+        });
+    }
+}
+
 /// Conservative physical defaults for dense, implementation-oriented drafts.
 /// These are canonical package families with predictable symbol/pad mappings;
 /// less universal choices (ICs, polarized capacitors, switches, and terminal
@@ -2048,12 +2149,15 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let (yaml, power_reference_normalizations) = normalize_invalid_power_references(&yaml);
     let (yaml, normalizations) = normalize_misplaced_footprint_parts(&yaml, ctx)?;
+    let (yaml, footprint_alias_normalizations) =
+        normalize_common_footprint_aliases(&yaml, ctx)?;
     let (yaml, default_footprint_normalizations) =
         normalize_dense_default_footprints(&yaml, ctx)?;
     let result = compile(&yaml, ctx.provider());
     let mut report = compile_authoring_report(&result, ctx)?;
     add_power_reference_normalizations(&mut report, power_reference_normalizations);
     add_footprint_part_normalizations(&mut report, normalizations);
+    add_footprint_alias_normalizations(&mut report, footprint_alias_normalizations);
     add_default_footprint_normalizations(&mut report, default_footprint_normalizations);
     if reject_empty_draft_candidate(&mut report, &result, draft_exists, yaml.trim().is_empty()) {
         return Ok(report);
@@ -2140,7 +2244,9 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let footprint_normalizations =
         normalize_misplaced_footprint_component_map(&mut upsert, ctx)?;
-    let update = match input.get("update") {
+    let mut footprint_alias_normalizations =
+        normalize_common_footprint_aliases_in_component_map(&mut upsert, ctx)?;
+    let mut update = match input.get("update") {
         None => serde_json::Map::new(),
         Some(Value::Object(map)) => map.clone(),
         Some(_) => {
@@ -2153,6 +2259,9 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }));
         }
     };
+    footprint_alias_normalizations.extend(
+        normalize_common_footprint_aliases_in_component_map(&mut update, ctx)?,
+    );
     for (reference, fields) in &update {
         let Some(fields) = fields.as_object() else {
             return Ok(json!({
@@ -2309,6 +2418,7 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let Some(mut patch_design) = patch_result.design else {
         let mut report = compile_report(&patch_result.diagnostics);
         add_footprint_part_normalizations(&mut report, footprint_normalizations);
+        add_footprint_alias_normalizations(&mut report, footprint_alias_normalizations);
         report["error"] = json!("component repair fragment is invalid");
         report["code"] = json!("invalid_component_repair");
         report["draft_written"] = json!(false);
@@ -2600,6 +2710,7 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let candidate_result = compile(&candidate_yaml, ctx.provider());
     let mut report = compile_authoring_report(&candidate_result, ctx)?;
     add_footprint_part_normalizations(&mut report, footprint_normalizations);
+    add_footprint_alias_normalizations(&mut report, footprint_alias_normalizations);
     let candidate_is_clean = report.get("ok").and_then(Value::as_bool) == Some(true);
     let prior_is_invalid = prior_report.get("ok").and_then(Value::as_bool) != Some(true);
     let candidate_strictly_improves = prior_is_invalid
@@ -2646,12 +2757,15 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let draft_exists = prior_draft.is_some();
         let (yaml, power_reference_normalizations) = normalize_invalid_power_references(yaml);
         let (yaml, normalizations) = normalize_misplaced_footprint_parts(&yaml, ctx)?;
+        let (yaml, footprint_alias_normalizations) =
+            normalize_common_footprint_aliases(&yaml, ctx)?;
         let (yaml, default_footprint_normalizations) =
             normalize_dense_default_footprints(&yaml, ctx)?;
         let result = compile(&yaml, ctx.provider());
         let mut report = compile_authoring_report(&result, ctx)?;
         add_power_reference_normalizations(&mut report, power_reference_normalizations);
         add_footprint_part_normalizations(&mut report, normalizations);
+        add_footprint_alias_normalizations(&mut report, footprint_alias_normalizations);
         add_default_footprint_normalizations(&mut report, default_footprint_normalizations);
         if reject_empty_draft_candidate(&mut report, &result, draft_exists, yaml.trim().is_empty())
         {
@@ -2955,11 +3069,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        common_default_footprint, compile, compile_report, create_design, edit_design,
-        invalid_compile_quality_regressed, normalize_dense_default_footprints,
-        normalize_invalid_power_references, normalize_misplaced_footprint_parts,
-        repair_components, repair_components_tool, require_search_query,
-        symbol_for_misplaced_footprint, tool_defs,
+        common_default_footprint, common_footprint_alias, compile, compile_report, create_design,
+        edit_design, invalid_compile_quality_regressed, normalize_common_footprint_aliases,
+        normalize_dense_default_footprints, normalize_invalid_power_references,
+        normalize_misplaced_footprint_parts, repair_components, repair_components_tool,
+        require_search_query, symbol_for_misplaced_footprint, tool_defs,
     };
 
     #[test]
@@ -2982,6 +3096,111 @@ mod tests {
             None
         );
         assert_eq!(common_default_footprint("Amplifier_Operational:LM358"), None);
+    }
+
+    #[test]
+    fn common_aliases_are_exact_and_never_guess_active_packages() {
+        assert_eq!(
+            common_footprint_alias("Resistor_SMD:R_0603"),
+            Some("Resistor_SMD:R_0603_1608Metric")
+        );
+        assert_eq!(
+            common_footprint_alias("Capacitor_SMD:C_0603"),
+            Some("Capacitor_SMD:C_0603_1608Metric")
+        );
+        assert_eq!(
+            common_footprint_alias("LED_SMD:LED_0603"),
+            Some("LED_SMD:LED_0603_1608Metric")
+        );
+        assert_eq!(
+            common_footprint_alias("Diode_SMD:SOD-123"),
+            Some("Diode_SMD:D_SOD-123")
+        );
+        assert_eq!(
+            common_footprint_alias("Capacitor_THT:CP_Radial_D8.0mm_P3.50mm_P7.5mm"),
+            None
+        );
+        assert_eq!(common_footprint_alias("Package_TO_SOT_SMD:SOT23"), None);
+        assert_eq!(common_footprint_alias("Custom:R_0603"), None);
+    }
+
+    #[test]
+    fn footprint_alias_normalization_requires_a_catalog_verified_target() {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../kicad-footprint/tests/fixtures/footprints/R_0603_1608Metric.kicad_mod");
+        let footprints = tempfile::tempdir().unwrap();
+        let pretty = footprints.path().join("Resistor_SMD.pretty");
+        std::fs::create_dir_all(&pretty).unwrap();
+        std::fs::copy(source, pretty.join("R_0603_1608Metric.kicad_mod")).unwrap();
+        let runtime =
+            AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf()).unwrap();
+        let yaml = r#"
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: Device:R, footprint: "Resistor_SMD:R_0603", between: [A, B]}
+      C1: {part: Device:C, footprint: "Capacitor_SMD:C_0603", between: [A, B]}
+      Q1: {part: Transistor_FET:Q_NMOS_GSD, footprint: "Package_TO_SOT_SMD:SOT23", pins: {G: A, S: B, D: C}}
+"#;
+
+        let (normalized, changes) = normalize_common_footprint_aliases(yaml, &runtime).unwrap();
+
+        assert_eq!(changes.len(), 1);
+        assert!(normalized.contains("Resistor_SMD:R_0603_1608Metric"));
+        assert!(normalized.contains("Capacitor_SMD:C_0603\""));
+        assert!(normalized.contains("Package_TO_SOT_SMD:SOT23"));
+    }
+
+    #[test]
+    fn footprint_aliases_persist_canonically_across_authoring_paths() {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../kicad-footprint/tests/fixtures/footprints/R_0603_1608Metric.kicad_mod");
+        let footprints = tempfile::tempdir().unwrap();
+        let pretty = footprints.path().join("Resistor_SMD.pretty");
+        std::fs::create_dir_all(&pretty).unwrap();
+        std::fs::copy(source, pretty.join("R_0603_1608Metric.kicad_mod")).unwrap();
+        let runtime =
+            AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf()).unwrap();
+        let yaml = r#"
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: Device:R, footprint: "Resistor_SMD:R_0603", between: [A, B]}
+"#;
+
+        let created = create_design(json!({"yaml": yaml}), &runtime).unwrap();
+        assert_eq!(created["normalized_footprint_aliases"]["count"], 1);
+        assert!(runtime
+            .workspace()
+            .read_draft()
+            .unwrap()
+            .unwrap()
+            .contains("Resistor_SMD:R_0603_1608Metric"));
+
+        let edited = edit_design(json!({"yaml": yaml}), &runtime).unwrap();
+        assert_eq!(edited["normalized_footprint_aliases"]["count"], 1);
+
+        let repaired = repair_components(
+            json!({
+                "update": {"R1": {"footprint": "Resistor_SMD:R_0603"}},
+                "components": {
+                    "R2": {
+                        "part": "Device:R",
+                        "footprint": "Resistor_SMD:R_0603",
+                        "pins": {"1": "A", "2": "B"}
+                    }
+                }
+            }),
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(repaired["normalized_footprint_aliases"]["count"], 2);
+        assert_eq!(repaired["draft_written"], true);
+        let draft = runtime.workspace().read_draft().unwrap().unwrap();
+        assert_eq!(draft.matches("Resistor_SMD:R_0603_1608Metric").count(), 2);
+        assert!(!draft.contains("footprint: Resistor_SMD:R_0603\n"));
     }
 
     #[test]
