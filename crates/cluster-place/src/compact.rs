@@ -25,7 +25,7 @@
 //! de-sprawls without regressing the routed metrics — so a dual-IC / huge-bank board where the
 //! single-row bank gets too wide (411be) is safely left to the SA.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use circuit_lang::model::Design;
 use geom::{Point2, Rect};
@@ -65,6 +65,175 @@ pub(crate) fn part_sprawl(items: &[Item]) -> f64 {
     }
     const CELL: f64 = 6.35 * 5.08;
     (x1 - x0) * (y1 - y0) / (items.len() as f64 * CELL)
+}
+
+/// Lay a bank of repeated active channels as identical cells instead of preserving the
+/// annealer's unrelated per-channel offsets.  This deliberately recognizes only the common
+/// "N identical hubs, each fed by one private 2-pin signal part" shape (opto/driver/input
+/// banks).  Everything else is a support part and occupies a separate top band.
+///
+/// The caller evaluates the fully routed rendering and restores the input placement unless
+/// this is a strict no-regression win, so this function only proposes geometry.
+fn repeated_channel_relayout(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) -> bool {
+    use sch_place::netclass::is_power_net;
+
+    let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);
+    let mut by_part: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, it) in items.iter().enumerate() {
+        if it.refdes.starts_with('U') && it.geom.pins.len() >= 3 {
+            by_part.entry(&it.part).or_default().push(i);
+        }
+    }
+    let Some((_, mut hubs)) = by_part.into_iter().max_by_key(|(_, v)| v.len()) else {
+        return false;
+    };
+    if hubs.len() < 4 {
+        return false;
+    }
+    let natural_refdes = |i: usize| {
+        let rd = items[i].refdes.as_str();
+        let split = rd
+            .char_indices()
+            .find(|(_, c)| c.is_ascii_digit())
+            .map_or(rd.len(), |(p, _)| p);
+        (
+            rd[..split].to_owned(),
+            rd[split..].parse::<u32>().unwrap_or(u32::MAX),
+            rd.to_owned(),
+        )
+    };
+    hubs.sort_by_key(|&i| natural_refdes(i));
+
+    // A private satellite shares a two-terminal non-rail net with exactly this hub.
+    let mut channels = Vec::with_capacity(hubs.len());
+    let mut used_sat = BTreeSet::new();
+    for &hub in &hubs {
+        let mut candidates: Vec<(usize, String)> = Vec::new();
+        for net in items[hub]
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.as_deref())
+            .filter(|n| !is_rail(n))
+        {
+            let Some(pins) = inc.get(net) else { continue };
+            if pins.len() != 2 {
+                continue;
+            }
+            if let Some(sat) = pins
+                .iter()
+                .map(|&(i, _)| i)
+                .find(|&i| i != hub && items[i].geom.pins.len() == 2)
+            {
+                candidates.push((sat, net.to_owned()));
+            }
+        }
+        candidates.sort();
+        candidates.dedup();
+        if candidates.len() != 1 || !used_sat.insert(candidates[0].0) {
+            return false;
+        }
+        channels.push((hub, candidates[0].0, candidates[0].1.clone()));
+    }
+
+    const GRID: f64 = 1.27;
+    const MARGIN: f64 = 12.7;
+    const SUPPORT_GAP: f64 = 17.78;
+    const BAND_GAP: f64 = 25.4;
+    const CELL_X: f64 = 60.96;
+    const CELL_Y: f64 = 30.48;
+
+    let channel_items: BTreeSet<usize> = channels.iter().flat_map(|&(h, s, _)| [h, s]).collect();
+    let mut supports: Vec<usize> = (0..items.len())
+        .filter(|i| !channel_items.contains(i))
+        .collect();
+    supports.sort_by_key(|&i| {
+        // Big boundaries first, then stable/natural reference order.
+        (
+            std::cmp::Reverse(items[i].geom.pins.len()),
+            natural_refdes(i),
+        )
+    });
+
+    // Support band: headers, resistor array and bypass parts read as one compact prelude.
+    let mut sx = MARGIN;
+    let mut support_bottom = MARGIN;
+    for i in supports {
+        if items[i].geom.pins.len() == 2
+            && items[i]
+                .pins
+                .iter()
+                .filter_map(|(_, _, n)| n.as_deref())
+                .all(&is_rail)
+        {
+            items[i].angle = orient_angle(&items[i].geom, sch_place::ir::Orient::Down);
+        } else {
+            items[i].angle = 0.0;
+        }
+        items[i].mirror = false;
+        let r = item_rect(&items[i], Point2::new(0.0, 0.0));
+        items[i].at = geom::GRID_50_MIL.snap_point(Point2::new(sx - r.min_x, MARGIN - r.min_y));
+        let seated = item_rect(&items[i], items[i].at);
+        sx = seated.max_x + SUPPORT_GAP;
+        support_bottom = support_bottom.max(seated.max_y);
+        items[i].frozen = true;
+    }
+
+    let ncols = if channels.len() >= 6 { 2 } else { 1 };
+    let base_y = ((support_bottom + BAND_GAP) / GRID).ceil() * GRID;
+    for (k, (hub, sat, shared)) in channels.into_iter().enumerate() {
+        let (col, row) = (k % ncols, k / ncols);
+        items[hub].angle = 0.0;
+        items[hub].mirror = false;
+        items[hub].at = geom::GRID_50_MIL.snap_point(Point2::new(
+            MARGIN + 25.4 + col as f64 * CELL_X,
+            base_y + row as f64 * CELL_Y,
+        ));
+
+        let hub_pin = items[hub]
+            .pins
+            .iter()
+            .find(|(_, _, n)| n.as_deref() == Some(shared.as_str()))
+            .map(|(num, _, _)| num.clone())
+            .unwrap();
+        let sat_pin = items[sat]
+            .pins
+            .iter()
+            .find(|(_, _, n)| n.as_deref() == Some(shared.as_str()))
+            .map(|(num, _, _)| num.clone())
+            .unwrap();
+        let pin_offset = |item: &Item, num: &str, angle: f64| {
+            item.geom
+                .pins
+                .iter()
+                .find(|p| p.number == num)
+                .map(|p| {
+                    let p = p.at.transform_offset(angle, false);
+                    Point2::new(p[0], p[1])
+                })
+                .unwrap_or(Point2::new(0.0, 0.0))
+        };
+        let sat_angle = [0.0, 90.0, 180.0, 270.0]
+            .into_iter()
+            .max_by(|a, b| {
+                pin_offset(&items[sat], &sat_pin, *a)
+                    .x
+                    .total_cmp(&pin_offset(&items[sat], &sat_pin, *b).x)
+            })
+            .unwrap();
+        items[sat].angle = sat_angle;
+        items[sat].mirror = false;
+        let hp = pin_offset(&items[hub], &hub_pin, items[hub].angle);
+        let sp = pin_offset(&items[sat], &sat_pin, sat_angle);
+        // Keep the satellite beyond the neighbouring hub pin's label strip.  A shorter lead
+        // seats the resistor body over the adjacent input's pennant on 2.54-mm pin rows.
+        items[sat].at = geom::GRID_50_MIL.snap_point(Point2::new(
+            items[hub].at.x + hp.x - 12.7 - sp.x,
+            items[hub].at.y + hp.y - sp.y,
+        ));
+        items[hub].frozen = true;
+        items[sat].frozen = true;
+    }
+    true
 }
 
 /// A module = a hub + the satellites that tap it, or a lone unclustered part. Frozen items
@@ -584,6 +753,31 @@ pub(crate) fn compact_clusters(
     let base = save(items);
     let s0 = score(eval, inc, ir, items);
     let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);
+    // Repeated channels deserve a structural proposal before the generic module packer:
+    // preserving SA-relative offsets is precisely what turns an isomorphic bank into islands.
+    // This uses the same shipped gate as every other compact candidate and restores `base` on
+    // any warning/crossing regression.
+    if repeated_channel_relayout(items, inc, ir) {
+        let s = score(eval, inc, ir, items);
+        let rendered = eval
+            .rendered(design, items)
+            .map(|(w, rect)| (w, rendered_sprawl(&rect, items.len())));
+        let ok = rendered.is_some_and(|(w, spr)| {
+            (s.0, s.1, s.2) <= (s0.0, s0.1, s0.2)
+                && w <= sa_warnings
+                && spr + 1e-3 < baseline_rendered
+        });
+        if debug {
+            eprintln!(
+                "[channels] rendered={rendered:?} routed={:?} ok={ok}",
+                (s.0, s.1, s.2)
+            );
+        }
+        if ok {
+            return;
+        }
+        restore(items, &base);
+    }
     // Tightest collision-free pack wins. Warnings rise monotonically as the gutter tightens
     // (denser ⇒ more label collisions), so sweep tight→loose and TAKE THE FIRST gutter whose
     // rendering ships no new warnings, no routed regression, and a real de-sprawl — it is the
