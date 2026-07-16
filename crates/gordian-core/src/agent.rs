@@ -507,6 +507,30 @@ fn is_discovery_tool(name: &str) -> bool {
     )
 }
 
+fn request_supplies_multiple_library_ids(intent: &str) -> bool {
+    let ids = intent
+        .split_whitespace()
+        .map(|token| {
+            token.trim_matches(|ch: char| {
+                !ch.is_ascii_alphanumeric() && !matches!(ch, '_' | '-' | '.' | ':')
+            })
+        })
+        .filter(|token| {
+            let Some((library, name)) = token.split_once(':') else {
+                return false;
+            };
+            !library.is_empty()
+                && !name.is_empty()
+                && library.chars().any(|ch| ch.is_ascii_alphabetic())
+                && name.chars().any(|ch| ch.is_ascii_alphabetic())
+                && token
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':'))
+        })
+        .collect::<HashSet<_>>();
+    ids.len() >= 3
+}
+
 fn is_batchable_discovery_tool(name: &str) -> bool {
     matches!(name, "search_symbols" | "search_footprints")
 }
@@ -949,6 +973,11 @@ impl<P: Provider> Agent<P> {
                 &revision_reads_used,
                 self.runtime.sch_path().exists(),
             );
+            if !draft_existed_before_completion
+                && request_supplies_multiple_library_ids(authoritative_intent)
+            {
+                defs.retain(|tool| !is_discovery_tool(tool.name.as_str()));
+            }
             let review_has_defects = schematic_review_current
                 .as_ref()
                 .is_some_and(|review| !review_result_is_clean(review));
@@ -5348,6 +5377,19 @@ mod tests {
             explicit_minimum_physical_components("Use a dense 24-bit design on a 45 mm board"),
             None
         );
+    }
+
+    #[test]
+    fn multiple_exact_library_ids_skip_initial_discovery() {
+        assert!(request_supplies_multiple_library_ids(
+            "Use LED_SMD:LED_0603, Resistor_SMD:R_0603, and MountingHole:MountingHole_2.7mm."
+        ));
+        assert!(!request_supplies_multiple_library_ids(
+            "Use Device:R and Connector:Conn_01x02_Pin; choose the rest"
+        ));
+        assert!(!request_supplies_multiple_library_ids(
+            "See https://example.com/a:b at 12:30"
+        ));
     }
 
     #[test]
