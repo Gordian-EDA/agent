@@ -353,6 +353,12 @@ fn write_seed_board(spec: &BoardSeedSpec, ctx: &AgentRuntime) -> std::result::Re
         .footprint_catalog()
         .map_err(|e| format!("footprint catalog unavailable: {e}"))?;
     let text = emit_seed_board(spec, catalog)?;
+    // Regeneration replaces the document, not merely its on-disk bytes. A
+    // cached pcbnew session otherwise keeps serving the old in-memory board for
+    // the same pathname, so the next tool sees stale bounds and footprints.
+    // Close before overwrite to prevent that process from later saving stale
+    // state back over the fresh seed.
+    ctx.close_kicad_session();
     std::fs::write(ctx.pcb_path(), text)
         .map_err(|e| format!("could not write {}: {e}", ctx.pcb_path().display()))
 }
@@ -2045,5 +2051,30 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0]["type"], "same_local_global_label");
         assert_eq!(warnings[0]["items"][0], "Label 'USB_DP'");
+    }
+
+    #[test]
+    fn seed_replacement_invalidates_same_runtime_live_session() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: KiCad is not installed");
+            return;
+        };
+        let spec = |width, height| BoardSeedSpec {
+            bounds: Rect::new(0.0, 0.0, width, height),
+            rules: SeedRules::default(),
+            parts: vec![],
+            outline: None,
+        };
+
+        write_seed_board(&spec(20.0, 10.0), &ctx).unwrap();
+        let first = super::super::active::board_problem(&ctx).unwrap();
+        assert_eq!(first.imported.bounds, Rect::new(0.0, 0.0, 20.0, 10.0));
+
+        // `first` opened and cached a pcbnew session. Replacing the same path
+        // must force the next snapshot to open the new document, not reuse it.
+        write_seed_board(&spec(40.0, 30.0), &ctx).unwrap();
+        let second = super::super::active::board_problem(&ctx).unwrap();
+        assert_eq!(second.imported.bounds, Rect::new(0.0, 0.0, 40.0, 30.0));
+        ctx.close_kicad_session();
     }
 }
