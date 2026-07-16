@@ -445,7 +445,7 @@ fn constrain_schematic_tools_for_draft_state(
             is_discovery_tool(tool.name.as_str())
                 || matches!(
                     tool.name.as_str(),
-                    "repair_components" | "assign_footprints"
+                    "edit_design" | "repair_components" | "assign_footprints"
                 )
         });
     } else if draft_known_invalid {
@@ -7180,7 +7180,7 @@ blocks:
 
         let defects = names_after(true, false, true, true, false, true);
         assert!(defects.contains("repair_components"));
-        assert!(!defects.contains("edit_design"));
+        assert!(defects.contains("edit_design"));
         assert!(defects.contains("assign_footprints"));
         assert!(!defects.contains("project_info"));
         assert!(!defects.contains("apply_design"));
