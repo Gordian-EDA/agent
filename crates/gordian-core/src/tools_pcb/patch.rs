@@ -140,7 +140,89 @@ fn footprint_reference(text: &str, fp: &Node) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// Local position of a visible footprint Reference property.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct ReferencePosition {
+    pub x: f64,
+    pub y: f64,
+}
+
+pub(super) fn reference_position(text: &str, reference: &str) -> Option<ReferencePosition> {
+    let (body_start, body_end) = root_body(text).ok()?;
+    for fp in child_nodes(text, body_start, body_end) {
+        if node_head(text, &fp) != "footprint"
+            || footprint_reference(text, &fp).as_deref() != Some(reference)
+        {
+            continue;
+        }
+        let property = child_nodes(text, fp.start + 1, fp.end - 1)
+            .into_iter()
+            .find(|node| {
+                node_head(text, node) == "property"
+                    && text[node.start..node.end].starts_with("(property \"Reference\"")
+                    && !text[node.start..node.end].contains("(hide yes)")
+            })?;
+        let at = child_nodes(text, property.start + 1, property.end - 1)
+            .into_iter()
+            .find(|node| node_head(text, node) == "at")?;
+        let (x, y, _) = parse_at(text, &at)?;
+        return Some(ReferencePosition { x, y });
+    }
+    None
+}
+
+/// Relocate one visible Reference property in footprint-local coordinates and
+/// counter-rotate it so the rendered board text remains upright.
+pub(super) fn patch_reference_position(
+    text: &str,
+    reference: &str,
+    position: ReferencePosition,
+) -> Result<String, String> {
+    let (body_start, body_end) = root_body(text)?;
+    for fp in child_nodes(text, body_start, body_end) {
+        if node_head(text, &fp) != "footprint"
+            || footprint_reference(text, &fp).as_deref() != Some(reference)
+        {
+            continue;
+        }
+        let property = child_nodes(text, fp.start + 1, fp.end - 1)
+            .into_iter()
+            .find(|node| {
+                node_head(text, node) == "property"
+                    && text[node.start..node.end].starts_with("(property \"Reference\"")
+            })
+            .ok_or_else(|| format!("footprint {reference}: no Reference property"))?;
+        if text[property.start..property.end].contains("(hide yes)") {
+            return Err(format!(
+                "footprint {reference}: Reference property is hidden"
+            ));
+        }
+        let footprint_at = child_nodes(text, fp.start + 1, fp.end - 1)
+            .into_iter()
+            .find(|node| node_head(text, node) == "at")
+            .ok_or_else(|| format!("footprint {reference}: no (at …) node"))?;
+        let (_, _, footprint_angle) = parse_at(text, &footprint_at)
+            .ok_or_else(|| format!("footprint {reference}: invalid (at …) node"))?;
+        let upright_angle = (-footprint_angle.unwrap_or(0.0)).rem_euclid(360.0);
+        let at = child_nodes(text, property.start + 1, property.end - 1)
+            .into_iter()
+            .find(|node| node_head(text, node) == "at")
+            .ok_or_else(|| format!("footprint {reference}: Reference has no (at …) node"))?;
+        let replacement = format!(
+            "(at {} {} {})",
+            fmt_num(position.x),
+            fmt_num(position.y),
+            fmt_num(upright_angle)
+        );
+        return Ok(apply_edits(text, vec![(at.start, at.end, replacement)]));
+    }
+    Err(format!("footprint {reference}: not found"))
+}
+
 fn fmt_num(v: f64) -> String {
+    if v.abs() < 0.0000005 {
+        return "0".to_string();
+    }
     let s = format!("{v:.6}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s.is_empty() || s == "-" {
@@ -521,6 +603,29 @@ mod tests {
 	)
 )
 "#;
+
+    #[test]
+    fn reference_relocation_stays_visible_and_upright() {
+        assert_eq!(
+            reference_position(BOARD, "R1"),
+            Some(ReferencePosition { x: 0.0, y: -1.65 })
+        );
+
+        let moved =
+            patch_reference_position(BOARD, "R1", ReferencePosition { x: 2.5, y: 1.5 }).unwrap();
+
+        assert!(moved.contains("(property \"Reference\" \"R1\"\n\t\t\t(at 2.5 1.5 0)"));
+        assert!(!moved.contains("(hide yes)"));
+        assert!(moved.contains("(at 12 20)"), "footprint must not move");
+        assert!(moved.contains("(at -0.7875 0)"), "pads must not move");
+
+        let rotated_board = BOARD.replacen("(at 12 20)", "(at 12 20 90)", 1);
+        let rotated =
+            patch_reference_position(&rotated_board, "R1", ReferencePosition { x: 2.5, y: 1.5 })
+                .unwrap();
+        assert!(rotated.contains("(property \"Reference\" \"R1\"\n\t\t\t(at 2.5 1.5 270)"));
+        assert!(rotated.contains("(at 12 20 90)"), "footprint must not move");
+    }
 
     #[test]
     fn patch_moves_and_rotates_footprint() {

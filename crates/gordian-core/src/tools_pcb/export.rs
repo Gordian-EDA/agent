@@ -154,10 +154,38 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Err(e) => return Ok(json!({ "error": e })),
     }
     let cli = KicadCli::new(ctx.env());
-    let report = match cli.drc(&path) {
+    let initial_report = match cli.drc(&path) {
         Ok(report) => report,
         Err(e) => return Ok(json!({ "error": format!("kicad-cli pcb drc failed: {e}") })),
     };
+    let initial_silk_warnings = super::silk::silk_warning_count(&initial_report);
+    let mut silk_cleanup_attempts = 0usize;
+    let mut silk_references_moved = Vec::new();
+    let mut silk_cleanup_error = None;
+    let report = if initial_silk_warnings > 0 {
+        // Cleanup edits the durable board between CLI DRC passes. Drop any live
+        // editor session first so stale in-memory state cannot overwrite it.
+        ctx.close_kicad_session();
+        match super::silk::cleanup_reference_silkscreen(&path, &cli, initial_report.clone()) {
+            Ok(cleanup) => {
+                silk_cleanup_attempts = cleanup.attempts;
+                silk_references_moved = cleanup.moved_references;
+                debug_assert_eq!(cleanup.initial_warnings, initial_silk_warnings);
+                debug_assert_eq!(
+                    cleanup.remaining_warnings,
+                    super::silk::silk_warning_count(&cleanup.report)
+                );
+                cleanup.report
+            }
+            Err(err) => {
+                silk_cleanup_error = Some(err);
+                initial_report
+            }
+        }
+    } else {
+        initial_report
+    };
+    let silk_warnings = super::silk::silk_warning_count(&report);
     let gate = gate_drc(&report);
     let meaningful_unconnected: Vec<_> = report
         .unconnected_items
@@ -172,6 +200,11 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "path": path.display().to_string(),
         "blocking_findings": blocking_findings,
         "reported_findings": reported_findings,
+        "silk_warnings": silk_warnings,
+        "silk_warnings_fixed": initial_silk_warnings.saturating_sub(silk_warnings),
+        "silk_cleanup_attempts": silk_cleanup_attempts,
+        "silk_references_moved": silk_references_moved,
+        "silk_cleanup_error": silk_cleanup_error,
         "violations": report.violations.len(),
         "copper_violations": gate.copper_violations,
         "unconnected_items": gate.meaningful_unconnected,
@@ -180,9 +213,16 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             report.violations.iter().filter(|v| !is_non_copper(v)),
             5,
         ),
+        "top_silk_violations": violation_summaries(
+            report.violations.iter().filter(|v| {
+                v.severity == "warning" && matches!(v.kind.as_str(),
+                    "silk_over_copper" | "silk_overlap" | "silk_edge_clearance" | "silk_over_silk")
+            }),
+            5,
+        ),
         "top_unconnected": violation_summaries(meaningful_unconnected, 5),
         "note": if gate.is_ok() {
-            format!("{note_prefix}KiCAD DRC passed.")
+            format!("{note_prefix}KiCAD DRC passed; {silk_warnings} silkscreen warning(s) remain after bounded reference cleanup.")
         } else {
             format!("{note_prefix}KiCAD DRC reported issues; inspect violations/unconnected counts.")
         },

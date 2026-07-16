@@ -42,6 +42,7 @@ mod place;
 mod render;
 mod route;
 mod seed;
+mod silk;
 
 pub(super) fn fmt_num(v: f64) -> String {
     let v = if v == 0.0 { 0.0 } else { v };
