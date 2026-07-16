@@ -40,6 +40,12 @@ trace its active-device functional pins and passive paths rather than accepting 
 same-order or superficially similar substitute. For timer/filter/feedback blocks,
 verify timing, cutoff, or gain from the actual topology and values.
 
+For repeated channels, audit EVERY channel against every explicit intent value and
+required support part. Report all proven channel/value omissions in the same verdict;
+do not stop after the first bad channel or defer an equivalent second-bank defect to a
+later review. When channels differ, cite the actually defective references rather than
+a correct reference used only as a class exemplar.
+
 "Flow-through protection" is a concrete topology: every protected signal must
 enter and leave the protector on separate pins and separate connector-side and
 downstream-side nets. A single shunt/ESD pin attached to a net that directly joins
@@ -1283,6 +1289,8 @@ blocks:
     #[test]
     fn netlist_review_requires_named_topology_and_actual_transfer_checks() {
         assert!(NETLIST_REVIEW_SYSTEM.contains("explicitly named in the intent"));
+        assert!(NETLIST_REVIEW_SYSTEM.contains("audit EVERY channel"));
+        assert!(NETLIST_REVIEW_SYSTEM.contains("same verdict"));
         assert!(NETLIST_REVIEW_SYSTEM.contains("actual topology and values"));
         for lenses in [QUICK_LENSES, LENSES] {
             assert!(

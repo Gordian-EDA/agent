@@ -778,7 +778,7 @@ fn repair_components_requires_confirmation_only_for_part_changes() {
     );
     assert_eq!(std::fs::read(ctx.workspace().draft_path()).unwrap(), before);
 
-    let moved = run_tool(
+    let routed = run_tool(
         "repair_components",
         serde_json::json!({
             "upsert": {"U1": {"part": "Device:R", "value": "3k", "pins": {"1": "B", "2": "GND"}}},
@@ -787,8 +787,9 @@ fn repair_components_requires_confirmation_only_for_part_changes() {
         &ctx,
     )
     .unwrap();
-    assert_eq!(moved["code"], "component_block_mismatch");
-    assert_eq!(std::fs::read(ctx.workspace().draft_path()).unwrap(), before);
+    assert_eq!(routed["replaced"], serde_json::json!(["U1"]), "{routed}");
+    let routed_draft = ctx.workspace().read_draft().unwrap().unwrap();
+    assert!(routed_draft.contains("value: 3k"), "{routed_draft}");
 
     let replaced = run_tool(
         "repair_components",
