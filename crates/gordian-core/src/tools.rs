@@ -928,24 +928,58 @@ fn validate_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// Build the `{ok, diagnostics, errors, warnings}` report a compile yields.
 pub(crate) fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
     use circuit_lang::Severity;
-    const MAX_DIAGNOSTICS: usize = 40;
-    const MAX_WARNINGS_WHEN_ERROR_FREE: usize = 20;
+    use std::collections::{BTreeMap, HashMap, HashSet};
 
-    let mut strings = Vec::new();
-    let mut omitted = 0usize;
+    const MAX_DIAGNOSTICS: usize = 40;
+    const MAX_REPRESENTATIVES_PER_CODE: usize = 6;
+
+    let mut code_counts = BTreeMap::<&str, (usize, usize)>::new();
     for d in &diags.0 {
-        let is_warning = d.severity == Severity::Warning;
-        let cap = if is_warning {
-            MAX_WARNINGS_WHEN_ERROR_FREE
-        } else {
-            MAX_DIAGNOSTICS
-        };
-        if strings.len() < cap || d.severity == Severity::Error {
-            strings.push(d.to_string());
-        } else {
-            omitted += 1;
+        let counts = code_counts.entry(d.code).or_default();
+        match d.severity {
+            Severity::Error => counts.0 += 1,
+            Severity::Warning => counts.1 += 1,
         }
     }
+
+    // Reserve one representative for every diagnostic class before allowing a
+    // repetitive class to consume the remaining context budget. This keeps a
+    // large syntax-error family from hiding later pin or electrical errors.
+    let mut selected = vec![false; diags.0.len()];
+    let mut represented_codes = HashSet::new();
+    let mut selected_count = 0usize;
+    for (index, d) in diags.0.iter().enumerate() {
+        if selected_count == MAX_DIAGNOSTICS {
+            break;
+        }
+        if represented_codes.insert(d.code) {
+            selected[index] = true;
+            selected_count += 1;
+        }
+    }
+    let mut representatives_per_code = represented_codes
+        .into_iter()
+        .map(|code| (code, 1usize))
+        .collect::<HashMap<_, _>>();
+    for (index, d) in diags.0.iter().enumerate() {
+        if selected_count == MAX_DIAGNOSTICS {
+            break;
+        }
+        let count = representatives_per_code.entry(d.code).or_default();
+        if !selected[index] && *count < MAX_REPRESENTATIVES_PER_CODE {
+            selected[index] = true;
+            selected_count += 1;
+            *count += 1;
+        }
+    }
+    let strings = diags
+        .0
+        .iter()
+        .zip(selected)
+        .filter(|(_, selected)| *selected)
+        .map(|(d, _)| d.to_string())
+        .collect::<Vec<_>>();
+    let omitted = diags.0.len() - strings.len();
     let errors = diags
         .0
         .iter()
@@ -959,13 +993,16 @@ pub(crate) fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
     let mut report = json!({
         "ok": errors == 0,
         "diagnostics": strings,
+        "diagnostic_code_counts": code_counts.into_iter().map(|(code, (errors, warnings))| {
+            (code.to_owned(), json!({ "errors": errors, "warnings": warnings }))
+        }).collect::<serde_json::Map<_, _>>(),
         "errors": errors,
         "warnings": warnings,
     });
     if omitted > 0 {
         report["diagnostics_omitted"] = json!(omitted);
         report["note"] = json!(
-            "diagnostics truncated for context efficiency; fix errors first, then run validate_design again if warning detail is needed"
+            "diagnostics are representative and truncated by code for context efficiency; diagnostic_code_counts preserves exact totals"
         );
     }
     report
@@ -2473,7 +2510,65 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{repair_components_tool, tool_defs};
+    use super::{compile_report, repair_components_tool, tool_defs};
+
+    #[test]
+    fn compile_report_preserves_error_classes_under_repetitive_diagnostics() {
+        use circuit_lang::{Diagnostic, Diagnostics};
+
+        let mut diagnostics = Diagnostics::default();
+        for index in 0..55 {
+            diagnostics.push(Diagnostic::error(
+                "bad-refdes",
+                format!("R_SENSOR_{index} is not a valid refdes"),
+            ));
+        }
+        diagnostics.push(Diagnostic::error(
+            "unknown-pin",
+            "pin ADC0 not found on U1",
+        ));
+        diagnostics.push(Diagnostic::error(
+            "power-pin-unconnected",
+            "U1 DVDD is not connected",
+        ));
+        for index in 0..9 {
+            diagnostics.push(Diagnostic::warning(
+                "single-pin-net",
+                format!("net SIGNAL_{index} has only one pin"),
+            ));
+        }
+
+        let report = compile_report(&diagnostics);
+        assert_eq!(report["errors"], 57);
+        assert_eq!(report["warnings"], 9);
+        assert_eq!(report["diagnostics_omitted"], 52);
+        assert_eq!(
+            report["diagnostic_code_counts"]["bad-refdes"]["errors"],
+            55
+        );
+        assert_eq!(
+            report["diagnostic_code_counts"]["single-pin-net"]["warnings"],
+            9
+        );
+
+        let rendered = report["diagnostics"].as_array().unwrap();
+        assert_eq!(rendered.len(), 14);
+        assert_eq!(
+            rendered
+                .iter()
+                .filter(|d| d.as_str().unwrap().contains("bad-refdes"))
+                .count(),
+            6
+        );
+        for code in ["unknown-pin", "power-pin-unconnected", "single-pin-net"] {
+            assert!(
+                rendered
+                    .iter()
+                    .any(|d| d.as_str().unwrap().contains(code)),
+                "missing representative for {code}: {report}"
+            );
+        }
+    }
 
     #[test]
     fn natural_components_alias_is_advertised_as_a_nonempty_component_map() {
