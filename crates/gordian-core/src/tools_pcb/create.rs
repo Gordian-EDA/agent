@@ -637,6 +637,7 @@ impl<'a> SeedBoardWriter<'a> {
     }
 
     fn push_zones(&self, out: &mut String) -> io::Result<()> {
+        let mut explicit_by_layer = BTreeMap::<u32, (i32, String, String, bool)>::new();
         for (idx, pour) in self.rules.pours.iter().enumerate() {
             let resolved = self.net_codes.get_key_value(&pour.net).or_else(|| {
                 let hierarchical = format!("/{}", pour.net.trim_start_matches('/'));
@@ -651,7 +652,8 @@ impl<'a> SeedBoardWriter<'a> {
                     ),
                 )
             })?;
-            let Some((_, layer_name)) = resolve_pour_layer(&pour.layer, self.rules.layer_count)
+            let Some((layer_idx, layer_name)) =
+                resolve_pour_layer(&pour.layer, self.rules.layer_count)
             else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -661,13 +663,30 @@ impl<'a> SeedBoardWriter<'a> {
                     ),
                 ));
             };
+            let solid = pour.pad_connection == PourPadConnection::Solid;
+            if let Some((existing_code, existing_net, _, existing_solid)) =
+                explicit_by_layer.get(&layer_idx)
+            {
+                if existing_code == net_code && *existing_solid == solid {
+                    continue;
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "rules.pours assigns incompatible full-board zones {existing_net:?} and {net_name:?} to {layer_name}"
+                    ),
+                ));
+            }
+            explicit_by_layer.insert(layer_idx, (*net_code, net_name.clone(), layer_name, solid));
+        }
+        for (layer_idx, (net_code, net, layer_name, solid)) in &explicit_by_layer {
             self.write_zone(
                 out,
                 *net_code,
-                net_name,
-                &layer_name,
-                &format!("{idx}"),
-                pour.pad_connection == PourPadConnection::Solid,
+                net,
+                layer_name,
+                &format!("explicit:{layer_idx}"),
+                *solid,
             );
         }
         // Solid GND/VCC planes on the centred inner layers — the physical
@@ -680,9 +699,11 @@ impl<'a> SeedBoardWriter<'a> {
                 acc
             },
         );
-        for (net, layer_idx) in
-            pcb_model::default_plane_nets(self.rules.layer_count, pad_counts.into_iter())
-        {
+        for (net, layer_idx) in pcb_model::default_plane_nets_excluding(
+            self.rules.layer_count,
+            pad_counts.into_iter(),
+            explicit_by_layer.keys().copied(),
+        ) {
             let Some(net_code) = self.net_codes.get(&net).copied() else {
                 continue;
             };
@@ -1303,22 +1324,15 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
                     ));
                 }
             };
-            // A pour floods a SIGNAL layer (top/bottom, or an inner signal layer on a
-            // 6-layer board) — never a GND/VCC PLANE (already a full copper layer) or a
-            // non-existent layer. Resolve + reject up front rather than silently drop it.
+            // A pour floods the requested copper layer. Reserved inner plane indices
+            // are valid explicit overrides of the automatic GND/supply assignment;
+            // the emitter suppresses the competing default on that physical layer.
             match resolve_pour_layer(layer, layer_count) {
                 None => {
                     return Err(format!(
                         "rules.pours[].layer '{layer}' is not a valid copper layer on a \
                          {layer_count}-layer board — use top/bottom, or an existing innerN"
                     ));
-                }
-                Some((idx, _))
-                    if grid_astar::router::plane_layers(layer_count as usize).contains(&idx) =>
-                {
-                    // Already a full copper plane there — the pour request is
-                    // satisfied by construction; don't fail the regenerate.
-                    continue;
                 }
                 Some((idx, _)) => {
                     if let Some((existing_net, existing_connection)) = pours_by_layer.get(&idx) {
@@ -1446,6 +1460,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_seed_rules_keeps_explicit_reserved_plane_overrides() {
+        let rules = parse_seed_rules(Some(&json!({
+            "layer_count": 4,
+            "pours": [
+                { "net": "GND", "layer": "inner1" },
+                { "net": "GND", "layer": "inner2" }
+            ]
+        })))
+        .unwrap();
+
+        assert_eq!(rules.pours.len(), 2);
+        assert_eq!(rules.pours[0].layer, "inner1");
+        assert_eq!(rules.pours[1].layer, "inner2");
+    }
+
+    #[test]
     fn parse_seed_rules_rejects_competing_full_board_pours() {
         let err = parse_seed_rules(Some(&json!({
             "layer_count": 2,
@@ -1543,6 +1573,53 @@ mod tests {
         assert!(board.contains("\n\t\t(layer \"B.Cu\")\n"));
         assert!(board.contains("\n\t\t(connect_pads yes\n"));
         assert!(board.contains("(xy 0 0) (xy 20 0) (xy 20 10) (xy 0 10)"));
+    }
+
+    #[test]
+    fn explicit_plane_pours_replace_defaults_without_duplicate_zones() {
+        let parts = vec![SeedFootprint {
+            reference: "U1".to_string(),
+            value: None,
+            lib_id: "Test:TwoPad".to_string(),
+            source: "(footprint \"TwoPad\" \
+                (pad \"1\" smd circle (at -1 0) (size 1 1) (layers \"F.Cu\")) \
+                (pad \"2\" smd circle (at 1 0) (size 1 1) (layers \"F.Cu\")))"
+                .to_string(),
+            pad_nets: BTreeMap::from([
+                ("1".to_string(), "GND".to_string()),
+                ("2".to_string(), "V3V3".to_string()),
+            ]),
+            at: Point2 { x: 5.0, y: 5.0 },
+            rotation: 0.0,
+            locked: false,
+        }];
+        let bounds = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let rules = SeedRules {
+            layer_count: 4,
+            pours: vec![
+                PourSpec {
+                    net: "GND".to_string(),
+                    layer: "inner1".to_string(),
+                    pad_connection: PourPadConnection::Thermal,
+                },
+                PourSpec {
+                    net: "GND".to_string(),
+                    layer: "inner2".to_string(),
+                    pad_connection: PourPadConnection::Thermal,
+                },
+            ],
+            ..SeedRules::default()
+        };
+
+        let board = SeedBoardWriter::new(&parts, &bounds, &rules, None)
+            .emit()
+            .unwrap();
+
+        assert_eq!(board.matches("\n\t(zone\n").count(), 2, "{board}");
+        assert_eq!(board.matches("\n\t\t(net_name \"GND\")\n").count(), 2);
+        assert_eq!(board.matches("\n\t\t(layer \"In1.Cu\")\n").count(), 1);
+        assert_eq!(board.matches("\n\t\t(layer \"In2.Cu\")\n").count(), 1);
+        assert!(!board.contains("\n\t\t(net_name \"V3V3\")\n"));
     }
 
     #[test]

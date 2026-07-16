@@ -329,11 +329,24 @@ pub fn default_plane_nets(
     layer_count: u32,
     nets: impl Iterator<Item = (String, usize)>,
 ) -> std::collections::BTreeMap<String, u32> {
+    default_plane_nets_excluding(layer_count, nets, std::iter::empty())
+}
+
+/// Default plane-net assignment after reserving layers explicitly configured by
+/// the caller. An authored full-board pour owns its physical layer, so an
+/// automatic GND/supply default must not emit a duplicate or competing zone on
+/// that layer. With no reserved layers this is identical to [`default_plane_nets`].
+pub fn default_plane_nets_excluding(
+    layer_count: u32,
+    nets: impl Iterator<Item = (String, usize)>,
+    reserved_layers: impl IntoIterator<Item = u32>,
+) -> std::collections::BTreeMap<String, u32> {
     let planes = plane_layers(layer_count);
     let mut assigned = std::collections::BTreeMap::new();
     let [gnd_layer, pwr_layer] = planes.as_slice() else {
         return assigned;
     };
+    let reserved: std::collections::BTreeSet<u32> = reserved_layers.into_iter().collect();
     let is_ground = |n: &str| {
         let u = n.to_ascii_uppercase();
         u == "GND" || u.ends_with("GND") || u == "VSS" || u == "AGND" || u == "PGND"
@@ -357,10 +370,14 @@ pub fn default_plane_nets(
             pwr = Some((name, pads));
         }
     }
-    if let Some((name, _)) = gnd {
+    if !reserved.contains(gnd_layer)
+        && let Some((name, _)) = gnd
+    {
         assigned.insert(name, *gnd_layer);
     }
-    if let Some((name, _)) = pwr {
+    if !reserved.contains(pwr_layer)
+        && let Some((name, _)) = pwr
+    {
         assigned.insert(name, *pwr_layer);
     }
     assigned
@@ -369,6 +386,7 @@ pub fn default_plane_nets(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn layer_ref_resolve_maps_index_and_name() {
@@ -383,6 +401,21 @@ mod tests {
         assert_eq!(LayerRef::resolve("inner3", 2), None);
         assert_eq!(LayerRef::resolve("nope", 4), None);
         assert_eq!(LayerRef::resolve("bottom", 0), None);
+    }
+
+    #[test]
+    fn explicit_plane_layers_suppress_only_competing_defaults() {
+        let nets = || [("GND".to_owned(), 10), ("V3V3".to_owned(), 8)].into_iter();
+
+        assert_eq!(
+            default_plane_nets_excluding(4, nets(), []),
+            BTreeMap::from([("GND".to_owned(), 1), ("V3V3".to_owned(), 2)])
+        );
+        assert_eq!(
+            default_plane_nets_excluding(4, nets(), [2]),
+            BTreeMap::from([("GND".to_owned(), 1)])
+        );
+        assert!(default_plane_nets_excluding(4, nets(), [1, 2]).is_empty());
     }
 
     #[test]

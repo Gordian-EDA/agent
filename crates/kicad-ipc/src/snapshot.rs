@@ -1725,6 +1725,31 @@ mod tests {
     }
 
     #[test]
+    fn explicit_dual_ground_planes_remove_unobserved_supply_default() {
+        let connection = |name: &str| Connection {
+            name: name.to_owned(),
+            points_to_connect: vec![
+                RoutePoint {
+                    x: 1.0,
+                    y: 1.0,
+                    layer: LayerRef::top(),
+                },
+                RoutePoint {
+                    x: 2.0,
+                    y: 1.0,
+                    layer: LayerRef::top(),
+                },
+            ],
+        };
+        let observed = BTreeMap::from([("GND".to_owned(), BTreeSet::from([1, 2]))]);
+
+        let assigned = observed_plane_nets(4, &[connection("GND"), connection("V3V3")], &observed);
+
+        assert_eq!(assigned, BTreeMap::from([("GND".to_owned(), 1)]));
+        assert!(!assigned.contains_key("V3V3"));
+    }
+
+    #[test]
     fn only_board_spanning_zones_can_be_planes() {
         let outline = Polygon::new(vec![
             Point2::new(0.0, 0.0),
