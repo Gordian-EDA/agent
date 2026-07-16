@@ -919,7 +919,14 @@ impl<P: Provider> Agent<P> {
         let mut schematic_review_current: Option<Value> = None;
         let mut last_tool_status: Option<String> = None;
         let mut component_shortfall_focus: Option<ComponentShortfallFocus> = None;
-        let mut pcb_only_stage = false;
+        // A fresh continuation can begin with the schematic already committed.
+        // Enter the bounded PCB stage immediately instead of requiring another
+        // no-op apply in this turn before regeneration may trigger the fixed
+        // place/route/DRC/render/fab pipeline.
+        let mut pcb_only_stage = starts_in_pcb_stage(
+            pcb_work_requested,
+            draft_committed_at_turn_start,
+        );
         let mut reserved_clean_apply_used = false;
 
         loop {
@@ -2619,6 +2626,10 @@ fn request_requires_fabrication(user_msg: &str) -> bool {
         || request.contains("export fab")
         || request.contains("gerber")
         || request.contains("board house")
+}
+
+fn starts_in_pcb_stage(pcb_work_requested: bool, draft_committed: bool) -> bool {
+    pcb_work_requested && draft_committed
 }
 
 fn request_budget_exhausted(
@@ -5670,6 +5681,9 @@ mod tests {
             "finish the requested board: 4-layer, placement/routing, DRC, export fab"
         ));
         assert!(request_requires_fabrication("DRC then export fab"));
+        assert!(starts_in_pcb_stage(true, true));
+        assert!(!starts_in_pcb_stage(true, false));
+        assert!(!starts_in_pcb_stage(false, true));
         assert!(!request_requires_pcb_work(
             "review this production schematic only"
         ));
