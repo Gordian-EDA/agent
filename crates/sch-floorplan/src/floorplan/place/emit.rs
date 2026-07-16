@@ -534,7 +534,7 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
         out.add_rect([rx0, ry0], [rx1, ry1], &format!("frame:{id}"));
         out.add_text(
             &display_name,
-            [rx0 + 1.0, ry0 + 2.5],
+            [rx0 + 1.0, ry0 + 4.0],
             3.0,
             true,
             &format!("label:{id}"),

@@ -1780,6 +1780,13 @@ fn common_footprint_alias(footprint: &str) -> Option<&'static str> {
         "Capacitor_SMD:C_0603" => Some("Capacitor_SMD:C_0603_1608Metric"),
         "LED_SMD:LED_0603" => Some("LED_SMD:LED_0603_1608Metric"),
         "Diode_SMD:SOD-123" => Some("Diode_SMD:D_SOD-123"),
+        "Connector:PinHeader_1x02_P2.54mm_Vertical" => {
+            Some("Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical")
+        }
+        "Connector:PinHeader_1x08_P2.54mm_Vertical" => {
+            Some("Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical")
+        }
+        "MountingHole:MountingHole_M3" => Some("MountingHole:MountingHole_3.2mm_M3"),
         _ => None,
     }
 }
@@ -3115,6 +3122,14 @@ mod tests {
         assert_eq!(
             common_footprint_alias("Diode_SMD:SOD-123"),
             Some("Diode_SMD:D_SOD-123")
+        );
+        assert_eq!(
+            common_footprint_alias("Connector:PinHeader_1x08_P2.54mm_Vertical"),
+            Some("Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical")
+        );
+        assert_eq!(
+            common_footprint_alias("MountingHole:MountingHole_M3"),
+            Some("MountingHole:MountingHole_3.2mm_M3")
         );
         assert_eq!(
             common_footprint_alias("Capacitor_THT:CP_Radial_D8.0mm_P3.50mm_P7.5mm"),
