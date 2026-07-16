@@ -12,7 +12,7 @@ use drc_lint::connectivity::Violation as ConnViolation;
 use drc_lint::lint::{DrcViolation, drop_unconnected_copper, lint};
 use kicad_ipc::snapshot::ImportedPart;
 use negotiated_mesh::copper::copper_obstacles;
-use negotiated_mesh::pathing::{GlobalRouteResult, global_route};
+use negotiated_mesh::pathing::GlobalRouteResult;
 use negotiated_mesh::pipeline::{
     RouteEngineAttempt, postroute_cleanup, prepare_wide_terminal_escapes,
     route_auto_with_diagnostics, route_mesh_with_diagnostics, route_sequential_with_diagnostics,
@@ -126,11 +126,11 @@ fn congestion_json_from_global(g: &GlobalRouteResult) -> Value {
     })
 }
 
-fn congestion_json(rp: &RouteProblem) -> Value {
-    // Fallback for explicit non-auto engines, which do not surface negotiated
-    // global diagnostics through their simple `RouteResult`.
-    let g = global_route(rp);
-    congestion_json_from_global(&g)
+fn route_congestion_json(global: Option<&GlobalRouteResult>, route_failed: bool) -> Value {
+    if !route_failed {
+        return Value::Null;
+    }
+    global.map_or(Value::Null, congestion_json_from_global)
 }
 
 /// When routing leaves nets unrouted, decide whether they CONCENTRATE on one part (a fine-pitch
@@ -226,13 +226,10 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
         .iter()
         .map(|f| json!({ "connection": f.connection, "reason": f.reason }))
         .collect();
-    let congestion = if result.failed.is_empty() {
-        Value::Null
-    } else if let Some(global) = &global_diagnostics {
-        congestion_json_from_global(global)
-    } else {
-        congestion_json(&rp)
-    };
+    // Congestion is engine-produced diagnostic evidence, not a reason to run a
+    // second router after routing has completed. Engines without a negotiated
+    // global report return an honest null here.
+    let congestion = route_congestion_json(global_diagnostics.as_ref(), !result.failed.is_empty());
     let escape = escape_bottleneck(&board.imported.parts, &result.failed).map(
         |(reference, footprint, pins_on_part, total_failed_pins)| {
             json!({
@@ -654,6 +651,7 @@ fn route_attempts_json(attempts: &[RouteEngineAttempt]) -> Value {
 }
 
 const MAX_MULTI_PIN_TERMINALS: usize = 16;
+const MAX_DIRECT_RESCUE_FAILED_NETS: usize = 8;
 
 /// Route wide multi-terminal nets before ordinary signals can occupy their
 /// scarce escape corridors. Successfully reserved trees are removed from the
@@ -945,7 +943,12 @@ pub fn apply_direct_rescue_fallback(rp: &RouteProblem, result: &mut RouteResult)
         .map(|f| f.connection.clone())
         .filter(|name| !name.is_empty())
         .collect();
-    if failed.is_empty() {
+    // Direct rescue enumerates dozens of candidate paths per failed net and
+    // validates each against the complete growing solution. Bound that work
+    // before cloning or modifying anything: a broad failure is placement or
+    // congestion feedback, not a useful direct-rescue portfolio. The original
+    // result remains byte-for-byte unchanged when the cap is exceeded.
+    if failed.is_empty() || failed.len() > MAX_DIRECT_RESCUE_FAILED_NETS {
         return false;
     }
     let mut applied = BTreeSet::new();
@@ -1925,6 +1928,30 @@ mod escape_bottleneck_tests {
     }
 
     #[test]
+    fn congestion_json_uses_only_engine_produced_global_diagnostics() {
+        assert_eq!(route_congestion_json(None, true), Value::Null);
+
+        let global = GlobalRouteResult {
+            plan: negotiated_mesh::pathing::GlobalPlan { nets: Vec::new() },
+            report: negotiated_mesh::pathing::CongestionReport {
+                iterations: 3,
+                final_overflow: 2,
+                edge_hotspots: Vec::new(),
+                unrouted: Vec::new(),
+            },
+        };
+        assert_eq!(route_congestion_json(Some(&global), false), Value::Null);
+        assert_eq!(
+            route_congestion_json(Some(&global), true),
+            json!({
+                "iterations": 3,
+                "final_overflow": 2,
+                "hotspots": [],
+            })
+        );
+    }
+
+    #[test]
     fn concentrated_failures_on_one_part_are_an_escape_bottleneck() {
         // A BGA whose 4 inner pins fail + a cap with 1 unrelated fail → 4/5 on U1 (≥60%) → flagged.
         let parts = vec![
@@ -2094,6 +2121,86 @@ mod escape_bottleneck_tests {
         assert!(result.failed.is_empty());
         assert_eq!(result.solution.traces.len(), 1);
         assert_eq!(result.engine, "naive+direct-rescue");
+    }
+
+    fn direct_rescue_limit_fixture(net_count: usize) -> (RouteProblem, RouteResult) {
+        let connections = (0..net_count)
+            .map(|index| {
+                let y = 1.0 + index as f64;
+                pcb_model::Connection {
+                    name: format!("SIG{index}"),
+                    points_to_connect: vec![
+                        pcb_model::RoutePoint {
+                            x: 1.0,
+                            y,
+                            layer: LayerRef::top(),
+                        },
+                        pcb_model::RoutePoint {
+                            x: 5.0,
+                            y,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                }
+            })
+            .collect::<Vec<_>>();
+        let failed = connections
+            .iter()
+            .map(|connection| FailedNet {
+                connection: connection.name.clone(),
+                reason: "fixture failure".to_owned(),
+            })
+            .collect();
+        (
+            RouteProblem {
+                layer_count: 2,
+                min_trace_width: 0.2,
+                obstacles: Vec::new(),
+                connections,
+                bounds: pcb_model::Rect {
+                    min_x: 0.0,
+                    min_y: 0.0,
+                    max_x: 6.0,
+                    max_y: net_count as f64 + 1.0,
+                },
+                clearance: 0.15,
+                via_diameter: 0.6,
+                via_drill: 0.3,
+                net_widths: Default::default(),
+                outline: None,
+                escape_layers: Default::default(),
+                plane_nets: Default::default(),
+            },
+            RouteResult {
+                solution: RouteSolution {
+                    traces: Vec::new(),
+                    vias: Vec::new(),
+                },
+                failed,
+                engine: "naive".to_owned(),
+            },
+        )
+    }
+
+    #[test]
+    fn direct_rescue_runs_at_failed_net_limit() {
+        let (problem, mut result) = direct_rescue_limit_fixture(MAX_DIRECT_RESCUE_FAILED_NETS);
+
+        assert!(apply_direct_rescue_fallback(&problem, &mut result));
+        assert!(result.failed.is_empty());
+        assert_eq!(result.solution.traces.len(), MAX_DIRECT_RESCUE_FAILED_NETS);
+    }
+
+    #[test]
+    fn direct_rescue_skips_atomically_above_failed_net_limit() {
+        let (problem, mut result) = direct_rescue_limit_fixture(MAX_DIRECT_RESCUE_FAILED_NETS + 1);
+        let before = serde_json::to_vec(&result).expect("serialize fixture result");
+
+        assert!(!apply_direct_rescue_fallback(&problem, &mut result));
+        assert_eq!(
+            serde_json::to_vec(&result).expect("serialize result after skipped rescue"),
+            before
+        );
     }
 
     #[test]
