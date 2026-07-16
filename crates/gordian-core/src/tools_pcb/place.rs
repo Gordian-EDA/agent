@@ -798,6 +798,7 @@ fn add_817_array_hints(
 
     let mut field_connectors = Vec::new();
     let mut logic_connectors = Vec::new();
+    let mut logic_aux_connectors = Vec::new();
     for imported in &board.imported.parts {
         if !is_connector(&imported.lib_id, &imported.reference)
             || is_mounting_hole(&imported.lib_id)
@@ -813,7 +814,19 @@ fn add_817_array_hints(
             field_connectors.push(imported.reference.clone());
         } else if logic > field && logic >= 2 {
             logic_connectors.push(imported.reference.clone());
-            output_domain.extend(nets.into_iter().map(str::to_owned));
+        }
+    }
+    // Learn shared logic rails only after the strong signal-bearing headers are
+    // fixed. Mutating this domain during the scan makes classification depend on
+    // board part order and can incorrectly promote a later GND/VCC-only header.
+    for reference in &logic_connectors {
+        if let Some(imported) = board
+            .imported
+            .parts
+            .iter()
+            .find(|part| &part.reference == reference)
+        {
+            output_domain.extend(part_nets(imported).into_iter().map(str::to_owned));
         }
     }
     // A separate logic power connector may only expose GND/VCC; after learning
@@ -828,7 +841,7 @@ fn add_817_array_hints(
         }
         let nets = part_nets(imported);
         if intersects(&nets, &output_domain) > intersects(&nets, &input_domain) {
-            logic_connectors.push(imported.reference.clone());
+            logic_aux_connectors.push(imported.reference.clone());
         }
     }
 
@@ -893,6 +906,7 @@ fn add_817_array_hints(
     let connector_refs = field_connectors
         .iter()
         .chain(&logic_connectors)
+        .chain(&logic_aux_connectors)
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
     let mut field_parts = Vec::new();
@@ -945,6 +959,14 @@ fn add_817_array_hints(
     add_group(
         "logic connectors",
         logic_connectors,
+        bottom,
+        Some(Edge::S),
+        true,
+        Some(90.0),
+    );
+    add_group(
+        "logic auxiliary connectors",
+        logic_aux_connectors,
         bottom,
         Some(Edge::S),
         true,
@@ -1587,6 +1609,106 @@ mod tests {
                 .members
                 .len(),
             16
+        );
+    }
+
+    #[test]
+    fn strong_logic_headers_keep_full_south_edge_spacing_from_aux_power() {
+        let (design, mut board, mut problem) = opto817_fixture(16, false);
+        let bounds = Rect::new(0.0, 0.0, 117.0, 60.0);
+        board.imported.bounds = bounds;
+        board.problem.bounds = bounds;
+        problem.bounds = bounds;
+
+        let logic_index = board
+            .imported
+            .parts
+            .iter()
+            .position(|part| part.reference == "JL1")
+            .unwrap();
+        board.imported.parts[logic_index].reference = "JLOG1".into();
+        let second = imported_part(
+            "JLOG2",
+            "Connector_PinHeader:PinHeader_2x10",
+            vec![
+                ("1".into(), "OUT9".into()),
+                ("2".into(), "OUT10".into()),
+                ("3".into(), "GND".into()),
+                ("4".into(), "V3V3".into()),
+            ],
+        );
+        let power = imported_part(
+            "JPWR",
+            "Connector_PinHeader:PinHeader_1x02",
+            vec![("1".into(), "GND".into()), ("2".into(), "V3V3".into())],
+        );
+        board.imported.parts.push(second.clone());
+        board.imported.parts.push(power.clone());
+
+        let first_part = problem
+            .parts
+            .iter_mut()
+            .find(|part| part.reference == "JL1")
+            .unwrap();
+        first_part.reference = "JLOG1".into();
+        first_part.courtyard_w = 5.0;
+        first_part.courtyard_h = 40.0;
+        let mut second_part = placement_part(&second, false);
+        second_part.courtyard_w = 5.0;
+        second_part.courtyard_h = 40.0;
+        problem.parts.push(second_part);
+        problem.parts.push(placement_part(&power, false));
+
+        let mut hints = PlacementHints::default();
+        add_817_array_hints(&design, &board, &problem, &mut hints).expect("verified 817 plan");
+        let strong = hints
+            .groups
+            .iter()
+            .find(|group| group.name == "logic connectors")
+            .unwrap();
+        let auxiliary = hints
+            .groups
+            .iter()
+            .find(|group| group.name == "logic auxiliary connectors")
+            .unwrap();
+        assert_eq!(strong.members, ["JLOG1", "JLOG2"]);
+        assert_eq!(auxiliary.members, ["JPWR"]);
+
+        pcb_place::placement::apply_grid_hints(&mut problem, &hints);
+        let connector = |reference: &str| {
+            problem
+                .parts
+                .iter()
+                .find(|part| part.reference == reference)
+                .unwrap()
+        };
+        let (jlog1, jlog2, jpwr) = (connector("JLOG1"), connector("JLOG2"), connector("JPWR"));
+        assert!((jlog1.locked.as_ref().unwrap().at.x - 29.875).abs() < 1e-9);
+        assert!((jlog2.locked.as_ref().unwrap().at.x - 87.125).abs() < 1e-9);
+        assert!((jpwr.locked.as_ref().unwrap().at.x - 58.5).abs() < 1e-9);
+        let placed_rect = |part: &Part| {
+            let locked = part.locked.as_ref().unwrap();
+            Rect::from_center_half(
+                locked.at,
+                pcb_model::place::rotated_courtyard_half(part, locked.rotation),
+            )
+            .inflate(pcb_model::place::courtyard_margin(problem.clearance) / 2.0)
+        };
+        for (a, b) in [(jlog1, jlog2), (jlog1, jpwr), (jlog2, jpwr)] {
+            let (x, y) = placed_rect(a).axis_penetration(&placed_rect(b));
+            assert!(
+                x <= geom::EPS || y <= geom::EPS,
+                "{} overlaps {}",
+                a.reference,
+                b.reference
+            );
+        }
+
+        let result = pcb_place::placement::place_board(&problem, &hints);
+        assert!(
+            result.legal,
+            "117x60 specialized placement should be legal: {:?}",
+            placement_overlap_pairs(&problem, &result)
         );
     }
 
