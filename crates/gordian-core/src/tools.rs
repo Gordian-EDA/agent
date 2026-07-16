@@ -68,14 +68,14 @@ pub fn tool_defs() -> Vec<Tool> {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "query": { "type": "string" },
+                        "query": { "type": "string", "minLength": 1 },
                         "limit": { "type": "integer", "minimum": 1 },
                         "queries": {
                             "type": "array", "minItems": 1, "maxItems": 4,
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "query": { "type": "string" },
+                                    "query": { "type": "string", "minLength": 1 },
                                     "limit": { "type": "integer", "minimum": 1 }
                                 },
                                 "required": ["query"],
@@ -195,14 +195,14 @@ pub fn tool_defs() -> Vec<Tool> {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "query": { "type": "string" },
+                        "query": { "type": "string", "minLength": 1 },
                         "limit": { "type": "integer", "minimum": 1 },
                         "queries": {
                             "type": "array", "minItems": 1, "maxItems": 4,
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "query": { "type": "string" },
+                                    "query": { "type": "string", "minLength": 1 },
                                     "limit": { "type": "integer", "minimum": 1 }
                                 },
                                 "required": ["query"],
@@ -3104,5 +3104,23 @@ blocks:
                 .unwrap()
                 .contains("Complete top-level circuit-YAML")
         );
+    }
+
+    #[test]
+    fn discovery_schemas_reject_empty_queries() {
+        for name in ["search_symbols", "search_footprints"] {
+            let tool = tool_defs()
+                .into_iter()
+                .find(|tool| tool.name.as_str() == name)
+                .unwrap();
+            let schema = tool.schema.unwrap();
+            assert_eq!(schema["properties"]["query"]["minLength"], 1, "{name}");
+            assert_eq!(
+                schema["properties"]["queries"]["items"]["properties"]["query"]
+                    ["minLength"],
+                1,
+                "{name}"
+            );
+        }
     }
 }
