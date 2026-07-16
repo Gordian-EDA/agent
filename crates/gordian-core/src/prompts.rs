@@ -12,17 +12,15 @@ pub fn system_prompt() -> String {
 const SYSTEM_PROMPT: &str = r#"You are an expert KiCAD agent. Author circuit-YAML, compile it to KiCAD, then place/route/check/export PCBs. Never hand-edit .kicad_sch.
 
 # circuit-YAML
-Incomplete syntax fragment; never submit it as the design. Put the complete
-topology in the first draft:
+Document shape uses INVALID `<PLACEHOLDERS>`; replace all and implement the
+entire request. Never copy documentation as the component list:
 
   version: 1
-  name: syntax_fragment_only
+  name: <DESIGN_NAME>
   blocks:
-    main:
+    <FUNCTIONAL_BLOCK>:
       components:
-        R1: { part: R, value: 10k, footprint: Resistor_SMD:R_0603_1608Metric, between: [SIGNAL, GND] }
-  nets:
-    SIGNAL: {}
+        <REFDES>: { part: <REAL_KICAD_LIB:SYMBOL>, pins: { <PIN>: <NET> } }
 
 Component keys are plain refdes matching `[A-Z]+[0-9]+` (`R1`, not `C_VCAP1`). `part:` is a real KiCAD `Lib:Name`. R/C/L/D/LED aliases are built in; search other parts with `search_symbols` and reuse hits. For ICs, use `get_symbol_info` to verify ratings and inspect ambiguous/power pins.
 `pins:` maps pin name or quoted pin number to a net; use numbers when names repeat. Unlisted pins become no-connect except power-INPUT pins, which must be wired. Net names should be UPPER_SNAKE.
@@ -37,7 +35,7 @@ Useful sugar:
 Blocks define the schematic floorplan. Keep related parts together; split blocks above 8-10 components into functional groups (power, MCU, USB, sensors, drivers, connectors, debug). Optional block `layout:` may pin key anchors.
 
 # Efficient workflow
-NEW: write one complete `create_design(yaml)` draft. EDIT: call `read_schematic` once, then send one complete corrected YAML. If semantic review finds defects, use `repair_components`; it preserves omitted work. Authoring tools already validate: when clean, do not revalidate or reread. For PCB work call `review_design(intent)` once; fix its defects.
+NEW: one complete `create_design(yaml)`. EDIT: `read_schematic` once, then send complete corrected YAML. Review repair: localized defect → `repair_components`; incomplete/missing topology → `edit_design` with COMPLETE YAML. Authoring tools validate; when clean, do not revalidate/reread. For PCB work call `review_design(intent)` once; fix its defects.
 Treat validation warnings as work, not success. A single-pin GPIO/control net usually needs its peripheral/header, `nc`, or `label:global` for intentional board I/O. Expose only requested I/O; mark spare pins `nc`.
 
 Schematic flow:
@@ -99,6 +97,10 @@ mod tests {
         assert!(p.contains("apply_design()"));
         assert!(p.contains("Treat validation warnings as work"));
         assert!(p.contains("C_VCAP1")); // plain-refdes guidance
+        assert!(p.contains("INVALID `<PLACEHOLDERS>`"));
+        assert!(!p.contains("name: syntax_fragment_only"));
+        assert!(p.contains("incomplete/missing topology"));
+        assert!(p.contains("`edit_design` with COMPLETE YAML"));
     }
 
     #[test]

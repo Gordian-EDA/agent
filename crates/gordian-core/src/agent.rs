@@ -1214,6 +1214,8 @@ impl<P: Provider> Agent<P> {
                 );
                 let create_on_existing_draft_blocked =
                     call.fn_name == "create_design" && draft_existed_before_completion;
+                let minimum_component_guard =
+                    undersized_full_draft_result(authoritative_intent, call);
                 let schematic_review_clean = schematic_review_current
                     .as_ref()
                     .is_some_and(review_result_is_clean);
@@ -1251,7 +1253,8 @@ impl<P: Provider> Agent<P> {
                     && !unchanged_apply_blocked
                     && !post_apply_authoring_blocked
                     && !authoring_batch_dependency_blocked
-                    && !create_on_existing_draft_blocked;
+                    && !create_on_existing_draft_blocked
+                    && minimum_component_guard.is_none();
                 let (mut content, images, image_path) = if timed_out_mutation_blocked {
                     (
                         json!({
@@ -1294,7 +1297,7 @@ impl<P: Provider> Agent<P> {
                         object.insert("code".into(), json!("precommit_review_defects"));
                         object.insert(
                             "note".into(),
-                            json!("The unchanged draft still has the cached semantic defects above. Fix them with repair_components so omitted valid work is preserved; apply_design cannot proceed until the changed draft passes a fresh review."),
+                            json!("The unchanged draft still has the cached semantic defects above. For localized component defects use repair_components; if review says the circuit/topology is incomplete or largely missing, use edit_design with one COMPLETE corrected YAML document. apply_design cannot proceed until the changed draft passes review."),
                         );
                     }
                     (cached.to_string(), Vec::new(), None)
@@ -1344,6 +1347,8 @@ impl<P: Provider> Agent<P> {
                         Vec::new(),
                         None,
                     )
+                } else if let Some(result) = minimum_component_guard {
+                    (result.to_string(), Vec::new(), None)
                 } else if run_erc_without_schematic {
                     (
                         json!({
@@ -1499,7 +1504,7 @@ impl<P: Provider> Agent<P> {
                             object.insert("code".into(), json!("precommit_review_defects"));
                             object.insert(
                                 "note".into(),
-                                json!("apply_design was deferred. Fix every high-confidence defect with repair_components, then apply again; the changed draft will be reviewed automatically."),
+                                json!("apply_design was deferred. For localized component defects use repair_components; if review says the circuit/topology is incomplete or largely missing, use edit_design with one COMPLETE corrected YAML document. Then apply again; the changed draft will be reviewed automatically."),
                             );
                         }
                         (guided.to_string(), Vec::new(), None)
@@ -2753,6 +2758,122 @@ fn post_apply_authoring_batch_blocked(name: &str, apply_already_dispatched: bool
 
 fn authoring_batch_dependency_blocked(name: &str, authoring_already_dispatched: bool) -> bool {
     is_authoring_for_commit(name) && authoring_already_dispatched
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DraftPhysicalCount {
+    explicit_footprinted: usize,
+    synthesized_decouplers: usize,
+}
+
+impl DraftPhysicalCount {
+    fn total(self) -> usize {
+        self.explicit_footprinted
+            .saturating_add(self.synthesized_decouplers)
+    }
+}
+
+/// Extract only unambiguous numeric component floors. General words such as
+/// "large", "dense", or "many" deliberately do not activate the guard.
+fn explicit_minimum_physical_components(intent: &str) -> Option<usize> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    for ch in intent.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            token.push(ch);
+        } else {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+            if ch == '+' {
+                tokens.push("+".to_owned());
+            }
+        }
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+
+    let component_floor = |number_index: usize, noun_index: usize| {
+        let required = tokens.get(number_index)?.parse::<usize>().ok()?;
+        let mut noun_index = noun_index;
+        if tokens
+            .get(noun_index)
+            .is_some_and(|token| token == "physical")
+        {
+            noun_index += 1;
+        }
+        matches!(
+            tokens.get(noun_index).map(String::as_str),
+            Some("component" | "components" | "part" | "parts")
+        )
+        .then_some(required)
+    };
+
+    let mut floors = Vec::new();
+    for index in 0..tokens.len() {
+        if tokens.get(index).is_some_and(|token| token == "at")
+            && tokens.get(index + 1).is_some_and(|token| token == "least")
+            && let Some(required) = component_floor(index + 2, index + 3)
+        {
+            floors.push(required);
+        }
+        if tokens.get(index + 1).is_some_and(|token| token == "+")
+            && let Some(required) = component_floor(index, index + 2)
+        {
+            floors.push(required);
+        }
+    }
+    floors.into_iter().max()
+}
+
+fn draft_physical_count(yaml: &str) -> DraftPhysicalCount {
+    let Some(surface) = circuit_lang::parse::parse_str(yaml).0 else {
+        return DraftPhysicalCount::default();
+    };
+    let explicit_footprinted = surface
+        .blocks
+        .values()
+        .flat_map(|block| block.components.values())
+        .filter(|component| component.footprint.is_some())
+        .count();
+    let synthesized_decouplers = surface
+        .blocks
+        .values()
+        .flat_map(|block| block.components.values())
+        .flat_map(|component| component.decouple.values())
+        .fold(0usize, |total, &count| total.saturating_add(count as usize));
+    DraftPhysicalCount {
+        explicit_footprinted,
+        synthesized_decouplers,
+    }
+}
+
+fn undersized_full_draft_result(authoritative_intent: &str, call: &ToolCall) -> Option<Value> {
+    if !matches!(call.fn_name.as_str(), "create_design" | "edit_design") {
+        return None;
+    }
+    let required = explicit_minimum_physical_components(authoritative_intent)?;
+    let yaml = call.fn_arguments.get("yaml")?.as_str()?;
+    let count = draft_physical_count(yaml);
+    let actual = count.total();
+    if actual >= required {
+        return None;
+    }
+    Some(json!({
+        "ok": false,
+        "error": format!("complete draft has {actual} physical components, below the explicit minimum of {required}"),
+        "code": "minimum_physical_component_count_not_met",
+        "required_minimum": required,
+        "candidate_physical_components": actual,
+        "explicit_footprinted_components": count.explicit_footprinted,
+        "synthesized_decouplers": count.synthesized_decouplers,
+        "shortfall": required - actual,
+        "draft_written": false,
+        "draft_changed": false,
+        "next_tool": call.fn_name,
+        "note": format!("Resend one complete {} YAML document with at least {required} physical components. The count includes footprint-assigned component entries plus `decouple`-synthesized capacitors; schematic-only power/label symbols do not count. Do not submit a syntax fragment or placeholder.", call.fn_name),
+    }))
 }
 
 /// Whether an authoring result actually changed the durable draft. Compile
@@ -4828,6 +4949,107 @@ mod tests {
             true
         ));
         assert!(!authoring_batch_dependency_blocked("apply_design", true));
+    }
+
+    #[test]
+    fn explicit_component_minimum_requires_authoritative_numeric_language() {
+        assert_eq!(
+            explicit_minimum_physical_components("Use at least 45 physical components"),
+            Some(45)
+        );
+        assert_eq!(
+            explicit_minimum_physical_components("Make a 40+ parts board"),
+            Some(40)
+        );
+        assert_eq!(
+            explicit_minimum_physical_components(
+                "Use 40+ components/parts and at least 45 components"
+            ),
+            Some(45)
+        );
+        assert_eq!(
+            explicit_minimum_physical_components("Use a dense 24-bit design on a 45 mm board"),
+            None
+        );
+    }
+
+    #[test]
+    fn full_draft_count_includes_decouple_synthesis() {
+        let yaml = r#"
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: MCU, footprint: Package_QFP:LQFP-48_7x7mm_P0.5mm, decouple: {100nF: 3, 4.7uF: 1}}
+      R1: {part: R, footprint: Resistor_SMD:R_0603_1608Metric, between: [SIG, GND]}
+      P1: {part: power:GND}
+"#;
+        assert_eq!(
+            draft_physical_count(yaml),
+            DraftPhysicalCount {
+                explicit_footprinted: 2,
+                synthesized_decouplers: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn undersized_full_draft_guard_is_structured_and_opt_in() {
+        let call = ToolCall {
+            call_id: "small".into(),
+            fn_name: "create_design".into(),
+            fn_arguments: json!({
+                "yaml": "version: 1\nblocks: {main: {components: {R1: {part: R, footprint: Resistor_SMD:R_0603_1608Metric, between: [A, B]}}}}\n"
+            }),
+            thought_signatures: None,
+        };
+        let blocked = undersized_full_draft_result("Build at least 45 physical parts", &call)
+            .expect("explicit minimum must guard the full draft");
+        assert_eq!(blocked["code"], "minimum_physical_component_count_not_met");
+        assert_eq!(blocked["required_minimum"], 45);
+        assert_eq!(blocked["candidate_physical_components"], 1);
+        assert_eq!(blocked["shortfall"], 44);
+        assert_eq!(blocked["draft_written"], false);
+        let mut edit_call = call.clone();
+        edit_call.fn_name = "edit_design".into();
+        assert_eq!(
+            undersized_full_draft_result("Require 40+ components", &edit_call).unwrap()["next_tool"],
+            "edit_design"
+        );
+        assert!(undersized_full_draft_result("Build a compact sensor", &call).is_none());
+    }
+
+    #[tokio::test]
+    async fn undersized_create_is_rejected_before_draft_write() {
+        let script = vec![
+            tool_call(
+                "small",
+                "create_design",
+                json!({
+                    "yaml": "version: 1\nblocks: {main: {components: {R1: {part: R, footprint: Resistor_SMD:R_0603_1608Metric, between: [A, B]}}}}\n"
+                }),
+            ),
+            final_text("I need to author the complete design."),
+        ];
+        let mut agent = Agent::new(ScriptedClient::new(script), test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        agent
+            .run_turn(
+                "Create a board with at least 45 physical components",
+                &mut approvals,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(agent.runtime.workspace().read_draft().unwrap().is_none());
+        let results = tool_results(&agent.history);
+        assert_eq!(
+            results["small"]["code"],
+            "minimum_physical_component_count_not_met"
+        );
+        assert_eq!(results["small"]["draft_written"], false);
     }
 
     #[test]

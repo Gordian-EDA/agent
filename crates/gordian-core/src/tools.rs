@@ -162,12 +162,12 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "create_design".into(),
-                description: "Create complete circuit YAML; ignore examples."
+                description: "Create complete requested circuit; no examples or fragments."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "yaml": { "type": "string" },
+                        "yaml": { "type": "string", "description": "Complete top-level circuit-YAML for the request." },
                         "overwrite": { "type": "boolean" }
                     },
                     "required": ["yaml"]
@@ -591,21 +591,21 @@ pub(crate) fn repair_components_tool() -> Tool {
     });
     Tool::new("repair_components")
         .with_description(
-            "Atomically repair one durable-draft block. Prefer update for pin rewires/value/footprint changes. Components adds or replaces refs with confirmation; omitted metadata and topology are preserved.",
+            "Repair localized defects in one substantive durable-draft block. NOT for an incomplete/missing circuit; use edit_design with complete YAML for that. Prefer update for existing refs. Components is only a direct refdes map for additions/replacements.",
         )
         .with_schema(json!({
             "type": "object",
             "properties": {
                 "block": { "type": "string", "description": "Target block; defaults to main." },
                 "components": {
-                    "description": "Components to add or replace. `part` is required. Existing metadata is preserved when omitted. Example: {\"D1\":{\"part\":\"Device:D\",\"pins\":{\"1\":\"VIN\",\"2\":\"VOUT\"}}}.",
+                    "description": "DIRECT refdes-to-component map for additions/replacements; no version/blocks/main/components wrapper. `part` is required. Existing metadata is preserved when omitted. Example: {\"D1\":{\"part\":\"Device:D\",\"pins\":{\"1\":\"VIN\",\"2\":\"VOUT\"}}}.",
                     "type": component_map_schema["type"].clone(),
                     "minProperties": component_map_schema["minProperties"].clone(),
                     "additionalProperties": component_map_schema["additionalProperties"].clone()
                 },
                 "update": {
                     "type": "object",
-                    "description": "Partial updates for existing authored refs; omitted fields/pins are preserved. Pin updates must use an exact existing pin key from the draft. Example: {\"D1\":{\"pins\":{\"1\":\"VIN\",\"2\":\"VPROT\"},\"footprint\":\"Diode_SMD:D_SOD-123\"},\"TP1\":{\"pins\":{\"1\":\"VPROT\"}}}.",
+                    "description": "DIRECT refdes-to-update map for existing authored refs; no YAML wrapper. Use this—not components—for pin/value/footprint changes. Omitted fields/pins are preserved. Pin updates must use an exact existing pin key from the draft. Example: {\"D1\":{\"pins\":{\"1\":\"VIN\",\"2\":\"VPROT\"},\"footprint\":\"Diode_SMD:D_SOD-123\"},\"TP1\":{\"pins\":{\"1\":\"VPROT\"}}}.",
                     "additionalProperties": {
                         "type": "object",
                         "properties": {
@@ -2473,11 +2473,18 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::repair_components_tool;
+    use super::{repair_components_tool, tool_defs};
 
     #[test]
     fn natural_components_alias_is_advertised_as_a_nonempty_component_map() {
-        let schema = repair_components_tool().schema.expect("repair schema");
+        let tool = repair_components_tool();
+        assert!(
+            tool.description
+                .as_deref()
+                .unwrap()
+                .contains("NOT for an incomplete/missing circuit")
+        );
+        let schema = tool.schema.expect("repair schema");
         let components = &schema["properties"]["components"];
         assert_eq!(components["type"], "object");
         assert_eq!(components["minProperties"], 1);
@@ -2490,5 +2497,37 @@ mod tests {
                 .iter()
                 .any(|branch| branch["required"] == serde_json::json!(["components"]))
         }));
+        assert!(
+            components["description"]
+                .as_str()
+                .unwrap()
+                .contains("DIRECT")
+        );
+        assert!(
+            schema["properties"]["update"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Use this—not components")
+        );
+    }
+
+    #[test]
+    fn create_design_demands_the_requested_complete_document() {
+        let tool = tool_defs()
+            .into_iter()
+            .find(|tool| tool.name.as_str() == "create_design")
+            .expect("create_design tool");
+        assert!(
+            tool.description
+                .as_deref()
+                .unwrap()
+                .contains("complete requested circuit")
+        );
+        assert!(
+            tool.schema.unwrap()["properties"]["yaml"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Complete top-level circuit-YAML")
+        );
     }
 }
