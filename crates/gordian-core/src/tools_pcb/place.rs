@@ -13,7 +13,8 @@ use kicad_ipc::{
 use pcb_model::place::PartPad;
 use pcb_model::{LayerRef, ViaSpan};
 use pcb_place::placement::{
-    EdgeDatum, LockedAt, Part, PlaceProblem, PlaceResult, Placement, PlacementHints, Rect,
+    Edge, EdgeDatum, GroupHint, LockedAt, Part, PlaceProblem, PlaceResult, Placement,
+    PlacementHints, Rect,
 };
 
 use crate::AgentRuntime;
@@ -594,6 +595,402 @@ fn placement_hints_from_input(mut input: Value) -> std::result::Result<Placement
     Ok(hints)
 }
 
+#[derive(Debug)]
+struct Opto817Channel {
+    reference: String,
+    input_nets: [String; 2],
+    emitter_net: String,
+    output_net: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Opto817Requirements {
+    width: f64,
+    height: f64,
+}
+
+fn pin_net(component: &circuit_lang::model::Component, pin: &str) -> Option<String> {
+    match component.pins.get(pin) {
+        Some(circuit_lang::model::PinTarget::Net(net)) => Some(net.clone()),
+        _ => None,
+    }
+}
+
+fn same_net(a: &str, b: &str) -> bool {
+    a.trim_start_matches('/') == b.trim_start_matches('/')
+}
+
+fn is_ground_net(net: &str) -> bool {
+    matches!(
+        net.trim_start_matches('/').to_ascii_uppercase().as_str(),
+        "GND" | "AGND" | "DGND" | "PGND"
+    )
+}
+
+fn is_817(part: &str) -> bool {
+    let part = part.to_ascii_uppercase();
+    part.contains("PC817") || part.contains("LTV-817") || part.contains("LTV817")
+}
+
+/// Detect a real 817 bank from the compiled durable draft. Besides the part
+/// family, require the corrected common-emitter topology (3=ground, 4=output)
+/// and require all four authored nets to agree with the board's actual pads.
+/// This keeps the specialized physical plan off unrelated four-pad devices and
+/// off electrically reversed drafts.
+fn opto817_channels(
+    design: &circuit_lang::model::Design,
+    board: &IpcBoardSnapshot,
+) -> Vec<Opto817Channel> {
+    let imported: BTreeMap<&str, &kicad_ipc::snapshot::ImportedPart> = board
+        .imported
+        .parts
+        .iter()
+        .map(|part| (part.reference.as_str(), part))
+        .collect();
+    let mut channels = Vec::new();
+    for block in design.blocks.values() {
+        for (reference, component) in &block.components {
+            if !is_817(&component.part) {
+                continue;
+            }
+            let (Some(anode), Some(cathode), Some(emitter), Some(output)) = (
+                pin_net(component, "1"),
+                pin_net(component, "2"),
+                pin_net(component, "3"),
+                pin_net(component, "4"),
+            ) else {
+                continue;
+            };
+            if !is_ground_net(&emitter) || is_ground_net(&output) {
+                continue;
+            }
+            let Some(part) = imported.get(reference.as_str()) else {
+                continue;
+            };
+            let actual = |number: &str, expected: &str| {
+                part.pads.iter().any(|pad| {
+                    pad.number == number
+                        && pad
+                            .net
+                            .as_deref()
+                            .is_some_and(|net| same_net(net, expected))
+                })
+            };
+            if !actual("1", &anode)
+                || !actual("2", &cathode)
+                || !actual("3", &emitter)
+                || !actual("4", &output)
+            {
+                continue;
+            }
+            channels.push(Opto817Channel {
+                reference: reference.clone(),
+                input_nets: [anode, cathode],
+                emitter_net: emitter,
+                output_net: output,
+            });
+        }
+    }
+    channels.sort_by(|a, b| natural_ref_key(&a.reference).cmp(&natural_ref_key(&b.reference)));
+    channels
+}
+
+fn natural_ref_key(reference: &str) -> (&str, u32) {
+    let split = reference
+        .find(|c: char| c.is_ascii_digit())
+        .unwrap_or(reference.len());
+    let (prefix, suffix) = reference.split_at(split);
+    (prefix, suffix.parse().unwrap_or(u32::MAX))
+}
+
+fn part_nets(part: &kicad_ipc::snapshot::ImportedPart) -> Vec<&str> {
+    part.pads
+        .iter()
+        .filter_map(|pad| pad.net.as_deref())
+        .collect()
+}
+
+fn intersects(nets: &[&str], domain: &std::collections::BTreeSet<String>) -> usize {
+    nets.iter()
+        .filter(|net| domain.iter().any(|candidate| same_net(net, candidate)))
+        .count()
+}
+
+/// Pick the quadrant rotation that puts the actual pads carrying pins 1/2 above
+/// the actual pads carrying pins 3/4. The footprint library, not a hard-coded
+/// SO-4 orientation, owns this decision.
+fn opto_input_above_rotation(part: &Part, channel: &Opto817Channel) -> Option<f64> {
+    let centroid = |nets: &[&str], rotation: f64| {
+        let points = part
+            .pads
+            .iter()
+            .filter(|pad| {
+                pad.net
+                    .as_deref()
+                    .is_some_and(|net| nets.iter().any(|candidate| same_net(net, candidate)))
+            })
+            .map(|pad| pad.offset.rotate(rotation))
+            .collect::<Vec<_>>();
+        (!points.is_empty())
+            .then(|| points.iter().map(|point| point.y).sum::<f64>() / points.len() as f64)
+    };
+    let input = [&*channel.input_nets[0], &*channel.input_nets[1]];
+    let output = [&*channel.emitter_net, &*channel.output_net];
+    [0.0, 90.0, 180.0, 270.0]
+        .into_iter()
+        .filter_map(|rotation| {
+            Some((
+                rotation,
+                centroid(&output, rotation)? - centroid(&input, rotation)?,
+            ))
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(rotation, _)| rotation)
+}
+
+/// Add the narrow, deterministic physical grammar for a repeated 817 isolation
+/// bank. Returns `None` without changing hints unless at least eight verified
+/// channels are present, preserving generic placement on every other board.
+fn add_817_array_hints(
+    design: &circuit_lang::model::Design,
+    board: &IpcBoardSnapshot,
+    problem: &PlaceProblem,
+    hints: &mut PlacementHints,
+) -> Option<Opto817Requirements> {
+    let channels = opto817_channels(design, board);
+    if channels.len() < 8 {
+        return None;
+    }
+    let Some(first_part) = problem
+        .parts
+        .iter()
+        .find(|part| part.reference == channels[0].reference)
+    else {
+        return None;
+    };
+    let Some(rotation) = opto_input_above_rotation(first_part, &channels[0]) else {
+        return None;
+    };
+    if channels.iter().any(|channel| {
+        problem
+            .parts
+            .iter()
+            .find(|part| part.reference == channel.reference)
+            .and_then(|part| opto_input_above_rotation(part, channel))
+            != Some(rotation)
+    }) {
+        return None;
+    }
+
+    let opto_refs = channels
+        .iter()
+        .map(|channel| channel.reference.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let input_domain = channels
+        .iter()
+        .flat_map(|channel| channel.input_nets.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut output_domain = channels
+        .iter()
+        .flat_map(|channel| [channel.emitter_net.clone(), channel.output_net.clone()])
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let mut field_connectors = Vec::new();
+    let mut logic_connectors = Vec::new();
+    for imported in &board.imported.parts {
+        if !is_connector(&imported.lib_id, &imported.reference)
+            || is_mounting_hole(&imported.lib_id)
+        {
+            continue;
+        }
+        let nets = part_nets(imported);
+        let (field, logic) = (
+            intersects(&nets, &input_domain),
+            intersects(&nets, &output_domain),
+        );
+        if field > logic && field >= 2 {
+            field_connectors.push(imported.reference.clone());
+        } else if logic > field && logic >= 2 {
+            logic_connectors.push(imported.reference.clone());
+            output_domain.extend(nets.into_iter().map(str::to_owned));
+        }
+    }
+    // A separate logic power connector may only expose GND/VCC; after learning
+    // those rails from the strong logic headers, place it on the logic edge too.
+    for imported in &board.imported.parts {
+        if !is_connector(&imported.lib_id, &imported.reference)
+            || is_mounting_hole(&imported.lib_id)
+            || field_connectors.contains(&imported.reference)
+            || logic_connectors.contains(&imported.reference)
+        {
+            continue;
+        }
+        let nets = part_nets(imported);
+        if intersects(&nets, &output_domain) > intersects(&nets, &input_domain) {
+            logic_connectors.push(imported.reference.clone());
+        }
+    }
+
+    let margin = problem.clearance.max(0.5) + 0.75;
+    let bounds = problem.bounds;
+    let (mut opto_w, mut opto_h): (f64, f64) = (0.0, 0.0);
+    for reference in &opto_refs {
+        let part = problem
+            .parts
+            .iter()
+            .find(|part| &part.reference == reference)
+            .expect("verified board part");
+        let half = pcb_model::place::rotated_courtyard_half(part, rotation);
+        opto_w = opto_w.max(half.0 * 2.0);
+        opto_h = opto_h.max(half.1 * 2.0);
+    }
+    let pitch_x = opto_w + margin;
+    // Every package must bridge ONE continuous corridor. Therefore this is one
+    // horizontal row, never a compact-looking second row on a board that is too
+    // narrow. The explicit dimensional gate below rejects that board before the
+    // generic grid code can wrap the bank into multiple rows.
+    let array_w = channels.len() as f64 * pitch_x;
+    // `apply_grid_hints` derives its column count from region aspect. A region
+    // with width `n*pitch` and height `pitch` selects exactly n columns, while
+    // the actual rotated courtyard height is reserved separately below.
+    let array_h = pitch_x;
+    let center = geom::Point2::new(
+        (bounds.min_x + bounds.max_x) / 2.0,
+        (bounds.min_y + bounds.max_y) / 2.0,
+    );
+    let center_region = Rect::new(
+        center.x - array_w / 2.0,
+        center.y - array_h / 2.0,
+        center.x + array_w / 2.0,
+        center.y + array_h / 2.0,
+    );
+    hints.groups.push(GroupHint {
+        name: "817 isolation array".into(),
+        members: channels
+            .iter()
+            .map(|channel| channel.reference.clone())
+            .collect(),
+        region: Some(center_region),
+        edge: None,
+        grid: true,
+        rotation: Some(rotation),
+        surround: None,
+    });
+
+    let top = Rect::new(
+        bounds.min_x + margin,
+        bounds.min_y + margin,
+        bounds.max_x - margin,
+        (center.y - opto_h / 2.0 - margin).max(bounds.min_y + margin),
+    );
+    let bottom = Rect::new(
+        bounds.min_x + margin,
+        (center.y + opto_h / 2.0 + margin).min(bounds.max_y - margin),
+        bounds.max_x - margin,
+        bounds.max_y - margin,
+    );
+    let connector_refs = field_connectors
+        .iter()
+        .chain(&logic_connectors)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut field_parts = Vec::new();
+    let mut logic_parts = Vec::new();
+    for imported in &board.imported.parts {
+        if opto_refs.contains(&imported.reference)
+            || connector_refs.contains(&imported.reference)
+            || is_mounting_hole(&imported.lib_id)
+            || imported.locked
+        {
+            continue;
+        }
+        let nets = part_nets(imported);
+        let (field, logic) = (
+            intersects(&nets, &input_domain),
+            intersects(&nets, &output_domain),
+        );
+        if field > logic {
+            field_parts.push(imported.reference.clone());
+        } else if logic > field {
+            logic_parts.push(imported.reference.clone());
+        }
+    }
+    let mut add_group = |name: &str,
+                         members: Vec<String>,
+                         region: Rect,
+                         edge: Option<Edge>,
+                         grid: bool,
+                         rotation: Option<f64>| {
+        if !members.is_empty() {
+            hints.groups.push(GroupHint {
+                name: name.into(),
+                members,
+                region: Some(region),
+                edge,
+                grid,
+                rotation,
+                surround: None,
+            });
+        }
+    };
+    add_group(
+        "field connectors",
+        field_connectors,
+        top,
+        Some(Edge::N),
+        true,
+        Some(90.0),
+    );
+    add_group(
+        "logic connectors",
+        logic_connectors,
+        bottom,
+        Some(Edge::S),
+        true,
+        Some(90.0),
+    );
+    add_group("field domain", field_parts, top, None, false, None);
+    add_group("logic domain", logic_parts, bottom, None, false, None);
+
+    // A single row is electrically meaningful: every isolator straddles the
+    // same continuous copper-free corridor. Reject a smaller board explicitly
+    // instead of allowing the generic grid code to silently wrap into two rows.
+    let side_depth = problem
+        .parts
+        .iter()
+        .filter(|part| connector_refs.contains(&part.reference))
+        .map(|part| part.courtyard_w.min(part.courtyard_h))
+        .fold(0.0, f64::max);
+    Some(Opto817Requirements {
+        width: array_w + 2.0 * margin,
+        height: opto_h + 2.0 * (side_depth + 2.0 * margin),
+    })
+}
+
+fn undersized_817_result(problem: &PlaceProblem, required: Opto817Requirements) -> Value {
+    let current_w = (problem.bounds.max_x - problem.bounds.min_x).max(0.0);
+    let current_h = (problem.bounds.max_y - problem.bounds.min_y).max(0.0);
+    let mut out = json!({
+        "placement_applied": false,
+        "legal": false,
+        "hpwl": 0.0,
+        "overlaps_resolved": 0,
+        "out_of_bounds_clamps": 0,
+        "positions": [],
+        "current_bounds_mm": {
+            "w": (current_w * 10.0).round() / 10.0,
+            "h": (current_h * 10.0).round() / 10.0,
+        },
+        "suggested_min_bounds_mm": {
+            "w": required.width.max(current_w).ceil(),
+            "h": required.height.max(current_h).ceil(),
+        },
+        "note": "placement is NOT legal, so no footprint positions were written and the board remains at its previous positions. The verified 817 isolation bank requires one continuous single-row barrier; regenerate_board with at least suggested_min_bounds_mm, then run place_board once.",
+    });
+    out["error"] = Value::String(illegal_placement_error(&out));
+    out
+}
+
 pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let board = match super::active::board_problem(ctx) {
         Ok(board) => board,
@@ -649,6 +1046,24 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
         } else if is_connector(&p.lib_id, &p.reference) && !hints.edge_seek.contains(&p.reference) {
             hints.edge_seek.push(p.reference.clone());
+        }
+    }
+
+    // A repeated phototransistor-isolator bank is a physical grammar the generic
+    // net-force placer cannot infer from a bag of footprints: keep the barrier in
+    // the centre, field copper above, and logic copper below. Invalid/missing
+    // durable drafts simply retain the generic behavior above.
+    let mut opto817_requirements = None;
+    if let Ok(Some(draft)) = ctx.workspace().read_draft()
+        && let Some(design) = circuit_lang::compile(&draft, ctx.provider()).design
+    {
+        opto817_requirements = add_817_array_hints(&design, &board, &problem, &mut hints);
+    }
+    if let Some(required) = opto817_requirements {
+        let board_w = problem.bounds.max_x - problem.bounds.min_x;
+        let board_h = problem.bounds.max_y - problem.bounds.min_y;
+        if board_w + 1e-9 < required.width || board_h + 1e-9 < required.height {
+            return Ok(undersized_817_result(&problem, required));
         }
     }
 
@@ -847,6 +1262,389 @@ mod tests {
     use kicad_footprint::{FootprintCatalog, PadTechnology};
     use kicad_ipc::snapshot::{ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot};
     use pcb_model::{RouteProblem, RouteSolution, Trace, Via};
+
+    fn imported_part(reference: &str, lib_id: &str, pads: Vec<(String, String)>) -> ImportedPart {
+        ImportedPart {
+            reference: reference.into(),
+            lib_id: lib_id.into(),
+            at: Point2::new(1.0, 1.0),
+            rotation: 0,
+            locked: false,
+            pads: pads
+                .into_iter()
+                .map(|(number, net)| ImportedPad {
+                    number,
+                    net: Some(net),
+                    at: Point2::new(1.0, 1.0),
+                    layers: vec![LayerRef::top()],
+                })
+                .collect(),
+        }
+    }
+
+    fn placement_part(imported: &ImportedPart, opto: bool) -> Part {
+        let pad_offset = |number: &str| match number {
+            "1" => Point2::new(-3.0, -1.0),
+            "2" => Point2::new(-3.0, 1.0),
+            "3" => Point2::new(3.0, 1.0),
+            "4" => Point2::new(3.0, -1.0),
+            _ => Point2::new(0.0, 0.0),
+        };
+        Part {
+            reference: imported.reference.clone(),
+            courtyard_w: if opto { 8.0 } else { 5.0 },
+            courtyard_h: if opto { 5.0 } else { 5.0 },
+            pads: imported
+                .pads
+                .iter()
+                .map(|pad| PartPad {
+                    number: pad.number.clone(),
+                    offset: pad_offset(&pad.number),
+                    width: 1.0,
+                    height: 1.0,
+                    layers: vec![LayerRef::top()],
+                    net: pad.net.clone(),
+                })
+                .collect(),
+            edge_datum: None,
+            locked: None,
+        }
+    }
+
+    fn opto817_fixture(
+        count: usize,
+        reversed: bool,
+    ) -> (circuit_lang::model::Design, IpcBoardSnapshot, PlaceProblem) {
+        let mut design = circuit_lang::model::Design::default();
+        let mut block = circuit_lang::model::Block::default();
+        let mut imported = Vec::new();
+        for index in 1..=count {
+            let mut component = circuit_lang::model::Component {
+                part: "Isolator:PC817".into(),
+                ..Default::default()
+            };
+            for (pin, net) in [
+                ("1", format!("FIELD{index}_LED")),
+                ("2", format!("FIELD{index}_RET")),
+                (
+                    "3",
+                    if reversed {
+                        format!("OUT{index}")
+                    } else {
+                        "GND".into()
+                    },
+                ),
+                (
+                    "4",
+                    if reversed {
+                        "GND".into()
+                    } else {
+                        format!("OUT{index}")
+                    },
+                ),
+            ] {
+                component
+                    .pins
+                    .insert(pin.into(), circuit_lang::model::PinTarget::Net(net));
+            }
+            block.components.insert(format!("U{index}"), component);
+            imported.push(imported_part(
+                &format!("U{index}"),
+                "Package_SO:SO-4_4.4x3.6mm_P2.54mm",
+                vec![
+                    ("1".into(), format!("FIELD{index}_LED")),
+                    ("2".into(), format!("FIELD{index}_RET")),
+                    (
+                        "3".into(),
+                        if reversed {
+                            format!("OUT{index}")
+                        } else {
+                            "GND".into()
+                        },
+                    ),
+                    (
+                        "4".into(),
+                        if reversed {
+                            "GND".into()
+                        } else {
+                            format!("OUT{index}")
+                        },
+                    ),
+                ],
+            ));
+        }
+        design.blocks.insert("channels".into(), block);
+        imported.push(imported_part(
+            "JF1",
+            "Connector_PinHeader:PinHeader_2x04",
+            (1..=4)
+                .flat_map(|index| {
+                    [
+                        ("1", format!("FIELD{index}_LED")),
+                        ("2", format!("FIELD{index}_RET")),
+                    ]
+                })
+                .map(|(pin, net)| (pin.into(), net))
+                .collect(),
+        ));
+        imported.push(imported_part(
+            "JL1",
+            "Connector_PinHeader:PinHeader_1x10",
+            vec![
+                ("1".into(), "OUT1".into()),
+                ("2".into(), "OUT2".into()),
+                ("3".into(), "GND".into()),
+                ("4".into(), "V3V3".into()),
+            ],
+        ));
+        imported.push(imported_part(
+            "R1",
+            "Resistor_SMD:R_0603",
+            vec![
+                ("1".into(), "FIELD1_LED".into()),
+                ("2".into(), "FIELD1_SRC".into()),
+            ],
+        ));
+        imported.push(imported_part(
+            "RN1",
+            "Resistor_THT:R_Array",
+            vec![
+                ("1".into(), "V3V3".into()),
+                ("2".into(), "OUT1".into()),
+                ("3".into(), "OUT2".into()),
+            ],
+        ));
+        let bounds = Rect::new(0.0, 0.0, 73.0, 58.0);
+        let route_problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![],
+            bounds,
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+        let parts = imported
+            .iter()
+            .map(|part| placement_part(part, part.reference.starts_with('U')))
+            .collect();
+        let board = IpcBoardSnapshot {
+            imported: ImportedBoard {
+                layer_count: 2,
+                bounds,
+                parts: imported,
+                placement_keepouts: vec![],
+                keepout_count: 0,
+            },
+            problem: route_problem,
+            copper: RouteSolution {
+                traces: vec![],
+                vias: vec![],
+            },
+            net_codes: Default::default(),
+            layer_names: vec!["F.Cu".into(), "B.Cu".into()],
+        };
+        let problem = PlaceProblem {
+            bounds,
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            parts,
+            keepouts: vec![],
+            outline: None,
+        };
+        (design, board, problem)
+    }
+
+    #[test]
+    fn verified_817_bank_gets_center_barrier_and_opposite_connector_edges() {
+        let (design, board, problem) = opto817_fixture(8, false);
+        let mut hints = PlacementHints::default();
+
+        assert!(add_817_array_hints(&design, &board, &problem, &mut hints).is_some());
+
+        let array = hints
+            .groups
+            .iter()
+            .find(|group| group.name == "817 isolation array")
+            .unwrap();
+        assert_eq!(array.members.len(), 8);
+        assert!(array.grid);
+        assert_eq!(array.rotation, Some(270.0));
+        let region = array.region.unwrap();
+        assert!((region.center().y - problem.bounds.center().y).abs() < 1e-9);
+        let field = hints
+            .groups
+            .iter()
+            .find(|group| group.name == "field connectors")
+            .unwrap();
+        let logic = hints
+            .groups
+            .iter()
+            .find(|group| group.name == "logic connectors")
+            .unwrap();
+        assert_eq!(field.members, ["JF1"]);
+        assert_eq!(field.edge, Some(Edge::N));
+        assert_eq!(logic.members, ["JL1"]);
+        assert_eq!(logic.edge, Some(Edge::S));
+        assert!(
+            hints
+                .groups
+                .iter()
+                .find(|group| group.name == "field domain")
+                .unwrap()
+                .members
+                .contains(&"R1".into())
+        );
+        assert!(
+            hints
+                .groups
+                .iter()
+                .find(|group| group.name == "logic domain")
+                .unwrap()
+                .members
+                .contains(&"RN1".into())
+        );
+
+        let mut locked = problem.clone();
+        pcb_place::placement::apply_grid_hints(&mut locked, &hints);
+        let optos = locked
+            .parts
+            .iter()
+            .filter(|part| part.reference.starts_with('U'))
+            .map(|part| part.locked.as_ref().unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            optos
+                .windows(2)
+                .all(|pair| (pair[0].at.y - pair[1].at.y).abs() < 1e-9)
+        );
+        let pitch = optos[1].at.x - optos[0].at.x;
+        assert!(pitch > 5.0);
+        assert!(
+            optos
+                .windows(2)
+                .all(|pair| ((pair[1].at.x - pair[0].at.x) - pitch).abs() < 1e-9)
+        );
+    }
+
+    #[test]
+    fn opto817_plan_requires_eight_correct_common_emitter_channels() {
+        for (count, reversed) in [(7, false), (8, true)] {
+            let (design, board, problem) = opto817_fixture(count, reversed);
+            let mut hints = PlacementHints::default();
+
+            assert!(add_817_array_hints(&design, &board, &problem, &mut hints).is_none());
+            assert!(hints.groups.is_empty());
+        }
+    }
+
+    #[test]
+    fn real_817_bank_rejects_73mm_and_forms_one_oriented_row_at_90mm() {
+        let Some(env) = KicadEnv::detect() else {
+            eprintln!("SKIP: KiCad libraries not installed");
+            return;
+        };
+        let catalog = FootprintCatalog::from_env(&env).expect("installed footprint catalog");
+        let id =
+            FootprintId::parse("Package_SO:SO-4_4.4x3.6mm_P2.54mm").expect("valid footprint id");
+        let footprint = catalog.footprint(&id).expect("installed SO-4 footprint");
+        let (design, mut board, mut problem) = opto817_fixture(16, false);
+        let bounds = Rect::new(0.0, 0.0, 90.0, 58.0);
+        board.imported.bounds = bounds;
+        board.problem.bounds = bounds;
+        problem.bounds = bounds;
+        for part in &mut problem.parts {
+            if !part.reference.starts_with('U') {
+                continue;
+            }
+            let imported = board
+                .imported
+                .parts
+                .iter()
+                .find(|candidate| candidate.reference == part.reference)
+                .unwrap();
+            let nets = imported
+                .pads
+                .iter()
+                .filter_map(|pad| Some((pad.number.clone(), pad.net.clone()?)))
+                .collect();
+            *part = part_from_footprint_layers(&footprint, &part.reference, &nets, 2, None);
+        }
+
+        let mut hints = PlacementHints::default();
+        let required =
+            add_817_array_hints(&design, &board, &problem, &mut hints).expect("verified 817 plan");
+        assert!(required.width > 73.0 && required.width <= 90.0);
+        assert!(required.height <= 58.0);
+
+        let mut undersized = problem.clone();
+        undersized.bounds = Rect::new(0.0, 0.0, 73.0, 58.0);
+        let rejected = undersized_817_result(&undersized, required);
+        assert_eq!(rejected["legal"], json!(false));
+        assert_eq!(rejected["placement_applied"], json!(false));
+        assert_eq!(rejected["positions"], json!([]));
+        assert!(rejected["suggested_min_bounds_mm"]["w"].as_f64().unwrap() >= required.width);
+        assert!(
+            rejected["error"]
+                .as_str()
+                .unwrap()
+                .contains("no positions were written")
+        );
+
+        pcb_place::placement::apply_grid_hints(&mut problem, &hints);
+        let channels = opto817_channels(&design, &board);
+        let optos = channels
+            .iter()
+            .map(|channel| {
+                let part = problem
+                    .parts
+                    .iter()
+                    .find(|part| part.reference == channel.reference)
+                    .unwrap();
+                (channel, part, part.locked.as_ref().unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(optos.len(), 16);
+        assert!(optos.iter().all(|(_, _, locked)| locked.rotation == 270.0));
+        assert!(
+            optos
+                .iter()
+                .all(|(_, _, locked)| (locked.at.y - 29.0).abs() < 1e-9)
+        );
+        assert!((optos[0].2.at.x - 4.875).abs() < 1e-9);
+        assert!((optos[15].2.at.x - 85.125).abs() < 1e-9);
+        assert!(
+            optos
+                .windows(2)
+                .all(|pair| { ((pair[1].2.at.x - pair[0].2.at.x) - 5.35).abs() < 1e-9 })
+        );
+        for (channel, part, locked) in optos {
+            let average_y = |nets: &[&str]| {
+                let pads = part
+                    .pads
+                    .iter()
+                    .filter(|pad| {
+                        pad.net.as_deref().is_some_and(|net| {
+                            nets.iter().any(|candidate| same_net(net, candidate))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                pads.iter()
+                    .map(|pad| locked.at.y + pad.offset.rotate(locked.rotation).y)
+                    .sum::<f64>()
+                    / pads.len() as f64
+            };
+            let input = [&*channel.input_nets[0], &*channel.input_nets[1]];
+            let output = [&*channel.emitter_net, &*channel.output_net];
+            assert!(average_y(&input) < average_y(&output));
+        }
+    }
 
     #[test]
     fn placement_tool_accepts_snake_case_visual_hints() {
