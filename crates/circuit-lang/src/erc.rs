@@ -249,12 +249,42 @@ pub fn erc_checks(d: &Design) -> Vec<String> {
     check_dangling(&items, &mut out);
     check_crystal(&items, &net_items, &mut out);
     check_polarity(&items, &net_items, &mut out);
+    check_phototransistor_optocoupler_polarity(&items, &mut out);
     check_missing_decoupling(&items, &net_items, &mut out);
     check_missing_pullup(&items, &net_items, &mut out);
     check_floating_input(&items, &net_items, &mut out);
     check_undriven_rail(&items, &net_items, &mut out);
     check_output_short(&items, &net_items, &mut out);
     out
+}
+
+/// Catch a reversed output transistor on optocouplers whose numeric pinout is fixed and
+/// unambiguous. PC817/LTV-817-family parts use 3=emitter and 4=collector. Grounding the
+/// collector while exposing the emitter as the output reverses the intended NPN current
+/// path; KiCad's symbols type both pins as anonymous passive pins, so ordinary ERC cannot
+/// distinguish this from the correct emitter-to-ground connection.
+///
+/// Keep this deliberately narrow: emitter-follower optocoupler circuits are valid, and
+/// unknown optocoupler families may use another pin order. We therefore only diagnose the
+/// known 817 family and only the impossible positive-domain shape (C on 0 V, E off 0 V).
+fn check_phototransistor_optocoupler_polarity(items: &[Item], out: &mut Vec<String>) {
+    for it in items {
+        let part = it.comp.part.to_ascii_uppercase();
+        if !(part.contains("PC817") || part.contains("LTV-817") || part.contains("LTV817")) {
+            continue;
+        }
+        let emitter = pin_net_alias(it.comp, &["3", "E", "EMITTER"]);
+        let collector = pin_net_alias(it.comp, &["4", "C", "COLLECTOR"]);
+        if let (Some(emitter), Some(collector)) = (emitter, collector)
+            && rail_voltage(collector) == Some(0.0)
+            && rail_voltage(emitter) != Some(0.0)
+        {
+            out.push(format!(
+                "- {}: {} output transistor is BACKWARDS — pin 4 collector is on {collector} while pin 3 emitter is on {emitter}; this family requires emitter to ground and collector to the pulled-up output",
+                it.refdes, it.comp.part
+            ));
+        }
+    }
 }
 
 /// A 555 timer whose discharge transistor is wired directly onto the same
@@ -1107,6 +1137,68 @@ blocks:
                 .any(|s| s.contains("D1") && s.contains("BACKWARDS")),
             "{:?}",
             erc_checks(&d)
+        );
+    }
+
+    #[test]
+    fn reversed_pc817_output_transistor_is_flagged() {
+        let d = design(
+            "
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: Isolator:PC817, pins: {1: FIELD_P, 2: FIELD_N, 3: OUT1, 4: GND}}
+      R1: {part: Device:R, value: 10k, pins: {1: 3V3, 2: OUT1}}
+",
+        );
+        assert!(
+            erc_checks(&d)
+                .iter()
+                .any(|s| s.contains("U1") && s.contains("output transistor is BACKWARDS")),
+            "{:?}",
+            erc_checks(&d)
+        );
+    }
+
+    #[test]
+    fn correct_pc817_and_emitter_follower_are_not_flagged() {
+        let common_emitter = design(
+            "
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: Isolator:PC817, pins: {1: FIELD_P, 2: FIELD_N, 3: GND, 4: OUT1}}
+      R1: {part: Device:R, value: 10k, pins: {1: 3V3, 2: OUT1}}
+",
+        );
+        assert!(
+            !erc_checks(&common_emitter)
+                .iter()
+                .any(|s| s.contains("output transistor is BACKWARDS")),
+            "{:?}",
+            erc_checks(&common_emitter)
+        );
+
+        // Collector-to-rail / emitter-output is a valid emitter follower and must
+        // remain outside this deliberately conservative rule.
+        let emitter_follower = design(
+            "
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: Isolator:LTV-817, pins: {1: FIELD_P, 2: FIELD_N, 3: OUT1, 4: 3V3}}
+      R1: {part: Device:R, value: 10k, pins: {1: OUT1, 2: GND}}
+",
+        );
+        assert!(
+            !erc_checks(&emitter_follower)
+                .iter()
+                .any(|s| s.contains("output transistor is BACKWARDS")),
+            "{:?}",
+            erc_checks(&emitter_follower)
         );
     }
 
