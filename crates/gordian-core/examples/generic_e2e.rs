@@ -73,12 +73,16 @@ fn main() -> anyhow::Result<()> {
         bail!("board has too few parts: {regenerated}");
     }
     let mut placed = attempt(&ctx, "place_board", json!({}))?;
-    if placed["legal"] != Value::Bool(true)
-        && let (Some(width), Some(height)) = (
+    for _ in 0..3 {
+        if placed["legal"] == Value::Bool(true) {
+            break;
+        }
+        let (Some(width), Some(height)) = (
             placed["suggested_min_bounds_mm"]["w"].as_f64(),
             placed["suggested_min_bounds_mm"]["h"].as_f64(),
-        )
-    {
+        ) else {
+            break;
+        };
         step(
             &ctx,
             "regenerate_board",
