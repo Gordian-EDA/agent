@@ -3836,7 +3836,11 @@ async fn run_kicad_tool(
     if call.fn_name == "apply_design" {
         match mode {
             RunMode::Preview => {
-                let mut input = call.fn_arguments.clone();
+                // apply_design has no public arguments. Providers occasionally
+                // replay the authored YAML here despite the advertised empty
+                // schema; discard those stale arguments instead of spending a
+                // recovery round on an obsolete inline-apply API.
+                let mut input = json!({});
                 input["__commit"] = json!(false);
                 let dry = run_blocking(ctx, "apply_design", input).await;
                 // `ready` = the YAML compiled (dry.ok == true); otherwise the loop
@@ -3855,14 +3859,16 @@ async fn run_kicad_tool(
                 );
             }
             RunMode::Commit => {
-                let mut input = call.fn_arguments.clone();
+                let mut input = json!({});
                 input["__commit"] = json!(true);
                 let committed = run_blocking(ctx, "apply_design", input).await;
                 let apply = committed.as_ref().ok().map(commit_apply_info);
                 return into_outcome(committed, apply);
             }
             // A normal (commit-less) apply_design: dry-run, no gate.
-            RunMode::Normal => {}
+            RunMode::Normal => {
+                return into_outcome(run_blocking(ctx, "apply_design", json!({})).await, None);
+            }
         }
     }
 
