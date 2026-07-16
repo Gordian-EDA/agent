@@ -1308,6 +1308,26 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
     let diff = design_diff(prior_design.as_ref(), &design);
 
+    // The interactive/headless gate only needs a truthful electrical diff to
+    // ask for approval. Defer the expensive schematic layout to the approved
+    // commit so large designs are not composed twice. Ordinary public dry-runs
+    // still include the full layout diagnostics below.
+    if !commit
+        && input
+            .get("__skip_layout_preview")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        return Ok(json!({
+            "ok": true,
+            "would_write": true,
+            "stale_draft_warning": stale,
+            "diff": diff,
+            "design_state": design_state,
+            "layout_pending": true,
+        }));
+    }
+
     let composed =
         crate::multisheet::compose_design(ctx.env(), &design).context("composing schematic")?;
 

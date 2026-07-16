@@ -698,6 +698,31 @@ fn apply_design_dry_run_returns_diff_without_writing() {
 }
 
 #[test]
+fn gated_apply_preview_defers_layout_until_commit() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    seed_draft(&ctx, TINY_YAML);
+
+    let out = run_tool(
+        "apply_design",
+        serde_json::json!({
+            "__commit": false,
+            "__skip_layout_preview": true
+        }),
+        &ctx,
+    )
+    .unwrap();
+
+    assert_eq!(out["ok"], serde_json::json!(true), "{out}");
+    assert_eq!(out["would_write"], serde_json::json!(true), "{out}");
+    assert_eq!(out["layout_pending"], serde_json::json!(true), "{out}");
+    assert!(out.get("layout_warnings").is_none(), "{out}");
+    assert!(!ctx.sch_path().exists(), "preview must not write");
+}
+
+#[test]
 fn apply_design_rejects_inline_yaml_without_mutating_the_draft() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");

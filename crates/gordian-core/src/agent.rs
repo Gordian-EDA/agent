@@ -3848,6 +3848,7 @@ async fn run_kicad_tool(
                 // recovery round on an obsolete inline-apply API.
                 let mut input = json!({});
                 input["__commit"] = json!(false);
+                input["__skip_layout_preview"] = json!(true);
                 let dry = run_blocking(ctx, "apply_design", input).await;
                 // `ready` = the YAML compiled (dry.ok == true); otherwise the loop
                 // returns the diagnostics straight back with no approval prompt.
