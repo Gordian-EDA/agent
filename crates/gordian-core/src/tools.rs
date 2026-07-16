@@ -1763,6 +1763,40 @@ fn add_footprint_part_normalizations(report: &mut Value, normalizations: Vec<Val
     }
 }
 
+fn normalize_misplaced_footprint_component_map(
+    components: &mut serde_json::Map<String, Value>,
+    ctx: &AgentRuntime,
+) -> Result<Vec<Value>> {
+    let catalog = ctx.footprint_catalog()?;
+    let mut normalizations = Vec::new();
+    for (reference, component) in components {
+        let Some(fields) = component.as_object_mut() else {
+            continue;
+        };
+        let Some(footprint) = fields.get("part").and_then(Value::as_str).map(str::to_owned) else {
+            continue;
+        };
+        let Ok(id) = FootprintId::parse(&footprint) else {
+            continue;
+        };
+        let Ok(metadata) = catalog.footprint(&id) else {
+            continue;
+        };
+        let Some(symbol) = symbol_for_misplaced_footprint(&footprint, metadata.pads.len()) else {
+            continue;
+        };
+        fields.insert("part".into(), json!(symbol));
+        fields.insert("footprint".into(), json!(footprint));
+        normalizations.push(json!({
+            "reference": reference,
+            "original_part": footprint,
+            "inferred_symbol": symbol,
+            "assigned_footprint": footprint,
+        }));
+    }
+    Ok(normalizations)
+}
+
 fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let yaml = require_str(&input, "yaml")?;
     let overwrite = input
@@ -1865,6 +1899,8 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "mode": "component_repair",
         }));
     }
+    let footprint_normalizations =
+        normalize_misplaced_footprint_component_map(&mut upsert, ctx)?;
     let update = match input.get("update") {
         None => serde_json::Map::new(),
         Some(Value::Object(map)) => map.clone(),
@@ -2033,6 +2069,7 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let patch_result = compile(&fragment_yaml, ctx.provider());
     let Some(mut patch_design) = patch_result.design else {
         let mut report = compile_report(&patch_result.diagnostics);
+        add_footprint_part_normalizations(&mut report, footprint_normalizations);
         report["error"] = json!("component repair fragment is invalid");
         report["code"] = json!("invalid_component_repair");
         report["draft_written"] = json!(false);
@@ -2321,6 +2358,7 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let candidate_yaml = circuit_lang::canon::to_canonical_yaml(&candidate);
     let candidate_result = compile(&candidate_yaml, ctx.provider());
     let mut report = compile_authoring_report(&candidate_result, ctx)?;
+    add_footprint_part_normalizations(&mut report, footprint_normalizations);
     let candidate_is_clean = report.get("ok").and_then(Value::as_bool) == Some(true);
     let prior_is_invalid = prior_report.get("ok").and_then(Value::as_bool) != Some(true);
     let candidate_strictly_improves = prior_is_invalid
@@ -2749,6 +2787,27 @@ mod tests {
         let draft = runtime.workspace().read_draft().unwrap().unwrap();
         assert!(draft.contains("part: \"Device:R\""));
         assert!(draft.contains(&format!("footprint: \"{misplaced}\"")));
+
+        let repaired = repair_components(
+            json!({
+                "block": "main",
+                "components": {
+                    "R2": {"part": misplaced, "between": ["C", "D"]}
+                }
+            }),
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(repaired["normalized_misplaced_footprints"]["count"], 1);
+        assert_eq!(repaired["draft_written"], true, "{repaired}");
+        let draft = runtime.workspace().read_draft().unwrap().unwrap();
+        assert!(draft.contains("R2:"));
+        assert_eq!(
+            draft.matches("part: Device:R").count()
+                + draft.matches("part: \"Device:R\"").count(),
+            10
+        );
+        assert_eq!(draft.matches(misplaced).count(), 10);
     }
 
     #[test]
