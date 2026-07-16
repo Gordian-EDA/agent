@@ -67,6 +67,8 @@ const ADAPTIVE_GRID_RIPUP_RESCUE_ENGINE: &str = "adaptive-grid-ripup-rescue";
 const ADAPTIVE_RESCUE_PORTFOLIO_MAX_FAILED: usize = 8;
 const ADAPTIVE_RIPUP_MAX_BLOCKERS: usize = 3;
 const AUTO_DETAILED_MAX_MULTILAYER_CONNECTIONS: usize = 11;
+const AUTO_BOUNDED_MAX_CONNECTIONS: usize = 48;
+const AUTO_BOUNDED_MAX_TERMINALS: usize = 160;
 
 // ── pipeline entry points ──────────────────────────────────────────────────────
 
@@ -786,6 +788,34 @@ pub fn route_auto_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
 }
 
 fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
+    // Large boards make the normal portfolio multiplicative: each specialist,
+    // negotiated detail, and the grid fallback may explore several net orders
+    // and rip-up retries. Keep automatic routing predictably bounded once the
+    // board crosses either complexity limit. The existing single-pass router
+    // retains the strict clearance model and connectivity reconciliation; the
+    // shared candidate path below still performs normal cleanup, lint-quality
+    // scoring, and diagnostic recording. Any nets it cannot route remain honest
+    // failures rather than triggering another portfolio.
+    if auto_route_requires_bounded_pass(problem) {
+        let started = Instant::now();
+        let result = router::route_orthogonal_single_pass(problem);
+        let elapsed_ms = started.elapsed().as_millis();
+        let mut best = None;
+        let mut attempts = Vec::with_capacity(1);
+        let _ = consider_candidate_recording(
+            problem,
+            &mut best,
+            result,
+            Some(&mut attempts),
+            elapsed_ms,
+        );
+        return RouteAutoRun {
+            result: best.expect("bounded grid candidate just populated best").0,
+            attempts,
+            global: None,
+        };
+    }
+
     let direct = DirectLineRouter;
     let layer_hop = LayerHopRouter;
     let via_escape = ViaEscapeRouter;
@@ -903,6 +933,16 @@ fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
         attempts,
         global,
     }
+}
+
+fn auto_route_requires_bounded_pass(problem: &RouteProblem) -> bool {
+    problem.connections.len() > AUTO_BOUNDED_MAX_CONNECTIONS
+        || problem
+            .connections
+            .iter()
+            .map(|connection| connection.points_to_connect.len())
+            .sum::<usize>()
+            > AUTO_BOUNDED_MAX_TERMINALS
 }
 
 fn should_try_detailed_in_auto(problem: &RouteProblem) -> bool {
@@ -3345,6 +3385,61 @@ mod tests {
         assert_eq!(r.attempts[0].engine, crate::direct::ENGINE);
         assert_eq!(r.attempts[0].failed_nets, 0);
         assert_eq!(r.attempts[0].geometry_violations, 0);
+    }
+
+    #[test]
+    fn bounded_auto_route_thresholds_are_strict() {
+        let mut p = simple_two_point_problem();
+        let connection = p.connections[0].clone();
+
+        p.connections = vec![connection.clone(); AUTO_BOUNDED_MAX_CONNECTIONS];
+        assert!(!auto_route_requires_bounded_pass(&p));
+        p.connections.push(connection.clone());
+        assert!(auto_route_requires_bounded_pass(&p));
+
+        p.connections = vec![connection];
+        let terminal = p.connections[0].points_to_connect[0].clone();
+        p.connections[0]
+            .points_to_connect
+            .resize(AUTO_BOUNDED_MAX_TERMINALS, terminal);
+        assert_eq!(
+            p.connections
+                .iter()
+                .map(|c| c.points_to_connect.len())
+                .sum::<usize>(),
+            AUTO_BOUNDED_MAX_TERMINALS
+        );
+        assert!(!auto_route_requires_bounded_pass(&p));
+        let extra_terminal = p.connections[0].points_to_connect[0].clone();
+        p.connections[0].points_to_connect.push(extra_terminal);
+        assert!(auto_route_requires_bounded_pass(&p));
+    }
+
+    #[test]
+    fn large_auto_route_records_exactly_one_bounded_attempt() {
+        let mut p = simple_two_point_problem();
+        p.connections = (0..=AUTO_BOUNDED_MAX_CONNECTIONS)
+            .map(|index| {
+                let point = crate::problem::RoutePoint {
+                    x: 1.0 + (index % 7) as f64 * 2.0,
+                    y: 1.0 + (index / 7) as f64,
+                    layer: LayerRef::top(),
+                };
+                Connection {
+                    name: format!("N{index}"),
+                    points_to_connect: vec![point.clone(), point],
+                }
+            })
+            .collect();
+
+        let run = route_auto_with_diagnostics(&p);
+
+        assert_eq!(run.attempts.len(), 1);
+        assert_eq!(run.attempts[0].engine, router::ENGINE);
+        assert_eq!(run.result.engine, router::ENGINE);
+        assert_eq!(run.result.failed, run.attempts[0].failed);
+        assert_eq!(run.attempts[0].geometry_violations, 0);
+        assert!(run.global.is_none());
     }
 
     #[test]
