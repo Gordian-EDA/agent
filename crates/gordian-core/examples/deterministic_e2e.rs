@@ -142,9 +142,22 @@ fn main() -> anyhow::Result<()> {
                     "grid": true
                 },
                 {
-                    "name": "power",
-                    "members": ["C1", "C2", "C6", "C7"],
-                    "region": {"min_x": 46.0, "min_y": 14.0, "max_x": 56.0, "max_y": 22.0},
+                    "name": "power_bulk",
+                    "members": ["C1", "C7"],
+                    "region": {"min_x": 48.0, "min_y": 14.0, "max_x": 56.0, "max_y": 22.0},
+                    "grid": true
+                },
+                {
+                    "name": "u1_decoupling_pos",
+                    "members": ["C2"],
+                    "region": {"min_x": 44.35, "min_y": 28.9, "max_x": 44.55, "max_y": 29.1},
+                    "grid": true,
+                    "rotation": 180
+                },
+                {
+                    "name": "u1_decoupling_neg",
+                    "members": ["C6"],
+                    "region": {"min_x": 55.45, "min_y": 32.9, "max_x": 55.65, "max_y": 33.1},
                     "grid": true
                 },
                 {
@@ -166,15 +179,27 @@ fn main() -> anyhow::Result<()> {
                     "grid": true
                 },
                 {
-                    "name": "preamp_decoupling_pos",
-                    "members": ["C8", "C10"],
-                    "region": {"min_x": 10.0, "min_y": 23.5, "max_x": 20.0, "max_y": 24.5},
+                    "name": "preamp_bulk_pos",
+                    "members": ["C8"],
+                    "region": {"min_x": 11.9, "min_y": 23.9, "max_x": 12.1, "max_y": 24.1},
                     "grid": true
                 },
                 {
-                    "name": "preamp_decoupling_neg",
-                    "members": ["C9", "C11"],
-                    "region": {"min_x": 10.0, "min_y": 37.5, "max_x": 20.0, "max_y": 38.5},
+                    "name": "preamp_bulk_neg",
+                    "members": ["C9"],
+                    "region": {"min_x": 11.9, "min_y": 37.9, "max_x": 12.1, "max_y": 38.1},
+                    "grid": true
+                },
+                {
+                    "name": "u2_decoupling_pos",
+                    "members": ["C10"],
+                    "region": {"min_x": 20.45, "min_y": 30.3, "max_x": 20.65, "max_y": 30.5},
+                    "grid": true
+                },
+                {
+                    "name": "u2_decoupling_neg",
+                    "members": ["C11"],
+                    "region": {"min_x": 12.4, "min_y": 34.7, "max_x": 12.6, "max_y": 34.9},
                     "grid": true
                 },
                 {
