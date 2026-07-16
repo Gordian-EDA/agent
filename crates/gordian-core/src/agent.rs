@@ -948,7 +948,13 @@ impl<P: Provider> Agent<P> {
             let review_has_defects = schematic_review_current
                 .as_ref()
                 .is_some_and(|review| !review_result_is_clean(review));
-            offer_component_repair_for_review(&mut defs, review_has_defects);
+            let review_needs_full_edit = schematic_review_current
+                .as_ref()
+                .is_some_and(review_requires_full_design_edit);
+            offer_component_repair_for_review(
+                &mut defs,
+                review_has_defects && !review_needs_full_edit,
+            );
             if !runtime_supports_live_footprint_moves(&self.runtime) {
                 defs.retain(|def| !matches!(def.name.as_str(), "move_parts" | "set_net_width"));
             }
@@ -1216,6 +1222,10 @@ impl<P: Provider> Agent<P> {
                     call.fn_name == "create_design" && draft_existed_before_completion;
                 let minimum_component_guard =
                     undersized_full_draft_result(authoritative_intent, call);
+                let full_design_repair_blocked = call.fn_name == "repair_components"
+                    && schematic_review_current
+                        .as_ref()
+                        .is_some_and(review_requires_full_design_edit);
                 let schematic_review_clean = schematic_review_current
                     .as_ref()
                     .is_some_and(review_result_is_clean);
@@ -1254,6 +1264,7 @@ impl<P: Provider> Agent<P> {
                     && !post_apply_authoring_blocked
                     && !authoring_batch_dependency_blocked
                     && !create_on_existing_draft_blocked
+                    && !full_design_repair_blocked
                     && minimum_component_guard.is_none();
                 let (mut content, images, image_path) = if timed_out_mutation_blocked {
                     (
@@ -1301,6 +1312,21 @@ impl<P: Provider> Agent<P> {
                         );
                     }
                     (cached.to_string(), Vec::new(), None)
+                } else if full_design_repair_blocked {
+                    (
+                        json!({
+                            "ok": false,
+                            "error": "repair_components cannot repair a circuit that semantic review classified as incomplete or largely missing",
+                            "code": "full_design_edit_required",
+                            "repair_scope": "full_design",
+                            "defects": schematic_review_current.as_ref().and_then(|review| review.get("defects")).cloned().unwrap_or_else(|| json!([])),
+                            "next_tool": "edit_design",
+                            "note": "Send one COMPLETE corrected top-level YAML document with edit_design. Preserve valid existing work, but implement the missing circuit/topology in that single full replacement.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
                 } else if unchanged_apply_blocked {
                     (
                         json!({
@@ -2219,6 +2245,40 @@ fn cacheable_review_result(value: &Value) -> Option<Value> {
     value.get("error").is_none().then(|| value.clone())
 }
 
+fn defects_require_full_design_edit(defects: &[String]) -> bool {
+    defects.iter().any(|defect| {
+        let defect = defect.to_ascii_lowercase();
+        [
+            "incomplete design",
+            "entire circuit missing",
+            "entire design missing",
+            "circuit is incomplete",
+            "topology is incomplete",
+            "topology largely missing",
+            "circuit largely missing",
+        ]
+        .iter()
+        .any(|marker| defect.contains(marker))
+    })
+}
+
+fn review_requires_full_design_edit(review: &Value) -> bool {
+    if review.get("repair_scope").and_then(Value::as_str) == Some("full_design")
+        || review.get("requires_full_edit").and_then(Value::as_bool) == Some(true)
+    {
+        return true;
+    }
+    let defects = review
+        .get("defects")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    defects_require_full_design_edit(&defects)
+}
+
 /// A timed-out `spawn_blocking` task may continue after its join handle is
 /// dropped. Once a mutation times out, no later mutation is safe in this
 /// subturn. Reads retain the narrower exact-call, same-revision guard.
@@ -2797,9 +2857,9 @@ fn explicit_minimum_physical_components(intent: &str) -> Option<usize> {
     let component_floor = |number_index: usize, noun_index: usize| {
         let required = tokens.get(number_index)?.parse::<usize>().ok()?;
         let mut noun_index = noun_index;
-        if tokens
+        while tokens
             .get(noun_index)
-            .is_some_and(|token| token == "physical")
+            .is_some_and(|token| matches!(token.as_str(), "physical" | "pcb" | "board" | "mounted"))
         {
             noun_index += 1;
         }
@@ -3149,13 +3209,23 @@ async fn review_design(
         }));
     }
     let (score, defects) = review_netlist_with_erc(ctx, reviewer, intent, &netlist).await?;
+    let repair_scope = if defects_require_full_design_edit(&defects) {
+        "full_design"
+    } else {
+        "localized"
+    };
     let note = if defects.is_empty() {
         "no high-confidence functional defects — the design looks electrically sound"
     } else {
         "high-confidence functional defects found (they pass ERC but are electrically wrong); \
          fix each with edit_design and re-check"
     };
-    Ok(json!({ "score": score, "defects": defects, "note": note }))
+    Ok(json!({
+        "score": score,
+        "defects": defects,
+        "repair_scope": repair_scope,
+        "note": note,
+    }))
 }
 
 /// Run the diverse-lens LLM review on `netlist` and UNION in the deterministic
@@ -4689,6 +4759,75 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_semantic_reviews_require_a_full_design_edit() {
+        assert!(review_requires_full_design_edit(&json!({
+            "repair_scope": "full_design",
+            "defects": ["an unfamiliar reviewer phrase"]
+        })));
+        assert!(review_requires_full_design_edit(&json!({
+            "defects": ["- J1: incomplete design / missing essential support components"]
+        })));
+        assert!(!review_requires_full_design_edit(&json!({
+            "repair_scope": "localized",
+            "defects": ["- R7: wrong resistor value"]
+        })));
+    }
+
+    #[tokio::test]
+    async fn incomplete_review_blocks_component_repair_before_dispatch() {
+        let runtime = test_runtime();
+        runtime
+            .workspace()
+            .write_draft(
+                "version: 1\nblocks:\n  main:\n    components:\n      R1: {part: Device:R, between: [A, GND]}\n",
+                None,
+            )
+            .unwrap();
+        let script = vec![
+            tool_call(
+                "review",
+                "review_design",
+                json!({"intent": "check the complete controller"}),
+            ),
+            final_text(
+                r#"FINAL_JSON: {"score": 3, "defects": [{"refdes": "J1", "issue": "incomplete design / missing essential support components", "why": "the requested controller topology is largely absent", "evidence": "only R1 is present", "severity": "major", "confidence": "high"}]}"#,
+            ),
+            tool_call(
+                "bad-repair",
+                "repair_components",
+                json!({"components": {"R2": {"part": "Device:R", "between": ["A", "GND"]}}}),
+            ),
+            final_text("I will replace the incomplete design in one complete edit."),
+        ];
+        let mut agent = Agent::new(ScriptedClient::new(script), runtime, "system");
+        let mut approvals = AutoApprove::no();
+
+        agent
+            .run_turn(
+                "Create a complete production controller schematic",
+                &mut approvals,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let results = tool_results(&agent.history);
+        assert_eq!(results["review"]["repair_scope"], "full_design");
+        assert_eq!(results["bad-repair"]["code"], "full_design_edit_required");
+        assert_eq!(results["bad-repair"]["next_tool"], "edit_design");
+        assert_eq!(results["bad-repair"]["repair_scope"], "full_design");
+        assert!(
+            !agent
+                .runtime
+                .workspace()
+                .read_draft()
+                .unwrap()
+                .unwrap()
+                .contains("R2")
+        );
+    }
+
+    #[test]
     fn pcb_requests_reserve_a_bounded_board_stage() {
         assert!(request_requires_pcb_work(
             "finish the two-layer PCB and run DRC"
@@ -4955,6 +5094,12 @@ mod tests {
     fn explicit_component_minimum_requires_authoritative_numeric_language() {
         assert_eq!(
             explicit_minimum_physical_components("Use at least 45 physical components"),
+            Some(45)
+        );
+        assert_eq!(
+            explicit_minimum_physical_components(
+                "Use at least 45 physical PCB components on a four-layer board"
+            ),
             Some(45)
         );
         assert_eq!(
