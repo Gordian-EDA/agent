@@ -1130,6 +1130,30 @@ fn design_component_count(design: &Design) -> usize {
         .sum()
 }
 
+fn invalid_compile_quality_regressed(
+    prior: &circuit_lang::Diagnostics,
+    candidate: &circuit_lang::Diagnostics,
+) -> bool {
+    use circuit_lang::Severity;
+
+    let quality = |diagnostics: &circuit_lang::Diagnostics| {
+        let errors = diagnostics
+            .0
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .count();
+        let warnings = diagnostics
+            .0
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Warning)
+            .count();
+        (errors, warnings)
+    };
+    let prior = quality(prior);
+    let candidate = quality(candidate);
+    prior.0 > 0 && candidate > prior
+}
+
 /// Returns `true` when at least one incompatible assignment was found.
 fn add_footprint_compatibility(
     report: &mut Value,
@@ -2259,6 +2283,28 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let prior_result = prior_draft
             .as_deref()
             .map(|draft| compile(draft, ctx.provider()));
+        if let Some(prior) = prior_result.as_ref()
+            && invalid_compile_quality_regressed(&prior.diagnostics, &result.diagnostics)
+        {
+            let current_validation = compile_report(&prior.diagnostics);
+            let candidate_validation = compile_report(&result.diagnostics);
+            report["ok"] = json!(false);
+            report["error"] = json!(
+                "full replacement regressed an invalid draft; the better repair anchor was preserved"
+            );
+            report["code"] = json!("invalid_replacement_regressed_draft");
+            report["current_validation"] = current_validation;
+            report["candidate_validation"] = candidate_validation;
+            report["draft_written"] = json!(false);
+            report["draft_changed"] = json!(false);
+            report["electrical_design_changed"] = json!(false);
+            report["mode"] = json!("full_replace");
+            report["next_tool"] = json!("edit_design");
+            report["next"] = json!(
+                "fix the rejected candidate diagnostics and resend the complete yaml; replacements with fewer errors, or equal errors and no more warnings, remain accepted"
+            );
+            return Ok(report);
+        }
         if let Some(prior) = prior_result
             .as_ref()
             .and_then(|compiled| compiled.design.as_ref())
@@ -2510,7 +2556,91 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{compile_report, repair_components_tool, tool_defs};
+    use crate::AgentRuntime;
+    use serde_json::json;
+
+    use super::{
+        compile_report, edit_design, invalid_compile_quality_regressed, repair_components_tool,
+        tool_defs,
+    };
+
+    fn invalid_refdes_draft(count: usize) -> String {
+        let components = (1..=count)
+            .map(|index| {
+                format!("R_BAD{index}: {{part: Device:R, between: [A, B]}}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("version: 1\nblocks: {{main: {{components: {{{components}}}}}}}\n")
+    }
+
+    #[test]
+    fn worse_invalid_full_replacement_preserves_the_better_draft() {
+        let footprints = tempfile::tempdir().unwrap();
+        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
+            .expect("test runtime");
+        let prior = invalid_refdes_draft(2);
+        let worse = invalid_refdes_draft(3);
+        runtime.workspace().write_draft(&prior, None).unwrap();
+
+        let report = edit_design(json!({"yaml": worse}), &runtime).unwrap();
+
+        assert_eq!(report["code"], "invalid_replacement_regressed_draft");
+        assert_eq!(report["current_validation"]["errors"], 2);
+        assert_eq!(report["candidate_validation"]["errors"], 3);
+        assert_eq!(report["draft_written"], false);
+        assert_eq!(report["draft_changed"], false);
+        assert_eq!(runtime.workspace().read_draft().unwrap().unwrap(), prior);
+    }
+
+    #[test]
+    fn improved_invalid_full_replacement_is_written() {
+        let footprints = tempfile::tempdir().unwrap();
+        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
+            .expect("test runtime");
+        let prior = invalid_refdes_draft(3);
+        let better = invalid_refdes_draft(2);
+        runtime.workspace().write_draft(&prior, None).unwrap();
+
+        let report = edit_design(
+            json!({"yaml": better, "allow_component_removal": true}),
+            &runtime,
+        )
+        .unwrap();
+
+        assert_ne!(report.get("code"), Some(&json!("invalid_replacement_regressed_draft")));
+        assert_eq!(report["errors"], 2);
+        assert_eq!(report["draft_written"], true);
+        assert_eq!(runtime.workspace().read_draft().unwrap().unwrap(), better);
+    }
+
+    #[test]
+    fn invalid_compile_quality_uses_warnings_only_as_an_error_tiebreak() {
+        use circuit_lang::{Diagnostic, Diagnostics};
+
+        let diagnostics = |errors, warnings| {
+            let mut diagnostics = Diagnostics::default();
+            for _ in 0..errors {
+                diagnostics.push(Diagnostic::error("error", "error"));
+            }
+            for _ in 0..warnings {
+                diagnostics.push(Diagnostic::warning("warning", "warning"));
+            }
+            diagnostics
+        };
+        assert!(invalid_compile_quality_regressed(
+            &diagnostics(2, 1),
+            &diagnostics(2, 2)
+        ));
+        assert!(!invalid_compile_quality_regressed(
+            &diagnostics(2, 1),
+            &diagnostics(2, 1)
+        ));
+        assert!(!invalid_compile_quality_regressed(
+            &diagnostics(2, 1),
+            &diagnostics(1, 20)
+        ));
+    }
 
     #[test]
     fn compile_report_preserves_error_classes_under_repetitive_diagnostics() {
