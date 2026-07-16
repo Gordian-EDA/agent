@@ -881,6 +881,7 @@ impl<P: Provider> Agent<P> {
         // defective draft from paying for the same LLM review repeatedly.
         let mut schematic_review_current: Option<Value> = None;
         let mut last_tool_status: Option<String> = None;
+        let mut component_shortfall_focus: Option<ComponentShortfallFocus> = None;
         let mut pcb_only_stage = false;
         let mut reserved_clean_apply_used = false;
 
@@ -979,6 +980,9 @@ impl<P: Provider> Agent<P> {
                     .is_some_and(|errors| errors > 0),
                 review_has_defects,
             );
+            if let Some(focus) = &component_shortfall_focus {
+                defs.retain(|tool| focus.permits(tool.name.as_str()));
+            }
 
             // Drive the provider's stream so assistant prose renders token-by-token
             // (each chunk forwarded as `AssistantDelta`), while the terminal End
@@ -1135,6 +1139,11 @@ impl<P: Provider> Agent<P> {
             let discovery_tools_this_completion: HashSet<&str> = tool_calls
                 .iter()
                 .filter(|call| is_discovery_tool(&call.fn_name))
+                .filter(|call| {
+                    component_shortfall_focus
+                        .as_ref()
+                        .is_none_or(|focus| focus.permits(&call.fn_name))
+                })
                 .map(|call| call.fn_name.as_str())
                 .collect();
             let discovery_tools_blocked: HashSet<&str> = discovery_tools_this_completion
@@ -1222,6 +1231,9 @@ impl<P: Provider> Agent<P> {
                     call.fn_name == "create_design" && draft_existed_before_completion;
                 let minimum_component_guard =
                     undersized_full_draft_result(authoritative_intent, call);
+                let component_shortfall_tool_blocked = component_shortfall_focus
+                    .as_ref()
+                    .is_some_and(|focus| !focus.permits(&call.fn_name));
                 let full_design_repair_blocked = call.fn_name == "repair_components"
                     && schematic_review_current
                         .as_ref()
@@ -1265,6 +1277,7 @@ impl<P: Provider> Agent<P> {
                     && !authoring_batch_dependency_blocked
                     && !create_on_existing_draft_blocked
                     && !full_design_repair_blocked
+                    && !component_shortfall_tool_blocked
                     && minimum_component_guard.is_none();
                 let (mut content, images, image_path) = if timed_out_mutation_blocked {
                     (
@@ -1273,6 +1286,25 @@ impl<P: Provider> Agent<P> {
                             "code": "timed_out_mutation_conflict",
                             "prior_timed_out_tools": timed_out_tool_calls.iter().map(|(name, _, _)| name).collect::<Vec<_>>(),
                             "note": "The prior mutation runs in non-cancellable blocking work and may still finish. No further schematic or PCB mutation is safe in this turn; use read-only inspection if useful, then report the timeout honestly.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if component_shortfall_tool_blocked {
+                    let focus = component_shortfall_focus
+                        .as_ref()
+                        .expect("blocked only while component shortfall focus is active");
+                    (
+                        json!({
+                            "ok": false,
+                            "error": "full authoring is required before any other tool",
+                            "code": "minimum_component_shortfall_focus",
+                            "required_minimum": focus.required,
+                            "candidate_physical_components": focus.actual,
+                            "shortfall": focus.shortfall,
+                            "next_tool": focus.authoring_tool,
+                            "note": "Submit one complete qualifying YAML document; discovery, reads, review, apply, and PCB tools remain paused until then.",
                         })
                         .to_string(),
                         Vec::new(),
@@ -1567,6 +1599,16 @@ impl<P: Provider> Agent<P> {
                 };
                 self.emit_pending_usage(events);
                 let parsed = parse_or_null(&content);
+                if let Some(focus) = ComponentShortfallFocus::from_result(&parsed) {
+                    component_shortfall_focus = Some(focus);
+                } else if dispatched
+                    && matches!(call.fn_name.as_str(), "create_design" | "edit_design")
+                    && component_shortfall_focus
+                        .as_ref()
+                        .is_some_and(|focus| focus.permits(&call.fn_name))
+                {
+                    component_shortfall_focus = None;
+                }
                 if tool_result_is_timeout(&parsed) {
                     timed_out_tool_calls.push((
                         call.fn_name.clone(),
@@ -1651,6 +1693,12 @@ impl<P: Provider> Agent<P> {
                 .push(ChatMessage::tool(MessageContent::from_tool_responses(
                     tool_responses,
                 )));
+            if let Some(focus) = component_shortfall_focus.as_mut()
+                && focus.nudge_pending
+            {
+                focus.nudge_pending = false;
+                self.history.push(ChatMessage::user(focus.nudge()));
+            }
             if !result_images.is_empty() && self.client.vision() {
                 self.history
                     .push(ChatMessage::user(MessageContent::from_parts(result_images)));
@@ -2818,6 +2866,51 @@ fn post_apply_authoring_batch_blocked(name: &str, apply_already_dispatched: bool
 
 fn authoring_batch_dependency_blocked(name: &str, authoring_already_dispatched: bool) -> bool {
     is_authoring_for_commit(name) && authoring_already_dispatched
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ComponentShortfallFocus {
+    required: usize,
+    actual: usize,
+    shortfall: usize,
+    authoring_tool: String,
+    nudge_pending: bool,
+}
+
+impl ComponentShortfallFocus {
+    fn from_result(result: &Value) -> Option<Self> {
+        (result.get("code").and_then(Value::as_str)
+            == Some("minimum_physical_component_count_not_met"))
+        .then(|| Self {
+            required: result
+                .get("required_minimum")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize,
+            actual: result
+                .get("candidate_physical_components")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize,
+            shortfall: result.get("shortfall").and_then(Value::as_u64).unwrap_or(0) as usize,
+            authoring_tool: result
+                .get("next_tool")
+                .and_then(Value::as_str)
+                .filter(|tool| matches!(*tool, "create_design" | "edit_design"))
+                .unwrap_or("edit_design")
+                .to_owned(),
+            nudge_pending: true,
+        })
+    }
+
+    fn permits(&self, tool: &str) -> bool {
+        tool == self.authoring_tool
+    }
+
+    fn nudge(&self) -> String {
+        format!(
+            "Component minimum not met: required {}, candidate {}, shortfall {}. Next call: one complete {} YAML document meeting the minimum; do not search, inspect, validate, review, apply, or start PCB work first.",
+            self.required, self.actual, self.shortfall, self.authoring_tool
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -5214,8 +5307,40 @@ blocks:
         );
     }
 
+    #[test]
+    fn component_shortfall_focus_exposes_only_requested_full_authoring_tool() {
+        let result = json!({
+            "code": "minimum_physical_component_count_not_met",
+            "required_minimum": 45,
+            "candidate_physical_components": 3,
+            "shortfall": 42,
+            "next_tool": "create_design",
+        });
+        let focus = ComponentShortfallFocus::from_result(&result).unwrap();
+        let mut defs = tool_defs_for_phase(
+            ToolPhase::Schematic,
+            &HashMap::new(),
+            false,
+            &HashSet::new(),
+            false,
+        );
+        defs.retain(|tool| focus.permits(tool.name.as_str()));
+
+        assert_eq!(
+            defs.iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["create_design"]
+        );
+        assert!(
+            focus
+                .nudge()
+                .contains("required 45, candidate 3, shortfall 42")
+        );
+    }
+
     #[tokio::test]
-    async fn undersized_create_is_rejected_before_draft_write() {
+    async fn undersized_create_focuses_next_completion_and_blocks_other_tools() {
         let script = vec![
             tool_call(
                 "small",
@@ -5224,9 +5349,11 @@ blocks:
                     "yaml": "version: 1\nblocks: {main: {components: {R1: {part: R, footprint: Resistor_SMD:R_0603_1608Metric, between: [A, B]}}}}\n"
                 }),
             ),
+            tool_call("distract", "search_symbols", json!({"query": "resistor"})),
             final_text("I need to author the complete design."),
         ];
-        let mut agent = Agent::new(ScriptedClient::new(script), test_runtime(), "system");
+        let (client, seen) = ScriptedClient::recording(script);
+        let mut agent = Agent::new(client, test_runtime(), "system");
         let mut approvals = AutoApprove::no();
 
         agent
@@ -5245,6 +5372,16 @@ blocks:
             "minimum_physical_component_count_not_met"
         );
         assert_eq!(results["small"]["draft_written"], false);
+        assert_eq!(
+            results["distract"]["code"],
+            "minimum_component_shortfall_focus"
+        );
+        let requests = seen.lock().unwrap();
+        assert!(requests[1].iter().any(|message| {
+            message.content.iter().any(|part| {
+                matches!(part, ContentPart::Text(text) if text.contains("required 45, candidate 1, shortfall 44"))
+            })
+        }));
     }
 
     #[test]
