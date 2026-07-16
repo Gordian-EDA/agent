@@ -10,7 +10,7 @@ use circuit_lang::model::Design;
 use kicad_env::KicadEnv;
 
 use super::idiom;
-use super::place::{gather, grid_from_layout, incidence};
+use super::place::{gather, grid_from_layout, grid_occurrences, incidence, unit_place_key};
 use super::*;
 use sch_place::item::{Incidence, Item};
 use sch_place::netclass::{
@@ -146,6 +146,7 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
     // order after the last grid column. With no grid the map is empty and this is
     // exactly the old col=k*5 / row=MID behaviour.
     let authored = grid_from_layout(design);
+    let authored_occurrences = grid_occurrences(design);
     let order = order_anchors(&items, &inc, &anchors);
     let max_gcol = authored.values().map(|b| b[2]).max().unwrap_or(-1);
     let mut anchor_col: BTreeMap<usize, i32> = BTreeMap::new();
@@ -196,16 +197,28 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
 
     for &ai in &order {
         let rd = &items[ai].refdes;
-        let (gcol, grow) = match authored.get(rd) {
-            Some(b) => (b[0], b[1]), // seed from the box's top-left cell
-            None => packed[&ai],
+        let authored_unit_cell = authored_occurrences
+            .get(rd)
+            .and_then(|cells| cells.get(items[ai].unit.saturating_sub(1) as usize))
+            .copied();
+        let (gcol, grow) = match authored_unit_cell {
+            Some(cell) => cell,
+            None => match authored.get(rd) {
+                Some(b) => (b[0], b[1]), // seed from the box's top-left cell
+                None => packed[&ai],
+            },
         };
         let col = gcol * 5; // wide gaps leave room for tap satellites either side
         let row = MID + grow * ROW_BAND;
         anchor_col.insert(ai, col);
         anchor_row.insert(ai, row);
+        let key = if authored_unit_cell.is_some() {
+            unit_place_key(rd, items[ai].unit)
+        } else {
+            rd.clone()
+        };
         place.insert(
-            rd.clone(),
+            key,
             Cell {
                 col,
                 row,
@@ -291,7 +304,13 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
     // cell (a bare 2-pin connector, or an all-passive block) is stacked there.
     let anchor_cells: BTreeSet<(i32, i32)> = anchors
         .iter()
-        .filter_map(|&ai| authored.get(&items[ai].refdes).map(|b| (b[0], b[1])))
+        .filter_map(|&ai| {
+            authored_occurrences
+                .get(&items[ai].refdes)
+                .and_then(|cells| cells.get(items[ai].unit.saturating_sub(1) as usize))
+                .copied()
+                .or_else(|| authored.get(&items[ai].refdes).map(|b| (b[0], b[1])))
+        })
         .collect();
     let mut stack_row: BTreeMap<(i32, i32), i32> = BTreeMap::new();
     // How many satellites have already tapped a given (anchor, pin), so the next

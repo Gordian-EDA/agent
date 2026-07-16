@@ -283,6 +283,11 @@ mod grid_tests {
         // its column (repeated down it), so its box grows in the row axis.
         assert_eq!(g["U1"], [3, 0, 3, 1]);
         assert_eq!(g.len(), 3);
+
+        let occurrences = grid_occurrences(&design);
+        assert_eq!(occurrences["J1"], vec![(0, 0)]);
+        assert_eq!(occurrences["R1"], vec![(2, 0)]);
+        assert_eq!(occurrences["U1"], vec![(3, 0), (3, 1)]);
     }
 
     #[test]

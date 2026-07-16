@@ -71,6 +71,36 @@ pub(crate) fn grid_from_layout(design: &Design) -> BTreeMap<String, [i32; 4]> {
     out
 }
 
+/// Every authored occurrence of a refdes, in row-major order. Repeated cells are
+/// meaningful for multi-unit symbols: occurrence 1 seeds unit 1, occurrence 2
+/// seeds unit 2, and so on. `grid_from_layout` deliberately keeps only their
+/// bounding box for ordering; this companion view preserves the individual cells.
+pub(crate) fn grid_occurrences(design: &Design) -> BTreeMap<String, Vec<(i32, i32)>> {
+    let mut out: BTreeMap<String, Vec<(i32, i32)>> = BTreeMap::new();
+    let mut col_base = 0i32;
+    for block in design.blocks.values() {
+        if block.layout.is_empty() {
+            continue;
+        }
+        let mut width = 0i32;
+        for (r, row) in block.layout.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                let Some(name) = cell else { continue };
+                out.entry(name.clone())
+                    .or_default()
+                    .push((col_base + c as i32, r as i32));
+                width = width.max(c as i32 + 1);
+            }
+        }
+        col_base += width.max(1);
+    }
+    out
+}
+
+pub(crate) fn unit_place_key(refdes: &str, unit: u8) -> String {
+    format!("{refdes}#unit{unit}")
+}
+
 // ---------------------------------------------------------------------------
 // Compiler internal model.
 // ---------------------------------------------------------------------------
@@ -777,19 +807,23 @@ pub fn assign_cells(items: &[Item], ir: &LayoutIr) -> Vec<Cell> {
                 *e += 1;
                 v
             };
-            match ir.place.get(&it.refdes) {
-                Some(c) => Cell {
-                    col: c.col,
-                    row: c.row + k,
-                    orient: c.orient,
-                },
-                None => {
-                    let c = spare;
-                    spare += 1;
-                    Cell {
-                        col: c,
-                        row: k,
-                        orient: Orient::Down,
+            if let Some(c) = ir.place.get(&unit_place_key(&it.refdes, it.unit)) {
+                *c
+            } else {
+                match ir.place.get(&it.refdes) {
+                    Some(c) => Cell {
+                        col: c.col,
+                        row: c.row + k,
+                        orient: c.orient,
+                    },
+                    None => {
+                        let c = spare;
+                        spare += 1;
+                        Cell {
+                            col: c,
+                            row: k,
+                            orient: Orient::Down,
+                        }
                     }
                 }
             }
