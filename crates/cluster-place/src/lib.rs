@@ -245,10 +245,41 @@ fn spine_fast_path_pin_profile<'a>(pin_profiles: impl Iterator<Item = (&'a str, 
             .filter(|&&(part, pins)| !is_wide_connector(part, pins) && (3..=6).contains(&pins))
             .count()
             <= 3;
+    // A bussed resistor-array feeding an edge header is already a complete regular
+    // topology: each array leg goes directly to one connector pin, while its common
+    // pin and the optional bypass capacitor land on rails. The small routed annealer
+    // spends roughly 80 seconds searching permutations of this shape even though it
+    // has no useful hub-pose choice. Keep the match intentionally structural and
+    // narrow so MCU/analog sheets retain the premium search.
+    let passive_bus_bank = profiles.len() <= 4
+        && pins <= 24
+        && profiles
+            .iter()
+            .filter(|&&(part, pins)| {
+                (8..=16).contains(&pins) && sch_place::netclass::is_connector_like(part)
+            })
+            .count()
+            == 1
+        && profiles
+            .iter()
+            .filter(|&&(part, pins)| {
+                (8..=16).contains(&pins) && part.to_ascii_uppercase().contains(":R_NETWORK")
+            })
+            .count()
+            == 1
+        && profiles.iter().all(|&(part, pins)| {
+            sch_place::netclass::is_connector_like(part)
+                || part.to_ascii_uppercase().contains(":R_NETWORK")
+                || (pins <= 2 && (part.starts_with("Device:R") || part.starts_with("Device:C")))
+        });
     if std::env::var_os("CLUSTER_DEBUG").is_some() {
         eprintln!("[cluster] pin profile {counts:?} total={pins}");
     }
-    single_anchor || dense_interactive || compact_multi_unit || wide_connector_block
+    single_anchor
+        || dense_interactive
+        || compact_multi_unit
+        || wide_connector_block
+        || passive_bus_bank
 }
 
 fn rail_candidate_wins(
@@ -368,6 +399,40 @@ mod tests {
         assert!(!profile([17, 2, 6, 5, 2, 2, 2, 2, 2, 2, 2, 2, 4]));
         assert!(!profile([15, 2, 6, 5, 2, 2, 2, 2, 2, 2, 2, 2, 4]));
         assert!(!connector_profile([17, 16, 6, 5, 2, 2, 2, 2, 2, 2], 17));
+    }
+
+    #[test]
+    fn passive_resistor_bus_bank_uses_bounded_fast_path() {
+        let bank = |parts: &[(&str, usize)]| spine_fast_path_pin_profile(parts.iter().copied());
+        assert!(bank(&[
+            ("Device:R_Network08", 9),
+            ("Device:C", 2),
+            ("Connector_Generic:Conn_01x10", 10),
+        ]));
+        // Declaration order does not change topology.
+        assert!(bank(&[
+            ("Connector_Generic:Conn_01x10", 10),
+            ("Device:R_Network08", 9),
+            ("Device:C", 2),
+        ]));
+
+        // Similar pin counts are not enough: active hubs and generic wide parts
+        // must retain the routed annealer.
+        assert!(!bank(&[
+            ("MCU_Microchip_ATmega:ATmega328P-AU", 9),
+            ("Device:C", 2),
+            ("Connector_Generic:Conn_01x10", 10),
+        ]));
+        assert!(!bank(&[
+            ("Device:Generic", 9),
+            ("Device:C", 2),
+            ("Connector_Generic:Conn_01x10", 10),
+        ]));
+        assert!(!bank(&[
+            ("Device:R_Network08", 9),
+            ("Analog_ADC:ADC", 3),
+            ("Connector_Generic:Conn_01x10", 10),
+        ]));
     }
 
     #[test]
