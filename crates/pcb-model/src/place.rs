@@ -998,7 +998,7 @@ fn placement_hint_penalty_um(
     hints: &PlacementHints,
     result: &PlaceResult,
 ) -> u64 {
-    if hints.edge_seek.is_empty() && hints.corner_seek.is_empty() {
+    if hints.groups.is_empty() && hints.edge_seek.is_empty() && hints.corner_seek.is_empty() {
         return 0;
     }
     let placements: BTreeMap<&str, &Placement> = result
@@ -1044,6 +1044,47 @@ fn placement_hint_penalty_um(
         let dy = (placement.at.y - hh - problem.bounds.min_y)
             .min(problem.bounds.max_y - (placement.at.y + hh));
         penalty += dx.max(0.0) + dy.max(0.0);
+    }
+    for group in &hints.groups {
+        for reference in &group.members {
+            let Some(part_idx) = problem
+                .parts
+                .iter()
+                .position(|part| part.reference == *reference)
+            else {
+                continue;
+            };
+            let Some(placement) = placements.get(reference.as_str()) else {
+                continue;
+            };
+            if let Some(region) = group.region {
+                let dx = if placement.at.x < region.min_x {
+                    region.min_x - placement.at.x
+                } else if placement.at.x > region.max_x {
+                    placement.at.x - region.max_x
+                } else {
+                    0.0
+                };
+                let dy = if placement.at.y < region.min_y {
+                    region.min_y - placement.at.y
+                } else if placement.at.y > region.max_y {
+                    placement.at.y - region.max_y
+                } else {
+                    0.0
+                };
+                penalty += dx + dy;
+            }
+            if let Some(edge) = group.edge {
+                let (hw, hh) = rotated_courtyard_half(&problem.parts[part_idx], placement.rotation);
+                penalty += match edge {
+                    Edge::N => placement.at.y - hh - problem.bounds.min_y,
+                    Edge::S => problem.bounds.max_y - (placement.at.y + hh),
+                    Edge::W => placement.at.x - hw - problem.bounds.min_x,
+                    Edge::E => problem.bounds.max_x - (placement.at.x + hw),
+                }
+                .max(0.0);
+            }
+        }
     }
     (penalty * 1000.0).round() as u64
 }
@@ -1340,6 +1381,60 @@ mod tests {
             result.placements[0].at,
             Point2 { x: 0.5, y: 0.5 },
             "an equally routed corner-seek part should prefer a board corner before layout-cost tie-breaks"
+        );
+    }
+
+    #[test]
+    fn routability_oracle_honors_group_region_before_layout_cost() {
+        let problem = PlaceProblem {
+            bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            parts: vec![Part {
+                reference: "P1".to_owned(),
+                courtyard_w: 1.0,
+                courtyard_h: 1.0,
+                pads: vec![],
+                edge_datum: None,
+                locked: None,
+            }],
+            keepouts: vec![],
+            outline: None,
+        };
+        let oracle = RoutabilityOracle::new(
+            vec![
+                Box::new(FixedXyPlacer {
+                    x: 8.0,
+                    y: 5.0,
+                    layout_cost: 1.0,
+                }),
+                Box::new(FixedXyPlacer {
+                    x: 1.0,
+                    y: 1.0,
+                    layout_cost: 100.0,
+                }),
+            ],
+            Box::new(EqualRanker),
+        );
+        let hints = PlacementHints {
+            groups: vec![GroupHint {
+                name: "authored".to_owned(),
+                members: vec!["P1".to_owned()],
+                region: Some(Rect::new(0.5, 0.5, 2.0, 2.0)),
+                edge: Some(Edge::N),
+                grid: false,
+                surround: None,
+            }],
+            ..PlacementHints::default()
+        };
+
+        let result = oracle.place(&problem, &hints);
+
+        assert_eq!(
+            result.placements[0].at,
+            Point2::new(1.0, 1.0),
+            "an equally routed placement inside its authored region and near its authored edge must win"
         );
     }
 
