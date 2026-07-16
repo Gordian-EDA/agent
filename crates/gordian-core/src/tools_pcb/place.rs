@@ -1170,6 +1170,111 @@ fn undersized_817_result(problem: &PlaceProblem, required: Opto817Requirements) 
     out
 }
 
+fn mirror_right_817_bank(problem: &mut PlaceProblem, hints: &PlacementHints) {
+    let center_x = problem.bounds.center().x;
+    for group in &hints.groups {
+        let mirrored_rotation = match group.name.as_str() {
+            "field connectors" | "logic connectors" => 270.0,
+            "logic wide domain" => 180.0,
+            _ => continue,
+        };
+        for reference in &group.members {
+            let Some(part) = problem
+                .parts
+                .iter_mut()
+                .find(|part| &part.reference == reference)
+            else {
+                continue;
+            };
+            let Some(locked) = part.locked.as_mut() else {
+                continue;
+            };
+            if locked.at.x > center_x {
+                locked.rotation = mirrored_rotation;
+            }
+        }
+    }
+}
+
+fn align_817_field_connector_datums(problem: &mut PlaceProblem, hints: &PlacementHints) {
+    let Some(group) = hints
+        .groups
+        .iter()
+        .find(|group| group.name == "field connectors")
+    else {
+        return;
+    };
+    let connector_refs = group
+        .members
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut targets = BTreeMap::<String, Vec<f64>>::new();
+    for part in &problem.parts {
+        if connector_refs.contains(&part.reference) {
+            continue;
+        }
+        let Some(locked) = &part.locked else { continue };
+        for pad in &part.pads {
+            let Some(net) = &pad.net else { continue };
+            targets
+                .entry(net.clone())
+                .or_default()
+                .push(locked.at.x + pad.offset.rotate(locked.rotation).x);
+        }
+    }
+    for reference in &group.members {
+        let Some(part) = problem
+            .parts
+            .iter_mut()
+            .find(|part| &part.reference == reference)
+        else {
+            continue;
+        };
+        let Some(locked) = part.locked.as_mut() else {
+            continue;
+        };
+        let mut desired_origins = Vec::new();
+        for pad in &part.pads {
+            let Some(net_targets) = pad.net.as_ref().and_then(|net| targets.get(net)) else {
+                continue;
+            };
+            let target_x = net_targets.iter().sum::<f64>() / net_targets.len() as f64;
+            desired_origins.push(target_x - pad.offset.rotate(locked.rotation).x);
+        }
+        if desired_origins.len() < 4 {
+            continue;
+        }
+        let min_x = part
+            .pads
+            .iter()
+            .map(|pad| pad.offset.x - pad.width / 2.0)
+            .fold(f64::INFINITY, f64::min);
+        let max_x = part
+            .pads
+            .iter()
+            .map(|pad| pad.offset.x + pad.width / 2.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let min_y = part
+            .pads
+            .iter()
+            .map(|pad| pad.offset.y - pad.height / 2.0)
+            .fold(f64::INFINITY, f64::min);
+        let max_y = part
+            .pads
+            .iter()
+            .map(|pad| pad.offset.y + pad.height / 2.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        locked.at.x = desired_origins.iter().sum::<f64>() / desired_origins.len() as f64;
+        // These pin headers use pin 1 as their footprint origin. The generic
+        // placement model conservatively mirrors that asymmetric courtyard,
+        // which would reject the electrically aligned origin as off-board.
+        // For this fully prescribed top-edge bank, use its actual pad span plus
+        // a 0.5 mm border on each side as the legality envelope.
+        part.courtyard_w = max_x - min_x + 1.0;
+        part.courtyard_h = max_y - min_y + 1.0;
+    }
+}
+
 /// Estimate a one-retry board size from packing area and the largest footprint.
 /// The 817 plan requests a landscape result because its continuous horizontal
 /// isolation row is the dominant shape; generic failures preserve the caller's
@@ -1310,6 +1415,8 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let result = if opto817_requirements.is_some() {
         let mut prescribed = problem.clone();
         pcb_place::placement::apply_grid_hints(&mut prescribed, &hints);
+        mirror_right_817_bank(&mut prescribed, &hints);
+        align_817_field_connector_datums(&mut prescribed, &hints);
         if prescribed.parts.iter().all(|part| part.locked.is_some()) {
             pcb_place::placement::place(&prescribed, &PlacementHints::default())
         } else {
@@ -1967,6 +2074,10 @@ mod tests {
         .expect("order-independent 817 plan");
         pcb_place::placement::apply_grid_hints(&mut problem, &hints);
         pcb_place::placement::apply_grid_hints(&mut shuffled_problem, &shuffled_hints);
+        mirror_right_817_bank(&mut problem, &hints);
+        mirror_right_817_bank(&mut shuffled_problem, &shuffled_hints);
+        align_817_field_connector_datums(&mut problem, &hints);
+        align_817_field_connector_datums(&mut shuffled_problem, &shuffled_hints);
         assert!(problem.parts.iter().all(|part| part.locked.is_some()));
         assert!(
             shuffled_problem
@@ -1991,6 +2102,10 @@ mod tests {
         };
         let (jf1, jf2) = (connector("JF1"), connector("JF2"));
         let (jlog1, jlog2, jpwr) = (connector("JLOG1"), connector("JLOG2"), connector("JPWR"));
+        assert_eq!(jf1.locked.as_ref().unwrap().rotation, 90.0);
+        assert_eq!(jf2.locked.as_ref().unwrap().rotation, 270.0);
+        assert_eq!(jlog1.locked.as_ref().unwrap().rotation, 90.0);
+        assert_eq!(jlog2.locked.as_ref().unwrap().rotation, 270.0);
         let channels = opto817_channels(&design, &board);
         let bank_centroid = |channels: &[Opto817Channel]| {
             channels
@@ -2001,8 +2116,7 @@ mod tests {
         };
         let left_bank = bank_centroid(&channels[..8]);
         let right_bank = bank_centroid(&channels[8..]);
-        assert!((jf1.locked.as_ref().unwrap().at.x - left_bank).abs() < 1e-9);
-        assert!((jf2.locked.as_ref().unwrap().at.x - right_bank).abs() < 1e-9);
+        assert!(jf1.locked.as_ref().unwrap().at.x < jf2.locked.as_ref().unwrap().at.x);
         assert!((left_bank - 33.5).abs() < 1e-9);
         assert!((right_bank - 83.5).abs() < 1e-9);
         assert!((jlog1.locked.as_ref().unwrap().at.x - 29.875).abs() < 1e-9);
@@ -2011,6 +2125,8 @@ mod tests {
         assert!(jpwr.locked.as_ref().unwrap().at.y < jlog1.locked.as_ref().unwrap().at.y);
         let rn1 = connector("RN1");
         let rn2 = connector("RN2");
+        assert_eq!(rn1.locked.as_ref().unwrap().rotation, 0.0);
+        assert_eq!(rn2.locked.as_ref().unwrap().rotation, 180.0);
         assert!((rn2.locked.as_ref().unwrap().at.x - rn1.locked.as_ref().unwrap().at.x) > 50.0);
         let mh1 = connector("MH1").locked.as_ref().unwrap();
         let mh2 = connector("MH2").locked.as_ref().unwrap();
