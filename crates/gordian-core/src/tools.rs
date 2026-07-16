@@ -122,7 +122,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "review_design".into(),
-                description: "Costly full-draft electrical review required before PCB work; fix defects."
+                description: "Full electrical review before PCB; fix defects."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -1781,7 +1781,6 @@ fn common_default_footprint(part: &str) -> Option<String> {
         "Device:C" => "Capacitor_SMD:C_0603_1608Metric",
         "Device:D" => "Diode_SMD:D_SOD-123",
         "Device:LED" => "LED_SMD:LED_0603_1608Metric",
-        "Transistor_FET:Q_NMOS_DGS" => "Package_TO_SOT_SMD:SOT-23",
         "Mechanical:MountingHole" => "MountingHole:MountingHole_3.2mm_M3",
         _ => {
             let (columns, pins) = if let Some(pins) = part
@@ -2978,6 +2977,10 @@ mod tests {
             Some("Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical")
         );
         assert_eq!(common_default_footprint("Device:C_Polarized"), None);
+        assert_eq!(
+            common_default_footprint("Transistor_FET:Q_NMOS_DGS"),
+            None
+        );
         assert_eq!(common_default_footprint("Amplifier_Operational:LM358"), None);
     }
 

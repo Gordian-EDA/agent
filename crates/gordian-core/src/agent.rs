@@ -431,8 +431,11 @@ fn constrain_schematic_tools_for_draft_state(
                 "validate_design"
                     | "apply_design"
                     | "review_design"
+                    | "project_info"
+                    | "edit_design"
                     | "read_schematic"
                     | "render_schematic"
+                    | "get_footprint_info"
                     | "assign_footprints"
             )
         });
@@ -494,11 +497,11 @@ fn pcb_stage_history(authoritative_request: &str) -> Vec<ChatMessage> {
          saved schematic and draft as final; do not read, edit, validate, review, or re-apply them. \
          Complete the PCB stage now. First call regenerate_board exactly once with the requested \
          dimensions/rules; when the request omits a value, choose reasonable compact values or use \
-         the tool's safe optional defaults instead of asking the user. Only regenerate_board is \
-         exposed until it creates the board; place/route/check appear automatically afterward. Once \
-         the board exists, call place_board, route_board, and check_board in that order, one result-aware step \
-         per completion. Do not stop at regeneration or inspect/render before the \
-         first check. If check_board reports blocking findings, make one concrete placement/copper/\
+         the tool's safe optional defaults instead of asking the user. A successful regeneration \
+         automatically runs the deterministic place/resize/route/check/render/fabrication pipeline \
+         without another provider request, stopping honestly at the first unsuccessful stage. Do \
+         not issue manual downstream calls unless that report stops with a concrete failure. If \
+         check_board reports blocking findings, make one concrete placement/copper/\
          outline recovery change and re-check; otherwise report the saved DRC and unrouted counts \
          honestly.",
         authoritative_request.trim()
@@ -2050,51 +2053,104 @@ impl<P: Provider> Agent<P> {
         }
 
         let mut stages = Vec::new();
-        for name in PCB_FINISH_PIPELINE_STEPS {
-            emit(
-                events,
-                AgentEvent::ToolStarted {
-                    name: name.to_string(),
-                },
-            );
-            let outcome = into_outcome(run_blocking(&self.runtime, name, json!({})).await, None);
-            let mut content = tool_result_text(&outcome.value);
-            let parsed = parse_or_null(&content);
-            if pcb_recovery.observe_tool_result(name, &parsed, true) {
-                content = add_route_retry_guidance(
-                    &content,
-                    pcb_recovery.failed_route_attempts,
-                    pcb_recovery.retry_note(),
-                );
+        let mut placement_retries = 0usize;
+        loop {
+            let stage = self
+                .run_pcb_finish_stage("place_board", json!({}), pcb_recovery, events)
+                .await;
+            let parsed = parse_or_null(&stage.content);
+            let succeeded = pcb_finish_stage_succeeded(stage.name, &parsed);
+            let resize = placement_resize_bounds(&parsed);
+            stages.push(stage);
+            if succeeded {
+                break;
             }
-            let parsed = parse_or_null(&content);
-            let summary = tool_summary(name, &json!({}), &parsed);
-            emit(
-                events,
-                AgentEvent::ToolFinished {
-                    name: name.to_string(),
-                    summary,
-                    image_path: outcome.image_path.clone(),
-                },
-            );
-            let succeeded = pcb_finish_stage_succeeded(name, &parsed);
-            stages.push(PcbFinishStage {
-                name,
-                content,
-                images: outcome.images,
-            });
+            let Some(bounds) = resize.filter(|_| placement_retries < 3) else {
+                return PcbFinishRun {
+                    approved: true,
+                    completed: false,
+                    stages,
+                };
+            };
+            let regenerated = self
+                .run_pcb_finish_stage(
+                    "regenerate_board",
+                    json!({"bounds": bounds}),
+                    pcb_recovery,
+                    events,
+                )
+                .await;
+            let regenerated_ok = regenerate_board_succeeded(&parse_or_null(&regenerated.content));
+            stages.push(regenerated);
+            if !regenerated_ok {
+                return PcbFinishRun {
+                    approved: true,
+                    completed: false,
+                    stages,
+                };
+            }
+            placement_retries += 1;
+        }
+
+        for name in PCB_FINISH_PIPELINE_STEPS.into_iter().skip(1) {
+            let stage = self
+                .run_pcb_finish_stage(name, json!({}), pcb_recovery, events)
+                .await;
+            let succeeded =
+                pcb_finish_stage_succeeded(stage.name, &parse_or_null(&stage.content));
+            stages.push(stage);
             if !succeeded {
                 break;
             }
         }
-        let completed = stages.len() == PCB_FINISH_PIPELINE_STEPS.len()
-            && stages.last().is_some_and(|stage| {
-                pcb_finish_stage_succeeded(stage.name, &parse_or_null(&stage.content))
-            });
+        let completed = stages.last().is_some_and(|stage| {
+            stage.name == "export_fab"
+                && pcb_finish_stage_succeeded(stage.name, &parse_or_null(&stage.content))
+        });
         PcbFinishRun {
             approved: true,
             completed,
             stages,
+        }
+    }
+
+    async fn run_pcb_finish_stage(
+        &self,
+        name: &'static str,
+        input: Value,
+        pcb_recovery: &mut PcbRecoveryState,
+        events: Events<'_>,
+    ) -> PcbFinishStage {
+        emit(
+            events,
+            AgentEvent::ToolStarted {
+                name: name.to_string(),
+            },
+        );
+        let outcome = into_outcome(run_blocking(&self.runtime, name, input).await, None);
+        let mut content = tool_result_text(&outcome.value);
+        let parsed = parse_or_null(&content);
+        if pcb_recovery.observe_tool_result(name, &parsed, true) {
+            content = add_route_retry_guidance(
+                &content,
+                pcb_recovery.failed_route_attempts,
+                pcb_recovery.retry_note(),
+            );
+        }
+        let parsed = parse_or_null(&content);
+        let summary = tool_summary(name, &json!({}), &parsed);
+        emit(
+            events,
+            AgentEvent::ToolFinished {
+                name: name.to_string(),
+                summary,
+                image_path: outcome.image_path.clone(),
+            },
+        );
+        PcbFinishStage {
+            name,
+            content,
+            images: outcome.images,
         }
     }
 
@@ -2324,7 +2380,7 @@ fn pcb_finish_pipeline_approval() -> Value {
         "approval_kind": "operation",
         "operation": "finish_pcb_pipeline",
         "steps": PCB_FINISH_PIPELINE_STEPS,
-        "note": "Run the fixed post-regeneration PCB sequence. It stops before every later step when placement, routing, or DRC is not clean.",
+        "note": "Run the fixed post-regeneration PCB sequence, including up to three board-resize recoveries from honest placement suggestions. It stops before every later step when placement, routing, or DRC is not clean.",
     })
 }
 
@@ -2333,6 +2389,17 @@ fn regenerate_board_succeeded(value: &Value) -> bool {
         && value.get("error").is_none()
         && value.get("rejected").and_then(Value::as_bool) != Some(true)
         && value.get("executed").and_then(Value::as_bool) != Some(false)
+}
+
+fn placement_resize_bounds(value: &Value) -> Option<Value> {
+    if value.get("legal").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let suggested = value.get("suggested_min_bounds_mm")?;
+    let width = suggested.get("w")?.as_f64()?;
+    let height = suggested.get("h")?.as_f64()?;
+    (width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0)
+        .then(|| json!([0.0, 0.0, width, height]))
 }
 
 fn pcb_finish_stage_succeeded(name: &str, value: &Value) -> bool {
@@ -5615,8 +5682,8 @@ mod tests {
         assert!(text.contains(request));
         assert!(text.contains("regenerate_board exactly once"));
         assert!(text.contains("safe optional defaults instead of asking the user"));
-        assert!(text.contains("place/route/check appear automatically afterward"));
-        assert!(text.contains("place_board, route_board, and check_board"));
+        assert!(text.contains("place/resize/route/check/render/fabrication pipeline"));
+        assert!(text.contains("without another provider request"));
         assert!(!text.contains("components:"));
 
         for tool in [
@@ -5690,6 +5757,31 @@ mod tests {
         assert_eq!(
             scripted_pcb_finish_order(&dirty_drc),
             ["place_board", "route_board", "check_board"]
+        );
+    }
+
+    #[test]
+    fn pcb_finish_uses_only_honest_positive_placement_resize_suggestions() {
+        assert_eq!(
+            placement_resize_bounds(&json!({
+                "legal": false,
+                "suggested_min_bounds_mm": {"w": 117.0, "h": 60.0}
+            })),
+            Some(json!([0.0, 0.0, 117.0, 60.0]))
+        );
+        assert_eq!(
+            placement_resize_bounds(&json!({
+                "legal": true,
+                "suggested_min_bounds_mm": {"w": 117.0, "h": 60.0}
+            })),
+            None
+        );
+        assert_eq!(
+            placement_resize_bounds(&json!({
+                "legal": false,
+                "suggested_min_bounds_mm": {"w": 0.0, "h": 60.0}
+            })),
+            None
         );
     }
 
@@ -6953,13 +7045,16 @@ blocks:
         };
 
         let fresh = names_after(false, false, false, false, false, false);
-        assert!(fresh.contains("edit_design"));
+        assert!(fresh.contains("create_design"));
         for absent in [
             "validate_design",
             "apply_design",
             "review_design",
+            "project_info",
+            "edit_design",
             "read_schematic",
             "render_schematic",
+            "get_footprint_info",
             "assign_footprints",
         ] {
             assert!(!fresh.contains(absent), "{absent}");
