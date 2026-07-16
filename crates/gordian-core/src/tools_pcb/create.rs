@@ -392,10 +392,31 @@ pub(super) fn emit_seed_board(
         });
         x += 2.54;
     }
-    let text = SeedBoardWriter::new(&parts, &spec.bounds, &spec.rules, spec.outline.as_ref())
-        .emit()
-        .map_err(|e| format!("board synthesis failed: {e}"))?;
+    let effective_rules = effective_seed_rules(&spec.rules, &parts);
+    let text = SeedBoardWriter::new(
+        &parts,
+        &spec.bounds,
+        &effective_rules,
+        spec.outline.as_ref(),
+    )
+    .emit()
+    .map_err(|e| format!("board synthesis failed: {e}"))?;
     Ok(text)
+}
+
+/// KiCad applies a footprint's direct `(clearance ...)` override in addition to its board
+/// netclass.  The router only sees the board/netclass clearance through IPC, so seed both with
+/// the strictest value present in the canonical footprint sources.  This keeps router-clean
+/// copper clean under KiCad DRC without rewriting the library footprint text.
+fn effective_seed_rules(requested: &SeedRules, parts: &[SeedFootprint]) -> SeedRules {
+    let mut effective = requested.clone();
+    for override_clearance in parts
+        .iter()
+        .filter_map(|part| footprint_clearance_override(&part.source))
+    {
+        effective.clearance = effective.clearance.max(override_clearance);
+    }
+    effective
 }
 
 fn add_default_power_pours(rules: &mut SeedRules, parts: &[SeedPart]) {
@@ -1042,6 +1063,24 @@ fn footprint_inner(body: &str) -> Option<&str> {
     Some(&body[inner_start..body.len() - 1])
 }
 
+fn footprint_clearance_override(source: &str) -> Option<f64> {
+    let body = footprint_body(source)?;
+    let inner = footprint_inner(body)?;
+    top_level_nodes(inner)
+        .into_iter()
+        .filter(|node| node_head(node) == "clearance")
+        .filter_map(|node| {
+            let value = node
+                .strip_prefix("(clearance")?
+                .strip_suffix(')')?
+                .trim()
+                .parse::<f64>()
+                .ok()?;
+            (value.is_finite() && value >= 0.0).then_some(value)
+        })
+        .max_by(f64::total_cmp)
+}
+
 fn top_level_nodes(inner: &str) -> Vec<&str> {
     let bytes = inner.as_bytes();
     let mut nodes = Vec::new();
@@ -1640,6 +1679,84 @@ mod tests {
         assert!(board.contains("\n\t\t(layer \"B.Cu\")\n"));
         assert!(board.contains("\n\t\t(connect_pads yes\n"));
         assert!(board.contains("(xy 0 0) (xy 20 0) (xy 20 10) (xy 0 10)"));
+    }
+
+    fn clearance_fixture(source: &str) -> SeedFootprint {
+        SeedFootprint {
+            reference: "U1".to_string(),
+            value: Some("Fixture".to_string()),
+            lib_id: "Test:Fixture".to_string(),
+            source: source.to_string(),
+            pad_nets: BTreeMap::from([("1".to_string(), "SIG".to_string())]),
+            at: Point2 { x: 5.0, y: 5.0 },
+            rotation: 0.0,
+            locked: false,
+        }
+    }
+
+    #[test]
+    fn footprint_clearance_raises_board_netclass_and_router_rule() {
+        let part = clearance_fixture(
+            "(footprint \"Fixture\"\n\
+             \t(clearance 0.2)\n\
+             \t(pad \"1\" smd circle (at 0 0) (size 1 1) (layers \"F.Cu\")\n\
+             \t\t(clearance 0.4)\n\
+             \t)\n\
+             )",
+        );
+        let effective = effective_seed_rules(&SeedRules::default(), std::slice::from_ref(&part));
+        let classes = seed_net_classes(&effective, ["SIG".to_string()]);
+
+        assert_eq!(effective.clearance, 0.2);
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].name, "Default");
+        assert_eq!(classes[0].clearance, 0.2);
+
+        let board =
+            SeedBoardWriter::new(&[part], &Rect::new(0.0, 0.0, 20.0, 10.0), &effective, None)
+                .emit()
+                .unwrap();
+        assert!(board.contains("(net_class \"Default\""));
+        // Library overrides remain present; only the board/router rule was raised.
+        assert!(board.contains("\n\t\t(clearance 0.2)\n"));
+        assert!(board.contains("\n\t(clearance 0.2)\n"));
+        assert!(board.contains("\n\t\t\t(clearance 0.4)\n"));
+    }
+
+    #[test]
+    fn explicit_stricter_clearance_is_never_lowered() {
+        let part = clearance_fixture(
+            "(footprint \"Fixture\"\n\
+             \t(clearance 0.2)\n\
+             \t(pad \"1\" smd circle (at 0 0) (size 1 1) (layers \"F.Cu\"))\n\
+             )",
+        );
+        let requested = SeedRules {
+            clearance: 0.25,
+            ..SeedRules::default()
+        };
+
+        let effective = effective_seed_rules(&requested, &[part]);
+
+        assert_eq!(effective.clearance, 0.25);
+    }
+
+    #[test]
+    fn nested_pad_and_zone_clearances_are_not_footprint_overrides() {
+        let part = clearance_fixture(
+            "(footprint \"Fixture\"\n\
+             \t(pad \"1\" smd circle (at 0 0) (size 1 1) (layers \"F.Cu\")\n\
+             \t\t(clearance 0.4)\n\
+             \t)\n\
+             \t(zone (net 0) (connect_pads (clearance 0.5)))\n\
+             )",
+        );
+
+        assert_eq!(footprint_clearance_override(&part.source), None);
+        assert_eq!(
+            effective_seed_rules(&SeedRules::default(), &[part]).clearance,
+            0.15
+        );
     }
 
     #[test]
