@@ -1064,11 +1064,28 @@ fn add_817_array_hints(
         center_region.max_x,
         top.max_y,
     );
+    let field_aux_height = field_parts
+        .iter()
+        .filter_map(|reference| {
+            problem
+                .parts
+                .iter()
+                .find(|part| &part.reference == reference)
+        })
+        .map(|part| part.courtyard_h)
+        .fold(0.0, f64::max)
+        + (!field_parts.is_empty() as u8 as f64) * margin;
+    let field_aux_strip = Rect::new(
+        center_region.min_x,
+        (field_strip.min_y - field_aux_height).max(top.min_y),
+        center_region.max_x,
+        field_strip.min_y,
+    );
     let connector_top = Rect::new(
         center_region.min_x,
         top.min_y,
         center_region.max_x,
-        field_strip.min_y,
+        field_aux_strip.min_y,
     );
     let part_height = |references: &[String]| {
         references
@@ -1210,7 +1227,14 @@ fn add_817_array_hints(
             None,
         );
     }
-    add_group("field domain", field_parts, field_strip, None, true, None);
+    add_group(
+        "field domain",
+        field_parts,
+        field_aux_strip,
+        None,
+        true,
+        None,
+    );
     add_group(
         "logic wide domain",
         logic_wide_parts,
@@ -2996,4 +3020,5 @@ mod tests {
             &auto_positions,
         ));
     }
+
 }
