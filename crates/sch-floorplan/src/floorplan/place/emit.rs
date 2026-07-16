@@ -496,13 +496,15 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
             geom::GRID_50_MIL.snap(ty + TILE_MARGIN - M),
         );
         w.translate(dx, dy);
-        // Frame: a dashed box hugging the tile's content + a bold name above it.
+        // Frame: a dashed box hugging the tile's content + a bold name in its
+        // reserved top gutter. Keeping the title inside the frame prevents
+        // top-row groups from colliding with the page border after composition.
         let (rx0, ry0) = (tx + TILE_MARGIN - 6.0, ty + TILE_MARGIN - 6.0);
         let (rx1, ry1) = (tx + TILE_MARGIN + tw + 1.0, ty + TILE_MARGIN + th + 1.0);
         out.add_rect([rx0, ry0], [rx1, ry1], &format!("frame:{id}"));
         out.add_text(
             &display_name,
-            [rx0 + 1.0, ry0 - 1.5],
+            [rx0 + 1.0, ry0 + 2.5],
             3.0,
             true,
             &format!("label:{id}"),
