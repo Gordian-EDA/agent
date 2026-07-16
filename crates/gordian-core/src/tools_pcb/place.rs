@@ -835,6 +835,7 @@ fn add_817_array_hints(
         .collect::<std::collections::BTreeSet<_>>();
 
     let mut field_connectors = Vec::new();
+    let mut field_aux_connectors = Vec::new();
     let mut logic_connectors = Vec::new();
     let mut logic_aux_connectors = Vec::new();
     for imported in &board.imported.parts {
@@ -878,11 +879,18 @@ fn add_817_array_hints(
             continue;
         }
         let nets = part_nets(imported);
-        if intersects(&nets, &output_domain) > intersects(&nets, &input_domain) {
+        let (field, logic) = (
+            intersects(&nets, &input_domain),
+            intersects(&nets, &output_domain),
+        );
+        if logic > field {
             logic_aux_connectors.push(imported.reference.clone());
+        } else if field > logic {
+            field_aux_connectors.push(imported.reference.clone());
         }
     }
     field_connectors.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
+    field_aux_connectors.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
     logic_connectors.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
     logic_aux_connectors.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
 
@@ -946,6 +954,7 @@ fn add_817_array_hints(
     );
     let connector_refs = field_connectors
         .iter()
+        .chain(&field_aux_connectors)
         .chain(&logic_connectors)
         .chain(&logic_aux_connectors)
         .cloned()
@@ -1102,17 +1111,34 @@ fn add_817_array_hints(
         .map(|part| part.courtyard_h)
         .fold(0.0, f64::max)
         + (!field_parts.is_empty() as u8 as f64) * margin;
+    let field_aux_top = (field_strip.min_y - field_aux_height).max(top.min_y);
     let field_aux_strip = Rect::new(
         center_region.min_x,
-        (field_strip.min_y - field_aux_height).max(top.min_y),
+        (field_aux_top + margin).min(field_strip.min_y),
         center_region.max_x,
         field_strip.min_y,
+    );
+    let field_connector_aux_height = field_aux_connectors
+        .iter()
+        .filter_map(|reference| {
+            problem
+                .parts
+                .iter()
+                .find(|part| &part.reference == reference)
+        })
+        .map(|part| pcb_model::place::rotated_courtyard_half(part, 90.0).1 * 2.0)
+        .fold(0.0, f64::max);
+    let field_connector_aux_strip = Rect::new(
+        center_region.min_x,
+        (field_aux_top - field_connector_aux_height - margin).max(top.min_y),
+        center_region.max_x,
+        field_aux_top,
     );
     let connector_top = Rect::new(
         center_region.min_x,
         top.min_y,
         center_region.max_x,
-        field_aux_strip.min_y,
+        field_connector_aux_strip.min_y,
     );
     let part_height = |references: &[String]| {
         references
@@ -1190,6 +1216,35 @@ fn add_817_array_hints(
         (logic_strip.max_y + aux_height + margin).min(bottom.max_y),
     );
     let header_bottom = Rect::new(bottom.min_x, aux_bottom.max_y, bottom.max_x, bottom.max_y);
+    let rotated_depth = |references: &[String]| {
+        references
+            .iter()
+            .filter_map(|reference| {
+                problem
+                    .parts
+                    .iter()
+                    .find(|part| &part.reference == reference)
+            })
+            .map(|part| pcb_model::place::rotated_courtyard_half(part, 90.0).1 * 2.0)
+            .fold(0.0, f64::max)
+    };
+    let top_depth = margin
+        + array_h
+        + field_aux_height
+        + field_connector_aux_height
+        + (!field_aux_connectors.is_empty() as u8 as f64) * margin
+        + rotated_depth(&field_connectors)
+        + margin;
+    let bottom_depth = margin
+        + channel_logic_height
+        + wide_logic_height
+        + (!logic_wide_parts.is_empty() as u8 as f64) * margin
+        + logic_height
+        + (!logic_small_parts.is_empty() as u8 as f64) * margin
+        + aux_height
+        + (!logic_aux_connectors.is_empty() as u8 as f64) * margin
+        + rotated_depth(&logic_connectors)
+        + margin;
     let mut add_group = |name: &str,
                          members: Vec<String>,
                          region: Rect,
@@ -1213,6 +1268,14 @@ fn add_817_array_hints(
         field_connectors,
         connector_top,
         Some(Edge::N),
+        true,
+        Some(90.0),
+    );
+    add_group(
+        "field auxiliary connectors",
+        field_aux_connectors,
+        field_connector_aux_strip,
+        None,
         true,
         Some(90.0),
     );
@@ -1340,15 +1403,9 @@ fn add_817_array_hints(
     // A single row is electrically meaningful: every isolator straddles the
     // same continuous copper-free corridor. Reject a smaller board explicitly
     // instead of allowing the generic grid code to silently wrap into two rows.
-    let side_depth = problem
-        .parts
-        .iter()
-        .filter(|part| connector_refs.contains(&part.reference))
-        .map(|part| part.courtyard_w.min(part.courtyard_h))
-        .fold(0.0, f64::max);
     Some(Opto817Requirements {
         width: array_w + 2.0 * margin,
-        height: opto_h + 2.0 * (side_depth + 2.0 * margin),
+        height: opto_h + top_depth + bottom_depth,
     })
 }
 
@@ -2237,6 +2294,99 @@ mod tests {
                 "three support references need separate horizontal lanes"
             );
         }
+    }
+
+    #[test]
+    fn opto817_field_power_connector_does_not_share_the_passive_grid() {
+        let (mut design, mut board, mut problem) = opto817_fixture(8, false);
+        let bounds = Rect::new(0.0, 0.0, 122.0, 62.0);
+        board.imported.bounds = bounds;
+        board.problem.bounds = bounds;
+        problem.bounds = bounds;
+
+        for component in design.blocks["channels"].components.values_mut() {
+            component.pins.insert(
+                "2".into(),
+                circuit_lang::model::PinTarget::Net("FIELD_GND".into()),
+            );
+        }
+        for imported in &mut board.imported.parts {
+            for pad in &mut imported.pads {
+                if imported.reference.starts_with('U') && pad.number == "2" {
+                    pad.net = Some("FIELD_GND".into());
+                } else if imported.reference == "JF1"
+                    && pad.net.as_deref().is_some_and(|net| net.ends_with("_RET"))
+                {
+                    pad.net = Some("FIELD_GND".into());
+                }
+            }
+        }
+
+        let ground_header = imported_part(
+            "J2",
+            "Connector_PinHeader:PinHeader_1x08",
+            (1..=8)
+                .map(|pin| (pin.to_string(), "FIELD_GND".into()))
+                .collect(),
+        );
+        let mut ground_header_part = placement_part(&ground_header, false);
+        ground_header_part.courtyard_w = 2.54;
+        ground_header_part.courtyard_h = 20.32;
+        board.imported.parts.push(ground_header);
+        problem.parts.push(ground_header_part);
+        let power = imported_part(
+            "JFP",
+            "Connector_PinHeader:PinHeader_1x02",
+            vec![("1".into(), "V24".into()), ("2".into(), "FIELD_GND".into())],
+        );
+        let mut power_part = placement_part(&power, false);
+        power_part.courtyard_w = 2.54;
+        power_part.courtyard_h = 5.08;
+        board.imported.parts.push(power);
+        problem.parts.push(power_part);
+        for index in 25..=32 {
+            let imported = imported_part(
+                &format!("R{index}"),
+                "Resistor_SMD:R_0603",
+                vec![("1".into(), "V24".into()), ("2".into(), "FIELD_GND".into())],
+            );
+            let mut part = placement_part(&imported, false);
+            part.courtyard_w = 2.0;
+            part.courtyard_h = 1.25;
+            board.imported.parts.push(imported);
+            problem.parts.push(part);
+        }
+
+        let mut hints = PlacementHints::default();
+        add_817_array_hints(&design, &board, &problem, &mut hints)
+            .expect("verified bank with field power support");
+        assert_eq!(
+            hints
+                .groups
+                .iter()
+                .find(|group| group.name == "field auxiliary connectors")
+                .unwrap()
+                .members,
+            ["JFP"]
+        );
+        let field_domain = hints
+            .groups
+            .iter()
+            .find(|group| group.name == "field domain")
+            .unwrap();
+        assert_eq!(field_domain.members.len(), 8);
+        assert!(!field_domain.members.contains(&"JFP".into()));
+
+        pcb_place::placement::apply_grid_hints(&mut problem, &hints);
+        mirror_right_817_bank(&mut problem, &hints);
+        align_817_field_connector_datums(&mut problem, &hints);
+        assert!(problem.parts.iter().all(|part| part.locked.is_some()));
+        let result = pcb_place::placement::place(&problem, &PlacementHints::default());
+        assert!(
+            result.legal,
+            "field power support placement should be legal: {:?}",
+            placement_overlap_pairs(&problem, &result)
+        );
     }
 
     #[test]
