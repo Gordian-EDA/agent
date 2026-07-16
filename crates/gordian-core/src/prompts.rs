@@ -22,13 +22,13 @@ entire request. Never copy documentation as the component list:
       components:
         <REFDES>: { part: <REAL_KICAD_LIB:SYMBOL>, pins: { <PIN>: <NET> } }
 
-Component keys match `[A-Z]+[0-9]+` (`R1`, not `C_VCAP1`). `part:` is a real KiCAD `Lib:Name`; R/C/L/D/LED aliases are built in. Use `search_symbols` for other parts. Never meet a numeric minimum with dummy/repeated filler; every part must implement the requested topology.
+Component keys match `[A-Z]+[0-9]+` (`R1`, not `C_VCAP1`). `part:` is a real KiCAD `Lib:Name`; R/C/L/D/LED aliases are built in. Use `search_symbols` for unknown parts. Never invent IC pins; unlisted pins auto-NC. Never meet a numeric minimum with dummy/repeated filler.
 `pins:` maps pin name or quoted pin number to a net; use numbers when names repeat. Unlisted pins become no-connect except power-INPUT pins, which must be wired. Net names should be UPPER_SNAKE.
 
 Useful sugar:
 - power symbols: `GND1: { part: power:GND, pins: { 1: GND } }`
 - symmetric 2-pin: `between: [A, B]`
-- polarized 2-pin: `positive: A`, `negative: B`
+- polarized LED/diode: `positive: A`, `negative: B`; never numeric `pins`
 - IC decoupling: `decouple: { 100nF: 4 }`
 - board I/O labels: `label:global`
 
@@ -39,7 +39,7 @@ NEW: one complete `create_design(yaml)`. EDIT: `read_schematic` once, then send 
 Treat validation warnings as work, not success. A single-pin GPIO/control net usually needs its peripheral/header, `nc`, or `label:global` for intentional board I/O. Expose only requested I/O; mark spare pins `nc`.
 
 Schematic flow:
-1. Batch each lookup tool's calls in one round, with at most one refinement per tool; never serially search synonyms/cosmetic variants. Use built-ins directly: `Device:R`, `Device:C`, `Device:LED`, `power:GND`, `power:+3V3`, `Connector:Conn_01x02_Pin`.
+1. Exact supplied `Lib:Name` IDs are authoritative: use them directly, never search them. Otherwise batch lookups once; never issue empty queries. Built-ins: `Device:R`, `Device:C`, `Device:LED`, `power:GND`, `power:+3V3`, `Connector:Conn_01x02_Pin`.
 2. For a PCB, choose real footprints now with `search_footprints` / `get_footprint_info`; put `footprint:` in YAML before apply.
 3. Fix create/edit diagnostics until 0 errors; use `validate_design()` only to recheck an existing draft whose last authoring result is unavailable.
 4. `review_design(intent)` is required for PCB work, otherwise optional; then `apply_design()` through approval. Apply runs ERC.
@@ -102,6 +102,10 @@ mod tests {
         assert!(p.contains("incomplete/missing topology"));
         assert!(p.contains("`edit_design` with COMPLETE YAML"));
         assert!(p.contains("Never meet a numeric minimum with dummy"));
+        assert!(p.contains("never search them"));
+        assert!(p.contains("never issue empty queries"));
+        assert!(p.contains("polarized LED/diode"));
+        assert!(p.contains("Never invent IC pins"));
     }
 
     #[test]
