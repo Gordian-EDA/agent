@@ -32,7 +32,7 @@ Useful sugar:
 - IC decoupling: `decouple: { 100nF: 4 }`
 - board I/O labels: `label:global`
 
-Blocks define the schematic floorplan. Keep related parts together; split blocks above 8-10 components into functional groups (power, MCU, USB, sensors, drivers, connectors, debug). Optional block `layout:` may pin key anchors.
+Blocks define floorplan regions. Keep end-to-end signal chains and repeated channel banks together; never split many nets across blocks. Split only cohesive regions. Optional block `layout:` may pin key anchors.
 
 # Efficient workflow
 NEW: one complete `create_design(yaml)`. EDIT: `read_schematic` once, then send complete corrected YAML. Review repair: localized defect → `repair_components`; incomplete/missing topology → `edit_design` with COMPLETE YAML. Authoring tools validate; when clean, do not revalidate/reread. For PCB work call `review_design(intent)` once; fix its defects.
@@ -108,6 +108,8 @@ mod tests {
         assert!(p.contains("never empty queries"));
         assert!(p.contains("polarized LED/diode"));
         assert!(p.contains("Never invent IC pins"));
+        assert!(p.contains("end-to-end signal chain"));
+        assert!(p.contains("never split many nets"));
     }
 
     #[test]
