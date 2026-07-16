@@ -10,7 +10,7 @@ use super::infer::{
 };
 use super::*;
 use sch_place::item::{Incidence, Item};
-use sch_place::netclass::{PinSide, is_ground};
+use sch_place::netclass::{PinSide, is_connector_like, is_ground};
 
 /// A circuit idiom recognized purely from connectivity + symbol pin geometry.
 /// `infer_ir` turns it into an [`sch_place::result::IdiomReport`] for the LLM. A FROZEN
@@ -353,14 +353,11 @@ fn detect_pc817_channel_bank(
             .collect::<Vec<_>>()
     };
     let has_net = |i: usize, wanted: &str| nets(i).contains(&wanted);
-    let other_net = |i: usize, known: &str| {
-        nets(i).into_iter().find(|net| *net != known)
-    };
+    let other_net = |i: usize, known: &str| nets(i).into_iter().find(|net| *net != known);
     let is_positive_rail = |net: &str| rails.contains_key(net) && !is_ground(net);
     let is_resistor = |i: usize| items[i].part == "Device:R";
-    let is_led = |i: usize| {
-        items[i].part == "Device:LED" || items[i].part.starts_with("Device:LED_")
-    };
+    let is_led =
+        |i: usize| items[i].part == "Device:LED" || items[i].part.starts_with("Device:LED_");
 
     let mut channels = Vec::new();
     for (opto, item) in items.iter().enumerate() {
@@ -422,11 +419,41 @@ fn detect_pc817_channel_bank(
         .min()
         .unwrap_or(0);
 
-    channels
+    // A repeated channel is much wider than it is tall, so an unbounded vertical
+    // strip wastes most of the page once a bank grows past a few channels.  Fold
+    // the bank into a near-page-shaped lattice while preserving natural channel
+    // order top-to-bottom within each column.  The aspect correction (n / 2)
+    // accounts for the roughly 2:1 width:height of the five-part channel cell.
+    let bank_cols = ((channels.len() as f64 / 2.0).sqrt().ceil() as usize).max(1);
+    let rows_per_bank = channels.len().div_ceil(bank_cols);
+
+    let channel_members: BTreeSet<usize> = channels
+        .iter()
+        .flat_map(|c| [c.opto, c.rin, c.rpu, c.rled, c.led])
+        .collect();
+    let input_nets: BTreeSet<&str> = channels
+        .iter()
+        .filter_map(|c| {
+            let opto_input = pin_net(c.opto, "1")?;
+            other_net(c.rin, opto_input)
+        })
+        .collect();
+    let output_nets: BTreeSet<&str> = channels
+        .iter()
+        .filter_map(|c| pin_net(c.opto, "4"))
+        .collect();
+    let bank_anchor = channels[0].opto;
+
+    let mut idioms: Vec<Idiom> = channels
         .into_iter()
         .enumerate()
         .map(|(index, channel)| {
-            let supply_row = base_row + index as i32 * 2;
+            let bank_col = index / rows_per_bank;
+            let bank_row = index % rows_per_bank;
+            // Five occupied channel columns plus one empty gutter keep adjacent
+            // banks visually distinct and leave a routing lane between them.
+            let channel_col = base_col + bank_col as i32 * 6;
+            let supply_row = base_row + bank_row as i32 * 2;
             let signal_row = supply_row + 1;
             Idiom {
                 kind: "pc817_channel",
@@ -435,7 +462,7 @@ fn detect_pc817_channel_bank(
                     (
                         items[channel.rin].refdes.clone(),
                         Cell {
-                            col: base_col,
+                            col: channel_col,
                             row: signal_row,
                             orient: Orient::Right,
                         },
@@ -443,7 +470,7 @@ fn detect_pc817_channel_bank(
                     (
                         items[channel.opto].refdes.clone(),
                         Cell {
-                            col: base_col + 1,
+                            col: channel_col + 1,
                             row: signal_row,
                             orient: Orient::Right,
                         },
@@ -451,7 +478,7 @@ fn detect_pc817_channel_bank(
                     (
                         items[channel.rpu].refdes.clone(),
                         Cell {
-                            col: base_col + 2,
+                            col: channel_col + 2,
                             row: supply_row,
                             orient: Orient::Down,
                         },
@@ -459,7 +486,7 @@ fn detect_pc817_channel_bank(
                     (
                         items[channel.rled].refdes.clone(),
                         Cell {
-                            col: base_col + 3,
+                            col: channel_col + 3,
                             row: supply_row,
                             orient: Orient::Down,
                         },
@@ -471,7 +498,7 @@ fn detect_pc817_channel_bank(
                             // vertical supply resistor. A shared column leaves
                             // KiCad's generated rail value directly on top of
                             // the next channel's LED body.
-                            col: base_col + 4,
+                            col: channel_col + 4,
                             row: signal_row,
                             // KiCad's LED pin 1 is K and pin 2 is A.  Pointing
                             // pin 1 down puts A beneath RLED and K on OUT.
@@ -482,7 +509,84 @@ fn detect_pc817_channel_bank(
                 freeze: true,
             }
         })
-        .collect()
+        .collect();
+
+    // Gather the shared connectors and rail-only support parts into the open
+    // flank immediately beside the bank.  Without this bounded support island,
+    // generic anchor shelving and spare-column placement strand the connectors,
+    // bypass parts, and mechanical symbols at unrelated page edges.  Detection
+    // remains topology-based: the signal connectors must carry only bank input
+    // or output nets, while support parts must carry only rails (or no pins).
+    let connector_on = |wanted: &BTreeSet<&str>, i: usize| {
+        is_connector_like(&items[i].part)
+            && !nets(i).is_empty()
+            && nets(i).iter().all(|net| wanted.contains(net))
+    };
+    let input_connector = (0..items.len()).find(|&i| connector_on(&input_nets, i));
+    let output_connector = (0..items.len()).find(|&i| connector_on(&output_nets, i));
+    let max_channel_col = base_col + (bank_cols.saturating_sub(1) as i32) * 6 + 4;
+    let mid_signal_row = base_row + (rows_per_bank.saturating_sub(1) as i32);
+    let mut support_cells = Vec::new();
+    if let Some(i) = input_connector {
+        support_cells.push((
+            items[i].refdes.clone(),
+            Cell {
+                col: base_col - 2,
+                row: mid_signal_row,
+                orient: Orient::Right,
+            },
+        ));
+    }
+    if let Some(i) = output_connector {
+        support_cells.push((
+            items[i].refdes.clone(),
+            Cell {
+                col: max_channel_col + 1,
+                row: mid_signal_row,
+                orient: Orient::Right,
+            },
+        ));
+    }
+
+    let claimed_connectors: BTreeSet<usize> = input_connector
+        .into_iter()
+        .chain(output_connector)
+        .collect();
+    let mut shared: Vec<usize> = (0..items.len())
+        .filter(|i| !channel_members.contains(i) && !claimed_connectors.contains(i))
+        .filter(|&i| {
+            if items[i].part.starts_with("power:") {
+                return false;
+            }
+            let ns = nets(i);
+            ns.is_empty() || ns.iter().all(|net| rails.contains_key(*net))
+        })
+        .collect();
+    shared.sort_by(|&a, &b| natural_refdes_cmp(&items[a].refdes, &items[b].refdes));
+    // Four columns make the usual 8-channel support set (power connectors,
+    // bypass bank, and mounting holes) roughly as tall as the four channel rows.
+    const SUPPORT_COLS: usize = 4;
+    let support_col = max_channel_col + 3;
+    for (index, i) in shared.into_iter().enumerate() {
+        support_cells.push((
+            items[i].refdes.clone(),
+            Cell {
+                col: support_col + (index % SUPPORT_COLS) as i32,
+                row: base_row + (index / SUPPORT_COLS) as i32 * 2,
+                orient: Orient::Down,
+            },
+        ));
+    }
+    if !support_cells.is_empty() {
+        idioms.push(Idiom {
+            kind: "pc817_bank_support",
+            anchor: bank_anchor,
+            cells: support_cells,
+            freeze: true,
+        });
+    }
+
+    idioms
 }
 
 fn natural_refdes_cmp(a: &str, b: &str) -> std::cmp::Ordering {

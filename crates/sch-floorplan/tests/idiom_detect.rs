@@ -180,7 +180,11 @@ blocks:
         .iter()
         .filter(|idiom| idiom.kind == "pc817_channel")
         .collect();
-    assert_eq!(channels.len(), 2, "one recognized idiom per complete channel");
+    assert_eq!(
+        channels.len(),
+        2,
+        "one recognized idiom per complete channel"
+    );
     assert_eq!(channels[0].anchor, "U1");
     assert_eq!(channels[1].anchor, "U2");
     for (n, channel) in channels.iter().enumerate() {
@@ -209,4 +213,57 @@ blocks:
     assert_eq!(ir.place["RPU1"].orient, floorplan::Orient::Down);
     assert_eq!(ir.place["RLED1"].orient, floorplan::Orient::Down);
     assert_eq!(ir.place["DLED1"].orient, floorplan::Orient::Up);
+}
+
+#[test]
+fn large_pc817_bank_folds_into_bounded_channel_columns() {
+    let Some(env) = KicadEnv::detect() else {
+        eprintln!("no KiCAD environment; skipping PC817 channel-layout test");
+        return;
+    };
+    let provider = SymbolTable::from_env(&env);
+    let mut components = String::from(
+        "      P1: {part: power:+5V, pins: {1: +5V}}\n      P2: {part: power:GND, pins: {1: FIELD_GND}}\n      P3: {part: power:GND, pins: {1: LOGIC_GND}}\n      J1: {part: Connector:Conn_01x08_Pin, pins: {1: IN1, 2: IN2, 3: IN3, 4: IN4, 5: IN5, 6: IN6, 7: IN7, 8: IN8}}\n      J2: {part: Connector:Conn_01x08_Pin, pins: {1: OUT1, 2: OUT2, 3: OUT3, 4: OUT4, 5: OUT5, 6: OUT6, 7: OUT7, 8: OUT8}}\n      J3: {part: Connector:Conn_01x02_Pin, pins: {1: +5V, 2: FIELD_GND}}\n      C1: {part: Device:C, value: 100n, pins: {1: +5V, 2: LOGIC_GND}}\n      H1: {part: Mechanical:MountingHole}\n",
+    );
+    for n in 1..=8 {
+        components.push_str(&format!(
+            "      RIN{n}: {{part: Device:R, value: 4.7k, pins: {{1: IN{n}, 2: OPTO_IN{n}}}}}\n      U{n}: {{part: Isolator:PC817, pins: {{1: OPTO_IN{n}, 2: FIELD_GND, 3: LOGIC_GND, 4: OUT{n}}}}}\n      RPU{n}: {{part: Device:R, value: 10k, pins: {{1: +5V, 2: OUT{n}}}}}\n      RLED{n}: {{part: Device:R, value: 1k, pins: {{1: +5V, 2: LED_A{n}}}}}\n      DLED{n}: {{part: Device:LED, pins: {{A: LED_A{n}, K: OUT{n}}}}}\n"
+        ));
+    }
+    let source = format!(
+        "version: 1\nname: pc817-bank-8\nblocks:\n  isolation:\n    components:\n{components}"
+    );
+    let design = compile_source(&provider, "pc817-bank-8", &source);
+    let ir = floorplan::infer_ir(&env, &design);
+
+    let optos: Vec<_> = (1..=8).map(|n| ir.place[&format!("U{n}")]).collect();
+    let cols: std::collections::BTreeSet<_> = optos.iter().map(|cell| cell.col).collect();
+    let rows: std::collections::BTreeSet<_> = optos.iter().map(|cell| cell.row).collect();
+    assert_eq!(
+        cols.len(),
+        2,
+        "eight wide channel cells fold into two banks"
+    );
+    assert_eq!(rows.len(), 4, "each bank is bounded to four channel rows");
+    assert!(optos[..4].windows(2).all(|pair| pair[0].row < pair[1].row));
+    assert!(optos[4..].windows(2).all(|pair| pair[0].row < pair[1].row));
+    assert!(optos[..4].iter().all(|cell| cell.col == optos[0].col));
+    assert!(optos[4..].iter().all(|cell| cell.col == optos[4].col));
+    assert!(optos[4].col > optos[0].col);
+
+    let min_channel_col = optos.iter().map(|cell| cell.col).min().unwrap();
+    let max_channel_col = optos.iter().map(|cell| cell.col).max().unwrap();
+    assert!(ir.place["J1"].col < min_channel_col);
+    assert!(ir.place["J2"].col > max_channel_col);
+    for refdes in ["J3", "C1", "H1"] {
+        let cell = ir.place[refdes];
+        assert!(
+            cell.col > ir.place["J2"].col && cell.col <= ir.place["J2"].col + 6,
+            "{refdes} stays in the bounded support island beside the bank: {cell:?}"
+        );
+        assert!(
+            cell.row <= *rows.iter().max().unwrap() + 2,
+            "{refdes} does not create a detached lower page island: {cell:?}"
+        );
+    }
 }
