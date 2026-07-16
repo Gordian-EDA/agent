@@ -249,6 +249,7 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
 
     let part_count = parts.len();
+    apply_complexity_default_layer_count(&mut rules, input.get("rules"), part_count);
 
     if !missing_footprints.is_empty() {
         return Ok(json!({
@@ -289,9 +290,23 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(json!({
         "ok": true,
         "part_count": part_count,
+        "layer_count": spec.rules.layer_count,
         "path": ctx.pcb_path().display().to_string(),
         "note": "board regenerated from the committed schematic file (not F8 sync; existing placement/routing may be replaced) — run place_board, then route_board, then check_board",
     }))
+}
+
+fn apply_complexity_default_layer_count(
+    rules: &mut SeedRules,
+    input: Option<&Value>,
+    part_count: usize,
+) {
+    let explicitly_selected = input
+        .and_then(Value::as_object)
+        .is_some_and(|rules| rules.contains_key("layer_count"));
+    if part_count >= 40 && !explicitly_selected {
+        rules.layer_count = 4;
+    }
 }
 
 fn unapplied_draft_footprint_changes(
@@ -1516,6 +1531,36 @@ mod tests {
         assert_eq!(rules.layer_count, 4);
         assert_eq!(rules.net_widths["GND"], 0.6);
         assert_eq!(rules.net_widths["V3V3"], 0.5);
+    }
+
+    #[test]
+    fn dense_board_implicit_stackup_defaults_to_four_layers() {
+        for (part_count, input, expected) in [
+            (39, None, 2),
+            (40, None, 4),
+            (40, Some(json!(null)), 4),
+            (40, Some(json!({})), 4),
+            (40, Some(json!({ "clearance": 0.2 })), 4),
+        ] {
+            let mut rules = parse_seed_rules(input.as_ref()).unwrap();
+            apply_complexity_default_layer_count(&mut rules, input.as_ref(), part_count);
+            assert_eq!(
+                rules.layer_count, expected,
+                "parts={part_count} input={input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_stackup_is_honored_at_every_supported_layer_count() {
+        for layer_count in [2, 4, 6, 8] {
+            let input = json!({ "layer_count": layer_count });
+            let mut rules = parse_seed_rules(Some(&input)).unwrap();
+
+            apply_complexity_default_layer_count(&mut rules, Some(&input), 40);
+
+            assert_eq!(rules.layer_count, layer_count);
+        }
     }
 
     #[test]
