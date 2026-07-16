@@ -1818,7 +1818,6 @@ pub fn postroute_cleanup(problem: &RouteProblem, solution: &mut RouteSolution) {
     drop_trace_spurs(problem, solution);
     drop_duplicate_traces(solution);
     drop_covered_collinear_traces(problem, solution);
-    collapse_shallow_same_net_forks(problem, solution);
     merge_touching_traces(problem, solution);
     shortcut_octilinear_traces(problem, solution);
     pull_orthogonal_trace_corners(problem, solution);
@@ -1826,95 +1825,6 @@ pub fn postroute_cleanup(problem: &RouteProblem, solution: &mut RouteSolution) {
     simplify_trace_paths(problem, solution);
     drop_duplicate_traces(solution);
     drop_covered_collinear_traces(problem, solution);
-}
-
-/// Turn a shallow same-net fork `P→A, P→B` into the explicit chain
-/// `P→A→Q→B`, where `Q` is A's projection onto the longer branch.
-/// KiCad flags the thin copper wedge between near-parallel branches as a
-/// `copper_sliver`. The rewrite preserves every terminal and is accepted only
-/// when it shortens copper without introducing any lint/connectivity finding.
-fn collapse_shallow_same_net_forks(problem: &RouteProblem, solution: &mut RouteSolution) {
-    const MAX_FORK_ANGLE_DEG: f64 = 15.0;
-    let min_cos = MAX_FORK_ANGLE_DEG.to_radians().cos();
-    let mut baseline = crate::lint::lint(problem, solution);
-
-    loop {
-        let mut improved = false;
-        'pair: for first in 0..solution.traces.len() {
-            for second in first + 1..solution.traces.len() {
-                let a = &solution.traces[first];
-                let b = &solution.traces[second];
-                if a.connection != b.connection
-                    || a.layer != b.layer
-                    || (a.width - b.width).abs() > 1e-9
-                    || a.path.len() != 2
-                    || b.path.len() != 2
-                {
-                    continue;
-                }
-                let Some((junction, a_end, b_end)) = shared_trace_endpoint(a, b) else {
-                    continue;
-                };
-                let (a_len, b_len) = (junction.dist(a_end), junction.dist(b_end));
-                if a_len < geom::EPS || b_len < geom::EPS {
-                    continue;
-                }
-                let dot = ((a_end.x - junction.x) * (b_end.x - junction.x)
-                    + (a_end.y - junction.y) * (b_end.y - junction.y))
-                    / (a_len * b_len);
-                if dot < min_cos {
-                    continue;
-                }
-                let (trunk_idx, branch_idx, trunk_end, branch_end) = if a_len >= b_len {
-                    (first, second, a_end, b_end)
-                } else {
-                    (second, first, b_end, a_end)
-                };
-                let vx = trunk_end.x - junction.x;
-                let vy = trunk_end.y - junction.y;
-                let t = ((branch_end.x - junction.x) * vx + (branch_end.y - junction.y) * vy)
-                    / (vx * vx + vy * vy);
-                if !(0.05..=0.95).contains(&t) {
-                    continue;
-                }
-                let projection = Point2 {
-                    x: junction.x + t * vx,
-                    y: junction.y + t * vy,
-                };
-                if projection.dist(branch_end) < geom::EPS {
-                    continue;
-                }
-
-                let mut candidate = solution.clone();
-                candidate.traces[trunk_idx].path = vec![projection, trunk_end];
-                candidate.traces[branch_idx].path = vec![junction, branch_end, projection];
-                if candidate.metrics().wirelength >= solution.metrics().wirelength {
-                    continue;
-                }
-                let findings = crate::lint::lint(problem, &candidate);
-                if !introduces_new_findings(&baseline, &findings) {
-                    *solution = candidate;
-                    baseline = findings;
-                    improved = true;
-                    break 'pair;
-                }
-            }
-        }
-        if !improved {
-            break;
-        }
-    }
-}
-
-fn shared_trace_endpoint(a: &Trace, b: &Trace) -> Option<(Point2, Point2, Point2)> {
-    for (a_junction, a_end) in [(a.path[0], a.path[1]), (a.path[1], a.path[0])] {
-        for (b_junction, b_end) in [(b.path[0], b.path[1]), (b.path[1], b.path[0])] {
-            if a_junction.near_eq(b_junction, JOIN_EPS) {
-                return Some((a_junction, a_end, b_end));
-            }
-        }
-    }
-    None
 }
 
 /// Drop a via that sits inside a SAME-NET through-hole pad: the pad's barrel
@@ -5485,61 +5395,6 @@ mod tests {
         assert_eq!(solution.traces.len(), 1);
         assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(4.0, 1.0)]);
         assert!(lint(&p, &solution).is_empty());
-    }
-
-    #[test]
-    fn shallow_same_net_fork_is_rewritten_as_a_sliver_free_chain() {
-        let mut p = simple_two_point_problem();
-        let junction = Point2 { x: 4.0, y: 8.0 };
-        let branch_end = Point2 { x: 9.0, y: 8.0 };
-        let trunk_end = Point2 { x: 14.0, y: 7.0 };
-        p.connections[0].points_to_connect = vec![
-            crate::problem::RoutePoint {
-                x: junction.x,
-                y: junction.y,
-                layer: LayerRef::top(),
-            },
-            crate::problem::RoutePoint {
-                x: branch_end.x,
-                y: branch_end.y,
-                layer: LayerRef::top(),
-            },
-            crate::problem::RoutePoint {
-                x: trunk_end.x,
-                y: trunk_end.y,
-                layer: LayerRef::top(),
-            },
-        ];
-        let mut solution = RouteSolution {
-            traces: vec![
-                Trace {
-                    connection: "N".to_owned(),
-                    layer: LayerRef::top(),
-                    width: 0.5,
-                    path: vec![junction, trunk_end],
-                },
-                Trace {
-                    connection: "N".to_owned(),
-                    layer: LayerRef::top(),
-                    width: 0.5,
-                    path: vec![junction, branch_end],
-                },
-            ],
-            vias: vec![],
-        };
-        let before = solution.metrics().wirelength;
-
-        collapse_shallow_same_net_forks(&p, &mut solution);
-
-        assert!(solution.metrics().wirelength < before);
-        assert!(crate::lint::lint(&p, &solution).is_empty());
-        assert!(solution.traces.iter().any(|trace| trace.path.len() == 3));
-        assert!(
-            !solution
-                .traces
-                .iter()
-                .any(|trace| trace.path == vec![junction, trunk_end])
-        );
     }
 
     #[test]
