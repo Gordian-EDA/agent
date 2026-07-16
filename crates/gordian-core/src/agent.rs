@@ -2822,14 +2822,14 @@ fn authoring_batch_dependency_blocked(name: &str, authoring_already_dispatched: 
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct DraftPhysicalCount {
+    authored_candidates: usize,
     explicit_footprinted: usize,
     synthesized_decouplers: usize,
 }
 
 impl DraftPhysicalCount {
     fn total(self) -> usize {
-        self.explicit_footprinted
-            .saturating_add(self.synthesized_decouplers)
+        self.authored_candidates
     }
 }
 
@@ -2891,11 +2891,25 @@ fn draft_physical_count(yaml: &str) -> DraftPhysicalCount {
     let Some(surface) = circuit_lang::parse::parse_str(yaml).0 else {
         return DraftPhysicalCount::default();
     };
-    let explicit_footprinted = surface
+    let components = surface
         .blocks
         .values()
-        .flat_map(|block| block.components.values())
-        .filter(|component| component.footprint.is_some())
+        .flat_map(|block| block.components.values());
+    let authored_candidates = components
+        .clone()
+        .filter(|component| {
+            !component.dnp
+                && !component.part.starts_with("power:")
+                && !component.part.starts_with("label:")
+        })
+        .count();
+    let explicit_footprinted = components
+        .filter(|component| {
+            !component.dnp
+                && !component.part.starts_with("power:")
+                && !component.part.starts_with("label:")
+                && component.footprint.is_some()
+        })
         .count();
     let synthesized_decouplers = surface
         .blocks
@@ -2904,6 +2918,7 @@ fn draft_physical_count(yaml: &str) -> DraftPhysicalCount {
         .flat_map(|component| component.decouple.values())
         .fold(0usize, |total, &count| total.saturating_add(count as usize));
     DraftPhysicalCount {
+        authored_candidates,
         explicit_footprinted,
         synthesized_decouplers,
     }
@@ -2926,13 +2941,14 @@ fn undersized_full_draft_result(authoritative_intent: &str, call: &ToolCall) -> 
         "code": "minimum_physical_component_count_not_met",
         "required_minimum": required,
         "candidate_physical_components": actual,
+        "authored_physical_candidates": count.authored_candidates,
         "explicit_footprinted_components": count.explicit_footprinted,
         "synthesized_decouplers": count.synthesized_decouplers,
         "shortfall": required - actual,
         "draft_written": false,
         "draft_changed": false,
         "next_tool": call.fn_name,
-        "note": format!("Resend one complete {} YAML document with at least {required} physical components. The count includes footprint-assigned component entries plus `decouple`-synthesized capacitors; schematic-only power/label symbols do not count. Do not submit a syntax fragment or placeholder.", call.fn_name),
+        "note": format!("Resend one complete {} YAML document with at least {required} authored physical component entries. Power/label symbols, DNP entries, and `decouple` sugar do not count. Footprints may be assigned in the YAML or with assign_footprints before apply. Do not submit a syntax fragment or placeholder.", call.fn_name),
     }))
 }
 
@@ -5119,7 +5135,7 @@ mod tests {
     }
 
     #[test]
-    fn full_draft_count_includes_decouple_synthesis() {
+    fn full_draft_count_tracks_authored_candidates_separately_from_synthesis() {
         let yaml = r#"
 version: 1
 blocks:
@@ -5132,10 +5148,12 @@ blocks:
         assert_eq!(
             draft_physical_count(yaml),
             DraftPhysicalCount {
+                authored_candidates: 2,
                 explicit_footprinted: 2,
                 synthesized_decouplers: 4,
             }
         );
+        assert_eq!(draft_physical_count(yaml).total(), 2);
     }
 
     #[test]
@@ -5162,6 +5180,38 @@ blocks:
             "edit_design"
         );
         assert!(undersized_full_draft_result("Build a compact sensor", &call).is_none());
+
+        let decouple_padding = ToolCall {
+            call_id: "padding".into(),
+            fn_name: "create_design".into(),
+            fn_arguments: json!({
+                "yaml": "version: 1\nblocks: {main: {components: {U1: {part: MCU, decouple: {100nF: 44}}}}}\n"
+            }),
+            thought_signatures: None,
+        };
+        assert!(
+            undersized_full_draft_result("Build at least 45 physical parts", &decouple_padding)
+                .is_some(),
+            "decouple sugar cannot substitute for authored, footprintable components"
+        );
+
+        let entries = (1..=45)
+            .map(|index| format!("R{index}: {{part: R, between: [N{index}, GND]}}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let complete_unassigned = ToolCall {
+            call_id: "complete".into(),
+            fn_name: "create_design".into(),
+            fn_arguments: json!({
+                "yaml": format!("version: 1\nblocks: {{main: {{components: {{{entries}}}}}}}\n")
+            }),
+            thought_signatures: None,
+        };
+        assert!(
+            undersized_full_draft_result("Build at least 45 physical parts", &complete_unassigned)
+                .is_none(),
+            "a complete schematic may assign its footprints in the next authoring step"
+        );
     }
 
     #[tokio::test]
