@@ -3452,8 +3452,10 @@ fn explicit_minimum_physical_components(intent: &str) -> Option<usize> {
                 matches!(
                     token.as_str(),
                     "distinct"
+                        | "electrical"
                         | "explicit"
                         | "fitted"
+                        | "functional"
                         | "meaningful"
                         | "physical"
                         | "real"
@@ -3467,7 +3469,7 @@ fn explicit_minimum_physical_components(intent: &str) -> Option<usize> {
         }
         matches!(
             tokens.get(noun_index).map(String::as_str),
-            Some("component" | "components" | "part" | "parts")
+            Some("component" | "components" | "footprint" | "footprints" | "part" | "parts")
         )
         .then_some(required)
     };
@@ -6373,6 +6375,12 @@ blocks:
         .expect("qualified physical minimum must guard the full draft");
         assert_eq!(distinct_floor["required_minimum"], 48);
         assert_eq!(distinct_floor["candidate_physical_components"], 1);
+        let hard_prompt_floor = undersized_full_draft_result(
+            "Use at least 40 meaningful physical electrical components and at least 40 functional footprints",
+            &call,
+        )
+        .expect("qualified electrical-component and footprint floors must be enforced");
+        assert_eq!(hard_prompt_floor["required_minimum"], 40);
         let dummy = ToolCall {
             call_id: "run17-dummy".into(),
             fn_name: "edit_design".into(),
