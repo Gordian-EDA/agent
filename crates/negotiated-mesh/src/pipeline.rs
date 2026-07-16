@@ -50,8 +50,8 @@ use crate::layer_hop::LayerHopRouter;
 use crate::pathing::{GlobalRouteResult, global_route_with_mesh};
 use crate::pattern::PatternRouter;
 use crate::problem::{
-    Capabilities, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteQuality, RouteResult,
-    RouteSolution, Router, Trace, Via, ViaSpan,
+    Capabilities, Connection, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteQuality,
+    RouteResult, RouteSolution, Router, Trace, Via, ViaSpan,
 };
 use crate::router::{self, GridAStarRouter};
 use crate::sequential::SequentialGridRouter;
@@ -544,9 +544,11 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, RouteSolution)>
             traces: Vec::new(),
             vias: Vec::new(),
         };
-        let mut complete = true;
+        let mut failed_points = Vec::new();
+        let mut existing_plane_anchor = None;
         for pt in &c.points_to_connect {
             if reaches_plane(pt) {
+                existing_plane_anchor.get_or_insert_with(|| pt.point());
                 continue;
             }
             let direct = pt.point();
@@ -579,8 +581,8 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, RouteSolution)>
                 router::geometry_violations(problem, &proposed) == 0
             });
             let Some(site) = site else {
-                complete = false;
-                break;
+                failed_points.push(pt.clone());
+                continue;
             };
             if site.dist(direct) > geom::EPS {
                 planned.traces.push(Trace {
@@ -598,9 +600,29 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, RouteSolution)>
                 span: ViaSpan::Through,
             });
         }
-        if !complete {
+        let plane_anchor = existing_plane_anchor.or_else(|| planned.vias.first().map(|via| via.at));
+        if !failed_points.is_empty() && plane_anchor.is_none() {
+            // Nothing on this connection reaches the plane, so the ordinary
+            // router remains the only honest fallback.
             sub.connections.push(c.clone());
             continue;
+        }
+        if let (Some(anchor), Some(layer)) = (
+            plane_anchor,
+            failed_points.first().map(|point| point.layer.clone()),
+        ) {
+            // One crowded pad must not demote an otherwise valid plane net into
+            // a board-wide routed tree. Route only the pads that could not take
+            // a local stitching via to one already-stitched plane anchor.
+            failed_points.push(crate::problem::RoutePoint {
+                x: anchor.x,
+                y: anchor.y,
+                layer,
+            });
+            sub.connections.push(Connection {
+                name: c.name.clone(),
+                points_to_connect: failed_points,
+            });
         }
         handled_plane_connection = true;
         fanout.traces.extend(planned.traces);
@@ -2844,6 +2866,48 @@ mod tests {
         assert_eq!(fanout.traces[0].width, p.min_trace_width);
         assert_eq!(router::geometry_violations(&p, &fanout), 0);
         assert!(fanout.traces[0].path[0].dist(fanout.traces[0].path[1]) <= 5.0);
+    }
+
+    #[test]
+    fn one_unstitchable_plane_pad_does_not_demote_the_whole_net() {
+        let mut p = simple_two_point_problem();
+        p.layer_count = 4;
+        p.plane_nets.insert("N".to_owned(), 1);
+        p.obstacles = p.connections[0]
+            .points_to_connect
+            .iter()
+            .map(|point| crate::problem::Obstacle {
+                kind: "pad".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: point.point(),
+                width: 1.0,
+                height: 1.0,
+                connected_to: vec!["N".to_owned()],
+            })
+            .collect();
+        p.obstacles.push(crate::problem::Obstacle {
+            kind: "keepout".to_owned(),
+            layers: vec![LayerRef::top(), LayerRef("inner1".to_owned())],
+            center: p.connections[0].points_to_connect[0].point(),
+            width: 11.0,
+            height: 11.0,
+            connected_to: vec!["FOREIGN".to_owned()],
+        });
+
+        let (sub, fanout) = plane_fanout(&p).expect("the stitchable pad is retained");
+
+        assert_eq!(fanout.vias.len(), 1);
+        assert_eq!(fanout.vias[0].at, Point2 { x: 18.0, y: 5.0 });
+        assert_eq!(sub.connections.len(), 1);
+        assert_eq!(sub.connections[0].points_to_connect.len(), 2);
+        assert_eq!(
+            sub.connections[0].points_to_connect[0].point(),
+            Point2 { x: 2.0, y: 5.0 }
+        );
+        assert_eq!(
+            sub.connections[0].points_to_connect[1].point(),
+            fanout.vias[0].at
+        );
     }
 
     #[test]
