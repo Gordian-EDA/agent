@@ -1061,7 +1061,14 @@ fn add_817_array_hints(
         true,
         Some(90.0),
     );
-    add_group("field domain", field_parts, field_strip, None, true, None);
+    add_group(
+        "field domain",
+        field_parts,
+        field_strip,
+        None,
+        true,
+        Some(90.0),
+    );
     add_group(
         "logic wide domain",
         logic_wide_parts,
@@ -1611,14 +1618,16 @@ mod tests {
                 ("4".into(), "V3V3".into()),
             ],
         ));
-        imported.push(imported_part(
-            "R1",
-            "Resistor_SMD:R_0603",
-            vec![
-                ("1".into(), "FIELD1_LED".into()),
-                ("2".into(), "FIELD1_SRC".into()),
-            ],
-        ));
+        for index in 1..=count {
+            imported.push(imported_part(
+                &format!("R{index}"),
+                "Resistor_SMD:R_0603",
+                vec![
+                    ("1".into(), format!("FIELD{index}_LED")),
+                    ("2".into(), format!("FIELD{index}_SRC")),
+                ],
+            ));
+        }
         imported.push(imported_part(
             "RN1",
             "Resistor_THT:R_Array",
@@ -1957,6 +1966,11 @@ mod tests {
         shuffled_board.imported.parts.reverse();
         let mut shuffled_problem = problem.clone();
         shuffled_problem.parts.reverse();
+        let mut compact_board = board.clone();
+        compact_board.imported.bounds = Rect::new(0.0, 0.0, 105.0, 60.0);
+        compact_board.problem.bounds = compact_board.imported.bounds;
+        let mut compact_problem = problem.clone();
+        compact_problem.bounds = compact_board.imported.bounds;
         let mut shuffled_hints = PlacementHints::default();
         add_817_array_hints(
             &design,
@@ -1982,6 +1996,22 @@ mod tests {
                 .collect::<BTreeMap<_, _>>()
         };
         assert_eq!(locked_by_ref(&problem), locked_by_ref(&shuffled_problem));
+        let mut compact_hints = PlacementHints::default();
+        add_817_array_hints(
+            &design,
+            &compact_board,
+            &compact_problem,
+            &mut compact_hints,
+        )
+        .expect("105x60 817 plan");
+        pcb_place::placement::apply_grid_hints(&mut compact_problem, &compact_hints);
+        assert!(
+            compact_problem
+                .parts
+                .iter()
+                .all(|part| part.locked.is_some())
+        );
+        assert!(pcb_place::placement::place(&compact_problem, &PlacementHints::default()).legal);
         let connector = |reference: &str| {
             problem
                 .parts
@@ -2001,6 +2031,16 @@ mod tests {
         };
         let left_bank = bank_centroid(&channels[..8]);
         let right_bank = bank_centroid(&channels[8..]);
+        for channel in &channels {
+            let index = natural_ref_key(&channel.reference).1;
+            let resistor = connector(&format!("R{index}"));
+            let opto = connector(&channel.reference);
+            assert_eq!(resistor.locked.as_ref().unwrap().rotation, 90.0);
+            assert!(
+                (resistor.locked.as_ref().unwrap().at.x - opto.locked.as_ref().unwrap().at.x).abs()
+                    < 1e-9
+            );
+        }
         assert!((jf1.locked.as_ref().unwrap().at.x - left_bank).abs() < 1e-9);
         assert!((jf2.locked.as_ref().unwrap().at.x - right_bank).abs() < 1e-9);
         assert!((left_bank - 33.5).abs() < 1e-9);
