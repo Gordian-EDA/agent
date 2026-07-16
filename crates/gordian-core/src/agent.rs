@@ -2606,12 +2606,17 @@ fn request_requires_pcb_work(user_msg: &str) -> bool {
         || request.contains("board layout")
         || request.contains("fabrication")
         || request.contains("gerber")
+        || (request.contains("board")
+            && ["place", "routing", "layer", "drc", "finish", "fab"]
+                .iter()
+                .any(|term| request.contains(term)))
 }
 
 fn request_requires_fabrication(user_msg: &str) -> bool {
     let request = user_msg.to_ascii_lowercase();
     request.contains("fabrication")
         || request.contains("fab bundle")
+        || request.contains("export fab")
         || request.contains("gerber")
         || request.contains("board house")
 }
@@ -5661,6 +5666,10 @@ mod tests {
             "finish the two-layer PCB and run DRC"
         ));
         assert!(request_requires_pcb_work("complete board routing"));
+        assert!(request_requires_pcb_work(
+            "finish the requested board: 4-layer, placement/routing, DRC, export fab"
+        ));
+        assert!(request_requires_fabrication("DRC then export fab"));
         assert!(!request_requires_pcb_work(
             "review this production schematic only"
         ));
