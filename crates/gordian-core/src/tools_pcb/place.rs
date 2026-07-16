@@ -903,6 +903,35 @@ fn add_817_array_hints(
         bounds.max_x - margin,
         bounds.max_y - margin,
     );
+    let aux_height = logic_aux_connectors
+        .iter()
+        .filter_map(|reference| {
+            problem
+                .parts
+                .iter()
+                .find(|part| &part.reference == reference)
+        })
+        .map(|part| pcb_model::place::rotated_courtyard_half(part, 90.0).1 * 2.0)
+        .fold(0.0, f64::max);
+    // Rail-only service/power headers belong on the logic side, but not on the
+    // same centreline as the long signal headers. Reserve a strip immediately
+    // below the opto barrier and begin the south-header region after it. The
+    // extra margin accounts for both courtyards' placement clearance.
+    let aux_bottom = if logic_aux_connectors.is_empty() {
+        bottom
+    } else {
+        Rect::new(
+            bottom.min_x,
+            bottom.min_y,
+            bottom.max_x,
+            (bottom.min_y + aux_height + margin).min(bottom.max_y),
+        )
+    };
+    let header_bottom = if logic_aux_connectors.is_empty() {
+        bottom
+    } else {
+        Rect::new(bottom.min_x, aux_bottom.max_y, bottom.max_x, bottom.max_y)
+    };
     let connector_refs = field_connectors
         .iter()
         .chain(&logic_connectors)
@@ -959,7 +988,7 @@ fn add_817_array_hints(
     add_group(
         "logic connectors",
         logic_connectors,
-        bottom,
+        header_bottom,
         Some(Edge::S),
         true,
         Some(90.0),
@@ -967,8 +996,8 @@ fn add_817_array_hints(
     add_group(
         "logic auxiliary connectors",
         logic_aux_connectors,
-        bottom,
-        Some(Edge::S),
+        aux_bottom,
+        None,
         true,
         Some(90.0),
     );
@@ -1652,10 +1681,10 @@ mod tests {
             .unwrap();
         first_part.reference = "JLOG1".into();
         first_part.courtyard_w = 5.0;
-        first_part.courtyard_h = 40.0;
+        first_part.courtyard_h = 54.0;
         let mut second_part = placement_part(&second, false);
         second_part.courtyard_w = 5.0;
-        second_part.courtyard_h = 40.0;
+        second_part.courtyard_h = 54.0;
         problem.parts.push(second_part);
         problem.parts.push(placement_part(&power, false));
 
@@ -1686,6 +1715,7 @@ mod tests {
         assert!((jlog1.locked.as_ref().unwrap().at.x - 29.875).abs() < 1e-9);
         assert!((jlog2.locked.as_ref().unwrap().at.x - 87.125).abs() < 1e-9);
         assert!((jpwr.locked.as_ref().unwrap().at.x - 58.5).abs() < 1e-9);
+        assert!(jpwr.locked.as_ref().unwrap().at.y < jlog1.locked.as_ref().unwrap().at.y);
         let placed_rect = |part: &Part| {
             let locked = part.locked.as_ref().unwrap();
             Rect::from_center_half(
