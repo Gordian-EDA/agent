@@ -272,6 +272,26 @@ fn spine_fast_path_pin_profile<'a>(pin_profiles: impl Iterator<Item = (&'a str, 
                 || part.to_ascii_uppercase().contains(":R_NETWORK")
                 || (pins <= 2 && (part.starts_with("Device:R") || part.starts_with("Device:C")))
         });
+    // A complete 8-channel 817 input bank is already fully constrained by the
+    // schematic idiom detector: the optocouplers and their per-channel passive
+    // chains are frozen into regular cells. Routed annealing has no useful
+    // permutation left, yet repeatedly realizing this ~60-part sheet took 158 s.
+    // Spine consumes the same inferred/frozen IR in one deterministic pass.
+    let opto817_count = profiles
+        .iter()
+        .filter(|&&(part, pins)| {
+            let part = part.to_ascii_uppercase().replace(['-', '_'], "");
+            pins == 4 && (part.contains("PC817") || part.contains("LTV817"))
+        })
+        .count();
+    let repeated_817_bank = (48..=80).contains(&profiles.len())
+        && opto817_count >= 8
+        && profiles.iter().filter(|(_, pins)| *pins == 2).count() >= 32
+        && profiles
+            .iter()
+            .filter(|&&(part, _)| sch_place::netclass::is_connector_like(part))
+            .count()
+            >= 4;
     if std::env::var_os("CLUSTER_DEBUG").is_some() {
         eprintln!("[cluster] pin profile {counts:?} total={pins}");
     }
@@ -280,6 +300,7 @@ fn spine_fast_path_pin_profile<'a>(pin_profiles: impl Iterator<Item = (&'a str, 
         || compact_multi_unit
         || wide_connector_block
         || passive_bus_bank
+        || repeated_817_bank
 }
 
 fn rail_candidate_wins(
@@ -433,6 +454,20 @@ mod tests {
             ("Analog_ADC:ADC", 3),
             ("Connector_Generic:Conn_01x10", 10),
         ]));
+    }
+
+    #[test]
+    fn repeated_817_input_bank_uses_bounded_fast_path() {
+        let mut bank = vec![("Isolator:PC817", 4); 8];
+        bank.extend(vec![("Device:R", 2); 32]);
+        bank.extend(vec![("Device:LED", 2); 8]);
+        bank.extend(vec![("Connector:Conn_01x08_Pin", 8); 4]);
+        bank.extend(vec![("Mechanical:MountingHole", 0); 4]);
+        assert!(spine_fast_path_pin_profile(bank.iter().copied()));
+
+        bank.retain(|(part, _)| *part != "Isolator:PC817");
+        bank.extend(vec![("Isolator:PC817", 4); 7]);
+        assert!(!spine_fast_path_pin_profile(bank.iter().copied()));
     }
 
     #[test]
