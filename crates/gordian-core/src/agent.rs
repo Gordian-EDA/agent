@@ -4131,6 +4131,19 @@ async fn review_netlist_with_erc(
     netlist: &str,
 ) -> Result<(f64, Vec<String>)> {
     let compiled = circuit_lang::compile(netlist, ctx.provider());
+
+    // Cheap, exact findings should be repaired before paying for a semantic
+    // review. Besides reducing latency, this keeps the reviewer focused on the
+    // topology defects that deterministic checks cannot prove. The changed
+    // draft is reviewed again, so a clean deterministic pass still receives
+    // the independent LLM review before it can be committed.
+    if let Some(design) = compiled.design.as_ref() {
+        let deterministic = deterministic_netlist_defects(ctx, intent, design);
+        if !deterministic.is_empty() {
+            return Ok(normalize_review_score((0.0, deterministic)));
+        }
+    }
+
     let review_subject = compiled
         .design
         .as_ref()
@@ -4138,27 +4151,28 @@ async fn review_netlist_with_erc(
             crate::review_kicad::annotate_netlist_for_review(netlist, design, ctx.provider())
         })
         .unwrap_or_else(|| netlist.to_string());
-    let (score, mut defects) = crate::review_kicad::review_netlist(
+    let (score, defects) = crate::review_kicad::review_netlist(
         reviewer,
         intent,
         &review_subject,
         &ctx.config().review,
     )
     .await?;
-    if let Some(design) = compiled.design {
-        let mut deterministic = circuit_lang::erc::erc_checks(&design);
-        deterministic.extend(crate::review_kicad::symbol_pin_rail_checks(
-            &design,
-            ctx.provider(),
-        ));
-        deterministic.extend(crate::review_kicad::intent_contract_checks(intent, &design));
-        for d in deterministic {
-            if !defects.iter().any(|e| crate::review::same_defect(e, &d)) {
-                defects.push(d);
-            }
-        }
-    }
     Ok(normalize_review_score((score, defects)))
+}
+
+fn deterministic_netlist_defects(
+    ctx: &AgentRuntime,
+    intent: &str,
+    design: &circuit_lang::Design,
+) -> Vec<String> {
+    let mut defects = circuit_lang::erc::erc_checks(design);
+    defects.extend(crate::review_kicad::symbol_pin_rail_checks(
+        design,
+        ctx.provider(),
+    ));
+    defects.extend(crate::review_kicad::intent_contract_checks(intent, design));
+    defects
 }
 
 /// The post-turn review of the committed schematic, in TWO complementary planes
@@ -6800,6 +6814,33 @@ blocks:
             ..call
         };
         assert!(authoritative_review_call(&non_review, "goal").is_none());
+    }
+
+    #[tokio::test]
+    async fn deterministic_review_defects_skip_the_provider_round_trip() {
+        let runtime = Arc::new(test_runtime());
+        let (reviewer, seen) = ScriptedClient::recording(Vec::new());
+        let yaml = r#"
+version: 1
+name: backwards-led
+blocks:
+  main:
+    components:
+      D1: {part: Device:LED, pins: {1: V3V3, 2: GND}}
+"#;
+
+        let (_, defects) = review_netlist_with_erc(&runtime, &reviewer, "", yaml)
+            .await
+            .unwrap();
+
+        assert!(
+            defects.iter().any(|defect| defect.contains("BACKWARDS")),
+            "{defects:?}"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "exact defects should be fixed before an expensive semantic review"
+        );
     }
 
     #[test]
