@@ -202,6 +202,18 @@ pub(crate) fn intent_contract_checks(intent: &str, design: &circuit_lang::Design
         );
     }
 
+    if (request.contains("pc817") || request.contains("optocoupl"))
+        && request.contains("input")
+    {
+        let bypassed = pc817_inputs_bypassing_series_resistors(&components);
+        if !bypassed.is_empty() {
+            defects.push(format!(
+                "intent contract: the requested isolated inputs must pass through their series resistors before the PC817 LEDs, but {} share an optocoupler-anode net directly with an input connector while the resistor branches to a positive rail",
+                bypassed.join(", ")
+            ));
+        }
+    }
+
     if request.contains("test point") || request.contains("testpoint") {
         let requested_nets = requested_test_point_nets(&request);
         let present_nets = test_point_nets(&components);
@@ -392,6 +404,45 @@ fn component_nets(component: &circuit_lang::model::Component) -> Vec<&str> {
             circuit_lang::model::PinTarget::NoConnect => None,
         })
         .collect()
+}
+
+fn pc817_inputs_bypassing_series_resistors(
+    components: &[(&String, &circuit_lang::model::Component)],
+) -> Vec<String> {
+    let connectors = components
+        .iter()
+        .filter(|(_, component)| component.part.to_ascii_lowercase().contains("connector"))
+        .flat_map(|(_, component)| component_nets(component))
+        .collect::<std::collections::HashSet<_>>();
+
+    let mut bypassed = Vec::new();
+    for (refdes, opto) in components {
+        let part = opto.part.to_ascii_uppercase().replace(['-', '_'], "");
+        if !part.contains("PC817") && !part.contains("LTV817") {
+            continue;
+        }
+        let Some(circuit_lang::model::PinTarget::Net(anode_net)) = opto.pins.get("1") else {
+            continue;
+        };
+        if !connectors.contains(anode_net.as_str()) {
+            continue;
+        }
+        let branches_to_rail = components.iter().any(|(_, component)| {
+            if !(component.part == "Device:R" || component.part.ends_with(":R")) {
+                return false;
+            }
+            let nets = component_nets(component);
+            nets.contains(&anode_net.as_str())
+                && nets
+                    .iter()
+                    .any(|net| *net != anode_net.as_str() && is_positive_rail_net(net))
+        });
+        if branches_to_rail {
+            bypassed.push((*refdes).clone());
+        }
+    }
+    bypassed.sort();
+    bypassed
 }
 
 fn is_ground_net(net: &str) -> bool {
@@ -1384,6 +1435,54 @@ nets:
                 &design,
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn intent_contract_rejects_pc817_input_resistor_bypass() {
+        let mut provider = circuit_lang::SymbolTable::with_basics();
+        provider.mock_add(
+            "Isolator:PC817",
+            vec![
+                ("1", "A", circuit_lang::PinType::Passive, 1),
+                ("2", "K", circuit_lang::PinType::Passive, 1),
+                ("3", "E", circuit_lang::PinType::Passive, 1),
+                ("4", "C", circuit_lang::PinType::Passive, 1),
+            ],
+        );
+        provider.mock_add(
+            "Connector:Conn_01x01_Pin",
+            vec![("1", "Pin_1", circuit_lang::PinType::Passive, 1)],
+        );
+        let compile = |body: &str| {
+            circuit_lang::compile(
+                &format!("version: 1\nblocks:\n  main:\n    components:\n{body}"),
+                &provider,
+            )
+            .design
+            .expect("fixture compiles")
+        };
+
+        let bypassed = compile(
+            "      J1: {part: Connector:Conn_01x01_Pin, pins: {1: LED_A}}\n\
+             \x20     R1: {part: Device:R, value: 4.7k, pins: {1: +24V, 2: LED_A}}\n\
+             \x20     U1: {part: Isolator:PC817, pins: {1: LED_A, 2: FIELD_GND, 3: LOGIC_GND, 4: OUT1}}\n",
+        );
+        let defects = intent_contract_checks("PC817 isolated 24V digital input", &bypassed);
+        assert!(
+            defects.iter().any(|defect| defect.contains("U1") && defect.contains("series resistors")),
+            "{defects:?}"
+        );
+
+        let correct = compile(
+            "      J1: {part: Connector:Conn_01x01_Pin, pins: {1: IN1}}\n\
+             \x20     R1: {part: Device:R, value: 4.7k, pins: {1: IN1, 2: LED_A}}\n\
+             \x20     U1: {part: Isolator:PC817, pins: {1: LED_A, 2: FIELD_GND, 3: LOGIC_GND, 4: OUT1}}\n",
+        );
+        assert!(
+            intent_contract_checks("PC817 isolated 24V digital input", &correct)
+                .iter()
+                .all(|defect| !defect.contains("series resistors"))
         );
     }
 
