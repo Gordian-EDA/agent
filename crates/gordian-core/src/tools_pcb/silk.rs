@@ -1,6 +1,6 @@
 //! Deterministic, DRC-oracled relocation of generated Reference silkscreen text.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Write;
 use std::path::Path;
 
@@ -78,44 +78,54 @@ pub(super) fn cleanup_reference_silkscreen(
             let batch_warnings = silk_warning_count(&batch_report);
             let best_gate = gate_drc(&best_report);
             let batch_gate = gate_drc(&batch_report);
-            if batch_warnings < best_warnings
+            let batch_improves = batch_warnings < best_warnings
                 && batch_gate.copper_violations <= best_gate.copper_violations
-                && batch_gate.meaningful_unconnected <= best_gate.meaningful_unconnected
-            {
+                && batch_gate.meaningful_unconnected <= best_gate.meaningful_unconnected;
+            if batch_improves {
+                for (reference, candidate) in &batch_moves {
+                    attempted
+                        .entry(reference.clone())
+                        .or_default()
+                        .insert(candidate_key(*candidate));
+                }
                 best_text = batch_text;
                 best_report = batch_report;
                 best_warnings = batch_warnings;
-                for (reference, candidate) in batch_moves {
-                    moved.insert(reference.clone());
-                    attempted
-                        .entry(reference)
-                        .or_default()
-                        .insert(candidate_key(candidate));
+                for (reference, _) in batch_moves {
+                    moved.insert(reference);
                 }
                 queue = offending_references(&best_report);
             } else {
+                // A rejected singleton batch tested the exact same state as an
+                // individual move, so do not spend the fallback budget retrying
+                // it. Multi-reference batches may fail through interactions even
+                // when one move is useful, and therefore remain individually
+                // eligible.
+                if let [(reference, candidate)] = batch_moves.as_slice() {
+                    attempted
+                        .entry(reference.clone())
+                        .or_default()
+                        .insert(candidate_key(*candidate));
+                }
                 write_board_text(path, &best_text)?;
             }
         }
     }
 
-    while let Some(reference) = queue.pop_first() {
+    let mut queue: VecDeque<_> = queue.into_iter().collect();
+    while let Some(reference) = queue.pop_front() {
         if attempts >= MAX_DRC_RETRIES || best_warnings == 0 {
             break;
         }
         let Some(origin) = reference_position(&best_text, &reference) else {
             continue;
         };
-        let candidates = reference_candidates(&reference, origin)
-            .into_iter()
-            .filter(|candidate| {
-                let key = candidate_key(*candidate);
-                attempted
-                    .get(&reference)
-                    .is_none_or(|positions| !positions.contains(&key))
-            })
-            .take(MAX_CANDIDATES_PER_REFERENCE_PASS)
-            .collect::<Vec<_>>();
+        let candidates =
+            untried_reference_candidates(&reference, origin, attempted.get(&reference))
+                .into_iter()
+                .take(MAX_CANDIDATES_PER_REFERENCE_PASS)
+                .collect::<Vec<_>>();
+        let mut accepted = false;
         for candidate in candidates {
             if attempts >= MAX_DRC_RETRIES {
                 break;
@@ -145,10 +155,21 @@ pub(super) fn cleanup_reference_silkscreen(
                 best_report = candidate_report;
                 best_warnings = candidate_warnings;
                 moved.insert(reference.clone());
-                queue.extend(offending_references(&best_report));
+                queue = offending_references(&best_report).into_iter().collect();
+                accepted = true;
                 break;
             }
             write_board_text(path, &best_text)?;
+        }
+        // Work in small per-reference passes for fairness, but do not discard a
+        // stubborn reference while fresh positions and the global retry budget
+        // remain. Re-queueing also lets a dense label reach the wider rings.
+        if !accepted
+            && attempts < MAX_DRC_RETRIES
+            && !untried_reference_candidates(&reference, origin, attempted.get(&reference))
+                .is_empty()
+        {
+            queue.push_back(reference);
         }
     }
 
@@ -236,6 +257,19 @@ fn candidate_key(candidate: ReferencePosition) -> (i64, i64) {
     )
 }
 
+fn untried_reference_candidates(
+    reference: &str,
+    origin: ReferencePosition,
+    attempted: Option<&BTreeSet<(i64, i64)>>,
+) -> Vec<ReferencePosition> {
+    reference_candidates(reference, origin)
+        .into_iter()
+        .filter(|candidate| {
+            attempted.is_none_or(|positions| !positions.contains(&candidate_key(*candidate)))
+        })
+        .collect()
+}
+
 fn write_board_text(path: &Path, text: &str) -> Result<(), String> {
     let parent = path
         .parent()
@@ -309,5 +343,28 @@ mod tests {
             a.iter()
                 .all(|candidate| candidate.x.hypot(candidate.y) <= 3.81)
         );
+    }
+
+    #[test]
+    fn rejected_batch_candidates_do_not_starve_wider_reference_ring() {
+        let origin = ReferencePosition { x: -1.8, y: 0.0 };
+        let all = reference_candidates("C6", origin);
+        let mut attempted = BTreeSet::new();
+        attempted.insert(candidate_key(origin));
+        for index in [4, 5, 6] {
+            attempted.insert(candidate_key(all[index]));
+        }
+
+        let first_pass = untried_reference_candidates("C6", origin, Some(&attempted))
+            .into_iter()
+            .take(MAX_CANDIDATES_PER_REFERENCE_PASS)
+            .collect::<Vec<_>>();
+        for candidate in &first_pass {
+            attempted.insert(candidate_key(*candidate));
+        }
+        let second_pass = untried_reference_candidates("C6", origin, Some(&attempted));
+
+        assert_eq!(first_pass.len(), MAX_CANDIDATES_PER_REFERENCE_PASS);
+        assert_eq!(second_pass[0], ReferencePosition { x: 2.8, y: 0.0 });
     }
 }
