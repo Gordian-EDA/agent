@@ -69,6 +69,7 @@ const ADAPTIVE_RIPUP_MAX_BLOCKERS: usize = 3;
 const AUTO_DETAILED_MAX_MULTILAYER_CONNECTIONS: usize = 11;
 const AUTO_BOUNDED_MAX_CONNECTIONS: usize = 48;
 const AUTO_BOUNDED_MAX_TERMINALS: usize = 160;
+const AUTO_BOUNDED_MAX_GRID_CELLS: usize = 725_000;
 
 // ── pipeline entry points ──────────────────────────────────────────────────────
 
@@ -943,6 +944,15 @@ fn auto_route_requires_bounded_pass(problem: &RouteProblem) -> bool {
             .map(|connection| connection.points_to_connect.len())
             .sum::<usize>()
             > AUTO_BOUNDED_MAX_TERMINALS
+        || estimated_grid_cells(problem) > AUTO_BOUNDED_MAX_GRID_CELLS
+}
+
+fn estimated_grid_cells(problem: &RouteProblem) -> usize {
+    let pitch = grid_astar::grid::grid_pitch(problem);
+    let cells = |span: f64| ((span.max(0.0) / pitch).ceil() as usize).max(1);
+    cells(problem.bounds.width())
+        .saturating_mul(cells(problem.bounds.height()))
+        .saturating_mul(problem.layer_count.max(1) as usize)
 }
 
 fn should_try_detailed_in_auto(problem: &RouteProblem) -> bool {
@@ -3413,6 +3423,28 @@ mod tests {
         let extra_terminal = p.connections[0].points_to_connect[0].clone();
         p.connections[0].points_to_connect.push(extra_terminal);
         assert!(auto_route_requires_bounded_pass(&p));
+
+        let mut p = simple_two_point_problem();
+        p.bounds = crate::problem::Rect {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 120.0,
+            max_y: 80.0,
+        };
+        p.layer_count = 4;
+        assert!(
+            estimated_grid_cells(&p) > AUTO_BOUNDED_MAX_GRID_CELLS,
+            "fixture must represent the live large-grid failure"
+        );
+        assert!(auto_route_requires_bounded_pass(&p));
+
+        p.bounds.max_x = 117.0;
+        p.bounds.max_y = 60.0;
+        assert!(
+            estimated_grid_cells(&p) <= AUTO_BOUNDED_MAX_GRID_CELLS,
+            "known-good compact isolation boards retain the normal portfolio"
+        );
+        assert!(!auto_route_requires_bounded_pass(&p));
     }
 
     #[test]
