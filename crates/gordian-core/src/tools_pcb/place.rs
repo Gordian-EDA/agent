@@ -633,10 +633,12 @@ fn is_817(part: &str) -> bool {
 }
 
 /// Detect a real 817 bank from the compiled durable draft. Besides the part
-/// family, require the corrected common-emitter topology (3=ground, 4=output)
-/// and require all four authored nets to agree with the board's actual pads.
-/// This keeps the specialized physical plan off unrelated four-pad devices and
-/// off electrically reversed drafts.
+/// family, require the corrected common-emitter topology (3=ground, 4=output),
+/// then take the physical domains from the actual numbered board pads. KiCad
+/// may legitimately rename private authored nets (for example to
+/// `Net-(R1-Pad2)`), so authored-to-board net-name equality is not an identity
+/// check. The narrow part predicate and corrected draft topology keep this plan
+/// off unrelated four-pad devices and electrically reversed drafts.
 fn opto817_channels(
     design: &circuit_lang::model::Design,
     board: &IpcBoardSnapshot,
@@ -653,7 +655,7 @@ fn opto817_channels(
             if !is_817(&component.part) {
                 continue;
             }
-            let (Some(anode), Some(cathode), Some(emitter), Some(output)) = (
+            let (Some(_anode), Some(_cathode), Some(authored_emitter), Some(authored_output)) = (
                 pin_net(component, "1"),
                 pin_net(component, "2"),
                 pin_net(component, "3"),
@@ -661,28 +663,27 @@ fn opto817_channels(
             ) else {
                 continue;
             };
-            if !is_ground_net(&emitter) || is_ground_net(&output) {
+            if !is_ground_net(&authored_emitter) || is_ground_net(&authored_output) {
                 continue;
             }
             let Some(part) = imported.get(reference.as_str()) else {
                 continue;
             };
-            let actual = |number: &str, expected: &str| {
-                part.pads.iter().any(|pad| {
-                    pad.number == number
-                        && pad
-                            .net
-                            .as_deref()
-                            .is_some_and(|net| same_net(net, expected))
-                })
+            let actual_net = |number: &str| {
+                part.pads
+                    .iter()
+                    .find(|pad| pad.number == number)
+                    .and_then(|pad| pad.net.as_deref())
+                    .map(|net| net.trim_start_matches('/').to_owned())
             };
-            if !actual("1", &anode)
-                || !actual("2", &cathode)
-                || !actual("3", &emitter)
-                || !actual("4", &output)
-            {
+            let (Some(anode), Some(cathode), Some(emitter), Some(output)) = (
+                actual_net("1"),
+                actual_net("2"),
+                actual_net("3"),
+                actual_net("4"),
+            ) else {
                 continue;
-            }
+            };
             channels.push(Opto817Channel {
                 reference: reference.clone(),
                 input_nets: [anode, cathode],
@@ -1542,6 +1543,51 @@ mod tests {
             assert!(add_817_array_hints(&design, &board, &problem, &mut hints).is_none());
             assert!(hints.groups.is_empty());
         }
+    }
+
+    #[test]
+    fn opto817_plan_uses_actual_anonymous_board_nets() {
+        let (design, mut board, mut problem) = opto817_fixture(16, false);
+        for imported in board
+            .imported
+            .parts
+            .iter_mut()
+            .filter(|part| part.reference.starts_with('U'))
+        {
+            imported
+                .pads
+                .iter_mut()
+                .find(|pad| pad.number == "1")
+                .unwrap()
+                .net = Some(format!("Net-({}-Pad1)", imported.reference));
+        }
+        for part in problem
+            .parts
+            .iter_mut()
+            .filter(|part| part.reference.starts_with('U'))
+        {
+            part.pads
+                .iter_mut()
+                .find(|pad| pad.number == "1")
+                .unwrap()
+                .net = Some(format!("Net-({}-Pad1)", part.reference));
+        }
+
+        let channels = opto817_channels(&design, &board);
+        assert_eq!(channels.len(), 16);
+        assert_eq!(channels[0].input_nets[0], "Net-(U1-Pad1)");
+        let mut hints = PlacementHints::default();
+        assert!(add_817_array_hints(&design, &board, &problem, &mut hints).is_some());
+        assert_eq!(
+            hints
+                .groups
+                .iter()
+                .find(|group| group.name == "817 isolation array")
+                .unwrap()
+                .members
+                .len(),
+            16
+        );
     }
 
     #[test]
