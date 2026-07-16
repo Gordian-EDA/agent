@@ -4,7 +4,8 @@
 //! `.kicad_pcb` Edge.Cuts instead of regenerating the board from a schematic.
 
 use anyhow::{Context, Result};
-use pcb_model::{Point2, Polygon, Rect};
+use pcb_model::place::{Part, PlaceProblem};
+use pcb_model::{Point2, Polygon, Rect, RouteSolution};
 use serde_json::{Value, json};
 
 use crate::AgentRuntime;
@@ -30,7 +31,11 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             Ok(board) => board,
             Err(err) => return Ok(json!({ "error": err })),
         };
-        let Some(bounds) = geometry_bounds(&board) else {
+        let placement = match super::place::place_problem_from_snapshot(&board, ctx) {
+            Ok(placement) => placement,
+            Err(err) => return Ok(json!({ "error": err })),
+        };
+        let Some(bounds) = geometry_bounds(&board, &placement) else {
             return Ok(json!({
                 "error": "cannot fit outline: board has no footprint or copper geometry"
             }));
@@ -137,14 +142,84 @@ fn parse_outline(v: Option<&Value>) -> std::result::Result<Polygon, String> {
     Polygon::new(points)
 }
 
-fn geometry_bounds(board: &kicad_ipc::snapshot::IpcBoardSnapshot) -> Option<Rect> {
-    let mut points = Vec::new();
-    points.extend(board.imported.parts.iter().map(|part| part.at));
-    for trace in &board.copper.traces {
-        points.extend(trace.path.iter().copied());
+fn geometry_bounds(
+    board: &kicad_ipc::snapshot::IpcBoardSnapshot,
+    placement: &PlaceProblem,
+) -> Option<Rect> {
+    let mut bounds = routed_copper_bounds(&board.copper);
+    for (imported, part) in board.imported.parts.iter().zip(&placement.parts) {
+        debug_assert_eq!(imported.reference, part.reference);
+        include_rect(
+            &mut bounds,
+            placed_part_bounds(imported.at, imported.rotation as f64, part),
+        );
     }
-    points.extend(board.copper.vias.iter().map(|via| via.at));
-    Rect::bounding(&points)
+    bounds
+}
+
+/// World-space bounds of a placed footprint, including its courtyard and every
+/// pad's actual offset and copper extent. The latter is deliberately explicit:
+/// some connector pads extend beyond a library courtyard, and fitting Edge.Cuts
+/// to footprint origins alone can clip them.
+fn placed_part_bounds(at: Point2, rotation: f64, part: &Part) -> Rect {
+    let courtyard_half =
+        Point2::new(part.courtyard_w / 2.0, part.courtyard_h / 2.0).rotated_half_extents(rotation);
+    let mut bounds = Rect::from_center_half(at, (courtyard_half.x, courtyard_half.y));
+    for pad in &part.pads {
+        let center = pad.offset.rotate(rotation);
+        let center = Point2::new(at.x + center.x, at.y + center.y);
+        let half = Point2::new(pad.width / 2.0, pad.height / 2.0).rotated_half_extents(rotation);
+        extend_rect(
+            &mut bounds,
+            Rect::from_center_half(center, (half.x, half.y)),
+        );
+    }
+    bounds
+}
+
+fn routed_copper_bounds(copper: &RouteSolution) -> Option<Rect> {
+    let mut bounds = None;
+    for trace in &copper.traces {
+        let half = trace.width / 2.0;
+        for point in &trace.path {
+            include_rect(
+                &mut bounds,
+                Rect::new(
+                    point.x - half,
+                    point.y - half,
+                    point.x + half,
+                    point.y + half,
+                ),
+            );
+        }
+    }
+    for via in &copper.vias {
+        let half = via.diameter / 2.0;
+        include_rect(
+            &mut bounds,
+            Rect::new(
+                via.at.x - half,
+                via.at.y - half,
+                via.at.x + half,
+                via.at.y + half,
+            ),
+        );
+    }
+    bounds
+}
+
+fn include_rect(bounds: &mut Option<Rect>, rect: Rect) {
+    match bounds {
+        Some(bounds) => extend_rect(bounds, rect),
+        None => *bounds = Some(rect),
+    }
+}
+
+fn extend_rect(bounds: &mut Rect, rect: Rect) {
+    bounds.min_x = bounds.min_x.min(rect.min_x);
+    bounds.min_y = bounds.min_y.min(rect.min_y);
+    bounds.max_x = bounds.max_x.max(rect.max_x);
+    bounds.max_y = bounds.max_y.max(rect.max_y);
 }
 
 fn expand_rect(mut rect: Rect, margin: f64) -> Rect {
@@ -361,6 +436,55 @@ fn suffix(kind: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pcb_model::place::PartPad;
+    use pcb_model::{LayerRef, Trace, Via, ViaSpan};
+
+    #[test]
+    fn fit_bounds_include_rotated_courtyard_and_off_center_pad_extents() {
+        let part = Part {
+            reference: "J1".to_owned(),
+            courtyard_w: 2.0,
+            courtyard_h: 6.0,
+            pads: vec![PartPad {
+                number: "1".to_owned(),
+                offset: Point2::new(4.0, 0.0),
+                width: 2.0,
+                height: 1.0,
+                layers: vec![LayerRef::top()],
+                net: Some("VBUS".to_owned()),
+            }],
+            edge_datum: None,
+            locked: None,
+        };
+
+        let bounds = placed_part_bounds(Point2::new(10.0, 20.0), 90.0, &part);
+
+        assert_eq!(bounds, Rect::new(7.0, 15.0, 13.0, 21.0));
+    }
+
+    #[test]
+    fn fit_bounds_include_trace_width_and_via_diameter() {
+        let copper = RouteSolution {
+            traces: vec![Trace {
+                connection: "N1".to_owned(),
+                layer: LayerRef::top(),
+                width: 2.0,
+                path: vec![Point2::new(1.0, 2.0), Point2::new(5.0, 6.0)],
+            }],
+            vias: vec![Via {
+                connection: "N1".to_owned(),
+                at: Point2::new(-3.0, 10.0),
+                diameter: 4.0,
+                drill: 2.0,
+                span: ViaSpan::Through,
+            }],
+        };
+
+        assert_eq!(
+            routed_copper_bounds(&copper),
+            Some(Rect::new(-5.0, 1.0, 6.0, 12.0))
+        );
+    }
 
     #[test]
     fn replaces_rectangular_edge_cuts() {
