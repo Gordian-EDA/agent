@@ -948,6 +948,15 @@ fn add_817_array_hints(
     }
     field_parts.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
     logic_parts.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
+    let logic_cell_width = (bottom.max_x - bottom.min_x) / logic_parts.len().max(1) as f64;
+    let (logic_wide_parts, logic_small_parts): (Vec<_>, Vec<_>) =
+        logic_parts.into_iter().partition(|reference| {
+            problem
+                .parts
+                .iter()
+                .find(|part| &part.reference == reference)
+                .is_some_and(|part| part.courtyard_w + margin > logic_cell_width)
+        });
 
     // The field series parts share the opto x cells in one row. This removes
     // the last force/anneal degree of freedom and keeps each input fanout local.
@@ -963,21 +972,35 @@ fn add_817_array_hints(
         center_region.max_x,
         field_strip.min_y,
     );
-    let logic_height = logic_parts
-        .iter()
-        .filter_map(|reference| {
-            problem
-                .parts
-                .iter()
-                .find(|part| &part.reference == reference)
-        })
-        .map(|part| part.courtyard_h)
-        .fold(0.0, f64::max);
-    let logic_strip = Rect::new(
+    let part_height = |references: &[String]| {
+        references
+            .iter()
+            .filter_map(|reference| {
+                problem
+                    .parts
+                    .iter()
+                    .find(|part| &part.reference == reference)
+            })
+            .map(|part| part.courtyard_h)
+            .fold(0.0, f64::max)
+    };
+    let wide_logic_height = part_height(&logic_wide_parts);
+    let logic_height = part_height(&logic_small_parts);
+    let wide_logic_strip = Rect::new(
         bottom.min_x,
         bottom.min_y,
         bottom.max_x,
-        (bottom.min_y + logic_height + margin).min(bottom.max_y),
+        (bottom.min_y + wide_logic_height + (!logic_wide_parts.is_empty() as u8 as f64) * margin)
+            .min(bottom.max_y),
+    );
+    let logic_strip = Rect::new(
+        bottom.min_x,
+        wide_logic_strip.max_y,
+        bottom.max_x,
+        (wide_logic_strip.max_y
+            + logic_height
+            + (!logic_small_parts.is_empty() as u8 as f64) * margin)
+            .min(bottom.max_y),
     );
     let aux_height = logic_aux_connectors
         .iter()
@@ -1039,7 +1062,22 @@ fn add_817_array_hints(
         Some(90.0),
     );
     add_group("field domain", field_parts, field_strip, None, true, None);
-    add_group("logic domain", logic_parts, logic_strip, None, true, None);
+    add_group(
+        "logic wide domain",
+        logic_wide_parts,
+        wide_logic_strip,
+        None,
+        true,
+        None,
+    );
+    add_group(
+        "logic domain",
+        logic_small_parts,
+        logic_strip,
+        None,
+        true,
+        None,
+    );
 
     // Finish the specialized floorplan by pinning un-authored mounting holes to
     // deterministic, maximally separated corners. Authored locks/regions win.
@@ -1055,7 +1093,9 @@ fn add_817_array_hints(
         .map(|part| part.reference.clone())
         .collect::<Vec<_>>();
     holes.sort_by(|a, b| natural_ref_key(a).cmp(&natural_ref_key(b)));
-    let corners = [(false, false), (true, true), (true, false), (false, true)];
+    // The wide south logic headers consume both lower corners, so specialized
+    // boards use the two clear top corners first.
+    let corners = [(false, false), (true, false), (true, true), (false, true)];
     for (reference, (right, bottom_edge)) in holes.into_iter().take(4).zip(corners) {
         let part = problem
             .parts
@@ -1826,8 +1866,34 @@ mod tests {
             "Connector_PinHeader:PinHeader_1x02",
             vec![("1".into(), "GND".into()), ("2".into(), "V3V3".into())],
         );
+        let rn2 = imported_part(
+            "RN2",
+            "Resistor_THT:R_Array_SIP9",
+            vec![
+                ("1".into(), "V3V3".into()),
+                ("2".into(), "OUT9".into()),
+                ("3".into(), "OUT10".into()),
+            ],
+        );
+        let cap1 = imported_part(
+            "C1",
+            "Capacitor_SMD:C_0603",
+            vec![("1".into(), "V3V3".into()), ("2".into(), "GND".into())],
+        );
+        let mut cap2 = cap1.clone();
+        cap2.reference = "C2".into();
+        let hole1 = imported_part("MH1", "MountingHole:MountingHole_3.2mm_M3", vec![]);
+        let mut hole2 = hole1.clone();
+        hole2.reference = "MH2".into();
         board.imported.parts.push(second.clone());
         board.imported.parts.push(power.clone());
+        board.imported.parts.extend([
+            rn2.clone(),
+            cap1.clone(),
+            cap2.clone(),
+            hole1.clone(),
+            hole2.clone(),
+        ]);
 
         let first_part = problem
             .parts
@@ -1842,6 +1908,29 @@ mod tests {
         second_part.courtyard_h = 49.5;
         problem.parts.push(second_part);
         problem.parts.push(placement_part(&power, false));
+        let rn1_part = problem
+            .parts
+            .iter_mut()
+            .find(|part| part.reference == "RN1")
+            .unwrap();
+        rn1_part.courtyard_w = 43.84;
+        rn1_part.courtyard_h = 3.12;
+        let mut rn2_part = placement_part(&rn2, false);
+        rn2_part.courtyard_w = 43.84;
+        rn2_part.courtyard_h = 3.12;
+        problem.parts.push(rn2_part);
+        for imported in [&cap1, &cap2] {
+            let mut part = placement_part(imported, false);
+            part.courtyard_w = 2.0;
+            part.courtyard_h = 2.0;
+            problem.parts.push(part);
+        }
+        for imported in [&hole1, &hole2] {
+            let mut part = placement_part(imported, false);
+            part.courtyard_w = 6.9;
+            part.courtyard_h = 6.9;
+            problem.parts.push(part);
+        }
 
         let mut hints = PlacementHints::default();
         add_817_array_hints(&design, &board, &problem, &mut hints).expect("verified 817 plan");
@@ -1920,6 +2009,13 @@ mod tests {
         assert!((jlog2.locked.as_ref().unwrap().at.x - 87.125).abs() < 1e-9);
         assert!((jpwr.locked.as_ref().unwrap().at.x - 58.5).abs() < 1e-9);
         assert!(jpwr.locked.as_ref().unwrap().at.y < jlog1.locked.as_ref().unwrap().at.y);
+        let rn1 = connector("RN1");
+        let rn2 = connector("RN2");
+        assert!((rn2.locked.as_ref().unwrap().at.x - rn1.locked.as_ref().unwrap().at.x) > 50.0);
+        let mh1 = connector("MH1").locked.as_ref().unwrap();
+        let mh2 = connector("MH2").locked.as_ref().unwrap();
+        assert!((mh1.at.y - 3.95).abs() < 1e-9);
+        assert!((mh2.at.y - 3.95).abs() < 1e-9);
         let placed_rect = |part: &Part| {
             let locked = part.locked.as_ref().unwrap();
             Rect::from_center_half(
