@@ -367,6 +367,41 @@ mod grid_tests {
     }
 
     #[test]
+    fn forced_single_port_wire_requires_the_original_clear_short_stub() {
+        let clear = sch_io::wire::RouteScene {
+            solids: Vec::new(),
+            points: Vec::new(),
+            segments: Vec::new(),
+            label_solids: Vec::new(),
+        };
+        assert!(safe_forced_single_port_stub(
+            [10.0, 10.0].into(),
+            [12.54, 10.0].into(),
+            "OUT1",
+            &clear,
+        ));
+        assert!(!safe_forced_single_port_stub(
+            [10.0, 10.0].into(),
+            [35.4, 10.0].into(),
+            "OUT1",
+            &clear,
+        ));
+
+        let blocked = sch_io::wire::RouteScene {
+            solids: vec![Rect::new(10.5, 9.0, 12.0, 11.0)],
+            points: Vec::new(),
+            segments: Vec::new(),
+            label_solids: Vec::new(),
+        };
+        assert!(!safe_forced_single_port_stub(
+            [10.0, 10.0].into(),
+            [12.54, 10.0].into(),
+            "OUT1",
+            &blocked,
+        ));
+    }
+
+    #[test]
     fn vdd_side_power_glyph_points_away_from_served_body() {
         // A west-facing VDD pin sits on the left edge of its symbol body. The VDD
         // arrow must extend west into open space, not east back through the body.

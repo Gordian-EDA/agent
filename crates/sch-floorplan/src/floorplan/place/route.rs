@@ -313,7 +313,16 @@ pub(crate) fn route_signal(
     // A LOCAL node — terminals clustered with no component body between them —
     // is drawn as one clean trunk + stubs (a tee), not an MST of independent
     // elbows whose overlapping collinear runs over-junction the node.
-    if route_local_tee(w, net, &terms, scene) {
+    // A nudged singleton port is no longer a local two-terminal tee. Treating a
+    // 25 mm collision-avoidance displacement as "local" draws a straight trunk
+    // through every intervening pin before the obstacle-aware router gets a say.
+    let local_tee_safe = port_idx.is_none_or(|pi| {
+        eps.len() != 1
+            || (terms[0].0[0] - terms[pi].0[0]).abs()
+                + (terms[0].0[1] - terms[pi].0[1]).abs()
+                <= 2.54 + EPS
+    });
+    if local_tee_safe && route_local_tee(w, net, &terms, scene) {
         if let (Some(side), Some(pi)) = (port, port_idx) {
             w.add_cluster_label(net, terms[pi].0, side_dir(side), true);
         }
@@ -471,11 +480,15 @@ pub(crate) fn route_signal(
     // 2.54mm pitch block each other's stubs): force the direct stub so the pin and its exit unify
     // into ONE component. Otherwise the bridge below emits a signal label on the pin (over the IC
     // body) AND the port label at the exit — the net renders twice (the BGA GPIO-bank defect). The
-    // hop is short + axis-aligned (single-pin ports follow the pin's own dir) so it's safe, and it
-    // only fires when the route genuinely failed, so cleanly-routed references stay byte-identical.
+    // The hop is normally short + axis-aligned (single-pin ports follow the pin's own dir), but
+    // collision avoidance may have nudged the exit through a neighbouring body. Only force the
+    // direct wire while the original short-stub invariant still holds and the live routing scene
+    // proves it clear. Otherwise the label bridge below keeps the two components electrically
+    // joined by name without drawing a placement-induced short through adjacent pins.
     if eps.len() == 1
         && let Some(pi) = port_idx
         && uf.find(0) != uf.find(pi)
+        && safe_forced_single_port_stub(pts[0], pts[pi], net, scene)
     {
         w.add_wire_on_net(pts[0], pts[pi], net);
         scene
@@ -673,6 +686,19 @@ pub(crate) fn route_signal(
         w.add_cluster_label(net, terms[pi].0, side_dir(side), true);
     }
     Ok(())
+}
+
+pub(crate) fn safe_forced_single_port_stub(
+    pin: ::geom::Point2,
+    exit: ::geom::Point2,
+    net: &str,
+    scene: &sch_io::wire::RouteScene,
+) -> bool {
+    let dx = (pin[0] - exit[0]).abs();
+    let dy = (pin[1] - exit[1]).abs();
+    let short = dx + dy <= 2.54 + EPS;
+    let axis_aligned = dx <= EPS || dy <= EPS;
+    short && axis_aligned && crate::wire::path_ok(&[pin, exit], net, scene)
 }
 
 /// Draw a clustered net as a single-trunk tee (one straight trunk + a short
