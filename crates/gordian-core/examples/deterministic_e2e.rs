@@ -83,9 +83,9 @@ fn main() -> anyhow::Result<()> {
         &ctx,
         "regenerate_board",
         json!({
-            "bounds": { "width": 86.0, "height": 63.0 },
+            "bounds": { "width": 80.0, "height": 58.0 },
             "rules": {
-                "layer_count": 4,
+                "layer_count": 6,
                 "clearance": 0.2,
                 "min_trace_width": 0.2,
                 "via_diameter": 0.6,
@@ -95,7 +95,11 @@ fn main() -> anyhow::Result<()> {
                     "-9V": 0.5,
                     "+3V3": 0.4,
                     "GND": 0.5
-                }
+                },
+                "pours": [
+                    {"net": "GND", "layer": "inner2"},
+                    {"net": "GND", "layer": "inner3"}
+                ]
             }
         }),
     )?;
@@ -110,13 +114,25 @@ fn main() -> anyhow::Result<()> {
                 {
                     "name": "mount_nw",
                     "members": ["H1"],
-                    "region": {"min_x": 3.6, "min_y": 3.6, "max_x": 3.8, "max_y": 3.8},
+                    "region": {"min_x": 4.9, "min_y": 4.9, "max_x": 5.1, "max_y": 5.1},
                     "grid": true
                 },
                 {
                     "name": "mount_ne",
                     "members": ["H2"],
-                    "region": {"min_x": 82.2, "min_y": 3.6, "max_x": 82.4, "max_y": 3.8},
+                    "region": {"min_x": 74.9, "min_y": 4.9, "max_x": 75.1, "max_y": 5.1},
+                    "grid": true
+                },
+                {
+                    "name": "mount_sw",
+                    "members": ["H3"],
+                    "region": {"min_x": 4.9, "min_y": 52.9, "max_x": 5.1, "max_y": 53.1},
+                    "grid": true
+                },
+                {
+                    "name": "mount_se",
+                    "members": ["H4"],
+                    "region": {"min_x": 74.9, "min_y": 52.9, "max_x": 75.1, "max_y": 53.1},
                     "grid": true
                 },
                 {
@@ -128,7 +144,7 @@ fn main() -> anyhow::Result<()> {
                 {
                     "name": "power",
                     "members": ["C1", "C2", "C6", "C7"],
-                    "region": {"min_x": 48.0, "min_y": 4.0, "max_x": 72.0, "max_y": 15.0},
+                    "region": {"min_x": 46.0, "min_y": 14.0, "max_x": 56.0, "max_y": 22.0},
                     "grid": true
                 },
                 {
@@ -140,36 +156,78 @@ fn main() -> anyhow::Result<()> {
                 {
                     "name": "output",
                     "members": ["J3"],
-                    "region": {"min_x": 84.1, "min_y": 26.0, "max_x": 84.4, "max_y": 37.0},
+                    "region": {"min_x": 78.1, "min_y": 24.0, "max_x": 78.4, "max_y": 35.0},
                     "grid": true
                 },
                 {
-                    "name": "preamp",
-                    "members": ["U2", "R1", "R2", "R3", "C3", "C4", "C5", "C8", "C9", "C10", "C11"],
-                    "region": {"min_x": 8.0, "min_y": 18.0, "max_x": 36.0, "max_y": 53.0},
+                    "name": "preamp_anchor",
+                    "members": ["U2"],
+                    "region": {"min_x": 14.9, "min_y": 30.9, "max_x": 15.1, "max_y": 31.1},
                     "grid": true
                 },
                 {
-                    "name": "filter",
-                    "members": ["U1", "C12", "C13", "R4", "R5", "R6", "R7", "R8", "R11", "C15", "C16", "R12", "R13"],
-                    "region": {"min_x": 44.0, "min_y": 18.0, "max_x": 68.0, "max_y": 49.0},
+                    "name": "preamp_decoupling_pos",
+                    "members": ["C8", "C10"],
+                    "region": {"min_x": 10.0, "min_y": 23.5, "max_x": 20.0, "max_y": 24.5},
                     "grid": true
                 },
                 {
-                    "name": "offset",
-                    "members": ["C14", "R9", "R10", "RV1"],
-                    "region": {"min_x": 70.0, "min_y": 47.0, "max_x": 82.0, "max_y": 59.0},
+                    "name": "preamp_decoupling_neg",
+                    "members": ["C9", "C11"],
+                    "region": {"min_x": 10.0, "min_y": 37.5, "max_x": 20.0, "max_y": 38.5},
+                    "grid": true
+                },
+                {
+                    "name": "preamp_input",
+                    "members": ["R1", "R2"],
+                    "region": {"min_x": 7.0, "min_y": 27.0, "max_x": 11.0, "max_y": 36.0},
+                    "grid": true
+                },
+                {
+                    "name": "preamp_feedback",
+                    "members": ["R3", "C3", "C4", "C5"],
+                    "region": {"min_x": 19.0, "min_y": 25.0, "max_x": 26.0, "max_y": 37.0},
+                    "grid": true
+                },
+                {
+                    "name": "filter_anchor",
+                    "members": ["U1"],
+                    "region": {"min_x": 49.9, "min_y": 30.9, "max_x": 50.1, "max_y": 31.1},
+                    "grid": true
+                },
+                {
+                    "name": "filter_network_west",
+                    "members": ["C12", "C13", "R4", "R5", "R6", "R7"],
+                    "region": {"min_x": 39.0, "min_y": 23.0, "max_x": 46.0, "max_y": 39.0},
+                    "grid": true
+                },
+                {
+                    "name": "filter_network_east",
+                    "members": ["R8", "R11", "C15", "C16", "R12", "R13"],
+                    "region": {"min_x": 54.0, "min_y": 23.0, "max_x": 61.0, "max_y": 39.0},
+                    "grid": true
+                },
+                {
+                    "name": "offset_passives",
+                    "members": ["C14", "R9", "R10"],
+                    "region": {"min_x": 58.0, "min_y": 40.0, "max_x": 62.0, "max_y": 48.0},
+                    "grid": true
+                },
+                {
+                    "name": "offset_pot",
+                    "members": ["RV1"],
+                    "region": {"min_x": 65.9, "min_y": 45.9, "max_x": 66.1, "max_y": 46.1},
                     "grid": true
                 },
                 {
                     "name": "postamp",
                     "members": ["R14", "RV2", "R15"],
-                    "region": {"min_x": 42.0, "min_y": 54.0, "max_x": 65.0, "max_y": 60.0},
+                    "region": {"min_x": 42.0, "min_y": 44.0, "max_x": 55.0, "max_y": 52.0},
                     "grid": true
                 }
             ],
             "edge_seek": [],
-            "corner_seek": ["H1", "H2"]
+            "corner_seek": []
         }),
     )?;
     if placement["legal"] != Value::Bool(true) {
