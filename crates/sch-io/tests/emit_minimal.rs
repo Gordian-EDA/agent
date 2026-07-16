@@ -35,3 +35,34 @@ fn emits_single_symbol_that_kicad_loads() {
     assert_eq!(nl.components[0].reference, "R1");
     let _ = report;
 }
+
+#[test]
+fn mounting_hole_instances_are_excluded_from_the_bom() {
+    let Some(env) = KicadEnv::detect() else {
+        eprintln!("SKIP: no KiCAD environment detected");
+        return;
+    };
+
+    let mut writer = SchematicWriter::new();
+    writer
+        .add_symbol(
+            &env,
+            "Mechanical:MountingHole",
+            "MH1",
+            "",
+            [50.8, 50.8],
+            0.0,
+        )
+        .unwrap();
+    writer
+        .add_symbol(&env, "Device:R", "R1", "1k", [76.2, 50.8], 0.0)
+        .unwrap();
+    let text = writer.finish();
+
+    let mounting_hole = &text[text
+        .find("\t\t(lib_id \"Mechanical:MountingHole\")")
+        .unwrap()..];
+    assert!(mounting_hole[..mounting_hole.find("\t)\n").unwrap()].contains("\t\t(in_bom no)"));
+    let resistor = &text[text.find("\t\t(lib_id \"Device:R\")").unwrap()..];
+    assert!(resistor[..resistor.find("\t)\n").unwrap()].contains("\t\t(in_bom yes)"));
+}

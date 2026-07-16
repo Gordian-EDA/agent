@@ -367,7 +367,11 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     }
     let _ = writeln!(s, "\t\t(unit {})", inst.unit);
     s.push_str("\t\t(exclude_from_sim no)\n");
-    s.push_str("\t\t(in_bom yes)\n");
+    let in_bom = !inst
+        .lib_id
+        .strip_prefix("Mechanical:")
+        .is_some_and(|name| name == "MountingHole" || name.starts_with("MountingHole_"));
+    let _ = writeln!(s, "\t\t(in_bom {})", if in_bom { "yes" } else { "no" });
     s.push_str("\t\t(on_board yes)\n");
     s.push_str("\t\t(dnp no)\n");
     let _ = writeln!(s, "\t\t(uuid \"{sym_uuid}\")");
