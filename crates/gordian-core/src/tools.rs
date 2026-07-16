@@ -63,7 +63,7 @@ pub fn tool_defs() -> Vec<Tool> {
     let defs = vec![
             Def {
                 name: "search_symbols".into(),
-                description: "Find symbol `Lib:Name`; batch up to 4 queries. Common parts are built in."
+                description: "Find symbol `Lib:Name`; batch 4 queries. Common parts are built in."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -89,7 +89,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "get_symbol_info".into(),
-                description: "Return symbol ratings/datasheet/default footprint and pins."
+                description: "Return symbol ratings, datasheet, footprint, and pins."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -101,7 +101,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "validate_design".into(),
-                description: "Recheck YAML/draft; authoring tools already return validation. Omit yaml for draft."
+                description: "Validate YAML or draft; omit yaml for draft."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -112,7 +112,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "apply_design".into(),
-                description: "Compile/render, approve/write the current durable draft, and run ERC. Author changes with edit_design first."
+                description: "Compile, render, write draft, and run ERC; edit first."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -122,7 +122,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "review_design".into(),
-                description: "Costly electrical review of the complete draft; required once before PCB work. Fix high-confidence defects."
+                description: "Costly full-draft electrical review required before PCB work; fix defects."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -133,7 +133,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "run_erc".into(),
-                description: "Fresh KiCAD ERC; do not call immediately after a clean apply_design."
+                description: "Run fresh KiCAD ERC; skip after clean apply_design."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
@@ -145,24 +145,24 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "read_schematic".into(),
-                description: "Read circuit-YAML text. source='draft' reads/seeds the draft; a .kicad_sch path does not."
+                description: "Read circuit YAML from draft or .kicad_sch; draft reads/seeds state."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "source": { "type": "string", "description": "'draft' (default) or .kicad_sch path." }
+                        "source": { "type": "string", "description": "draft (default) or .kicad_sch." }
                     }
                 }),
             },
             Def {
                 name: "render_schematic".into(),
-                description: "Render current schematic to PNG for visual inspection."
+                description: "Render schematic PNG."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "create_design".into(),
-                description: "Create complete circuit-YAML; never copy the example."
+                description: "Create complete circuit YAML; ignore examples."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -175,7 +175,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "edit_design".into(),
-                description: "Replace the complete draft with `yaml`; part loss needs allow_component_removal."
+                description: "Replace full draft; part loss needs allow_component_removal."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -190,7 +190,7 @@ pub fn tool_defs() -> Vec<Tool> {
             // ── PCB tools (slice 5) ─────────────────────────────────────────
             Def {
                 name: "search_footprints".into(),
-                description: "Find real footprint `Lib:Name` ids; batch up to 4 queries."
+                description: "Find footprint `Lib:Name` IDs; batch 4 queries."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -216,7 +216,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "get_footprint_info".into(),
-                description: "Return footprint pad numbers and compact geometry summary for a `Lib:Name`."
+                description: "Return pads and geometry for footprint `Lib:Name`."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -228,7 +228,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "assign_footprints".into(),
-                description: "Batch-set draft footprints; apply_design before regenerate_board."
+                description: "Set draft footprints; apply before PCB regeneration."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -252,13 +252,13 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "open_board".into(),
-                description: "Open project PCB for live IPC edits; returns get_board state."
+                description: "Open PCB for live IPC edits; return board state."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "move_parts".into(),
-                description: "Batch-move live footprints by absolute to, relative by, near, or edge; supports rotation/offsets."
+                description: "Move footprints by to, by, near, or edge, with rotation/offsets."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -299,7 +299,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "route_track".into(),
-                description: "Route one live connection with obstacle avoidance, layer changes, and optional via anchors."
+                description: "Route one connection around obstacles, with layers and optional vias."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -317,7 +317,7 @@ pub fn tool_defs() -> Vec<Tool> {
                             "maxItems": 2,
                         },
                         "net": { "type": "string" },
-                        "from_layer": { "type": "string", "description": "F.Cu/B.Cu/In1.Cu/top/bottom; default F.Cu." },
+                        "from_layer": { "type": "string", "description": "Layer; default F.Cu." },
                         "to_layer": { "type": "string" },
                         "width": { "type": "number" },
                         "vias": {
@@ -342,7 +342,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "delete_copper".into(),
-                description: "Delete live track/via copper near a point; optional kind/net/layer filters."
+                description: "Delete nearby track/via; filter by kind, net, or layer."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -369,7 +369,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "set_net_width".into(),
-                description: "Set live net-class width/clearance; prefer regenerate_board rules before routing."
+                description: "Set net-class width/clearance; prefer regeneration rules pre-route."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -384,7 +384,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "update_board_outline".into(),
-                description: "Edit existing Edge.Cuts: rectangle bounds, polygon outline, or fit_to_geometry plus margin."
+                description: "Edit Edge.Cuts by bounds, polygon, or fitted geometry."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -399,7 +399,7 @@ pub fn tool_defs() -> Vec<Tool> {
                         },
                         "outline": {
                             "type": "array",
-                            "description": "Closed [[x,y],...] polygon, mm.",
+                            "description": "Closed [[x,y],...] polygon (mm).",
                             "minItems": 3,
                             "items": {
                                 "type": "array",
@@ -410,9 +410,9 @@ pub fn tool_defs() -> Vec<Tool> {
                         },
                         "fit_to_geometry": {
                             "type": "boolean",
-                            "description": "Fit rectangle around parts/copper."
+                            "description": "Fit around parts/copper."
                         },
-                        "margin": { "type": "number", "description": "Fit margin, mm; default 2." }
+                        "margin": { "type": "number", "description": "Margin mm; default 2." }
                     }
                 }),
             },
@@ -460,7 +460,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "get_board".into(),
-                description: "Return board state. A net filter adds pad centers; include_copper adds copper."
+                description: "Return board; net adds pad centers, include_copper adds copper."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -478,7 +478,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "place_board".into(),
-                description: "Auto-place regenerated board; optional groups steer functional regions, regular grids, decoupler surrounds, and edge parts."
+                description: "Auto-place PCB; groups steer regions, grids, surrounds, and edges."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -501,7 +501,7 @@ pub fn tool_defs() -> Vec<Tool> {
                                     },
                                     "edge": { "type": "string", "enum": ["n", "s", "e", "w"] },
                                     "grid": { "type": "boolean" },
-                                    "surround": { "type": "string", "description": "Locked anchor reference to ring tightly." }
+                                    "surround": { "type": "string", "description": "Anchor reference to surround." }
                                 },
                                 "required": ["name", "members"],
                                 "additionalProperties": false
@@ -515,25 +515,25 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "route_board".into(),
-                description: "Auto-route placed board; returns failed nets/metrics."
+                description: "Auto-route board; return failures and metrics."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "render_board".into(),
-                description: "Render board PNG for visual inspection."
+                description: "Render board PNG."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "check_board".into(),
-                description: "Run PCB DRC. If ok=true, stop; do not reroute unchanged."
+                description: "Run PCB DRC; stop when ok."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "export_fab".into(),
-                description: "Export Gerbers/drill/position/BOM after check_board passes."
+                description: "Export fabrication files after clean check_board."
                     .into(),
                 input_schema: json!({
                     "type": "object",
