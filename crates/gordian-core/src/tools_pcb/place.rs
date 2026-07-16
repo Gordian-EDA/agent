@@ -505,7 +505,51 @@ pub(super) fn is_mounting_hole(footprint: &str) -> bool {
     footprint.to_ascii_lowercase().contains("mountinghole")
 }
 
-pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
+fn placement_hints_from_input(mut input: Value) -> std::result::Result<PlacementHints, String> {
+    let object = input
+        .as_object_mut()
+        .ok_or_else(|| "place_board input must be an object".to_owned())?;
+
+    // Tool inputs consistently use snake_case. The neutral placement SDK uses
+    // camelCase serde names so external engine payloads remain language-neutral.
+    // Normalize only that boundary here and keep the engine type canonical.
+    for (tool_name, sdk_name) in [("edge_seek", "edgeSeek"), ("corner_seek", "cornerSeek")] {
+        if let Some(value) = object.remove(tool_name) {
+            if object.insert(sdk_name.to_owned(), value).is_some() {
+                return Err(format!(
+                    "use {tool_name}, not both snake_case and camelCase"
+                ));
+            }
+        }
+    }
+    if let Some(groups) = object.get_mut("groups").and_then(Value::as_array_mut) {
+        for group in groups {
+            if let Some(region) = group
+                .as_object_mut()
+                .and_then(|group| group.get_mut("region"))
+                .and_then(Value::as_object_mut)
+            {
+                for (tool_name, sdk_name) in [
+                    ("min_x", "minX"),
+                    ("min_y", "minY"),
+                    ("max_x", "maxX"),
+                    ("max_y", "maxY"),
+                ] {
+                    if let Some(value) = region.remove(tool_name) {
+                        if region.insert(sdk_name.to_owned(), value).is_some() {
+                            return Err(format!(
+                                "use region.{tool_name}, not both snake_case and camelCase"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    serde_json::from_value(input).map_err(|e| format!("invalid placement hints: {e}"))
+}
+
+pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let board = match super::active::board_problem(ctx) {
         Ok(board) => board,
         Err(live_err) => return Ok(json!({ "error": live_err })),
@@ -520,7 +564,10 @@ pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // they land at the perimeter (where a cable or the enclosure reaches them),
     // not stranded in the interior with copper wrapping around them. Skip any
     // part the model already steered with an explicit group `edge` hint.
-    let mut hints = PlacementHints::default();
+    let mut hints = match placement_hints_from_input(input) {
+        Ok(hints) => hints,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
     let explicitly_edged: std::collections::BTreeSet<&str> = hints
         .groups
         .iter()
@@ -741,6 +788,45 @@ mod tests {
     use kicad_footprint::{FootprintCatalog, PadTechnology};
     use kicad_ipc::snapshot::{ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot};
     use pcb_model::{RouteProblem, RouteSolution, Trace, Via};
+
+    #[test]
+    fn placement_tool_accepts_snake_case_visual_hints() {
+        let hints = placement_hints_from_input(json!({
+            "groups": [{
+                "name": "power",
+                "members": ["U1", "C1", "C2"],
+                "region": { "min_x": 2.0, "min_y": 3.0, "max_x": 18.0, "max_y": 12.0 },
+                "edge": "w",
+                "grid": true,
+                "surround": "U1"
+            }],
+            "edge_seek": ["J1"],
+            "corner_seek": ["H1", "H2"]
+        }))
+        .expect("valid tool hints");
+
+        assert_eq!(hints.edge_seek, ["J1"]);
+        assert_eq!(hints.corner_seek, ["H1", "H2"]);
+        assert_eq!(hints.groups.len(), 1);
+        let group = &hints.groups[0];
+        assert_eq!(group.members, ["U1", "C1", "C2"]);
+        assert_eq!(group.region, Some(Rect::new(2.0, 3.0, 18.0, 12.0)));
+        assert_eq!(group.edge, Some(pcb_place::placement::Edge::W));
+        assert!(group.grid);
+        assert_eq!(group.surround.as_deref(), Some("U1"));
+    }
+
+    #[test]
+    fn placement_tool_rejects_unknown_or_mixed_case_hints() {
+        assert!(placement_hints_from_input(json!({ "scatter": ["R1"] })).is_err());
+        assert!(
+            placement_hints_from_input(json!({
+                "edge_seek": ["J1"],
+                "edgeSeek": ["J2"]
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn routing_bounds_reserve_kicad_edge_clearance_for_rectangles() {

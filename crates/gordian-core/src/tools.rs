@@ -478,9 +478,40 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "place_board".into(),
-                description: "Auto-place regenerated board; run after regenerate_board."
+                description: "Auto-place regenerated board; optional groups steer functional regions, regular grids, decoupler surrounds, and edge parts."
                     .into(),
-                input_schema: json!({ "type": "object", "properties": {} }),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "groups": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string" },
+                                    "members": { "type": "array", "items": { "type": "string" } },
+                                    "region": {
+                                        "type": "object",
+                                        "properties": {
+                                            "min_x": { "type": "number" }, "max_x": { "type": "number" },
+                                            "min_y": { "type": "number" }, "max_y": { "type": "number" }
+                                        },
+                                        "required": ["min_x", "min_y", "max_x", "max_y"],
+                                        "additionalProperties": false
+                                    },
+                                    "edge": { "type": "string", "enum": ["n", "s", "e", "w"] },
+                                    "grid": { "type": "boolean" },
+                                    "surround": { "type": "string", "description": "Locked anchor reference to ring tightly." }
+                                },
+                                "required": ["name", "members"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "edge_seek": { "type": "array", "items": { "type": "string" } },
+                        "corner_seek": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "additionalProperties": false
+                }),
             },
             Def {
                 name: "route_board".into(),
