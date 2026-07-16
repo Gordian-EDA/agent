@@ -1807,7 +1807,12 @@ impl<P: Provider> Agent<P> {
                     && regenerate_board_succeeded(&parsed)
                 {
                     let pipeline = self
-                        .run_pcb_finish_pipeline(approvals, &mut pcb_recovery, events)
+                        .run_pcb_finish_pipeline(
+                            authoritative_intent,
+                            approvals,
+                            &mut pcb_recovery,
+                            events,
+                        )
                         .await;
                     tool_calls_made += pipeline.stages.len();
                     for stage in &pipeline.stages {
@@ -2070,6 +2075,7 @@ impl<P: Provider> Agent<P> {
     /// Every other call runs once in [`RunMode::Normal`].
     async fn run_pcb_finish_pipeline(
         &self,
+        intent: &str,
         approvals: &mut dyn Approvals,
         pcb_recovery: &mut PcbRecoveryState,
         events: Events<'_>,
@@ -2122,15 +2128,31 @@ impl<P: Provider> Agent<P> {
             placement_retries += 1;
         }
 
-        for name in PCB_FINISH_PIPELINE_STEPS.into_iter().skip(1) {
+        for name in ["route_board", "check_board", "render_board"] {
             let stage = self
                 .run_pcb_finish_stage(name, json!({}), pcb_recovery, events)
                 .await;
-            let succeeded =
-                pcb_finish_stage_succeeded(stage.name, &parse_or_null(&stage.content));
+            let succeeded = pcb_finish_stage_succeeded(stage.name, &parse_or_null(&stage.content));
             stages.push(stage);
             if !succeeded {
                 break;
+            }
+        }
+        if stages.last().is_some_and(|stage| {
+            stage.name == "render_board"
+                && pcb_finish_stage_succeeded(stage.name, &parse_or_null(&stage.content))
+        }) {
+            let review = self
+                .run_pcb_visual_review_stage(intent, stages.last().expect("render stage"), events)
+                .await;
+            let succeeded =
+                pcb_finish_stage_succeeded(review.name, &parse_or_null(&review.content));
+            stages.push(review);
+            if succeeded {
+                let export = self
+                    .run_pcb_finish_stage("export_fab", json!({}), pcb_recovery, events)
+                    .await;
+                stages.push(export);
             }
         }
         let completed = stages.last().is_some_and(|stage| {
@@ -2141,6 +2163,82 @@ impl<P: Provider> Agent<P> {
             approved: true,
             completed,
             stages,
+        }
+    }
+
+    async fn run_pcb_visual_review_stage(
+        &self,
+        intent: &str,
+        render: &PcbFinishStage,
+        events: Events<'_>,
+    ) -> PcbFinishStage {
+        const NAME: &str = "review_board";
+        emit(
+            events,
+            AgentEvent::ToolStarted {
+                name: NAME.to_string(),
+            },
+        );
+        let value = if !self.runtime.config().review.layout {
+            json!({
+                "ok": true,
+                "skipped": true,
+                "reason": "visual layout review is disabled by configuration",
+            })
+        } else if !self.client.vision() {
+            json!({
+                "ok": true,
+                "skipped": true,
+                "reason": "the configured provider does not accept image input",
+            })
+        } else if render.images.len() != 1 {
+            json!({
+                "ok": false,
+                "error": format!(
+                    "render_board produced {} usable overview images; expected exactly one",
+                    render.images.len()
+                ),
+            })
+        } else {
+            match review_layout_board(
+                &self.client,
+                intent,
+                render.images[0].clone(),
+                &self.runtime.config().review,
+            )
+            .await
+            {
+                Ok((score, defects)) if defects.is_empty() => json!({
+                    "ok": true,
+                    "score": score,
+                    "defects": defects,
+                }),
+                Ok((score, defects)) => json!({
+                    "ok": false,
+                    "code": "pcb_visual_review_defects",
+                    "score": score,
+                    "defects": defects,
+                    "error": "PCB visual review found actionable layout defects",
+                }),
+                Err(error) => json!({
+                    "ok": false,
+                    "code": "pcb_visual_review_failed",
+                    "error": error.to_string(),
+                }),
+            }
+        };
+        emit(
+            events,
+            AgentEvent::ToolFinished {
+                name: NAME.to_string(),
+                summary: tool_summary(NAME, &json!({}), &value),
+                image_path: None,
+            },
+        );
+        PcbFinishStage {
+            name: NAME,
+            content: value.to_string(),
+            images: Vec::new(),
         }
     }
 
@@ -2397,11 +2495,12 @@ fn operation_approval(call: &ToolCall) -> Value {
     })
 }
 
-const PCB_FINISH_PIPELINE_STEPS: [&str; 5] = [
+const PCB_FINISH_PIPELINE_STEPS: [&str; 6] = [
     "place_board",
     "route_board",
     "check_board",
     "render_board",
+    "review_board",
     "export_fab",
 ];
 
@@ -2446,7 +2545,9 @@ fn pcb_finish_stage_succeeded(name: &str, value: &Value) -> bool {
             .and_then(Value::as_array)
             .is_some_and(Vec::is_empty),
         "check_board" => check_board_is_clean(value),
-        "render_board" | "export_fab" => value.get("ok").and_then(Value::as_bool) == Some(true),
+        "render_board" | "review_board" | "export_fab" => {
+            value.get("ok").and_then(Value::as_bool) == Some(true)
+        }
         _ => false,
     }
 }
@@ -4150,6 +4251,28 @@ async fn review_layout_schematic(
     .ok()
 }
 
+async fn review_layout_board(
+    reviewer: &dyn Provider,
+    intent: &str,
+    image: Binary,
+    config: &crate::config::ReviewConfig,
+) -> Result<(f64, Vec<String>)> {
+    let (score, defects) = crate::review_kicad::review_layout(
+        reviewer,
+        intent,
+        image,
+        crate::review_kicad::LayoutKind::Board,
+        config,
+    )
+    .await?;
+    if score <= 0.0 && defects.is_empty() {
+        return Err(anyhow::anyhow!(
+            "PCB visual reviewer returned no usable verdict"
+        ));
+    }
+    Ok((score, defects))
+}
+
 /// Turn a tool's `Result<Value>` into a [`ToolOutcome`]: a tool error becomes a
 /// structured `{error: …}` value (the model self-repairs), images are pulled out
 /// of the value via [`take_images`] (which also surfaces the render PNG's path for
@@ -5769,12 +5892,13 @@ mod tests {
     }
 
     #[test]
-    fn scripted_pcb_finish_success_is_ordered_without_provider_work() {
+    fn scripted_pcb_finish_success_includes_visual_review_before_fabrication() {
         let results = vec![
             json!({"ok": true, "legal": true}),
             json!({"ok": true, "failed": []}),
             json!({"ok": true, "blocking_findings": 0}),
             json!({"ok": true, "png_path": "/tmp/board.png"}),
+            json!({"ok": true, "score": 9.0, "defects": []}),
             json!({"ok": true, "file_count": 16}),
         ];
 
@@ -5787,6 +5911,7 @@ mod tests {
                 .iter()
                 .all(|name| *name != "review_design")
         );
+        assert_eq!(PCB_FINISH_PIPELINE_STEPS[4], "review_board");
         assert_eq!(
             pcb_finish_pipeline_approval()["steps"],
             json!(PCB_FINISH_PIPELINE_STEPS)
@@ -5815,6 +5940,46 @@ mod tests {
             scripted_pcb_finish_order(&dirty_drc),
             ["place_board", "route_board", "check_board"]
         );
+
+        let rejected_visual_review = vec![
+            json!({"ok": true, "legal": true}),
+            json!({"ok": true, "failed": []}),
+            json!({"ok": true, "blocking_findings": 0}),
+            json!({"ok": true}),
+            json!({"ok": false, "defects": ["poor connector placement"]}),
+            json!({"ok": true}),
+        ];
+        assert_eq!(
+            scripted_pcb_finish_order(&rejected_visual_review),
+            [
+                "place_board",
+                "route_board",
+                "check_board",
+                "render_board",
+                "review_board"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pcb_visual_review_requires_a_parseable_verdict_and_surfaces_defects() {
+        let image = Binary::from_base64("image/png", "AA==", None);
+        let config = crate::config::ReviewConfig::default();
+        let malformed = ScriptedClient::new(vec![final_text("not a verdict")]);
+        let error = review_layout_board(&malformed, "test board", image.clone(), &config)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no usable verdict"), "{error}");
+
+        let defective = ScriptedClient::new(vec![final_text(
+            r#"FINAL_JSON: {"score":6,"defects":[{"severity":"major","confidence":"high","category":"placement","location":"J1","description":"J1 is stranded in the board center instead of on the accessible edge.","verification":"The visible board outline surrounds J1 on all four sides."}]}"#,
+        )]);
+        let (score, defects) = review_layout_board(&defective, "test board", image, &config)
+            .await
+            .unwrap();
+        assert_eq!(score, 6.0);
+        assert_eq!(defects.len(), 1);
+        assert!(defects[0].contains("J1"), "{defects:?}");
     }
 
     #[test]
@@ -5849,7 +6014,7 @@ mod tests {
         let mut recovery = PcbRecoveryState::default();
 
         let run = agent
-            .run_pcb_finish_pipeline(&mut approvals, &mut recovery, None)
+            .run_pcb_finish_pipeline("test board", &mut approvals, &mut recovery, None)
             .await;
 
         assert!(!run.approved);
