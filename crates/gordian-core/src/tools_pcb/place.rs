@@ -1521,11 +1521,29 @@ fn placement_size_estimate(
     }
 }
 
+fn placement_existing_copper_error(tracks: usize, vias: usize) -> Option<Value> {
+    (tracks > 0 || vias > 0).then(|| {
+        json!({
+            "error": "automatic placement requires a copper-free board",
+            "code": "placement_requires_copper_free_board",
+            "placement_applied": false,
+            "tracks": tracks,
+            "vias": vias,
+            "note": "Footprints were not moved. Preserve the existing route, or explicitly delete all tracks and vias before running place_board.",
+        })
+    })
+}
+
 pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let board = match super::active::board_problem(ctx) {
         Ok(board) => board,
         Err(live_err) => return Ok(json!({ "error": live_err })),
     };
+    if let Some(error) =
+        placement_existing_copper_error(board.copper.traces.len(), board.copper.vias.len())
+    {
+        return Ok(error);
+    }
 
     let problem = match place_problem_from_snapshot(&board, ctx) {
         Ok(p) => p,
@@ -2206,6 +2224,17 @@ mod tests {
                 .collect()
             );
         }
+    }
+
+    #[test]
+    fn placement_refuses_to_move_footprints_under_existing_copper() {
+        let blocked = placement_existing_copper_error(1, 0).unwrap();
+
+        assert_eq!(blocked["code"], "placement_requires_copper_free_board");
+        assert_eq!(blocked["placement_applied"], false);
+        assert_eq!(blocked["tracks"], 1);
+        assert_eq!(blocked["vias"], 0);
+        assert!(placement_existing_copper_error(0, 0).is_none());
     }
 
     #[test]
