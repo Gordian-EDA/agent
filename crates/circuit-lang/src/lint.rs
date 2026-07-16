@@ -8,6 +8,8 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
     let mut diags = Diagnostics::default();
     let mut net_pins: indexmap::IndexMap<&str, Vec<String>> = indexmap::IndexMap::new();
     let mut net_parts: indexmap::IndexMap<&str, Vec<String>> = indexmap::IndexMap::new();
+    let mut net_blocks: indexmap::IndexMap<&str, std::collections::BTreeSet<String>> =
+        indexmap::IndexMap::new();
     let mut net_power_inputs: indexmap::IndexMap<String, Vec<String>> = indexmap::IndexMap::new();
     let mut net_power_sources: indexmap::IndexMap<String, Vec<String>> = indexmap::IndexMap::new();
     let mut passive_fuse_links: Vec<(String, String, String)> = Vec::new();
@@ -17,11 +19,15 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
     let mut osc_nets: std::collections::BTreeSet<String> = Default::default();
     let mut ctrl_pins: indexmap::IndexMap<String, Vec<String>> = Default::default();
 
-    for (_bname, block) in &d.blocks {
+    for (bname, block) in &d.blocks {
         for (refdes, comp) in block.components.iter() {
             let all_pins = comp.pins.iter().chain(comp.units.values().flatten());
             for (key, target) in all_pins.clone() {
                 if let PinTarget::Net(n) = target {
+                    net_blocks
+                        .entry(n.as_str())
+                        .or_default()
+                        .insert(bname.clone());
                     net_pins
                         .entry(n.as_str())
                         .or_default()
@@ -177,6 +183,42 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
     }
 
     let allow = |code: &str| d.lint_allow.contains(code);
+
+    // Blocks are independently placed schematic regions. Splitting a wide signal
+    // bank by component category turns every channel into off-region labels and can
+    // overwhelm both placement and human review. Flag only a strong signal: at least
+    // twelve distinct non-power nets crossing the same pair of blocks.
+    if !allow("fragmented-block-floorplan") {
+        let mut pair_nets: std::collections::BTreeMap<(String, String), Vec<&str>> =
+            Default::default();
+        for (net, blocks) in &net_blocks {
+            let upper = net.to_ascii_uppercase();
+            if is_power_like_net_name(net) || upper == "GND" || upper.starts_with("GND") {
+                continue;
+            }
+            let blocks = blocks.iter().collect::<Vec<_>>();
+            for i in 0..blocks.len() {
+                for j in (i + 1)..blocks.len() {
+                    pair_nets
+                        .entry((blocks[i].clone(), blocks[j].clone()))
+                        .or_default()
+                        .push(net);
+                }
+            }
+        }
+        for ((a, b), nets) in pair_nets {
+            if nets.len() >= 12 {
+                diags.push(Diagnostic::warning(
+                    "fragmented-block-floorplan",
+                    format!(
+                        "blocks `{a}` and `{b}` share {} signal nets ({}) — keep the repeated channel bank/end-to-end paths in one block to avoid a label-only fragmented floorplan",
+                        nets.len(),
+                        nets.iter().take(6).copied().collect::<Vec<_>>().join(", ")
+                    ),
+                ));
+            }
+        }
+    }
 
     // A connector or regulator can legitimately feed a named rail through a
     // fuse. Passive fuse symbols do not declare a power-output pin, so carry
@@ -548,6 +590,36 @@ blocks:
         assert!(
             !diags.0.iter().any(|d| d.code == "near-name"),
             "multi-pin near-named nets must not warn: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn wide_cross_block_signal_bank_warns_about_fragmented_floorplan() {
+        let left = (1..=12)
+            .map(|i| format!("R{i}: {{part: R, between: [CH{i}, LEFT{i}]}}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let right = (1..=12)
+            .map(|i| format!("R{}: {{part: R, between: [CH{i}, RIGHT{i}]}}", i + 12))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let src = format!(
+            "version: 1\nblocks:\n  inputs:\n    components: {{{left}}}\n  isolators:\n    components: {{{right}}}\n"
+        );
+        let diags = run(&src);
+        let warning = diags
+            .0
+            .iter()
+            .find(|d| d.code == "fragmented-block-floorplan")
+            .expect("wide cross-block bank must be regrouped");
+        assert!(warning.message.contains("12 signal nets"));
+
+        let allowed = format!("{src}lint:\n  allow: [fragmented-block-floorplan]\n");
+        assert!(
+            !run(&allowed)
+                .0
+                .iter()
+                .any(|d| d.code == "fragmented-block-floorplan")
         );
     }
 
