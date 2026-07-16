@@ -1675,6 +1675,94 @@ fn erc_hint(kind: &str, description: &str) -> Option<&'static str> {
 
 // ── 9. create_design / edit_design ────────────────────────────────────────
 
+fn symbol_for_misplaced_footprint(footprint: &str, pad_count: usize) -> Option<String> {
+    let (library, name) = footprint.split_once(':')?;
+    let symbol = if library.starts_with("Resistor_") {
+        "Device:R"
+    } else if library.starts_with("Capacitor_") {
+        "Device:C"
+    } else if library.starts_with("Inductor_") {
+        "Device:L"
+    } else if library.starts_with("LED_") {
+        "Device:LED"
+    } else if matches!(library, "Diode_SMD" | "Diode_THT") {
+        "Device:D"
+    } else if library == "MountingHole" && name.starts_with("MountingHole") {
+        "Mechanical:MountingHole"
+    } else if (library.contains("TestPoint") || name.starts_with("TestPoint")) && pad_count == 1 {
+        "Connector:TestPoint"
+    } else if library.starts_with("Connector_PinHeader_")
+        && name.starts_with("PinHeader_1x")
+        && (1..=40).contains(&pad_count)
+    {
+        return Some(format!("Connector_Generic:Conn_01x{pad_count:02}"));
+    } else {
+        return None;
+    };
+    Some(symbol.to_owned())
+}
+
+fn normalize_misplaced_footprint_parts(
+    yaml: &str,
+    ctx: &AgentRuntime,
+) -> Result<(String, Vec<Value>)> {
+    let Some(surface) = circuit_lang::parse::parse_str(yaml).0 else {
+        return Ok((yaml.to_owned(), Vec::new()));
+    };
+    let catalog = ctx.footprint_catalog()?;
+    let mut replacements = Vec::new();
+    for block in surface.blocks.values() {
+        for (reference, component) in &block.components {
+            let Ok(id) = FootprintId::parse(&component.part) else {
+                continue;
+            };
+            let Ok(footprint) = catalog.footprint(&id) else {
+                continue;
+            };
+            let Some(symbol) = symbol_for_misplaced_footprint(&component.part, footprint.pads.len())
+            else {
+                continue;
+            };
+            replacements.push((reference.clone(), component.part.clone(), symbol));
+        }
+    }
+
+    let mut normalized = yaml.to_owned();
+    let mut report = Vec::new();
+    for (reference, footprint, symbol) in replacements {
+        normalized = crate::tools_pcb::patch_part_and_footprint(
+            &normalized,
+            &reference,
+            &symbol,
+            &footprint,
+        )
+        .map_err(anyhow::Error::msg)?;
+        report.push(json!({
+            "reference": reference,
+            "original_part": footprint,
+            "inferred_symbol": symbol,
+            "assigned_footprint": footprint,
+        }));
+    }
+    Ok((normalized, report))
+}
+
+fn add_footprint_part_normalizations(report: &mut Value, normalizations: Vec<Value>) {
+    if !normalizations.is_empty() {
+        const MAX_EXAMPLES: usize = 8;
+        let count = normalizations.len();
+        let examples = normalizations
+            .into_iter()
+            .take(MAX_EXAMPLES)
+            .collect::<Vec<_>>();
+        report["normalized_misplaced_footprints"] = json!({
+            "count": count,
+            "examples": examples,
+            "omitted": count.saturating_sub(MAX_EXAMPLES),
+        });
+    }
+}
+
 fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let yaml = require_str(&input, "yaml")?;
     let overwrite = input
@@ -1690,8 +1778,10 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "draft_changed": false,
         }));
     }
+    let (yaml, normalizations) = normalize_misplaced_footprint_parts(&yaml, ctx)?;
     let result = compile(&yaml, ctx.provider());
     let mut report = compile_authoring_report(&result, ctx)?;
+    add_footprint_part_normalizations(&mut report, normalizations);
     if reject_empty_draft_candidate(&mut report, &result, draft_exists, yaml.trim().is_empty()) {
         return Ok(report);
     }
@@ -2275,8 +2365,10 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Some(yaml) = full_yaml {
         let prior_draft = ctx.workspace().read_draft()?;
         let draft_exists = prior_draft.is_some();
-        let result = compile(yaml, ctx.provider());
+        let (yaml, normalizations) = normalize_misplaced_footprint_parts(yaml, ctx)?;
+        let result = compile(&yaml, ctx.provider());
         let mut report = compile_authoring_report(&result, ctx)?;
+        add_footprint_part_normalizations(&mut report, normalizations);
         if reject_empty_draft_candidate(&mut report, &result, draft_exists, yaml.trim().is_empty())
         {
             report["mode"] = json!(if draft_exists {
@@ -2372,12 +2464,12 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
         }
         ctx.workspace()
-            .write_draft(yaml, current_sch_text(ctx).as_deref())?;
+            .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
         report["draft_written"] = json!(true);
-        report["draft_changed"] = json!(prior_draft.as_deref() != Some(yaml));
+        report["draft_changed"] = json!(prior_draft.as_deref() != Some(yaml.as_str()));
         report["electrical_design_changed"] = json!(electrical_yaml_changed(
             prior_draft.as_deref(),
-            yaml,
+            &yaml,
             ctx.provider()
         ));
         report["mode"] = json!(if draft_exists {
@@ -2566,9 +2658,144 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        compile_report, edit_design, invalid_compile_quality_regressed, repair_components,
-        repair_components_tool, tool_defs,
+        compile_report, create_design, edit_design, invalid_compile_quality_regressed,
+        normalize_misplaced_footprint_parts, repair_components, repair_components_tool,
+        symbol_for_misplaced_footprint, tool_defs,
     };
+
+    #[test]
+    fn misplaced_footprint_inference_is_limited_to_safe_families() {
+        for (footprint, pads, symbol) in [
+            ("Resistor_SMD:R_0603", 2, "Device:R"),
+            ("Capacitor_THT:C_Disc", 2, "Device:C"),
+            ("Inductor_SMD:L_0603", 2, "Device:L"),
+            ("LED_SMD:LED_0603", 2, "Device:LED"),
+            ("Diode_SMD:D_SOD-123", 2, "Device:D"),
+            ("MountingHole:MountingHole_3.2mm", 0, "Mechanical:MountingHole"),
+            ("TestPoint:TestPoint_Pad", 1, "Connector:TestPoint"),
+            (
+                "Connector_PinHeader_2.54mm:PinHeader_1x08_Vertical",
+                8,
+                "Connector_Generic:Conn_01x08",
+            ),
+        ] {
+            assert_eq!(
+                symbol_for_misplaced_footprint(footprint, pads).as_deref(),
+                Some(symbol),
+                "{footprint}"
+            );
+        }
+        assert_eq!(symbol_for_misplaced_footprint("Package_QFP:LQFP-48", 48), None);
+        assert_eq!(symbol_for_misplaced_footprint("Package_TO_SOT_SMD:SOT-23", 3), None);
+        assert_eq!(
+            symbol_for_misplaced_footprint(
+                "Connector_PinHeader_2.54mm:PinHeader_2x04_Vertical",
+                8
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn create_and_edit_persist_misplaced_footprint_recovery() {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../kicad-footprint/tests/fixtures/footprints/R_0603_1608Metric.kicad_mod");
+        let footprints = tempfile::tempdir().unwrap();
+        let pretty = footprints.path().join("Resistor_SMD.pretty");
+        std::fs::create_dir_all(&pretty).unwrap();
+        std::fs::copy(&source, pretty.join("R_0603_1608Metric.kicad_mod")).unwrap();
+        let runtime =
+            AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf()).unwrap();
+        let misplaced = "Resistor_SMD:R_0603_1608Metric";
+        let components = (1..=10)
+            .map(|index| {
+                format!(
+                    "      R{index}:\n        part: {misplaced}\n        between: [A{index}, B{index}]"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let multiline = format!(
+            "version: 1\nblocks:\n  main:\n    components:\n{components}\n"
+        );
+
+        let created = create_design(json!({"yaml": multiline}), &runtime).unwrap();
+        assert_eq!(created["normalized_misplaced_footprints"]["count"], 10);
+        assert_eq!(created["normalized_misplaced_footprints"]["examples"].as_array().unwrap().len(), 8);
+        assert_eq!(created["normalized_misplaced_footprints"]["examples"][0]["reference"], "R1");
+        assert_eq!(created["normalized_misplaced_footprints"]["omitted"], 2);
+        assert_eq!(created["draft_written"], true);
+        let draft = runtime.workspace().read_draft().unwrap().unwrap();
+        assert!(draft.contains("part: \"Device:R\""));
+        assert!(draft.contains(&format!("footprint: \"{misplaced}\"")));
+
+        let inline_components = (1..=10)
+            .map(|index| {
+                format!(
+                    "R{index}: {{part: {misplaced}, between: [A{index}, C{index}]}}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let inline = format!(
+            "version: 1\nblocks: {{main: {{components: {{{inline_components}}}}}}}\n"
+        );
+        let edited = edit_design(json!({"yaml": inline}), &runtime).unwrap();
+        assert_eq!(edited["normalized_misplaced_footprints"]["count"], 10);
+        assert_eq!(edited["normalized_misplaced_footprints"]["examples"].as_array().unwrap().len(), 8);
+        assert_eq!(edited["normalized_misplaced_footprints"]["examples"][0]["reference"], "R1");
+        assert_eq!(edited["normalized_misplaced_footprints"]["omitted"], 2);
+        assert_eq!(edited["draft_written"], true);
+        let draft = runtime.workspace().read_draft().unwrap().unwrap();
+        assert!(draft.contains("part: \"Device:R\""));
+        assert!(draft.contains(&format!("footprint: \"{misplaced}\"")));
+    }
+
+    #[test]
+    fn misplaced_footprints_normalize_safe_inline_and_multiline_families_only() {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../kicad-footprint/tests/fixtures/footprints");
+        let footprints = tempfile::tempdir().unwrap();
+        for (library, file) in [
+            ("Resistor_SMD", "R_0603_1608Metric.kicad_mod"),
+            (
+                "Connector_PinHeader_2.54mm",
+                "PinHeader_1x02_P2.54mm_Vertical.kicad_mod",
+            ),
+            ("Package_TO_SOT_SMD", "SOT-23.kicad_mod"),
+        ] {
+            let pretty = footprints.path().join(format!("{library}.pretty"));
+            std::fs::create_dir_all(&pretty).unwrap();
+            std::fs::copy(source.join(file), pretty.join(file)).unwrap();
+        }
+        let runtime =
+            AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf()).unwrap();
+        let yaml = r#"version: 1
+blocks:
+  main:
+    components:
+      R1: {part: Resistor_SMD:R_0603_1608Metric, between: [A, B]}
+      J1:
+        part: Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical
+        pins: {1: A, 2: B}
+      U1: {part: Package_TO_SOT_SMD:SOT-23, pins: {1: A, 2: B, 3: C}}
+"#;
+
+        let (normalized, changes) =
+            normalize_misplaced_footprint_parts(yaml, &runtime).unwrap();
+
+        assert!(normalized.contains(
+            "R1: {part: \"Device:R\", between: [A, B], footprint: \"Resistor_SMD:R_0603_1608Metric\"}"
+        ));
+        assert!(normalized.contains("        part: \"Connector_Generic:Conn_01x02\""));
+        assert!(normalized.contains(
+            "        footprint: \"Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical\""
+        ));
+        assert!(normalized.contains("U1: {part: Package_TO_SOT_SMD:SOT-23"));
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0]["reference"], "R1");
+        assert_eq!(changes[1]["reference"], "J1");
+    }
 
     fn invalid_refdes_draft(count: usize) -> String {
         let components = (1..=count)

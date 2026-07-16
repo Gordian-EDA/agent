@@ -260,6 +260,26 @@ fn patch_footprint(
     reference: &str,
     footprint: &str,
 ) -> Result<(String, &'static str), String> {
+    patch_component_scalar(draft, reference, "footprint", footprint)
+}
+
+pub(crate) fn patch_part_and_footprint(
+    draft: &str,
+    reference: &str,
+    part: &str,
+    footprint: &str,
+) -> Result<String, String> {
+    let (draft, _) = patch_component_scalar(draft, reference, "part", part)?;
+    let (draft, _) = patch_component_scalar(&draft, reference, "footprint", footprint)?;
+    Ok(draft)
+}
+
+fn patch_component_scalar(
+    draft: &str,
+    reference: &str,
+    field: &str,
+    value: &str,
+) -> Result<(String, &'static str), String> {
     let mut lines: Vec<String> = draft.lines().map(str::to_owned).collect();
     let had_trailing_newline = draft.ends_with('\n');
     let target = format!("{reference}:");
@@ -270,7 +290,7 @@ fn patch_footprint(
             && line[target_pos..].contains('{')
             && line[target_pos..].contains('}')
         {
-            let (line, kind) = patch_inline_component(line, target_pos, footprint)?;
+            let (line, kind) = patch_inline_component(line, target_pos, field, value)?;
             lines[i] = line;
             return Ok((join_lines(lines, had_trailing_newline), kind));
         }
@@ -292,19 +312,19 @@ fn patch_footprint(
             end += 1;
         }
         for line in lines.iter_mut().take(end).skip(i + 1) {
-            if line.trim_start().starts_with("footprint:") {
+            if line.trim_start().starts_with(&format!("{field}:")) {
                 let existing_indent = line.len() - line.trim_start().len();
                 *line = format!(
-                    "{}footprint: {}",
+                    "{}{field}: {}",
                     " ".repeat(existing_indent),
-                    yaml_string(footprint)
+                    yaml_string(value)
                 );
                 return Ok((join_lines(lines, had_trailing_newline), "updated"));
             }
         }
         lines.insert(
             i + 1,
-            format!("{child_indent}footprint: {}", yaml_string(footprint)),
+            format!("{child_indent}{field}: {}", yaml_string(value)),
         );
         return Ok((join_lines(lines, had_trailing_newline), "inserted"));
     }
@@ -316,7 +336,8 @@ fn patch_footprint(
 fn patch_inline_component(
     line: &str,
     target_pos: usize,
-    footprint: &str,
+    field: &str,
+    field_value: &str,
 ) -> Result<(String, &'static str), String> {
     let open = line[target_pos..]
         .find('{')
@@ -326,13 +347,12 @@ fn patch_inline_component(
         .ok_or_else(|| "inline component map has no matching `}`".to_string())?;
     let body_start = open + 1;
     let body = &line[body_start..close];
-    let value = format!("footprint: {}", yaml_string(footprint));
-    if let Some(rel_pos) = body.find("footprint:") {
+    let value = format!("{field}: {}", yaml_string(field_value));
+    let field_prefix = format!("{field}:");
+    if let Some(rel_pos) = body.find(&field_prefix) {
         let pos = body_start + rel_pos;
-        let after = pos + "footprint:".len();
-        let rel_end = line[after..close]
-            .find([',', '}'])
-            .ok_or_else(|| "inline component footprint field is malformed".to_string())?;
+        let after = pos + field_prefix.len();
+        let rel_end = line[after..close].find(',').unwrap_or(close - after);
         let end = after + rel_end;
         let mut out = String::new();
         out.push_str(&line[..pos]);

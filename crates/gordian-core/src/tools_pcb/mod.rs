@@ -53,6 +53,7 @@ pub use create::regenerate_board;
 pub use export::check_board;
 pub use fab::export_fab;
 pub use footprints::{assign_footprints, get_footprint_info, search_footprints};
+pub(crate) use footprints::patch_part_and_footprint;
 pub use interactive::{
     delete_copper, move_parts, open_board, route_track, save_session_if_open, set_net_width,
 };
