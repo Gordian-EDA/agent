@@ -1262,8 +1262,23 @@ impl<P: Provider> Agent<P> {
                 );
                 let create_on_existing_draft_blocked =
                     call.fn_name == "create_design" && draft_existed_before_completion;
+                let current_draft = self.runtime.workspace().read_draft().ok().flatten();
                 let minimum_component_guard =
-                    undersized_full_draft_result(authoritative_intent, call);
+                    undersized_full_draft_result(authoritative_intent, call)
+                        .or_else(|| {
+                            undersized_existing_draft_result(
+                                authoritative_intent,
+                                call,
+                                current_draft.as_deref(),
+                            )
+                        })
+                        .or_else(|| {
+                            undersized_component_repair_result(
+                                authoritative_intent,
+                                call,
+                                current_draft.as_deref(),
+                            )
+                        });
                 let component_shortfall_tool_blocked = component_shortfall_focus
                     .as_ref()
                     .is_some_and(|focus| !focus.permits(&call.fn_name));
@@ -3198,6 +3213,145 @@ fn undersized_full_draft_result(authoritative_intent: &str, call: &ToolCall) -> 
         "draft_changed": false,
         "next_tool": call.fn_name,
         "note": format!("Resend one complete {} YAML document with at least {required} authored physical component entries. Power/label symbols, DNP entries, and `decouple` sugar do not count. Footprints may be assigned in the YAML or with assign_footprints before apply. Do not submit a syntax fragment or placeholder.", call.fn_name),
+    }))
+}
+
+/// Keep an explicit component floor invariant once a draft exists. This also
+/// closes the case where a turn starts from an older undersized draft: scalar
+/// footprint edits and apply/review calls must not let that draft advance.
+fn undersized_existing_draft_result(
+    authoritative_intent: &str,
+    call: &ToolCall,
+    current_yaml: Option<&str>,
+) -> Option<Value> {
+    if matches!(call.fn_name.as_str(), "create_design" | "edit_design") {
+        return None;
+    }
+    let required = explicit_minimum_physical_components(authoritative_intent)?;
+    let current_yaml = current_yaml?;
+    let count = draft_physical_count(current_yaml);
+    let actual = count.total();
+    if actual >= required {
+        return None;
+    }
+    Some(json!({
+        "ok": false,
+        "error": format!("current draft has {actual} physical components, below the explicit minimum of {required}"),
+        "code": "minimum_physical_component_count_not_met",
+        "required_minimum": required,
+        "candidate_physical_components": actual,
+        "authored_physical_candidates": count.authored_candidates,
+        "explicit_footprinted_components": count.explicit_footprinted,
+        "synthesized_decouplers": count.synthesized_decouplers,
+        "shortfall": required - actual,
+        "draft_written": false,
+        "draft_changed": false,
+        "next_tool": "edit_design",
+        "note": format!("The existing draft was preserved. Submit one complete edit_design YAML document with at least {required} authored physical component entries before footprint assignment, review, apply, or PCB work."),
+    }))
+}
+
+fn surface_component_is_physical(component: &circuit_lang::surface::SurfaceComponent) -> bool {
+    !component.dnp && !component.part.starts_with("power:") && !component.part.starts_with("label:")
+}
+
+/// `repair_components` is transactional, but it can remove authored entries.
+/// Predict the physical-count delta before dispatch so a clean qualifying draft
+/// cannot be durably reduced below the request's explicit floor.
+fn undersized_component_repair_result(
+    authoritative_intent: &str,
+    call: &ToolCall,
+    current_yaml: Option<&str>,
+) -> Option<Value> {
+    if call.fn_name != "repair_components" {
+        return None;
+    }
+    let required = explicit_minimum_physical_components(authoritative_intent)?;
+    let current_yaml = current_yaml?;
+    let surface = circuit_lang::parse::parse_str(current_yaml).0?;
+    let current = draft_physical_count(current_yaml);
+    if current.total() < required {
+        // The broader existing-draft guard reports this case.
+        return None;
+    }
+
+    let block_name = call
+        .fn_arguments
+        .get("block")
+        .and_then(Value::as_str)
+        .unwrap_or("main");
+    let block = surface.blocks.get(block_name)?;
+    let mut projected = current.total();
+
+    let remove = match call.fn_arguments.get("remove") {
+        None => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<Vec<_>>>()?,
+        Some(_) => return None,
+    };
+    for reference in &remove {
+        let component = block.components.get(*reference)?;
+        if surface_component_is_physical(component) {
+            projected = projected.saturating_sub(1);
+        }
+    }
+
+    let mut upsert = call
+        .fn_arguments
+        .get("upsert")
+        .or_else(|| call.fn_arguments.get("components"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if upsert.len() == 1
+        && let Some(Value::Object(components)) = upsert.get("components")
+    {
+        upsert = components.clone();
+    }
+    for (reference, replacement) in upsert {
+        let replacement = replacement.as_object()?;
+        if remove.contains(&reference.as_str()) {
+            // Let the repair tool return its more specific conflict diagnostic.
+            return None;
+        }
+        let previous = block.components.get(&reference);
+        if previous.is_none()
+            && surface.blocks.iter().any(|(name, other)| {
+                name != block_name && other.components.contains_key(&reference)
+            })
+        {
+            return None;
+        }
+        let was_physical = previous.is_some_and(surface_component_is_physical);
+        let part = replacement.get("part").and_then(Value::as_str)?;
+        let dnp = replacement
+            .get("dnp")
+            .and_then(Value::as_bool)
+            .or_else(|| previous.map(|component| component.dnp))
+            .unwrap_or(false);
+        let is_physical = !dnp && !part.starts_with("power:") && !part.starts_with("label:");
+        projected = projected
+            .saturating_sub(usize::from(was_physical))
+            .saturating_add(usize::from(is_physical));
+    }
+
+    if projected >= required {
+        return None;
+    }
+    Some(json!({
+        "ok": false,
+        "error": format!("component repair would reduce the draft to {projected} physical components, below the explicit minimum of {required}"),
+        "code": "minimum_physical_component_count_not_met",
+        "required_minimum": required,
+        "candidate_physical_components": projected,
+        "authored_physical_candidates": projected,
+        "shortfall": required - projected,
+        "draft_written": false,
+        "draft_changed": false,
+        "next_tool": "edit_design",
+        "note": format!("The existing draft was preserved. Use edit_design with one complete YAML document retaining at least {required} functional physical entries."),
     }))
 }
 
@@ -5493,6 +5647,68 @@ blocks:
             undersized_full_draft_result("Build at least 45 physical parts", &complete_unassigned)
                 .is_none(),
             "a complete schematic may assign its footprints in the next authoring step"
+        );
+    }
+
+    #[test]
+    fn explicit_floor_blocks_preserving_or_reducing_an_undersized_draft() {
+        let small = "version: 1\nblocks: {main: {components: {R1: {part: R, between: [A, B]}}}}\n";
+        let assign = ToolCall {
+            call_id: "assign".into(),
+            fn_name: "assign_footprints".into(),
+            fn_arguments: json!({"assignments": [{
+                "reference": "R1",
+                "footprint": "Resistor_SMD:R_0603_1608Metric"
+            }]}),
+            thought_signatures: None,
+        };
+        let blocked = undersized_existing_draft_result(
+            "Author at least 48 distinct physical component entries",
+            &assign,
+            Some(small),
+        )
+        .expect("scalar footprint assignment must not advance an undersized draft");
+        assert_eq!(blocked["required_minimum"], 48);
+        assert_eq!(blocked["candidate_physical_components"], 1);
+        assert_eq!(blocked["next_tool"], "edit_design");
+
+        let entries = (1..=48)
+            .map(|index| format!("R{index}: {{part: R, between: [N{index}, GND]}}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let qualifying = format!("version: 1\nblocks: {{main: {{components: {{{entries}}}}}}}\n");
+        let remove = ToolCall {
+            call_id: "remove".into(),
+            fn_name: "repair_components".into(),
+            fn_arguments: json!({"remove": ["R48"]}),
+            thought_signatures: None,
+        };
+        let blocked = undersized_component_repair_result(
+            "Author at least 48 distinct physical component entries",
+            &remove,
+            Some(&qualifying),
+        )
+        .expect("component repair must preserve the explicit floor");
+        assert_eq!(blocked["candidate_physical_components"], 47);
+        assert_eq!(blocked["shortfall"], 1);
+        assert_eq!(blocked["draft_changed"], false);
+
+        let replace_one_for_one = ToolCall {
+            call_id: "replace".into(),
+            fn_name: "repair_components".into(),
+            fn_arguments: json!({
+                "components": {"R48": {"part": "Device:C", "between": ["N48", "GND"]}},
+                "replace_existing": true
+            }),
+            thought_signatures: None,
+        };
+        assert!(
+            undersized_component_repair_result(
+                "Author at least 48 distinct physical component entries",
+                &replace_one_for_one,
+                Some(&qualifying),
+            )
+            .is_none()
         );
     }
 
