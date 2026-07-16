@@ -2879,8 +2879,13 @@ struct ComponentShortfallFocus {
 
 impl ComponentShortfallFocus {
     fn from_result(result: &Value) -> Option<Self> {
-        (result.get("code").and_then(Value::as_str)
-            == Some("minimum_physical_component_count_not_met"))
+        matches!(
+            result.get("code").and_then(Value::as_str),
+            Some(
+                "minimum_physical_component_count_not_met"
+                    | "minimum_component_padding_suspected"
+            )
+        )
         .then(|| Self {
             required: result
                 .get("required_minimum")
@@ -2907,7 +2912,7 @@ impl ComponentShortfallFocus {
 
     fn nudge(&self) -> String {
         format!(
-            "Component minimum not met: required {}, candidate {}, shortfall {}. Next call: one complete {} YAML document meeting the minimum; do not search, inspect, validate, review, apply, or start PCB work first.",
+            "Component minimum qualification failed: required {}, candidate {}, shortfall {}. Next call: one complete {} YAML document meeting the minimum with functional circuitry; do not search, inspect, validate, review, apply, or start PCB work first.",
             self.required, self.actual, self.shortfall, self.authoring_tool
         )
     }
@@ -3017,6 +3022,119 @@ fn draft_physical_count(yaml: &str) -> DraftPhysicalCount {
     }
 }
 
+fn padded_full_draft_result(
+    required: usize,
+    yaml: &str,
+    count: DraftPhysicalCount,
+    next_tool: &str,
+) -> Option<Value> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    const MIN_EXPLICIT_FLOOR: usize = 20;
+    const MIN_DOMINANT_CLONE_COUNT: usize = 12;
+
+    if required < MIN_EXPLICIT_FLOOR {
+        return None;
+    }
+    let surface = circuit_lang::parse::parse_str(yaml).0?;
+    let physical = surface
+        .blocks
+        .values()
+        .flat_map(|block| block.components.values())
+        .filter(|component| {
+            !component.dnp
+                && !component.part.starts_with("power:")
+                && !component.part.starts_with("label:")
+        })
+        .collect::<Vec<_>>();
+    if physical.len() < required {
+        return None;
+    }
+
+    let mut unique_parts = BTreeSet::new();
+    let mut unique_targets = BTreeSet::new();
+    let mut unvalued_parallel_clones = BTreeMap::<(String, String, String), usize>::new();
+    for component in &physical {
+        unique_parts.insert(component.part.as_str());
+        let mut targets = component
+            .pins
+            .values()
+            .map(|(target, _)| target.as_str())
+            .chain(
+                component
+                    .units
+                    .values()
+                    .flat_map(|unit| unit.values().map(|(target, _)| target.as_str())),
+            )
+            .chain(
+                component
+                    .between
+                    .iter()
+                    .flat_map(|((a, _), (b, _))| [a.as_str(), b.as_str()]),
+            )
+            .chain(component.positive.iter().map(|(target, _)| target.as_str()))
+            .chain(component.negative.iter().map(|(target, _)| target.as_str()))
+            .filter(|target| !target.eq_ignore_ascii_case("nc"))
+            .collect::<Vec<_>>();
+        unique_targets.extend(targets.iter().copied());
+        if component
+            .value
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || targets.len() != 2
+        {
+            continue;
+        }
+        targets.sort_unstable();
+        *unvalued_parallel_clones
+            .entry((
+                component.part.clone(),
+                targets[0].to_owned(),
+                targets[1].to_owned(),
+            ))
+            .or_default() += 1;
+    }
+
+    let ((part, endpoint_a, endpoint_b), dominant_count) = unvalued_parallel_clones
+        .into_iter()
+        .max_by_key(|(_, clone_count)| *clone_count)?;
+    let outside_clone = physical.len() - dominant_count;
+    let dominant_enough = dominant_count >= MIN_DOMINANT_CLONE_COUNT
+        && dominant_count.saturating_mul(5) >= physical.len().saturating_mul(4);
+    let little_other_circuit = outside_clone <= 2.max(physical.len() / 10);
+    if !dominant_enough
+        || !little_other_circuit
+        || unique_parts.len() > 2
+        || unique_targets.len() > 3
+    {
+        return None;
+    }
+
+    Some(json!({
+        "ok": false,
+        "error": "complete draft appears padded with repeated electrically identical, unvalued two-terminal components",
+        "code": "minimum_component_padding_suspected",
+        "required_minimum": required,
+        "candidate_physical_components": count.total(),
+        "authored_physical_candidates": count.authored_candidates,
+        "explicit_footprinted_components": count.explicit_footprinted,
+        "dominant_clone": {
+            "part": part,
+            "endpoints": [endpoint_a, endpoint_b],
+            "count": dominant_count,
+            "percent_of_authored_candidates": dominant_count.saturating_mul(100) / physical.len(),
+            "missing_value": true,
+        },
+        "components_outside_dominant_clone": outside_clone,
+        "unique_part_ids": unique_parts.len(),
+        "unique_connected_targets": unique_targets.len(),
+        "draft_written": false,
+        "draft_changed": false,
+        "next_tool": next_tool,
+        "note": "Replace padding with the requested functional circuit blocks in one complete YAML document. Legitimate repeated arrays should have distinct row/channel nets; intentional parallel passive banks need explicit values.",
+    }))
+}
+
 fn undersized_full_draft_result(authoritative_intent: &str, call: &ToolCall) -> Option<Value> {
     if !matches!(call.fn_name.as_str(), "create_design" | "edit_design") {
         return None;
@@ -3026,7 +3144,7 @@ fn undersized_full_draft_result(authoritative_intent: &str, call: &ToolCall) -> 
     let count = draft_physical_count(yaml);
     let actual = count.total();
     if actual >= required {
-        return None;
+        return padded_full_draft_result(required, yaml, count, &call.fn_name);
     }
     Some(json!({
         "ok": false,
@@ -5308,6 +5426,109 @@ blocks:
     }
 
     #[test]
+    fn explicit_minimum_guard_rejects_unvalued_parallel_clone_padding() {
+        let entries = (1..=46)
+            .map(|index| format!("X{index}: {{part: Device:R, pins: {{1: A, 2: B}}}}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let call = ToolCall {
+            call_id: "run04-padding".into(),
+            fn_name: "edit_design".into(),
+            fn_arguments: json!({
+                "yaml": format!("version: 1\nname: DUMMY\nblocks: {{main: {{components: {{{entries}}}}}}}\n")
+            }),
+            thought_signatures: None,
+        };
+
+        let blocked = undersized_full_draft_result(
+            "Use at least 45 physical PCB components",
+            &call,
+        )
+        .expect("electrically identical padding must not satisfy the component floor");
+        assert_eq!(blocked["code"], "minimum_component_padding_suspected");
+        assert_eq!(blocked["candidate_physical_components"], 46);
+        assert_eq!(blocked["dominant_clone"]["part"], "Device:R");
+        assert_eq!(blocked["dominant_clone"]["endpoints"], json!(["A", "B"]));
+        assert_eq!(blocked["dominant_clone"]["count"], 46);
+        assert_eq!(blocked["unique_part_ids"], 1);
+        assert_eq!(blocked["unique_connected_targets"], 2);
+        assert_eq!(blocked["draft_written"], false);
+        assert_eq!(blocked["next_tool"], "edit_design");
+    }
+
+    #[test]
+    fn explicit_minimum_guard_accepts_distinct_arrays_and_valued_parallel_banks() {
+        let matrix = (1..=45)
+            .map(|index| {
+                format!(
+                    "D{index}: {{part: Device:LED, pins: {{1: ROW{}, 2: COL{}}}}}",
+                    (index - 1) / 8,
+                    (index - 1) % 8,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let valued_bank = (1..=45)
+            .map(|index| {
+                format!("R{index}: {{part: Device:R, value: 10k, between: [A, B]}}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        for (name, entries) in [("matrix", matrix), ("valued-bank", valued_bank)] {
+            let call = ToolCall {
+                call_id: name.into(),
+                fn_name: "create_design".into(),
+                fn_arguments: json!({
+                    "yaml": format!("version: 1\nblocks: {{main: {{components: {{{entries}}}}}}}\n")
+                }),
+                thought_signatures: None,
+            };
+            assert!(
+                undersized_full_draft_result("Build at least 45 physical parts", &call).is_none(),
+                "legitimate repeated topology was rejected: {name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_clone_padding_is_rejected_before_draft_write() {
+        let entries = (1..=46)
+            .map(|index| format!("X{index}: {{part: Device:R, pins: {{1: A, 2: B}}}}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let script = vec![
+            tool_call(
+                "padding",
+                "create_design",
+                json!({
+                    "yaml": format!("version: 1\nname: DUMMY\nblocks: {{main: {{components: {{{entries}}}}}}}\n")
+                }),
+            ),
+            final_text("I need to replace the padding with the functional circuit."),
+        ];
+        let mut agent = Agent::new(ScriptedClient::new(script), test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        agent
+            .run_turn(
+                "Create a controller with at least 45 physical components",
+                &mut approvals,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(agent.runtime.workspace().read_draft().unwrap().is_none());
+        let results = tool_results(&agent.history);
+        assert_eq!(
+            results["padding"]["code"],
+            "minimum_component_padding_suspected"
+        );
+        assert_eq!(results["padding"]["draft_written"], false);
+        assert_eq!(results["padding"]["next_tool"], "create_design");
+    }
+
+    #[test]
     fn component_shortfall_focus_exposes_only_requested_full_authoring_tool() {
         let result = json!({
             "code": "minimum_physical_component_count_not_met",
@@ -5336,6 +5557,22 @@ blocks:
             focus
                 .nudge()
                 .contains("required 45, candidate 3, shortfall 42")
+        );
+
+        let padding = ComponentShortfallFocus::from_result(&json!({
+            "code": "minimum_component_padding_suspected",
+            "required_minimum": 45,
+            "candidate_physical_components": 46,
+            "next_tool": "edit_design",
+        }))
+        .expect("padding rejection should retain the one-tool authoring focus");
+        assert_eq!(padding.shortfall, 0);
+        assert!(padding.permits("edit_design"));
+        assert!(!padding.permits("search_symbols"));
+        assert!(
+            padding
+                .nudge()
+                .contains("required 45, candidate 46, shortfall 0")
         );
     }
 
