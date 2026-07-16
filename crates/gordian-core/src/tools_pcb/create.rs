@@ -78,11 +78,14 @@ impl From<&BoardSeedRules> for SeedRules {
 }
 
 fn resolve_pour_layer(layer: &str, layer_count: u32) -> Option<(u32, String)> {
-    match layer {
-        "top" => Some((0, "F.Cu".to_string())),
-        "bottom" => Some((layer_count - 1, "B.Cu".to_string())),
-        _ if layer.starts_with("inner") => layer
+    let normalized = layer.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "top" | "f.cu" => Some((0, "F.Cu".to_string())),
+        "bottom" | "b.cu" => Some((layer_count - 1, "B.Cu".to_string())),
+        _ if normalized.starts_with("inner") || normalized.starts_with("in") => normalized
             .trim_start_matches("inner")
+            .trim_start_matches("in")
+            .trim_end_matches(".cu")
             .parse::<u32>()
             .ok()
             .filter(|idx| *idx > 0 && *idx < layer_count.max(1) - 1)
@@ -1458,7 +1461,7 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
                 None => {
                     return Err(format!(
                         "rules.pours[].layer '{layer}' is not a valid copper layer on a \
-                         {layer_count}-layer board — use top/bottom, or an existing innerN"
+                         {layer_count}-layer board — use top/bottom, innerN, or F.Cu/B.Cu/InN.Cu"
                     ));
                 }
                 Some((idx, _)) => {
@@ -1630,6 +1633,21 @@ mod tests {
         assert_eq!(rules.pours.len(), 2);
         assert_eq!(rules.pours[0].layer, "inner1");
         assert_eq!(rules.pours[1].layer, "inner2");
+    }
+
+    #[test]
+    fn parse_seed_rules_accepts_kicad_inner_layer_names() {
+        let rules = parse_seed_rules(Some(&json!({
+            "layer_count": 4,
+            "pours": [
+                { "net": "FIELD_GND", "layer": "In1.Cu" },
+                { "net": "+5V", "layer": "Inner2.Cu" }
+            ]
+        })))
+        .unwrap();
+
+        assert_eq!(resolve_pour_layer(&rules.pours[0].layer, 4).unwrap().1, "In1.Cu");
+        assert_eq!(resolve_pour_layer(&rules.pours[1].layer, 4).unwrap().1, "In2.Cu");
     }
 
     #[test]
