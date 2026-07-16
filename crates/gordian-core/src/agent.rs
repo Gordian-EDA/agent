@@ -193,6 +193,11 @@ const MAX_AUTHORING_TRANSITION_NUDGES: usize = 1;
 /// invalid draft and then starts inspecting instead of fixing diagnostics.
 const MAX_INVALID_DRAFT_REPAIR_NUDGES: usize = 1;
 
+/// One retry when a provider exhausts its output budget before completing a
+/// tool call. The retry is explicitly compact; a second truncation stops
+/// honestly instead of being misreported as a blank successful completion.
+const MAX_OUTPUT_TRUNCATION_NUDGES: usize = 1;
+
 /// The human mutation gate. The loop calls [`Approvals::approve`] with either a
 /// dry-run preview or a structured immediate-operation proposal; returning
 /// `false` prevents the mutation.
@@ -878,6 +883,8 @@ impl<P: Provider> Agent<P> {
         let mut nudges_left = MAX_COMMIT_NUDGES;
         let mut authoring_transition_nudges_left = MAX_AUTHORING_TRANSITION_NUDGES;
         let mut invalid_draft_repair_nudges_left = MAX_INVALID_DRAFT_REPAIR_NUDGES;
+        let mut output_truncation_nudges_left = MAX_OUTPUT_TRUNCATION_NUDGES;
+        let mut output_truncations = 0usize;
         let mut erc_cleanup_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut last_committed_erc_cleanup_needed: Option<bool> = None;
         let mut pcb_recovery = PcbRecoveryState::default();
@@ -1090,6 +1097,10 @@ impl<P: Provider> Agent<P> {
                     (final_text, end)
                 }
             };
+            let output_truncated = end
+                .captured_stop_reason
+                .as_ref()
+                .is_some_and(|reason| reason.is_max_tokens());
             let tool_calls = end.captured_into_tool_calls().unwrap_or_default();
             self.emit_pending_usage(events);
 
@@ -1114,6 +1125,27 @@ impl<P: Provider> Agent<P> {
 
             // No tool calls → the model wants to stop.
             if tool_calls.is_empty() {
+                if output_truncated {
+                    output_truncations += 1;
+                    if output_truncation_nudges_left > 0 {
+                        output_truncation_nudges_left -= 1;
+                        self.history
+                            .push(ChatMessage::user(OUTPUT_TRUNCATION_NUDGE));
+                        continue;
+                    }
+                    let final_text = format!(
+                        "Stopped after {output_truncations} provider responses exhausted the output-token limit before producing a usable tool call. No blank completion was accepted; resend the design in a more compact representation."
+                    );
+                    emit(events, AgentEvent::AssistantText(final_text.clone()));
+                    return Ok(TurnOutcome {
+                        applied: applied && !draft_dirty,
+                        final_text,
+                        tool_calls_made,
+                        stop_reason: StopReason::NoProgress {
+                            completions: output_truncations,
+                        },
+                    });
+                }
                 // A board-design request that spent its turn researching parts
                 // has not completed merely because the model emitted prose.
                 // Spend the existing single transition nudge here, where it can
@@ -3404,6 +3436,8 @@ const INVALID_DRAFT_REPAIR_NUDGE: &str = "The current draft is substantive but s
 /// violation details, so no redundant `run_erc` call is needed.
 const ERC_CLEANUP_NUDGE: &str = "The design was written, but the latest `apply_design` ERC report still contains actionable violations. Inspect those exact violations, batch-fix them with `edit_design`, and re-run `apply_design` before ending. Do not claim ERC is clean unless the new apply result says `erc_clean: true`; if a finding is genuinely unavoidable, explain it precisely.";
 
+const OUTPUT_TRUNCATION_NUDGE: &str = "Your previous response hit the output-token limit before completing a usable tool call. Retry now with exactly one tool call and no prose or private reasoning. Use compact YAML flow syntax, `between`, `positive`/`negative`, and short block/net names; omit optional fields and comments. The YAML must still be one complete functional design meeting the requested physical-component minimum.";
+
 /// The text fed back as a fix turn when the post-turn review finds defects.
 fn fix_prompt(defects: &[String]) -> String {
     format!(
@@ -4370,6 +4404,58 @@ mod tests {
             );
         }
         assert!(saw_failed_request_usage);
+    }
+
+    #[tokio::test]
+    async fn max_token_response_retries_compactly_instead_of_completing_blank() {
+        let truncated = StreamEnd {
+            captured_stop_reason: Some(genai::chat::StopReason::MaxTokens(
+                "max_tokens".to_owned(),
+            )),
+            ..Default::default()
+        };
+        let (client, seen) =
+            ScriptedClient::recording(vec![truncated, final_text("recovered")]);
+        let mut agent = Agent::new(client, test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn("produce a large answer", &mut approvals, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.final_text, "recovered");
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].iter().any(|message| {
+            first_text(message).is_some_and(|text| text == OUTPUT_TRUNCATION_NUDGE)
+        }));
+    }
+
+    #[tokio::test]
+    async fn repeated_max_token_responses_stop_honestly() {
+        let truncated = || StreamEnd {
+            captured_stop_reason: Some(genai::chat::StopReason::MaxTokens(
+                "max_tokens".to_owned(),
+            )),
+            ..Default::default()
+        };
+        let client = ScriptedClient::new(vec![truncated(), truncated()]);
+        let mut agent = Agent::new(client, test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn("produce a large answer", &mut approvals, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::NoProgress { completions: 2 }
+        );
+        assert!(outcome.final_text.contains("output-token limit"));
+        assert!(!outcome.final_text.trim().is_empty());
     }
 
     fn batched_tool_calls(calls: &[(&str, &str, Value)]) -> StreamEnd {
