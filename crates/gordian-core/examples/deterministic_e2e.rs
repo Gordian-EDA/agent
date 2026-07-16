@@ -143,8 +143,14 @@ fn main() -> anyhow::Result<()> {
                 },
                 {
                     "name": "power_bulk",
-                    "members": ["C1", "C7"],
-                    "region": {"min_x": 48.0, "min_y": 14.0, "max_x": 56.0, "max_y": 22.0},
+                    "members": ["C1"],
+                    "region": {"min_x": 51.9, "min_y": 15.9, "max_x": 52.1, "max_y": 16.1},
+                    "grid": true
+                },
+                {
+                    "name": "power_bulk_neg",
+                    "members": ["C7"],
+                    "region": {"min_x": 53.325, "min_y": 19.9, "max_x": 53.525, "max_y": 20.1},
                     "grid": true
                 },
                 {
