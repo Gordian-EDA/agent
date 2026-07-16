@@ -244,11 +244,12 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     replace_route_atomically(ctx, &rp, &result.solution, &board.layer_names, existing)
         .map_err(|e| format!("could not write route to the board: {e}"))?;
 
-    let failed: Vec<Value> = result
-        .failed
-        .iter()
-        .map(|f| json!({ "connection": f.connection, "reason": f.reason }))
-        .collect();
+    // A connection can acquire more than one failure reason as the route is
+    // cleaned up (for example, an initial router miss followed by an honest
+    // connectivity drop). Preserve those diagnostic records in `failed`, but
+    // also publish an unambiguous net-level summary so callers do not mistake
+    // record count for the number of unrouted connections.
+    let failure_summary = failed_route_summary(&result.failed);
     // Congestion is engine-produced diagnostic evidence, not a reason to run a
     // second router after routing has completed. Engines without a negotiated
     // global report return an honest null here.
@@ -267,7 +268,10 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     Ok(json!({
         "router": result.engine,
         "router_attempts": route_attempts_json(&router_attempts),
-        "failed": failed,
+        "failed": failure_summary.records,
+        "failed_record_count": failure_summary.record_count,
+        "failed_connection_count": failure_summary.connection_count,
+        "failed_connections": failure_summary.connections,
         "metrics": {
             "wirelength": m.wirelength,
             "vias": m.via_count,
@@ -479,6 +483,38 @@ fn failed_connections(result: &RouteResult) -> BTreeSet<String> {
         .map(|f| f.connection.clone())
         .filter(|name| !name.is_empty())
         .collect()
+}
+
+struct FailedRouteSummary {
+    records: Vec<Value>,
+    record_count: usize,
+    connections: Vec<String>,
+    connection_count: usize,
+}
+
+fn failed_route_summary(failed: &[FailedNet]) -> FailedRouteSummary {
+    let records = failed
+        .iter()
+        .map(|failure| {
+            json!({
+                "connection": failure.connection,
+                "reason": failure.reason,
+            })
+        })
+        .collect::<Vec<_>>();
+    let connections = failed
+        .iter()
+        .map(|failure| failure.connection.clone())
+        .filter(|connection| !connection.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    FailedRouteSummary {
+        record_count: records.len(),
+        connection_count: connections.len(),
+        records,
+        connections,
+    }
 }
 
 fn drop_failed_net_copper(result: &mut RouteResult) -> Vec<String> {
@@ -3470,5 +3506,32 @@ mod escape_bottleneck_tests {
         assert_eq!(result.solution.traces.len(), 1);
         assert_eq!(result.solution.traces[0].connection, "OK");
         assert!(result.solution.vias.is_empty());
+    }
+
+    #[test]
+    fn failed_route_summary_distinguishes_records_from_connections() {
+        let summary = failed_route_summary(&[
+            FailedNet {
+                connection: "/IN2".to_string(),
+                reason: "router could not find a path".to_string(),
+            },
+            FailedNet {
+                connection: "/IN2".to_string(),
+                reason: "connectivity cleanup dropped partial copper".to_string(),
+            },
+            FailedNet {
+                connection: "/IN7".to_string(),
+                reason: "router could not find a path".to_string(),
+            },
+        ]);
+
+        assert_eq!(summary.record_count, 3);
+        assert_eq!(summary.connection_count, 2);
+        assert_eq!(summary.connections, vec!["/IN2", "/IN7"]);
+        assert_eq!(summary.records[0]["connection"], "/IN2");
+        assert_eq!(
+            summary.records[1]["reason"],
+            "connectivity cleanup dropped partial copper"
+        );
     }
 }

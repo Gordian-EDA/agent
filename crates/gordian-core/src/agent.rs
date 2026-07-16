@@ -2991,6 +2991,9 @@ fn route_failure_context(value: &Value) -> Value {
         "error",
         "ok",
         "failed",
+        "failed_record_count",
+        "failed_connection_count",
+        "failed_connections",
         "blocking_findings",
         "reported_findings",
         "copper_violations",
@@ -4415,9 +4418,10 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
         }
         "route_board" => {
             let failed = result
-                .get("failed")
-                .and_then(Value::as_array)
-                .map(Vec::len)
+                .get("failed_connection_count")
+                .and_then(Value::as_u64)
+                .map(|count| count as usize)
+                .or_else(|| result.get("failed").and_then(Value::as_array).map(Vec::len))
                 .unwrap_or(0);
             let traces = result
                 .pointer("/metrics/traces")
@@ -6746,7 +6750,14 @@ blocks:
             "route_board",
             &json!({}),
             &json!({
-                "failed": [{"connection": "GND"}, {"connection": "VCC"}],
+                "failed": [
+                    {"connection": "GND", "reason": "blocked"},
+                    {"connection": "GND", "reason": "partial copper dropped"},
+                    {"connection": "VCC", "reason": "blocked"}
+                ],
+                "failed_record_count": 3,
+                "failed_connection_count": 2,
+                "failed_connections": ["GND", "VCC"],
                 "metrics": {"traces": 9, "vias": 1}
             }),
         );
@@ -7562,6 +7573,9 @@ blocks:
         let source = json!({
             "router": "detailed",
             "failed": [{"connection": "GND", "reason": "blocked"}],
+            "failed_record_count": 2,
+            "failed_connection_count": 1,
+            "failed_connections": ["GND"],
             "metrics": {"wirelength": 10.0, "vias": 1, "traces": 2},
             "lint_summary": {"connectivity": 1},
             "expected_connectivity_gaps": 1,
@@ -7584,6 +7598,9 @@ blocks:
 
         assert_eq!(context["router"], "detailed");
         assert_eq!(context["failed"][0]["connection"], "GND");
+        assert_eq!(context["failed_record_count"], 2);
+        assert_eq!(context["failed_connection_count"], 1);
+        assert_eq!(context["failed_connections"], json!(["GND"]));
         assert_eq!(context["router_attempts"][0]["engine"], "direct");
         assert_eq!(context["lint_summary"]["connectivity"], 1);
         assert_eq!(context["expected_connectivity_gaps"], 1);
