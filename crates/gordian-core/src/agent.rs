@@ -423,6 +423,7 @@ fn constrain_schematic_tools_for_draft_state(
     draft_known_clean: bool,
     draft_known_invalid: bool,
     review_has_defects: bool,
+    review_needs_full_edit: bool,
 ) {
     if !draft_exists && !schematic_exists {
         defs.retain(|tool| {
@@ -443,10 +444,9 @@ fn constrain_schematic_tools_for_draft_state(
     if review_has_defects {
         defs.retain(|tool| {
             is_discovery_tool(tool.name.as_str())
-                || matches!(
-                    tool.name.as_str(),
-                    "edit_design" | "repair_components" | "assign_footprints"
-                )
+                || tool.name.as_str() == "assign_footprints"
+                || (review_needs_full_edit && tool.name.as_str() == "edit_design")
+                || (!review_needs_full_edit && tool.name.as_str() == "repair_components")
         });
     } else if draft_known_invalid {
         defs.retain(|tool| {
@@ -1029,6 +1029,7 @@ impl<P: Provider> Agent<P> {
                     == Some(0),
                 draft_known_invalid,
                 review_has_defects,
+                review_needs_full_edit,
             );
             if let Some(focus) = &component_shortfall_focus {
                 defs.retain(|tool| focus.permits(tool.name.as_str()));
@@ -7342,7 +7343,8 @@ blocks:
 
     #[test]
     fn draft_state_hides_tools_that_can_only_fail_or_repeat_defects() {
-        let names_after = |draft_exists, schematic_exists, dirty, clean, invalid, defects| {
+        let names_after =
+            |draft_exists, schematic_exists, dirty, clean, invalid, defects, full_edit: bool| {
             let mut defs = tool_defs_for_phase(
                 ToolPhase::Schematic,
                 &HashMap::new(),
@@ -7350,7 +7352,7 @@ blocks:
                 &HashSet::new(),
                 schematic_exists,
             );
-            offer_component_repair(&mut defs, defects || invalid);
+            offer_component_repair(&mut defs, invalid || (defects && !full_edit));
             constrain_schematic_tools_for_draft_state(
                 &mut defs,
                 draft_exists,
@@ -7359,13 +7361,14 @@ blocks:
                 clean,
                 invalid,
                 defects,
+                full_edit,
             );
             defs.into_iter()
                 .map(|tool| tool.name.as_str().to_owned())
                 .collect::<std::collections::BTreeSet<_>>()
         };
 
-        let fresh = names_after(false, false, false, false, false, false);
+        let fresh = names_after(false, false, false, false, false, false, false);
         assert!(fresh.contains("create_design"));
         for absent in [
             "validate_design",
@@ -7381,25 +7384,29 @@ blocks:
             assert!(!fresh.contains(absent), "{absent}");
         }
 
-        let invalid = names_after(true, false, true, false, true, false);
+        let invalid = names_after(true, false, true, false, true, false, false);
         assert!(invalid.contains("edit_design"));
         assert!(invalid.contains("repair_components"));
         assert!(invalid.contains("assign_footprints"));
         assert!(!invalid.contains("apply_design"));
         assert!(!invalid.contains("project_info"));
 
-        let clean = names_after(true, false, true, true, false, false);
+        let clean = names_after(true, false, true, true, false, false, false);
         assert_eq!(clean.len(), 1);
         assert!(clean.contains("apply_design"));
 
-        let defects = names_after(true, false, true, true, false, true);
+        let defects = names_after(true, false, true, true, false, true, false);
         assert!(defects.contains("repair_components"));
-        assert!(defects.contains("edit_design"));
+        assert!(!defects.contains("edit_design"));
         assert!(defects.contains("assign_footprints"));
         assert!(!defects.contains("project_info"));
         assert!(!defects.contains("apply_design"));
 
-        let ordinary = names_after(true, false, true, false, false, false);
+        let full_edit = names_after(true, false, true, true, false, true, true);
+        assert!(full_edit.contains("edit_design"));
+        assert!(!full_edit.contains("repair_components"));
+
+        let ordinary = names_after(true, false, true, false, false, false, false);
         assert!(!ordinary.contains("repair_components"));
     }
 
