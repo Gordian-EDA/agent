@@ -249,6 +249,100 @@ pub(super) fn field_position(text: &str, reference: &str, field: &str) -> Option
     None
 }
 
+/// Rewrite a visible text field's font size and stroke thickness.
+pub(super) fn patch_field_text_size(
+    text: &str,
+    reference: &str,
+    field: &str,
+    size_mm: f64,
+    thickness_mm: f64,
+) -> Result<String, String> {
+    let prefix = field_prefix(field);
+    let (body_start, body_end) = root_body(text)?;
+    for fp in child_nodes(text, body_start, body_end) {
+        if node_head(text, &fp) != "footprint"
+            || footprint_reference(text, &fp).as_deref() != Some(reference)
+        {
+            continue;
+        }
+        let property = child_nodes(text, fp.start + 1, fp.end - 1)
+            .into_iter()
+            .find(|node| {
+                node_head(text, node) == "property"
+                    && text[node.start..node.end].starts_with(&prefix)
+                    && !text[node.start..node.end].contains("(hide yes)")
+            })
+            .ok_or_else(|| format!("footprint {reference}: no visible {field} property"))?;
+        let effects = child_nodes(text, property.start + 1, property.end - 1)
+            .into_iter()
+            .find(|node| node_head(text, node) == "effects")
+            .ok_or_else(|| format!("footprint {reference}: {field} has no effects"))?;
+        let font = child_nodes(text, effects.start + 1, effects.end - 1)
+            .into_iter()
+            .find(|node| node_head(text, node) == "font")
+            .ok_or_else(|| format!("footprint {reference}: {field} has no font"))?;
+        let mut edits = Vec::new();
+        for node in child_nodes(text, font.start + 1, font.end - 1) {
+            match node_head(text, &node) {
+                "size" => edits.push((
+                    node.start,
+                    node.end,
+                    format!("(size {} {})", fmt_num(size_mm), fmt_num(size_mm)),
+                )),
+                "thickness" => edits.push((
+                    node.start,
+                    node.end,
+                    format!("(thickness {})", fmt_num(thickness_mm)),
+                )),
+                _ => {}
+            }
+        }
+        if edits.is_empty() {
+            return Err(format!("footprint {reference}: {field} font has no size"));
+        }
+        return Ok(apply_edits(text, edits));
+    }
+    Err(format!("footprint {reference}: not found"))
+}
+
+/// Hide a footprint text field entirely.
+pub(super) fn patch_field_hidden(
+    text: &str,
+    reference: &str,
+    field: &str,
+) -> Result<String, String> {
+    let prefix = field_prefix(field);
+    let (body_start, body_end) = root_body(text)?;
+    for fp in child_nodes(text, body_start, body_end) {
+        if node_head(text, &fp) != "footprint"
+            || footprint_reference(text, &fp).as_deref() != Some(reference)
+        {
+            continue;
+        }
+        let property = child_nodes(text, fp.start + 1, fp.end - 1)
+            .into_iter()
+            .find(|node| {
+                node_head(text, node) == "property"
+                    && text[node.start..node.end].starts_with(&prefix)
+            })
+            .ok_or_else(|| format!("footprint {reference}: no {field} property"))?;
+        if text[property.start..property.end].contains("(hide yes)") {
+            return Ok(text.to_string());
+        }
+        let effects = child_nodes(text, property.start + 1, property.end - 1)
+            .into_iter()
+            .find(|node| node_head(text, node) == "effects")
+            .ok_or_else(|| format!("footprint {reference}: {field} has no effects"))?;
+        let insertion = effects.start;
+        let mut out = String::with_capacity(text.len() + 12);
+        out.push_str(&text[..insertion]);
+        out.push_str("(hide yes) ");
+        out.push_str(&text[insertion..]);
+        return Ok(out);
+    }
+    Err(format!("footprint {reference}: not found"))
+}
+
 /// Footprints carrying a visible silkscreen text field named `field`.
 ///
 /// KiCad 9 DRC reports omit `PCB_FIELD` items other than Reference/Value, so

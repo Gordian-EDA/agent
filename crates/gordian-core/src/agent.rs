@@ -954,10 +954,8 @@ impl<P: Provider> Agent<P> {
         // Enter the bounded PCB stage immediately instead of requiring another
         // no-op apply in this turn before regeneration may trigger the fixed
         // place/route/DRC/render/fab pipeline.
-        let mut pcb_only_stage = starts_in_pcb_stage(
-            pcb_work_requested,
-            draft_committed_at_turn_start,
-        );
+        let mut pcb_only_stage =
+            starts_in_pcb_stage(pcb_work_requested, draft_committed_at_turn_start);
         let mut reserved_clean_apply_used = false;
         let mut reserved_review_repair_requests = RESERVED_REVIEW_REPAIR_REQUESTS;
 
@@ -3454,8 +3452,7 @@ impl ComponentShortfallFocus {
         matches!(
             result.get("code").and_then(Value::as_str),
             Some(
-                "minimum_physical_component_count_not_met"
-                    | "minimum_component_padding_suspected"
+                "minimum_physical_component_count_not_met" | "minimum_component_padding_suspected"
             )
         )
         .then(|| Self {
@@ -3527,25 +3524,22 @@ fn explicit_minimum_physical_components(intent: &str) -> Option<usize> {
     let component_floor = |number_index: usize, noun_index: usize| {
         let required = tokens.get(number_index)?.parse::<usize>().ok()?;
         let mut noun_index = noun_index;
-        while tokens
-            .get(noun_index)
-            .is_some_and(|token| {
-                matches!(
-                    token.as_str(),
-                    "distinct"
-                        | "electrical"
-                        | "explicit"
-                        | "fitted"
-                        | "functional"
-                        | "meaningful"
-                        | "physical"
-                        | "real"
-                        | "pcb"
-                        | "board"
-                        | "mounted"
-                )
-            })
-        {
+        while tokens.get(noun_index).is_some_and(|token| {
+            matches!(
+                token.as_str(),
+                "distinct"
+                    | "electrical"
+                    | "explicit"
+                    | "fitted"
+                    | "functional"
+                    | "meaningful"
+                    | "physical"
+                    | "real"
+                    | "pcb"
+                    | "board"
+                    | "mounted"
+            )
+        }) {
             noun_index += 1;
         }
         matches!(
@@ -4983,13 +4977,10 @@ mod tests {
     #[tokio::test]
     async fn max_token_response_retries_compactly_instead_of_completing_blank() {
         let truncated = StreamEnd {
-            captured_stop_reason: Some(genai::chat::StopReason::MaxTokens(
-                "max_tokens".to_owned(),
-            )),
+            captured_stop_reason: Some(genai::chat::StopReason::MaxTokens("max_tokens".to_owned())),
             ..Default::default()
         };
-        let (client, seen) =
-            ScriptedClient::recording(vec![truncated, final_text("recovered")]);
+        let (client, seen) = ScriptedClient::recording(vec![truncated, final_text("recovered")]);
         let mut agent = Agent::new(client, test_runtime(), "system");
         let mut approvals = AutoApprove::no();
 
@@ -5010,9 +5001,7 @@ mod tests {
     #[tokio::test]
     async fn repeated_max_token_responses_stop_honestly() {
         let truncated = || StreamEnd {
-            captured_stop_reason: Some(genai::chat::StopReason::MaxTokens(
-                "max_tokens".to_owned(),
-            )),
+            captured_stop_reason: Some(genai::chat::StopReason::MaxTokens("max_tokens".to_owned())),
             ..Default::default()
         };
         let client = ScriptedClient::new(vec![truncated(), truncated()]);
@@ -6699,11 +6688,9 @@ blocks:
             thought_signatures: None,
         };
 
-        let blocked = undersized_full_draft_result(
-            "Use at least 45 physical PCB components",
-            &call,
-        )
-        .expect("electrically identical padding must not satisfy the component floor");
+        let blocked =
+            undersized_full_draft_result("Use at least 45 physical PCB components", &call)
+                .expect("electrically identical padding must not satisfy the component floor");
         assert_eq!(blocked["code"], "minimum_component_padding_suspected");
         assert_eq!(blocked["candidate_physical_components"], 46);
         assert_eq!(blocked["dominant_clone"]["part"], "Device:R");
@@ -6728,9 +6715,7 @@ blocks:
             .collect::<Vec<_>>()
             .join(", ");
         let valued_bank = (1..=45)
-            .map(|index| {
-                format!("R{index}: {{part: Device:R, value: 10k, between: [A, B]}}")
-            })
+            .map(|index| format!("R{index}: {{part: Device:R, value: 10k, between: [A, B]}}"))
             .collect::<Vec<_>>()
             .join(", ");
         for (name, entries) in [("matrix", matrix), ("valued-bank", valued_bank)] {
@@ -7534,29 +7519,29 @@ blocks:
     fn draft_state_hides_tools_that_can_only_fail_or_repeat_defects() {
         let names_after =
             |draft_exists, schematic_exists, dirty, clean, invalid, defects, full_edit: bool| {
-            let mut defs = tool_defs_for_phase(
-                ToolPhase::Schematic,
-                &HashMap::new(),
-                MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
-                draft_exists,
-                &HashSet::new(),
-                schematic_exists,
-            );
-            offer_component_repair(&mut defs, invalid || (defects && !full_edit));
-            constrain_schematic_tools_for_draft_state(
-                &mut defs,
-                draft_exists,
-                schematic_exists,
-                dirty,
-                clean,
-                invalid,
-                defects,
-                full_edit,
-            );
-            defs.into_iter()
-                .map(|tool| tool.name.as_str().to_owned())
-                .collect::<std::collections::BTreeSet<_>>()
-        };
+                let mut defs = tool_defs_for_phase(
+                    ToolPhase::Schematic,
+                    &HashMap::new(),
+                    MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
+                    draft_exists,
+                    &HashSet::new(),
+                    schematic_exists,
+                );
+                offer_component_repair(&mut defs, invalid || (defects && !full_edit));
+                constrain_schematic_tools_for_draft_state(
+                    &mut defs,
+                    draft_exists,
+                    schematic_exists,
+                    dirty,
+                    clean,
+                    invalid,
+                    defects,
+                    full_edit,
+                );
+                defs.into_iter()
+                    .map(|tool| tool.name.as_str().to_owned())
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
 
         let fresh = names_after(false, false, false, false, false, false, false);
         assert!(fresh.contains("create_design"));

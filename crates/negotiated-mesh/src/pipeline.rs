@@ -838,6 +838,10 @@ fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
             Some(&mut attempts),
             elapsed_ms,
         );
+        // The rescue only re-routes the failed nets on a refined grid, so it
+        // stays bounded; without it a single walled-in pin ships as a failure
+        // with the whole tool budget unspent.
+        try_adaptive_grid_rescue(problem, &mut best, &mut attempts);
         return RouteAutoRun {
             result: best.expect("bounded candidate just populated best").0,
             attempts,

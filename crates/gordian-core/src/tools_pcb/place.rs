@@ -756,11 +756,7 @@ fn opto_input_above_rotation(part: &Part, channel: &Opto817Channel) -> Option<f6
         .map(|(rotation, _)| rotation)
 }
 
-fn opto_bridge_midpoint_y(
-    part: &Part,
-    channel: &Opto817Channel,
-    rotation: f64,
-) -> Option<f64> {
+fn opto_bridge_midpoint_y(part: &Part, channel: &Opto817Channel, rotation: f64) -> Option<f64> {
     let input = [&*channel.input_nets[0], &*channel.input_nets[1]];
     let output = [&*channel.emitter_net, &*channel.output_net];
     Some(
@@ -966,7 +962,12 @@ fn add_817_array_hints(
             && !part.locked
     };
     let mut net_fanout = BTreeMap::<String, usize>::new();
-    for imported in board.imported.parts.iter().filter(|part| eligible_channel_part(part)) {
+    for imported in board
+        .imported
+        .parts
+        .iter()
+        .filter(|part| eligible_channel_part(part))
+    {
         let nets = part_nets(imported)
             .into_iter()
             .map(|net| net.trim_start_matches('/').to_owned())
@@ -1043,9 +1044,9 @@ fn add_817_array_hints(
             .filter(|part| eligible_channel_part(part))
             .filter(|part| {
                 direct_refs.contains(part.reference.as_str())
-                    || part_nets(part).iter().any(|net| {
-                        expansion_nets.contains(net.trim_start_matches('/'))
-                    })
+                    || part_nets(part)
+                        .iter()
+                        .any(|net| expansion_nets.contains(net.trim_start_matches('/')))
             })
             .map(|part| part.reference.clone())
             .collect::<Vec<_>>();
@@ -2154,9 +2155,10 @@ mod tests {
     fn opto817_plan_accepts_explicit_logic_ground_domain_names() {
         let (mut design, mut board, problem) = opto817_fixture(8, false);
         for component in design.blocks["channels"].components.values_mut() {
-            component
-                .pins
-                .insert("3".into(), circuit_lang::model::PinTarget::Net("LOGIC_GND".into()));
+            component.pins.insert(
+                "3".into(),
+                circuit_lang::model::PinTarget::Net("LOGIC_GND".into()),
+            );
         }
         for imported in board
             .imported
@@ -2195,8 +2197,7 @@ mod tests {
         }
         let mut hints = PlacementHints::default();
 
-        add_817_array_hints(&design, &board, &problem, &mut hints)
-            .expect("asymmetric DIP bank");
+        add_817_array_hints(&design, &board, &problem, &mut hints).expect("asymmetric DIP bank");
 
         let array = hints
             .groups
@@ -2211,11 +2212,14 @@ mod tests {
             .find(|part| part.reference == channel.reference)
             .unwrap();
         let bridge_offset = opto_bridge_midpoint_y(part, channel, rotation).unwrap();
-        assert!((array.region.unwrap().center().y + bridge_offset
-            - problem.bounds.center().y)
-            .abs()
-            < 1e-9);
-        assert!(bridge_offset.abs() > 1.0, "fixture must exercise offset origin");
+        assert!(
+            (array.region.unwrap().center().y + bridge_offset - problem.bounds.center().y).abs()
+                < 1e-9
+        );
+        assert!(
+            bridge_offset.abs() > 1.0,
+            "fixture must exercise offset origin"
+        );
     }
 
     #[test]
@@ -2279,7 +2283,11 @@ mod tests {
                 .find(|group| group.name == format!("817 logic channel {index}"))
                 .expect("per-channel output group");
             assert_eq!(
-                logic.members.iter().cloned().collect::<std::collections::BTreeSet<_>>(),
+                logic
+                    .members
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>(),
                 [
                     format!("DLED{index}"),
                     format!("RLED{index}"),
@@ -3282,5 +3290,4 @@ mod tests {
             &auto_positions,
         ));
     }
-
 }

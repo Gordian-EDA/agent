@@ -61,488 +61,468 @@ pub fn tool_defs() -> Vec<Tool> {
         input_schema: Value,
     }
     let defs = vec![
-            Def {
-                name: "search_symbols".into(),
-                description: "Find symbol `Lib:Name`; batch 4 queries. Common parts are built in."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "minLength": 1 },
-                        "limit": { "type": "integer", "minimum": 1 },
-                        "queries": {
-                            "type": "array", "minItems": 1, "maxItems": 4,
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "query": { "type": "string", "minLength": 1 },
-                                    "limit": { "type": "integer", "minimum": 1 }
-                                },
-                                "required": ["query"],
-                                "additionalProperties": false
-                            }
-                        }
-                    },
-                    "anyOf": [{ "required": ["query"] }, { "required": ["queries"] }],
-                    "additionalProperties": false
-                }),
-            },
-            Def {
-                name: "get_symbol_info".into(),
-                description: "Return symbol ratings, datasheet, footprint, and pins."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "lib_id": { "type": "string", "description": "E.g. Device:R." }
-                    },
-                    "required": ["lib_id"]
-                }),
-            },
-            Def {
-                name: "validate_design".into(),
-                description: "Validate YAML or draft; omit yaml for draft."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "yaml": { "type": "string" }
-                    }
-                }),
-            },
-            Def {
-                name: "apply_design".into(),
-                description: "Compile, render, write draft, and run ERC; edit first."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                }),
-            },
-            Def {
-                name: "review_design".into(),
-                description: "Full electrical review before PCB; fix defects."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "intent": { "type": "string", "description": "Goal, rails, key parts/interfaces." }
-                    }
-                }),
-            },
-            Def {
-                name: "run_erc".into(),
-                description: "Run fresh KiCAD ERC; skip after clean apply_design."
-                    .into(),
-                input_schema: json!({ "type": "object", "properties": {} }),
-            },
-            Def {
-                name: "project_info".into(),
-                description: "Return project paths/state."
-                    .into(),
-                input_schema: json!({ "type": "object", "properties": {} }),
-            },
-            Def {
-                name: "read_schematic".into(),
-                description: "Read circuit YAML from draft or .kicad_sch; draft reads/seeds state."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "source": { "type": "string", "description": "draft (default) or .kicad_sch." }
-                    }
-                }),
-            },
-            Def {
-                name: "render_schematic".into(),
-                description: "Render schematic PNG."
-                    .into(),
-                input_schema: json!({ "type": "object", "properties": {} }),
-            },
-            Def {
-                name: "create_design".into(),
-                description: "Create complete requested circuit; no examples or fragments."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "yaml": { "type": "string", "description": "Complete top-level circuit-YAML for the request." },
-                        "overwrite": { "type": "boolean" }
-                    },
-                    "required": ["yaml"]
-                }),
-            },
-            Def {
-                name: "edit_design".into(),
-                description: "Replace full draft; part loss needs allow_component_removal."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "yaml": { "type": "string" },
-                        "allow_component_removal": { "type": "boolean" }
-                    },
-                    "required": ["yaml"],
-                    "additionalProperties": false
-                }),
-            },
-            // ── PCB tools (slice 5) ─────────────────────────────────────────
-            Def {
-                name: "search_footprints".into(),
-                description: "Find footprint `Lib:Name` IDs; batch 4 queries."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "minLength": 1 },
-                        "limit": { "type": "integer", "minimum": 1 },
-                        "queries": {
-                            "type": "array", "minItems": 1, "maxItems": 4,
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "query": { "type": "string", "minLength": 1 },
-                                    "limit": { "type": "integer", "minimum": 1 }
-                                },
-                                "required": ["query"],
-                                "additionalProperties": false
-                            }
-                        }
-                    },
-                    "anyOf": [{ "required": ["query"] }, { "required": ["queries"] }],
-                    "additionalProperties": false
-                }),
-            },
-            Def {
-                name: "get_footprint_info".into(),
-                description: "Return pads and geometry for footprint `Lib:Name`."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "lib_id": { "type": "string" }
-                    },
-                    "required": ["lib_id"]
-                }),
-            },
-            Def {
-                name: "assign_footprints".into(),
-                description: "Set draft footprints; apply before PCB regeneration."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "assignments": {
-                            "type": "array",
-                            "description": "Use even for one component.",
-                            "minItems": 1,
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "reference": { "type": "string" },
-                                    "footprint": { "type": "string", "description": "Lib:Name." }
-                                },
-                                "required": ["reference", "footprint"]
-                            }
-                        }
-                    },
-                    "required": ["assignments"]
-                }),
-            },
-            Def {
-                name: "open_board".into(),
-                description: "Open PCB for live IPC edits; return board state."
-                    .into(),
-                input_schema: json!({ "type": "object", "properties": {} }),
-            },
-            Def {
-                name: "move_parts".into(),
-                description: "Move footprints by to, by, near, or edge, with rotation/offsets."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "moves": {
-                            "type": "array",
-                            "minItems": 1,
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "reference": { "type": "string" },
-                                    "to": {
-                                        "type": "array",
-                                        "items": { "type": "number" },
-                                        "minItems": 2,
-                                        "maxItems": 2
-                                    },
-                                    "by": {
-                                        "type": "array",
-                                        "items": { "type": "number" },
-                                        "minItems": 2,
-                                        "maxItems": 2
-                                    },
-                                    "near": { "type": "string" },
-                                    "side": { "type": "string", "enum": ["left", "right", "above", "below"] },
-                                    "edge": { "type": "string", "enum": ["left", "right", "top", "bottom"] },
-                                    "gap": { "type": "number" },
-                                    "rotation": { "type": "number" },
-                                    "horizontal_offset": { "type": "number" },
-                                    "vertical_offset": { "type": "number" }
-                                },
-                                "required": ["reference"]
-                            }
-                        }
-                    },
-                    "required": ["moves"]
-                }),
-            },
-            Def {
-                name: "route_track".into(),
-                description: "Route one connection around obstacles, with layers and optional vias."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "from": {
-                            "type": "array",
-                            "items": {"type":"number"},
-                            "minItems": 2,
-                            "maxItems": 2,
-                        },
-                        "to": {
-                            "type": "array",
-                            "items": {"type":"number"},
-                            "minItems": 2,
-                            "maxItems": 2,
-                        },
-                        "net": { "type": "string" },
-                        "from_layer": { "type": "string", "description": "Layer; default F.Cu." },
-                        "to_layer": { "type": "string" },
-                        "width": { "type": "number" },
-                        "vias": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "at": {
-                                        "type": "array",
-                                        "items": {"type":"number"},
-                                        "minItems": 2,
-                                        "maxItems": 2
-                                    },
-                                    "to_layer": { "type": "string" }
-                                },
-                                "required": ["at", "to_layer"]
-                            }
-                        }
-                    },
-                    "required": ["from", "to", "net"]
-                }),
-            },
-            Def {
-                name: "delete_copper".into(),
-                description: "Delete nearby track/via; filter by kind, net, or layer."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "at": {
-                            "type": "array",
-                            "items": {"type":"number"},
-                            "minItems": 2,
-                            "maxItems": 2,
-                            "description": "Point [x,y] mm."
-                        },
-                        "radius": { "type": "number", "description": "mm; default 0.4." },
-                        "kinds": {
-                            "type": "array",
-                            "items": { "type": "string", "enum": ["track", "via"] },
-                            "description": "Default both."
-                        },
-                        "net": { "type": "string" },
-                        "layer": { "type": "string" },
-                        "all": { "type": "boolean", "description": "All matches; default nearest." }
-                    },
-                    "required": ["at"]
-                }),
-            },
-            Def {
-                name: "set_net_width".into(),
-                description: "Set net-class width/clearance; prefer regeneration rules pre-route."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string" },
-                        "width": { "type": "number", "description": "mm; default 0.5." },
-                        "clearance": { "type": "number", "description": "mm; default 0.2." },
-                        "nets": { "type": "array", "items": {"type":"string"} }
-                    },
-                    "required": ["name", "nets"]
-                }),
-            },
-            Def {
-                name: "update_board_outline".into(),
-                description: "Edit Edge.Cuts by bounds, polygon, or fitted geometry."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "bounds": {
-                            "type": "object",
-                            "description": "Rectangle, mm.",
-                            "properties": {
-                                "min_x": { "type": "number" }, "max_x": { "type": "number" },
-                                "min_y": { "type": "number" }, "max_y": { "type": "number" }
-                            }
-                        },
-                        "outline": {
-                            "type": "array",
-                            "description": "Closed [[x,y],...] polygon (mm).",
-                            "minItems": 3,
-                            "items": {
-                                "type": "array",
-                                "items": { "type": "number" },
-                                "minItems": 2,
-                                "maxItems": 2
-                            }
-                        },
-                        "fit_to_geometry": {
-                            "type": "boolean",
-                            "description": "Fit around parts/copper."
-                        },
-                        "margin": { "type": "number", "description": "Margin mm; default 2." }
-                    }
-                }),
-            },
-            Def {
-                name: "regenerate_board".into(),
-                description: "Seed PCB; optional bounds/rules use safe defaults.".into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "bounds": {
+        Def {
+            name: "search_symbols".into(),
+            description: "Find symbol `Lib:Name`; batch 4 queries. Common parts are built in."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "minLength": 1 },
+                    "limit": { "type": "integer", "minimum": 1 },
+                    "queries": {
+                        "type": "array", "minItems": 1, "maxItems": 4,
+                        "items": {
                             "type": "object",
                             "properties": {
-                                "min_x": { "type": "number" }, "max_x": { "type": "number" },
-                                "min_y": { "type": "number" }, "max_y": { "type": "number" }
-                            }
-                        },
-                        "rules": {
+                                "query": { "type": "string", "minLength": 1 },
+                                "limit": { "type": "integer", "minimum": 1 }
+                            },
+                            "required": ["query"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "anyOf": [{ "required": ["query"] }, { "required": ["queries"] }],
+                "additionalProperties": false
+            }),
+        },
+        Def {
+            name: "get_symbol_info".into(),
+            description: "Return symbol ratings, datasheet, footprint, and pins.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "lib_id": { "type": "string", "description": "E.g. Device:R." }
+                },
+                "required": ["lib_id"]
+            }),
+        },
+        Def {
+            name: "validate_design".into(),
+            description: "Validate YAML or draft; omit yaml for draft.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "yaml": { "type": "string" }
+                }
+            }),
+        },
+        Def {
+            name: "apply_design".into(),
+            description: "Compile, render, write draft, and run ERC; edit first.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        },
+        Def {
+            name: "review_design".into(),
+            description: "Full electrical review before PCB; fix defects.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "intent": { "type": "string", "description": "Goal, rails, key parts/interfaces." }
+                }
+            }),
+        },
+        Def {
+            name: "run_erc".into(),
+            description: "Run fresh KiCAD ERC; skip after clean apply_design.".into(),
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        Def {
+            name: "project_info".into(),
+            description: "Return project paths/state.".into(),
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        Def {
+            name: "read_schematic".into(),
+            description: "Read circuit YAML from draft or .kicad_sch; draft reads/seeds state."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "description": "draft (default) or .kicad_sch." }
+                }
+            }),
+        },
+        Def {
+            name: "render_schematic".into(),
+            description: "Render schematic PNG.".into(),
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        Def {
+            name: "create_design".into(),
+            description: "Create complete requested circuit; no examples or fragments.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "yaml": { "type": "string", "description": "Complete top-level circuit-YAML for the request." },
+                    "overwrite": { "type": "boolean" }
+                },
+                "required": ["yaml"]
+            }),
+        },
+        Def {
+            name: "edit_design".into(),
+            description: "Replace full draft; part loss needs allow_component_removal.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "yaml": { "type": "string" },
+                    "allow_component_removal": { "type": "boolean" }
+                },
+                "required": ["yaml"],
+                "additionalProperties": false
+            }),
+        },
+        // ── PCB tools (slice 5) ─────────────────────────────────────────
+        Def {
+            name: "search_footprints".into(),
+            description: "Find footprint `Lib:Name` IDs; batch 4 queries.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "minLength": 1 },
+                    "limit": { "type": "integer", "minimum": 1 },
+                    "queries": {
+                        "type": "array", "minItems": 1, "maxItems": 4,
+                        "items": {
                             "type": "object",
                             "properties": {
-                                "layer_count": { "type": "integer", "enum": [2, 4, 6, 8] },
-                                "clearance": { "type": "number" },
-                                "min_trace_width": { "type": "number" },
-                                "via_diameter": { "type": "number" },
-                                "via_drill": { "type": "number" },
-                                "net_widths": {
-                                    "type": "object",
-                                    "additionalProperties": { "type": "number" }
-                                },
-                                "pours": {
+                                "query": { "type": "string", "minLength": 1 },
+                                "limit": { "type": "integer", "minimum": 1 }
+                            },
+                            "required": ["query"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "anyOf": [{ "required": ["query"] }, { "required": ["queries"] }],
+                "additionalProperties": false
+            }),
+        },
+        Def {
+            name: "get_footprint_info".into(),
+            description: "Return pads and geometry for footprint `Lib:Name`.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "lib_id": { "type": "string" }
+                },
+                "required": ["lib_id"]
+            }),
+        },
+        Def {
+            name: "assign_footprints".into(),
+            description: "Set draft footprints; apply before PCB regeneration.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "assignments": {
+                        "type": "array",
+                        "description": "Use even for one component.",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "reference": { "type": "string" },
+                                "footprint": { "type": "string", "description": "Lib:Name." }
+                            },
+                            "required": ["reference", "footprint"]
+                        }
+                    }
+                },
+                "required": ["assignments"]
+            }),
+        },
+        Def {
+            name: "open_board".into(),
+            description: "Open PCB for live IPC edits; return board state.".into(),
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        Def {
+            name: "move_parts".into(),
+            description: "Move footprints by to, by, near, or edge, with rotation/offsets.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "moves": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "reference": { "type": "string" },
+                                "to": {
                                     "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "net": { "type": "string" },
-                                            "layer": { "type": "string" },
-                                            "connect": { "type": "string", "enum": ["thermal", "solid"] }
-                                        },
-                                        "required": ["net", "layer"]
-                                    }
+                                    "items": { "type": "number" },
+                                    "minItems": 2,
+                                    "maxItems": 2
+                                },
+                                "by": {
+                                    "type": "array",
+                                    "items": { "type": "number" },
+                                    "minItems": 2,
+                                    "maxItems": 2
+                                },
+                                "near": { "type": "string" },
+                                "side": { "type": "string", "enum": ["left", "right", "above", "below"] },
+                                "edge": { "type": "string", "enum": ["left", "right", "top", "bottom"] },
+                                "gap": { "type": "number" },
+                                "rotation": { "type": "number" },
+                                "horizontal_offset": { "type": "number" },
+                                "vertical_offset": { "type": "number" }
+                            },
+                            "required": ["reference"]
+                        }
+                    }
+                },
+                "required": ["moves"]
+            }),
+        },
+        Def {
+            name: "route_track".into(),
+            description: "Route one connection around obstacles, with layers and optional vias."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "from": {
+                        "type": "array",
+                        "items": {"type":"number"},
+                        "minItems": 2,
+                        "maxItems": 2,
+                    },
+                    "to": {
+                        "type": "array",
+                        "items": {"type":"number"},
+                        "minItems": 2,
+                        "maxItems": 2,
+                    },
+                    "net": { "type": "string" },
+                    "from_layer": { "type": "string", "description": "Layer; default F.Cu." },
+                    "to_layer": { "type": "string" },
+                    "width": { "type": "number" },
+                    "vias": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "at": {
+                                    "type": "array",
+                                    "items": {"type":"number"},
+                                    "minItems": 2,
+                                    "maxItems": 2
+                                },
+                                "to_layer": { "type": "string" }
+                            },
+                            "required": ["at", "to_layer"]
+                        }
+                    }
+                },
+                "required": ["from", "to", "net"]
+            }),
+        },
+        Def {
+            name: "delete_copper".into(),
+            description: "Delete nearby track/via; filter by kind, net, or layer.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "at": {
+                        "type": "array",
+                        "items": {"type":"number"},
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "description": "Point [x,y] mm."
+                    },
+                    "radius": { "type": "number", "description": "mm; default 0.4." },
+                    "kinds": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["track", "via"] },
+                        "description": "Default both."
+                    },
+                    "net": { "type": "string" },
+                    "layer": { "type": "string" },
+                    "all": { "type": "boolean", "description": "All matches; default nearest." }
+                },
+                "required": ["at"]
+            }),
+        },
+        Def {
+            name: "set_net_width".into(),
+            description: "Set net-class width/clearance; prefer regeneration rules pre-route."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "width": { "type": "number", "description": "mm; default 0.5." },
+                    "clearance": { "type": "number", "description": "mm; default 0.2." },
+                    "nets": { "type": "array", "items": {"type":"string"} }
+                },
+                "required": ["name", "nets"]
+            }),
+        },
+        Def {
+            name: "update_board_outline".into(),
+            description: "Edit Edge.Cuts by bounds, polygon, or fitted geometry.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "bounds": {
+                        "type": "object",
+                        "description": "Rectangle, mm.",
+                        "properties": {
+                            "min_x": { "type": "number" }, "max_x": { "type": "number" },
+                            "min_y": { "type": "number" }, "max_y": { "type": "number" }
+                        }
+                    },
+                    "outline": {
+                        "type": "array",
+                        "description": "Closed [[x,y],...] polygon (mm).",
+                        "minItems": 3,
+                        "items": {
+                            "type": "array",
+                            "items": { "type": "number" },
+                            "minItems": 2,
+                            "maxItems": 2
+                        }
+                    },
+                    "fit_to_geometry": {
+                        "type": "boolean",
+                        "description": "Fit around parts/copper."
+                    },
+                    "margin": { "type": "number", "description": "Margin mm; default 2." }
+                }
+            }),
+        },
+        Def {
+            name: "regenerate_board".into(),
+            description: "Seed PCB; optional bounds/rules use safe defaults.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "bounds": {
+                        "type": "object",
+                        "properties": {
+                            "min_x": { "type": "number" }, "max_x": { "type": "number" },
+                            "min_y": { "type": "number" }, "max_y": { "type": "number" }
+                        }
+                    },
+                    "rules": {
+                        "type": "object",
+                        "properties": {
+                            "layer_count": { "type": "integer", "enum": [2, 4, 6, 8] },
+                            "clearance": { "type": "number" },
+                            "min_trace_width": { "type": "number" },
+                            "via_diameter": { "type": "number" },
+                            "via_drill": { "type": "number" },
+                            "net_widths": {
+                                "type": "object",
+                                "additionalProperties": { "type": "number" }
+                            },
+                            "pours": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "net": { "type": "string" },
+                                        "layer": { "type": "string" },
+                                        "connect": { "type": "string", "enum": ["thermal", "solid"] }
+                                    },
+                                    "required": ["net", "layer"]
                                 }
                             }
                         }
                     }
-                }),
-            },
-            Def {
-                name: "get_board".into(),
-                description: "Return board; net adds pad centers, include_copper adds copper."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "include_copper": { "type": "boolean" },
-                        "kinds": {
-                            "type": "array",
-                            "items": { "type": "string", "enum": ["track", "via"] },
-                            "description": "Default both."
-                        },
-                        "net": { "type": "string" },
-                        "layer": { "type": "string" }
-                    }
-                }),
-            },
-            Def {
-                name: "place_board".into(),
-                description: "Auto-place PCB; groups steer regions, grids, surrounds, and edges."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "groups": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": { "type": "string" },
-                                    "members": { "type": "array", "items": { "type": "string" } },
-                                    "region": {
-                                        "type": "object",
-                                        "properties": {
-                                            "min_x": { "type": "number" }, "max_x": { "type": "number" },
-                                            "min_y": { "type": "number" }, "max_y": { "type": "number" }
-                                        },
-                                        "required": ["min_x", "min_y", "max_x", "max_y"],
-                                        "additionalProperties": false
-                                    },
-                                    "edge": { "type": "string", "enum": ["n", "s", "e", "w"] },
-                                    "grid": { "type": "boolean" },
-                                    "rotation": { "type": "number", "enum": [0, 90, 180, 270] },
-                                    "surround": { "type": "string", "description": "Anchor reference to surround." }
-                                },
-                                "required": ["name", "members"],
-                                "additionalProperties": false
-                            }
-                        },
-                        "edge_seek": { "type": "array", "items": { "type": "string" } },
-                        "corner_seek": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+        },
+        Def {
+            name: "get_board".into(),
+            description: "Return board; net adds pad centers, include_copper adds copper.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "include_copper": { "type": "boolean" },
+                    "kinds": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["track", "via"] },
+                        "description": "Default both."
                     },
-                    "additionalProperties": false
-                }),
-            },
-            Def {
-                name: "route_board".into(),
-                description: "Auto-route board; reports exact failed connections.".into(),
-                input_schema: json!({ "type": "object", "properties": {} }),
-            },
-            Def {
-                name: "render_board".into(),
-                description: "Render board PNG."
-                    .into(),
-                input_schema: json!({ "type": "object", "properties": {} }),
-            },
-            Def {
-                name: "check_board".into(),
-                description: "Run PCB DRC; stop when ok."
-                    .into(),
-                input_schema: json!({ "type": "object", "properties": {} }),
-            },
-            Def {
-                name: "export_fab".into(),
-                description: "Export fabrication files after clean check_board."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Default project PCB." },
-                        "out_dir": { "type": "string", "description": "Default fab/." }
-                    }
-                }),
-            },
+                    "net": { "type": "string" },
+                    "layer": { "type": "string" }
+                }
+            }),
+        },
+        Def {
+            name: "place_board".into(),
+            description: "Auto-place PCB; groups steer regions, grids, surrounds, and edges."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "groups": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "members": { "type": "array", "items": { "type": "string" } },
+                                "region": {
+                                    "type": "object",
+                                    "properties": {
+                                        "min_x": { "type": "number" }, "max_x": { "type": "number" },
+                                        "min_y": { "type": "number" }, "max_y": { "type": "number" }
+                                    },
+                                    "required": ["min_x", "min_y", "max_x", "max_y"],
+                                    "additionalProperties": false
+                                },
+                                "edge": { "type": "string", "enum": ["n", "s", "e", "w"] },
+                                "grid": { "type": "boolean" },
+                                "rotation": { "type": "number", "enum": [0, 90, 180, 270] },
+                                "surround": { "type": "string", "description": "Anchor reference to surround." }
+                            },
+                            "required": ["name", "members"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "edge_seek": { "type": "array", "items": { "type": "string" } },
+                    "corner_seek": { "type": "array", "items": { "type": "string" } }
+                },
+                "additionalProperties": false
+            }),
+        },
+        Def {
+            name: "route_board".into(),
+            description: "Auto-route board; reports exact failed connections.".into(),
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        Def {
+            name: "render_board".into(),
+            description: "Render board PNG.".into(),
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        Def {
+            name: "check_board".into(),
+            description: "Run PCB DRC; stop when ok.".into(),
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        Def {
+            name: "export_fab".into(),
+            description: "Export fabrication files after clean check_board.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Default project PCB." },
+                    "out_dir": { "type": "string", "description": "Default fab/." }
+                }
+            }),
+        },
     ];
     defs.into_iter()
         .map(|d| {
@@ -1322,12 +1302,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // ask for approval. Defer the expensive schematic layout to the approved
     // commit so large designs are not composed twice. Ordinary public dry-runs
     // still include the full layout diagnostics below.
-    if !commit
-        && input
-            .get("__skip_layout_preview")
-            .and_then(Value::as_bool)
-            == Some(true)
-    {
+    if !commit && input.get("__skip_layout_preview").and_then(Value::as_bool) == Some(true) {
         return Ok(json!({
             "ok": true,
             "would_write": true,
@@ -1756,7 +1731,8 @@ fn normalize_misplaced_footprint_parts(
             let Ok(footprint) = catalog.footprint(&id) else {
                 continue;
             };
-            let Some(symbol) = symbol_for_misplaced_footprint(&component.part, footprint.pads.len())
+            let Some(symbol) =
+                symbol_for_misplaced_footprint(&component.part, footprint.pads.len())
             else {
                 continue;
             };
@@ -1920,9 +1896,8 @@ fn common_default_footprint(part: &str) -> Option<String> {
         "Device:LED" => "LED_SMD:LED_0603_1608Metric",
         "Mechanical:MountingHole" => "MountingHole:MountingHole_3.2mm_M3",
         _ => {
-            let (columns, pins) = if let Some(pins) = part
-                .strip_prefix("Connector_Generic:Conn_01x")
-                .or_else(|| {
+            let (columns, pins) = if let Some(pins) =
+                part.strip_prefix("Connector_Generic:Conn_01x").or_else(|| {
                     part.strip_prefix("Connector:Conn_01x")
                         .and_then(|pins| pins.strip_suffix("_Pin"))
                 }) {
@@ -2045,13 +2020,10 @@ fn normalize_invalid_power_references(yaml: &str) -> (String, Vec<Value>) {
     let mut next_power = 1usize;
     let mut edits = Vec::new();
     for diagnostic in diagnostics.0.iter().filter(|d| d.code == "bad-refdes") {
-        let Some(span) = diagnostic.span else { continue };
-        let Some(reference) = diagnostic
-            .message
-            .split('`')
-            .nth(1)
-            .map(str::to_owned)
-        else {
+        let Some(span) = diagnostic.span else {
+            continue;
+        };
+        let Some(reference) = diagnostic.message.split('`').nth(1).map(str::to_owned) else {
             continue;
         };
         let is_power = surface.blocks.values().any(|block| {
@@ -2109,8 +2081,7 @@ fn normalize_invalid_power_references(yaml: &str) -> (String, Vec<Value>) {
             format!("\"{reference}\""),
         ];
         let Some(literal) = literals.into_iter().find(|literal| {
-            suffix.starts_with(literal)
-                && suffix[literal.len()..].trim_start().starts_with(':')
+            suffix.starts_with(literal) && suffix[literal.len()..].trim_start().starts_with(':')
         }) else {
             continue;
         };
@@ -2144,7 +2115,11 @@ fn normalize_misplaced_footprint_component_map(
         let Some(fields) = component.as_object_mut() else {
             continue;
         };
-        let Some(footprint) = fields.get("part").and_then(Value::as_str).map(str::to_owned) else {
+        let Some(footprint) = fields
+            .get("part")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
             continue;
         };
         let Ok(id) = FootprintId::parse(&footprint) else {
@@ -2185,10 +2160,8 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let (yaml, power_reference_normalizations) = normalize_invalid_power_references(&yaml);
     let (yaml, normalizations) = normalize_misplaced_footprint_parts(&yaml, ctx)?;
-    let (yaml, footprint_alias_normalizations) =
-        normalize_common_footprint_aliases(&yaml, ctx)?;
-    let (yaml, default_footprint_normalizations) =
-        normalize_dense_default_footprints(&yaml, ctx)?;
+    let (yaml, footprint_alias_normalizations) = normalize_common_footprint_aliases(&yaml, ctx)?;
+    let (yaml, default_footprint_normalizations) = normalize_dense_default_footprints(&yaml, ctx)?;
     let result = compile(&yaml, ctx.provider());
     let mut report = compile_authoring_report(&result, ctx)?;
     add_power_reference_normalizations(&mut report, power_reference_normalizations);
@@ -2278,8 +2251,7 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "mode": "component_repair",
         }));
     }
-    let footprint_normalizations =
-        normalize_misplaced_footprint_component_map(&mut upsert, ctx)?;
+    let footprint_normalizations = normalize_misplaced_footprint_component_map(&mut upsert, ctx)?;
     let mut footprint_alias_normalizations =
         normalize_common_footprint_aliases_in_component_map(&mut upsert, ctx)?;
     let mut update = match input.get("update") {
@@ -2295,9 +2267,10 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }));
         }
     };
-    footprint_alias_normalizations.extend(
-        normalize_common_footprint_aliases_in_component_map(&mut update, ctx)?,
-    );
+    footprint_alias_normalizations.extend(normalize_common_footprint_aliases_in_component_map(
+        &mut update,
+        ctx,
+    )?);
     for (reference, fields) in &update {
         let Some(fields) = fields.as_object() else {
             return Ok(json!({
@@ -3106,9 +3079,9 @@ mod tests {
 
     use super::{
         common_default_footprint, common_footprint_alias, compile, compile_report, create_design,
-        edit_design, invalid_compile_quality_regressed, normalize_common_footprint_aliases,
-        normalize_dense_default_footprints, normalize_invalid_power_references,
-        footprint_suggestion_clause, normalize_misplaced_footprint_parts, repair_components,
+        edit_design, footprint_suggestion_clause, invalid_compile_quality_regressed,
+        normalize_common_footprint_aliases, normalize_dense_default_footprints,
+        normalize_invalid_power_references, normalize_misplaced_footprint_parts, repair_components,
         repair_components_tool, require_search_query, symbol_for_misplaced_footprint, tool_defs,
     };
 
@@ -3140,11 +3113,11 @@ mod tests {
             Some("Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical")
         );
         assert_eq!(common_default_footprint("Device:C_Polarized"), None);
+        assert_eq!(common_default_footprint("Transistor_FET:Q_NMOS_DGS"), None);
         assert_eq!(
-            common_default_footprint("Transistor_FET:Q_NMOS_DGS"),
+            common_default_footprint("Amplifier_Operational:LM358"),
             None
         );
-        assert_eq!(common_default_footprint("Amplifier_Operational:LM358"), None);
     }
 
     #[test]
@@ -3229,12 +3202,14 @@ blocks:
 
         let created = create_design(json!({"yaml": yaml}), &runtime).unwrap();
         assert_eq!(created["normalized_footprint_aliases"]["count"], 1);
-        assert!(runtime
-            .workspace()
-            .read_draft()
-            .unwrap()
-            .unwrap()
-            .contains("Resistor_SMD:R_0603_1608Metric"));
+        assert!(
+            runtime
+                .workspace()
+                .read_draft()
+                .unwrap()
+                .unwrap()
+                .contains("Resistor_SMD:R_0603_1608Metric")
+        );
 
         let edited = edit_design(json!({"yaml": yaml}), &runtime).unwrap();
         assert_eq!(edited["normalized_footprint_aliases"]["count"], 1);
@@ -3285,8 +3260,7 @@ blocks:
             .join("\n");
         let yaml = format!("version: 1\nblocks:\n  main:\n    components:\n{components}\n");
 
-        let (normalized, changes) =
-            normalize_dense_default_footprints(&yaml, &runtime).unwrap();
+        let (normalized, changes) = normalize_dense_default_footprints(&yaml, &runtime).unwrap();
 
         assert_eq!(changes.len(), 39);
         assert!(normalized.contains("R1: {part: Device:R, footprint: Custom:R1"));
@@ -3294,10 +3268,7 @@ blocks:
             "R40: {part: Device:R, between: [N40, GND], footprint: \"Resistor_SMD:R_0603_1608Metric\"}"
         ));
 
-        let sparse = yaml.replace(
-            "      R40: {part: Device:R, between: [N40, GND]}\n",
-            "",
-        );
+        let sparse = yaml.replace("      R40: {part: Device:R, between: [N40, GND]}\n", "");
         let (sparse, sparse_changes) =
             normalize_dense_default_footprints(&sparse, &runtime).unwrap();
         assert!(sparse_changes.is_empty());
@@ -3319,9 +3290,18 @@ blocks:
 
         let (normalized, changes) = normalize_invalid_power_references(yaml);
 
-        assert!(normalized.contains("PWR2: {part: power:+3V3"), "{normalized}");
-        assert!(normalized.contains("PWR3: {part: power:+1V8"), "{normalized}");
-        assert!(normalized.contains("R_BAD1: {part: Device:R"), "{normalized}");
+        assert!(
+            normalized.contains("PWR2: {part: power:+3V3"),
+            "{normalized}"
+        );
+        assert!(
+            normalized.contains("PWR3: {part: power:+1V8"),
+            "{normalized}"
+        );
+        assert!(
+            normalized.contains("R_BAD1: {part: Device:R"),
+            "{normalized}"
+        );
         assert_eq!(changes.len(), 2);
         let (_, diagnostics) = circuit_lang::parse::parse_str(&normalized);
         let bad = diagnostics
@@ -3338,7 +3318,8 @@ blocks:
         let footprints = tempfile::tempdir().unwrap();
         let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
             .expect("test runtime");
-        let draft = "version: 1\nblocks: {main: {components: {R1: {part: Device:R, between: [A, B]}}}}\n";
+        let draft =
+            "version: 1\nblocks: {main: {components: {R1: {part: Device:R, between: [A, B]}}}}\n";
         runtime.workspace().write_draft(draft, None).unwrap();
 
         let report = edit_design(json!({"new_string": "4.7k"}), &runtime).unwrap();
@@ -3354,7 +3335,8 @@ blocks:
         let footprints = tempfile::tempdir().unwrap();
         let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
             .expect("test runtime");
-        let prior = "version: 1\nblocks: {main: {components: {R1: {part: Device:R, between: [A, B]}}}}\n";
+        let prior =
+            "version: 1\nblocks: {main: {components: {R1: {part: Device:R, between: [A, B]}}}}\n";
         runtime.workspace().write_draft(prior, None).unwrap();
         let candidate = r#"
 version: 1
@@ -3382,7 +3364,11 @@ blocks:
             ("Inductor_SMD:L_0603", 2, "Device:L"),
             ("LED_SMD:LED_0603", 2, "Device:LED"),
             ("Diode_SMD:D_SOD-123", 2, "Device:D"),
-            ("MountingHole:MountingHole_3.2mm", 0, "Mechanical:MountingHole"),
+            (
+                "MountingHole:MountingHole_3.2mm",
+                0,
+                "Mechanical:MountingHole",
+            ),
             ("TestPoint:TestPoint_Pad", 1, "Connector:TestPoint"),
             (
                 "Connector_PinHeader_2.54mm:PinHeader_1x08_Vertical",
@@ -3396,13 +3382,16 @@ blocks:
                 "{footprint}"
             );
         }
-        assert_eq!(symbol_for_misplaced_footprint("Package_QFP:LQFP-48", 48), None);
-        assert_eq!(symbol_for_misplaced_footprint("Package_TO_SOT_SMD:SOT-23", 3), None);
         assert_eq!(
-            symbol_for_misplaced_footprint(
-                "Connector_PinHeader_2.54mm:PinHeader_2x04_Vertical",
-                8
-            ),
+            symbol_for_misplaced_footprint("Package_QFP:LQFP-48", 48),
+            None
+        );
+        assert_eq!(
+            symbol_for_misplaced_footprint("Package_TO_SOT_SMD:SOT-23", 3),
+            None
+        );
+        assert_eq!(
+            symbol_for_misplaced_footprint("Connector_PinHeader_2.54mm:PinHeader_2x04_Vertical", 8),
             None
         );
     }
@@ -3426,14 +3415,21 @@ blocks:
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let multiline = format!(
-            "version: 1\nblocks:\n  main:\n    components:\n{components}\n"
-        );
+        let multiline = format!("version: 1\nblocks:\n  main:\n    components:\n{components}\n");
 
         let created = create_design(json!({"yaml": multiline}), &runtime).unwrap();
         assert_eq!(created["normalized_misplaced_footprints"]["count"], 10);
-        assert_eq!(created["normalized_misplaced_footprints"]["examples"].as_array().unwrap().len(), 8);
-        assert_eq!(created["normalized_misplaced_footprints"]["examples"][0]["reference"], "R1");
+        assert_eq!(
+            created["normalized_misplaced_footprints"]["examples"]
+                .as_array()
+                .unwrap()
+                .len(),
+            8
+        );
+        assert_eq!(
+            created["normalized_misplaced_footprints"]["examples"][0]["reference"],
+            "R1"
+        );
         assert_eq!(created["normalized_misplaced_footprints"]["omitted"], 2);
         assert_eq!(created["draft_written"], true);
         let draft = runtime.workspace().read_draft().unwrap().unwrap();
@@ -3441,20 +3437,24 @@ blocks:
         assert!(draft.contains(&format!("footprint: \"{misplaced}\"")));
 
         let inline_components = (1..=10)
-            .map(|index| {
-                format!(
-                    "R{index}: {{part: {misplaced}, between: [A{index}, C{index}]}}"
-                )
-            })
+            .map(|index| format!("R{index}: {{part: {misplaced}, between: [A{index}, C{index}]}}"))
             .collect::<Vec<_>>()
             .join(", ");
-        let inline = format!(
-            "version: 1\nblocks: {{main: {{components: {{{inline_components}}}}}}}\n"
-        );
+        let inline =
+            format!("version: 1\nblocks: {{main: {{components: {{{inline_components}}}}}}}\n");
         let edited = edit_design(json!({"yaml": inline}), &runtime).unwrap();
         assert_eq!(edited["normalized_misplaced_footprints"]["count"], 10);
-        assert_eq!(edited["normalized_misplaced_footprints"]["examples"].as_array().unwrap().len(), 8);
-        assert_eq!(edited["normalized_misplaced_footprints"]["examples"][0]["reference"], "R1");
+        assert_eq!(
+            edited["normalized_misplaced_footprints"]["examples"]
+                .as_array()
+                .unwrap()
+                .len(),
+            8
+        );
+        assert_eq!(
+            edited["normalized_misplaced_footprints"]["examples"][0]["reference"],
+            "R1"
+        );
         assert_eq!(edited["normalized_misplaced_footprints"]["omitted"], 2);
         assert_eq!(edited["draft_written"], true);
         let draft = runtime.workspace().read_draft().unwrap().unwrap();
@@ -3476,8 +3476,7 @@ blocks:
         let draft = runtime.workspace().read_draft().unwrap().unwrap();
         assert!(draft.contains("R2:"));
         assert_eq!(
-            draft.matches("part: Device:R").count()
-                + draft.matches("part: \"Device:R\"").count(),
+            draft.matches("part: Device:R").count() + draft.matches("part: \"Device:R\"").count(),
             10
         );
         assert_eq!(draft.matches(misplaced).count(), 10);
@@ -3513,8 +3512,7 @@ blocks:
       U1: {part: Package_TO_SOT_SMD:SOT-23, pins: {1: A, 2: B, 3: C}}
 "#;
 
-        let (normalized, changes) =
-            normalize_misplaced_footprint_parts(yaml, &runtime).unwrap();
+        let (normalized, changes) = normalize_misplaced_footprint_parts(yaml, &runtime).unwrap();
 
         assert!(normalized.contains(
             "R1: {part: \"Device:R\", between: [A, B], footprint: \"Resistor_SMD:R_0603_1608Metric\"}"
@@ -3531,9 +3529,7 @@ blocks:
 
     fn invalid_refdes_draft(count: usize) -> String {
         let components = (1..=count)
-            .map(|index| {
-                format!("R_BAD{index}: {{part: Device:R, between: [A, B]}}")
-            })
+            .map(|index| format!("R_BAD{index}: {{part: Device:R, between: [A, B]}}"))
             .collect::<Vec<_>>()
             .join(", ");
         format!("version: 1\nblocks: {{main: {{components: {{{components}}}}}}}\n")
@@ -3554,7 +3550,12 @@ blocks:
         assert_eq!(report["current_validation"]["errors"], 2);
         assert_eq!(report["candidate_validation"]["errors"], 3);
         assert_eq!(report["diagnostics_scope"], "rejected_candidate");
-        assert!(report["error"].as_str().unwrap().contains("current_validation"));
+        assert!(
+            report["error"]
+                .as_str()
+                .unwrap()
+                .contains("current_validation")
+        );
         assert_eq!(report["draft_written"], false);
         assert_eq!(report["draft_changed"], false);
         assert_eq!(runtime.workspace().read_draft().unwrap().unwrap(), prior);
@@ -3575,7 +3576,10 @@ blocks:
         )
         .unwrap();
 
-        assert_ne!(report.get("code"), Some(&json!("invalid_replacement_regressed_draft")));
+        assert_ne!(
+            report.get("code"),
+            Some(&json!("invalid_replacement_regressed_draft"))
+        );
         assert_eq!(report["errors"], 2);
         assert_eq!(report["draft_written"], true);
         assert_eq!(runtime.workspace().read_draft().unwrap().unwrap(), better);
@@ -3722,10 +3726,7 @@ blocks:
                 format!("R_SENSOR_{index} is not a valid refdes"),
             ));
         }
-        diagnostics.push(Diagnostic::error(
-            "unknown-pin",
-            "pin ADC0 not found on U1",
-        ));
+        diagnostics.push(Diagnostic::error("unknown-pin", "pin ADC0 not found on U1"));
         diagnostics.push(Diagnostic::error(
             "power-pin-unconnected",
             "U1 DVDD is not connected",
@@ -3741,10 +3742,7 @@ blocks:
         assert_eq!(report["errors"], 57);
         assert_eq!(report["warnings"], 9);
         assert_eq!(report["diagnostics_omitted"], 52);
-        assert_eq!(
-            report["diagnostic_code_counts"]["bad-refdes"]["errors"],
-            55
-        );
+        assert_eq!(report["diagnostic_code_counts"]["bad-refdes"]["errors"], 55);
         assert_eq!(
             report["diagnostic_code_counts"]["single-pin-net"]["warnings"],
             9
@@ -3761,9 +3759,7 @@ blocks:
         );
         for code in ["unknown-pin", "power-pin-unconnected", "single-pin-net"] {
             assert!(
-                rendered
-                    .iter()
-                    .any(|d| d.as_str().unwrap().contains(code)),
+                rendered.iter().any(|d| d.as_str().unwrap().contains(code)),
                 "missing representative for {code}: {report}"
             );
         }
@@ -3841,9 +3837,7 @@ blocks:
             let schema = tool.schema.unwrap();
             assert_eq!(schema["properties"]["query"]["minLength"], 1, "{name}");
             assert_eq!(
-                schema["properties"]["queries"]["items"]["properties"]["query"]
-                    ["minLength"],
-                1,
+                schema["properties"]["queries"]["items"]["properties"]["query"]["minLength"], 1,
                 "{name}"
             );
         }

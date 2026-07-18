@@ -8,8 +8,8 @@ use kicad_cli::{DrcReport, KicadCli, Violation};
 
 use super::export::gate_drc;
 use super::patch::{
-    FieldPosition, board_outline_bbox, field_position, footprint_placement, patch_field_position,
-    silk_field_owners,
+    FieldPosition, board_outline_bbox, field_position, footprint_placement, patch_field_hidden, patch_field_position,
+    patch_field_text_size, silk_field_owners,
 };
 
 const MAX_DRC_RETRIES: usize = 16;
@@ -19,6 +19,11 @@ const BOARD_INSET_MM: f64 = 0.5;
 const BATCH_CANDIDATE_INDICES: [usize; 4] = [3, 4, 5, 6];
 const REFERENCE_FIELD: &str = "Reference";
 const FUNCTION_FIELD: &str = "Function";
+
+/// Fallback text sizes for stubborn dense clusters, applied the way a layout
+/// engineer would: smaller readable silk beats overlapping silk. Each step is
+/// one batched DRC call outside the positional retry budget.
+const SHRINK_STEPS_MM: [(f64, f64); 2] = [(0.8, 0.12), (0.6, 0.1)];
 
 pub(super) struct SilkCleanup {
     pub report: DrcReport,
@@ -66,137 +71,236 @@ pub(super) fn cleanup_silk_text(
     let mut best_warnings = initial_warnings;
     let mut attempts = 0usize;
     let mut moved = BTreeSet::new();
-    let mut queue = offending_targets(&best_report, &best_text);
     let mut attempted: BTreeMap<String, BTreeSet<(i64, i64)>> = BTreeMap::new();
 
-    // Move all current offenders per pass. These few DRC calls remove the bulk
-    // of collisions without paying for one DRC process per target. Later
-    // passes use label-hashed directions to spread dense text clusters.
-    for candidate_index in BATCH_CANDIDATE_INDICES {
-        if queue.is_empty() || attempts >= MAX_DRC_RETRIES {
+    // Each tier re-runs the full oracle-gated position search; tiers beyond
+    // the first shrink the still-offending texts first, the way a layout
+    // engineer trades text size for clean silk in a dense cluster, and clear
+    // their attempted positions since a spot rejected at full size can accept
+    // the smaller text.
+    for tier in 0..=SHRINK_STEPS_MM.len() {
+        if best_warnings == 0 {
             break;
         }
-        let mut batch_text = best_text.clone();
-        let mut batch_moves = Vec::new();
-        for target in &queue {
-            let Some(origin) = field_position(&batch_text, &target.reference, &target.field) else {
-                continue;
-            };
-            let candidates = on_board_candidates(&batch_text, target, origin);
-            let Some(&candidate) = candidates.get(candidate_index) else {
-                continue;
-            };
-            batch_text =
-                patch_field_position(&batch_text, &target.reference, &target.field, candidate)?;
-            batch_moves.push((target.clone(), candidate));
-        }
-        if !batch_moves.is_empty() {
-            write_board_text(path, &batch_text)?;
+        if tier > 0 {
+            let (size, thickness) = SHRINK_STEPS_MM[tier - 1];
+            let mut shrunk_text = best_text.clone();
+            let mut shrunk_labels = Vec::new();
+            for target in offending_targets(&best_report, &best_text) {
+                if let Ok(next) = patch_field_text_size(
+                    &shrunk_text,
+                    &target.reference,
+                    &target.field,
+                    size,
+                    thickness,
+                ) {
+                    shrunk_text = next;
+                    shrunk_labels.push(target.label());
+                }
+            }
+            if shrunk_labels.is_empty() {
+                break;
+            }
+            write_board_text(path, &shrunk_text)?;
             attempts += 1;
-            let batch_report = match cli.drc(path) {
+            let shrunk_report = match cli.drc(path) {
                 Ok(report) => report,
                 Err(err) => {
                     write_board_text(path, &best_text)?;
-                    return Err(format!("silkscreen batch cleanup DRC failed: {err}"));
+                    return Err(format!("silkscreen shrink cleanup DRC failed: {err}"));
                 }
             };
-            let batch_warnings = silk_warning_count(&batch_report);
+            let shrunk_warnings = silk_warning_count(&shrunk_report);
             let best_gate = gate_drc(&best_report);
-            let batch_gate = gate_drc(&batch_report);
-            let batch_improves = batch_warnings < best_warnings
-                && batch_gate.copper_violations <= best_gate.copper_violations
-                && batch_gate.meaningful_unconnected <= best_gate.meaningful_unconnected;
-            if batch_improves {
-                for (target, candidate) in &batch_moves {
-                    attempted
-                        .entry(target.label())
-                        .or_default()
-                        .insert(candidate_key(*candidate));
+            let shrunk_gate = gate_drc(&shrunk_report);
+            if shrunk_warnings <= best_warnings
+                && shrunk_gate.copper_violations <= best_gate.copper_violations
+                && shrunk_gate.meaningful_unconnected <= best_gate.meaningful_unconnected
+            {
+                best_text = shrunk_text;
+                best_report = shrunk_report;
+                best_warnings = shrunk_warnings;
+                moved.extend(shrunk_labels.iter().cloned());
+                for label in shrunk_labels {
+                    attempted.remove(&label);
                 }
-                best_text = batch_text;
-                best_report = batch_report;
-                best_warnings = batch_warnings;
-                for (target, _) in batch_moves {
-                    moved.insert(target.label());
-                }
-                queue = offending_targets(&best_report, &best_text);
             } else {
-                // A rejected singleton batch tested the exact same state as an
-                // individual move, so do not spend the fallback budget retrying
-                // it. Multi-target batches may fail through interactions even
-                // when one move is useful, and therefore remain individually
-                // eligible.
-                if let [(target, candidate)] = batch_moves.as_slice() {
-                    attempted
-                        .entry(target.label())
-                        .or_default()
-                        .insert(candidate_key(*candidate));
+                write_board_text(path, &best_text)?;
+            }
+        }
+        let tier_budget = (tier + 1) * MAX_DRC_RETRIES;
+        let mut queue = offending_targets(&best_report, &best_text);
+
+        // Move all current offenders per pass. These few DRC calls remove the bulk
+        // of collisions without paying for one DRC process per target. Later
+        // passes use label-hashed directions to spread dense text clusters.
+        for candidate_index in BATCH_CANDIDATE_INDICES {
+            if queue.is_empty() || attempts >= tier_budget {
+                break;
+            }
+            let mut batch_text = best_text.clone();
+            let mut batch_moves = Vec::new();
+            for target in &queue {
+                let Some(origin) = field_position(&batch_text, &target.reference, &target.field)
+                else {
+                    continue;
+                };
+                let candidates = on_board_candidates(&batch_text, target, origin);
+                let Some(&candidate) = candidates.get(candidate_index) else {
+                    continue;
+                };
+                batch_text =
+                    patch_field_position(&batch_text, &target.reference, &target.field, candidate)?;
+                batch_moves.push((target.clone(), candidate));
+            }
+            if !batch_moves.is_empty() {
+                write_board_text(path, &batch_text)?;
+                attempts += 1;
+                let batch_report = match cli.drc(path) {
+                    Ok(report) => report,
+                    Err(err) => {
+                        write_board_text(path, &best_text)?;
+                        return Err(format!("silkscreen batch cleanup DRC failed: {err}"));
+                    }
+                };
+                let batch_warnings = silk_warning_count(&batch_report);
+                let best_gate = gate_drc(&best_report);
+                let batch_gate = gate_drc(&batch_report);
+                let batch_improves = batch_warnings < best_warnings
+                    && batch_gate.copper_violations <= best_gate.copper_violations
+                    && batch_gate.meaningful_unconnected <= best_gate.meaningful_unconnected;
+                if batch_improves {
+                    for (target, candidate) in &batch_moves {
+                        attempted
+                            .entry(target.label())
+                            .or_default()
+                            .insert(candidate_key(*candidate));
+                    }
+                    best_text = batch_text;
+                    best_report = batch_report;
+                    best_warnings = batch_warnings;
+                    for (target, _) in batch_moves {
+                        moved.insert(target.label());
+                    }
+                    queue = offending_targets(&best_report, &best_text);
+                } else {
+                    // A rejected singleton batch tested the exact same state as an
+                    // individual move, so do not spend the fallback budget retrying
+                    // it. Multi-target batches may fail through interactions even
+                    // when one move is useful, and therefore remain individually
+                    // eligible.
+                    if let [(target, candidate)] = batch_moves.as_slice() {
+                        attempted
+                            .entry(target.label())
+                            .or_default()
+                            .insert(candidate_key(*candidate));
+                    }
+                    write_board_text(path, &best_text)?;
+                }
+            }
+        }
+
+        let mut queue: VecDeque<_> = queue.into_iter().collect();
+        while let Some(target) = queue.pop_front() {
+            if attempts >= tier_budget || best_warnings == 0 {
+                break;
+            }
+            let Some(origin) = field_position(&best_text, &target.reference, &target.field) else {
+                continue;
+            };
+            let viable = on_board_candidates(&best_text, &target, origin);
+            let candidates = untried_candidates(&viable, attempted.get(&target.label()))
+                .into_iter()
+                .take(MAX_CANDIDATES_PER_TARGET_PASS)
+                .collect::<Vec<_>>();
+            let mut accepted = false;
+            for candidate in candidates {
+                if attempts >= tier_budget {
+                    break;
+                }
+                attempted
+                    .entry(target.label())
+                    .or_default()
+                    .insert(candidate_key(candidate));
+                let candidate_text =
+                    patch_field_position(&best_text, &target.reference, &target.field, candidate)?;
+                write_board_text(path, &candidate_text)?;
+                attempts += 1;
+                let candidate_report = match cli.drc(path) {
+                    Ok(report) => report,
+                    Err(err) => {
+                        write_board_text(path, &best_text)?;
+                        return Err(format!("silkscreen cleanup DRC failed: {err}"));
+                    }
+                };
+                let candidate_warnings = silk_warning_count(&candidate_report);
+                let best_gate = gate_drc(&best_report);
+                let candidate_gate = gate_drc(&candidate_report);
+                let blocking_not_worse = candidate_gate.copper_violations
+                    <= best_gate.copper_violations
+                    && candidate_gate.meaningful_unconnected <= best_gate.meaningful_unconnected;
+                if blocking_not_worse && candidate_warnings < best_warnings {
+                    best_text = candidate_text;
+                    best_report = candidate_report;
+                    best_warnings = candidate_warnings;
+                    moved.insert(target.label());
+                    queue = offending_targets(&best_report, &best_text)
+                        .into_iter()
+                        .collect();
+                    accepted = true;
+                    break;
                 }
                 write_board_text(path, &best_text)?;
+            }
+            // Work in small per-target passes for fairness, but do not discard a
+            // stubborn target while fresh positions and the global retry budget
+            // remain. Re-queueing also lets a dense label reach the wider rings.
+            if !accepted
+                && attempts < tier_budget
+                && !untried_candidates(&viable, attempted.get(&target.label())).is_empty()
+            {
+                queue.push_back(target);
             }
         }
     }
 
-    let mut queue: VecDeque<_> = queue.into_iter().collect();
-    while let Some(target) = queue.pop_front() {
-        if attempts >= MAX_DRC_RETRIES || best_warnings == 0 {
-            break;
-        }
-        let Some(origin) = field_position(&best_text, &target.reference, &target.field) else {
-            continue;
-        };
-        let viable = on_board_candidates(&best_text, &target, origin);
-        let candidates = untried_candidates(&viable, attempted.get(&target.label()))
-            .into_iter()
-            .take(MAX_CANDIDATES_PER_TARGET_PASS)
-            .collect::<Vec<_>>();
-        let mut accepted = false;
-        for candidate in candidates {
-            if attempts >= MAX_DRC_RETRIES {
-                break;
+    // Texts that survive every size tier and ring have no legal silk spot on
+    // this board. Industry practice for such ultra-dense clusters is to omit
+    // the silk reference (it stays in the fab drawing), which reads cleaner
+    // than clipped or overlapping text. The DRC oracle still gates the result.
+    if best_warnings > 0 {
+        let mut hidden_text = best_text.clone();
+        let mut hidden_labels = Vec::new();
+        for target in offending_targets(&best_report, &best_text) {
+            if let Ok(next) = patch_field_hidden(&hidden_text, &target.reference, &target.field) {
+                hidden_text = next;
+                hidden_labels.push(target.label());
             }
-            attempted
-                .entry(target.label())
-                .or_default()
-                .insert(candidate_key(candidate));
-            let candidate_text =
-                patch_field_position(&best_text, &target.reference, &target.field, candidate)?;
-            write_board_text(path, &candidate_text)?;
+        }
+        if !hidden_labels.is_empty() {
+            write_board_text(path, &hidden_text)?;
             attempts += 1;
-            let candidate_report = match cli.drc(path) {
+            let hidden_report = match cli.drc(path) {
                 Ok(report) => report,
                 Err(err) => {
                     write_board_text(path, &best_text)?;
-                    return Err(format!("silkscreen cleanup DRC failed: {err}"));
+                    return Err(format!("silkscreen hide cleanup DRC failed: {err}"));
                 }
             };
-            let candidate_warnings = silk_warning_count(&candidate_report);
+            let hidden_warnings = silk_warning_count(&hidden_report);
             let best_gate = gate_drc(&best_report);
-            let candidate_gate = gate_drc(&candidate_report);
-            let blocking_not_worse = candidate_gate.copper_violations
-                <= best_gate.copper_violations
-                && candidate_gate.meaningful_unconnected <= best_gate.meaningful_unconnected;
-            if blocking_not_worse && candidate_warnings < best_warnings {
-                best_text = candidate_text;
-                best_report = candidate_report;
-                best_warnings = candidate_warnings;
-                moved.insert(target.label());
-                queue = offending_targets(&best_report, &best_text)
-                    .into_iter()
-                    .collect();
-                accepted = true;
-                break;
+            let hidden_gate = gate_drc(&hidden_report);
+            if hidden_warnings < best_warnings
+                && hidden_gate.copper_violations <= best_gate.copper_violations
+                && hidden_gate.meaningful_unconnected <= best_gate.meaningful_unconnected
+            {
+                best_text = hidden_text;
+                best_report = hidden_report;
+                best_warnings = hidden_warnings;
+                moved.extend(hidden_labels);
+            } else {
+                write_board_text(path, &best_text)?;
             }
-            write_board_text(path, &best_text)?;
-        }
-        // Work in small per-target passes for fairness, but do not discard a
-        // stubborn target while fresh positions and the global retry budget
-        // remain. Re-queueing also lets a dense label reach the wider rings.
-        if !accepted
-            && attempts < MAX_DRC_RETRIES
-            && !untried_candidates(&viable, attempted.get(&target.label())).is_empty()
-        {
-            queue.push_back(target);
         }
     }
 
@@ -306,6 +410,9 @@ fn candidate_positions(target: &SilkTarget, origin: FieldPosition) -> Vec<FieldP
         (-diag, -diag),
     ];
     let mut candidates = vec![origin]; // first retry only makes rotated text upright
+    // The body center: pad-free on most IC packages, and the spot a layout
+    // engineer uses when the perimeter is packed.
+    candidates.push(FieldPosition { x: 0.0, y: 0.0 });
     let norm = origin.x.hypot(origin.y);
     if norm > 1e-9 {
         let ux = origin.x / norm;
@@ -319,7 +426,7 @@ fn candidate_positions(target: &SilkTarget, origin: FieldPosition) -> Vec<FieldP
             });
         }
     }
-    for extra in [0.0, 1.0, 2.0] {
+    for extra in [0.0, 1.0, 2.0, 3.5] {
         for offset in 0..directions.len() {
             let (dx, dy) = directions[(phase + offset) % directions.len()];
             let r = radius + extra;
@@ -483,10 +590,11 @@ mod tests {
 
         assert_eq!(a, b);
         assert_eq!(a[0], origin);
-        assert!(a.len() <= 25);
+        assert_eq!(a[1], FieldPosition { x: 0.0, y: 0.0 });
+        assert!(a.len() <= 40);
         assert!(
             a.iter()
-                .all(|candidate| candidate.x.hypot(candidate.y) <= 3.81)
+                .all(|candidate| candidate.x.hypot(candidate.y) <= 5.31)
         );
     }
 
@@ -497,7 +605,7 @@ mod tests {
         let all = candidate_positions(&c6, origin);
         let mut attempted = BTreeSet::new();
         attempted.insert(candidate_key(origin));
-        for index in [4, 5, 6] {
+        for index in [5, 6, 7, 8] {
             attempted.insert(candidate_key(all[index]));
         }
 

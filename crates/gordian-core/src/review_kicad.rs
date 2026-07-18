@@ -202,9 +202,7 @@ pub(crate) fn intent_contract_checks(intent: &str, design: &circuit_lang::Design
         );
     }
 
-    if (request.contains("pc817") || request.contains("optocoupl"))
-        && request.contains("input")
-    {
+    if (request.contains("pc817") || request.contains("optocoupl")) && request.contains("input") {
         let bypassed = pc817_inputs_bypassing_series_resistors(&components);
         if !bypassed.is_empty() {
             defects.push(format!(
@@ -360,9 +358,14 @@ fn requires_status_signal(request: &str) -> bool {
         .split(['.', ';', '\n'])
         .filter(|clause| clause.contains("status"))
         .filter(|clause| {
-            ["status signal", "status output", "status header", "status pin"]
-                .iter()
-                .any(|term| clause.contains(term))
+            [
+                "status signal",
+                "status output",
+                "status header",
+                "status pin",
+            ]
+            .iter()
+            .any(|term| clause.contains(term))
         })
         .any(|clause| {
             ![
@@ -1470,7 +1473,9 @@ nets:
         );
         let defects = intent_contract_checks("PC817 isolated 24V digital input", &bypassed);
         assert!(
-            defects.iter().any(|defect| defect.contains("U1") && defect.contains("series resistors")),
+            defects
+                .iter()
+                .any(|defect| defect.contains("U1") && defect.contains("series resistors")),
             "{defects:?}"
         );
 

@@ -1763,8 +1763,14 @@ mod tests {
         })))
         .unwrap();
 
-        assert_eq!(resolve_pour_layer(&rules.pours[0].layer, 4).unwrap().1, "In1.Cu");
-        assert_eq!(resolve_pour_layer(&rules.pours[1].layer, 4).unwrap().1, "In2.Cu");
+        assert_eq!(
+            resolve_pour_layer(&rules.pours[0].layer, 4).unwrap().1,
+            "In1.Cu"
+        );
+        assert_eq!(
+            resolve_pour_layer(&rules.pours[1].layer, 4).unwrap().1,
+            "In2.Cu"
+        );
     }
 
     #[test]
