@@ -178,10 +178,20 @@ impl Kicad {
         let outline = edge_cuts_outline(&shapes)
             .ok_or_else(|| Error::NotFound("Edge.Cuts board outline from KiCAD IPC".to_owned()))?;
         let outline = Polygon::new(outline).map_err(Error::Unsupported)?;
-        let rules = match (self.net_classes(), self.net_classes_for_nets(nets.clone())) {
-            (Ok(net_classes), Ok(effective)) => board_rules(net_classes, effective)?,
-            (Err(err), _) | (_, Err(err)) if is_unimplemented(&err) => default_rules(),
-            (Err(err), _) | (_, Err(err)) => return Err(err),
+        let net_class_queries_safe = self
+            .version()
+            .map(|(major, minor, patch, _)| {
+                crate::client::net_class_queries_supported(major, minor, patch)
+            })
+            .unwrap_or(false);
+        let rules = if !net_class_queries_safe {
+            default_rules()
+        } else {
+            match (self.net_classes(), self.net_classes_for_nets(nets.clone())) {
+                (Ok(net_classes), Ok(effective)) => board_rules(net_classes, effective)?,
+                (Err(err), _) | (_, Err(err)) if is_unimplemented(&err) => default_rules(),
+                (Err(err), _) | (_, Err(err)) => return Err(err),
+            }
         };
         Ok(snapshot_from_items_with_context(
             footprints,

@@ -70,6 +70,37 @@ impl SessionManager {
             .session
             .lock()
             .map_err(|_| Error::Spawn("KiCAD session manager mutex poisoned".to_string()))?;
+        self.ensure_bound(&mut session, board)?;
+        Ok(())
+    }
+
+    pub fn with_session<T>(
+        &self,
+        board: &Path,
+        f: impl FnOnce(&mut Session) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        remove_board_lock(board);
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| Error::Spawn("KiCAD session manager mutex poisoned".to_string()))?;
+        self.ensure_bound(&mut session, board)?;
+        f(&mut session.as_mut().expect("session initialized").session)
+    }
+
+    /// Bind the manager to `board`, relaunching when the managed server process
+    /// has died (a crashed pcbnew leaves a socket that only times out).
+    fn ensure_bound(
+        &self,
+        session: &mut Option<ManagedSession>,
+        board: &Path,
+    ) -> Result<(), Error> {
+        if let Some(existing) = session.as_mut()
+            && same_board(&existing.board, board)
+            && existing.session.process_exited()
+        {
+            *session = None;
+        }
         match session.as_ref() {
             Some(existing) if same_board(&existing.board, board) => {}
             Some(existing) => {
@@ -87,35 +118,6 @@ impl SessionManager {
             }
         }
         Ok(())
-    }
-
-    pub fn with_session<T>(
-        &self,
-        board: &Path,
-        f: impl FnOnce(&mut Session) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        remove_board_lock(board);
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|_| Error::Spawn("KiCAD session manager mutex poisoned".to_string()))?;
-        match session.as_ref() {
-            Some(existing) if same_board(&existing.board, board) => {}
-            Some(existing) => {
-                return Err(Error::Spawn(format!(
-                    "KiCAD session is already bound to {}; refusing to reuse it for {}",
-                    existing.board.display(),
-                    board.display()
-                )));
-            }
-            None => {
-                *session = Some(ManagedSession {
-                    board: board.to_path_buf(),
-                    session: self.attach_or_launch(board)?,
-                });
-            }
-        }
-        f(&mut session.as_mut().expect("session initialized").session)
     }
 
     pub fn save_if_open(&self) -> Result<bool, Error> {
@@ -273,6 +275,14 @@ impl Session {
     /// The connected client (board read/edit ops).
     pub fn kicad(&mut self) -> &mut Kicad {
         &mut self.kicad
+    }
+
+    /// Whether the managed server process has exited. Attached sessions own no
+    /// process and are assumed alive.
+    pub fn process_exited(&mut self) -> bool {
+        self.child
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
     }
 
     fn await_socket(timeout: Duration) -> Result<(), Error> {

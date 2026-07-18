@@ -177,9 +177,16 @@ pub fn footprint_update_supported(major: u32, minor: u32, patch: u32) -> bool {
     !(major == 9 && minor == 0 && patch <= 2)
 }
 
+/// Whether this KiCad release survives `GetNetClassForNets`. KiCad 9.0.2's
+/// pcbnew answers the call and then crashes, killing the session for every
+/// later request.
+pub fn net_class_queries_supported(major: u32, minor: u32, patch: u32) -> bool {
+    !(major == 9 && minor == 0 && patch <= 2)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::footprint_update_supported;
+    use super::{footprint_update_supported, net_class_queries_supported};
 
     #[test]
     fn footprint_updates_gate_known_unstable_kicad_902() {
@@ -187,5 +194,12 @@ mod tests {
         assert!(!footprint_update_supported(9, 0, 2));
         assert!(footprint_update_supported(9, 0, 3));
         assert!(footprint_update_supported(10, 0, 0));
+    }
+
+    #[test]
+    fn net_class_queries_gate_session_killing_kicad_902() {
+        assert!(!net_class_queries_supported(9, 0, 2));
+        assert!(net_class_queries_supported(9, 0, 3));
+        assert!(net_class_queries_supported(10, 0, 0));
     }
 }
