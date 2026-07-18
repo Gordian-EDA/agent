@@ -167,14 +167,18 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "edit_design".into(),
-            description: "Replace full draft; part loss needs allow_component_removal.".into(),
+            description: "Replace full draft via `yaml`, or patch via exact \
+                          old_string/new_string; part loss needs allow_component_removal."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "yaml": { "type": "string" },
+                    "old_string": { "type": "string" },
+                    "new_string": { "type": "string" },
+                    "replace_all": { "type": "boolean" },
                     "allow_component_removal": { "type": "boolean" }
                 },
-                "required": ["yaml"],
                 "additionalProperties": false
             }),
         },

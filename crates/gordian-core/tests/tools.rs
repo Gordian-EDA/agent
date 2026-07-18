@@ -1210,10 +1210,13 @@ fn defs_lists_all_tools() {
         }
         if def.name.to_string() == "edit_design" {
             assert_eq!(schema["additionalProperties"], false);
-            assert_eq!(schema["required"], serde_json::json!(["yaml"]));
+            // Both authoring shapes are advertised: full `yaml` replacement and
+            // the exact-match patch that spares a large draft the 30k-token
+            // resend that truncates weaker providers.
             let props = schema["properties"].as_object().expect("properties object");
-            assert!(!props.contains_key("old_string"));
-            assert!(!props.contains_key("new_string"));
+            assert!(props.contains_key("yaml"));
+            assert!(props.contains_key("old_string"));
+            assert!(props.contains_key("new_string"));
         }
         if def.name.to_string() == "route_track" {
             let props = schema["properties"].as_object().expect("properties object");
@@ -1242,7 +1245,7 @@ fn tool_definitions_stay_within_static_context_budget() {
     let defs = tool_defs();
     let total: usize = defs.iter().map(|tool| tool.size()).sum();
     assert!(
-        total <= 8_200,
+        total <= 8_350,
         "tool definitions use {total} bytes; keep the always-on schemas concise"
     );
 }
