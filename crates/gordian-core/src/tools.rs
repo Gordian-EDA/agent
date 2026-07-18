@@ -1216,15 +1216,36 @@ fn add_footprint_compatibility(
             .as_deref()
             .map(|reason| format!("; polarity mismatch: {reason}"))
             .unwrap_or_default();
+        // Generic Device:Q_* symbols number their pins with letters, so NO
+        // numbered-pad package can ever match: changing footprints loops
+        // forever. Name the real fix — swap to a concrete part symbol.
+        let lettered_symbol = !mismatch.symbol_pins_absent_from_footprint.is_empty()
+            && mismatch
+                .symbol_pins_absent_from_footprint
+                .iter()
+                .all(|pin| pin.parse::<u32>().is_err())
+            && mismatch
+                .footprint_pads_absent_from_symbol
+                .iter()
+                .all(|pad| pad.parse::<u32>().is_ok());
+        let hint = if lettered_symbol {
+            "; this symbol numbers its pins with LETTERS, so no numbered-pad package can \
+             match — replace the SYMBOL with a concrete part (search for the actual device, \
+             e.g. Transistor_BJT:MMBT3904 or Transistor_FET:AO3401A for SOT-23) instead of \
+             trying other footprints"
+        } else {
+            ""
+        };
         format!(
             "error[footprint_pin_mismatch]: {} uses symbol {} with footprint {}; \
-             symbol pins absent from footprint: {:?}; footprint pads absent from symbol: {:?}{}",
+             symbol pins absent from footprint: {:?}; footprint pads absent from symbol: {:?}{}{}",
             mismatch.reference,
             mismatch.symbol,
             mismatch.footprint,
             mismatch.symbol_pins_absent_from_footprint,
             mismatch.footprint_pads_absent_from_symbol,
             polarity,
+            hint,
         )
         .into()
     }));
