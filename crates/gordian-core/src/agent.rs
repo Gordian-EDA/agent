@@ -217,6 +217,10 @@ const MAX_AUTHORING_TRANSITION_NUDGES: usize = 1;
 /// invalid draft and then starts inspecting instead of fixing diagnostics.
 const MAX_INVALID_DRAFT_REPAIR_NUDGES: usize = 1;
 
+/// One reminder to re-apply when a clean draft is stalled behind a
+/// semantic-review deferral and repairs have stopped changing anything.
+const MAX_REVIEW_REAPPLY_NUDGES: usize = 1;
+
 /// One retry when a provider exhausts its output budget before completing a
 /// tool call. The retry is explicitly compact; a second truncation stops
 /// honestly instead of being misreported as a blank successful completion.
@@ -912,6 +916,7 @@ impl<P: Provider> Agent<P> {
         let mut nudges_left = MAX_COMMIT_NUDGES;
         let mut authoring_transition_nudges_left = MAX_AUTHORING_TRANSITION_NUDGES;
         let mut invalid_draft_repair_nudges_left = MAX_INVALID_DRAFT_REPAIR_NUDGES;
+        let mut review_reapply_nudges_left = MAX_REVIEW_REAPPLY_NUDGES;
         let mut output_truncation_nudges_left = MAX_OUTPUT_TRUNCATION_NUDGES;
         let mut output_truncations = 0usize;
         let mut erc_cleanup_nudges_left = MAX_ERC_CLEANUP_NUDGES;
@@ -2030,6 +2035,21 @@ impl<P: Provider> Agent<P> {
                         consecutive_no_progress_completions = 0;
                         self.history
                             .push(ChatMessage::user(INVALID_DRAFT_REPAIR_NUDGE));
+                        continue;
+                    }
+                    let repaired_draft_waiting_for_reapply = draft_dirty
+                        && commit_attempted_for_current_draft
+                        && latest_authoring_diagnostics
+                            .as_ref()
+                            .and_then(|state| state.errors)
+                            == Some(0)
+                        && schematic_review_current
+                            .as_ref()
+                            .is_some_and(|review| !review_result_is_clean(review));
+                    if repaired_draft_waiting_for_reapply && review_reapply_nudges_left > 0 {
+                        review_reapply_nudges_left -= 1;
+                        consecutive_no_progress_completions = 0;
+                        self.history.push(ChatMessage::user(REVIEW_REAPPLY_NUDGE));
                         continue;
                     }
                     let current_applied = applied && !draft_dirty;
@@ -3921,6 +3941,12 @@ const INVALID_DRAFT_REPAIR_NUDGE: &str = "The current draft is substantive but s
      component/refdes/pin/footprint defects, or one COMPLETE `edit_design` only when the broad \
      document structure is wrong. Do not read, render, validate, apply, or search first; \
      authoring already returns fresh validation.";
+
+/// The re-prompt sent when a clean draft sits behind a semantic-review
+/// deferral and the model keeps issuing no-op repairs instead of re-applying.
+const REVIEW_REAPPLY_NUDGE: &str = "The draft is authoring-clean and your repairs are recorded. \
+     Call `apply_design` now: the semantic review runs again on the updated draft. If defects \
+     remain, fix exactly those with `repair_components`, then apply again.";
 
 /// The re-prompt sent after a commit whose ERC report contains actionable
 /// findings. The result immediately before this message contains the exact
