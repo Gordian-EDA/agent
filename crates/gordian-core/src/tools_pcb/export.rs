@@ -166,7 +166,7 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         // Cleanup edits the durable board between CLI DRC passes. Drop any live
         // editor session first so stale in-memory state cannot overwrite it.
         ctx.close_kicad_session();
-        match super::silk::cleanup_reference_silkscreen(&path, &cli, initial_report.clone()) {
+        match super::silk::cleanup_silk_text(&path, &cli, initial_report.clone()) {
             Ok(cleanup) => {
                 silk_cleanup_attempts = cleanup.attempts;
                 silk_references_moved = cleanup.moved_references;

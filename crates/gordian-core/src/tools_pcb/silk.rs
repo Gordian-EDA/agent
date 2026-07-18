@@ -1,4 +1,4 @@
-//! Deterministic, DRC-oracled relocation of generated Reference silkscreen text.
+//! Deterministic, DRC-oracled relocation of generated silkscreen text fields.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Write;
@@ -7,12 +7,18 @@ use std::path::Path;
 use kicad_cli::{DrcReport, KicadCli, Violation};
 
 use super::export::gate_drc;
-use super::patch::{ReferencePosition, patch_reference_position, reference_position};
+use super::patch::{
+    FieldPosition, board_outline_bbox, field_position, footprint_placement, patch_field_position,
+    silk_field_owners,
+};
 
 const MAX_DRC_RETRIES: usize = 16;
-const MAX_CANDIDATES_PER_REFERENCE_PASS: usize = 4;
-const MIN_REFERENCE_RADIUS_MM: f64 = 1.8;
+const MAX_CANDIDATES_PER_TARGET_PASS: usize = 4;
+const MIN_TEXT_RADIUS_MM: f64 = 1.8;
+const BOARD_INSET_MM: f64 = 0.5;
 const BATCH_CANDIDATE_INDICES: [usize; 4] = [3, 4, 5, 6];
+const REFERENCE_FIELD: &str = "Reference";
+const FUNCTION_FIELD: &str = "Function";
 
 pub(super) struct SilkCleanup {
     pub report: DrcReport,
@@ -20,6 +26,24 @@ pub(super) struct SilkCleanup {
     pub remaining_warnings: usize,
     pub moved_references: Vec<String>,
     pub attempts: usize,
+}
+
+/// One movable silkscreen text: a footprint's Reference or generated Function
+/// legend.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SilkTarget {
+    reference: String,
+    field: String,
+}
+
+impl SilkTarget {
+    fn label(&self) -> String {
+        if self.field == REFERENCE_FIELD {
+            self.reference.clone()
+        } else {
+            format!("{}.{}", self.reference, self.field)
+        }
+    }
 }
 
 pub(super) fn silk_warning_count(report: &DrcReport) -> usize {
@@ -30,7 +54,7 @@ pub(super) fn silk_warning_count(report: &DrcReport) -> usize {
         .count()
 }
 
-pub(super) fn cleanup_reference_silkscreen(
+pub(super) fn cleanup_silk_text(
     path: &Path,
     cli: &KicadCli,
     initial_report: DrcReport,
@@ -42,28 +66,29 @@ pub(super) fn cleanup_reference_silkscreen(
     let mut best_warnings = initial_warnings;
     let mut attempts = 0usize;
     let mut moved = BTreeSet::new();
-    let mut queue = offending_references(&best_report);
+    let mut queue = offending_targets(&best_report, &best_text);
     let mut attempted: BTreeMap<String, BTreeSet<(i64, i64)>> = BTreeMap::new();
 
     // Move all current offenders per pass. These few DRC calls remove the bulk
-    // of collisions without paying for one DRC process per reference. Later
-    // passes use reference-hashed directions to spread dense label clusters.
+    // of collisions without paying for one DRC process per target. Later
+    // passes use label-hashed directions to spread dense text clusters.
     for candidate_index in BATCH_CANDIDATE_INDICES {
         if queue.is_empty() || attempts >= MAX_DRC_RETRIES {
             break;
         }
         let mut batch_text = best_text.clone();
         let mut batch_moves = Vec::new();
-        for reference in &queue {
-            let Some(origin) = reference_position(&batch_text, reference) else {
+        for target in &queue {
+            let Some(origin) = field_position(&batch_text, &target.reference, &target.field) else {
                 continue;
             };
-            let candidates = reference_candidates(reference, origin);
+            let candidates = on_board_candidates(&batch_text, target, origin);
             let Some(&candidate) = candidates.get(candidate_index) else {
                 continue;
             };
-            batch_text = patch_reference_position(&batch_text, reference, candidate)?;
-            batch_moves.push((reference.clone(), candidate));
+            batch_text =
+                patch_field_position(&batch_text, &target.reference, &target.field, candidate)?;
+            batch_moves.push((target.clone(), candidate));
         }
         if !batch_moves.is_empty() {
             write_board_text(path, &batch_text)?;
@@ -82,28 +107,28 @@ pub(super) fn cleanup_reference_silkscreen(
                 && batch_gate.copper_violations <= best_gate.copper_violations
                 && batch_gate.meaningful_unconnected <= best_gate.meaningful_unconnected;
             if batch_improves {
-                for (reference, candidate) in &batch_moves {
+                for (target, candidate) in &batch_moves {
                     attempted
-                        .entry(reference.clone())
+                        .entry(target.label())
                         .or_default()
                         .insert(candidate_key(*candidate));
                 }
                 best_text = batch_text;
                 best_report = batch_report;
                 best_warnings = batch_warnings;
-                for (reference, _) in batch_moves {
-                    moved.insert(reference);
+                for (target, _) in batch_moves {
+                    moved.insert(target.label());
                 }
-                queue = offending_references(&best_report);
+                queue = offending_targets(&best_report, &best_text);
             } else {
                 // A rejected singleton batch tested the exact same state as an
                 // individual move, so do not spend the fallback budget retrying
-                // it. Multi-reference batches may fail through interactions even
+                // it. Multi-target batches may fail through interactions even
                 // when one move is useful, and therefore remain individually
                 // eligible.
-                if let [(reference, candidate)] = batch_moves.as_slice() {
+                if let [(target, candidate)] = batch_moves.as_slice() {
                     attempted
-                        .entry(reference.clone())
+                        .entry(target.label())
                         .or_default()
                         .insert(candidate_key(*candidate));
                 }
@@ -113,28 +138,29 @@ pub(super) fn cleanup_reference_silkscreen(
     }
 
     let mut queue: VecDeque<_> = queue.into_iter().collect();
-    while let Some(reference) = queue.pop_front() {
+    while let Some(target) = queue.pop_front() {
         if attempts >= MAX_DRC_RETRIES || best_warnings == 0 {
             break;
         }
-        let Some(origin) = reference_position(&best_text, &reference) else {
+        let Some(origin) = field_position(&best_text, &target.reference, &target.field) else {
             continue;
         };
-        let candidates =
-            untried_reference_candidates(&reference, origin, attempted.get(&reference))
-                .into_iter()
-                .take(MAX_CANDIDATES_PER_REFERENCE_PASS)
-                .collect::<Vec<_>>();
+        let viable = on_board_candidates(&best_text, &target, origin);
+        let candidates = untried_candidates(&viable, attempted.get(&target.label()))
+            .into_iter()
+            .take(MAX_CANDIDATES_PER_TARGET_PASS)
+            .collect::<Vec<_>>();
         let mut accepted = false;
         for candidate in candidates {
             if attempts >= MAX_DRC_RETRIES {
                 break;
             }
             attempted
-                .entry(reference.clone())
+                .entry(target.label())
                 .or_default()
                 .insert(candidate_key(candidate));
-            let candidate_text = patch_reference_position(&best_text, &reference, candidate)?;
+            let candidate_text =
+                patch_field_position(&best_text, &target.reference, &target.field, candidate)?;
             write_board_text(path, &candidate_text)?;
             attempts += 1;
             let candidate_report = match cli.drc(path) {
@@ -154,22 +180,23 @@ pub(super) fn cleanup_reference_silkscreen(
                 best_text = candidate_text;
                 best_report = candidate_report;
                 best_warnings = candidate_warnings;
-                moved.insert(reference.clone());
-                queue = offending_references(&best_report).into_iter().collect();
+                moved.insert(target.label());
+                queue = offending_targets(&best_report, &best_text)
+                    .into_iter()
+                    .collect();
                 accepted = true;
                 break;
             }
             write_board_text(path, &best_text)?;
         }
-        // Work in small per-reference passes for fairness, but do not discard a
-        // stubborn reference while fresh positions and the global retry budget
+        // Work in small per-target passes for fairness, but do not discard a
+        // stubborn target while fresh positions and the global retry budget
         // remain. Re-queueing also lets a dense label reach the wider rings.
         if !accepted
             && attempts < MAX_DRC_RETRIES
-            && !untried_reference_candidates(&reference, origin, attempted.get(&reference))
-                .is_empty()
+            && !untried_candidates(&viable, attempted.get(&target.label())).is_empty()
         {
-            queue.push_back(reference);
+            queue.push_back(target);
         }
     }
 
@@ -193,42 +220,100 @@ fn is_silk_warning(violation: &Violation) -> bool {
         )
 }
 
-fn offending_references(report: &DrcReport) -> BTreeSet<String> {
-    report
-        .violations
-        .iter()
-        .filter(|violation| is_silk_warning(violation))
-        .flat_map(|violation| &violation.items)
-        .filter_map(|item| item.description.strip_prefix("Reference field of "))
-        .map(str::to_owned)
+/// Movable texts implicated by the report.
+///
+/// References come straight from violation items. KiCad 9 omits `PCB_FIELD`
+/// items other than Reference/Value from DRC reports, so a violation caused by
+/// a generated Function legend surfaces with empty items or only its partner
+/// (e.g. the clipped segment, or the Edge.Cuts outline). Whenever such an
+/// unattributed silk violation exists, every visible Function legend on the
+/// board becomes a relocation candidate; the DRC oracle keeps only moves that
+/// reduce warnings.
+fn offending_targets(report: &DrcReport, board_text: &str) -> BTreeSet<SilkTarget> {
+    let mut targets = BTreeSet::new();
+    let mut unattributed = false;
+    for violation in report.violations.iter().filter(|v| is_silk_warning(v)) {
+        let mut attributed = false;
+        for item in &violation.items {
+            if let Some(reference) = item.description.strip_prefix("Reference field of ") {
+                targets.insert(SilkTarget {
+                    reference: reference.to_owned(),
+                    field: REFERENCE_FIELD.to_owned(),
+                });
+                attributed = true;
+            }
+        }
+        unattributed |= !attributed;
+    }
+    if unattributed {
+        for reference in silk_field_owners(board_text, FUNCTION_FIELD) {
+            targets.insert(SilkTarget {
+                reference,
+                field: FUNCTION_FIELD.to_owned(),
+            });
+        }
+    }
+    targets
+}
+
+/// Candidate positions whose text center stays on the board.
+///
+/// KiCad flags silk crossing the outline but not silk placed entirely outside
+/// it, so an unconstrained search can "fix" an edge warning by pushing a label
+/// off the board — DRC-clean, but the label vanishes from fabrication.
+fn on_board_candidates(
+    text: &str,
+    target: &SilkTarget,
+    origin: FieldPosition,
+) -> Vec<FieldPosition> {
+    let candidates = candidate_positions(target, origin);
+    let Some((min_x, min_y, max_x, max_y)) = board_outline_bbox(text) else {
+        return candidates;
+    };
+    let Some((fx, fy, angle)) = footprint_placement(text, &target.reference) else {
+        return candidates;
+    };
+    let (sin, cos) = angle.to_radians().sin_cos();
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            let x = fx + candidate.x * cos + candidate.y * sin;
+            let y = fy - candidate.x * sin + candidate.y * cos;
+            x >= min_x + BOARD_INSET_MM
+                && x <= max_x - BOARD_INSET_MM
+                && y >= min_y + BOARD_INSET_MM
+                && y <= max_y - BOARD_INSET_MM
+        })
         .collect()
 }
 
-fn reference_candidates(reference: &str, origin: ReferencePosition) -> Vec<ReferencePosition> {
-    let radius = origin.x.hypot(origin.y).max(MIN_REFERENCE_RADIUS_MM);
-    let phase = reference
+fn candidate_positions(target: &SilkTarget, origin: FieldPosition) -> Vec<FieldPosition> {
+    let radius = origin.x.hypot(origin.y).max(MIN_TEXT_RADIUS_MM);
+    let phase = target
+        .label()
         .bytes()
         .fold(0usize, |sum, byte| sum.wrapping_add(byte as usize))
         % 8;
+    let diag = std::f64::consts::FRAC_1_SQRT_2;
     let directions = [
         (0.0, -1.0),
         (1.0, 0.0),
         (0.0, 1.0),
         (-1.0, 0.0),
-        (0.707106781, -0.707106781),
-        (0.707106781, 0.707106781),
-        (-0.707106781, 0.707106781),
-        (-0.707106781, -0.707106781),
+        (diag, -diag),
+        (diag, diag),
+        (-diag, diag),
+        (-diag, -diag),
     ];
     let mut candidates = vec![origin]; // first retry only makes rotated text upright
     let norm = origin.x.hypot(origin.y);
     if norm > 1e-9 {
         let ux = origin.x / norm;
         let uy = origin.y / norm;
-        // Most library references begin just outside one body edge. Try the
+        // Most library texts begin just outside one body edge. Try the
         // opposite and the two adjacent edges before a generic hash-spread ring.
         for (dx, dy) in [(-ux, -uy), (-uy, ux), (uy, -ux)] {
-            candidates.push(ReferencePosition {
+            candidates.push(FieldPosition {
                 x: (dx * radius * 100.0).round() / 100.0,
                 y: (dy * radius * 100.0).round() / 100.0,
             });
@@ -238,7 +323,7 @@ fn reference_candidates(reference: &str, origin: ReferencePosition) -> Vec<Refer
         for offset in 0..directions.len() {
             let (dx, dy) = directions[(phase + offset) % directions.len()];
             let r = radius + extra;
-            let candidate = ReferencePosition {
+            let candidate = FieldPosition {
                 x: (dx * r * 100.0).round() / 100.0,
                 y: (dy * r * 100.0).round() / 100.0,
             };
@@ -250,20 +335,20 @@ fn reference_candidates(reference: &str, origin: ReferencePosition) -> Vec<Refer
     candidates
 }
 
-fn candidate_key(candidate: ReferencePosition) -> (i64, i64) {
+fn candidate_key(candidate: FieldPosition) -> (i64, i64) {
     (
         (candidate.x * 1000.0).round() as i64,
         (candidate.y * 1000.0).round() as i64,
     )
 }
 
-fn untried_reference_candidates(
-    reference: &str,
-    origin: ReferencePosition,
+fn untried_candidates(
+    candidates: &[FieldPosition],
     attempted: Option<&BTreeSet<(i64, i64)>>,
-) -> Vec<ReferencePosition> {
-    reference_candidates(reference, origin)
-        .into_iter()
+) -> Vec<FieldPosition> {
+    candidates
+        .iter()
+        .copied()
         .filter(|candidate| {
             attempted.is_none_or(|positions| !positions.contains(&candidate_key(*candidate)))
         })
@@ -310,6 +395,28 @@ mod tests {
         }
     }
 
+    fn target(reference: &str, field: &str) -> SilkTarget {
+        SilkTarget {
+            reference: reference.to_owned(),
+            field: field.to_owned(),
+        }
+    }
+
+    const FUNCTION_BOARD: &str = r#"(kicad_pcb
+	(footprint "Connector:Header"
+		(at 38 11.93)
+		(property "Reference" "J1"
+			(at 0 -2.38 0)
+			(layer "F.SilkS")
+		)
+		(property "Function" "+3V3/GND"
+			(at 0 12.54 0)
+			(layer "F.SilkS")
+		)
+	)
+)
+"#;
+
     #[test]
     fn silk_census_and_reference_extraction_are_specific() {
         let report = DrcReport {
@@ -323,18 +430,56 @@ mod tests {
 
         assert_eq!(silk_warning_count(&report), 2);
         assert_eq!(
-            offending_references(&report)
+            offending_targets(&report, "(kicad_pcb\n)")
                 .into_iter()
                 .collect::<Vec<_>>(),
-            vec!["C1", "R2"]
+            vec![target("C1", "Reference"), target("R2", "Reference")]
         );
     }
 
     #[test]
-    fn reference_candidates_are_deterministic_nearby_and_bounded() {
-        let origin = ReferencePosition { x: 0.0, y: -1.5 };
-        let a = reference_candidates("R17", origin);
-        let b = reference_candidates("R17", origin);
+    fn unattributed_silk_violations_enqueue_function_legends() {
+        // KiCad 9 reports Function-field collisions with empty items or only
+        // the partner item, never the field itself.
+        let report = DrcReport {
+            violations: vec![
+                violation("silk_over_copper", &[]),
+                violation("silk_overlap", &["Segment of C7 on F.Silkscreen"]),
+                violation("silk_edge_clearance", &["Rectangle on Edge.Cuts"]),
+            ],
+            unconnected_items: vec![],
+        };
+
+        let targets = offending_targets(&report, FUNCTION_BOARD)
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(targets, vec![target("J1", "Function")]);
+        assert_eq!(targets[0].label(), "J1.Function");
+    }
+
+    #[test]
+    fn attributed_silk_violations_leave_function_legends_alone() {
+        let report = DrcReport {
+            violations: vec![violation(
+                "silk_overlap",
+                &["Reference field of C1", "Reference field of C2"],
+            )],
+            unconnected_items: vec![],
+        };
+
+        assert_eq!(
+            offending_targets(&report, FUNCTION_BOARD)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![target("C1", "Reference"), target("C2", "Reference")]
+        );
+    }
+
+    #[test]
+    fn candidate_positions_are_deterministic_nearby_and_bounded() {
+        let origin = FieldPosition { x: 0.0, y: -1.5 };
+        let a = candidate_positions(&target("R17", "Reference"), origin);
+        let b = candidate_positions(&target("R17", "Reference"), origin);
 
         assert_eq!(a, b);
         assert_eq!(a[0], origin);
@@ -346,25 +491,57 @@ mod tests {
     }
 
     #[test]
-    fn rejected_batch_candidates_do_not_starve_wider_reference_ring() {
-        let origin = ReferencePosition { x: -1.8, y: 0.0 };
-        let all = reference_candidates("C6", origin);
+    fn rejected_batch_candidates_do_not_starve_wider_target_ring() {
+        let origin = FieldPosition { x: -1.8, y: 0.0 };
+        let c6 = target("C6", "Reference");
+        let all = candidate_positions(&c6, origin);
         let mut attempted = BTreeSet::new();
         attempted.insert(candidate_key(origin));
         for index in [4, 5, 6] {
             attempted.insert(candidate_key(all[index]));
         }
 
-        let first_pass = untried_reference_candidates("C6", origin, Some(&attempted))
+        let first_pass = untried_candidates(&all, Some(&attempted))
             .into_iter()
-            .take(MAX_CANDIDATES_PER_REFERENCE_PASS)
+            .take(MAX_CANDIDATES_PER_TARGET_PASS)
             .collect::<Vec<_>>();
         for candidate in &first_pass {
             attempted.insert(candidate_key(*candidate));
         }
-        let second_pass = untried_reference_candidates("C6", origin, Some(&attempted));
+        let second_pass = untried_candidates(&all, Some(&attempted));
 
-        assert_eq!(first_pass.len(), MAX_CANDIDATES_PER_REFERENCE_PASS);
-        assert_eq!(second_pass[0], ReferencePosition { x: 2.8, y: 0.0 });
+        assert_eq!(first_pass.len(), MAX_CANDIDATES_PER_TARGET_PASS);
+        assert_eq!(second_pass[0], FieldPosition { x: 2.8, y: 0.0 });
+    }
+
+    #[test]
+    fn candidates_that_leave_the_board_are_rejected() {
+        // J1 sits 1.77mm from the 80mm edge; a 12.54mm-radius ring reaches far
+        // past the outline, where KiCad DRC no longer sees the text at all.
+        let board = "(kicad_pcb\n\
+            \t(footprint \"Connector:Header\"\n\
+            \t\t(at 78.23 29.5)\n\
+            \t\t(property \"Reference\" \"J1\"\n\
+            \t\t\t(at 0 -2.38 0)\n\
+            \t\t\t(layer \"F.SilkS\")\n\
+            \t\t)\n\
+            \t)\n\
+            \t(gr_rect\n\
+            \t\t(start 0 0)\n\
+            \t\t(end 80 58)\n\
+            \t\t(layer \"Edge.Cuts\")\n\
+            \t)\n\
+            )\n";
+        let function = target("J1", "Function");
+        let origin = FieldPosition { x: 0.0, y: 12.54 };
+        let viable = on_board_candidates(board, &function, origin);
+
+        assert!(!viable.is_empty());
+        assert!(candidate_positions(&function, origin).len() > viable.len());
+        for candidate in viable {
+            let x = 78.23 + candidate.x;
+            let y = 29.5 + candidate.y;
+            assert!((0.5..=79.5).contains(&x) && (0.5..=57.5).contains(&y));
+        }
     }
 }

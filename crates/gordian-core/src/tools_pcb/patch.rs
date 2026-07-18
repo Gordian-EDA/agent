@@ -213,14 +213,19 @@ fn footprint_reference(text: &str, fp: &Node) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-/// Local position of a visible footprint Reference property.
+/// Local position of a visible footprint text field.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct ReferencePosition {
+pub(super) struct FieldPosition {
     pub x: f64,
     pub y: f64,
 }
 
-pub(super) fn reference_position(text: &str, reference: &str) -> Option<ReferencePosition> {
+fn field_prefix(field: &str) -> String {
+    format!("(property \"{field}\"")
+}
+
+pub(super) fn field_position(text: &str, reference: &str, field: &str) -> Option<FieldPosition> {
+    let prefix = field_prefix(field);
     let (body_start, body_end) = root_body(text).ok()?;
     for fp in child_nodes(text, body_start, body_end) {
         if node_head(text, &fp) != "footprint"
@@ -232,25 +237,110 @@ pub(super) fn reference_position(text: &str, reference: &str) -> Option<Referenc
             .into_iter()
             .find(|node| {
                 node_head(text, node) == "property"
-                    && text[node.start..node.end].starts_with("(property \"Reference\"")
+                    && text[node.start..node.end].starts_with(&prefix)
                     && !text[node.start..node.end].contains("(hide yes)")
             })?;
         let at = child_nodes(text, property.start + 1, property.end - 1)
             .into_iter()
             .find(|node| node_head(text, node) == "at")?;
         let (x, y, _) = parse_at(text, &at)?;
-        return Some(ReferencePosition { x, y });
+        return Some(FieldPosition { x, y });
     }
     None
 }
 
-/// Relocate one visible Reference property in footprint-local coordinates and
+/// Footprints carrying a visible silkscreen text field named `field`.
+///
+/// KiCad 9 DRC reports omit `PCB_FIELD` items other than Reference/Value, so
+/// violations caused by generated fields arrive without attribution; this scan
+/// recovers the candidate owners directly from the board text.
+pub(super) fn silk_field_owners(text: &str, field: &str) -> Vec<String> {
+    let prefix = field_prefix(field);
+    let Ok((body_start, body_end)) = root_body(text) else {
+        return Vec::new();
+    };
+    let mut owners = Vec::new();
+    for fp in child_nodes(text, body_start, body_end) {
+        if node_head(text, &fp) != "footprint" {
+            continue;
+        }
+        let on_silk = child_nodes(text, fp.start + 1, fp.end - 1)
+            .into_iter()
+            .any(|node| {
+                let body = &text[node.start..node.end];
+                node_head(text, &node) == "property"
+                    && body.starts_with(&prefix)
+                    && !body.contains("(hide yes)")
+                    && (body.contains("(layer \"F.SilkS\")")
+                        || body.contains("(layer \"B.SilkS\")"))
+            });
+        if on_silk && let Some(reference) = footprint_reference(text, &fp) {
+            owners.push(reference);
+        }
+    }
+    owners
+}
+
+/// A footprint's board placement: position and rotation in degrees.
+pub(super) fn footprint_placement(text: &str, reference: &str) -> Option<(f64, f64, f64)> {
+    let (body_start, body_end) = root_body(text).ok()?;
+    for fp in child_nodes(text, body_start, body_end) {
+        if node_head(text, &fp) != "footprint"
+            || footprint_reference(text, &fp).as_deref() != Some(reference)
+        {
+            continue;
+        }
+        let at = child_nodes(text, fp.start + 1, fp.end - 1)
+            .into_iter()
+            .find(|node| node_head(text, node) == "at")?;
+        let (x, y, angle) = parse_at(text, &at)?;
+        return Some((x, y, angle.unwrap_or(0.0)));
+    }
+    None
+}
+
+/// Bounding box of the board outline: every `(start/end/mid/center …)` point of
+/// top-level Edge.Cuts graphics.
+pub(super) fn board_outline_bbox(text: &str) -> Option<(f64, f64, f64, f64)> {
+    let (body_start, body_end) = root_body(text).ok()?;
+    let mut bbox: Option<(f64, f64, f64, f64)> = None;
+    for node in child_nodes(text, body_start, body_end) {
+        let body = &text[node.start..node.end];
+        if !node_head(text, &node).starts_with("gr_") || !body.contains("(layer \"Edge.Cuts\")") {
+            continue;
+        }
+        for point in child_nodes(text, node.start + 1, node.end - 1) {
+            if !matches!(node_head(text, &point), "start" | "end" | "mid" | "center") {
+                continue;
+            }
+            let inner = &text[point.start + 1..point.end - 1];
+            let mut it = inner.split_whitespace().skip(1);
+            let (Some(Ok(x)), Some(Ok(y))) = (
+                it.next().map(str::parse::<f64>),
+                it.next().map(str::parse::<f64>),
+            ) else {
+                continue;
+            };
+            bbox = Some(match bbox {
+                None => (x, y, x, y),
+                Some((min_x, min_y, max_x, max_y)) => {
+                    (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+                }
+            });
+        }
+    }
+    bbox
+}
+
+/// Relocate one visible text field in footprint-local coordinates and
 /// counter-rotate it so the rendered board text remains upright.
-pub(super) fn patch_reference_position(
+pub(super) fn patch_field_position(
     text: &str,
     reference: &str,
-    position: ReferencePosition,
+    field: &str,
+    position: FieldPosition,
 ) -> Result<String, String> {
+    let prefix = field_prefix(field);
     let (body_start, body_end) = root_body(text)?;
     for fp in child_nodes(text, body_start, body_end) {
         if node_head(text, &fp) != "footprint"
@@ -262,13 +352,11 @@ pub(super) fn patch_reference_position(
             .into_iter()
             .find(|node| {
                 node_head(text, node) == "property"
-                    && text[node.start..node.end].starts_with("(property \"Reference\"")
+                    && text[node.start..node.end].starts_with(&prefix)
             })
-            .ok_or_else(|| format!("footprint {reference}: no Reference property"))?;
+            .ok_or_else(|| format!("footprint {reference}: no {field} property"))?;
         if text[property.start..property.end].contains("(hide yes)") {
-            return Err(format!(
-                "footprint {reference}: Reference property is hidden"
-            ));
+            return Err(format!("footprint {reference}: {field} property is hidden"));
         }
         let footprint_at = child_nodes(text, fp.start + 1, fp.end - 1)
             .into_iter()
@@ -280,7 +368,7 @@ pub(super) fn patch_reference_position(
         let at = child_nodes(text, property.start + 1, property.end - 1)
             .into_iter()
             .find(|node| node_head(text, node) == "at")
-            .ok_or_else(|| format!("footprint {reference}: Reference has no (at …) node"))?;
+            .ok_or_else(|| format!("footprint {reference}: {field} has no (at …) node"))?;
         let replacement = format!(
             "(at {} {} {})",
             fmt_num(position.x),
@@ -678,14 +766,15 @@ mod tests {
 "#;
 
     #[test]
-    fn reference_relocation_stays_visible_and_upright() {
+    fn field_relocation_stays_visible_and_upright() {
         assert_eq!(
-            reference_position(BOARD, "R1"),
-            Some(ReferencePosition { x: 0.0, y: -1.65 })
+            field_position(BOARD, "R1", "Reference"),
+            Some(FieldPosition { x: 0.0, y: -1.65 })
         );
 
         let moved =
-            patch_reference_position(BOARD, "R1", ReferencePosition { x: 2.5, y: 1.5 }).unwrap();
+            patch_field_position(BOARD, "R1", "Reference", FieldPosition { x: 2.5, y: 1.5 })
+                .unwrap();
 
         assert!(moved.contains("(property \"Reference\" \"R1\"\n\t\t\t(at 2.5 1.5 0)"));
         assert!(!moved.contains("(hide yes)"));
@@ -693,11 +782,32 @@ mod tests {
         assert!(moved.contains("(at -0.7875 0)"), "pads must not move");
 
         let rotated_board = BOARD.replacen("(at 12 20)", "(at 12 20 90)", 1);
-        let rotated =
-            patch_reference_position(&rotated_board, "R1", ReferencePosition { x: 2.5, y: 1.5 })
-                .unwrap();
+        let rotated = patch_field_position(
+            &rotated_board,
+            "R1",
+            "Reference",
+            FieldPosition { x: 2.5, y: 1.5 },
+        )
+        .unwrap();
         assert!(rotated.contains("(property \"Reference\" \"R1\"\n\t\t\t(at 2.5 1.5 270)"));
         assert!(rotated.contains("(at 12 20 90)"), "footprint must not move");
+    }
+
+    #[test]
+    fn silk_field_owners_finds_visible_silk_fields_only() {
+        let board = BOARD.replacen(
+            "(property \"Reference\" \"R1\"\n\t\t\t(at 0 -1.65 0)\n\t\t)",
+            "(property \"Reference\" \"R1\"\n\t\t\t(at 0 -1.65 0)\n\t\t)\n\t\t(property \"Function\" \"GND/VOUT\"\n\t\t\t(at 0 3 0)\n\t\t\t(layer \"F.SilkS\")\n\t\t)",
+            1,
+        );
+        assert_eq!(silk_field_owners(&board, "Function"), vec!["R1"]);
+        assert!(silk_field_owners(BOARD, "Function").is_empty());
+        let hidden = board.replacen(
+            "(property \"Function\" \"GND/VOUT\"\n\t\t\t(at 0 3 0)",
+            "(property \"Function\" \"GND/VOUT\"\n\t\t\t(hide yes)\n\t\t\t(at 0 3 0)",
+            1,
+        );
+        assert!(silk_field_owners(&hidden, "Function").is_empty());
     }
 
     #[test]
