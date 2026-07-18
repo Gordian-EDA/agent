@@ -842,13 +842,17 @@ fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
         // stays bounded; without it a single walled-in pin ships as a failure
         // with the whole tool budget unspent.
         try_adaptive_grid_rescue(problem, &mut best, &mut attempts);
-        // Still-failed nets earn one sequential-grid pass: its runaway class
-        // died with plane fanout and the count-based search budgets, and on
-        // dense multi-connector boards it recovers buses the single naive
-        // pass cannot thread. A second rescue then targets what remains.
-        let still_failed = best
-            .as_ref()
-            .is_some_and(|(result, quality)| quality.faults() > 0 && !result.failed.is_empty());
+        // A handful of still-failed nets earn one sequential-grid pass: its
+        // runaway class died with plane fanout and the count-based search
+        // budgets, and it recovers buses the single naive pass cannot thread.
+        // A broad failure (dozens of walled-in pins) is a placement problem
+        // sequential grinds minutes on without fixing, so it is skipped.
+        const SEQUENTIAL_ESCALATION_MAX_FAILED: usize = 6;
+        let still_failed = best.as_ref().is_some_and(|(result, quality)| {
+            quality.faults() > 0
+                && !result.failed.is_empty()
+                && result.failed.len() <= SEQUENTIAL_ESCALATION_MAX_FAILED
+        });
         if still_failed {
             let sequential = SequentialGridRouter;
             if sequential.can_route(problem) {
