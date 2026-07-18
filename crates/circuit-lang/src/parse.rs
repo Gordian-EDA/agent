@@ -42,6 +42,10 @@ pub fn looks_like_refdes(s: &str) -> bool {
             let (prefix, suffix) = s.split_at(i);
             prefix.chars().all(|c| c.is_ascii_uppercase())
                 && suffix.chars().all(|c| c.is_ascii_digit())
+                // KiCad identifies a component by prefix + numeric value, so
+                // `D01` and `D1` collapse into ONE component in its netlist
+                // export (one silently vanishes). Forbid leading zeros.
+                && !(suffix.len() > 1 && suffix.starts_with('0'))
         }
         _ => false,
     }
@@ -291,7 +295,10 @@ impl Parser<'_> {
                 if !looks_like_refdes(refdes) {
                     self.err(
                         "bad-refdes",
-                        format!("`{refdes}` is not a valid refdes (expected e.g. U1, R10)"),
+                        format!(
+                            "`{refdes}` is not a valid refdes (expected e.g. U1, R10; no \
+                             leading zeros — KiCad merges D01 into D1)"
+                        ),
                         *rspan,
                     );
                 }
