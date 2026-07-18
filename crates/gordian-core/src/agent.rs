@@ -954,6 +954,7 @@ impl<P: Provider> Agent<P> {
             draft_committed_at_turn_start,
         );
         let mut reserved_clean_apply_used = false;
+        let mut reserved_review_repair_requests = RESERVED_REVIEW_REPAIR_REQUESTS;
 
         loop {
             let request_budget_is_exhausted = request_budget_exhausted(
@@ -973,7 +974,17 @@ impl<P: Provider> Agent<P> {
                     latest_authoring_diagnostics.as_ref(),
                     schematic_review_current.as_ref(),
                 );
-            if request_budget_is_exhausted && !may_use_reserved_clean_apply {
+            let may_use_reserved_review_repair = request_budget_is_exhausted
+                && !may_use_reserved_clean_apply
+                && reserved_review_repair_requests > 0
+                && review_defects_need_reserved_repair(
+                    latest_authoring_diagnostics.as_ref(),
+                    schematic_review_current.as_ref(),
+                );
+            if request_budget_is_exhausted
+                && !may_use_reserved_clean_apply
+                && !may_use_reserved_review_repair
+            {
                 let current_applied = applied && !draft_dirty;
                 let final_text = provider_limit_final_text(
                     None,
@@ -993,6 +1004,9 @@ impl<P: Provider> Agent<P> {
             }
             if may_use_reserved_clean_apply {
                 reserved_clean_apply_used = true;
+            }
+            if may_use_reserved_review_repair {
+                reserved_review_repair_requests -= 1;
             }
             provider_requests += 1;
             stage_provider_requests += 1;
@@ -2782,6 +2796,19 @@ fn request_budget_exhausted(
         budgets.schematic_requests_for_pcb
     };
     stage_requests >= stage_limit
+}
+
+/// A deferred apply whose only blocker is a fresh semantic-review defect list
+/// is one localized repair away from committing. Grant a short reserve so the
+/// request ceiling cannot strand an otherwise-finished design.
+const RESERVED_REVIEW_REPAIR_REQUESTS: usize = 4;
+
+fn review_defects_need_reserved_repair(
+    diagnostics: Option<&AuthoringDiagnosticsState>,
+    current_review: Option<&Value>,
+) -> bool {
+    diagnostics.and_then(|state| state.errors) == Some(0)
+        && current_review.is_some_and(|review| !review_result_is_clean(review))
 }
 
 fn clean_draft_needs_reserved_apply(
@@ -5964,6 +5991,37 @@ mod tests {
             false,
             Some(&clean),
             None,
+        ));
+    }
+
+    #[test]
+    fn review_defects_earn_a_bounded_repair_reserve() {
+        let clean = AuthoringDiagnosticsState {
+            design_state: None,
+            errors: Some(0),
+            warnings: Some(2),
+            fingerprint: None,
+        };
+        let broken = AuthoringDiagnosticsState {
+            design_state: None,
+            errors: Some(3),
+            warnings: Some(0),
+            fingerprint: None,
+        };
+        let defects = json!({"defects": ["LED1 installed backwards"]});
+        let clean_review = json!({"defects": []});
+        assert!(review_defects_need_reserved_repair(
+            Some(&clean),
+            Some(&defects)
+        ));
+        assert!(!review_defects_need_reserved_repair(
+            Some(&clean),
+            Some(&clean_review)
+        ));
+        assert!(!review_defects_need_reserved_repair(Some(&clean), None));
+        assert!(!review_defects_need_reserved_repair(
+            Some(&broken),
+            Some(&defects)
         ));
     }
 
