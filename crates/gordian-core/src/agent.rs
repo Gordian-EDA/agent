@@ -64,17 +64,16 @@ const MAX_COMMIT_NUDGES: usize = 2;
 /// not design defects, so they do not consume this budget.
 const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 
-/// Hard ceiling on provider invocations within one agent subturn. This is a
-/// last-resort guard against a model that keeps requesting tools forever: the
+/// Base hard ceiling on provider invocations within one agent subturn. This is
+/// a last-resort guard against a model that keeps requesting tools forever: the
 /// narrower commit-nudge and routing retry budgets handle known stalls, while
-/// this bounds every other cycle (and therefore cost and context growth).
+/// this bounds every other cycle (and therefore cost and context growth). An
+/// explicit component floor in the request raises it via [`TurnBudgets`].
 const MAX_PROVIDER_REQUESTS_PER_TURN: usize = 32;
 
 /// Reserve enough of a complex turn for the deterministic PCB pipeline instead
 /// of allowing schematic repair chatter to consume the whole global ceiling.
-const MAX_SCHEMATIC_REQUESTS_FOR_PCB: usize = 20;
-const MAX_PCB_STAGE_REQUESTS: usize =
-    MAX_PROVIDER_REQUESTS_PER_TURN - MAX_SCHEMATIC_REQUESTS_FOR_PCB;
+const MAX_PCB_STAGE_REQUESTS: usize = 12;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct MeteredUsage {
@@ -174,15 +173,40 @@ impl<P: Provider> Provider for MeteredProvider<P> {
 /// current repair strategy is stuck.
 const MAX_CONSECUTIVE_NO_PROGRESS_COMPLETIONS: usize = 3;
 
-/// Cap each kind of catalog exploration before the model must reuse its best
-/// prior hits. One assistant completion may batch several same-kind discovery
-/// calls and still costs that tool only one round.
+/// Base cap on each kind of catalog exploration before the model must reuse
+/// its best prior hits. One assistant completion may batch several same-kind
+/// discovery calls and still costs that tool only one round. An explicit
+/// component floor in the request raises it via [`TurnBudgets`].
 const MAX_DISCOVERY_ROUNDS_PER_SUBTURN: usize = 1;
 
 /// A model can batch dozens of near-duplicate catalog queries into one
 /// completion. Bound the actually dispatched fan-out so one speculative batch
 /// cannot flood history with hundreds of low-value hits.
 const MAX_DISCOVERY_CALLS_PER_COMPLETION: usize = 4;
+
+/// Turn-wide budgets computed once from the authoritative intent. A request
+/// with an explicit numeric component floor (45+ parts, multi-domain) needs
+/// more catalog discovery and more provider rounds than the base constants
+/// sized for small boards; without a stated floor, or below 24 parts, every
+/// field equals its base constant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TurnBudgets {
+    discovery_rounds_per_subturn: usize,
+    provider_requests: usize,
+    schematic_requests_for_pcb: usize,
+}
+
+impl TurnBudgets {
+    fn for_intent(intent: &str) -> Self {
+        let floor = explicit_minimum_physical_components(intent).unwrap_or(0);
+        let provider_requests = MAX_PROVIDER_REQUESTS_PER_TURN + floor.saturating_sub(24);
+        Self {
+            discovery_rounds_per_subturn: MAX_DISCOVERY_ROUNDS_PER_SUBTURN + floor / 24,
+            provider_requests,
+            schematic_requests_for_pcb: provider_requests - MAX_PCB_STAGE_REQUESTS,
+        }
+    }
+}
 
 /// One explicit transition from catalog exploration to concrete authoring.
 /// Without it, weak models can consume their bounded searches and then inspect
@@ -351,6 +375,7 @@ impl ToolPhase {
 fn tool_defs_for_phase(
     phase: ToolPhase,
     discovery_rounds_used: &HashMap<String, usize>,
+    discovery_rounds_allowed: usize,
     draft_exists: bool,
     revision_reads_used: &HashSet<String>,
     schematic_exists: bool,
@@ -359,7 +384,7 @@ fn tool_defs_for_phase(
         .into_iter()
         // A budget that only rejects calls after the model makes them still
         // spends a provider round (and replays the growing history) on a result
-        // that is guaranteed to fail. Once a discovery tool has had its two
+        // that is guaranteed to fail. Once a discovery tool has had its allowed
         // rounds, stop advertising it for the rest of this subturn. Keep the
         // dispatch-side check below as defense against providers that return a
         // stale/unadvertised tool call.
@@ -369,7 +394,7 @@ fn tool_defs_for_phase(
                     .get(tool.name.as_str())
                     .copied()
                     .unwrap_or(0)
-                    < MAX_DISCOVERY_ROUNDS_PER_SUBTURN
+                    < discovery_rounds_allowed
         })
         // `create_design` is a one-shot initializer. Once a durable draft
         // exists, `edit_design` is the only safe authoring surface: advertising
@@ -871,6 +896,7 @@ impl<P: Provider> Agent<P> {
         let mut tool_calls_made = 0usize;
         let precommit_review_required = request_requires_precommit_review(authoritative_intent);
         let pcb_work_requested = request_requires_pcb_work(authoritative_intent);
+        let budgets = TurnBudgets::for_intent(authoritative_intent);
         // `applied` deliberately means "committed in this turn", but bounded
         // stop messages must also recognize a draft that was already synced to
         // the current schematic when a continuation turn began.
@@ -931,6 +957,7 @@ impl<P: Provider> Agent<P> {
 
         loop {
             let request_budget_is_exhausted = request_budget_exhausted(
+                budgets,
                 provider_requests,
                 stage_provider_requests,
                 pcb_work_requested,
@@ -986,6 +1013,7 @@ impl<P: Provider> Agent<P> {
             let mut defs = tool_defs_for_phase(
                 self.tool_phase,
                 &discovery_rounds_used,
+                budgets.discovery_rounds_per_subturn,
                 draft_existed_before_completion,
                 &revision_reads_used,
                 self.runtime.sch_path().exists(),
@@ -1062,6 +1090,7 @@ impl<P: Provider> Agent<P> {
                     // If the stream itself used the last slot, preserve any
                     // partial prose and stop without issuing request N+1.
                     if request_budget_exhausted(
+                        budgets,
                         provider_requests,
                         stage_provider_requests,
                         pcb_work_requested,
@@ -1227,7 +1256,7 @@ impl<P: Provider> Agent<P> {
                 .copied()
                 .filter(|name| {
                     discovery_rounds_used.get(*name).copied().unwrap_or(0)
-                        >= MAX_DISCOVERY_ROUNDS_PER_SUBTURN
+                        >= budgets.discovery_rounds_per_subturn
                 })
                 .collect();
             for name in discovery_tools_this_completion
@@ -1568,7 +1597,7 @@ impl<P: Provider> Agent<P> {
                             "error": "discovery tool budget exhausted",
                             "code": "discovery_budget_exhausted",
                             "tool": call.fn_name,
-                            "discovery_rounds_allowed": MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
+                            "discovery_rounds_allowed": budgets.discovery_rounds_per_subturn,
                             "note": "Reuse the symbol and footprint hits already returned, choose the best candidates, and proceed to authoring; do not issue more discovery calls this subturn.",
                         })
                         .to_string(),
@@ -2735,12 +2764,13 @@ fn starts_in_pcb_stage(pcb_work_requested: bool, draft_committed: bool) -> bool 
 }
 
 fn request_budget_exhausted(
+    budgets: TurnBudgets,
     total_requests: usize,
     stage_requests: usize,
     pcb_work_requested: bool,
     pcb_stage: bool,
 ) -> bool {
-    if total_requests >= MAX_PROVIDER_REQUESTS_PER_TURN {
+    if total_requests >= budgets.provider_requests {
         return true;
     }
     if !pcb_work_requested {
@@ -2749,7 +2779,7 @@ fn request_budget_exhausted(
     let stage_limit = if pcb_stage {
         MAX_PCB_STAGE_REQUESTS
     } else {
-        MAX_SCHEMATIC_REQUESTS_FOR_PCB
+        budgets.schematic_requests_for_pcb
     };
     stage_requests >= stage_limit
 }
@@ -5153,6 +5183,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_component_floor_raises_request_and_discovery_budgets() {
+        let floored =
+            TurnBudgets::for_intent("must contain at least 45 components").provider_requests;
+        let client = ScriptedClient::new(discovery_script(floored));
+        let mut agent = Agent::new(client, test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn(
+                "must contain at least 45 components; keep searching",
+                &mut approvals,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::ProviderRequestLimit { requests: 53 }
+        );
+        assert_eq!(
+            outcome.tool_calls_made, 2,
+            "a 45-part floor buys a second discovery round per tool"
+        );
+    }
+
+    #[tokio::test]
     async fn unchanged_non_discovery_cycle_stops_after_three_completions() {
         let script = vec![
             tool_call("project-1", "project_info", json!({})),
@@ -5828,12 +5885,42 @@ mod tests {
             "review this production schematic only"
         ));
 
-        assert!(!request_budget_exhausted(19, 19, true, false));
-        assert!(request_budget_exhausted(20, 20, true, false));
-        assert!(!request_budget_exhausted(31, 11, true, true));
-        assert!(request_budget_exhausted(32, 12, true, true));
-        assert!(!request_budget_exhausted(31, 31, false, false));
-        assert!(request_budget_exhausted(32, 32, false, false));
+        let base = TurnBudgets::for_intent("finish the board");
+        assert!(!request_budget_exhausted(base, 19, 19, true, false));
+        assert!(request_budget_exhausted(base, 20, 20, true, false));
+        assert!(!request_budget_exhausted(base, 31, 11, true, true));
+        assert!(request_budget_exhausted(base, 32, 12, true, true));
+        assert!(!request_budget_exhausted(base, 31, 31, false, false));
+        assert!(request_budget_exhausted(base, 32, 32, false, false));
+
+        let floored = TurnBudgets::for_intent("must contain at least 45 components");
+        assert!(!request_budget_exhausted(floored, 40, 40, true, false));
+        assert!(request_budget_exhausted(floored, 41, 41, true, false));
+        assert!(request_budget_exhausted(floored, 52, 12, true, true));
+        assert!(!request_budget_exhausted(floored, 52, 52, false, false));
+        assert!(request_budget_exhausted(floored, 53, 53, false, false));
+    }
+
+    #[test]
+    fn explicit_component_floor_scales_turn_budgets() {
+        let base = TurnBudgets::for_intent("design a small sensor board");
+        assert_eq!(base.discovery_rounds_per_subturn, 1);
+        assert_eq!(base.provider_requests, 32);
+        assert_eq!(base.schematic_requests_for_pcb, 20);
+        assert_eq!(
+            TurnBudgets::for_intent("use at least 12 components"),
+            base,
+            "small floors keep the base budgets"
+        );
+
+        let floored = TurnBudgets::for_intent("must contain at least 45 components");
+        assert_eq!(floored.discovery_rounds_per_subturn, 2);
+        assert_eq!(floored.provider_requests, 53);
+        assert_eq!(floored.schematic_requests_for_pcb, 41);
+
+        let dense = TurnBudgets::for_intent("a minimum of 100 physical parts");
+        assert_eq!(dense.discovery_rounds_per_subturn, 5);
+        assert_eq!(dense.provider_requests, 108);
     }
 
     #[test]
@@ -6615,6 +6702,7 @@ blocks:
         let mut defs = tool_defs_for_phase(
             ToolPhase::Schematic,
             &HashMap::new(),
+            MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
             false,
             &HashSet::new(),
             false,
@@ -7283,6 +7371,7 @@ blocks:
         let schematic = tool_defs_for_phase(
             ToolPhase::Schematic,
             &HashMap::new(),
+            MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
             false,
             &HashSet::new(),
             true,
@@ -7290,6 +7379,7 @@ blocks:
         let seed = tool_defs_for_phase(
             ToolPhase::BoardSeed,
             &HashMap::new(),
+            MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
             false,
             &HashSet::new(),
             true,
@@ -7297,6 +7387,7 @@ blocks:
         let active = tool_defs_for_phase(
             ToolPhase::BoardActive,
             &HashMap::new(),
+            MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
             false,
             &HashSet::new(),
             true,
@@ -7348,6 +7439,7 @@ blocks:
             let mut defs = tool_defs_for_phase(
                 ToolPhase::Schematic,
                 &HashMap::new(),
+                MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
                 draft_exists,
                 &HashSet::new(),
                 schematic_exists,
@@ -7419,11 +7511,17 @@ blocks:
         );
         rounds.insert("get_symbol_info".to_string(), 0);
 
-        let names =
-            tool_defs_for_phase(ToolPhase::Schematic, &rounds, false, &HashSet::new(), true)
-                .into_iter()
-                .map(|tool| tool.name.as_str().to_owned())
-                .collect::<std::collections::BTreeSet<_>>();
+        let names = tool_defs_for_phase(
+            ToolPhase::Schematic,
+            &rounds,
+            MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
+            false,
+            &HashSet::new(),
+            true,
+        )
+        .into_iter()
+        .map(|tool| tool.name.as_str().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
 
         assert!(!names.contains("search_symbols"));
         assert!(
@@ -7433,6 +7531,22 @@ blocks:
         assert!(names.contains("search_footprints"));
         assert!(names.contains("create_design"));
         assert!(names.contains("apply_design"));
+
+        let raised = tool_defs_for_phase(
+            ToolPhase::Schematic,
+            &rounds,
+            MAX_DISCOVERY_ROUNDS_PER_SUBTURN + 1,
+            false,
+            &HashSet::new(),
+            true,
+        )
+        .into_iter()
+        .map(|tool| tool.name.as_str().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            raised.contains("search_symbols"),
+            "a floor-raised budget keeps advertising discovery tools"
+        );
     }
 
     #[test]
@@ -7440,6 +7554,7 @@ blocks:
         let names = tool_defs_for_phase(
             ToolPhase::Schematic,
             &HashMap::new(),
+            MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
             true,
             &HashSet::new(),
             true,
@@ -7465,11 +7580,17 @@ blocks:
         .into_iter()
         .map(str::to_string)
         .collect::<HashSet<_>>();
-        let exhausted =
-            tool_defs_for_phase(ToolPhase::BoardActive, &HashMap::new(), true, &used, true)
-                .into_iter()
-                .map(|tool| tool.name.as_str().to_owned())
-                .collect::<HashSet<_>>();
+        let exhausted = tool_defs_for_phase(
+            ToolPhase::BoardActive,
+            &HashMap::new(),
+            MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
+            true,
+            &used,
+            true,
+        )
+        .into_iter()
+        .map(|tool| tool.name.as_str().to_owned())
+        .collect::<HashSet<_>>();
         for name in &used {
             assert!(!exhausted.contains(name), "{name}");
         }
@@ -7479,6 +7600,7 @@ blocks:
         let before_commit = tool_defs_for_phase(
             ToolPhase::Schematic,
             &HashMap::new(),
+            MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
             false,
             &HashSet::new(),
             false,
