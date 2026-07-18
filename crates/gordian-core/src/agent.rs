@@ -4375,6 +4375,33 @@ fn take_images(value: &mut Value) -> (Vec<Binary>, Option<String>) {
 
 /// A short, human-readable one-liner for a finished tool call, used to label a
 /// collapsed tool-call card in the UI. Reads the structured JSON result.
+/// One line per query, covering both the single-`query` and batched
+/// `queries`/`results` shapes of the search tools.
+fn search_summary(input: &Value, result: &Value) -> String {
+    if let Some(results) = result.get("results").and_then(Value::as_array) {
+        let per_query: Vec<String> = results
+            .iter()
+            .map(|entry| {
+                let q = entry.get("query").and_then(Value::as_str).unwrap_or("");
+                let n = entry
+                    .get("hits")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                format!("\"{q}\" → {n}")
+            })
+            .collect();
+        return format!("{} hits", per_query.join(", "));
+    }
+    let q = input.get("query").and_then(Value::as_str).unwrap_or("");
+    let n = result
+        .get("hits")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    format!("\"{q}\" → {n} hits")
+}
+
 fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
     if let Some(err) = result.get("error").and_then(Value::as_str) {
         let diagnostic = result
@@ -4396,24 +4423,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
         return "rejected".to_string();
     }
     match name {
-        "search_symbols" => {
-            let q = input.get("query").and_then(Value::as_str).unwrap_or("");
-            let n = result
-                .get("hits")
-                .and_then(Value::as_array)
-                .map(Vec::len)
-                .unwrap_or(0);
-            format!("\"{q}\" → {n} hits")
-        }
-        "search_footprints" => {
-            let q = input.get("query").and_then(Value::as_str).unwrap_or("");
-            let n = result
-                .get("hits")
-                .and_then(Value::as_array)
-                .map(Vec::len)
-                .unwrap_or(0);
-            format!("\"{q}\" → {n} hits")
-        }
+        "search_symbols" | "search_footprints" => search_summary(input, result),
         "get_symbol_info" => {
             let lib = input.get("lib_id").and_then(Value::as_str).unwrap_or("");
             let n = result
