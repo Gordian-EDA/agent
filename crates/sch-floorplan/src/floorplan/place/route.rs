@@ -222,6 +222,18 @@ pub(crate) fn wire(
             &mut scene,
         )?;
     }
+
+    // A power-input net that is not a rail (a barrel-jack VIN feeding a
+    // regulator, say) still needs its PWR_FLAG or ERC reports it undriven; the
+    // rail phase never draws it, so anchor the flag at the net's first pin.
+    for net in needs_flag {
+        if flag_points.contains_key(net) {
+            continue;
+        }
+        if let Some((ep, _)) = net_eps.get(net).and_then(|eps| eps.first()) {
+            flag_points.insert(net.clone(), (*ep, 0.0));
+        }
+    }
     Ok(())
 }
 
