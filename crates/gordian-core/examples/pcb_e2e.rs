@@ -96,6 +96,42 @@ fn main() -> anyhow::Result<()> {
     if placed["legal"] != Value::Bool(true) {
         bail!("placement is illegal: {placed}");
     }
+    // Empirical shrink probe: the packing estimate over-reserves on THT-heavy
+    // boards, so a legal placement often fits a tighter canvas. Try 0.85x
+    // steps and keep shrinking while placement stays legal; on the first
+    // failure restore the last legal canvas.
+    let mut legal_bounds: Option<(f64, f64)> = None;
+    for _ in 0..2 {
+        let (Some(width), Some(height)) = (
+            placed["current_bounds_mm"]["w"].as_f64(),
+            placed["current_bounds_mm"]["h"].as_f64(),
+        ) else {
+            break;
+        };
+        let (tighter_w, tighter_h) = ((width * 0.85).ceil(), (height * 0.85).ceil());
+        step(
+            &ctx,
+            "regenerate_board",
+            json!({"bounds": [0.0, 0.0, tighter_w, tighter_h]}),
+        )?;
+        let tightened = attempt(&ctx, "place_board", json!({}))?;
+        if tightened["legal"] == Value::Bool(true) {
+            legal_bounds = Some((tighter_w, tighter_h));
+            placed = tightened;
+        } else {
+            let (width, height) = legal_bounds.unwrap_or((width, height));
+            step(
+                &ctx,
+                "regenerate_board",
+                json!({"bounds": [0.0, 0.0, width, height]}),
+            )?;
+            placed = attempt(&ctx, "place_board", json!({}))?;
+            if placed["legal"] != Value::Bool(true) {
+                bail!("placement did not recover after tightening: {placed}");
+            }
+            break;
+        }
+    }
     let routed = step(&ctx, "route_board", json!({}))?;
     if routed["failed"]
         .as_array()

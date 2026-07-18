@@ -1551,6 +1551,18 @@ fn placement_size_estimate(
     minimum_height: f64,
     landscape: bool,
 ) -> PlacementSizeEstimate {
+    placement_size_estimate_with_growth(problem, minimum_width, minimum_height, landscape, true)
+}
+
+/// `grow_from_current=false` sizes a fresh canvas purely from the parts —
+/// used to shrink an oversized-but-legal board back to its packing estimate.
+fn placement_size_estimate_with_growth(
+    problem: &PlaceProblem,
+    minimum_width: f64,
+    minimum_height: f64,
+    landscape: bool,
+    grow_from_current: bool,
+) -> PlacementSizeEstimate {
     let total_area: f64 = problem
         .parts
         .iter()
@@ -1570,7 +1582,11 @@ fn placement_size_estimate(
     let current_h = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
     // ~2x courtyard area reserves packing and routing space. Growing at least
     // 1.3x beyond a failed/current outline prevents identical retry loops.
-    let min_area = (total_area * 2.0).max(current_w * current_h * 1.3);
+    let min_area = if grow_from_current {
+        (total_area * 2.0).max(current_w * current_h * 1.3)
+    } else {
+        total_area * 2.0
+    };
     let aspect = if landscape {
         2.0
     } else {
@@ -1578,8 +1594,12 @@ fn placement_size_estimate(
     };
     let mut height = (min_area / aspect).sqrt();
     let mut width = aspect * height;
-    width = width.max(current_w).max(max_w + 2.0).max(minimum_width);
-    height = height.max(current_h).max(max_h + 2.0).max(minimum_height);
+    width = width.max(max_w + 2.0).max(minimum_width);
+    height = height.max(max_h + 2.0).max(minimum_height);
+    if grow_from_current {
+        width = width.max(current_w);
+        height = height.max(current_h);
+    }
     PlacementSizeEstimate {
         width,
         height,
@@ -1783,6 +1803,50 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
             "suggested_min_bounds_mm": { "w": estimate.width.ceil(), "h": estimate.height.ceil() },
         });
+    } else {
+        // A legal placement on an oversized canvas reads as wasted board: report
+        // the tight courtyard envelope so callers can regenerate at fit_bounds_mm
+        // and re-place instead of shipping empty acreage.
+        let by_ref: std::collections::BTreeMap<&str, _> = result
+            .placements
+            .iter()
+            .map(|placement| (placement.reference.as_str(), placement))
+            .collect();
+        let mut envelope: Option<Rect> = None;
+        for part in &problem.parts {
+            let Some(placement) = by_ref.get(part.reference.as_str()) else {
+                continue;
+            };
+            let half = pcb_model::place::rotated_courtyard_half(part, placement.rotation);
+            let rect = Rect::from_center_half(placement.at, half);
+            envelope = Some(match envelope {
+                None => rect,
+                Some(existing) => Rect::new(
+                    existing.min_x.min(rect.min_x),
+                    existing.min_y.min(rect.min_y),
+                    existing.max_x.max(rect.max_x),
+                    existing.max_y.max(rect.max_y),
+                ),
+            });
+        }
+        if let Some(envelope) = envelope {
+            let cw = (problem.bounds.max_x - problem.bounds.min_x).max(0.1);
+            let ch = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
+            // Utilization from courtyard area, not the placed envelope:
+            // edge-seeking connectors span the rim of any canvas, so an
+            // envelope ratio always reads full even on an oversized board.
+            let fresh = placement_size_estimate_with_growth(&problem, 0.0, 0.0, false, false);
+            let utilization = (fresh.total_area * 2.0) / (cw * ch);
+            extra = json!({
+                "utilized_bounds_mm": {
+                    "w": (envelope.width() * 10.0).round() / 10.0,
+                    "h": (envelope.height() * 10.0).round() / 10.0,
+                },
+                "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
+                "fit_bounds_mm": { "w": fresh.width.ceil(), "h": fresh.height.ceil() },
+                "canvas_utilization_percent": (utilization * 100.0).round().min(100.0),
+            });
+        }
     }
 
     let mut out = json!({
