@@ -97,13 +97,22 @@ fn main() -> anyhow::Result<()> {
         bail!("placement is illegal: {placed}");
     }
     // Empirical shrink probe: the packing estimate over-reserves on THT-heavy
-    // boards, so a legal placement often fits a tighter canvas. One 0.85x
-    // attempt, reverted if the tighter placement fails.
+    // boards, so a legal placement often fits a tighter canvas. A canvas that
+    // ballooned during illegal-placement retries jumps straight back to the
+    // fresh packing estimate; otherwise one 0.85x attempt. Either way the
+    // roomier legal canvas is restored if the tighter placement fails.
     if let (Some(width), Some(height)) = (
         placed["current_bounds_mm"]["w"].as_f64(),
         placed["current_bounds_mm"]["h"].as_f64(),
     ) {
-        let (tighter_w, tighter_h) = ((width * 0.85).ceil(), (height * 0.85).ceil());
+        let fit = (
+            placed["fit_bounds_mm"]["w"].as_f64(),
+            placed["fit_bounds_mm"]["h"].as_f64(),
+        );
+        let (tighter_w, tighter_h) = match fit {
+            (Some(fw), Some(fh)) if fw * fh < width * height * 0.7 => (fw.ceil(), fh.ceil()),
+            _ => ((width * 0.85).ceil(), (height * 0.85).ceil()),
+        };
         step(
             &ctx,
             "regenerate_board",
