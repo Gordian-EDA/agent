@@ -416,7 +416,7 @@ pub(super) fn place_problem_from_snapshot(
                 imported.reference, imported.lib_id
             )
         })?;
-        parts.push(part_from_footprint_layers(
+        let mut part = part_from_footprint_layers(
             &fp,
             &imported.reference,
             &pad_net_map(&imported.pads),
@@ -425,7 +425,17 @@ pub(super) fn place_problem_from_snapshot(
                 at: imported.at,
                 rotation: imported.rotation as f64,
             }),
-        ));
+        );
+        // A many-padded IC needs routing channels around it, not just legal
+        // courtyards: packed passives that satisfy the courtyard margin still
+        // wall in its escapes and the router reports enclosure. Reserve
+        // breathing room in the courtyard itself; connectors keep their tight
+        // envelope so edge seating is unaffected.
+        if part.pads.len() >= 12 && !is_connector(&imported.lib_id, &imported.reference) {
+            part.courtyard_w += 0.8;
+            part.courtyard_h += 0.8;
+        }
+        parts.push(part);
     }
 
     Ok(PlaceProblem {
