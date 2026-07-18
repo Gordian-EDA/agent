@@ -73,7 +73,10 @@ pub fn get_footprint_info(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Va
     let id = match FootprintId::parse(&lib_id) {
         Ok(id) => id,
         Err(_) => {
-            return Ok(json!({ "error": format!("invalid footprint id `{lib_id}`") }));
+            return Ok(json!({
+                "error": format!("invalid footprint id `{lib_id}`"),
+                "suggestions": suggestion_strings(catalog.suggest_text(&lib_id)),
+            }));
         }
     };
 
@@ -124,12 +127,16 @@ pub fn get_footprint_info(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Va
         }
         Err(e) if e.is_not_found() => Ok(json!({
             "error": format!("unknown footprint `{lib_id}`"),
-            "suggestions": catalog.suggest(&id).iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+            "suggestions": suggestion_strings(catalog.suggest(&id)),
         })),
         Err(e) => Ok(json!({
             "error": format!("footprint `{lib_id}` could not be read: {e}"),
         })),
     }
+}
+
+fn suggestion_strings(suggestions: Vec<FootprintId>) -> Vec<String> {
+    suggestions.iter().map(ToString::to_string).collect()
 }
 
 fn bbox_json(b: &geom::Rect) -> Value {
@@ -161,7 +168,8 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Val
                     "error": format!(
                         "part {}: invalid footprint id `{}`",
                         assignment.reference, assignment.footprint
-                    )
+                    ),
+                    "suggestions": suggestion_strings(catalog.suggest_text(&assignment.footprint)),
                 }));
             }
         };
@@ -172,7 +180,7 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Val
                         "part {}: unknown footprint `{}`",
                         assignment.reference, assignment.footprint
                     ),
-                    "suggestions": catalog.suggest(&id).iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+                    "suggestions": suggestion_strings(catalog.suggest(&id)),
                 }));
             }
             return Ok(json!({

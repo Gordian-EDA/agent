@@ -572,11 +572,37 @@ fn authoring_rejects_guessed_or_unknown_footprint_ids() {
         )
         .unwrap();
         assert_eq!(out["ok"], false, "{out}");
+        let text = out.to_string();
         assert!(
-            out.to_string().contains("footprint"),
+            text.contains("footprint"),
             "the guessed assignment must be diagnosed: {out}"
         );
+        assert!(
+            !text.contains("suggestions: \"") && !text.contains("suggestions: ,"),
+            "a diagnostic must never end in a dangling suggestions clause: {out}"
+        );
     }
+}
+
+#[test]
+fn unknown_footprint_diagnostic_suggests_the_right_library() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let yaml = "version: 1\nblocks: {main: {components: {SW1: {part: Device:R, footprint: 'Button_SMD_SW_SPST:SW_SPST_TL3342', pins: {1: A, 2: GND}}}}}";
+    let out = run_tool(
+        "edit_design",
+        serde_json::json!({ "yaml": yaml, "allow_component_removal": true }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(out["ok"], false, "{out}");
+    assert!(
+        out.to_string()
+            .contains("suggestions: Button_Switch_SMD:SW_SPST_TL3342"),
+        "the wrong-library id must suggest the exact-name match first: {out}"
+    );
 }
 
 #[test]

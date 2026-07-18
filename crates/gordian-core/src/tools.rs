@@ -1169,6 +1169,20 @@ fn authoring_report_quality(report: &Value) -> (u64, u64) {
     )
 }
 
+/// `"; suggestions: a, b"` for a non-empty candidate list, empty otherwise —
+/// a diagnostic never ends in a dangling `suggestions:`.
+pub(crate) fn footprint_suggestion_clause(suggestions: &[FootprintId]) -> String {
+    if suggestions.is_empty() {
+        return String::new();
+    }
+    let list = suggestions
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("; suggestions: {list}")
+}
+
 /// Returns `true` when at least one incompatible assignment was found.
 fn add_footprint_compatibility(
     report: &mut Value,
@@ -1185,21 +1199,17 @@ fn add_footprint_compatibility(
             let id = match FootprintId::parse(footprint) {
                 Ok(id) => id,
                 Err(error) => {
+                    let clause = footprint_suggestion_clause(&catalog.suggest_text(footprint));
                     lookup_errors.push(format!(
-                        "error[invalid_footprint]: {reference} uses invalid footprint id `{footprint}`: {error}"
+                        "error[invalid_footprint]: {reference} uses invalid footprint id `{footprint}`: {error}{clause}"
                     ));
                     continue;
                 }
             };
             if let Err(error) = catalog.footprint(&id) {
                 let detail = if error.is_not_found() {
-                    let suggestions = catalog
-                        .suggest(&id)
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("unknown footprint `{footprint}`; suggestions: {suggestions}")
+                    let clause = footprint_suggestion_clause(&catalog.suggest(&id));
+                    format!("unknown footprint `{footprint}`{clause}")
                 } else {
                     format!("footprint `{footprint}` could not be read: {error}")
                 };
@@ -3098,9 +3108,22 @@ mod tests {
         common_default_footprint, common_footprint_alias, compile, compile_report, create_design,
         edit_design, invalid_compile_quality_regressed, normalize_common_footprint_aliases,
         normalize_dense_default_footprints, normalize_invalid_power_references,
-        normalize_misplaced_footprint_parts, repair_components, repair_components_tool,
-        require_search_query, symbol_for_misplaced_footprint, tool_defs,
+        footprint_suggestion_clause, normalize_misplaced_footprint_parts, repair_components,
+        repair_components_tool, require_search_query, symbol_for_misplaced_footprint, tool_defs,
     };
+
+    #[test]
+    fn footprint_suggestion_clause_is_omitted_when_empty() {
+        assert_eq!(footprint_suggestion_clause(&[]), "");
+        let ids = vec![
+            "Resistor_SMD:R_0603_1608Metric".parse().unwrap(),
+            "Resistor_SMD:R_0805_2012Metric".parse().unwrap(),
+        ];
+        assert_eq!(
+            footprint_suggestion_clause(&ids),
+            "; suggestions: Resistor_SMD:R_0603_1608Metric, Resistor_SMD:R_0805_2012Metric"
+        );
+    }
 
     #[test]
     fn common_defaults_cover_only_canonical_package_families() {

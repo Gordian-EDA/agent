@@ -13,6 +13,7 @@ use pcb_model::{Point2, Polygon};
 use pcb_place::placement::{LockedAt, Rect};
 
 use crate::AgentRuntime;
+use crate::tools::footprint_suggestion_clause;
 
 use super::fmt_num;
 use super::seed::{BoardSeedRules, PourPadConnection, PourSpec};
@@ -380,21 +381,17 @@ pub(super) fn emit_seed_board(
     let y = spec.bounds.min_y + 2.0;
     for dp in &spec.parts {
         let id = FootprintId::parse(&dp.footprint).map_err(|e| {
+            let clause = footprint_suggestion_clause(&catalog.suggest_text(&dp.footprint));
             format!(
-                "part {}: invalid footprint id `{}`: {e}",
+                "part {}: invalid footprint id `{}`: {e}{clause}",
                 dp.reference, dp.footprint
             )
         })?;
         let source = catalog.source(&id).map_err(|e| {
             if e.is_not_found() {
-                let suggestions = catalog
-                    .suggest(&id)
-                    .iter()
-                    .map(|i| i.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let clause = footprint_suggestion_clause(&catalog.suggest(&id));
                 format!(
-                    "part {}: unknown footprint `{}` — use one of these real lib_ids if suitable: {suggestions}",
+                    "part {}: unknown footprint `{}`{clause} — assign a real lib_id via search_footprints",
                     dp.reference, dp.footprint
                 )
             } else {

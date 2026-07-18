@@ -87,6 +87,10 @@ pub(crate) fn normalize(s: &str) -> String {
     out
 }
 
+/// Backfilled did-you-mean candidates farther than this normalized distance
+/// are noise, not suggestions, and are dropped.
+const SUGGEST_MAX_BACKFILL_DISTANCE: f64 = 0.6;
+
 /// Rank `items` against an already-normalized `needle`, returning the indices
 /// of the best `n`, best first.
 ///
@@ -103,20 +107,86 @@ pub(crate) fn rank<T>(
     norm: impl Fn(&T) -> &str,
     tiebreak: impl Fn(&T) -> &str,
 ) -> Vec<usize> {
+    rank_by(
+        items,
+        n,
+        |m, t| m.fuzzy_match(norm(t), needle),
+        |t| Some(1.0 - strsim::normalized_levenshtein(needle, norm(t))),
+        |t| norm(t).len(),
+        tiebreak,
+    )
+}
+
+/// Rank `items` as did-you-mean suggestions for an unresolved footprint id,
+/// returning the indices of the best `n`, best first.
+///
+/// Each item scores the better of its full `Lib:Name` text against
+/// `full_needle` and its bare name against `name_needle`, so a right name in
+/// a wrong library still ranks. Non-subsequence candidates backfill by the
+/// best of edit-distance and token-overlap closeness — KiCAD names are
+/// dimension-token heavy, and token overlap keeps `LGA-8_2.5x2.5mm_P0.65mm`
+/// variants together where raw edit distance drifts — but only within
+/// [`SUGGEST_MAX_BACKFILL_DISTANCE`], so a hopeless id yields nothing rather
+/// than arbitrary nearest neighbors.
+pub(crate) fn rank_suggestions<T>(
+    items: &[T],
+    full_needle: &str,
+    name_needle: &str,
+    n: usize,
+    full: impl Fn(&T) -> &str,
+    name: impl Fn(&T) -> &str,
+    tiebreak: impl Fn(&T) -> &str,
+) -> Vec<usize> {
+    rank_by(
+        items,
+        n,
+        |m, t| {
+            let by_full = m.fuzzy_match(full(t), full_needle);
+            let by_name = m.fuzzy_match(name(t), name_needle);
+            by_full.max(by_name)
+        },
+        |t| {
+            let lev = |a: &str, b: &str| 1.0 - strsim::normalized_levenshtein(a, b);
+            let d = [
+                lev(full_needle, full(t)),
+                lev(name_needle, name(t)),
+                token_distance(full_needle, full(t)),
+                token_distance(name_needle, name(t)),
+            ]
+            .into_iter()
+            .fold(f64::INFINITY, f64::min);
+            (d <= SUGGEST_MAX_BACKFILL_DISTANCE).then_some(d)
+        },
+        |t| full(t).len(),
+        tiebreak,
+    )
+}
+
+/// The shared ranking core: fzf subsequence scores first (higher is better,
+/// ties break on shorter text then `tiebreak`), then non-matching items
+/// backfill by ascending `distance` (returning `None` excludes an item).
+fn rank_by<T>(
+    items: &[T],
+    n: usize,
+    fuzzy: impl Fn(&SkimMatcherV2, &T) -> Option<i64>,
+    distance: impl Fn(&T) -> Option<f64>,
+    text_len: impl Fn(&T) -> usize,
+    tiebreak: impl Fn(&T) -> &str,
+) -> Vec<usize> {
     let matcher = SkimMatcherV2::default();
 
-    let mut fuzzy: Vec<(i64, usize)> = items
+    let mut scored: Vec<(i64, usize)> = items
         .iter()
         .enumerate()
-        .filter_map(|(i, t)| matcher.fuzzy_match(norm(t), needle).map(|s| (s, i)))
+        .filter_map(|(i, t)| fuzzy(&matcher, t).map(|s| (s, i)))
         .collect();
-    fuzzy.sort_by(|&(sa, ia), &(sb, ib)| {
+    scored.sort_by(|&(sa, ia), &(sb, ib)| {
         sb.cmp(&sa)
-            .then_with(|| norm(&items[ia]).len().cmp(&norm(&items[ib]).len()))
+            .then_with(|| text_len(&items[ia]).cmp(&text_len(&items[ib])))
             .then_with(|| tiebreak(&items[ia]).cmp(tiebreak(&items[ib])))
     });
 
-    let mut chosen: Vec<usize> = fuzzy.into_iter().take(n).map(|(_, i)| i).collect();
+    let mut chosen: Vec<usize> = scored.into_iter().take(n).map(|(_, i)| i).collect();
     if chosen.len() >= n {
         return chosen;
     }
@@ -126,7 +196,7 @@ pub(crate) fn rank<T>(
         .iter()
         .enumerate()
         .filter(|(i, _)| !taken.contains(i))
-        .map(|(i, t)| (1.0 - strsim::normalized_levenshtein(needle, norm(t)), i))
+        .filter_map(|(i, t)| distance(t).map(|d| (d, i)))
         .collect();
     rest.sort_by(|&(da, ia), &(db, ib)| {
         da.partial_cmp(&db)
@@ -135,6 +205,25 @@ pub(crate) fn rank<T>(
     });
     chosen.extend(rest.into_iter().take(n - chosen.len()).map(|(_, i)| i));
     chosen
+}
+
+/// `1 −` the Dice coefficient over the whitespace tokens of two normalized
+/// strings: 0.0 for identical token multisets, 1.0 for disjoint ones.
+fn token_distance(a: &str, b: &str) -> f64 {
+    let ta: Vec<&str> = a.split_whitespace().collect();
+    let mut tb: Vec<&str> = b.split_whitespace().collect();
+    if ta.is_empty() || tb.is_empty() {
+        return 1.0;
+    }
+    let total = ta.len() + tb.len();
+    let mut matched = 0usize;
+    for t in ta {
+        if let Some(pos) = tb.iter().position(|&x| x == t) {
+            tb.swap_remove(pos);
+            matched += 1;
+        }
+    }
+    1.0 - (2.0 * matched as f64) / total as f64
 }
 
 /// The fuzzy score `needle` earns against `text`, if it matches as a

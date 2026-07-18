@@ -19,8 +19,8 @@ use crate::id::{FootprintId, LibraryId};
 use crate::search::{self, FootprintSearchHit, SearchQuery};
 use crate::types::Footprint;
 
-const SUGGEST_MAX_DISTANCE: usize = 6;
 const SUGGEST_LIMIT: usize = 3;
+const SUGGEST_MIN_PREFIX: usize = 4;
 
 /// One discovered `.pretty` library.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,11 +84,12 @@ impl FootprintEntry {
     }
 }
 
-/// An entry plus its pre-normalized searchable text and canonical lib-id string
-/// (the latter is the deterministic search tie-break key).
+/// An entry plus its pre-normalized searchable texts (full id and bare name)
+/// and canonical lib-id string (the deterministic search tie-break key).
 struct Indexed {
     entry: FootprintEntry,
     normalized: String,
+    normalized_name: String,
     lib_id: String,
 }
 
@@ -135,10 +136,12 @@ impl FootprintCatalogBuilder {
                 }
                 let lib_id = entry.id().to_string();
                 let normalized = search::normalize(&lib_id);
+                let normalized_name = search::normalize(entry.id().name());
                 by_id.insert(entry.id().clone(), indexed.len());
                 indexed.push(Indexed {
                     entry,
                     normalized,
+                    normalized_name,
                     lib_id,
                 });
             }
@@ -256,27 +259,108 @@ impl FootprintCatalog {
         Ok(fp)
     }
 
-    /// "Did-you-mean" ids within `id`'s library, closest name first.
+    /// "Did-you-mean" ids for an unresolved `id`, best first.
+    ///
+    /// A footprint whose bare name matches exactly ranks first — the common
+    /// authoring mistake is a right name under a wrong or invented library —
+    /// then fuzzy matches over the whole index (scored against both the bare
+    /// name and the full `Lib:Name`) fill the remaining slots. Empty only when
+    /// nothing in the index comes close.
     pub fn suggest(&self, id: &FootprintId) -> Vec<FootprintId> {
-        let needle = id.name().to_lowercase();
-        let mut hits: Vec<(usize, &FootprintId)> = self
+        let name_key = id.name().to_lowercase();
+        let mut out: Vec<FootprintId> = self
             .indexed
             .iter()
             .map(|i| i.entry.id())
-            .filter(|fid| fid.library() == id.library())
-            .map(|fid| {
-                (
-                    strsim::levenshtein(&needle, &fid.name().to_lowercase()),
-                    fid,
-                )
-            })
-            .filter(|(d, _)| *d <= SUGGEST_MAX_DISTANCE)
+            .filter(|fid| *fid != id && fid.name().to_lowercase() == name_key)
+            .cloned()
             .collect();
-        hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
-        hits.into_iter()
-            .take(SUGGEST_LIMIT)
-            .map(|(_, fid)| fid.clone())
-            .collect()
+        out.sort();
+        out.truncate(SUGGEST_LIMIT);
+        self.fill_fuzzy_suggestions(
+            &mut out,
+            &search::normalize(&id.to_string()),
+            &search::normalize(id.name()),
+        );
+        out
+    }
+
+    /// "Did-you-mean" ids for `text` that does not even parse as `Lib:Name`
+    /// (e.g. the missing-colon shape `Device_R_0805`), best first.
+    ///
+    /// A mashed-together id usually embeds the real footprint name as a
+    /// suffix, so the longest separator-split suffix that prefixes a real name
+    /// ranks first (`Device_R_0805` → `Resistor_SMD:R_0805_2012Metric`); fuzzy
+    /// matches over the whole index fill the rest.
+    pub fn suggest_text(&self, text: &str) -> Vec<FootprintId> {
+        let mut out = self.name_prefix_suggestions(text);
+        out.truncate(SUGGEST_LIMIT);
+        let needle = search::normalize(text);
+        self.fill_fuzzy_suggestions(&mut out, &needle, &needle);
+        out
+    }
+
+    /// Ids whose name is prefixed by the longest suffix of `text` (split at
+    /// separators) that prefixes anything, shortest name first. Suffixes
+    /// shorter than [`SUGGEST_MIN_PREFIX`] are too unspecific to trust.
+    fn name_prefix_suggestions(&self, text: &str) -> Vec<FootprintId> {
+        let lower = text.to_lowercase();
+        let suffixes = std::iter::once(lower.as_str()).chain(
+            lower
+                .char_indices()
+                .filter(|(_, c)| !c.is_alphanumeric())
+                .map(|(i, c)| &lower[i + c.len_utf8()..]),
+        );
+        let suffixes = suffixes.filter(|s| s.len() >= SUGGEST_MIN_PREFIX);
+        for suffix in suffixes {
+            let mut hits: Vec<FootprintId> = self
+                .indexed
+                .iter()
+                .map(|i| i.entry.id())
+                .filter(|fid| fid.name().to_lowercase().starts_with(suffix))
+                .cloned()
+                .collect();
+            if !hits.is_empty() {
+                hits.sort_by(|a, b| {
+                    a.name()
+                        .len()
+                        .cmp(&b.name().len())
+                        .then_with(|| a.cmp(b))
+                });
+                return hits;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Top up `out` to [`SUGGEST_LIMIT`] with fuzzy suggestion matches.
+    fn fill_fuzzy_suggestions(
+        &self,
+        out: &mut Vec<FootprintId>,
+        full_needle: &str,
+        name_needle: &str,
+    ) {
+        if out.len() >= SUGGEST_LIMIT {
+            return;
+        }
+        let ranked = search::rank_suggestions(
+            &self.indexed,
+            full_needle,
+            name_needle,
+            SUGGEST_LIMIT + out.len(),
+            |i| i.normalized.as_str(),
+            |i| i.normalized_name.as_str(),
+            |i| i.lib_id.as_str(),
+        );
+        for i in ranked {
+            let fid = self.indexed[i].entry.id();
+            if !out.contains(fid) {
+                out.push(fid.clone());
+            }
+            if out.len() >= SUGGEST_LIMIT {
+                return;
+            }
+        }
     }
 
     /// The best matches for `query`, best first. Pad counts are resolved lazily
