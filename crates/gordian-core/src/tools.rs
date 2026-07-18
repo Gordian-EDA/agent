@@ -2170,6 +2170,9 @@ fn normalize_misplaced_footprint_component_map(
 
 fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let yaml = require_str(&input, "yaml")?;
+    if let Some(rejection) = elided_placeholder_rejection(&yaml) {
+        return Ok(rejection);
+    }
     let overwrite = input
         .get("overwrite")
         .and_then(Value::as_bool)
@@ -2784,7 +2787,32 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(report)
 }
 
+/// A model can echo the history-elision placeholder back as its document; that
+/// text must never become the draft.
+fn elided_placeholder_rejection(text: &str) -> Option<Value> {
+    (text.contains("[omitted ") && text.contains(" chars from"))
+        .then(|| json!({
+            "ok": false,
+            "error": "this text is the history-elision placeholder, not design content; \
+                      the full draft is preserved on disk — recover it with \
+                      read_schematic({source:\"draft\"}) or apply a small \
+                      old_string/new_string patch instead of resending the document",
+            "code": "elided_placeholder_rejected",
+            "draft_written": false,
+            "draft_changed": false,
+            "electrical_design_changed": false,
+            "next_tool": "edit_design",
+        }))
+}
+
 fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    for key in ["yaml", "new_string"] {
+        if let Some(text) = input.get(key).and_then(Value::as_str)
+            && let Some(rejection) = elided_placeholder_rejection(text)
+        {
+            return Ok(rejection);
+        }
+    }
     let full_yaml = input.get("yaml").and_then(Value::as_str);
     if let Some(yaml) = full_yaml {
         let prior_draft = ctx.workspace().read_draft()?;
