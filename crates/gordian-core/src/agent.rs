@@ -1011,6 +1011,9 @@ impl<P: Provider> Agent<P> {
                 reserved_clean_apply_used = true;
             }
             if may_use_reserved_review_repair {
+                if reserved_review_repair_requests == RESERVED_REVIEW_REPAIR_REQUESTS {
+                    self.history.push(ChatMessage::user(REVIEW_REAPPLY_NUDGE));
+                }
                 reserved_review_repair_requests -= 1;
             }
             provider_requests += 1;
@@ -3581,10 +3584,10 @@ fn explicit_minimum_physical_components(intent: &str) -> Option<usize> {
     floors.into_iter().max()
 }
 
-fn draft_physical_count(yaml: &str) -> DraftPhysicalCount {
-    let Some(surface) = circuit_lang::parse::parse_str(yaml).0 else {
-        return DraftPhysicalCount::default();
-    };
+/// `None` when the document does not parse: an unparseable draft must surface
+/// its real syntax diagnostics, not a misleading component-floor shortfall.
+fn draft_physical_count(yaml: &str) -> Option<DraftPhysicalCount> {
+    let surface = circuit_lang::parse::parse_str(yaml).0?;
     let components = surface
         .blocks
         .values()
@@ -3611,11 +3614,11 @@ fn draft_physical_count(yaml: &str) -> DraftPhysicalCount {
         .flat_map(|block| block.components.values())
         .flat_map(|component| component.decouple.values())
         .fold(0usize, |total, &count| total.saturating_add(count as usize));
-    DraftPhysicalCount {
+    Some(DraftPhysicalCount {
         authored_candidates,
         explicit_footprinted,
         synthesized_decouplers,
-    }
+    })
 }
 
 fn padded_full_draft_result(
@@ -3737,7 +3740,7 @@ fn undersized_full_draft_result(authoritative_intent: &str, call: &ToolCall) -> 
     }
     let required = explicit_minimum_physical_components(authoritative_intent)?;
     let yaml = call.fn_arguments.get("yaml")?.as_str()?;
-    let count = draft_physical_count(yaml);
+    let count = draft_physical_count(yaml)?;
     let actual = count.total();
     if actual >= required {
         return padded_full_draft_result(required, yaml, count, &call.fn_name);
@@ -3772,7 +3775,7 @@ fn undersized_existing_draft_result(
     }
     let required = explicit_minimum_physical_components(authoritative_intent)?;
     let current_yaml = current_yaml?;
-    let count = draft_physical_count(current_yaml);
+    let count = draft_physical_count(current_yaml)?;
     let actual = count.total();
     if actual >= required {
         return None;
@@ -3812,7 +3815,7 @@ fn undersized_component_repair_result(
     let required = explicit_minimum_physical_components(authoritative_intent)?;
     let current_yaml = current_yaml?;
     let surface = circuit_lang::parse::parse_str(current_yaml).0?;
-    let current = draft_physical_count(current_yaml);
+    let current = draft_physical_count(current_yaml)?;
     if current.total() < required {
         // The broader existing-draft guard reports this case.
         return None;
@@ -6524,13 +6527,14 @@ blocks:
 "#;
         assert_eq!(
             draft_physical_count(yaml),
-            DraftPhysicalCount {
+            Some(DraftPhysicalCount {
                 authored_candidates: 2,
                 explicit_footprinted: 2,
                 synthesized_decouplers: 4,
-            }
+            })
         );
-        assert_eq!(draft_physical_count(yaml).total(), 2);
+        assert_eq!(draft_physical_count(yaml).unwrap().total(), 2);
+        assert_eq!(draft_physical_count("components: ["), None);
     }
 
     #[test]
