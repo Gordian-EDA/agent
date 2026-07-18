@@ -822,6 +822,10 @@ fn synth_decouple(
                     let mut c = Component {
                         part: "Device:C".into(),
                         value: Some(value.clone()),
+                        // Synthesized decouplers are physical parts the board
+                        // needs a footprint for; the author never sees them to
+                        // assign one, so default to the ubiquitous 0402.
+                        footprint: Some("Capacitor_SMD:C_0402_1005Metric".into()),
                         origin: Origin::Synthesized {
                             parent: refdes.clone(),
                             role: "decouple".into(),
