@@ -1716,7 +1716,7 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // multi-candidate routing oracle when every part is locked by the structured
     // grids; this makes placement independent of RNG/hash order and completes in
     // one legality pass. Any incomplete specialization keeps the generic path.
-    let result = if opto817_requirements.is_some() {
+    let mut result = if opto817_requirements.is_some() {
         let mut prescribed = problem.clone();
         pcb_place::placement::apply_grid_hints(&mut prescribed, &hints);
         mirror_right_817_bank(&mut prescribed, &hints);
@@ -1729,6 +1729,16 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         pcb_place::placement::place_board(&problem, &hints)
     };
+    // The 817 grammar prescribes strips sized for its canonical channel shape;
+    // a richer channel (series R + TVS + status LED per input) can overflow
+    // them with sub-millimetre collisions no canvas growth fixes. An illegal
+    // prescribed result falls back to the generic placer instead of failing.
+    if !result.legal && opto817_requirements.is_some() {
+        let generic = pcb_place::placement::place_board(&problem, &PlacementHints::default());
+        if generic.legal {
+            result = generic;
+        }
+    }
 
     if result.legal {
         let locked_refs: std::collections::BTreeSet<&str> = board

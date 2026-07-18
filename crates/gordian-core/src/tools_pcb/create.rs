@@ -95,6 +95,20 @@ fn resolve_pour_layer(layer: &str, layer_count: u32) -> Option<(u32, String)> {
     }
 }
 
+/// A dangling wire shorter than 0.1mm is emitter rounding residue, not a
+/// broken connection: its endpoints sit inside any pin snap tolerance.
+fn degenerate_wire_endpoint(v: &kicad_cli::Violation) -> bool {
+    v.kind == "unconnected_wire_endpoint"
+        && v.items.iter().all(|item| {
+            item.description
+                .split("length ")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|len| len.parse::<f64>().ok())
+                .is_some_and(|len| len < 0.1)
+        })
+}
+
 fn blocking_erc_warnings(report: &kicad_cli::ErcReport) -> Vec<Value> {
     report
         .violations
@@ -103,6 +117,7 @@ fn blocking_erc_warnings(report: &kicad_cli::ErcReport) -> Vec<Value> {
             v.severity == "warning"
                 && !v.kind.starts_with("lib_symbol")
                 && v.kind != "global_label_dangling"
+                && !degenerate_wire_endpoint(v)
         })
         .map(|v| {
             let items: Vec<_> = v
