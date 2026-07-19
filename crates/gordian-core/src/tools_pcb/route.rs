@@ -195,6 +195,13 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
         remove_existing_copper_obstacles(&mut rp);
     }
     rp.bounds = super::place::routing_bounds(&rp.bounds, rp.outline.as_ref());
+    // Escape-ring reservations are still being tuned: with the ring on, the
+    // IC's own nets pass (shared-region cells) but displaced foreign nets
+    // currently fail more than the ring frees. Off by default until the frame
+    // geometry converges.
+    if std::env::var_os("ROUTE_ESCAPE_FRAMES").is_some() {
+        reserve_fine_pitch_escape_frames(&mut rp, &board.imported.parts);
+    }
     let (router_problem, terminal_escapes) = prepare_wide_terminal_escapes(&rp);
     let (routing_subproblem, reserved_wide_routes) = reserve_wide_multi_pin_routes(&router_problem);
     let routed = route_with_engine(&routing_subproblem, ctx.config().engines.pcb_router);
@@ -1893,6 +1900,78 @@ pub(super) fn write_route_offline(
 ) -> std::result::Result<(), String> {
     ctx.close_kicad_session();
     super::patch::append_copper_file(&ctx.pcb_path(), solution, rp.layer_count, layer_names)
+}
+
+/// Reserve an escape annulus around every fine-pitch IC: four frame obstacles
+/// passable only to the IC's own nets (grid-astar renders them as shared-region
+/// cells). Foreign copper that merely clears the pads by the design clearance
+/// otherwise consumes the sole escape lane and walls the pads in.
+fn reserve_fine_pitch_escape_frames(rp: &mut pcb_model::RouteProblem, parts: &[ImportedPart]) {
+    const FINE_PITCH_MM: f64 = 0.66;
+    const INNER_MARGIN_MM: f64 = 0.4;
+    const FRAME_WIDTH_MM: f64 = 1.2;
+    let all_layers: Vec<pcb_model::LayerRef> = {
+        let n = rp.layer_count.max(2) as usize;
+        std::iter::once(pcb_model::LayerRef::top())
+            .chain((1..=n.saturating_sub(2)).map(|i| pcb_model::LayerRef(format!("inner{i}"))))
+            .chain(std::iter::once(pcb_model::LayerRef::bottom()))
+            .collect()
+    };
+    let mut frames = Vec::new();
+    for part in parts {
+        if part.pads.len() < 12 {
+            continue;
+        }
+        let mut pitch = f64::MAX;
+        for (i, a) in part.pads.iter().enumerate() {
+            for b in &part.pads[i + 1..] {
+                let d = a.at.dist(b.at);
+                if d > 1e-6 {
+                    pitch = pitch.min(d);
+                }
+            }
+        }
+        if pitch >= FINE_PITCH_MM {
+            continue;
+        }
+        let nets: Vec<String> = part
+            .pads
+            .iter()
+            .filter_map(|pad| pad.net.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if nets.len() < 2 {
+            continue;
+        }
+        let (mut min_x, mut min_y, mut max_x, mut max_y) =
+            (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for pad in &part.pads {
+            min_x = min_x.min(pad.at.x);
+            min_y = min_y.min(pad.at.y);
+            max_x = max_x.max(pad.at.x);
+            max_y = max_y.max(pad.at.y);
+        }
+        let inner_w = (max_x - min_x) + 2.0 * INNER_MARGIN_MM;
+        let inner_h = (max_y - min_y) + 2.0 * INNER_MARGIN_MM;
+        let outer_w = inner_w + 2.0 * FRAME_WIDTH_MM;
+        let center = pcb_model::Point2::new((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+        let frame = |cx: f64, cy: f64, w: f64, h: f64| pcb_model::Obstacle {
+            kind: "rect".to_owned(),
+            layers: all_layers.clone(),
+            center: pcb_model::Point2::new(cx, cy),
+            width: w,
+            height: h,
+            connected_to: nets.clone(),
+        };
+        let half_gap = (inner_h + FRAME_WIDTH_MM) / 2.0;
+        frames.push(frame(center.x, center.y - half_gap, outer_w, FRAME_WIDTH_MM));
+        frames.push(frame(center.x, center.y + half_gap, outer_w, FRAME_WIDTH_MM));
+        let half_side = (inner_w + FRAME_WIDTH_MM) / 2.0;
+        frames.push(frame(center.x - half_side, center.y, FRAME_WIDTH_MM, inner_h));
+        frames.push(frame(center.x + half_side, center.y, FRAME_WIDTH_MM, inner_h));
+    }
+    rp.obstacles.extend(frames);
 }
 
 fn is_seed_placement(bounds: &pcb_model::Rect, parts: &[ImportedPart]) -> bool {

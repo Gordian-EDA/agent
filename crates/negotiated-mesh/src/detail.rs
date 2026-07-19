@@ -1886,6 +1886,7 @@ fn terminal_neighborhood_counts(
                     counts.foreign += 1;
                     counts.foreign_owners.insert(owner);
                 }
+                Cell::Shared(_) => counts.free += 1,
                 Cell::BlockedAll => counts.blocked += 1,
             }
         }
@@ -1898,6 +1899,7 @@ fn occupancy_label(problem: &RouteProblem, cell: Cell, conn_idx: usize) -> Strin
         Cell::Free => "free".to_owned(),
         Cell::Net(owner) if owner == conn_idx => "own".to_owned(),
         Cell::Net(owner) => format!("foreign({})", connection_owner_label(problem, owner)),
+        Cell::Shared(_) => "shared".to_owned(),
         Cell::BlockedAll => "blocked".to_owned(),
     }
 }

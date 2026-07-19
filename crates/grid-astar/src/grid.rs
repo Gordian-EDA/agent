@@ -42,6 +42,10 @@ pub enum Cell {
     Free,
     /// Owned by connection index `usize` — free only for that connection.
     Net(usize),
+    /// Passable only for the connections in the grid's shared-region table
+    /// entry — a reserved corridor (a fine-pitch IC's escape ring) that the
+    /// owning IC's nets may cross while foreign copper must detour.
+    Shared(u16),
     /// Blocked for every connection (keepout, unowned copper, or off-board).
     BlockedAll,
 }
@@ -65,6 +69,8 @@ pub struct RouteGrid {
     cells: Vec<Cell>,
     /// Connection name → dense index, built in `connections` order.
     name_index: BTreeMap<String, usize>,
+    /// Sorted connection-index sets backing [`Cell::Shared`].
+    shared_regions: Vec<Vec<usize>>,
 }
 
 impl RouteGrid {
@@ -105,6 +111,7 @@ impl RouteGrid {
         let cells = vec![Cell::Free; plane * layer_count];
 
         let mut grid = RouteGrid {
+            shared_regions: Vec::new(),
             layer_count,
             nx,
             ny,
@@ -219,6 +226,7 @@ impl RouteGrid {
         let cells = vec![Cell::Free; plane * layer_count];
 
         let mut grid = RouteGrid {
+            shared_regions: Vec::new(),
             layer_count,
             nx,
             ny,
@@ -277,6 +285,9 @@ impl RouteGrid {
         match self.cell(layer, ix, iy) {
             Cell::Free => true,
             Cell::Net(owner) => owner == conn,
+            Cell::Shared(region) => self.shared_regions[region as usize]
+                .binary_search(&conn)
+                .is_ok(),
             Cell::BlockedAll => false,
         }
     }
@@ -284,6 +295,30 @@ impl RouteGrid {
     /// Mark `(layer, ix, iy)` as copper owned by connection `conn`.
     ///
     /// Used by the router to turn a routed path into an obstacle for later
+    /// Intern a sorted connection-index set as a shared region id.
+    fn shared_region_id(&mut self, owners: Vec<usize>) -> u16 {
+        if let Some(found) = self.shared_regions.iter().position(|r| *r == owners) {
+            return found as u16;
+        }
+        self.shared_regions.push(owners);
+        (self.shared_regions.len() - 1) as u16
+    }
+
+    /// [`combine`] with region awareness: a net cell inside its own region
+    /// stays the (stricter) net cell; a foreign net collapses the cell.
+    fn combine_cells(&self, existing: Cell, incoming: Cell) -> Cell {
+        match (existing, incoming) {
+            (Cell::Shared(region), Cell::Net(net)) | (Cell::Net(net), Cell::Shared(region)) => {
+                if self.shared_regions[region as usize].binary_search(&net).is_ok() {
+                    Cell::Net(net)
+                } else {
+                    Cell::BlockedAll
+                }
+            }
+            (a, b) => combine(a, b),
+        }
+    }
+
     /// nets. Never overwrites a [`Cell::BlockedAll`] (a keepout or board edge
     /// stays blocked) and a cell already owned by another net is upgraded to
     /// `BlockedAll` (two nets' copper at one cell is a hard block for everyone
@@ -298,6 +333,13 @@ impl RouteGrid {
             Cell::Free => Cell::Net(conn),
             Cell::Net(owner) if owner == conn => Cell::Net(conn),
             Cell::Net(_) => Cell::BlockedAll,
+            Cell::Shared(region) => {
+                if self.shared_regions[region as usize].binary_search(&conn).is_ok() {
+                    Cell::Net(conn)
+                } else {
+                    Cell::BlockedAll
+                }
+            }
         };
     }
 
@@ -505,14 +547,22 @@ impl RouteGrid {
         let min_y = ob.center.y - hh;
         let max_y = ob.center.y + hh;
 
-        // The tag this obstacle contributes: its first owning connection's
-        // index, or BlockedAll when it owns no net (keepout / foreign copper).
-        let tag = ob
+        // The tag this obstacle contributes: its owning connection when it
+        // has exactly one, a shared region when several connections may pass
+        // (an escape-ring reservation), or BlockedAll when it owns no net
+        // (keepout / foreign copper).
+        let mut owners: Vec<usize> = ob
             .connected_to
             .iter()
-            .find_map(|n| self.connection_index(n))
-            .map(Cell::Net)
-            .unwrap_or(Cell::BlockedAll);
+            .filter_map(|n| self.connection_index(n))
+            .collect();
+        owners.sort_unstable();
+        owners.dedup();
+        let tag = match owners.as_slice() {
+            [] => Cell::BlockedAll,
+            [only] => Cell::Net(*only),
+            _ => Cell::Shared(self.shared_region_id(owners.clone())),
+        };
 
         // Cell index span touching the inflated rect.
         let (ix0, ix1) = cell_span(self.min_x, min_x, max_x, self.pitch, self.nx);
@@ -534,7 +584,7 @@ impl RouteGrid {
                         continue;
                     }
                     let i = self.idx(layer, ix, iy);
-                    self.cells[i] = combine(self.cells[i], tag);
+                    self.cells[i] = self.combine_cells(self.cells[i], tag);
                 }
             }
         }
@@ -671,6 +721,10 @@ fn combine(existing: Cell, incoming: Cell) -> Cell {
         (other, Cell::Free) => other,
         (Cell::Net(a), Cell::Net(b)) if a == b => Cell::Net(a),
         (Cell::Net(_), Cell::Net(_)) => Cell::BlockedAll,
+        // Region interactions are resolved by RouteGrid::combine_cells, which
+        // can consult the region table; a bare combine treats them strictly.
+        (Cell::Shared(a), Cell::Shared(b)) if a == b => Cell::Shared(a),
+        (Cell::Shared(_), _) | (_, Cell::Shared(_)) => Cell::BlockedAll,
     }
 }
 
