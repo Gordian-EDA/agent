@@ -1909,7 +1909,7 @@ pub(super) fn write_route_offline(
 fn reserve_fine_pitch_escape_frames(rp: &mut pcb_model::RouteProblem, parts: &[ImportedPart]) {
     const FINE_PITCH_MM: f64 = 0.66;
     const INNER_MARGIN_MM: f64 = 0.4;
-    const FRAME_WIDTH_MM: f64 = 1.2;
+    const FRAME_WIDTH_MM: f64 = 0.7;
     let all_layers: Vec<pcb_model::LayerRef> = {
         let n = rp.layer_count.max(2) as usize;
         std::iter::once(pcb_model::LayerRef::top())
@@ -1964,9 +1964,10 @@ fn reserve_fine_pitch_escape_frames(rp: &mut pcb_model::RouteProblem, parts: &[I
             height: h,
             connected_to: nets.clone(),
         };
+        let _ = outer_w;
         let half_gap = (inner_h + FRAME_WIDTH_MM) / 2.0;
-        frames.push(frame(center.x, center.y - half_gap, outer_w, FRAME_WIDTH_MM));
-        frames.push(frame(center.x, center.y + half_gap, outer_w, FRAME_WIDTH_MM));
+        frames.push(frame(center.x, center.y - half_gap, inner_w, FRAME_WIDTH_MM));
+        frames.push(frame(center.x, center.y + half_gap, inner_w, FRAME_WIDTH_MM));
         let half_side = (inner_w + FRAME_WIDTH_MM) / 2.0;
         frames.push(frame(center.x - half_side, center.y, FRAME_WIDTH_MM, inner_h));
         frames.push(frame(center.x + half_side, center.y, FRAME_WIDTH_MM, inner_h));
