@@ -3187,16 +3187,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "specctra"
-version = "0.1.0"
-dependencies = [
- "kiutils_sexpr",
- "pcb-model",
- "tempfile",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "spine-place"
 version = "0.1.0"
 dependencies = [
