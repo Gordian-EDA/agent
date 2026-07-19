@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use sch_place::ir::LayoutIr;
 use sch_place::item::Incidence;
-use sch_place::netclass::{is_ground, is_power_net};
+use circuit_graph::netclass::{is_ground, is_power_net};
 
 /// The three net classes the grammar distinguishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

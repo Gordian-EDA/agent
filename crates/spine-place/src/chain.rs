@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 use sch_place::item::{Incidence, Item};
-use sch_place::netclass::is_connector_like;
+use circuit_graph::netclass::is_connector_like;
 
 use crate::net::NetClass;
 

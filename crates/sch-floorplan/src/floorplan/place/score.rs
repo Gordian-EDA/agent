@@ -18,7 +18,7 @@ use crate::wire::DrawnSegment;
 use crate::write::SchematicWriter;
 
 use sch_place::item::{Incidence, Item};
-use sch_place::netclass::is_ground;
+use circuit_graph::netclass::is_ground;
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
 // `geom::union_find`, shared with circuit-lang's pin reconciler.

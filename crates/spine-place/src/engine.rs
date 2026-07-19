@@ -265,8 +265,8 @@ impl SpinePlace {
             // labels by convention, never by drawn harness wires.
             let bundled_pair = |a: usize, b: usize| {
                 pair_count.get(&(a.min(b), a.max(b))).copied().unwrap_or(0) >= 4
-                    || (sch_place::netclass::is_connector_like(&problem.items[a].part)
-                        && sch_place::netclass::is_connector_like(&problem.items[b].part))
+                    || (circuit_graph::netclass::is_connector_like(&problem.items[a].part)
+                        && circuit_graph::netclass::is_connector_like(&problem.items[b].part))
             };
             let node_anchor_item = |v: usize| scene.nodes[v].anchor;
             (0..scene.nodes.len())

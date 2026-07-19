@@ -1,5 +1,6 @@
 //! Placement over the live KiCAD IPC board.
 
+use circuit_graph::netclass::is_ground;
 use std::collections::BTreeMap;
 
 use anyhow::Result;
@@ -651,10 +652,6 @@ fn same_net(a: &str, b: &str) -> bool {
     a.trim_start_matches('/') == b.trim_start_matches('/')
 }
 
-fn is_ground_net(net: &str) -> bool {
-    let net = net.trim_start_matches('/').to_ascii_uppercase();
-    matches!(net.as_str(), "GND" | "AGND" | "DGND" | "PGND") || net.ends_with("_GND")
-}
 
 fn is_817(part: &str) -> bool {
     let part = part.to_ascii_uppercase();
@@ -692,7 +689,7 @@ fn opto817_channels(
             ) else {
                 continue;
             };
-            if !is_ground_net(&authored_emitter) || is_ground_net(&authored_output) {
+            if !is_ground(&authored_emitter) || is_ground(&authored_output) {
                 continue;
             }
             let Some(part) = imported.get(reference.as_str()) else {
@@ -1054,7 +1051,7 @@ fn add_817_array_hints(
             .flat_map(|part| part_nets(part))
             .map(|net| net.trim_start_matches('/').to_owned())
             .filter(|net| !same_net(net, &channel.output_net))
-            .filter(|net| !is_ground_net(net))
+            .filter(|net| !is_ground(net))
             .filter(|net| net_fanout.get(net).copied().unwrap_or(usize::MAX) <= 3)
             .collect::<std::collections::BTreeSet<_>>();
         let direct_refs = direct_logic

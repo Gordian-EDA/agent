@@ -620,18 +620,14 @@ fn rotated_locked_half(part: &Part, rotation: f64) -> (f64, f64) {
 }
 
 fn is_powerish_net(net: &str) -> bool {
+    // Reference/regulated rails count as "powerish" for hint weighting even
+    // though they are not supply rails in the shared vocabulary.
     let n = net.trim_start_matches('/').to_ascii_uppercase();
-    n == "GND"
-        || n == "GNDA"
-        || n.starts_with("VCC")
-        || n.starts_with("VDD")
-        || n.starts_with("VSS")
-        || n.starts_with("VBUS")
+    circuit_graph::netclass::is_power_net(&n)
         || n.starts_with("VREG")
         || n.starts_with("VREF")
-        || n.starts_with("V3V")
-        || n.starts_with("3V3")
-        || n.starts_with("+")
+        || n.starts_with("VSS")
+        || n.starts_with('+')
 }
 
 /// UNIFIED radial fan-out placement: the dominant IC centred, its decoupling caps

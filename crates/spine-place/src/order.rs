@@ -193,7 +193,7 @@ pub fn arrange(
             !adj[v].is_empty()
                 && scene.nodes[v]
                     .anchor
-                    .is_some_and(|a| sch_place::netclass::is_connector_like(&items[a].part))
+                    .is_some_and(|a| circuit_graph::netclass::is_connector_like(&items[a].part))
         }));
     }
     seeds.sort_unstable();

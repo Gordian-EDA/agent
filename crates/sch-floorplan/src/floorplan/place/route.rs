@@ -12,7 +12,7 @@ use geom::{Dir, EPS, ParentForest, Rect};
 
 use super::*;
 use sch_place::item::{Incidence, Item};
-use sch_place::netclass::{is_connector_like, is_ground};
+use circuit_graph::netclass::{is_connector_like, is_ground};
 
 use sch_place::ir::{Band, LayoutIr, Side};
 
@@ -1300,7 +1300,7 @@ pub(crate) fn power_lib_id(net: &str) -> String {
         "12V" | "+12V" => "+12V",
         "VCC" => "VCC",
         "VDD" => "VDD",
-        g if g.starts_with("GND") || g.starts_with("VSS") || g == "AGND" || g == "DGND" => "GND",
+        g if is_ground(g) => "GND",
         // Custom rail (e.g. VCC3V3, VCCD): a generic donor symbol whose Value
         // names the net — KiCAD derives the global net from the Value field.
         _ => "VCC",

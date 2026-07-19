@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Parser, linter, and canonical emitter for the gordian circuit markup language."
 
 [dependencies]
+circuit-graph = { path = "../circuit-graph" }
 kicad-symbol = { path = "../kicad-symbol" }
 geom = { path = "../geom" }
 saphyr.workspace = true

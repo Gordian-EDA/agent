@@ -19,6 +19,7 @@
 pub mod graph;
 pub mod library;
 pub mod matcher;
+pub mod netclass;
 pub mod pattern;
 pub mod value;
 

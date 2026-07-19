@@ -7,7 +7,7 @@ use kicad_symbol::geometry::SymbolGeometry;
 use super::super::infer::anchor_tap;
 use sch_place::ir::{LayoutIr, Orient};
 use sch_place::item::{Incidence, Item};
-use sch_place::netclass::{is_ground, is_power_net};
+use circuit_graph::netclass::{is_ground, is_power_net};
 
 /// each load cap two gaps out, level with its osc pin. Returns true if it moved
 /// anything (so the caller re-runs `decongest`). The cluster members are frozen, so

@@ -51,8 +51,7 @@ fn block_nets(b: &Block) -> HashSet<String> {
     let mut s = HashSet::new();
     let mut add = |t: &PinTarget| {
         if let PinTarget::Net(n) = t {
-            let u = n.to_ascii_uppercase();
-            if u != "GND" && !u.starts_with("GND") && u != "VSS" {
+            if !circuit_graph::netclass::is_ground(n) {
                 s.insert(n.clone());
             }
         }

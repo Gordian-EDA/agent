@@ -12,10 +12,8 @@ use kicad_env::KicadEnv;
 use super::idiom;
 use super::place::{gather, grid_from_layout, grid_occurrences, incidence, unit_place_key};
 use super::*;
-use sch_place::item::{Incidence, Item};
-use sch_place::netclass::{
-    PinSide, is_connector_like, is_ground, is_neg_supply, is_power_net, pin_side,
-};
+use circuit_graph::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
+use sch_place::item::{Incidence, Item, PinSide, pin_side};
 
 /// A deterministic baseline IR for designs without an LLM-produced one: rails
 /// from the design's power nets (ground-like → bottom, else top), no explicit

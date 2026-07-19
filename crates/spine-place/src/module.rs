@@ -15,7 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use geom::Point2;
 use sch_place::ir::Orient;
 use sch_place::item::{Incidence, Item};
-use sch_place::netclass::{PinSide, is_connector_like as is_connector_like_part};
+use circuit_graph::netclass::is_connector_like as is_connector_like_part;
+use sch_place::item::PinSide;
 
 use crate::chain::{ChainRole, NodeKind, Reduced};
 use crate::net::NetClass;
@@ -706,7 +707,7 @@ pub fn form_modules(
                 .is_some_and(|p| pair_nets.get(p).copied().unwrap_or(0) >= 4);
             // Connector pins label by convention regardless of span (a header
             // is a harness boundary), so their names always reserve.
-            let connectorish = sch_place::netclass::is_connector_like(&items[a].part);
+            let connectorish = circuit_graph::netclass::is_connector_like(&items[a].part);
             let certain = fanout >= 3 || bundled || connectorish;
             let predicted = labeled.is_some_and(|set| set.contains(net.as_str()));
             let text = if is_rail {

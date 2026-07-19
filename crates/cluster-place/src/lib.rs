@@ -227,7 +227,7 @@ fn spine_fast_path_pin_profile<'a>(pin_profiles: impl Iterator<Item = (&'a str, 
     // connector, no other item above six pins, and at most three modest support
     // hubs (regulator, protector, header). Multi-IC and MCU sheets retain anneal.
     let is_wide_connector = |part: &str, pins: usize| {
-        (15..=26).contains(&pins) && sch_place::netclass::is_connector_like(part)
+        (15..=26).contains(&pins) && circuit_graph::netclass::is_connector_like(part)
     };
     let wide_connector_count = profiles
         .iter()
@@ -256,7 +256,7 @@ fn spine_fast_path_pin_profile<'a>(pin_profiles: impl Iterator<Item = (&'a str, 
         && profiles
             .iter()
             .filter(|&&(part, pins)| {
-                (8..=16).contains(&pins) && sch_place::netclass::is_connector_like(part)
+                (8..=16).contains(&pins) && circuit_graph::netclass::is_connector_like(part)
             })
             .count()
             == 1
@@ -268,7 +268,7 @@ fn spine_fast_path_pin_profile<'a>(pin_profiles: impl Iterator<Item = (&'a str, 
             .count()
             == 1
         && profiles.iter().all(|&(part, pins)| {
-            sch_place::netclass::is_connector_like(part)
+            circuit_graph::netclass::is_connector_like(part)
                 || part.to_ascii_uppercase().contains(":R_NETWORK")
                 || (pins <= 2 && (part.starts_with("Device:R") || part.starts_with("Device:C")))
         });
@@ -289,7 +289,7 @@ fn spine_fast_path_pin_profile<'a>(pin_profiles: impl Iterator<Item = (&'a str, 
         && profiles.iter().filter(|(_, pins)| *pins == 2).count() >= 32
         && profiles
             .iter()
-            .filter(|&&(part, _)| sch_place::netclass::is_connector_like(part))
+            .filter(|&&(part, _)| circuit_graph::netclass::is_connector_like(part))
             .count()
             >= 4;
     if std::env::var_os("CLUSTER_DEBUG").is_some() {

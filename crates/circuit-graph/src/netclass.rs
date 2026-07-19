@@ -1,18 +1,14 @@
 //! Net- and part-name classification vocabulary: which names are grounds, power
-//! rails, or negative supplies; which parts are connector-like; which side of a
-//! symbol body a pin sits on. Pure string/geometry heuristics shared by the infer
-//! and place stages — lifting them here breaks the infer↔place dependency.
+//! rails, or negative supplies; which parts are connector-like. Pure string
+//! heuristics — the single owner every stage (lint, infer, place, route, review)
+//! classifies names through, so the vocabulary cannot drift between them.
 
-/// Ground-like net name heuristic.
+/// Ground-like net or pin-function name heuristic.
 pub fn is_ground(net: &str) -> bool {
-    let u = net.to_ascii_uppercase();
-    u == "GND"
-        || u == "GNDD"
-        || u == "AGND"
-        || u == "DGND"
-        || u == "VSS"
+    let u = net.trim_start_matches('/').to_ascii_uppercase();
+    matches!(u.as_str(), "GNDD" | "GNDA" | "VSS" | "VSSA" | "VSSD")
         || u.starts_with("GND")
-        || u.ends_with("_GND")
+        || u.ends_with("GND")
 }
 
 /// A voltage-rail token: optional `+`/`-`, then a number with `V` as the decimal/unit
@@ -56,17 +52,19 @@ pub fn is_power_net(net: &str) -> bool {
     if is_ground(net) {
         return true;
     }
-    let u = net.to_ascii_uppercase();
+    let u = net.trim_start_matches('/').to_ascii_uppercase();
     if matches!(
         u.as_str(),
         "VCC"
             | "VDD"
             | "VDDA"
+            | "VDDD"
             | "VCCA"
             | "VCCD"
             | "AVCC"
             | "AVDD"
             | "DVDD"
+            | "PVDD"
             | "VBAT"
             | "VBUS"
             | "VIN"
@@ -110,30 +108,6 @@ pub fn is_connector_like(part: &str) -> bool {
         || part.contains("TestPoint")
 }
 
-/// The side of the symbol body a pin sits on, from its local geometry.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PinSide {
-    East,
-    West,
-    North,
-    South,
-}
-
-/// Classify a pin's local `(x, y)` offset into the body side it sits on.
-pub fn pin_side(at: ::geom::Point2) -> PinSide {
-    if at.x.abs() >= at.y.abs() {
-        if at.x >= 0.0 {
-            PinSide::East
-        } else {
-            PinSide::West
-        }
-    } else if at.y >= 0.0 {
-        PinSide::North // symbol-local +y is up; the pin points up = top side
-    } else {
-        PinSide::South
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{is_ground, is_power_net};
@@ -150,12 +124,18 @@ mod tests {
 
     #[test]
     fn recognizes_named_ground_domains_without_matching_signal_suffixes() {
-        for net in ["FIELD_GND", "LOGIC_GND", "CHASSIS_GND"] {
+        for net in ["FIELD_GND", "LOGIC_GND", "CHASSIS_GND", "PGND", "SGND", "VSSA", "GNDA"] {
             assert!(is_ground(net), "{net}");
             assert!(is_power_net(net), "{net}");
         }
-        for net in ["SIGNAL_GND_SENSE", "GROUND_FAULT", "NOT_GNDED"] {
+        for net in ["SIGNAL_GND_SENSE", "GROUND_FAULT", "NOT_GNDED", "VSS_DRIVE"] {
             assert!(!is_ground(net), "{net}");
         }
+    }
+
+    #[test]
+    fn trims_sheet_path_prefix() {
+        assert!(is_ground("/GND"));
+        assert!(is_power_net("/3V3"));
     }
 }

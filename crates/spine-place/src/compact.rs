@@ -80,7 +80,7 @@ fn obstacle(
         let off = pg.at.transform_offset(item.angle, item.mirror);
         let (px, py) = (item.at[0] + off[0], item.at[1] + off[1]);
         let class = *classes.get(net).unwrap_or(&NetClass::Signal);
-        let connectorish = sch_place::netclass::is_connector_like(&item.part);
+        let connectorish = circuit_graph::netclass::is_connector_like(&item.part);
         let text = if class.is_rail() {
             7.62
         } else if labeled.contains(net.as_str()) || connectorish {

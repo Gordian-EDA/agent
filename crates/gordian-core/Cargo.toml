@@ -7,6 +7,7 @@ repository.workspace = true
 description = "The Gordian KiCAD agent: the turn loop + human apply-gate, the schematic/PCB tools, prompts, review and render — over a genai-backed, provider-agnostic LLM client."
 
 [dependencies]
+circuit-graph = { path = "../circuit-graph" }
 circuit-lang = { path = "../circuit-lang" }
 kicad-cli = { path = "../kicad-cli" }
 kicad-env = { path = "../kicad-env" }

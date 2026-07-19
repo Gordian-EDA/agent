@@ -54,6 +54,7 @@ dependencies = [
 name = "anneal-place"
 version = "0.1.0"
 dependencies = [
+ "circuit-graph",
  "circuit-lang",
  "geom",
  "rayon",
@@ -346,6 +347,7 @@ version = "0.1.0"
 name = "circuit-lang"
 version = "0.1.0"
 dependencies = [
+ "circuit-graph",
  "geom",
  "indexmap 2.14.0",
  "kicad-env",
@@ -360,6 +362,7 @@ name = "cluster-place"
 version = "0.1.0"
 dependencies = [
  "anneal-place",
+ "circuit-graph",
  "circuit-lang",
  "geom",
  "rayon",
@@ -1037,6 +1040,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "circuit-graph",
  "circuit-lang",
  "cluster-place",
  "directories",
@@ -2091,6 +2095,7 @@ dependencies = [
 name = "pcb-place"
 version = "0.1.0"
 dependencies = [
+ "circuit-graph",
  "drc-lint",
  "geom",
  "grid-astar",
@@ -3196,6 +3201,7 @@ name = "spine-place"
 version = "0.1.0"
 dependencies = [
  "anneal-place",
+ "circuit-graph",
  "circuit-lang",
  "geom",
  "kicad-env",

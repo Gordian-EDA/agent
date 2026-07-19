@@ -17,7 +17,7 @@ use circuit_lang::model::Design;
 use geom::{EPS, Point2, Rect};
 use sch_place::ir::{LayoutIr, Orient};
 use sch_place::item::{Incidence, Item};
-use sch_place::netclass::is_power_net;
+use circuit_graph::netclass::is_power_net;
 use sch_place::place::{Crossings, PlaceResult};
 
 use sch_floorplan::contract::{

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use geom::Rect;
 use sch_place::item::Item;
-use sch_place::netclass::is_connector_like;
+use circuit_graph::netclass::is_connector_like;
 
 use crate::scene::Scene;
 

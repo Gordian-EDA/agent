@@ -75,7 +75,7 @@ pub(crate) fn part_sprawl(items: &[Item]) -> f64 {
 /// The caller evaluates the fully routed rendering and restores the input placement unless
 /// this is a strict no-regression win, so this function only proposes geometry.
 fn repeated_channel_relayout(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) -> bool {
-    use sch_place::netclass::is_power_net;
+    use circuit_graph::netclass::is_power_net;
 
     let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);
     let mut by_part: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
@@ -251,7 +251,7 @@ fn modules(items: &[Item], inc: &Incidence, ir: &sch_place::ir::LayoutIr) -> Vec
     // everything), so without this they become singleton modules and the bank never forms.
     let mut extra: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     {
-        use sch_place::netclass::{is_ground, is_power_net};
+        use circuit_graph::netclass::{is_ground, is_power_net};
         let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);
         let assigned: std::collections::BTreeSet<usize> =
             blocks.values().flatten().copied().collect();
@@ -325,7 +325,7 @@ fn module_adjacency(
     mod_of: &[usize],
     ir: &sch_place::ir::LayoutIr,
 ) -> Vec<BTreeMap<usize, f64>> {
-    use sch_place::netclass::{is_ground, is_power_net};
+    use circuit_graph::netclass::{is_ground, is_power_net};
     let mut adj: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); mods.len()];
     for (net, pins) in inc.iter() {
         // GROUND touches everything → no placement signal, skip. A non-ground POWER rail
@@ -368,7 +368,7 @@ fn holistic_relayout(
     ir: &sch_place::ir::LayoutIr,
     gut: f64,
 ) -> bool {
-    use sch_place::netclass::{is_ground, is_power_net};
+    use circuit_graph::netclass::{is_ground, is_power_net};
     let mods = modules(items, inc, ir);
     if mods.len() < 2 {
         return false;
@@ -551,7 +551,7 @@ pub(crate) fn rail_relayout(
     inc: &Incidence,
     ir: &sch_place::ir::LayoutIr,
 ) -> Option<String> {
-    use sch_place::netclass::{is_ground, is_power_net};
+    use circuit_graph::netclass::{is_ground, is_power_net};
     let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);
     // Dominant non-ground power rail = the one the most ≥4-pin ICs tap. Only ACTIVE ICs
     // (refdes "U") qualify as row members: the "modules between rails" geometry stands ICs in a
@@ -747,7 +747,7 @@ pub(crate) fn compact_clusters(
     baseline_rendered: f64,
     sa_warnings: usize,
 ) {
-    use sch_place::netclass::is_power_net;
+    use circuit_graph::netclass::is_power_net;
     let force = std::env::var_os("CLUSTER_FORCE").is_some();
     let debug = std::env::var_os("CLUSTER_DEBUG").is_some();
     let base = save(items);

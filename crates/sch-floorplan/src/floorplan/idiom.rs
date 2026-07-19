@@ -10,7 +10,8 @@ use super::infer::{
 };
 use super::*;
 use sch_place::item::{Incidence, Item};
-use sch_place::netclass::{PinSide, is_connector_like, is_ground};
+use circuit_graph::netclass::{is_connector_like, is_ground};
+use sch_place::item::PinSide;
 
 /// A circuit idiom recognized purely from connectivity + symbol pin geometry.
 /// `infer_ir` turns it into an [`sch_place::result::IdiomReport`] for the LLM. A FROZEN

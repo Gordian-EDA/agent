@@ -67,12 +67,7 @@ pub fn parse_value(s: &str) -> Option<f64> {
 /// `12V`→12, `3.3V`→3.3, `+5V`→5, `GND`/`VSS`→0. Ambiguous names (`VOUT`, `V12`, `VCC`) → `None`.
 pub fn rail_voltage(net: &str) -> Option<f64> {
     let n = net.trim().trim_start_matches('+').to_uppercase();
-    if n == "GND"
-        || n.starts_with("GND")
-        || n == "VSS"
-        || n.starts_with("AGND")
-        || n.starts_with("DGND")
-    {
+    if circuit_graph::netclass::is_ground(&n) {
         return Some(0.0);
     }
     // Common net-label spelling with a leading voltage-domain marker:

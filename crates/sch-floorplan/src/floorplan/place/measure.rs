@@ -20,7 +20,7 @@ use kicad_env::KicadEnv;
 use crate::write::SchematicWriter;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
-use sch_place::netclass::is_ground;
+use circuit_graph::netclass::is_ground;
 use sch_place::place::Crossings;
 
 use sch_place::place::PlaceResult;

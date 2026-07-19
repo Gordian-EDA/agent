@@ -18,6 +18,7 @@
 //! → unbiased; the generating model can't rationalise its own slips). The netlist
 //! pass also unions in the deterministic exact-math ERC.
 
+use circuit_graph::netclass::is_ground;
 use crate::config::ReviewConfig;
 use crate::{Binary, Provider};
 use anyhow::Result;
@@ -448,9 +449,6 @@ fn pc817_inputs_bypassing_series_resistors(
     bypassed
 }
 
-fn is_ground_net(net: &str) -> bool {
-    net.eq_ignore_ascii_case("gnd") || net.to_ascii_lowercase().ends_with("gnd")
-}
 
 fn is_positive_rail_net(net: &str) -> bool {
     if circuit_lang::erc::rail_voltage(net).is_some_and(|volts| volts > 0.0) {
@@ -589,7 +587,7 @@ fn has_decoupling(components: &[(&String, &circuit_lang::model::Component)]) -> 
             return false;
         }
         let nets = component_nets(component);
-        nets.iter().any(|net| is_ground_net(net))
+        nets.iter().any(|net| is_ground(net))
             && nets.iter().any(|net| is_positive_rail_net(net))
     })
 }
@@ -611,7 +609,7 @@ fn has_power_led(components: &[(&String, &circuit_lang::model::Component)]) -> b
             led_nets
                 .iter()
                 .chain(resistor_nets.iter())
-                .any(|net| is_ground_net(net))
+                .any(|net| is_ground(net))
                 && led_nets
                     .iter()
                     .chain(resistor_nets.iter())
@@ -631,7 +629,7 @@ fn has_reverse_protection(components: &[(&String, &circuit_lang::model::Componen
             && !is_tvs_component(component);
         let non_ground_nets = component_nets(component)
             .into_iter()
-            .filter(|net| !is_ground_net(net))
+            .filter(|net| !is_ground(net))
             .collect::<Vec<_>>();
         candidate
             && non_ground_nets.len() >= 2
@@ -769,7 +767,7 @@ pub(crate) fn symbol_pin_rail_checks(
                             "- {refdes}: symbol pin {}/{} is tied to ground net {net} — a positive supply pin cannot be grounded",
                             pin.number, pin.name
                         ));
-                    } else if is_ground_function(&pin.name)
+                    } else if is_ground(&pin.name)
                         && voltage.is_some_and(|volts| volts > 0.0)
                     {
                         findings.push(format!(
@@ -861,12 +859,6 @@ fn is_positive_supply_function(name: &str) -> bool {
     )
 }
 
-fn is_ground_function(name: &str) -> bool {
-    matches!(
-        name.trim().to_ascii_uppercase().as_str(),
-        "GND" | "VSS" | "VSSA" | "VSSD" | "AGND" | "DGND" | "PGND"
-    )
-}
 
 fn decoupling_by_parent(design: &circuit_lang::Design) -> BTreeMap<&str, BTreeMap<&str, usize>> {
     let mut out: BTreeMap<&str, BTreeMap<&str, usize>> = BTreeMap::new();
@@ -941,7 +933,7 @@ fn explicit_pin_facts(
     let has_semantic_rail_pin = meta
         .pins
         .iter()
-        .any(|pin| is_positive_supply_function(&pin.name) || is_ground_function(&pin.name));
+        .any(|pin| is_positive_supply_function(&pin.name) || is_ground(&pin.name));
     let is_polarized_two_pin = meta.pins.len() == 2
         && meta.pins.iter().any(|pin| {
             matches!(
