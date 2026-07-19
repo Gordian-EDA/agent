@@ -43,8 +43,9 @@ fn main() -> anyhow::Result<()> {
         .next()
         .unwrap_or_else(|| "180".to_owned())
         .parse::<f64>()?;
+    let layer_count = args.next().map(|s| s.parse::<u32>()).transpose()?;
     if args.next().is_some() {
-        bail!("usage: pcb_e2e <yaml> <fresh-output> [minimum-parts] [maximum-seconds]");
+        bail!("usage: pcb_e2e <yaml> <fresh-output> [minimum-parts] [maximum-seconds] [layers]");
     }
     if output.exists() && output.read_dir()?.next().is_some() {
         bail!("output directory is not empty: {}", output.display());
@@ -71,7 +72,14 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(0);
 
     let pcb_started = Instant::now();
-    let regenerated = step(&ctx, "regenerate_board", json!({}))?;
+    let rules = layer_count.map(|layers| json!({"layer_count": layers}));
+    let with_rules = |mut input: Value| {
+        if let (Some(rules), Value::Object(o)) = (&rules, &mut input) {
+            o.insert("rules".into(), rules.clone());
+        }
+        input
+    };
+    let regenerated = step(&ctx, "regenerate_board", with_rules(json!({})))?;
     if regenerated["part_count"].as_u64().unwrap_or(0) < minimum_parts {
         bail!("board has too few parts: {regenerated}");
     }
@@ -89,7 +97,7 @@ fn main() -> anyhow::Result<()> {
         step(
             &ctx,
             "regenerate_board",
-            json!({"bounds": [0.0, 0.0, width, height]}),
+            with_rules(json!({"bounds": [0.0, 0.0, width, height]})),
         )?;
         placed = attempt(&ctx, "place_board", json!({}))?;
     }
@@ -116,7 +124,7 @@ fn main() -> anyhow::Result<()> {
         step(
             &ctx,
             "regenerate_board",
-            json!({"bounds": [0.0, 0.0, tighter_w, tighter_h]}),
+            with_rules(json!({"bounds": [0.0, 0.0, tighter_w, tighter_h]})),
         )?;
         let tightened = attempt(&ctx, "place_board", json!({}))?;
         if tightened["legal"] == Value::Bool(true) {
@@ -125,7 +133,7 @@ fn main() -> anyhow::Result<()> {
             step(
                 &ctx,
                 "regenerate_board",
-                json!({"bounds": [0.0, 0.0, width, height]}),
+                with_rules(json!({"bounds": [0.0, 0.0, width, height]})),
             )?;
             placed = attempt(&ctx, "place_board", json!({}))?;
             if placed["legal"] != Value::Bool(true) {

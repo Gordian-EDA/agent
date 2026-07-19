@@ -67,8 +67,8 @@ const ADAPTIVE_GRID_RIPUP_RESCUE_ENGINE: &str = "adaptive-grid-ripup-rescue";
 const ADAPTIVE_RESCUE_PORTFOLIO_MAX_FAILED: usize = 8;
 const ADAPTIVE_RIPUP_MAX_BLOCKERS: usize = 3;
 const AUTO_DETAILED_MAX_MULTILAYER_CONNECTIONS: usize = 11;
-const AUTO_BOUNDED_MAX_CONNECTIONS: usize = 120;
-const AUTO_BOUNDED_MAX_TERMINALS: usize = 400;
+const AUTO_BOUNDED_MAX_CONNECTIONS: usize = 48;
+const AUTO_BOUNDED_MAX_TERMINALS: usize = 160;
 const AUTO_BOUNDED_MAX_GRID_CELLS: usize = 725_000;
 
 // ── pipeline entry points ──────────────────────────────────────────────────────
