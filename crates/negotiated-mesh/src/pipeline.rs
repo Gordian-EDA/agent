@@ -788,7 +788,21 @@ pub fn route_auto_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
     with_plane_fanout(problem, route_auto_with_diagnostics_inner)
 }
 
+/// Wall-clock budget for STARTING further auto-portfolio engine attempts. The
+/// cheap tier always runs; expensive stages (sequential, mesh-detailed, grid)
+/// are skipped once the budget is spent, and the targeted rescue still runs on
+/// the best candidate. Keeps a fine-pitch grind from eating fifteen minutes to
+/// deliver the same failed nets the first pass already found.
+fn auto_attempt_deadline() -> std::time::Duration {
+    let secs = std::env::var("ROUTE_AUTO_DEADLINE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(60);
+    std::time::Duration::from_secs(secs)
+}
+
 fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
+    let attempt_deadline = Instant::now() + auto_attempt_deadline();
     // Large boards make the normal portfolio multiplicative: each specialist,
     // negotiated detail, and the grid fallback may explore several net orders
     // and rip-up retries. Keep automatic routing predictably bounded once the
@@ -892,7 +906,36 @@ fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
         }
     }
 
-    if sequential.can_route(problem) {
+    // The single grid pass is an order of magnitude cheaper than the
+    // sequential/mesh tiers and cleanly routes most mid-size boards; give it
+    // the first full-board shot so a solvable board ships in seconds instead
+    // of after minutes of higher-tier grinding. Imperfect results stay as the
+    // incumbent for the tiers below to beat.
+    {
+        let started = Instant::now();
+        let result = router::route_orthogonal_single_pass(problem);
+        let elapsed_ms = started.elapsed().as_millis();
+        let _ = consider_candidate_recording(
+            problem,
+            &mut best,
+            result,
+            Some(&mut attempts),
+            elapsed_ms,
+        );
+        if !route_best_is_clean(&best) {
+            try_adaptive_grid_rescue(problem, &mut best, &mut attempts);
+        }
+        if route_best_is_clean(&best) {
+            let result = best.expect("single-pass candidate just populated best").0;
+            return RouteAutoRun {
+                result,
+                attempts,
+                global,
+            };
+        }
+    }
+
+    if sequential.can_route(problem) && Instant::now() < attempt_deadline {
         let started = Instant::now();
         let result = sequential.route(problem);
         let elapsed_ms = started.elapsed().as_millis();
@@ -913,7 +956,10 @@ fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
         }
     }
 
-    if mesh.can_route(problem) && should_try_detailed_in_auto(problem) {
+    if mesh.can_route(problem)
+        && should_try_detailed_in_auto(problem)
+        && Instant::now() < attempt_deadline
+    {
         let started = Instant::now();
         let (mut result, g) = route_detailed_with_global(problem);
         reconcile_connectivity(problem, &mut result.solution, &mut result.failed);
@@ -939,7 +985,7 @@ fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
         }
     }
 
-    if grid.can_route(problem) {
+    if grid.can_route(problem) && Instant::now() < attempt_deadline {
         let started = Instant::now();
         let result = grid.route(problem);
         let elapsed_ms = started.elapsed().as_millis();
@@ -3400,7 +3446,7 @@ mod tests {
         // the sequential candidate can solve it cleanly and should short-circuit.
         let p = load("quad.json");
         let r = route_auto(&p);
-        assert_eq!(r.engine, crate::sequential::ENGINE);
+        assert_eq!(r.engine, router::ENGINE);
         assert!(
             r.failed.is_empty(),
             "route_auto routes quad cleanly: {:?}",
@@ -5145,7 +5191,7 @@ mod tests {
                 crate::via_escape::ENGINE,
                 crate::pattern::ENGINE,
                 crate::channel::ENGINE,
-                crate::sequential::ENGINE,
+                router::ENGINE,
             ],
             "clean via-heavy cheap routes should keep competing with later cheap routers before skipping the mesh"
         );
@@ -6028,7 +6074,7 @@ mod tests {
     fn route_auto_diagnostics_skip_global_for_clean_sequential_route() {
         let p = load("quad.json");
         let r = route_auto_with_diagnostics(&p);
-        assert_eq!(r.result.engine, crate::sequential::ENGINE);
+        assert_eq!(r.result.engine, router::ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         let engines: Vec<&str> = r
             .attempts
@@ -6043,7 +6089,7 @@ mod tests {
                 crate::via_escape::ENGINE,
                 crate::pattern::ENGINE,
                 crate::channel::ENGINE,
-                crate::sequential::ENGINE,
+                router::ENGINE,
             ],
             "route_auto diagnostics should preserve attempted engines until the clean winner"
         );

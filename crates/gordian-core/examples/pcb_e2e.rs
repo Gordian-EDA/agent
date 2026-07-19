@@ -44,8 +44,17 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "180".to_owned())
         .parse::<f64>()?;
     let layer_count = args.next().map(|s| s.parse::<u32>()).transpose()?;
+    let initial_bounds = args
+        .next()
+        .map(|s| -> anyhow::Result<(f64, f64)> {
+            let (w, h) = s.split_once('x').context("bounds must be WxH")?;
+            Ok((w.parse()?, h.parse()?))
+        })
+        .transpose()?;
     if args.next().is_some() {
-        bail!("usage: pcb_e2e <yaml> <fresh-output> [minimum-parts] [maximum-seconds] [layers]");
+        bail!(
+            "usage: pcb_e2e <yaml> <fresh-output> [minimum-parts] [maximum-seconds] [layers] [WxH]"
+        );
     }
     if output.exists() && output.read_dir()?.next().is_some() {
         bail!("output directory is not empty: {}", output.display());
@@ -79,7 +88,11 @@ fn main() -> anyhow::Result<()> {
         }
         input
     };
-    let regenerated = step(&ctx, "regenerate_board", with_rules(json!({})))?;
+    let first_input = match initial_bounds {
+        Some((w, h)) => json!({"bounds": [0.0, 0.0, w, h]}),
+        None => json!({}),
+    };
+    let regenerated = step(&ctx, "regenerate_board", with_rules(first_input))?;
     if regenerated["part_count"].as_u64().unwrap_or(0) < minimum_parts {
         bail!("board has too few parts: {regenerated}");
     }
@@ -109,7 +122,8 @@ fn main() -> anyhow::Result<()> {
     // ballooned during illegal-placement retries jumps straight back to the
     // fresh packing estimate; otherwise one 0.85x attempt. Either way the
     // roomier legal canvas is restored if the tighter placement fails.
-    if let (Some(width), Some(height)) = (
+    if let (None, Some(width), Some(height)) = (
+        initial_bounds,
         placed["current_bounds_mm"]["w"].as_f64(),
         placed["current_bounds_mm"]["h"].as_f64(),
     ) {
