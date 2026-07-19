@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use crate::llm::{
+use gordian_llm::{
     ChatMessage, ChatStreamEvent, EventStream, MessageContent, Provider, StreamChunk, StreamEnd,
     Tool, ToolCall,
 };

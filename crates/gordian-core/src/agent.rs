@@ -41,7 +41,7 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::llm::{
+use gordian_llm::{
     Binary, ChatMessage, ChatRole, ChatStreamEvent, ContentPart, EventStream, GenaiProvider,
     MessageContent, Provider, StreamEnd, Tool, ToolCall, ToolResponse, completed_text, token_usage,
 };
@@ -4895,7 +4895,7 @@ mod tests {
     #[tokio::test]
     async fn provider_meter_captures_complete_and_stream_usage() {
         let end = || StreamEnd {
-            captured_usage: Some(crate::llm::Usage {
+            captured_usage: Some(gordian_llm::Usage {
                 prompt_tokens: Some(120),
                 completion_tokens: Some(7),
                 ..Default::default()
@@ -4916,7 +4916,7 @@ mod tests {
         );
 
         let streamed = MeteredProvider::new(ScriptedClient::new(vec![end()]));
-        crate::llm::drain_stream(streamed.stream("", &[], &[]).await.unwrap())
+        gordian_llm::drain_stream(streamed.stream("", &[], &[]).await.unwrap())
             .await
             .unwrap();
         assert_eq!(

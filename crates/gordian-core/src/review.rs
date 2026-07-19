@@ -12,7 +12,7 @@
 //! prompt. JSON retries are caller-controlled; a total parse failure degrades to
 //! `(0.0, [])` (conservative — nothing actionable).
 
-use crate::llm::{Binary, ChatMessage, ContentPart, MessageContent, Provider, completed_text};
+use gordian_llm::{Binary, ChatMessage, ContentPart, MessageContent, Provider, completed_text};
 use anyhow::Result;
 use futures::future::join_all;
 use serde_json::Value;

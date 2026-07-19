@@ -5,7 +5,7 @@
 //! draining it). genai is provider-agnostic. Gordian can bind its wire adapter
 //! explicitly from config, or let genai infer the adapter from the model name
 //! for older configs. Gordian supplies model/auth/endpoint from
-//! [`crate::config::LlmConfig`], so core does not read provider environment
+//! [`crate::LlmConfig`], so core does not read provider environment
 //! variables.
 //!
 //! Notable: one request-level `ephemeral` [`CacheControl`] breakpoint caches the
@@ -24,7 +24,7 @@ use genai::chat::{
 use genai::resolver::{AuthData, Endpoint};
 
 use super::seam::{EventStream, Provider};
-use crate::config::{LlmConfig, LlmReasoningEffort};
+use crate::{LlmConfig, LlmReasoningEffort};
 
 /// The one production [`Provider`], over genai: the configured [`Client`] and the
 /// model id. When `llm.adapter` is set, the client is bound to that adapter;

@@ -7,7 +7,7 @@
 //! mechanics, and the [`prompts`] system prompt.
 //!
 //! The loop is built around ONE external seam — the [`Provider`] trait, whose one
-//! production impl is [`GenaiProvider`], the genai-backed LLM (see the [`llm`]
+//! production impl is [`GenaiProvider`], the genai-backed LLM (see the [`gordian_llm`]
 //! module) — plus the KiCAD tools it drives directly. The only decoupling that
 //! remains is this library vs. the [`gordian`](../gordian/index.html) CLI binary,
 //! so a future web frontend reuses the lib. To build a working agent:
@@ -32,7 +32,6 @@
 mod agent;
 pub mod config;
 mod footprint_compat;
-pub mod llm;
 pub mod multisheet;
 pub mod prompts;
 pub mod render;
@@ -59,7 +58,7 @@ pub use tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
 // Re-export the LLM (the production `GenaiProvider`, the `Provider` seam, and
 // the genai conversation types they speak) so callers can build on
 // `gordian_core::*` alone.
-pub use llm::{
+pub use gordian_llm::{
     Binary, ChatMessage, ChatRole, ChatStreamEvent, ContentPart, EventStream, GenaiProvider,
     MessageContent, Provider, StreamChunk, StreamEnd, Tool, ToolCall, ToolResponse, Usage,
     completed_text, drain_stream, token_usage,

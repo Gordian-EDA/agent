@@ -1048,6 +1048,7 @@ dependencies = [
  "futures",
  "genai",
  "geom",
+ "gordian-llm",
  "grid-astar",
  "indexmap 2.14.0",
  "kicad-cli",
@@ -1072,6 +1073,18 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "gordian-llm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "genai",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

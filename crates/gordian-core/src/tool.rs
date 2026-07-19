@@ -16,7 +16,7 @@
 //! The KiCAD-concrete classifiers and the commit-forcing / `ApplyInfo`-lifting body
 //! live in [`crate::agent`] alongside the loop they serve.
 
-use crate::llm::Binary;
+use gordian_llm::Binary;
 use serde_json::Value;
 
 /// How a tool affects the world — the loop's dispatch discriminator.
