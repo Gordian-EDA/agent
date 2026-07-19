@@ -81,7 +81,20 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(0);
 
     let pcb_started = Instant::now();
-    let rules = layer_count.map(|layers| json!({"layer_count": layers}));
+    let mut rule_map = serde_json::Map::new();
+    if let Some(layers) = layer_count {
+        rule_map.insert("layer_count".into(), json!(layers));
+    }
+    if let Ok(clearance) = std::env::var("PCB_E2E_CLEARANCE") {
+        rule_map.insert("clearance".into(), json!(clearance.parse::<f64>().unwrap_or(0.2)));
+    }
+    if let Ok(width) = std::env::var("PCB_E2E_TRACE_WIDTH") {
+        rule_map.insert(
+            "min_trace_width".into(),
+            json!(width.parse::<f64>().unwrap_or(0.25)),
+        );
+    }
+    let rules = (!rule_map.is_empty()).then(|| Value::Object(rule_map));
     let with_rules = |mut input: Value| {
         if let (Some(rules), Value::Object(o)) = (&rules, &mut input) {
             o.insert("rules".into(), rules.clone());

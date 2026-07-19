@@ -500,7 +500,11 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, RouteSolution)>
                 (false, true) => dy,
                 (false, false) => f64::NEG_INFINITY,
             };
-            gap >= via_r + problem.clearance
+            // One extra routing channel beyond bare clearance: a barrel that
+            // legally clears a fine-pitch pad by the design clearance still
+            // blocks the only escape lane past that pad, walling the pad in
+            // for every signal engine.
+            gap >= via_r + problem.clearance + (problem.min_trace_width + problem.clearance)
         })
     };
     const SITE_STEP_MM: f64 = 0.1;
