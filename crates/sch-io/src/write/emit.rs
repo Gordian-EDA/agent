@@ -215,7 +215,7 @@ impl SchematicWriter {
 /// component value). Do **not** apply it to the verbatim `raw_definition`
 /// splice (already valid KiCAD output) or to internally generated tokens
 /// (uuids, validated lib_ids).
-fn escape_sexpr_string(s: &str) -> String {
+pub fn escape_sexpr_string(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")

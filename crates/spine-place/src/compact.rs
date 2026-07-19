@@ -13,15 +13,11 @@ use geom::Rect;
 use sch_place::item::{Incidence, Item};
 
 use crate::net::NetClass;
+use crate::snap;
 
-const GRID: f64 = 1.27;
 /// Clearance kept between packed obstacle rects: a column gap's worth — the
 /// strip estimates run ~a text-height of error, so a two-lane cushion collides.
 const GAP: f64 = 5.08;
-
-fn snap(v: f64) -> f64 {
-    (v / GRID).round() * GRID
-}
 
 /// Nets whose CURRENT pin span exceeds the realizer's wire threshold — these
 /// will carry labels, so their pins need name-width strips; wired pins need

@@ -13,20 +13,10 @@ use sch_place::item::Item;
 use circuit_graph::netclass::is_connector_like;
 
 use crate::scene::Scene;
+use crate::snap;
+use circuit_lang::parse::refdes_key;
 
-const GRID: f64 = 1.27;
 const PITCH_GAP: f64 = 7.62;
-
-fn snap(v: f64) -> f64 {
-    (v / GRID).round() * GRID
-}
-
-/// Refdes sort key: alpha prefix + numeric suffix, so J2 < J10.
-pub(crate) fn refdes_key(r: &str) -> (String, u64) {
-    let split = r.find(|c: char| c.is_ascii_digit()).unwrap_or(r.len());
-    let (alpha, num) = r.split_at(split);
-    (alpha.to_string(), num.parse().unwrap_or(0))
-}
 
 /// The band a module belongs to, from its anchor's part.
 fn band_key(part: &str, same_part_counts: &BTreeMap<&str, usize>) -> Option<String> {

@@ -3,6 +3,7 @@
 //! This is the non-destructive PCB geometry path: it edits the current
 //! `.kicad_pcb` Edge.Cuts instead of regenerating the board from a schematic.
 
+use super::sexpr::{sexpr_end, sexpr_point};
 use anyhow::{Context, Result};
 use pcb_model::place::{Part, PlaceProblem};
 use pcb_model::{Point2, Polygon, Rect, RouteSolution};
@@ -334,55 +335,13 @@ fn outline_segments(outline: &Outline) -> Vec<(Point2, Point2)> {
     }
 }
 
-fn sexpr_point(block: &str, key: &str) -> Option<Point2> {
-    let marker = format!("({key} ");
-    let rest = block.split_once(&marker)?.1;
-    let mut values = rest
-        .split(|ch: char| ch.is_ascii_whitespace() || ch == ')')
-        .filter(|value| !value.is_empty());
-    Some(Point2::new(
-        values.next()?.parse().ok()?,
-        values.next()?.parse().ok()?,
-    ))
-}
-
 fn segments_match(a: (Point2, Point2), b: (Point2, Point2)) -> bool {
     (points_match(a.0, b.0) && points_match(a.1, b.1))
         || (points_match(a.0, b.1) && points_match(a.1, b.0))
 }
 
 fn points_match(a: Point2, b: Point2) -> bool {
-    (a.x - b.x).abs() <= 1e-9 && (a.y - b.y).abs() <= 1e-9
-}
-
-fn sexpr_end(text: &str, start: usize) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut in_str = false;
-    let mut esc = false;
-    for (offset, ch) in text[start..].char_indices() {
-        if in_str {
-            if esc {
-                esc = false;
-            } else if ch == '\\' {
-                esc = true;
-            } else if ch == '"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_str = true,
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(start + offset + ch.len_utf8());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    a.near_eq(b, geom::STRICT_EPS)
 }
 
 fn edge_cut_sexpr(outline: &Outline) -> String {

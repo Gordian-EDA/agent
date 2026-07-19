@@ -448,7 +448,7 @@ fn gap_above(prev: Option<Speaker>, cur: &Entry) -> bool {
         Speaker::Assistant => prev != Speaker::Assistant,
         Speaker::Tool => true,
         Speaker::System => {
-            matches!(cur.level, NoticeLevel::Warn | NoticeLevel::Error)
+            matches!(cur.level, NoticeLevel::Error)
                 || matches!(prev, Speaker::Assistant | Speaker::Tool)
         }
     }
@@ -497,7 +497,6 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
             let (glyph, color) = match e.level {
                 NoticeLevel::Plain => ("• ", Color::DarkGray),
                 NoticeLevel::Success => ("✓ ", Color::Green),
-                NoticeLevel::Warn => ("⚠ ", Color::Yellow),
                 NoticeLevel::Error => ("✗ ", Color::Red),
             };
             let body = match e.level {
@@ -508,7 +507,7 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
             };
             // Continuation rows of a loud notice keep a colored rule; quiet ones
             // just indent under the glyph.
-            let loud = matches!(e.level, NoticeLevel::Warn | NoticeLevel::Error);
+            let loud = matches!(e.level, NoticeLevel::Error);
             let cont = if loud { "▌ " } else { "  " };
             (glyph, cont, Style::default().fg(color), body, false)
         }
@@ -527,11 +526,10 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
             .collect()
     };
 
-    // Warn/error notices get a one-cell background tint so the whole line reads
+    // Error notices get a one-cell background tint so the whole line reads
     // as a callout band, not just a colored glyph.
     let notice_tint = match (e.speaker, e.level) {
         (Speaker::System, NoticeLevel::Error) => Some(Color::Rgb(58, 30, 36)),
-        (Speaker::System, NoticeLevel::Warn) => Some(Color::Rgb(54, 46, 28)),
         _ => None,
     };
 
@@ -575,7 +573,6 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
 
 fn render_worked_divider(text: &str, width: usize, level: NoticeLevel) -> Line<'static> {
     let color = match level {
-        NoticeLevel::Warn => Color::Yellow,
         NoticeLevel::Error => Color::Red,
         NoticeLevel::Plain | NoticeLevel::Success => Color::DarkGray,
     };
@@ -898,11 +895,9 @@ mod tests {
     fn loud_system_notices_get_a_gap_after_user_messages() {
         let user = Entry::user("hey");
         let error = Entry::notice(NoticeLevel::Error, "Stopped after 0s");
-        let warn = Entry::notice(NoticeLevel::Warn, "try again");
         let plain = Entry::system("agent unavailable");
 
         assert!(gap_above(Some(user.speaker), &error));
-        assert!(gap_above(Some(user.speaker), &warn));
         assert!(!gap_above(Some(user.speaker), &plain));
     }
 

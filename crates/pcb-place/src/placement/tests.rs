@@ -1,4 +1,4 @@
-use super::anneal::{greedy_swap_polish, routing_aware_swap_order};
+use super::anneal::{greedy_swap_polish_with_order, routing_aware_swap_order};
 use super::cost::place_cost;
 use super::cost::ratline_crossings;
 use super::cost::ratline_obstruction_pressure;
@@ -887,7 +887,8 @@ fn greedy_swap_polish_untangles_crossed_two_pin_ratlines() {
     let mut cost = cost_of(&pos);
     assert_eq!(ratline_crossings(&problem, &rotations, &nets, &pos), 1);
 
-    greedy_swap_polish(&problem, &half, &[0, 1, 2, 3], &mut pos, &mut cost, cost_of);
+    let all_pairs: Vec<(usize, usize)> = (0..4).flat_map(|a| (a + 1..4).map(move |b| (a, b))).collect();
+    greedy_swap_polish_with_order(&problem, &half, &all_pairs, &mut pos, &mut cost, cost_of);
 
     assert_eq!(ratline_crossings(&problem, &rotations, &nets, &pos), 0);
 }

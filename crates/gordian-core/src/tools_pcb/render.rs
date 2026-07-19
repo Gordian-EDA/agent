@@ -193,9 +193,9 @@ fn parse_board_render_source(text: &str) -> std::result::Result<BoardRenderSourc
         match board_node_head(text, &node) {
             "gr_rect" => {
                 let start =
-                    board_sexpr_point(block, "start").ok_or("Edge.Cuts rectangle has no start")?;
+                    super::sexpr::sexpr_point(block, "start").ok_or("Edge.Cuts rectangle has no start")?;
                 let end =
-                    board_sexpr_point(block, "end").ok_or("Edge.Cuts rectangle has no end")?;
+                    super::sexpr::sexpr_point(block, "end").ok_or("Edge.Cuts rectangle has no end")?;
                 let bounds = Rect::new(
                     start.x.min(end.x),
                     start.y.min(end.y),
@@ -236,8 +236,8 @@ fn parse_board_render_source(text: &str) -> std::result::Result<BoardRenderSourc
                     .to_owned(),
             );
         }
-        let start = board_sexpr_point(block, "start").ok_or("Edge.Cuts line has no start")?;
-        let end = board_sexpr_point(block, "end").ok_or("Edge.Cuts line has no end")?;
+        let start = super::sexpr::sexpr_point(block, "start").ok_or("Edge.Cuts line has no start")?;
+        let end = super::sexpr::sexpr_point(block, "end").ok_or("Edge.Cuts line has no end")?;
         segments.push((start, end));
     }
     let outline = Polygon::new(stitch_board_outline(segments)?)
@@ -251,40 +251,7 @@ fn parse_board_render_source(text: &str) -> std::result::Result<BoardRenderSourc
 }
 
 fn balanced_node(text: &str, start: usize) -> Option<BoardNode> {
-    let bytes = text.as_bytes();
-    if bytes.get(start) != Some(&b'(') {
-        return None;
-    }
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (offset, byte) in bytes[start..].iter().copied().enumerate() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match byte {
-            b'"' => in_string = true,
-            b'(' => depth += 1,
-            b')' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(BoardNode {
-                        start,
-                        end: start + offset + 1,
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    super::sexpr::sexpr_end(text, start).map(|end| BoardNode { start, end })
 }
 
 fn child_board_nodes(text: &str, start: usize, end: usize) -> Vec<BoardNode> {
@@ -309,18 +276,6 @@ fn board_node_head<'a>(text: &'a str, node: &BoardNode) -> &'a str {
         .split(|ch: char| ch.is_ascii_whitespace() || ch == '(' || ch == ')')
         .find(|token| !token.is_empty())
         .unwrap_or("")
-}
-
-fn board_sexpr_point(block: &str, key: &str) -> Option<Point2> {
-    let marker = format!("({key} ");
-    let rest = block.split_once(&marker)?.1;
-    let mut values = rest
-        .split(|ch: char| ch.is_ascii_whitespace() || ch == ')')
-        .filter(|value| !value.is_empty());
-    Some(Point2::new(
-        values.next()?.parse().ok()?,
-        values.next()?.parse().ok()?,
-    ))
 }
 
 fn board_poly_points(block: &str) -> std::result::Result<Vec<Point2>, String> {

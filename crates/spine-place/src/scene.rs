@@ -13,13 +13,9 @@ use sch_place::item::Item;
 use crate::chain::{Chain, ChainRole, NodeKind, Reduced};
 use crate::module::{ModuleForm, SatPlace, orient_for, pin_offset};
 use crate::net::NetClass;
+use crate::snap;
 
-const GRID: f64 = 1.27;
 const LEAD: f64 = 2.54;
-
-fn snap(v: f64) -> f64 {
-    (v / GRID).round() * GRID
-}
 
 /// One placeable unit.
 #[derive(Debug)]

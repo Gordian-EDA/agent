@@ -10,27 +10,6 @@ use sch_place::result::EmitOutput;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// Deterministic UUIDv5-style id from a seed (no randomness ⇒ stable re-emits).
-pub fn det_uuid(seed: &str) -> String {
-    let h = |salt: u64| -> u64 {
-        let mut h: u64 = 0xcbf29ce484222325 ^ salt;
-        for b in seed.bytes() {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        h
-    };
-    let (a, b) = (h(1), h(2));
-    format!(
-        "{:08x}-{:04x}-5{:03x}-8{:03x}-{:012x}",
-        (a & 0xffffffff) as u32,
-        ((a >> 32) & 0xffff) as u16,
-        ((a >> 48) & 0xfff) as u16,
-        (b & 0xfff) as u16,
-        (b >> 12) & 0xffffffffffff
-    )
-}
-
 /// Sanitize a block name into a filename stem.
 pub fn sanitize(name: &str) -> String {
     name.chars()

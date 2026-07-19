@@ -36,6 +36,14 @@ fn suggest(key: &str, allowed: &[&str]) -> Option<String> {
 /// Strict `[A-Z]+[0-9]+`: an uppercase-letter prefix followed by a digit
 /// suffix, with nothing interleaved (e.g. `U1`, `R10`). Shared by the
 /// refdes validator here and the pin-ref detector in `desugar`.
+/// Natural refdes sort key: alpha prefix + numeric suffix, so `J2` < `J10`.
+/// Malformed suffixes sort last within their prefix.
+pub fn refdes_key(r: &str) -> (&str, u64) {
+    let split = r.find(|c: char| c.is_ascii_digit()).unwrap_or(r.len());
+    let (alpha, num) = r.split_at(split);
+    (alpha, num.parse().unwrap_or(u64::MAX))
+}
+
 pub fn looks_like_refdes(s: &str) -> bool {
     match s.find(|c: char| c.is_ascii_digit()) {
         Some(i) if i > 0 => {

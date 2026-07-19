@@ -92,15 +92,8 @@ fn repeated_channel_relayout(items: &mut [Item], inc: &Incidence, ir: &LayoutIr)
     }
     let natural_refdes = |i: usize| {
         let rd = items[i].refdes.as_str();
-        let split = rd
-            .char_indices()
-            .find(|(_, c)| c.is_ascii_digit())
-            .map_or(rd.len(), |(p, _)| p);
-        (
-            rd[..split].to_owned(),
-            rd[split..].parse::<u32>().unwrap_or(u32::MAX),
-            rd.to_owned(),
-        )
+        let (alpha, num) = circuit_lang::parse::refdes_key(rd);
+        (alpha.to_owned(), num, rd.to_owned())
     };
     hubs.sort_by_key(|&i| natural_refdes(i));
 

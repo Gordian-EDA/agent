@@ -158,8 +158,8 @@ pub fn routed_board_text(
         .iter()
         .map(|placement| FootprintMove {
             reference: placement.reference.clone(),
-            x_nm: (placement.at.x * 1_000_000.0).round() as i64,
-            y_nm: (placement.at.y * 1_000_000.0).round() as i64,
+            x_nm: kicad_ipc::units::mm_to_nm(placement.at.x),
+            y_nm: kicad_ipc::units::mm_to_nm(placement.at.y),
             rotation_deg: Some(placement.rotation),
         })
         .collect::<Vec<_>>();

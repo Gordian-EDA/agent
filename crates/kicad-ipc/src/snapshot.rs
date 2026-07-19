@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom::Polyline;
 
+use crate::units::nm_to_mm;
 use crate::{
     Error, Kicad, footprint_reference,
     proto::kiapi::{
@@ -780,9 +781,7 @@ fn edge_cuts_outline(shapes: &[BoardGraphicShape]) -> Option<Vec<Point2>> {
                 };
                 let center = point(center);
                 let radius_point = point(radius_point);
-                let radius = ((center.x - radius_point.x).powi(2)
-                    + (center.y - radius_point.y).powi(2))
-                .sqrt();
+                let radius = center.dist(radius_point);
                 outline_points.extend((0..32).map(|idx| {
                     let theta = (idx as f64) * std::f64::consts::TAU / 32.0;
                     Point2 {
@@ -1337,10 +1336,6 @@ fn point(v: &Vector2) -> Point2 {
         x: nm_to_mm(v.x_nm),
         y: nm_to_mm(v.y_nm),
     }
-}
-
-fn nm_to_mm(nm: i64) -> f64 {
-    nm as f64 / 1_000_000.0
 }
 
 #[cfg(test)]

@@ -144,29 +144,9 @@ pub(crate) fn anneal_placement(
 }
 
 /// Deterministic 2-opt polish: SA can cool with two movable parts assigned to
-/// crossed ratlines or suboptimal sides of a local cluster. Sweep pairs in input
-/// order and keep only strict cost improvements. Two passes are enough to cascade
-/// a local improvement without turning this into another O(n^3) search.
-#[allow(dead_code)]
-pub(crate) fn greedy_swap_polish<F>(
-    problem: &PlaceProblem,
-    half: &[(f64, f64)],
-    movable: &[usize],
-    pos: &mut [Point2],
-    cost: &mut f64,
-    cost_of: F,
-) where
-    F: Fn(&[Point2]) -> f64,
-{
-    let mut swap_order = Vec::new();
-    for ai in 0..movable.len() {
-        for bi in ai + 1..movable.len() {
-            swap_order.push((movable[ai], movable[bi]));
-        }
-    }
-    greedy_swap_polish_with_order(problem, half, &swap_order, pos, cost, cost_of);
-}
-
+/// crossed ratlines or suboptimal sides of a local cluster. Sweep the given pairs
+/// and keep only strict cost improvements. Two passes are enough to cascade a
+/// local improvement without turning this into another O(n^3) search.
 pub(crate) fn greedy_swap_polish_with_order<F>(
     problem: &PlaceProblem,
     half: &[(f64, f64)],

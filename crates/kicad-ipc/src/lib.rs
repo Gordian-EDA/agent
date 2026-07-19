@@ -19,6 +19,7 @@ pub mod proto {
 }
 
 pub mod session;
+pub mod units;
 pub mod snapshot;
 
 pub use client::{Kicad, footprint_update_supported, net_class_queries_supported};

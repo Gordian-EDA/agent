@@ -32,9 +32,6 @@ pub enum NoticeLevel {
     Plain,
     /// A clean success (green) — a turn that finished.
     Success,
-    /// A caution (yellow) for non-fatal notices.
-    #[allow(dead_code)]
-    Warn,
     /// A failure (red) — a turn that errored out.
     Error,
 }

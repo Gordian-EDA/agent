@@ -1869,7 +1869,7 @@ fn node_key(
 }
 
 fn quantize_mm(v: f64) -> i64 {
-    (v * 1_000_000.0).round() as i64
+    kicad_ipc::units::mm_to_nm(v)
 }
 
 fn write_route(

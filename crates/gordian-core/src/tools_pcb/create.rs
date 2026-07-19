@@ -1,5 +1,6 @@
 //! Board-construction tools and shared input parsers.
 
+use sch_io::write::escape_sexpr_string as sexpr_escape;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io;
@@ -1164,10 +1165,6 @@ fn replace_property_value(node: &str, value: &str) -> Option<String> {
     }
     let close = close?;
     Some(format!("{prefix}{}{}", sexpr_escape(value), &rest[close..]))
-}
-
-fn sexpr_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn transform_seed_pad(

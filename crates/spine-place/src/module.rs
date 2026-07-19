@@ -20,16 +20,12 @@ use sch_place::item::PinSide;
 
 use crate::chain::{ChainRole, NodeKind, Reduced};
 use crate::net::NetClass;
+use crate::{GRID, snap};
 
-const GRID: f64 = 1.27;
 /// Lead between an anchor pin endpoint and the first satellite pin (2 grid).
 const LEAD: f64 = 2.54;
 /// Column pitch when several legs fan off the same region.
 const PITCH: f64 = 5.08;
-
-fn snap(v: f64) -> f64 {
-    (v / GRID).round() * GRID
-}
 
 /// One satellite item placed relative to its module origin (the anchor's `at`).
 #[derive(Debug, Clone)]

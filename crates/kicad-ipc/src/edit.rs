@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::units::mm_to_nm;
 use crate::{Error, Kicad, proto};
 
 use pcb_model::{LayerRef, RouteProblem, RouteSolution, ViaSpan};
@@ -256,10 +257,6 @@ fn distance_mm(value: f64) -> Distance {
     Distance {
         value_nm: mm_to_nm(value),
     }
-}
-
-fn mm_to_nm(value: f64) -> i64 {
-    (value * 1_000_000.0).round() as i64
 }
 
 fn board_layer_for_route_layer(layer: &LayerRef, layer_count: u32, layer_names: &[String]) -> i32 {

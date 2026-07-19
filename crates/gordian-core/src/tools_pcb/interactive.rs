@@ -11,6 +11,7 @@ use anyhow::Result;
 use geom::{Point2, Rect, Segment};
 use serde_json::{Value, json};
 
+use kicad_ipc::units::{mm_to_nm, nm_to_mm};
 use kicad_ipc::{
     FootprintMove,
     proto::kiapi::{
@@ -29,10 +30,6 @@ use crate::tools::require_str;
 
 fn ipc_err(e: kicad_ipc::Error) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
-}
-
-fn mm_to_nm(mm: f64) -> i64 {
-    (mm * 1_000_000.0).round() as i64
 }
 
 /// Open the project board in a live headless KiCAD for interactive editing.
@@ -1376,10 +1373,6 @@ fn via_diameter(via: &IpcVia) -> f64 {
 
 fn point_from_ipc(v: &Vector2) -> Point2 {
     Point2::new(nm_to_mm(v.x_nm), nm_to_mm(v.y_nm))
-}
-
-fn nm_to_mm(nm: i64) -> f64 {
-    nm as f64 / 1_000_000.0
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@ use sch_place::item::Item;
 
 use crate::chain::{NodeKind, Reduced};
 use crate::scene::Scene;
+use crate::snap;
 
 /// Signal direction of a pin as far as flow layering cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,11 +23,6 @@ pub enum PinDir {
 const COL_GAP: f64 = 7.62;
 /// Vertical gap between stacked nodes in a column.
 const ROW_GAP: f64 = 7.62;
-const GRID: f64 = 1.27;
-
-fn snap(v: f64) -> f64 {
-    (v / GRID).round() * GRID
-}
 
 /// A strap islet: a stub module or a small free module — the population of the
 /// dedicated strap column.
@@ -358,7 +354,7 @@ pub fn arrange(
             .collect();
         if free.len() >= 3 {
             free.sort_by_key(|&v| {
-                crate::bands::refdes_key(&items[scene.nodes[v].anchor.unwrap_or(0)].refdes)
+                circuit_lang::parse::refdes_key(&items[scene.nodes[v].anchor.unwrap_or(0)].refdes)
             });
             let base_layer = layer
                 .iter()
@@ -520,7 +516,7 @@ pub fn arrange(
                 .all(|&v| v < n_scene && scene.nodes[v].anchor.is_some() && is_strapish(scene, v));
         if is_strap_col && cols[strap_l].len() >= 2 {
             cols[strap_l].sort_by_key(|&v| {
-                crate::bands::refdes_key(&items[scene.nodes[v].anchor.unwrap_or(0)].refdes)
+                circuit_lang::parse::refdes_key(&items[scene.nodes[v].anchor.unwrap_or(0)].refdes)
             });
         }
     }

@@ -1,7 +1,6 @@
 //! Deterministic, DRC-oracled relocation of generated silkscreen text fields.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::io::Write;
 use std::path::Path;
 
 use kicad_cli::{DrcReport, KicadCli, Violation};
@@ -463,23 +462,8 @@ fn untried_candidates(
 }
 
 fn write_board_text(path: &Path, text: &str) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("board path {} has no parent", path.display()))?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|err| format!("could not stage silkscreen cleanup: {err}"))?;
-    temp.write_all(text.as_bytes())
-        .map_err(|err| format!("could not write staged silkscreen cleanup: {err}"))?;
-    temp.as_file()
-        .sync_all()
-        .map_err(|err| format!("could not sync staged silkscreen cleanup: {err}"))?;
-    temp.persist(path).map_err(|err| {
-        format!(
-            "could not replace board after silkscreen cleanup: {}",
-            err.error
-        )
-    })?;
-    Ok(())
+    crate::workspace::atomic_write(path, text.as_bytes())
+        .map_err(|err| format!("could not replace board after silkscreen cleanup: {err}"))
 }
 
 #[cfg(test)]

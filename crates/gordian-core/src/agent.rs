@@ -2999,7 +2999,7 @@ fn authoring_diagnostics_state(name: &str, value: &Value) -> Option<AuthoringDia
         fingerprint: value
             .get("diagnostics")
             .and_then(|diagnostics| serde_json::to_vec(diagnostics).ok())
-            .map(hash_bytes),
+            .map(|bytes| geom::fnv1a(&bytes)),
     };
     (state.design_state.is_some() || state.errors.is_some() || state.warnings.is_some())
         .then_some(state)
@@ -3045,18 +3045,12 @@ fn semantic_draft_hash(runtime: &AgentRuntime) -> Option<u64> {
         .design
         .map(|design| circuit_lang::canon::to_canonical_yaml(&design).into_bytes())
         .unwrap_or_else(|| text.into_bytes());
-    Some(hash_bytes(bytes))
+    Some(geom::fnv1a(&bytes))
 }
 
 fn file_content_hash(path: &std::path::Path) -> Option<u64> {
     let bytes = std::fs::read(path).ok()?;
-    Some(hash_bytes(bytes))
-}
-
-fn hash_bytes(bytes: impl IntoIterator<Item = u8>) -> u64 {
-    bytes.into_iter().fold(0xcbf29ce484222325, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
-    })
+    Some(geom::fnv1a(&bytes))
 }
 
 fn runtime_supports_live_footprint_moves(runtime: &AgentRuntime) -> bool {

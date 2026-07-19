@@ -1775,8 +1775,8 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .filter(|p| !locked_refs.contains(p.reference.as_str()))
             .map(|p| FootprintMove {
                 reference: p.reference.clone(),
-                x_nm: (p.at.x * 1_000_000.0).round() as i64,
-                y_nm: (p.at.y * 1_000_000.0).round() as i64,
+                x_nm: kicad_ipc::units::mm_to_nm(p.at.x),
+                y_nm: kicad_ipc::units::mm_to_nm(p.at.y),
                 rotation_deg: Some(p.rotation),
             })
             .collect();

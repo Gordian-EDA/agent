@@ -210,7 +210,7 @@ fn read_regular_to_string(path: &Path) -> io::Result<String> {
 /// Replace one state file atomically from a temporary file in the same
 /// directory. Readers see either the complete old value or the complete new
 /// value; an existing leaf symlink is replaced rather than followed.
-fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,

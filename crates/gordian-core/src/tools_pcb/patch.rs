@@ -9,7 +9,7 @@
 //! it: footprint blocks with a block-level `(at …)`, top-level
 //! `(segment …)`/`(via …)` copper, and `(net N "NAME")` declarations.
 
-use std::{collections::BTreeMap, io::Write, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
 use kicad_ipc::FootprintMove;
 use pcb_model::{LayerRef, RouteSolution, ViaSpan};
@@ -527,7 +527,7 @@ pub fn patch_placements(text: &str, moves: &[FootprintMove]) -> Result<String, S
             .ok_or_else(|| format!("footprint {reference}: malformed (at …)"))?;
         let old_rot = old_rot.unwrap_or(0.0);
         let new_rot = mv.rotation_deg.unwrap_or(old_rot);
-        let (x, y) = (mv.x_nm as f64 / 1_000_000.0, mv.y_nm as f64 / 1_000_000.0);
+        let (x, y) = (kicad_ipc::units::nm_to_mm(mv.x_nm), kicad_ipc::units::nm_to_mm(mv.y_nm));
         let new_at = if new_rot.rem_euclid(360.0).abs() < 1e-9 {
             format!("(at {} {})", fmt_num(x), fmt_num(y))
         } else {
@@ -761,18 +761,8 @@ pub fn append_copper_file(
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("could not read board {}: {err}", path.display()))?;
     let updated = append_copper(&text, solution, layer_count, layer_names)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("board path {} has no parent directory", path.display()))?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|err| format!("could not create temporary board file: {err}"))?;
-    temp.write_all(updated.as_bytes())
-        .map_err(|err| format!("could not write temporary board file: {err}"))?;
-    temp.as_file()
-        .sync_all()
-        .map_err(|err| format!("could not sync temporary board file: {err}"))?;
-    temp.persist(path)
-        .map_err(|err| format!("could not replace board {}: {}", path.display(), err.error))?;
+    crate::workspace::atomic_write(path, updated.as_bytes())
+        .map_err(|err| format!("could not replace board {}: {err}", path.display()))?;
     Ok(())
 }
 

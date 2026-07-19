@@ -406,7 +406,7 @@ fn detect_pc817_channel_bank(
     if channels.len() < 2 {
         return Vec::new();
     }
-    channels.sort_by(|a, b| natural_refdes_cmp(&items[a.opto].refdes, &items[b.opto].refdes));
+    channels.sort_by(|a, b| refdes_cmp(&items[a.opto].refdes, &items[b.opto].refdes));
     let base_col = channels
         .iter()
         .filter_map(|c| anchor_col.get(&c.opto))
@@ -563,7 +563,7 @@ fn detect_pc817_channel_bank(
             ns.is_empty() || ns.iter().all(|net| rails.contains_key(*net))
         })
         .collect();
-    shared.sort_by(|&a, &b| natural_refdes_cmp(&items[a].refdes, &items[b].refdes));
+    shared.sort_by(|&a, &b| refdes_cmp(&items[a].refdes, &items[b].refdes));
     // Four columns make the usual 8-channel support set (power connectors,
     // bypass bank, and mounting holes) roughly as tall as the four channel rows.
     const SUPPORT_COLS: usize = 4;
@@ -590,10 +590,9 @@ fn detect_pc817_channel_bank(
     idioms
 }
 
-fn natural_refdes_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    fn split(s: &str) -> (&str, u32) {
-        let cut = s.find(|c: char| c.is_ascii_digit()).unwrap_or(s.len());
-        (&s[..cut], s[cut..].parse::<u32>().unwrap_or(u32::MAX))
-    }
-    split(a).cmp(&split(b)).then_with(|| a.cmp(b))
+/// Natural refdes order via the canonical key, with the full string as tiebreak.
+fn refdes_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use circuit_lang::parse::refdes_key;
+    refdes_key(a).cmp(&refdes_key(b)).then_with(|| a.cmp(b))
 }
+

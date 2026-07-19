@@ -53,7 +53,7 @@ mod textsolve;
 // Re-export the public surface VERBATIM so external `sch_io::write::…` paths
 // resolve unchanged across the split.
 pub use build::{pin_end0, pin_endpoint, quantize_dir};
-pub use emit::fmt_coord;
+pub use emit::{escape_sexpr_string, fmt_coord};
 
 /// Stable key identifying *this* schematic sheet for root-uuid derivation.
 ///
