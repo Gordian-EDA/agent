@@ -1063,10 +1063,17 @@ fn try_adaptive_grid_rescue(
 
 /// Wall-clock cap on the rescue's order exploration: refined-grid passes on a
 /// large failed set otherwise grind for minutes delivering nothing new.
-const ADAPTIVE_RESCUE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+/// ADAPTIVE_RESCUE_DEADLINE_SECS overrides for deep rip-up experiments.
+fn adaptive_rescue_deadline() -> std::time::Duration {
+    let secs = std::env::var("ADAPTIVE_RESCUE_DEADLINE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(30);
+    std::time::Duration::from_secs(secs)
+}
 
 fn adaptive_grid_rescue(problem: &RouteProblem, selected: &RouteResult) -> Option<RouteResult> {
-    let rescue_deadline = Instant::now() + ADAPTIVE_RESCUE_DEADLINE;
+    let rescue_deadline = Instant::now() + adaptive_rescue_deadline();
     let failed_names: BTreeSet<String> = selected
         .failed
         .iter()
