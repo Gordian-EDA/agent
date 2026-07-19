@@ -30,30 +30,23 @@
 //! without a network; tools always run against a real [`AgentRuntime`].
 
 mod agent;
-pub mod config;
-mod footprint_compat;
 pub mod multisheet;
 pub mod prompts;
-pub mod render;
 pub mod review;
 pub mod review_kicad;
-mod runtime;
 pub mod session;
 pub mod testing;
-mod tool;
 pub mod tools;
-pub mod tools_pcb;
-pub mod workspace;
 
 pub use agent::{Agent, AgentEvent, Approvals, AutoApprove, ContextStats, StopReason, TurnOutcome};
-pub use config::{
+pub use gordian_runtime::config::{
     AgentConfig, CONFIG_SCHEMA_VERSION, ConfigError, DEFAULT_MAX_TOKENS, DEFAULT_RENDER_MAX_PX,
     DEFAULT_SCHEMATIC_FILENAME, DEFAULT_SEARCH_LIMIT, EngineConfig, GordianConfig, KicadConfig,
     LlmConfig, LlmReasoningEffort, PcbRouterEngine, ProjectConfig, ReviewConfig, ToolConfig,
 };
 pub use review::{review, review_image};
-pub use runtime::AgentRuntime;
-pub use tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
+pub use gordian_runtime::AgentRuntime;
+pub use gordian_runtime::tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
 
 // Re-export the LLM (the production `GenaiProvider`, the `Provider` seam, and
 // the genai conversation types they speak) so callers can build on

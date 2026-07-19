@@ -23,7 +23,8 @@ use pcb_model::{
     Via, ViaSpan,
 };
 
-use crate::{AgentRuntime, PcbRouterEngine};
+use gordian_runtime::AgentRuntime;
+use gordian_runtime::config::PcbRouterEngine;
 
 // ── route_board ──────────────────────────────────────────────────────────────
 

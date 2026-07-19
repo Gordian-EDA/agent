@@ -1049,6 +1049,8 @@ dependencies = [
  "genai",
  "geom",
  "gordian-llm",
+ "gordian-runtime",
+ "gordian-tools-pcb",
  "grid-astar",
  "indexmap 2.14.0",
  "kicad-cli",
@@ -1085,6 +1087,53 @@ dependencies = [
  "genai",
  "serde",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "gordian-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "circuit-lang",
+ "gordian-llm",
+ "kicad-cli",
+ "kicad-env",
+ "kicad-footprint",
+ "kicad-ipc",
+ "kicad-symbol",
+ "resvg",
+ "sch-io",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
+name = "gordian-tools-pcb"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "circuit-graph",
+ "circuit-lang",
+ "drc-lint",
+ "geom",
+ "gordian-runtime",
+ "grid-astar",
+ "kicad-cli",
+ "kicad-env",
+ "kicad-footprint",
+ "kicad-ipc",
+ "negotiated-mesh",
+ "pcb-model",
+ "pcb-place",
+ "place-model",
+ "prost-types",
+ "sch-io",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

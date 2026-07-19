@@ -194,7 +194,7 @@ impl AgentRuntime {
     }
 
     /// The live KiCAD IPC session manager.
-    pub(crate) fn kicad(&self) -> &kicad_ipc::SessionManager {
+    pub fn kicad(&self) -> &kicad_ipc::SessionManager {
         &self.services.kicad
     }
 
@@ -204,7 +204,7 @@ impl AgentRuntime {
     }
 
     /// The cross-library symbol index, built once and cached.
-    pub(crate) fn index(&self) -> Result<&SymbolIndex> {
+    pub fn index(&self) -> Result<&SymbolIndex> {
         if let Some(idx) = self.services.index.get() {
             return Ok(idx);
         }
@@ -214,7 +214,7 @@ impl AgentRuntime {
     }
 
     /// The cross-library footprint catalog, built once and cached.
-    pub(crate) fn footprint_catalog(&self) -> Result<&FootprintCatalog> {
+    pub fn footprint_catalog(&self) -> Result<&FootprintCatalog> {
         if let Some(catalog) = self.services.footprint_catalog.get() {
             return Ok(catalog);
         }

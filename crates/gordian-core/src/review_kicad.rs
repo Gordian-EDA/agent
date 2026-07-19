@@ -19,7 +19,7 @@
 //! pass also unions in the deterministic exact-math ERC.
 
 use circuit_graph::netclass::is_ground;
-use crate::config::ReviewConfig;
+use gordian_runtime::config::ReviewConfig;
 use crate::{Binary, Provider};
 use anyhow::Result;
 use std::collections::BTreeMap;

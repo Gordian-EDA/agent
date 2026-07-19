@@ -761,7 +761,7 @@ pub fn append_copper_file(
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("could not read board {}: {err}", path.display()))?;
     let updated = append_copper(&text, solution, layer_count, layer_names)?;
-    crate::workspace::atomic_write(path, updated.as_bytes())
+    gordian_runtime::workspace::atomic_write(path, updated.as_bytes())
         .map_err(|err| format!("could not replace board {}: {err}", path.display()))?;
     Ok(())
 }

@@ -18,7 +18,7 @@ use place_model::{
     PlacementHints,
 };
 
-use crate::AgentRuntime;
+use gordian_runtime::AgentRuntime;
 
 pub(super) fn part_from_footprint_layers(
     footprint: &Footprint,

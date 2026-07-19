@@ -13,8 +13,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use drc_lint::lint::lint;
-use gordian_core::tools_pcb::apply_direct_rescue_fallback;
-use gordian_core::tools_pcb::corpus::{
+use gordian_tools_pcb::apply_direct_rescue_fallback;
+use gordian_tools_pcb::corpus::{
     load_corpus_board, route_problem_for_placement, run_kicad_drc,
 };
 use kicad_env::KicadEnv;

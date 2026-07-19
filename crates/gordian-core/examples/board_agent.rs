@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut approvals = AutoApprove::yes();
     let outcome = agent.run_turn(&prompt, &mut approvals, Some(&tx)).await?;
-    if let Err(e) = gordian_core::tools_pcb::save_session_if_open(agent.ctx()) {
+    if let Err(e) = gordian_tools_pcb::save_session_if_open(agent.ctx()) {
         eprintln!("warning: could not save live KiCAD session before closing: {e}");
     }
     agent.ctx().close_kicad_session();

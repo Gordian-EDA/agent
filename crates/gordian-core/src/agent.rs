@@ -47,8 +47,9 @@ use gordian_llm::{
 };
 
 use crate::AgentRuntime;
-use crate::tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
-use crate::tools::{IMAGE_PATH_KEY, repair_components_tool, run_tool, tool_defs};
+use gordian_runtime::tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
+use crate::tools::{repair_components_tool, run_tool, tool_defs};
+use gordian_runtime::tool::IMAGE_PATH_KEY;
 
 /// After this many route attempts with failed nets, block further blind PCB
 /// regenerate/place/route retries in the same turn and force an honest report.
@@ -4321,7 +4322,7 @@ async fn review_layout_schematic(
     let review_config = ctx.config().review.clone();
     let ctx = Arc::clone(ctx);
     let png = tokio::task::spawn_blocking(move || {
-        crate::render::schematic_png(ctx.env(), ctx.sch_path(), render_max_px)
+        gordian_runtime::render::schematic_png(ctx.env(), ctx.sch_path(), render_max_px)
     })
     .await
     .ok()?
@@ -4346,7 +4347,7 @@ async fn review_layout_board(
     reviewer: &dyn Provider,
     intent: &str,
     image: Binary,
-    config: &crate::config::ReviewConfig,
+    config: &gordian_runtime::config::ReviewConfig,
 ) -> Result<(f64, Vec<String>)> {
     let (score, defects) = crate::review_kicad::review_layout(
         reviewer,
@@ -6148,7 +6149,7 @@ mod tests {
     #[tokio::test]
     async fn pcb_visual_review_requires_a_parseable_verdict_and_surfaces_defects() {
         let image = Binary::from_base64("image/png", "AA==", None);
-        let config = crate::config::ReviewConfig::default();
+        let config = gordian_runtime::config::ReviewConfig::default();
         let malformed = ScriptedClient::new(vec![final_text("not a verdict")]);
         let error = review_layout_board(&malformed, "test board", image.clone(), &config)
             .await

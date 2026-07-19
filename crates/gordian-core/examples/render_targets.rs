@@ -91,7 +91,7 @@ fn render_fixture(
     // content-only, matching the zoomed-to-content reference screenshots.
     let svg_path = KicadCli::new(env).export_svg_opts(&sch_path, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
-    let png = gordian_core::render::svg_to_png(&svg, 1600)?;
+    let png = gordian_runtime::render::svg_to_png(&svg, 1600)?;
     std::fs::write(out, png)?;
     for wmsg in &emit.layout_warnings {
         eprintln!("  WARN: {wmsg}");

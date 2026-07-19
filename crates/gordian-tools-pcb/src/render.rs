@@ -8,7 +8,7 @@ use kicad_cli::KicadCli;
 use pcb_model::{Point2, Polygon, Rect};
 use serde_json::{Value, json};
 
-use crate::AgentRuntime;
+use gordian_runtime::AgentRuntime;
 
 const BOARD_RENDER_LAYERS: &str = "F.Cu,B.Cu,F.SilkS,B.SilkS";
 const BOARD_FRONT_DETAIL_LAYERS: &str = "F.Cu,F.SilkS";
@@ -84,7 +84,7 @@ pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         &source.bounds,
         ctx.config().tools.render_max_px,
     );
-    let png = crate::render::svg_to_png(&svg, plan.overview_px)?;
+    let png = gordian_runtime::render::svg_to_png(&svg, plan.overview_px)?;
     let path = ctx.workspace().write_render(&png)?;
 
     let mut detail_paths = serde_json::Map::new();
@@ -133,7 +133,7 @@ pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !detail_errors.is_empty() {
         obj["detail_errors"] = json!(detail_errors);
     }
-    obj[crate::tools::IMAGE_PATH_KEY] = json!(path.display().to_string());
+    obj[gordian_runtime::tool::IMAGE_PATH_KEY] = json!(path.display().to_string());
     Ok(obj)
 }
 
@@ -395,7 +395,7 @@ fn render_side_detail(
     let svg = std::fs::read_to_string(&svg_path)
         .with_context(|| format!("reading {side} PCB detail SVG {}", svg_path.display()))?;
     let svg = add_dark_background(&svg).unwrap_or(svg);
-    let png = crate::render::svg_to_png(&svg, max_px)
+    let png = gordian_runtime::render::svg_to_png(&svg, max_px)
         .with_context(|| format!("rasterizing {side} PCB detail"))?;
     ctx.workspace()
         .write_render(&png)

@@ -98,7 +98,7 @@ fn main() -> anyhow::Result<()> {
     let svg_dir = tempfile::tempdir()?;
     let svg_path = KicadCli::new(&env).export_svg_opts(&sch_out, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
-    let png = gordian_core::render::svg_to_png(&svg, 1600)?;
+    let png = gordian_runtime::render::svg_to_png(&svg, 1600)?;
     let png_out = out_dir.join(format!("{label}.png"));
     std::fs::write(&png_out, png)?;
 

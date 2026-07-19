@@ -2790,7 +2790,7 @@ fn render_board_after_place_returns_ok_and_png_magic() {
 
     // IMAGE_PATH_KEY must be set to the same path (so the agent loop attaches it).
     assert_eq!(
-        out[gordian_core::tools::IMAGE_PATH_KEY].as_str(),
+        out[gordian_runtime::tool::IMAGE_PATH_KEY].as_str(),
         Some(png_path),
         "IMAGE_PATH_KEY must equal png_path"
     );
@@ -2826,7 +2826,7 @@ fn render_board_after_route_returns_ok_and_png_magic() {
 
     // IMAGE_PATH_KEY set.
     assert_eq!(
-        out[gordian_core::tools::IMAGE_PATH_KEY].as_str(),
+        out[gordian_runtime::tool::IMAGE_PATH_KEY].as_str(),
         Some(png_path),
         "IMAGE_PATH_KEY must equal png_path"
     );

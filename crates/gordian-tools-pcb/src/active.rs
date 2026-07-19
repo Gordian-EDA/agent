@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use kicad_ipc::snapshot::{ImportedBoard, IpcBoardSnapshot};
 use place_model::Placement;
 
-use crate::AgentRuntime;
+use gordian_runtime::AgentRuntime;
 
 /// Save the active KiCAD board and return its project PCB path.
 pub fn save_live_board(ctx: &AgentRuntime) -> std::result::Result<PathBuf, String> {

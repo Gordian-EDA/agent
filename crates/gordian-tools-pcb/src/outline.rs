@@ -9,7 +9,7 @@ use place_model::{Part, PlaceProblem};
 use pcb_model::{Point2, Polygon, Rect, RouteSolution};
 use serde_json::{Value, json};
 
-use crate::AgentRuntime;
+use gordian_runtime::AgentRuntime;
 
 use super::create::req_num;
 
@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn replaces_rectangular_edge_cuts() {
-        let board = include_str!("../../tests/fixtures/two_res.kicad_pcb");
+        let board = include_str!("../tests/fixtures/two_res.kicad_pcb");
         let updated = replace_edge_cuts(
             board,
             &Outline::Rect(Rect {
@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn emits_polygon_edge_cuts_as_lines() {
-        let board = include_str!("../../tests/fixtures/two_res.kicad_pcb");
+        let board = include_str!("../tests/fixtures/two_res.kicad_pcb");
         let poly = Polygon::new(vec![
             Point2 { x: 0.0, y: 0.0 },
             Point2 { x: 10.0, y: 0.0 },

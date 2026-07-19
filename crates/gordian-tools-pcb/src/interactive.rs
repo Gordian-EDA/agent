@@ -25,8 +25,8 @@ use pcb_model::{
     Trace, Via, ViaSpan,
 };
 
-use crate::AgentRuntime;
-use crate::tools::require_str;
+use gordian_runtime::AgentRuntime;
+use gordian_runtime::tool::require_str;
 
 fn ipc_err(e: kicad_ipc::Error) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())

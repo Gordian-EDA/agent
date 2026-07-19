@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
     let svg_dir = tempfile::tempdir()?;
     let svg_path = KicadCli::new(&env).export_svg_opts(&root, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
-    let png = gordian_core::render::svg_to_png(&svg, 2400)?;
+    let png = gordian_runtime::render::svg_to_png(&svg, 2400)?;
     let stem = std::path::Path::new(&yaml)
         .file_stem()
         .and_then(|s| s.to_str())

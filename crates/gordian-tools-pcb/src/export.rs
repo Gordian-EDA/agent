@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use kicad_cli::{KicadCli, Violation};
 
-use crate::AgentRuntime;
+use gordian_runtime::AgentRuntime;
 
 /// DRC findings KiCAD raises that are independent of routed copper.
 const NON_COPPER_WARNINGS: &[&str] = &[

@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 
 use kicad_footprint::{FootprintId, SearchQuery};
 
-use crate::AgentRuntime;
-use crate::tools::{compile_report, current_sch_text, require_search_query, require_str};
+use gordian_runtime::AgentRuntime;
+use gordian_runtime::tool::{compile_report, current_sch_text, require_search_query, require_str};
 
 pub fn search_footprints(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Value> {
     if let Some(queries) = input.get("queries") {
@@ -263,7 +263,7 @@ fn footprint_assignments(input: &Value) -> anyhow::Result<Vec<FootprintAssignmen
         .collect()
 }
 
-pub(crate) fn patch_footprint(
+pub fn patch_footprint(
     draft: &str,
     reference: &str,
     footprint: &str,
@@ -271,7 +271,7 @@ pub(crate) fn patch_footprint(
     patch_component_scalar(draft, reference, "footprint", footprint)
 }
 
-pub(crate) fn patch_part_and_footprint(
+pub fn patch_part_and_footprint(
     draft: &str,
     reference: &str,
     part: &str,

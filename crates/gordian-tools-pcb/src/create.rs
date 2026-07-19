@@ -14,8 +14,8 @@ use pcb_model::{Point2, Polygon};
 use geom::Rect;
 use place_model::LockedAt;
 
-use crate::AgentRuntime;
-use crate::tools::footprint_suggestion_clause;
+use gordian_runtime::AgentRuntime;
+use gordian_runtime::tool::footprint_suggestion_clause;
 
 use super::fmt_num;
 use super::seed::{BoardSeedRules, PourPadConnection, PourSpec};
@@ -283,7 +283,7 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     }
 
-    let footprint_pin_mismatches = crate::footprint_compat::netlist_pin_mismatches(ctx, &netlist)?;
+    let footprint_pin_mismatches = gordian_runtime::footprint_compat::netlist_pin_mismatches(ctx, &netlist)?;
     if !footprint_pin_mismatches.is_empty() {
         return Ok(json!({
             "ok": false,

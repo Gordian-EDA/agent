@@ -1,0 +1,26 @@
+[package]
+name = "gordian-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared agent plumbing: GordianConfig, the AgentRuntime project context, the tool result contract, and workspace state files."
+
+[dependencies]
+anyhow.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tempfile.workspace = true
+resvg = { workspace = true }
+circuit-lang = { path = "../circuit-lang" }
+gordian-llm = { path = "../gordian-llm" }
+kicad-cli = { path = "../kicad-cli" }
+kicad-env = { path = "../kicad-env" }
+kicad-ipc = { path = "../kicad-ipc" }
+kicad-footprint = { path = "../kicad-footprint" }
+kicad-symbol = { path = "../kicad-symbol" }
+sch-io = { path = "../sch-io" }
+
+[dev-dependencies]
+serde_json.workspace = true
+toml.workspace = true

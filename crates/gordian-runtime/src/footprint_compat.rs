@@ -11,16 +11,16 @@ use serde::Serialize;
 use crate::AgentRuntime;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct FootprintPinMismatch {
-    pub(crate) reference: String,
-    pub(crate) symbol: String,
-    pub(crate) footprint: String,
+pub struct FootprintPinMismatch {
+    pub reference: String,
+    pub symbol: String,
+    pub footprint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) polarity_mismatch: Option<String>,
+    pub polarity_mismatch: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) footprint_pads_absent_from_symbol: Vec<String>,
+    pub footprint_pads_absent_from_symbol: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) symbol_pins_absent_from_footprint: Vec<String>,
+    pub symbol_pins_absent_from_footprint: Vec<String>,
 }
 
 struct Assignment<'a> {
@@ -30,7 +30,7 @@ struct Assignment<'a> {
 }
 
 /// Validate explicit footprint assignments in a compiled circuit design.
-pub(crate) fn design_pin_mismatches(
+pub fn design_pin_mismatches(
     ctx: &AgentRuntime,
     design: &Design,
 ) -> Result<Vec<FootprintPinMismatch>> {
@@ -52,7 +52,7 @@ pub(crate) fn design_pin_mismatches(
 }
 
 /// Validate footprint assignments exported by KiCAD before board creation.
-pub(crate) fn netlist_pin_mismatches(
+pub fn netlist_pin_mismatches(
     ctx: &AgentRuntime,
     netlist: &kicad_cli::Netlist,
 ) -> Result<Vec<FootprintPinMismatch>> {

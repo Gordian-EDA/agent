@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use kicad_cli::KicadCli;
 
-use crate::AgentRuntime;
+use gordian_runtime::AgentRuntime;
 
 /// Run the routed board through the fabrication exporters into `<project>/fab/`
 /// and report the produced files.

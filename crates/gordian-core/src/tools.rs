@@ -36,6 +36,10 @@
 //! tool calls on `spawn_blocking` threads — keeping a single-threaded UI
 //! responsive while a tool compiles, renders, or shells out to `kicad-cli`.
 
+use gordian_runtime::tool::{
+    IMAGE_PATH_KEY, compile_report, current_sch_text, footprint_suggestion_clause,
+    require_search_query, require_str,
+};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -635,42 +639,27 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "create_design" => create_design(input, ctx),
         "edit_design" => edit_design(input, ctx),
         "repair_components" => repair_components(input, ctx),
-        "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
-        "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
-        "regenerate_board" => crate::tools_pcb::regenerate_board(input, ctx),
-        "assign_footprints" => crate::tools_pcb::assign_footprints(input, ctx),
-        "get_board" => crate::tools_pcb::get_board(input, ctx),
-        "place_board" => crate::tools_pcb::place_board(input, ctx),
-        "route_board" => crate::tools_pcb::route_board(input, ctx),
-        "check_board" => crate::tools_pcb::check_board(input, ctx),
-        "export_fab" => crate::tools_pcb::export_fab(input, ctx),
-        "open_board" => crate::tools_pcb::open_board(input, ctx),
-        "move_parts" => crate::tools_pcb::move_parts(input, ctx),
-        "route_track" => crate::tools_pcb::route_track(input, ctx),
-        "delete_copper" => crate::tools_pcb::delete_copper(input, ctx),
-        "set_net_width" => crate::tools_pcb::set_net_width(input, ctx),
-        "update_board_outline" => crate::tools_pcb::update_board_outline(input, ctx),
-        "render_board" => crate::tools_pcb::render_board(input, ctx),
+        "search_footprints" => gordian_tools_pcb::search_footprints(input, ctx),
+        "get_footprint_info" => gordian_tools_pcb::get_footprint_info(input, ctx),
+        "regenerate_board" => gordian_tools_pcb::regenerate_board(input, ctx),
+        "assign_footprints" => gordian_tools_pcb::assign_footprints(input, ctx),
+        "get_board" => gordian_tools_pcb::get_board(input, ctx),
+        "place_board" => gordian_tools_pcb::place_board(input, ctx),
+        "route_board" => gordian_tools_pcb::route_board(input, ctx),
+        "check_board" => gordian_tools_pcb::check_board(input, ctx),
+        "export_fab" => gordian_tools_pcb::export_fab(input, ctx),
+        "open_board" => gordian_tools_pcb::open_board(input, ctx),
+        "move_parts" => gordian_tools_pcb::move_parts(input, ctx),
+        "route_track" => gordian_tools_pcb::route_track(input, ctx),
+        "delete_copper" => gordian_tools_pcb::delete_copper(input, ctx),
+        "set_net_width" => gordian_tools_pcb::set_net_width(input, ctx),
+        "update_board_outline" => gordian_tools_pcb::update_board_outline(input, ctx),
+        "render_board" => gordian_tools_pcb::render_board(input, ctx),
         other => bail!("unknown tool: {other}"),
     }
 }
 
-/// Pull a required string field out of the input, with a clear error.
-pub(crate) fn require_str(input: &Value, key: &str) -> Result<String> {
-    input
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("missing required string field `{key}`"))
-}
 
-pub(crate) fn require_search_query(input: &Value) -> Result<String> {
-    let query = require_str(input, "query")?;
-    if query.trim().is_empty() {
-        bail!("search query must contain non-whitespace text");
-    }
-    Ok(query)
-}
 
 // ── 1. search_symbols ──────────────────────────────────────────────────────
 
@@ -851,9 +840,6 @@ fn pin_type_str(t: circuit_lang::PinType) -> &'static str {
 
 // ── 3. read_schematic helpers ──────────────────────────────────────────────
 
-pub(crate) fn current_sch_text(ctx: &AgentRuntime) -> Option<String> {
-    std::fs::read_to_string(ctx.sch_path()).ok()
-}
 
 struct DraftRead {
     yaml: String,
@@ -914,89 +900,6 @@ fn validate_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let result = compile(&yaml, ctx.provider());
     compile_authoring_report(&result, ctx)
-}
-
-/// Build the `{ok, diagnostics, errors, warnings}` report a compile yields.
-pub(crate) fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
-    use circuit_lang::Severity;
-    use std::collections::{BTreeMap, HashMap, HashSet};
-
-    const MAX_DIAGNOSTICS: usize = 40;
-    const MAX_REPRESENTATIVES_PER_CODE: usize = 6;
-
-    let mut code_counts = BTreeMap::<&str, (usize, usize)>::new();
-    for d in &diags.0 {
-        let counts = code_counts.entry(d.code).or_default();
-        match d.severity {
-            Severity::Error => counts.0 += 1,
-            Severity::Warning => counts.1 += 1,
-        }
-    }
-
-    // Reserve one representative for every diagnostic class before allowing a
-    // repetitive class to consume the remaining context budget. This keeps a
-    // large syntax-error family from hiding later pin or electrical errors.
-    let mut selected = vec![false; diags.0.len()];
-    let mut represented_codes = HashSet::new();
-    let mut selected_count = 0usize;
-    for (index, d) in diags.0.iter().enumerate() {
-        if selected_count == MAX_DIAGNOSTICS {
-            break;
-        }
-        if represented_codes.insert(d.code) {
-            selected[index] = true;
-            selected_count += 1;
-        }
-    }
-    let mut representatives_per_code = represented_codes
-        .into_iter()
-        .map(|code| (code, 1usize))
-        .collect::<HashMap<_, _>>();
-    for (index, d) in diags.0.iter().enumerate() {
-        if selected_count == MAX_DIAGNOSTICS {
-            break;
-        }
-        let count = representatives_per_code.entry(d.code).or_default();
-        if !selected[index] && *count < MAX_REPRESENTATIVES_PER_CODE {
-            selected[index] = true;
-            selected_count += 1;
-            *count += 1;
-        }
-    }
-    let strings = diags
-        .0
-        .iter()
-        .zip(selected)
-        .filter(|(_, selected)| *selected)
-        .map(|(d, _)| d.to_string())
-        .collect::<Vec<_>>();
-    let omitted = diags.0.len() - strings.len();
-    let errors = diags
-        .0
-        .iter()
-        .filter(|d| d.severity == Severity::Error)
-        .count();
-    let warnings = diags
-        .0
-        .iter()
-        .filter(|d| d.severity == Severity::Warning)
-        .count();
-    let mut report = json!({
-        "ok": errors == 0,
-        "diagnostics": strings,
-        "diagnostic_code_counts": code_counts.into_iter().map(|(code, (errors, warnings))| {
-            (code.to_owned(), json!({ "errors": errors, "warnings": warnings }))
-        }).collect::<serde_json::Map<_, _>>(),
-        "errors": errors,
-        "warnings": warnings,
-    });
-    if omitted > 0 {
-        report["diagnostics_omitted"] = json!(omitted);
-        report["note"] = json!(
-            "diagnostics are representative and truncated by code for context efficiency; diagnostic_code_counts preserves exact totals"
-        );
-    }
-    report
 }
 
 /// Add physical package compatibility to the normal circuit-language report.
@@ -1153,19 +1056,6 @@ fn authoring_report_quality(report: &Value) -> (u64, u64) {
     )
 }
 
-/// `"; suggestions: a, b"` for a non-empty candidate list, empty otherwise —
-/// a diagnostic never ends in a dangling `suggestions:`.
-pub(crate) fn footprint_suggestion_clause(suggestions: &[FootprintId]) -> String {
-    if suggestions.is_empty() {
-        return String::new();
-    }
-    let list = suggestions
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("; suggestions: {list}")
-}
 
 /// Returns `true` when at least one incompatible assignment was found.
 fn add_footprint_compatibility(
@@ -1203,7 +1093,7 @@ fn add_footprint_compatibility(
             }
         }
     }
-    let mismatches = crate::footprint_compat::design_pin_mismatches(ctx, design)?;
+    let mismatches = gordian_runtime::footprint_compat::design_pin_mismatches(ctx, design)?;
     if lookup_errors.is_empty() && mismatches.is_empty() {
         return Ok(false);
     }
@@ -1768,7 +1658,7 @@ fn normalize_misplaced_footprint_parts(
     let mut normalized = yaml.to_owned();
     let mut report = Vec::new();
     for (reference, footprint, symbol) in replacements {
-        normalized = crate::tools_pcb::patch_part_and_footprint(
+        normalized = gordian_tools_pcb::patch_part_and_footprint(
             &normalized,
             &reference,
             &symbol,
@@ -1855,7 +1745,7 @@ fn normalize_common_footprint_aliases(
     let mut normalized = yaml.to_owned();
     let mut report = Vec::new();
     for (reference, original, canonical) in replacements {
-        normalized = crate::tools_pcb::patch_footprint(&normalized, &reference, canonical)
+        normalized = gordian_tools_pcb::patch_footprint(&normalized, &reference, canonical)
             .map_err(anyhow::Error::msg)?
             .0;
         report.push(json!({
@@ -2000,7 +1890,7 @@ fn normalize_dense_default_footprints(
     let mut normalized = yaml.to_owned();
     let mut report = Vec::new();
     for (reference, part, footprint) in assignments {
-        normalized = crate::tools_pcb::patch_footprint(&normalized, &reference, &footprint)
+        normalized = gordian_tools_pcb::patch_footprint(&normalized, &reference, &footprint)
             .map_err(anyhow::Error::msg)?
             .0;
         report.push(json!({
@@ -3105,7 +2995,6 @@ fn add_draft_next_step(report: &mut Value) {
 
 /// Result key carrying a PNG path for the agent loop to attach as an image
 /// block (and strip from the JSON the model sees as text).
-pub const IMAGE_PATH_KEY: &str = "_image_path";
 
 fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
     if !ctx.sch_path().exists() {
@@ -3114,7 +3003,7 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
         }));
     }
     let png =
-        crate::render::schematic_png(ctx.env(), ctx.sch_path(), ctx.config().tools.render_max_px)?;
+        gordian_runtime::render::schematic_png(ctx.env(), ctx.sch_path(), ctx.config().tools.render_max_px)?;
     let path = ctx.workspace().write_render(&png)?;
     let mut obj = json!({
         "ok": true,

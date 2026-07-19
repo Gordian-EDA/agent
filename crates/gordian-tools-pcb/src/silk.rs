@@ -462,7 +462,7 @@ fn untried_candidates(
 }
 
 fn write_board_text(path: &Path, text: &str) -> Result<(), String> {
-    crate::workspace::atomic_write(path, text.as_bytes())
+    gordian_runtime::workspace::atomic_write(path, text.as_bytes())
         .map_err(|err| format!("could not replace board after silkscreen cleanup: {err}"))
 }
 

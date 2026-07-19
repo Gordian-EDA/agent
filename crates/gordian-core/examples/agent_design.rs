@@ -115,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
     let svg_dir = tempfile::tempdir()?;
     let svg_path = KicadCli::new(&env).export_svg_opts(&sch_path, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
-    let png = gordian_core::render::svg_to_png(&svg, 1600)?;
+    let png = gordian_runtime::render::svg_to_png(&svg, 1600)?;
     std::fs::write(&out, png)?;
     // Keep the source sch + a lifted YAML next to the PNG so a defect can be
     // reproduced deterministically (re-render via layout_spike) without re-spending
