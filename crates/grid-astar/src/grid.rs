@@ -145,6 +145,7 @@ impl RouteGrid {
         // walk out along its own pad. Foreign clearance is preserved (the cell stays
         // `Net(owner)`, which still blocks every other net).
         grid.assert_pad_copper(&problem.obstacles);
+        grid.assert_fine_pitch_escape_lanes(problem, &problem.obstacles);
 
         grid
     }
@@ -660,6 +661,124 @@ impl RouteGrid {
     /// Does any pad owned by a net OTHER than `owner` have un-inflated copper on
     /// `layer` covering the point `(cx, cy)`? Used by [`Self::assert_pad_copper`] to
     /// refuse to relax a cell where two pads' real copper genuinely overlap (a short).
+    /// Open the straight-out escape lane in front of each fine-pitch pad.
+    ///
+    /// At sub-0.66mm pitch the neighbouring pads' clearance halos overlap the
+    /// cells directly beyond a pad's tip, collapsing them to `BlockedAll` even
+    /// though a minimum-width trace exiting straight out clears both
+    /// neighbours by the design clearance. The A* then dead-ends on the pad
+    /// itself and reports enclosure. Relax exactly those lane cells back to
+    /// the owner where the trace genuinely clears every foreign obstacle's
+    /// REAL copper; anything tighter stays blocked.
+    fn assert_fine_pitch_escape_lanes(
+        &mut self,
+        problem: &RouteProblem,
+        obstacles: &[crate::problem::Obstacle],
+    ) {
+        const FINE_PITCH_MM: f64 = 0.66;
+        let clear = problem.clearance + problem.min_trace_width / 2.0;
+        let lane_len = clear + self.pitch;
+        for ob in obstacles {
+            let Some(owner) = ob
+                .connected_to
+                .iter()
+                .find_map(|n| self.connection_index(n))
+            else {
+                continue;
+            };
+            // Fine-pitch membership: another owned pad's centre closer than the
+            // pitch threshold.
+            let fine = obstacles.iter().any(|other| {
+                !std::ptr::eq(ob, other)
+                    && !other.connected_to.is_empty()
+                    && other.center.dist(ob.center) < FINE_PITCH_MM
+            });
+            if !fine {
+                continue;
+            }
+            // Elongated pads escape along their long axis, both directions.
+            let (long, short, horizontal) = if ob.width >= ob.height {
+                (ob.width, ob.height, true)
+            } else {
+                (ob.height, ob.width, false)
+            };
+            if long < short * 1.3 {
+                continue;
+            }
+            for dir in [-1.0f64, 1.0] {
+                let (lane_cx, lane_cy, lane_w, lane_h) = if horizontal {
+                    (
+                        ob.center.x + dir * (long / 2.0 + lane_len / 2.0),
+                        ob.center.y,
+                        lane_len,
+                        short,
+                    )
+                } else {
+                    (
+                        ob.center.x,
+                        ob.center.y + dir * (long / 2.0 + lane_len / 2.0),
+                        short,
+                        lane_len,
+                    )
+                };
+                let (min_x, max_x) = (lane_cx - lane_w / 2.0, lane_cx + lane_w / 2.0);
+                let (min_y, max_y) = (lane_cy - lane_h / 2.0, lane_cy + lane_h / 2.0);
+                let (ix0, ix1) = cell_span(self.min_x, min_x, max_x, self.pitch, self.nx);
+                let (iy0, iy1) = cell_span(self.min_y, min_y, max_y, self.pitch, self.ny);
+                for layer_ref in &ob.layers {
+                    let Some(layer) = layer_ref.index(self.layer_count as u32) else {
+                        continue;
+                    };
+                    let layer = layer as usize;
+                    for ix in ix0..=ix1 {
+                        let cx = self.cell_center_x(ix);
+                        if cx < min_x || cx > max_x {
+                            continue;
+                        }
+                        for iy in iy0..=iy1 {
+                            let cy = self.cell_center_y(iy);
+                            if cy < min_y || cy > max_y {
+                                continue;
+                            }
+                            let i = self.idx(layer, ix, iy);
+                            if self.cells[i] != Cell::BlockedAll {
+                                continue;
+                            }
+                            let legal = !obstacles.iter().any(|other| {
+                                let other_owner = other
+                                    .connected_to
+                                    .iter()
+                                    .find_map(|n| self.connection_index(n));
+                                if other_owner == Some(owner) {
+                                    return false;
+                                }
+                                if !other
+                                    .layers
+                                    .iter()
+                                    .any(|l| l.index(self.layer_count as u32) == Some(layer as u32))
+                                {
+                                    return false;
+                                }
+                                let dx = (cx - other.center.x).abs() - other.width / 2.0;
+                                let dy = (cy - other.center.y).abs() - other.height / 2.0;
+                                let gap = match (dx > 0.0, dy > 0.0) {
+                                    (true, true) => (dx * dx + dy * dy).sqrt(),
+                                    (true, false) => dx,
+                                    (false, true) => dy,
+                                    (false, false) => f64::NEG_INFINITY,
+                                };
+                                gap < clear
+                            });
+                            if legal {
+                                self.cells[i] = Cell::Net(owner);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn foreign_pad_copper(
         &self,
         obstacles: &[crate::problem::Obstacle],
