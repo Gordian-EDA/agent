@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 
 use kicad_footprint::{FootprintCatalog, FootprintId};
 use pcb_model::{Point2, Polygon};
-use pcb_place::placement::{LockedAt, Rect};
+use geom::Rect;
+use place_model::LockedAt;
 
 use crate::AgentRuntime;
 use crate::tools::footprint_suggestion_clause;

@@ -29,10 +29,6 @@ pub use pcb_model as problem;
 
 pub mod placement;
 
-pub use placement::{PlaceProblem, PlaceResult, PlacementHints, place_board};
-// The engine-SDK seam (kernel-homed): the trait a third party implements, the
-// oracle it drops into, and the built-in placers + route ranker.
-pub use placement::{
-    AnnealingPlacer, FanoutPlacer, GridAstarRanker, LegalizingPlacer, Placer, RoutabilityOracle,
-    RouteRanker,
-};
+pub use placement::place_board;
+// The built-in engines a `place-model` RoutabilityOracle can drive.
+pub use placement::{AnnealingPlacer, FanoutPlacer, GridAstarRanker, LegalizingPlacer};

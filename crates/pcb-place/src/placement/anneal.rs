@@ -9,7 +9,7 @@
 
 use super::cost::place_cost;
 use super::geometry::{PLACEMENT_GRID, courtyard_margin, rotated_courtyard_half};
-use super::model::{LogicalNet, Pin, PlaceProblem, PlacementHints};
+use place_model::{LogicalNet, Pin, PlaceProblem, PlacementHints};
 use super::pairs::coplacement_pairs;
 use crate::problem::{LayerRef, Point2, Rect};
 

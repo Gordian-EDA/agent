@@ -5,7 +5,7 @@
 
 use super::sexpr::{sexpr_end, sexpr_point};
 use anyhow::{Context, Result};
-use pcb_model::place::{Part, PlaceProblem};
+use place_model::{Part, PlaceProblem};
 use pcb_model::{Point2, Polygon, Rect, RouteSolution};
 use serde_json::{Value, json};
 
@@ -395,7 +395,7 @@ fn suffix(kind: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pcb_model::place::PartPad;
+    use place_model::PartPad;
     use pcb_model::{LayerRef, Trace, Via, ViaSpan};
 
     #[test]

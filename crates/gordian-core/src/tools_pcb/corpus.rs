@@ -10,9 +10,9 @@ use std::path::Path;
 
 use kicad_footprint::{FootprintCatalog, FootprintId};
 use kicad_ipc::FootprintMove;
-use pcb_model::place::{Edge, GroupHint, Placement, PlacementHints};
+use place_model::{Edge, GroupHint, Placement, PlacementHints};
 use pcb_model::{LayerRef, Obstacle, Point2, Polygon, Rect, RouteProblem, RouteSolution};
-use pcb_place::placement::{LockedAt, PlaceProblem};
+use place_model::{LockedAt, PlaceProblem};
 use serde::Deserialize;
 
 use super::place::{is_connector, is_mounting_hole, part_from_footprint_layers, routing_bounds};
@@ -92,7 +92,7 @@ pub fn load_corpus_board(
 }
 
 pub fn route_problem_for_placement(board: &CorpusBoard, placements: &[Placement]) -> RouteProblem {
-    let mut rp = pcb_place::placement::to_route_problem(&board.problem, placements);
+    let mut rp = place_model::to_route_problem(&board.problem, placements);
     rp.bounds = routing_bounds(&rp.bounds, rp.outline.as_ref());
     rp.plane_nets = pcb_model::default_plane_nets(
         rp.layer_count,

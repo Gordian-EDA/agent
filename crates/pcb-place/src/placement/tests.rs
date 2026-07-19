@@ -8,10 +8,11 @@ use super::geometry::{
 };
 use super::hints::{apply_grid_hints, unified_fanout_place};
 use super::legalize::is_legal;
-use super::model::{
-    Edge, GroupHint, LockedAt, Part, PartPad, PlaceProblem, PlacementHints, Rect, derive_nets,
+use geom::Rect;
+use place_model::{
+    Edge, GroupHint, LockedAt, Part, PartPad, PlaceProblem, PlacementHints, derive_nets,
+    series_pairs, to_route_problem,
 };
-use super::pairs::series_pairs;
 use super::route::{
     EdgeLockedPlacer, GridAstarRanker, PlaceOpts, better_place_result,
     edge_seek_position_candidates, fanout_fast_path_accepts, net_centroid_position_candidates,
@@ -23,10 +24,10 @@ use super::route::{
     ratline_obstruction_position_candidates, ratline_obstruction_position_candidates_from_edges,
     ratline_tree_edge_list, route_rank_key, route_rank_key_better, route_rank_key_clean_via_free,
     seat_corner_seek_parts, should_try_full_grid_ranker_fallback, swap_pair_order,
-    to_route_problem, unique_position_candidates,
+    unique_position_candidates,
 };
 use crate::connectivity;
-use crate::problem::place::{Placer, RouteRanker, compute_hpwl, compute_hpwl_with_rotations};
+use place_model::{Placer, RouteRanker, compute_hpwl, compute_hpwl_with_rotations};
 use crate::problem::{Connection, LayerRef, Obstacle, Point2, Polygon, RoutePoint, RouteProblem};
 
 fn board(w: f64, h: f64) -> Rect {
@@ -154,20 +155,20 @@ fn mechanical(reference: &str, size: f64) -> Part {
     }
 }
 
-fn placed_result(problem: &PlaceProblem, positions: &[Point2]) -> super::model::PlaceResult {
-    super::model::PlaceResult {
+fn placed_result(problem: &PlaceProblem, positions: &[Point2]) -> place_model::PlaceResult {
+    place_model::PlaceResult {
         placements: problem
             .parts
             .iter()
             .zip(positions)
-            .map(|(part, &at)| super::model::Placement {
+            .map(|(part, &at)| place_model::Placement {
                 reference: part.reference.clone(),
                 at,
                 rotation: 0.0,
             })
             .collect(),
         legal: true,
-        report: super::model::PlaceReport {
+        report: place_model::PlaceReport {
             overlaps_resolved: 0,
             out_of_bounds_clamps: 0,
             hpwl: 0.0,
@@ -3685,26 +3686,26 @@ fn place_result_selector_keeps_routable_layout_over_lower_cost_unroutable_one() 
         parts: vec![sig("A"), sig("B"), blocker],
         outline: None,
     };
-    let result = |ax, ay, bx, by, layout_cost| super::model::PlaceResult {
+    let result = |ax, ay, bx, by, layout_cost| place_model::PlaceResult {
         placements: vec![
-            super::model::Placement {
+            place_model::Placement {
                 reference: "A".to_owned(),
                 at: Point2 { x: ax, y: ay },
                 rotation: 0.0,
             },
-            super::model::Placement {
+            place_model::Placement {
                 reference: "B".to_owned(),
                 at: Point2 { x: bx, y: by },
                 rotation: 0.0,
             },
-            super::model::Placement {
+            place_model::Placement {
                 reference: "W".to_owned(),
                 at: Point2 { x: 10.0, y: 10.0 },
                 rotation: 0.0,
             },
         ],
         legal: true,
-        report: super::model::PlaceReport {
+        report: place_model::PlaceReport {
             overlaps_resolved: 0,
             out_of_bounds_clamps: 0,
             hpwl: layout_cost,
@@ -3764,26 +3765,26 @@ fn place_result_selector_prefers_lower_via_route_before_layout_cost() {
         parts: vec![sig("A"), sig("B"), top_wall],
         outline: None,
     };
-    let result = |ax, ay, bx, by, layout_cost| super::model::PlaceResult {
+    let result = |ax, ay, bx, by, layout_cost| place_model::PlaceResult {
         placements: vec![
-            super::model::Placement {
+            place_model::Placement {
                 reference: "A".to_owned(),
                 at: Point2 { x: ax, y: ay },
                 rotation: 0.0,
             },
-            super::model::Placement {
+            place_model::Placement {
                 reference: "B".to_owned(),
                 at: Point2 { x: bx, y: by },
                 rotation: 0.0,
             },
-            super::model::Placement {
+            place_model::Placement {
                 reference: "W".to_owned(),
                 at: Point2 { x: 10.0, y: 10.0 },
                 rotation: 0.0,
             },
         ],
         legal: true,
-        report: super::model::PlaceReport {
+        report: place_model::PlaceReport {
             overlaps_resolved: 0,
             out_of_bounds_clamps: 0,
             hpwl: layout_cost,
@@ -3828,14 +3829,14 @@ fn place_result_selector_keeps_incumbent_on_exact_rank_tie() {
         parts: vec![r0603("R1", None, None)],
         outline: None,
     };
-    let mk = |x| super::model::PlaceResult {
-        placements: vec![super::model::Placement {
+    let mk = |x| place_model::PlaceResult {
+        placements: vec![place_model::Placement {
             reference: "R1".to_owned(),
             at: Point2 { x, y: 10.0 },
             rotation: 0.0,
         }],
         legal: true,
-        report: super::model::PlaceReport {
+        report: place_model::PlaceReport {
             overlaps_resolved: 0,
             out_of_bounds_clamps: 0,
             hpwl: 1.0,

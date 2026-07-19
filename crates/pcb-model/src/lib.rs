@@ -11,7 +11,6 @@
 
 use serde::{Deserialize, Serialize};
 
-pub mod place;
 pub mod route;
 pub use geom::UnionFind;
 pub use geom::{Point2, Polygon, Rect, Segment};

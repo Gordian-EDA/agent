@@ -29,7 +29,7 @@
 //!
 //! The placement TRAIT seam — the [`Placer`] contract, the [`PlaceProblem`] it
 //! reads, the [`PlaceResult`] it returns, the [`RouteRanker`] evaluator, and the
-//! [`RoutabilityOracle`] selector — lives in the KERNEL ([`pcb_model::place`]) so a
+//! [`RoutabilityOracle`] selector — lives in the KERNEL (`place-model`) so a
 //! third party implements it against `pcb-model` ALONE. This crate supplies the
 //! BUILT-IN implementations: [`LegalizingPlacer`], [`AnnealingPlacer`],
 //! [`FanoutPlacer`], and the grid-astar-backed [`GridAstarRanker`]. The model types
@@ -53,7 +53,7 @@
 //!   + the built-in [`Placer`]s and the [`GridAstarRanker`].
 //!
 //! Routing for the ranking comes from `grid-astar`; DRC from `drc-lint`; the engine
-//! kernel + shared geometry from `pcb-model`.
+//! kernel from `place-model`; shared geometry from `geom`.
 
 mod anneal;
 mod cost;
@@ -61,26 +61,16 @@ mod force;
 mod geometry;
 mod hints;
 mod legalize;
-mod model;
 mod pairs;
 mod route;
 
-// The engine-SDK seam lives in the kernel — re-exported so a `pcb-place` caller can
-// reach the trait + oracle without a second `pcb_model::place` import.
-pub use crate::problem::place::{Placer, RoutabilityOracle, RouteRanker, compute_hpwl, is_legal};
-
-// Public surface — re-exported VERBATIM so every external `pcb_place::placement::…`
-// path resolves unchanged.
+// The problem/result DTOs, legality, HPWL, and the Placer/RouteRanker contracts
+// live in `place-model`; import them from there. This module exports the ENGINES.
 pub use hints::{
     apply_edge_lock, apply_grid_hints, apply_surround, fan_out_rings, unified_fanout_place,
 };
-pub use model::{
-    Edge, EdgeDatum, GroupHint, LockedAt, LogicalNet, Part, PartPad, Pin, PlaceProblem,
-    PlaceReport, PlaceResult, Placement, PlacementHints, Rect, derive_nets,
-};
-pub use pairs::{decoupling_pairs, series_fanout_order, series_pairs};
 pub use route::{AnnealingPlacer, FanoutPlacer, GridAstarRanker, LegalizingPlacer};
-pub use route::{place, place_best, place_board, to_route_problem};
+pub use route::{place, place_best, place_board};
 
 #[cfg(test)]
 mod tests;

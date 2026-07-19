@@ -9,8 +9,8 @@ use super::geometry::{
     rotated_copper_bbox, sign_nonzero,
 };
 use super::legalize::collides;
-use super::model::{LogicalNet, PlaceProblem, PlacementHints};
-use super::pairs::decoupling_pairs;
+use place_model::{LogicalNet, PlaceProblem, PlacementHints};
+use place_model::decoupling_pairs;
 use super::route::PlaceOpts;
 use crate::problem::{Point2, Rect};
 

@@ -6,8 +6,8 @@ use super::geometry::{
     clamp_center_for_envelope, datum_rotation_for_edge, part_edge_target,
     part_placement_bounds_envelope, rotated_copper_bbox, rotated_courtyard_half,
 };
-use super::model::{Edge, LockedAt, Part, PlaceProblem, PlacementHints};
-use super::pairs::{decoupling_pairs, series_pairs};
+use place_model::{Edge, LockedAt, Part, PlaceProblem, PlacementHints};
+use place_model::{decoupling_pairs, series_pairs};
 use crate::problem::Point2;
 
 /// Lock each member of a `grid` group at a computed cell of a regular grid (row-major,

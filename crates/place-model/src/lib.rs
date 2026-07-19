@@ -1,9 +1,9 @@
 //! The PCB placement-engine SDK: the [`PlaceProblem`] an engine reads, the
 //! [`PlacementHints`] that steer it, the [`PlaceResult`] it returns, and the
-//! [`Placer`] contract it implements — all in the neutral kernel (`pcb-model`) so a
-//! THIRD-PARTY placer can be written against `pcb-model` ALONE. It never touches the
-//! incumbent engine crate (`pcb-place`) nor any KiCAD CLI. A placer: depends on
-//! `pcb-model`, `impl Placer for MyPlacer`, reads `problem.parts`/`problem.bounds`
+//! [`Placer`] contract it implements — a neutral kernel, so a THIRD-PARTY placer
+//! can be written against `place-model` ALONE. It never touches the incumbent
+//! engine crate (`pcb-place`) nor any KiCAD CLI. A placer: depends on
+//! `place-model`, `impl Placer for MyPlacer`, reads `problem.parts`/`problem.bounds`
 //! plus [`derive_nets`], produces [`Placement`]s, self-verifies with the shared
 //! [`is_legal`], sets [`PlaceResult::legal`] + `hpwl` honestly, and returns. To pick
 //! among placers by routability it drops `Box::new(MyPlacer)` into a
@@ -14,7 +14,8 @@
 //! so the two tiers stay symmetric. The evaluator here is the [`RouteRanker`] (the
 //! placement oracle's router).
 
-use crate::{Connection, LayerRef, Obstacle, Point2, Polygon, Rect, RoutePoint, RouteProblem};
+use geom::{Point2, Polygon, Rect};
+use pcb_model::{Connection, LayerRef, Obstacle, RoutePoint, RouteProblem};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

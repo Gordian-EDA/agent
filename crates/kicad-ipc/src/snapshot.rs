@@ -21,8 +21,8 @@ use crate::{
 use pcb_model::{
     Connection, LayerRef, Obstacle, Point2, Polygon, Rect, RoutePoint, RouteProblem, RouteSolution,
     Segment, Trace, Via as ModelVia, ViaSpan,
-    place::{LockedAt, Part, PartPad, PlaceProblem},
 };
+use place_model::{LockedAt, Part, PartPad, PlaceProblem};
 
 const DEFAULT_MIN_TRACE_WIDTH_MM: f64 = 0.2;
 const DEFAULT_CLEARANCE_MM: f64 = 0.2;

@@ -1058,6 +1058,7 @@ dependencies = [
  "negotiated-mesh",
  "pcb-model",
  "pcb-place",
+ "place-model",
  "prost",
  "prost-types",
  "rayon",
@@ -1645,6 +1646,7 @@ dependencies = [
  "geom",
  "nng",
  "pcb-model",
+ "place-model",
  "prost",
  "prost-build",
  "prost-types",
@@ -2100,6 +2102,7 @@ dependencies = [
  "geom",
  "grid-astar",
  "pcb-model",
+ "place-model",
  "rayon",
  "serde",
  "serde_json",
@@ -2138,6 +2141,17 @@ name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+
+[[package]]
+name = "place-model"
+version = "0.1.0"
+dependencies = [
+ "geom",
+ "pcb-model",
+ "rayon",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "png"
