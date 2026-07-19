@@ -1057,7 +1057,12 @@ fn try_adaptive_grid_rescue(
     let _ = consider_candidate_recording(problem, best, candidate, Some(attempts), elapsed_ms);
 }
 
+/// Wall-clock cap on the rescue's order exploration: refined-grid passes on a
+/// large failed set otherwise grind for minutes delivering nothing new.
+const ADAPTIVE_RESCUE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn adaptive_grid_rescue(problem: &RouteProblem, selected: &RouteResult) -> Option<RouteResult> {
+    let rescue_deadline = Instant::now() + ADAPTIVE_RESCUE_DEADLINE;
     let failed_names: BTreeSet<String> = selected
         .failed
         .iter()
@@ -1071,6 +1076,9 @@ fn adaptive_grid_rescue(problem: &RouteProblem, selected: &RouteResult) -> Optio
     let mut best: Option<(RouteResult, RouteQuality)> = None;
     let base = adaptive_rescue_base(problem, selected, &failed_names);
     for order in adaptive_rescue_orders(problem, &failed_names) {
+        if Instant::now() >= rescue_deadline {
+            break;
+        }
         let Some(mut candidate) = adaptive_grid_rescue_order(problem, selected, &base, &order)
         else {
             continue;
@@ -1097,6 +1105,9 @@ fn adaptive_grid_rescue(problem: &RouteProblem, selected: &RouteResult) -> Optio
         router::geometry_violations(problem, &selected.solution),
     );
     for order in adaptive_ripup_rescue_orders(problem, selected, &failed_names) {
+        if Instant::now() >= rescue_deadline {
+            break;
+        }
         let Some(mut candidate) =
             adaptive_grid_ripup_rescue_order(problem, selected, &failed_names, &order)
         else {
@@ -1132,6 +1143,9 @@ fn adaptive_grid_rescue(problem: &RouteProblem, selected: &RouteResult) -> Optio
             .filter(|name| !name.is_empty())
             .collect();
         for order in adaptive_ripup_rescue_orders(problem, &residual, &residual_failed_names) {
+            if Instant::now() >= rescue_deadline {
+                break;
+            }
             let Some(mut candidate) = adaptive_grid_ripup_rescue_order(
                 problem,
                 &residual,

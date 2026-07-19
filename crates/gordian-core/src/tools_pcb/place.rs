@@ -430,10 +430,24 @@ pub(super) fn place_problem_from_snapshot(
         // courtyards: packed passives that satisfy the courtyard margin still
         // wall in its escapes and the router reports enclosure. Reserve
         // breathing room in the courtyard itself; connectors keep their tight
-        // envelope so edge seating is unaffected.
+        // envelope so edge seating is unaffected. A FINE-PITCH IC needs a real
+        // escape ring — its pins cannot exit between neighbouring pads, so
+        // every escape crosses the courtyard boundary where a hugging cap
+        // otherwise sits (measured: LQFP-48 boards strand 5-6 ring nets at any
+        // canvas or layer count without this).
         if part.pads.len() >= 12 && !is_connector(&imported.lib_id, &imported.reference) {
-            part.courtyard_w += 0.8;
-            part.courtyard_h += 0.8;
+            let mut pitch = f64::MAX;
+            for (i, a) in part.pads.iter().enumerate() {
+                for b in &part.pads[i + 1..] {
+                    let d = a.offset.dist(b.offset);
+                    if d > 1e-6 {
+                        pitch = pitch.min(d);
+                    }
+                }
+            }
+            let extra = if pitch < 0.66 { 2.4 } else { 0.8 };
+            part.courtyard_w += extra;
+            part.courtyard_h += extra;
         }
         parts.push(part);
     }
