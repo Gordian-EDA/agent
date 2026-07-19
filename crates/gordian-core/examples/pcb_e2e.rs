@@ -62,7 +62,12 @@ fn main() -> anyhow::Result<()> {
 
     let yaml = std::fs::read_to_string(&fixture)?;
     let env = KicadEnv::detect().context("no KiCad environment detected")?;
-    let ctx = AgentRuntime::for_project(env, output.clone())?;
+    let mut config = gordian_core::config::GordianConfig::default();
+    if let Ok(router) = std::env::var("PCB_E2E_ROUTER") {
+        config.engines.pcb_router = serde_json::from_value(json!(router))
+            .map_err(|e| anyhow::anyhow!("bad PCB_E2E_ROUTER: {e}"))?;
+    }
+    let ctx = AgentRuntime::for_project_with_config(env, output.clone(), config)?;
     ctx.workspace().write_draft(&yaml, None)?;
     let started = Instant::now();
 
