@@ -7,10 +7,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Known symbol-library locations, checked in order.
+/// Known symbol-library locations, checked in order. The macOS installer's
+/// disk image is dragged straight to `/Applications`, so `KiCad.app` lands
+/// there directly; the nested `KiCad/KiCad.app` form only occurs when a user
+/// drags the enclosing folder instead, which some older releases shipped.
 const KNOWN_SYMBOL_DIRS: &[&str] = &[
     "/usr/share/kicad/symbols",
     "/usr/local/share/kicad/symbols",
+    "/Applications/KiCad.app/Contents/SharedSupport/symbols",
     "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols",
 ];
 
@@ -18,7 +22,15 @@ const KNOWN_SYMBOL_DIRS: &[&str] = &[
 const KNOWN_FOOTPRINT_DIRS: &[&str] = &[
     "/usr/share/kicad/footprints",
     "/usr/local/share/kicad/footprints",
+    "/Applications/KiCad.app/Contents/SharedSupport/footprints",
     "/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints",
+];
+
+/// Known `kicad-cli` locations, checked when it is not on `PATH`. The macOS
+/// app bundle does not add its `MacOS/` directory to `PATH` on install.
+const KNOWN_CLI_PATHS: &[&str] = &[
+    "/Applications/KiCad.app/Contents/MacOS/kicad-cli",
+    "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
 ];
 
 /// A discovered KiCAD installation.
@@ -129,10 +141,21 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
     {
         return Some(path);
     }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
+    if let Some(path) = std::env::var_os("PATH") {
+        if let Some(found) = std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+        {
+            return Some(found);
+        }
+    }
+    if name == "kicad-cli" {
+        return KNOWN_CLI_PATHS
+            .iter()
+            .map(PathBuf::from)
+            .find(|p| p.is_file());
+    }
+    None
 }
 
 fn env_dir(name: &str) -> Option<PathBuf> {

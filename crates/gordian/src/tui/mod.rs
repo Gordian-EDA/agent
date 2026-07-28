@@ -138,14 +138,15 @@ pub async fn run(project_dir: PathBuf, config: GordianConfig, config_path: PathB
 
     // 2. Build the agent if we have both KiCAD and LLM config; otherwise launch
     //    a "degraded" UI that explains what's missing (so `tui` never panics).
-    let client = gordian_core::GenaiProvider::from_config(&config.llm).ok();
-    let (provider, model) = match &client {
-        Some(client) => client.status(),
-        None => ("unconfigured".to_string(), "(llm.model unset)".to_string()),
+    let client_result = gordian_core::GenaiProvider::from_config(&config.llm);
+    let llm_error = client_result.as_ref().err().map(|e| format!("{e:#}"));
+    let (provider, model) = match &client_result {
+        Ok(client) => client.status(),
+        Err(_) => ("unconfigured".to_string(), "(llm.model unset)".to_string()),
     };
 
-    let agent_handle: Option<SharedAgent> = match (&env, client) {
-        (Some(env), Some(client)) => {
+    let agent_handle: Option<SharedAgent> = match (&env, client_result) {
+        (Some(env), Ok(client)) => {
             let ctx = AgentRuntime::for_project_with_config(
                 env.clone(),
                 project_dir.clone(),
@@ -173,8 +174,20 @@ pub async fn run(project_dir: PathBuf, config: GordianConfig, config_path: PathB
     }
     let mut app = App::new(status);
     if agent_handle.is_none() {
+        let mut missing = Vec::new();
+        if env.is_none() {
+            missing.push(
+                "no KiCAD install found (install KiCAD 9+/10, or set kicad.symbolDir / \
+                 kicad.footprintDir / kicad.cliPath)"
+                    .to_string(),
+            );
+        }
+        if let Some(err) = &llm_error {
+            missing.push(format!("LLM provider not configured: {err}"));
+        }
         app.transcript.push(app::Entry::system(format!(
-            "agent unavailable: need KiCAD + llm.adapter, llm.model, and provider credentials in {}. UI is read-only.",
+            "agent unavailable — {}. Edit {} then restart. UI is read-only.",
+            missing.join("; "),
             config_path.display()
         )));
     }
