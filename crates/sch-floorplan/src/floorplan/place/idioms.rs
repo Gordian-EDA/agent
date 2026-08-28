@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use kicad_symbol::geometry::SymbolGeometry;
 
 use super::super::infer::anchor_tap;
+use circuit_graph::netclass::{is_ground, is_power_net};
 use sch_place::ir::{LayoutIr, Orient};
 use sch_place::item::{Incidence, Item};
-use circuit_graph::netclass::{is_ground, is_power_net};
 
 /// each load cap two gaps out, level with its osc pin. Returns true if it moved
 /// anything (so the caller re-runs `decongest`). The cluster members are frozen, so
@@ -147,14 +147,6 @@ pub fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
         }
     }
     let moved = !moves.is_empty();
-    if std::env::var("IDIOM_DEBUG").is_ok() {
-        for (i, at, ang) in &moves {
-            eprintln!(
-                "ALIGN {} -> [{:.1},{:.1}] ang={ang:?}",
-                items[*i].refdes, at[0], at[1]
-            );
-        }
-    }
     for (i, at, ang) in moves {
         items[i].at = at.into();
         if let Some(a) = ang {
@@ -225,14 +217,6 @@ pub fn align_led_chains(items: &mut [Item], _inc: &Incidence, ir: &LayoutIr) -> 
         moves.push((ri, at, angle));
     }
     let moved = !moves.is_empty();
-    if std::env::var("IDIOM_DEBUG").is_ok() {
-        for (i, at, _) in &moves {
-            eprintln!(
-                "ALIGN-LED {} -> [{:.1},{:.1}]",
-                items[*i].refdes, at[0], at[1]
-            );
-        }
-    }
     for (i, at, angle) in moves {
         items[i].at = at.into();
         items[i].angle = angle;

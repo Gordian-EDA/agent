@@ -9,9 +9,9 @@ use super::infer::{
     best_decoupling_anchor, place_cc_pulldown, place_crystal, place_decoupling, place_i2c_pullup,
 };
 use super::*;
-use sch_place::item::{Incidence, Item};
 use circuit_graph::netclass::{is_connector_like, is_ground};
 use sch_place::item::PinSide;
+use sch_place::item::{Incidence, Item};
 
 /// A circuit idiom recognized purely from connectivity + symbol pin geometry.
 /// `infer_ir` turns it into an [`sch_place::result::IdiomReport`] for the LLM. A FROZEN
@@ -87,24 +87,17 @@ pub(super) fn detect_idioms(
     pin_meta: &BTreeMap<(usize, String), (PinSide, i32)>,
     anchor_col: &BTreeMap<usize, i32>,
     anchor_row: &BTreeMap<usize, i32>,
+    multisheet_refine: bool,
 ) -> Vec<Idiom> {
     let _ = (sats, pin_meta);
     let graph = build_circuit_graph(items, rails);
     // I2C_PULLUP is gated to the multi-sheet refine path so single-sheet reference snapshots stay
     // byte-identical (it would otherwise re-bind pull-up pairs on IC reference sheets).
     let mut lib = circuit_graph::library::active_library();
-    if std::env::var_os("MULTISHEET_REFINE").is_some() {
+    if multisheet_refine {
         lib.push(circuit_graph::library::I2C_PULLUP.clone());
     }
     let matches = circuit_graph::find_all(&graph, &lib);
-    if std::env::var("IDIOM_AUDIT").is_ok() {
-        for m in &matches {
-            eprintln!(
-                "AUDIT-MATCH {} anchor={} score={:.2} bindings={:?}",
-                m.pattern, m.anchor, m.score, m.bindings
-            );
-        }
-    }
     let idx: BTreeMap<&str, usize> = items
         .iter()
         .enumerate()
@@ -188,7 +181,16 @@ pub(super) fn detect_idioms(
                 // far corner" critic defect).
                 let ai = best_decoupling_anchor(items, anchors, rails, &caps).unwrap_or(ai);
                 if let Some(mut cells) = place_decoupling(
-                    items, inc, anchors, rails, anchor_col, anchor_row, ai, &caps, &out,
+                    items,
+                    inc,
+                    anchors,
+                    rails,
+                    anchor_col,
+                    anchor_row,
+                    ai,
+                    &caps,
+                    &out,
+                    multisheet_refine,
                 ) {
                     // A SMALL decoupling anchor (a 3-4 pin LDO/regulator) connects only through
                     // power rails — weak cohesion, so the SA drifts it off its own FROZEN bank
@@ -196,7 +198,7 @@ pub(super) fn detect_idioms(
                     // WITH the bank so the power-conversion block stays together. Multi-pin ⇒
                     // `orient_angle` returns 0 (no rotation). Gated to multi-sheet so single-sheet
                     // reference snapshots stay byte-identical.
-                    if std::env::var_os("MULTISHEET_REFINE").is_some()
+                    if multisheet_refine
                         && (3..=4).contains(&items[ai].geom.pins.len())
                         && !claimed.contains(&ai)
                         && let (Some(&acol), Some(&arow)) =
@@ -595,4 +597,3 @@ fn refdes_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     use circuit_lang::parse::refdes_key;
     refdes_key(a).cmp(&refdes_key(b)).then_with(|| a.cmp(b))
 }
-

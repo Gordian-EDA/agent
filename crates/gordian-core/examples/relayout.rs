@@ -11,13 +11,12 @@
 //!       [--compose]
 //!
 //! `--compose` lays out each authored block independently and tiles them onto one
-//! sheet as framed regions (the real multi-block commit path); the engine comes
-//! from SCH_ENGINE, matching `compose_design`.
+//! sheet as framed regions (the real multi-block commit path), using the selected
+//! engine explicitly.
 
 use std::path::PathBuf;
 
-use kicad_cli::KicadCli;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 
 fn engine_of(name: &str) -> Box<dyn sch_floorplan::contract::PlacementEngine> {
@@ -29,9 +28,18 @@ fn engine_of(name: &str) -> Box<dyn sch_floorplan::contract::PlacementEngine> {
     }
 }
 
+fn engine_config(name: &str) -> gordian_runtime::config::SchematicPlacementEngine {
+    match name {
+        "anneal" | "sa" => gordian_runtime::config::SchematicPlacementEngine::Anneal,
+        "cluster" | "cluster-place" => gordian_runtime::config::SchematicPlacementEngine::Cluster,
+        "spine" | "spine-place" => gordian_runtime::config::SchematicPlacementEngine::Spine,
+        other => panic!("unknown engine `{other}` (anneal|cluster|spine)"),
+    }
+}
+
 fn main() -> anyhow::Result<()> {
-    let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let provider = SymbolTable::from_env(&env);
+    let env = KicadInstallation::detect().expect("no KiCAD environment detected");
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
 
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut out_dir = PathBuf::from("/tmp/relayout");
@@ -82,9 +90,11 @@ fn main() -> anyhow::Result<()> {
 
     let t0 = std::time::Instant::now();
     let emit = if compose.is_some() {
-        // SAFETY: single-threaded example setup; compose_design reads SCH_ENGINE.
-        unsafe { std::env::set_var("SCH_ENGINE", &engine_name) };
-        gordian_core::multisheet::compose_design(&env, &design)?
+        gordian_core::multisheet::compose_design_with_engine(
+            &env,
+            &design,
+            engine_config(&engine_name),
+        )?
     } else {
         sch_floorplan::floorplan::emit_strategy(&env, &design, engine_of(&engine_name), None)
             .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?
@@ -96,7 +106,7 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(&sch_out, emit.sch.as_bytes())?;
 
     let svg_dir = tempfile::tempdir()?;
-    let svg_path = KicadCli::new(&env).export_svg_opts(&sch_out, svg_dir.path(), true)?;
+    let svg_path = env.export_svg_opts(&sch_out, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
     let png = gordian_runtime::render::svg_to_png(&svg, 1600)?;
     let png_out = out_dir.join(format!("{label}.png"));

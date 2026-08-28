@@ -10,13 +10,13 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+use anyhow::Result;
+use async_trait::async_trait;
+use futures::stream::{self, StreamExt};
 use gordian_llm::{
     ChatMessage, ChatStreamEvent, EventStream, MessageContent, Provider, StreamChunk, StreamEnd,
     Tool, ToolCall,
 };
-use anyhow::Result;
-use async_trait::async_trait;
-use futures::stream::{self, StreamExt};
 
 /// A [`Provider`] that replays a fixed script of completions, one per call, and
 /// records the conversation it was shown.

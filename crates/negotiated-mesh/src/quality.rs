@@ -1,10 +1,10 @@
-use crate::problem::{RouteProblem, RouteQuality, RouteResult, RouteSolution, Trace};
+use pcb_model::{RouteProblem, RouteQuality, RouteResult, RouteSolution, Trace};
 
 pub(crate) fn route_quality(problem: &RouteProblem, result: &RouteResult) -> RouteQuality {
     RouteQuality::of(
         problem,
         result,
-        crate::router::geometry_violations(problem, &result.solution),
+        grid_astar::router::geometry_violations(problem, &result.solution),
     )
 }
 

@@ -12,8 +12,7 @@ chafa = ["ratatui-image/chafa-dyn"]
 
 [dependencies]
 gordian-core = { path = "../gordian-core" }
-kicad-cli = { path = "../kicad-cli" }
-kicad-env = { path = "../kicad-env" }
+kicad = { path = "../kicad" }
 
 anyhow.workspace = true
 tokio.workspace = true

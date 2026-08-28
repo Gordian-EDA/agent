@@ -6,12 +6,11 @@ use std::fmt::Write as _;
 use std::io;
 
 use anyhow::Result;
-use kicad_cli::KicadCli;
 use serde_json::{Value, json};
 
+use geom::Rect;
 use kicad_footprint::{FootprintCatalog, FootprintId};
 use pcb_model::{Point2, Polygon};
-use geom::Rect;
 use place_model::LockedAt;
 
 use gordian_runtime::AgentRuntime;
@@ -99,7 +98,7 @@ fn resolve_pour_layer(layer: &str, layer_count: u32) -> Option<(u32, String)> {
 
 /// A dangling wire shorter than 0.1mm is emitter rounding residue, not a
 /// broken connection: its endpoints sit inside any pin snap tolerance.
-fn degenerate_wire_endpoint(v: &kicad_cli::Violation) -> bool {
+fn degenerate_wire_endpoint(v: &kicad::Violation) -> bool {
     v.kind == "unconnected_wire_endpoint"
         && v.items.iter().all(|item| {
             item.description
@@ -111,7 +110,7 @@ fn degenerate_wire_endpoint(v: &kicad_cli::Violation) -> bool {
         })
 }
 
-fn blocking_erc_warnings(report: &kicad_cli::ErcReport) -> Vec<Value> {
+fn blocking_erc_warnings(report: &kicad::ErcReport) -> Vec<Value> {
     report
         .violations
         .iter()
@@ -148,7 +147,7 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                       then regenerate_board"
         }));
     }
-    let netlist = match KicadCli::new(ctx.env()).netlist(ctx.sch_path()) {
+    let netlist = match ctx.env().netlist(ctx.sch_path()) {
         Ok(netlist) => netlist,
         Err(e) => {
             return Ok(json!({ "error": format!("could not export the schematic netlist: {e}") }));
@@ -164,7 +163,7 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "note": "footprint fields live in circuit-YAML/schematic state; do not retry regenerate_board until the draft footprint changes are applied",
         }));
     }
-    let erc = match KicadCli::new(ctx.env()).erc(ctx.sch_path()) {
+    let erc = match ctx.env().erc(ctx.sch_path()) {
         Ok(report) => report,
         Err(e) => {
             return Ok(
@@ -283,7 +282,8 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     }
 
-    let footprint_pin_mismatches = gordian_runtime::footprint_compat::netlist_pin_mismatches(ctx, &netlist)?;
+    let footprint_pin_mismatches =
+        gordian_runtime::footprint_compat::netlist_pin_mismatches(ctx, &netlist)?;
     if !footprint_pin_mismatches.is_empty() {
         return Ok(json!({
             "ok": false,
@@ -332,7 +332,7 @@ fn apply_complexity_default_layer_count(
 
 fn unapplied_draft_footprint_changes(
     ctx: &AgentRuntime,
-    netlist: &kicad_cli::Netlist,
+    netlist: &kicad::Netlist,
 ) -> anyhow::Result<Vec<Value>> {
     let Some(draft) = ctx.workspace().read_draft()? else {
         return Ok(Vec::new());
@@ -801,7 +801,7 @@ impl<'a> SeedBoardWriter<'a> {
         }
         // Solid GND/VCC planes on the centred inner layers — the physical
         // counterpart of the router's plane fanout (per-pad vias assume real
-        // plane copper, and kicad-cli DRC checks the file, not our oracle).
+        // plane copper, and kicad DRC checks the file, not our oracle).
         let pad_counts = self.parts.iter().flat_map(|p| p.pad_nets.values()).fold(
             BTreeMap::<String, usize>::new(),
             |mut acc, net| {
@@ -1521,7 +1521,7 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
     let via_diameter = num("via_diameter", d.via_diameter);
     let via_drill = num("via_drill", d.via_drill);
     // Vias must be fabricable to KiCAD's built-in standard-fab minimums (verified
-    // against kicad-cli DRC): via ≥ 0.5 mm, drill ≥ 0.3 mm, annular ring ≥ 0.1 mm
+    // against kicad DRC): via ≥ 0.5 mm, drill ≥ 0.3 mm, annular ring ≥ 0.1 mm
     // (i.e. via ≥ drill + 0.2). Below these the board would route but fail KiCAD
     // DRC (via_diameter / drill_out_of_range / annular_width) — reject up front
     // with the floor, rather than silently emit copper that lies about fab.
@@ -2287,25 +2287,25 @@ mod tests {
 
     #[test]
     fn blocking_erc_warnings_allow_only_library_mismatch() {
-        let report = kicad_cli::ErcReport {
+        let report = kicad::ErcReport {
             violations: vec![
-                kicad_cli::Violation {
+                kicad::Violation {
                     severity: "warning".to_string(),
                     kind: "lib_symbol_mismatch".to_string(),
                     description: "cached symbol differs".to_string(),
                     items: vec![],
                 },
-                kicad_cli::Violation {
+                kicad::Violation {
                     severity: "warning".to_string(),
                     kind: "lib_symbol_issues".to_string(),
                     description: "library unavailable".to_string(),
                     items: vec![],
                 },
-                kicad_cli::Violation {
+                kicad::Violation {
                     severity: "warning".to_string(),
                     kind: "same_local_global_label".to_string(),
                     description: "Local and global labels have same name".to_string(),
-                    items: vec![kicad_cli::ViolationItem {
+                    items: vec![kicad::ViolationItem {
                         description: "Label 'USB_DP'".to_string(),
                         uuid: None,
                     }],
@@ -2321,6 +2321,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "live KiCAD IPC; run through tools/live_kicad_test.sh"]
     fn seed_replacement_invalidates_same_runtime_live_session() {
         let Some(ctx) = AgentRuntime::detect_for_test() else {
             eprintln!("SKIP: KiCad is not installed");

@@ -15,8 +15,6 @@ use serde::{Deserialize, Serialize};
 /// Version of the config schema described by this module.
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
-/// Default request token cap used by the production LLM provider today.
-
 /// Default number of symbol and footprint hits when a tool input does not
 /// provide its own limit.
 pub const DEFAULT_SEARCH_LIMIT: usize = 5;
@@ -131,9 +129,15 @@ pub struct KicadConfig {
     pub footprint_dir: Option<PathBuf>,
     /// Optional `kicad-cli` path override.
     pub cli_path: Option<PathBuf>,
+    /// Optional matching `pcbnew` path override for live IPC sessions.
+    pub pcbnew_path: Option<PathBuf>,
     /// Prefer attaching to an already-running KiCAD IPC server before launching
     /// a managed headless process.
     pub attach_running: bool,
+    /// Explicitly allow managed headless launch to enable the API server in the
+    /// selected KiCAD major version's preferences. Disabled by default because
+    /// library initialization must not silently rewrite user configuration.
+    pub enable_api_config: bool,
 }
 
 impl KicadConfig {
@@ -141,6 +145,7 @@ impl KicadConfig {
         validate_optional_path(path, "symbolDir", &self.symbol_dir)?;
         validate_optional_path(path, "footprintDir", &self.footprint_dir)?;
         validate_optional_path(path, "cliPath", &self.cli_path)?;
+        validate_optional_path(path, "pcbnewPath", &self.pcbnew_path)?;
         Ok(())
     }
 }
@@ -273,6 +278,8 @@ impl ToolConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct EngineConfig {
+    /// Schematic placement engine.
+    pub schematic_placer: SchematicPlacementEngine,
     /// PCB routing engine.
     pub pcb_router: PcbRouterEngine,
 }
@@ -280,6 +287,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
+            schematic_placer: SchematicPlacementEngine::Cluster,
             pcb_router: PcbRouterEngine::Auto,
         }
     }
@@ -289,6 +297,20 @@ impl EngineConfig {
     fn validate(&self, _path: &'static str) -> Result<(), ConfigError> {
         Ok(())
     }
+}
+
+/// Schematic placement engine selected at the application composition root.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SchematicPlacementEngine {
+    /// Annealing followed by cluster-pose and compaction polish.
+    #[default]
+    Cluster,
+    /// Simulated annealing only.
+    #[serde(alias = "sa")]
+    Anneal,
+    /// Deterministic grammar placement only.
+    Spine,
 }
 
 /// PCB routing engine.
@@ -367,6 +389,18 @@ mod tests {
         assert!(!cfg.llm.capture_reasoning);
         assert_eq!(cfg.project.schematic_filename, DEFAULT_SCHEMATIC_FILENAME);
         assert_eq!(cfg.engines.pcb_router, PcbRouterEngine::Auto);
+    }
+
+    #[test]
+    fn kicad_pcbnew_path_round_trips_in_config() {
+        let mut cfg = GordianConfig::default();
+        cfg.kicad.pcbnew_path = Some(PathBuf::from("/opt/kicad10/bin/pcbnew"));
+
+        let encoded = toml::to_string(&cfg).unwrap();
+        let decoded: GordianConfig = toml::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded.kicad.pcbnew_path, cfg.kicad.pcbnew_path);
+        decoded.validate().unwrap();
     }
 
     #[test]
@@ -551,6 +585,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(cfg.engines.pcb_router, PcbRouterEngine::Astar);
+        assert_eq!(
+            cfg.engines.schematic_placer,
+            SchematicPlacementEngine::Cluster
+        );
 
         let cfg: GordianConfig = toml::from_str(
             r#"
@@ -561,6 +599,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(cfg.engines.pcb_router, PcbRouterEngine::Sequential);
+
+        let cfg: GordianConfig = toml::from_str(
+            r#"
+            [engines]
+            schematicPlacer = "sa"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.engines.schematic_placer,
+            SchematicPlacementEngine::Anneal
+        );
     }
 
     #[test]

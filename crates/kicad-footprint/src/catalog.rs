@@ -5,13 +5,11 @@
 //! and resolver — not merely a ranking index — so it owns library/entry
 //! enumeration, raw-source access, parsed-footprint loading (memoized), fuzzy
 //! search, and did-you-mean suggestions. Platform discovery stays one layer
-//! down in [`kicad_env`]; the catalog only ever indexes a *resolved* root.
+//! down in [`kicad`]; the catalog only ever indexes a *resolved* root.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-
-use kicad_env::KicadEnv;
 
 use crate::discover::discover;
 use crate::error::{Error, Result};
@@ -105,11 +103,6 @@ impl FootprintCatalogBuilder {
         FootprintCatalogBuilder::default()
     }
 
-    /// A builder seeded with the environment's resolved footprint directory.
-    pub fn from_env(env: &KicadEnv) -> Self {
-        FootprintCatalogBuilder::new().root(env.footprint_dir.clone())
-    }
-
     /// Add a footprint root (a directory of `.pretty` libraries).
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
         self.roots.push(root.into());
@@ -172,11 +165,6 @@ impl FootprintCatalog {
     /// Start configuring a catalog.
     pub fn builder() -> FootprintCatalogBuilder {
         FootprintCatalogBuilder::new()
-    }
-
-    /// Build from the environment's resolved footprint directory.
-    pub fn from_env(env: &KicadEnv) -> Result<Self> {
-        FootprintCatalogBuilder::from_env(env).build()
     }
 
     /// Build from a single explicit footprint root.
@@ -321,12 +309,7 @@ impl FootprintCatalog {
                 .cloned()
                 .collect();
             if !hits.is_empty() {
-                hits.sort_by(|a, b| {
-                    a.name()
-                        .len()
-                        .cmp(&b.name().len())
-                        .then_with(|| a.cmp(b))
-                });
+                hits.sort_by(|a, b| a.name().len().cmp(&b.name().len()).then_with(|| a.cmp(b)));
                 return hits;
             }
         }

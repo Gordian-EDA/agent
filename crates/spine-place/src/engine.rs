@@ -1,21 +1,21 @@
 //! The `spine` placement engine: deterministic grammar typesetting.
 //!
 //! parse (net classes → chains) → modules → layered ordering → coordinates →
-//! orphan sweep → decongest/normalize → routed self-check. Falls back to the
-//! anneal engine when the shipped self-check finds truthfulness breaks or body
-//! overlaps, so it is never worse than the incumbent on correctness.
+//! orphan sweep → decongest/normalize → routed self-check.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use circuit_lang::model::Design;
 use geom::Point2;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::{PinDir as SymPinDir, SymbolMeta, find_pin};
 
 use sch_floorplan::contract::{
     PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
-    apply_cells, assign_cells, body_overlap_count, decongest, infer_ir, normalize,
+};
+use sch_floorplan::engine_support::{
+    apply_cells, assign_cells, body_overlap_count, decongest, normalize,
 };
 use sch_place::ir::LayoutIr;
 use sch_place::place::PlaceResult;
@@ -39,23 +39,17 @@ impl PlacementEngine for SpinePlace {
 
     fn place(
         &self,
-        env: &KicadEnv,
+        env: &KicadInstallation,
         design: &Design,
         problem: &mut SchematicPlaceProblem,
         ir: Option<LayoutIr>,
     ) -> PlacementOutput {
-        // A caller-AUTHORED layout (sidecar/LLM cells or a relative grid) is the
-        // author's arrangement, not a hint — half-honoring it reads worse than
-        // either engine. Those boards keep the tuned anneal path. Our own
-        // inferred frame below doesn't count: its cells are seeds, not intent.
-        if let Some(authored) = ir
-            .as_ref()
-            .filter(|ir| !ir.place.is_empty() || !ir.grid.is_empty())
-        {
-            let authored = authored.clone();
-            return anneal_place::Anneal.place(env, design, problem, Some(authored));
-        }
-        let ir = ir.unwrap_or_else(|| infer_ir(env, design));
+        // Authored cells and grids are input to this engine, not a reason to
+        // silently substitute a sibling engine. Engine selection remains a
+        // caller-owned decision.
+        let ir = ir.unwrap_or_else(|| {
+            sch_floorplan::floorplan::infer_ir_with_options(env, design, problem.options)
+        });
         for item in &mut problem.items {
             item.frozen = ir.frozen.contains(&item.refdes);
         }
@@ -111,8 +105,8 @@ impl PlacementEngine for SpinePlace {
 impl SpinePlace {
     fn place_pass(
         &self,
-        env: &KicadEnv,
-        design: &Design,
+        env: &KicadInstallation,
+        _design: &Design,
         problem: &mut SchematicPlaceProblem,
         ir: LayoutIr,
         labeled: Option<std::collections::BTreeSet<String>>,
@@ -187,7 +181,7 @@ impl SpinePlace {
             labeled.as_ref(),
             &port_nets,
         );
-        let debug = std::env::var_os("SPINE_DEBUG").is_some();
+        let debug = problem.options.debug_timing;
         if debug {
             for (ci, c) in g.chains.iter().enumerate() {
                 if !c.parts.is_empty() && !form.consumed.contains_key(&ci) {
@@ -244,7 +238,7 @@ impl SpinePlace {
         // One full placement variant: arrange (folded or not), commit, orphan
         // sweep, safety passes, truthfulness self-check with collinearity
         // stagger. Returns the metrics the fold A/B decides on.
-        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
+        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir, problem.options);
         let eval = RoutedEvaluator::new(&realizer);
         // Bundle-freed nodes: every wired chain of the node rides a BUNDLE (>=4
         // parallel nets between one item pair — always realized as labels), so
@@ -350,19 +344,6 @@ impl SpinePlace {
 
             // Crystal clusters re-seat canonically (opt-in; kept only if it
             // doesn't ADD body overlaps — dual-crystal boards collide).
-            if std::env::var_os("SPINE_IDIOM").is_some() {
-                let before: Vec<_> = items.iter().map(|it| (it.at, it.angle)).collect();
-                let overlaps_before = body_overlap_count(items);
-                if sch_floorplan::contract::align_idiom_clusters(items, &ir) {
-                    decongest(items);
-                    if body_overlap_count(items) > overlaps_before {
-                        for (it, (at, angle)) in items.iter_mut().zip(before) {
-                            it.at = at;
-                            it.angle = angle;
-                        }
-                    }
-                }
-            }
             decongest(items);
             normalize(items);
 
@@ -388,7 +369,7 @@ impl SpinePlace {
         // that lets a page-shaped layout beat an equally-clean BANNER — raw
         // area always prefers the banner and shape never wins.
         let sheet_area = |items: &[sch_place::item::Item]| -> i64 {
-            use sch_floorplan::contract::item_rect;
+            use sch_floorplan::engine_support::item_rect;
             let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
             for it in items {
                 let r = item_rect(it, it.at);
@@ -583,8 +564,8 @@ impl SpinePlace {
         }
 
         let overlaps = body_overlap_count(&problem.items);
-        if overlaps > 0 && std::env::var_os("SPINE_DEBUG").is_some() {
-            use sch_floorplan::contract::item_rect;
+        if overlaps > 0 && problem.options.debug_timing {
+            use sch_floorplan::engine_support::item_rect;
             for i in 0..problem.items.len() {
                 for j in (i + 1)..problem.items.len() {
                     let (a, b) = (&problem.items[i], &problem.items[j]);
@@ -607,21 +588,9 @@ impl SpinePlace {
             );
         }
         let crossings = eval.crossings(&problem.items);
-        let through_body = crossings.body + crossings.ic;
-        if (breaks > 0 || overlaps > 0 || through_body > 4)
-            && std::env::var_os("SPINE_NO_FALLBACK").is_none()
-        {
-            if problem.options.debug_timing {
-                eprintln!(
-                    "[spine] falling back to anneal (breaks={breaks}, overlaps={overlaps}, through_body={through_body})"
-                );
-            }
-            return anneal_place::Anneal.place(env, design, problem, Some(ir));
-        }
-
         let warnings = eval.warnings(&problem.items);
         if warnings > 0
-            && std::env::var_os("SPINE_DEBUG").is_some()
+            && problem.options.debug_timing
             && let Ok(mut w) = realizer.realize_writer(
                 None,
                 &problem.items,
@@ -648,8 +617,11 @@ impl SpinePlace {
 }
 
 /// (item, pin) → flow direction, from the symbol library's electrical types.
-fn pin_dirs(env: &KicadEnv, problem: &SchematicPlaceProblem) -> BTreeMap<(usize, String), PinDir> {
-    let table = SymbolTable::from_env(env);
+fn pin_dirs(
+    env: &KicadInstallation,
+    problem: &SchematicPlaceProblem,
+) -> BTreeMap<(usize, String), PinDir> {
+    let table = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let mut meta_cache: BTreeMap<String, Option<SymbolMeta>> = BTreeMap::new();
     let mut dirs = BTreeMap::new();
     for (i, it) in problem.items.iter().enumerate() {

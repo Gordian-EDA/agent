@@ -10,7 +10,7 @@ use std::time::Instant;
 use anyhow::{Context, anyhow, bail};
 use gordian_core::AgentRuntime;
 use gordian_core::tools::run_tool;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use serde_json::{Value, json};
 
 fn run_step(ctx: &AgentRuntime, name: &str, input: Value) -> anyhow::Result<Value> {
@@ -60,7 +60,8 @@ fn main() -> anyhow::Result<()> {
 
     let yaml = std::fs::read_to_string(&fixture)
         .with_context(|| format!("reading {}", fixture.display()))?;
-    let env = KicadEnv::detect().ok_or_else(|| anyhow!("no KiCad environment detected"))?;
+    let env =
+        KicadInstallation::detect().ok_or_else(|| anyhow!("no KiCad environment detected"))?;
     let ctx = AgentRuntime::for_project(env, output.clone())?;
     ctx.workspace().write_draft(&yaml, None)?;
 

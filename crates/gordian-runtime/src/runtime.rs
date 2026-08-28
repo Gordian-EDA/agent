@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_footprint::FootprintCatalog;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::search::SymbolIndex;
@@ -24,7 +24,7 @@ use crate::config::GordianConfig;
 /// It is not process-global, so hosted or multi-tenant callers can construct a
 /// fresh runtime for each request/session.
 pub struct AgentRuntime {
-    env: KicadEnv,
+    env: KicadInstallation,
     /// Client-supplied typed config. Persistence belongs to the frontend.
     config: GordianConfig,
     /// Project-local files and persistent state.
@@ -72,13 +72,13 @@ impl AgentRuntime {
     ///
     /// `project_dir` must exist; `sch_path` is the schematic the tools read and
     /// write. The schematic itself need not exist yet.
-    pub fn new(env: KicadEnv, project_dir: PathBuf, sch_path: PathBuf) -> Result<Self> {
+    pub fn new(env: KicadInstallation, project_dir: PathBuf, sch_path: PathBuf) -> Result<Self> {
         Self::new_with_config(env, project_dir, sch_path, GordianConfig::default())
     }
 
     /// Build a runtime for an existing project directory with typed config.
     pub fn new_with_config(
-        env: KicadEnv,
+        env: KicadInstallation,
         project_dir: PathBuf,
         sch_path: PathBuf,
         config: GordianConfig,
@@ -89,10 +89,19 @@ impl AgentRuntime {
         validate_project_schematic_path(&project_dir, &sch_path)?;
         let project = ProjectContext::for_project(project_dir, sch_path)?;
         ensure_project_files(&env, &project.project_dir, &project.sch_path)?;
-        let provider = SymbolTable::from_env(&env);
+        let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
+        let pcbnew_path = env.pcbnew_path().to_path_buf();
+        let kicad_major = env.major_version();
         Ok(Self {
             env,
-            services: ToolServices::new(provider, None, config.kicad.attach_running),
+            services: ToolServices::new(
+                provider,
+                None,
+                config.kicad.attach_running,
+                pcbnew_path,
+                kicad_major,
+                config.kicad.enable_api_config,
+            ),
             project,
             config,
             _tempdir: None,
@@ -101,14 +110,14 @@ impl AgentRuntime {
 
     /// Build a runtime for a real project directory using the default schematic
     /// filename.
-    pub fn for_project(env: KicadEnv, project_dir: PathBuf) -> Result<Self> {
+    pub fn for_project(env: KicadInstallation, project_dir: PathBuf) -> Result<Self> {
         Self::for_project_with_config(env, project_dir, GordianConfig::default())
     }
 
     /// Build a runtime for a real project directory using the configured
     /// schematic filename.
     pub fn for_project_with_config(
-        env: KicadEnv,
+        env: KicadInstallation,
         project_dir: PathBuf,
         config: GordianConfig,
     ) -> Result<Self> {
@@ -124,16 +133,18 @@ impl AgentRuntime {
     /// Detect a real KiCAD installation and build a runtime over a fresh
     /// temporary project. Returns `None` when no KiCAD is found.
     pub fn detect_for_test() -> Option<Self> {
-        let env = KicadEnv::detect()?;
+        let env = KicadInstallation::detect()?;
         let tempdir = tempfile::tempdir().ok()?;
         let project_dir = tempdir.path().to_path_buf();
         let sch_path = project_dir.join("project.kicad_sch");
         let project = ProjectContext::for_project(project_dir, sch_path).ok()?;
-        let provider = SymbolTable::from_env(&env);
+        let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
+        let pcbnew_path = env.pcbnew_path().to_path_buf();
+        let kicad_major = env.major_version();
         Some(Self {
             env,
             project,
-            services: ToolServices::new(provider, None, false),
+            services: ToolServices::new(provider, None, false, pcbnew_path, kicad_major, false),
             config: GordianConfig::default(),
             _tempdir: Some(tempdir),
         })
@@ -142,17 +153,30 @@ impl AgentRuntime {
     /// Build a runtime over a fresh temporary project whose footprint index is
     /// sourced from `footprint_dir` instead of an installed KiCAD share dir.
     pub fn with_footprint_dir_for_test(footprint_dir: PathBuf) -> Option<Self> {
-        let env = KicadEnv::detect()
-            .unwrap_or_else(|| KicadEnv::with_symbol_dir(PathBuf::from("/nonexistent")));
+        let env = KicadInstallation::detect().unwrap_or_else(|| {
+            KicadInstallation::for_library_tests(
+                PathBuf::from("/nonexistent"),
+                PathBuf::from("/nonexistent"),
+            )
+        });
         let tempdir = tempfile::tempdir().ok()?;
         let project_dir = tempdir.path().to_path_buf();
         let sch_path = project_dir.join("project.kicad_sch");
         let project = ProjectContext::for_project(project_dir, sch_path).ok()?;
-        let provider = SymbolTable::from_env(&env);
+        let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
+        let pcbnew_path = env.pcbnew_path().to_path_buf();
+        let kicad_major = env.major_version();
         Some(Self {
             env,
             project,
-            services: ToolServices::new(provider, Some(footprint_dir), false),
+            services: ToolServices::new(
+                provider,
+                Some(footprint_dir),
+                false,
+                pcbnew_path,
+                kicad_major,
+                false,
+            ),
             config: GordianConfig::default(),
             _tempdir: Some(tempdir),
         })
@@ -179,7 +203,7 @@ impl AgentRuntime {
     }
 
     /// The detected KiCAD environment.
-    pub fn env(&self) -> &KicadEnv {
+    pub fn env(&self) -> &KicadInstallation {
         &self.env
     }
 
@@ -208,7 +232,7 @@ impl AgentRuntime {
         if let Some(idx) = self.services.index.get() {
             return Ok(idx);
         }
-        let idx = SymbolIndex::build(&self.env).context("building symbol index")?;
+        let idx = SymbolIndex::build(self.env.symbol_dir()).context("building symbol index")?;
         let _ = self.services.index.set(idx);
         Ok(self.services.index.get().expect("index just set"))
     }
@@ -221,7 +245,8 @@ impl AgentRuntime {
         let catalog = match &self.services.footprint_dir_override {
             Some(dir) => FootprintCatalog::from_root(dir)
                 .with_context(|| format!("building footprint catalog from {}", dir.display()))?,
-            None => FootprintCatalog::from_env(&self.env).context("building footprint catalog")?,
+            None => FootprintCatalog::from_root(self.env.footprint_dir())
+                .context("building footprint catalog")?,
         };
         let _ = self.services.footprint_catalog.set(catalog);
         Ok(self
@@ -254,7 +279,11 @@ fn validate_project_schematic_path(project_dir: &Path, sch_path: &Path) -> Resul
     Ok(())
 }
 
-fn ensure_project_files(env: &KicadEnv, project_dir: &Path, sch_path: &Path) -> Result<()> {
+fn ensure_project_files(
+    env: &KicadInstallation,
+    project_dir: &Path,
+    sch_path: &Path,
+) -> Result<()> {
     write_project_file(sch_path)?;
     write_sym_lib_table(env, project_dir)?;
     write_fp_lib_table(env, project_dir)?;
@@ -309,14 +338,14 @@ fn write_project_file(sch_path: &Path) -> Result<()> {
     std::fs::write(&path, format!("{out}\n")).with_context(|| format!("writing {}", path.display()))
 }
 
-fn write_sym_lib_table(env: &KicadEnv, project_dir: &Path) -> Result<()> {
+fn write_sym_lib_table(env: &KicadInstallation, project_dir: &Path) -> Result<()> {
     let path = project_dir.join("sym-lib-table");
     if path.exists() {
         return Ok(());
     }
     let mut libs = Vec::new();
-    for entry in std::fs::read_dir(&env.symbol_dir)
-        .with_context(|| format!("reading symbol dir {}", env.symbol_dir.display()))?
+    for entry in std::fs::read_dir(env.symbol_dir())
+        .with_context(|| format!("reading symbol dir {}", env.symbol_dir().display()))?
     {
         let entry = entry?;
         let path = entry.path();
@@ -341,14 +370,14 @@ fn write_sym_lib_table(env: &KicadEnv, project_dir: &Path) -> Result<()> {
     std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))
 }
 
-fn write_fp_lib_table(env: &KicadEnv, project_dir: &Path) -> Result<()> {
+fn write_fp_lib_table(env: &KicadInstallation, project_dir: &Path) -> Result<()> {
     let path = project_dir.join("fp-lib-table");
     if path.exists() {
         return Ok(());
     }
     let mut libs = Vec::new();
-    for entry in std::fs::read_dir(&env.footprint_dir)
-        .with_context(|| format!("reading footprint dir {}", env.footprint_dir.display()))?
+    for entry in std::fs::read_dir(env.footprint_dir())
+        .with_context(|| format!("reading footprint dir {}", env.footprint_dir().display()))?
     {
         let entry = entry?;
         let path = entry.path();
@@ -390,13 +419,21 @@ impl ToolServices {
         provider: SymbolTable,
         footprint_dir_override: Option<PathBuf>,
         attach_running_kicad: bool,
+        pcbnew_path: PathBuf,
+        expected_kicad_major: Option<u32>,
+        enable_api_config: bool,
     ) -> Self {
         Self {
             provider,
             index: OnceLock::new(),
             footprint_catalog: OnceLock::new(),
             footprint_dir_override,
-            kicad: kicad_ipc::SessionManager::with_attach_running(attach_running_kicad),
+            kicad: kicad_ipc::SessionManager::with_installation(
+                pcbnew_path,
+                expected_kicad_major,
+                attach_running_kicad,
+                enable_api_config,
+            ),
         }
     }
 }
@@ -405,16 +442,16 @@ impl ToolServices {
 mod tests {
     use super::*;
 
-    fn fixture_env(root: &Path) -> KicadEnv {
+    fn fixture_env(root: &Path) -> KicadInstallation {
         let symbols = root.join("symbols");
         let footprints = root.join("footprints");
         std::fs::create_dir_all(&symbols).expect("symbols dir");
         std::fs::create_dir_all(&footprints).expect("footprints dir");
-        KicadEnv::with_library_dirs(symbols, footprints)
+        KicadInstallation::for_library_tests(symbols, footprints)
     }
 
     fn assert_explicit_path_rejected_without_writes(
-        env: &KicadEnv,
+        env: &KicadInstallation,
         project_dir: PathBuf,
         sch_path: PathBuf,
         case: &str,
@@ -465,7 +502,7 @@ mod tests {
 
         let project = temp.path().join("project");
         std::fs::create_dir_all(&project).expect("project dir");
-        let env = KicadEnv::with_library_dirs(symbols, footprints);
+        let env = KicadInstallation::for_library_tests(symbols, footprints);
 
         ensure_project_files(&env, &project, &project.join("design.kicad_sch"))
             .expect("project files");

@@ -1,8 +1,4 @@
-//! KiCAD installation and library path discovery.
-//!
-//! This crate is the shared compatibility layer for locating KiCAD resources.
-//! Higher-level crates should depend on it rather than deriving install paths
-//! from each other.
+//! KiCad installation and library path discovery.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -33,26 +29,35 @@ const KNOWN_CLI_PATHS: &[&str] = &[
     "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
 ];
 
+/// Known `pcbnew` locations, checked when it is not beside the selected CLI or
+/// on `PATH`.
+const KNOWN_PCBNEW_PATHS: &[&str] = &[
+    "/Applications/KiCad.app/Contents/MacOS/pcbnew",
+    "/Applications/KiCad/KiCad.app/Contents/MacOS/pcbnew",
+];
+
 /// A discovered KiCAD installation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KicadEnv {
+pub struct KicadInstallation {
     /// Directory containing `*.kicad_sym` libraries.
-    pub symbol_dir: PathBuf,
+    symbol_dir: PathBuf,
     /// Directory containing `*.pretty` footprint libraries.
-    pub footprint_dir: PathBuf,
+    footprint_dir: PathBuf,
     /// Path to the `kicad-cli` executable.
-    pub cli_path: PathBuf,
+    cli_path: PathBuf,
+    /// Path to the matching PCB editor used for live IPC sessions.
+    pcbnew_path: PathBuf,
     /// Output of `kicad-cli version`, e.g. `10.0.3`.
-    pub cli_version: String,
+    cli_version: String,
 }
 
-impl KicadEnv {
+impl KicadInstallation {
     /// Discover an installed KiCAD. Returns `None` if required resources cannot
     /// be found.
     ///
     /// Checks known install paths for libraries and `PATH` for `kicad-cli`.
     pub fn detect() -> Option<Self> {
-        Self::detect_with(None, None, None)
+        Self::detect_with(None, None, None, None)
     }
 
     /// Discover KiCAD using explicit overrides where provided, then known
@@ -61,6 +66,7 @@ impl KicadEnv {
         symbol_dir: Option<&Path>,
         footprint_dir: Option<&Path>,
         cli_path: Option<&Path>,
+        pcbnew_path: Option<&Path>,
     ) -> Option<Self> {
         let symbol_dir = detect_symbol_dir(symbol_dir)?;
         let footprint_dir = detect_footprint_dir(&symbol_dir, footprint_dir)?;
@@ -70,40 +76,63 @@ impl KicadEnv {
             None => find_in_path("kicad-cli")?,
         };
         let cli_version = cli_version(&cli_path)?;
+        if !supported_version(&cli_version) {
+            return None;
+        }
+        let pcbnew_path = detect_pcbnew_path(&cli_path, pcbnew_path)?;
         Some(Self {
             symbol_dir,
             footprint_dir,
             cli_path,
+            pcbnew_path,
             cli_version,
         })
     }
 
-    /// Build an environment pointing at an arbitrary symbol directory
-    /// (for tests and unsupported distros). CLI fields are placeholders.
-    ///
-    /// The footprint directory is derived as the sibling `footprints` directory.
-    pub fn with_symbol_dir(symbol_dir: PathBuf) -> Self {
-        let footprint_dir = sibling_footprint_dir(&symbol_dir);
-        Self::with_library_dirs(symbol_dir, footprint_dir)
-    }
-
-    /// Build an environment with explicit symbol and footprint directories.
-    pub fn with_library_dirs(symbol_dir: PathBuf, footprint_dir: PathBuf) -> Self {
+    /// Build a library-only fixture with no executable installation.
+    #[doc(hidden)]
+    pub fn for_library_tests(symbol_dir: PathBuf, footprint_dir: PathBuf) -> Self {
         Self {
             symbol_dir,
             footprint_dir,
             cli_path: PathBuf::new(),
+            pcbnew_path: PathBuf::new(),
             cli_version: "0".to_string(),
         }
     }
+
+    pub fn major_version(&self) -> Option<u32> {
+        version_major(&self.cli_version)
+    }
+
+    pub fn symbol_dir(&self) -> &Path {
+        &self.symbol_dir
+    }
+
+    pub fn footprint_dir(&self) -> &Path {
+        &self.footprint_dir
+    }
+
+    pub fn cli_path(&self) -> &Path {
+        &self.cli_path
+    }
+
+    pub fn pcbnew_path(&self) -> &Path {
+        &self.pcbnew_path
+    }
+
+    pub fn version(&self) -> &str {
+        &self.cli_version
+    }
+}
+
+fn supported_version(version: &str) -> bool {
+    matches!(version_major(version), Some(9 | 10))
 }
 
 fn detect_symbol_dir(configured: Option<&Path>) -> Option<PathBuf> {
     if let Some(dir) = configured {
         return dir.is_dir().then(|| dir.to_path_buf());
-    }
-    if let Some(dir) = env_dir("KICAD_SYMBOL_DIR") {
-        return Some(dir);
     }
     KNOWN_SYMBOL_DIRS
         .iter()
@@ -114,9 +143,6 @@ fn detect_symbol_dir(configured: Option<&Path>) -> Option<PathBuf> {
 fn detect_footprint_dir(symbol_dir: &Path, configured: Option<&Path>) -> Option<PathBuf> {
     if let Some(dir) = configured {
         return dir.is_dir().then(|| dir.to_path_buf());
-    }
-    if let Some(dir) = env_dir("KICAD_FOOTPRINT_DIR") {
-        return Some(dir);
     }
     let sibling = sibling_footprint_dir(symbol_dir);
     if sibling.is_dir() {
@@ -136,18 +162,12 @@ fn sibling_footprint_dir(symbol_dir: &Path) -> PathBuf {
 }
 
 fn find_in_path(name: &str) -> Option<PathBuf> {
-    if name == "kicad-cli"
-        && let Some(path) = env_file("KICAD_CLI_PATH")
-    {
-        return Some(path);
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        if let Some(found) = std::env::split_paths(&path)
+    if let Some(path) = std::env::var_os("PATH")
+        && let Some(found) = std::env::split_paths(&path)
             .map(|dir| dir.join(name))
             .find(|candidate| candidate.is_file())
-        {
-            return Some(found);
-        }
+    {
+        return Some(found);
     }
     if name == "kicad-cli" {
         return KNOWN_CLI_PATHS
@@ -158,16 +178,22 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-fn env_dir(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name)
+fn detect_pcbnew_path(cli_path: &Path, configured: Option<&Path>) -> Option<PathBuf> {
+    if let Some(path) = configured {
+        return path.is_file().then(|| path.to_path_buf());
+    }
+    if let Some(sibling) = cli_path.parent().map(|parent| parent.join("pcbnew"))
+        && sibling.is_file()
+    {
+        return Some(sibling);
+    }
+    if let Some(found) = find_in_path("pcbnew") {
+        return Some(found);
+    }
+    KNOWN_PCBNEW_PATHS
+        .iter()
         .map(PathBuf::from)
-        .filter(|path| path.is_dir())
-}
-
-fn env_file(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name)
-        .map(PathBuf::from)
-        .filter(|path| path.is_file())
+        .find(|path| path.is_file())
 }
 
 fn cli_version(cli_path: &Path) -> Option<String> {
@@ -177,4 +203,29 @@ fn cli_version(cli_path: &Path) -> Option<String> {
     }
     let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!version.is_empty()).then_some(version)
+}
+
+fn version_major(version: &str) -> Option<u32> {
+    version
+        .trim()
+        .split('.')
+        .next()?
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::supported_version;
+
+    #[test]
+    fn supports_maintained_kicad_versions() {
+        assert!(supported_version("9.0.2+dfsg-1"));
+        assert!(supported_version("9.0.3"));
+        assert!(supported_version("10.0.5"));
+        assert!(!supported_version("11.0.0"));
+    }
 }

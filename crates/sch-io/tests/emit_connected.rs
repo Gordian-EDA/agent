@@ -4,13 +4,12 @@
 //! label endpoints actually land on the pins. SKIP-graceful when no KiCAD is
 //! detected; runs against KiCAD 10 here.
 
-use kicad_cli::KicadCli;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use sch_io::write::SchematicWriter;
 
 #[test]
 fn two_pins_same_net_name_are_electrically_connected() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
@@ -35,7 +34,7 @@ fn two_pins_same_net_name_are_electrically_connected() {
 
     // The netlist is the authoritative proof: SIG joins R1.1 and R2.1 (2 nodes),
     // connectivity established purely by the same-named labels.
-    let nl = KicadCli::new(&env).netlist(tmp.path()).unwrap();
+    let nl = env.netlist(tmp.path()).unwrap();
     let sig = nl
         .nets
         .iter()
@@ -44,7 +43,7 @@ fn two_pins_same_net_name_are_electrically_connected() {
     assert_eq!(sig.nodes.len(), 2, "SIG net must join exactly 2 pins");
 
     // No off-grid endpoint ERC violations: the labels land cleanly on the grid.
-    let report = KicadCli::new(&env).erc(tmp.path()).unwrap();
+    let report = env.erc(tmp.path()).unwrap();
     assert_eq!(
         report
             .violations
@@ -64,7 +63,7 @@ fn two_pins_same_net_name_are_electrically_connected() {
 /// endpoints are computed correctly.
 #[test]
 fn rotated_symbols_pins_land_on_the_same_nets() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
@@ -88,7 +87,7 @@ fn rotated_symbols_pins_land_on_the_same_nets() {
         .unwrap();
     std::fs::write(tmp.path(), &text).unwrap();
 
-    let nl = KicadCli::new(&env).netlist(tmp.path()).unwrap();
+    let nl = env.netlist(tmp.path()).unwrap();
     let sig = nl
         .nets
         .iter()
@@ -102,7 +101,7 @@ fn rotated_symbols_pins_land_on_the_same_nets() {
         .expect("GND net present");
     assert_eq!(gnd.nodes.len(), 3, "GND must join all three rotated pin-2s");
 
-    let report = KicadCli::new(&env).erc(tmp.path()).unwrap();
+    let report = env.erc(tmp.path()).unwrap();
     assert_eq!(
         report
             .violations

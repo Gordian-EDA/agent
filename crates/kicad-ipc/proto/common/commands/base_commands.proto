@@ -40,7 +40,7 @@ message Ping
 // Returns the full path to the given KiCad binary
 message GetKiCadBinaryPath
 {
-  // The short name of the binary, such as `kicad-cli` or `kicad-cli.exe`.  If on Windows, an `.exe`
+  // The short name of the binary, such as `kicad` or `kicad.exe`.  If on Windows, an `.exe`
   // extension will be assumed if not present.
   string binary_name = 1;
 }

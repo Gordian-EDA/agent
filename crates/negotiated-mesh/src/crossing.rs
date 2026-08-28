@@ -14,7 +14,7 @@
 //! orders, each holding the leaf's terminals (pad points, boundary entry/exit
 //! points, via sites) with mm positions and layers — exactly what the per-cell
 //! router ([`crate::detail`], Task 2) iterates over. It is deliberately
-//! independent of [`crate::grid`] / [`crate::astar`]; it consumes the public
+//! independent of [`grid_astar::grid`] / [`grid_astar::astar`]; it consumes the public
 //! [`CapacityMesh`] / [`GlobalPlan`] API and the [`RouteProblem`] obstacle model.
 //!
 //! ## Algorithm
@@ -56,12 +56,12 @@
 //! breaks ties by net name; the spiral is a fixed sequence. Two runs serialize
 //! byte-for-byte (a determinism test asserts this).
 
-use crate::grid::grid_pitch;
 use crate::mesh::{CapacityMesh, LeafId};
 use crate::pathing::GlobalPlan;
-use crate::problem::Rect;
-use crate::problem::{LayerRef, Point2, RouteProblem};
 use geom::{BoundaryAxis, STRICT_EPS, SharedBoundary};
+use grid_astar::grid::grid_pitch;
+use pcb_model::Rect;
+use pcb_model::{LayerRef, Point2, RouteProblem};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -1077,7 +1077,7 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
 mod tests {
     use super::*;
     use crate::pathing::{CellPath, CellStep, GlobalPlan, NetPlan, global_route};
-    use crate::problem::{Connection, Obstacle, Rect, RoutePoint};
+    use pcb_model::{Connection, Obstacle, Rect, RoutePoint};
     use std::path::Path;
 
     fn load(name: &str) -> RouteProblem {

@@ -4,12 +4,12 @@
 //! Usage: cargo run --release -p gordian-core --example lift_roundtrip -- <file.kicad_sch> [...]
 //! Exits nonzero if any lifted YAML fails to compile.
 
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 
 fn main() -> anyhow::Result<()> {
-    let env = KicadEnv::detect().expect("no KiCAD environment");
-    let provider = SymbolTable::from_env(&env);
+    let env = KicadInstallation::detect().expect("no KiCAD environment");
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let mut bad = 0;
     for path in std::env::args().skip(1) {
         let yaml = match sch_io::read::lift(&env, std::path::Path::new(&path)) {

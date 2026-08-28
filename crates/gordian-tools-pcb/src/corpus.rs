@@ -10,8 +10,8 @@ use std::path::Path;
 
 use kicad_footprint::{FootprintCatalog, FootprintId};
 use kicad_ipc::FootprintMove;
-use place_model::{Edge, GroupHint, Placement, PlacementHints};
 use pcb_model::{LayerRef, Obstacle, Point2, Polygon, Rect, RouteProblem, RouteSolution};
+use place_model::{Edge, GroupHint, Placement, PlacementHints};
 use place_model::{LockedAt, PlaceProblem};
 use serde::Deserialize;
 
@@ -175,7 +175,7 @@ pub fn run_kicad_drc(
     placements: &[Placement],
     solution: &RouteSolution,
     catalog: &FootprintCatalog,
-    env: &kicad_env::KicadEnv,
+    env: &kicad::KicadInstallation,
 ) -> std::result::Result<CorpusDrcResult, String> {
     let text = routed_board_text(board, placements, solution, catalog)?;
     let dir = tempfile::Builder::new()
@@ -185,11 +185,16 @@ pub fn run_kicad_drc(
     let path = dir.path().join("corpus.kicad_pcb");
     std::fs::write(&path, text)
         .map_err(|e| format!("could not write temporary routed board: {e}"))?;
-    let sessions = kicad_ipc::SessionManager::new();
+    let sessions = kicad_ipc::SessionManager::with_installation(
+        env.pcbnew_path().to_path_buf(),
+        env.major_version(),
+        false,
+        false,
+    );
     let materialized = super::export::materialize_zones_for_drc(&path, env, &sessions);
     sessions.close();
     materialized?;
-    let report = kicad_cli::KicadCli::new(env)
+    let report = env
         .drc(&path)
         .map_err(|e| format!("kicad-cli pcb drc failed: {e}"))?;
     let gate = super::export::gate_drc(&report);

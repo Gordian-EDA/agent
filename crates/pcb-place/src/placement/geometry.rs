@@ -1,7 +1,7 @@
 //! Engine-private placement geometry constants and edge affinity.
 
+use pcb_model::{Point2, Rect};
 use place_model::{Edge, EdgeDatum, Part};
-use crate::problem::{Point2, Rect};
 
 // Shared placement geometry.
 pub(crate) use place_model::{

@@ -4,31 +4,27 @@
 //! nearest board edge, keep the crystal by the MCU. Proves the refactored tools
 //! reach a clean (critic-9+) layout when driven.
 //!
-//!   cargo run -p kicad-ipc --example refine_placement -- BOARD.kicad_pcb [RING_MM]
+//!   cargo run -p kicad-ipc --example refine_placement -- PCBNEW BOARD.kicad_pcb [RING_MM]
 
-use kicad_ipc::proto::kiapi::common::types::Vector2;
-use kicad_ipc::{Session, footprint_reference};
+use kicad_ipc::{FootprintPosition, Session};
 use std::path::Path;
 
 const NM: f64 = 1_000_000.0;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let board = std::env::args().nth(1).expect("board path");
-    let ring_mm: f64 = std::env::args()
-        .nth(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(7.5);
+    let mut args = std::env::args().skip(1);
+    let pcbnew = args.next().expect("pcbnew path");
+    let board = args.next().expect("board path");
+    let ring_mm: f64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(7.5);
 
-    let mut session = Session::launch_headless(Path::new(&board))?;
+    let mut session = Session::launch_headless_with(Path::new(&pcbnew), Path::new(&board))?;
     let k = session.kicad();
-    let fps = k.footprints()?;
+    let fps = k.footprint_positions()?;
 
     // Classify by reference designator prefix.
-    let refs: Vec<(String, Vector2)> = fps
-        .iter()
-        .map(|f| (footprint_reference(f), f.position.unwrap_or_default()))
-        .collect();
-    let pos = |pred: &dyn Fn(&str) -> bool| -> Vec<(String, Vector2)> {
+    let refs: Vec<(String, FootprintPosition)> =
+        fps.into_iter().map(|f| (f.reference.clone(), f)).collect();
+    let pos = |pred: &dyn Fn(&str) -> bool| -> Vec<(String, FootprintPosition)> {
         refs.iter().filter(|(r, _)| pred(r)).cloned().collect()
     };
     let ics = pos(&|r| r.starts_with('U'));

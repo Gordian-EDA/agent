@@ -6,8 +6,7 @@
 //! Usage: cargo run --release -p agent --example render_targets [name ...]
 //! With no args, renders all four targets.
 
-use kicad_cli::KicadCli;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 
 const TARGETS: &[&str] = &[
@@ -18,7 +17,7 @@ const TARGETS: &[&str] = &[
 ];
 
 fn main() -> anyhow::Result<()> {
-    let env = KicadEnv::detect().expect("no KiCAD environment detected");
+    let env = KicadInstallation::detect().expect("no KiCAD environment detected");
     let dir = std::path::Path::new("crates/sch-floorplan/tests/fixtures/validation");
     let out_dir = std::path::Path::new("/tmp/renders");
     std::fs::create_dir_all(out_dir)?;
@@ -42,12 +41,12 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn render_fixture(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     yaml_path: &std::path::Path,
     out: &std::path::Path,
 ) -> anyhow::Result<()> {
     let src = std::fs::read_to_string(yaml_path)?;
-    let provider = SymbolTable::from_env(env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let result = circuit_lang::compile(&src, &provider);
     let design = result.design.ok_or_else(|| {
         let errs: Vec<String> = result
@@ -89,7 +88,7 @@ fn render_fixture(
     let svg_dir = tempfile::tempdir()?;
     // Exclude the drawing sheet (page border + title block) so the render is
     // content-only, matching the zoomed-to-content reference screenshots.
-    let svg_path = KicadCli::new(env).export_svg_opts(&sch_path, svg_dir.path(), true)?;
+    let svg_path = env.export_svg_opts(&sch_path, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
     let png = gordian_runtime::render::svg_to_png(&svg, 1600)?;
     std::fs::write(out, png)?;

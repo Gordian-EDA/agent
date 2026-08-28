@@ -12,11 +12,9 @@
 //! [`lint::drop_unconnected_copper`]) built on top of the report. A third party
 //! adds a rule against `drc-core` directly, with no edit here.
 //!
-//! Shared types come from `pcb-model` (re-exported here as [`problem`]). The
+//! Shared types come directly from `pcb-model`. The
 //! report type [`DrcViolation`] (= [`drc_core::Finding`]) is re-exported at
 //! the crate root for convenience.
-
-pub use pcb_model as problem;
 
 pub mod connectivity;
 pub mod lint;

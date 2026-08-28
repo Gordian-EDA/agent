@@ -17,7 +17,11 @@ ephemeralCache = true
 # symbolDir = "/usr/share/kicad/symbols"
 # footprintDir = "/usr/share/kicad/footprints"
 # cliPath = "/usr/bin/kicad-cli"
+# pcbnewPath = "/usr/bin/pcbnew"
 attachRunning = false
+# Allow managed launch to enable KiCad's IPC server for the selected major.
+# This is an explicit config mutation opt-in; ordinary discovery never rewrites it.
+enableApiConfig = false
 
 [project]
 schematicFilename = "design.kicad_sch"
@@ -36,5 +40,7 @@ defaultSearchLimit = 8
 renderMaxPx = 1600
 
 [engines]
+# Schematic placement implementation: cluster | anneal | spine
+schematicPlacer = "cluster"
 # pcbRouter: "auto" (A* + mesh selector), "astar", or "mesh"
 pcbRouter = "auto"

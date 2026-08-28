@@ -13,20 +13,23 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use circuit_graph::netclass::is_power_net;
 use circuit_lang::model::Design;
 use geom::{EPS, Point2, Rect};
+use kicad::KicadInstallation;
 use sch_place::ir::{LayoutIr, Orient};
 use sch_place::item::{Incidence, Item};
-use circuit_graph::netclass::is_power_net;
 use sch_place::place::{Crossings, PlaceResult};
 
 use sch_floorplan::contract::{
-    COL_GAP, FAST_PINS, GRID_KEY, KicadEnv, PlacementEngine, PlacementOutput, ROW_GAP, RawMetrics,
-    RouteRealization, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
-    align_idiom_clusters, align_led_chains, align_rail_cap_rows, apply_cells, assign_cells,
-    body_overlap_count, build_anchor_blocks, cluster_group, cohesion_targets, decongest,
-    grid_order_viol, infer_ir, item_rect, multi_unit_siblings, normalize, orient_angle,
-    overlaps_any, pin_endpoint, signal_anchor_centroid, supply_pin_target,
+    PlacementEngine, PlacementOutput, RawMetrics, RouteRealization, RoutedEvaluator,
+    RoutedSheetRealizer, SchematicPlaceProblem,
+};
+use sch_floorplan::engine_support::{
+    COL_GAP, FAST_PINS, GRID_KEY, ROW_GAP, align_idiom_clusters, align_led_chains,
+    align_rail_cap_rows, apply_cells, assign_cells, body_overlap_count, build_anchor_blocks,
+    cluster_group, cohesion_targets, decongest, grid_order_viol, item_rect, multi_unit_siblings,
+    normalize, orient_angle, overlaps_any, pin_endpoint, signal_anchor_centroid, supply_pin_target,
 };
 
 /// Simulated annealing: a seeded refine→anneal AND a broad anneal from the
@@ -40,12 +43,14 @@ impl PlacementEngine for Anneal {
 
     fn place(
         &self,
-        env: &KicadEnv,
+        env: &KicadInstallation,
         design: &Design,
         problem: &mut SchematicPlaceProblem,
         ir: Option<LayoutIr>,
     ) -> PlacementOutput {
-        let ir = ir.unwrap_or_else(|| infer_ir(env, design));
+        let ir = ir.unwrap_or_else(|| {
+            sch_floorplan::floorplan::infer_ir_with_options(env, design, problem.options)
+        });
         for it in &mut problem.items {
             it.mirror = ir.mirror.contains(&it.refdes);
             it.frozen = ir.frozen.contains(&it.refdes);
@@ -67,7 +72,7 @@ impl PlacementEngine for Anneal {
             decongest(&mut problem.items);
         }
 
-        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
+        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir, problem.options);
         let eval = RoutedEvaluator::new(&realizer);
         PlacementOutput {
             result: report(self.name(), problem, &eval),
@@ -530,13 +535,14 @@ impl Rng {
 /// (the calling [`PlacementEngine`]'s name). Behaviour is byte-identical to the old
 /// inline `Anneal::place` body — this is code-MOTION, not a re-tune.
 pub fn anneal_place(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     problem: &mut SchematicPlaceProblem,
     ir: &LayoutIr,
     engine: &'static str,
 ) -> PlaceResult {
     let inc = &problem.inc;
-    let realizer = RoutedSheetRealizer::new(env, inc, ir);
+    let realizer =
+        RoutedSheetRealizer::new(env, inc, ir, sch_place::place::PlaceOptions::default());
     let eval = RoutedEvaluator::new(&realizer);
     let seed = problem.seed;
     use rayon::prelude::*;

@@ -1,0 +1,1 @@
+In the existing routed PCB, replace R1 with a 4.7k 0603 resistor. Update both the schematic and PCB, but preserve R2, the board outline, and the rest of the placement as much as possible. Re-route only what is necessary and finish with checks and renders.

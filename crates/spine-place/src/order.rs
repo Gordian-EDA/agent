@@ -275,7 +275,7 @@ pub fn arrange(
         }
     }
 
-    if std::env::var_os("SPINE_DEBUG").is_some() {
+    if crate::DEBUG_DIAGNOSTICS {
         for v in 0..n_total {
             let name = if v < n_scene {
                 scene.nodes[v]

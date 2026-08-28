@@ -23,7 +23,6 @@ use serde_json::{Value, json};
 
 use crate::AgentRuntime;
 
-
 /// How a tool affects the world — the loop's dispatch discriminator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolEffect {
@@ -207,7 +206,6 @@ pub fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
     }
     report
 }
-
 
 /// `"; suggestions: a, b"` for a non-empty candidate list, empty otherwise —
 /// a diagnostic never ends in a dangling `suggestions:`.

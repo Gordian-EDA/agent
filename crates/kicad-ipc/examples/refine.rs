@@ -4,28 +4,28 @@
 //! render to confirm the IPC round-trip preserved the board.
 //!
 //! ```text
-//! cargo run -p kicad-ipc --example refine -- /tmp/pcb-harness/dual-bga-bus/board.kicad_pcb
+//! cargo run -p kicad-ipc --example refine -- /path/to/pcbnew /tmp/board.kicad_pcb
 //! ```
 
 use kicad_ipc::Session;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let board = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "/tmp/pcb-harness/dual-bga-bus/board.kicad_pcb".to_string());
+    let mut args = std::env::args().skip(1);
+    let pcbnew = args.next().expect("pcbnew path");
+    let board = args.next().expect("board path");
 
-    let mut session = Session::launch_headless(Path::new(&board))?;
+    let mut session = Session::launch_headless_with(Path::new(&pcbnew), Path::new(&board))?;
     let k = session.kicad();
 
-    let fps = k.footprints()?;
-    let tracks = k.tracks()?;
+    let footprint_count = k.footprint_positions()?.len();
+    let track_count = k.track_count()?;
     let nets = k.nets()?;
     println!(
         "opened {}: {} footprints, {} tracks, {} nets",
         board,
-        fps.len(),
-        tracks.len(),
+        footprint_count,
+        track_count,
         nets.len()
     );
 

@@ -16,14 +16,14 @@ use crate::heuristics::{
     connection_segment_obstacle_pressure_um, connection_span_um,
 };
 use crate::layer_hop::LayerHopRouter;
-use crate::problem::{
-    Capabilities, FailedNet, Point2, RouteProblem, RouteQuality, RouteResult, RouteSolution,
-    Router, Trace, Via, ViaSpan,
-};
 use crate::quality::{
     compare_route_quality as compare_quality, keep_route_candidate as keep_candidate, route_quality,
 };
 use crate::via_escape::ViaEscapeRouter;
+use pcb_model::{
+    Capabilities, FailedNet, Point2, RouteProblem, RouteQuality, RouteResult, RouteSolution,
+    Router, Trace, Via, ViaSpan,
+};
 use std::collections::BTreeSet;
 
 /// This engine's [`RouteResult::engine`] provenance tag.
@@ -83,7 +83,7 @@ pub fn route_pattern(problem: &RouteProblem) -> RouteResult {
         let q = RouteQuality::of(
             problem,
             &result,
-            crate::router::geometry_violations(problem, &result.solution),
+            grid_astar::router::geometry_violations(problem, &result.solution),
         );
         best = match best.take() {
             None => Some((result, q)),
@@ -429,7 +429,7 @@ fn isolated_candidates(problem: &RouteProblem, routers: &[&dyn Router]) -> Vec<V
                 continue;
             }
             crate::via_cleanup::normalize_redundant_vias(&subproblem, &mut result.solution);
-            if crate::lint::lint(&subproblem, &result.solution).is_empty()
+            if drc_lint::lint::lint(&subproblem, &result.solution).is_empty()
                 && seen.insert(solution_candidate_key(&result.solution))
             {
                 net_candidates.push(result.solution);
@@ -526,7 +526,7 @@ fn add_synthetic_same_layer_candidates(
             }],
             vias: vec![],
         };
-        if !crate::lint::lint(subproblem, &solution).is_empty() {
+        if !drc_lint::lint::lint(subproblem, &solution).is_empty() {
             continue;
         }
         if seen.insert(solution_candidate_key(&solution)) {
@@ -535,7 +535,7 @@ fn add_synthetic_same_layer_candidates(
     }
 }
 
-fn has_nearby_foreign_obstacle(problem: &RouteProblem, conn: &crate::problem::Connection) -> bool {
+fn has_nearby_foreign_obstacle(problem: &RouteProblem, conn: &pcb_model::Connection) -> bool {
     let Some((mut min_x, mut max_x, mut min_y, mut max_y)) = connection_bbox(conn) else {
         return false;
     };
@@ -559,10 +559,10 @@ fn has_nearby_foreign_obstacle(problem: &RouteProblem, conn: &crate::problem::Co
 
 fn synthetic_detour_axes(
     problem: &RouteProblem,
-    conn: &crate::problem::Connection,
+    conn: &pcb_model::Connection,
     a: Point2,
     b: Point2,
-    layer: &crate::problem::LayerRef,
+    layer: &pcb_model::LayerRef,
 ) -> (Vec<f64>, Vec<f64>) {
     let route_width = problem.net_width(&conn.name).max(problem.min_trace_width);
     let clearance = problem.clearance + route_width;
@@ -707,7 +707,7 @@ fn via_span_key(span: &ViaSpan) -> (u32, u32, bool, bool) {
     }
 }
 
-fn connection_bbox(conn: &crate::problem::Connection) -> Option<(f64, f64, f64, f64)> {
+fn connection_bbox(conn: &pcb_model::Connection) -> Option<(f64, f64, f64, f64)> {
     let first = conn.points_to_connect.first()?;
     let (mut min_x, mut max_x, mut min_y, mut max_y) = (first.x, first.x, first.y, first.y);
     for pt in &conn.points_to_connect {
@@ -737,7 +737,7 @@ fn route_one_net_candidates(
         candidate.vias.extend(route.vias.clone());
         crate::via_cleanup::normalize_redundant_vias(&validation_problem, &mut candidate);
 
-        let findings = crate::lint::lint(&validation_problem, &candidate);
+        let findings = drc_lint::lint::lint(&validation_problem, &candidate);
         if !findings.is_empty() {
             continue;
         }
@@ -859,7 +859,7 @@ fn problem_with_connections_and_extra(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, Trace};
+    use pcb_model::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, Trace};
 
     fn conn(name: &str, pts: &[(f64, f64, &str)]) -> Connection {
         Connection {
@@ -964,7 +964,7 @@ mod tests {
         assert!(r.failed.is_empty(), "{:?}", r.failed);
         assert_eq!(r.solution.traces.len(), 3);
         assert_eq!(r.solution.vias.len(), 3);
-        assert!(crate::lint::lint(&p, &r.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1159,7 +1159,7 @@ mod tests {
             let subproblem = problem_with_connections(&p, &[idx]);
             assert!(routes.iter().all(|solution| {
                 (!solution.traces.is_empty() || !solution.vias.is_empty())
-                    && crate::lint::lint(&subproblem, solution).is_empty()
+                    && drc_lint::lint::lint(&subproblem, solution).is_empty()
             }));
         }
     }
@@ -1269,7 +1269,8 @@ mod tests {
         assert!(
             channel_candidates[0].iter().any(|solution| {
                 solution.traces.len() >= 2
-                    && crate::lint::lint(&problem_with_connections(&p, &[0]), solution).is_empty()
+                    && drc_lint::lint::lint(&problem_with_connections(&p, &[0]), solution)
+                        .is_empty()
             }),
             "channel router should add a clean multi-pin preferred-direction tree: {:?}",
             channel_candidates[0]
@@ -1312,7 +1313,7 @@ mod tests {
             "pattern should select A's longer synthetic detour when the straight route blocks B: {:?}",
             r.solution.traces
         );
-        assert!(crate::lint::lint(&p, &r.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1365,7 +1366,7 @@ mod tests {
                 .any(|t| t.connection == "A" && t.path.iter().any(|p| (p.y - 14.0).abs() < 1e-9)),
             "beam should retain the longer A candidate because it lets B route"
         );
-        assert!(crate::lint::lint(&p, &r.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1482,7 +1483,7 @@ mod tests {
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].vias.len(), 1);
-        assert!(crate::lint::lint(&p, &selected[0]).is_empty());
+        assert!(drc_lint::lint::lint(&p, &selected[0]).is_empty());
     }
 
     #[test]
@@ -1529,7 +1530,7 @@ mod tests {
             "failed-net retry should route B first, forcing A onto its longer clean detour: {:?}",
             r.solution.traces
         );
-        assert!(crate::lint::lint(&p, &r.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &r.solution).is_empty());
     }
 
     #[test]

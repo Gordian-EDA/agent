@@ -11,8 +11,8 @@
 //! boundary. Slice-2 pathing (Task 2) routes nets over this graph,
 //! congestion-costed.
 //!
-//! This module is deliberately independent of [`crate::grid`] / [`crate::astar`]
-//! / [`crate::router`]: the slice-1 fallback path stays untouched and
+//! This module is deliberately independent of [`grid_astar::grid`] / [`grid_astar::astar`]
+//! / [`grid_astar::router`]: the slice-1 fallback path stays untouched and
 //! always-correct. The mesh shares only the [`RouteProblem`] model and the
 //! obstacle/net-attribution convention (a net's own pads never block it).
 //!
@@ -38,8 +38,8 @@
 //! iteration, no float-keyed ordering, leaks into the output — the slice's
 //! determinism tests serialize the mesh twice and compare byte-for-byte.
 
-use crate::problem::{Point2, Rect, RouteProblem};
 use geom::{BoundaryAxis, SharedBoundary};
+use pcb_model::{Point2, Rect, RouteProblem};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -290,7 +290,7 @@ pub fn max_depth(bounds: &Rect, track_pitch: f64) -> u32 {
 }
 
 /// Connection name → dense index (connections order), first-wins (matches
-/// [`crate::grid`]).
+/// [`grid_astar::grid`]).
 fn name_index(problem: &RouteProblem) -> BTreeMap<String, usize> {
     let mut m = BTreeMap::new();
     for (i, c) in problem.connections.iter().enumerate() {
@@ -575,7 +575,7 @@ fn union_length(intervals: &mut [(f64, f64)]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem};
+    use pcb_model::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem};
     use std::path::Path;
 
     fn base(obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RouteProblem {

@@ -23,10 +23,6 @@
 //! `rotated_*`, …) and the place types. Routing for the ranking comes from
 //! `grid-astar`; DRC from `drc-lint`; shared geometry types from `pcb-model`.
 
-pub use drc_lint::{connectivity, lint};
-pub use grid_astar::{astar, grid, router};
-pub use pcb_model as problem;
-
 pub mod placement;
 
 pub use placement::place_board;

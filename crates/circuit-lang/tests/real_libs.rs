@@ -2,16 +2,16 @@
 //! `circuit_lang::compile` through a real [`SymbolTable`] (skipped when no KiCAD
 //! install is detected).
 
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 
 #[test]
 fn compiles_minimal_design_against_real_libs() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP");
         return;
     };
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     // Self-contained smoke circuit — standard KiCAD symbols only (a regulator + bypass caps), so
     // the test has no external-fixture dependency. Verifies the DSL drives `compile` through a
     // real [`SymbolTable`] and produces a design with zero diagnostics.

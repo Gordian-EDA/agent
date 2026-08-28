@@ -249,7 +249,7 @@ pub struct Placement {
 }
 
 /// Placement diagnostics: how much legalization happened and the HPWL metric.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlaceReport {
     /// How many parts the spiral legalizer had to move off their snapped cell.
@@ -977,20 +977,20 @@ impl RoutabilityOracle {
             scored.push((i, key, r));
         }
         scored.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-        if std::env::var_os("PLACE_ORACLE_DEBUG").is_some() {
-            for (idx, key, result) in &scored {
-                eprintln!(
-                    "[place-oracle] idx={idx} key={key:?} legal={} hpwl={:.2} layout_cost={:.2}",
-                    result.legal, result.report.hpwl, result.report.layout_cost
-                );
-            }
-        }
-        if let Ok(pick) = std::env::var("PLACE_ORACLE_PICK")
-            && let Ok(pick) = pick.parse::<usize>()
-            && let Some(pos) = scored.iter().position(|(idx, _, _)| *idx == pick)
-        {
-            let (_, key, result) = scored.swap_remove(pos);
-            return (result, key);
+        if scored.is_empty() {
+            return (
+                PlaceResult {
+                    placements: Vec::new(),
+                    legal: false,
+                    report: PlaceReport::default(),
+                },
+                (
+                    (usize::MAX, usize::MAX, usize::MAX, usize::MAX, u64::MAX),
+                    u64::MAX,
+                    u64::MAX,
+                    u64::MAX,
+                ),
+            );
         }
         let (_, key, result) = scored.swap_remove(0);
         (result, key)

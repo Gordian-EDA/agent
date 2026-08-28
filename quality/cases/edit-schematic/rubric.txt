@@ -1,0 +1,1 @@
+The original R1/C1 filter should remain intact and recognizable. The added protection should be electrically plausible and located before the filter. Unrelated components or nets should not be rewritten, removed, or renamed.

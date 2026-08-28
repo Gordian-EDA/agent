@@ -9,8 +9,7 @@ description = "The Gordian KiCAD agent: the turn loop + human apply-gate, the sc
 [dependencies]
 circuit-graph = { path = "../circuit-graph" }
 circuit-lang = { path = "../circuit-lang" }
-kicad-cli = { path = "../kicad-cli" }
-kicad-env = { path = "../kicad-env" }
+kicad = { path = "../kicad" }
 kicad-footprint = { path = "../kicad-footprint" }
 kicad-symbol = { path = "../kicad-symbol" }
 kicad-ipc = { path = "../kicad-ipc" }

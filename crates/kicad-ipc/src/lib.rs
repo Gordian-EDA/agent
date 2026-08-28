@@ -2,9 +2,10 @@
 //!
 //! KiCAD hosts a per-instance API server (protobuf messages over an NNG REQ/REP
 //! socket); this crate speaks that protocol directly — no Python. The generated
-//! message types live under [`proto`]; the high-level board client is layered on
-//! top (added incrementally). See the validated wire protocol in the project
-//! memory `kicad-ipc-protocol`.
+//! generated message types are an implementation detail; callers use the
+//! high-level board client and bridge-owned DTOs. Routing and placement model
+//! conversion belongs to callers, so this transport crate stays a dependency
+//! leaf with respect to engine SDKs.
 
 mod client;
 mod documents;
@@ -13,16 +14,18 @@ mod error;
 mod items;
 mod nets;
 
-/// Generated protobuf types — the full `kiapi::{common, board, ...}` module tree.
-pub mod proto {
+#[allow(dead_code, clippy::all)]
+mod proto {
     include!(concat!(env!("OUT_DIR"), "/_proto.rs"));
 }
 
 pub mod session;
-pub mod units;
 pub mod snapshot;
+pub mod units;
 
-pub use client::{Kicad, footprint_update_supported, net_class_queries_supported};
-pub use edit::{FootprintMove, footprint_reference};
+pub use client::Kicad;
+pub use edit::{
+    CopperDeleteRequest, CopperHit, CopperKind, FootprintMove, FootprintPosition, RouteWrite,
+};
 pub use error::Error;
 pub use session::{Session, SessionManager};

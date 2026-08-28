@@ -2,7 +2,7 @@
 //!
 //! Usage: cargo run --release -p gordian-core --example sa_e2e [name ...]
 
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan::{self, LayoutIr};
 
@@ -19,7 +19,7 @@ const FIXTURES: &[&str] = &[
     "bga-fpga-ice40",
 ];
 
-fn render(env: &KicadEnv, provider: &SymbolTable, name: &str) -> anyhow::Result<usize> {
+fn render(env: &KicadInstallation, provider: &SymbolTable, name: &str) -> anyhow::Result<usize> {
     let dir = std::path::Path::new("crates/sch-floorplan/tests/fixtures/validation");
     let src = std::fs::read_to_string(dir.join(format!("{name}.circuit.yaml")))?;
     let result = circuit_lang::compile(&src, provider);
@@ -35,14 +35,14 @@ fn render(env: &KicadEnv, provider: &SymbolTable, name: &str) -> anyhow::Result<
 }
 
 fn main() -> anyhow::Result<()> {
-    let env = KicadEnv::detect().expect("no KiCAD environment");
+    let env = KicadInstallation::detect().expect("no KiCAD environment");
     let dir = std::path::Path::new("docs/validation");
     if !dir.is_dir() {
         anyhow::bail!(
             "docs/validation corpus is not present; provide the validation fixtures before running sa_e2e"
         );
     }
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let args: Vec<String> = std::env::args().skip(1).collect();
     let names: Vec<&str> = if args.is_empty() {
         FIXTURES.to_vec()

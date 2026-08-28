@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use kicad_cli::{KicadCli, Violation};
+use kicad::Violation;
 
 use gordian_runtime::AgentRuntime;
 
@@ -69,7 +69,7 @@ impl DrcGate {
 /// Apply the same production DRC policy to live boards and offline corpus
 /// boards. Library/silkscreen warnings and KiCad's zone-self artifacts do not
 /// describe routed-copper correctness; every other finding blocks the gate.
-pub(super) fn gate_drc(report: &kicad_cli::DrcReport) -> DrcGate {
+pub(super) fn gate_drc(report: &kicad::DrcReport) -> DrcGate {
     let copper_violations = report
         .violations
         .iter()
@@ -94,7 +94,7 @@ pub(super) fn gate_drc(report: &kicad_cli::DrcReport) -> DrcGate {
 /// KiCad 10+ can refill through the CLI; KiCad 9 needs its board IPC API.
 pub(super) fn materialize_zones_for_drc(
     path: &Path,
-    env: &kicad_env::KicadEnv,
+    env: &kicad::KicadInstallation,
     sessions: &kicad_ipc::SessionManager,
 ) -> std::result::Result<bool, String> {
     let has_zones = std::fs::read_to_string(path)
@@ -104,19 +104,19 @@ pub(super) fn materialize_zones_for_drc(
         return Ok(false);
     }
     let major = env
-        .cli_version
+        .version()
         .split('.')
         .next()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(0);
     if major >= 10 {
-        // KicadCli::drc uses `--refill-zones` when this version supports it.
+        // drc uses `--refill-zones` when this version supports it.
         return Ok(false);
     }
     if major < 9 {
         return Err(format!(
             "KiCad {} cannot refill generated zones headlessly; KiCad 9+ is required to DRC boards with zones",
-            env.cli_version
+            env.version()
         ));
     }
     sessions
@@ -153,7 +153,7 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(false) => {}
         Err(e) => return Ok(json!({ "error": e })),
     }
-    let cli = KicadCli::new(ctx.env());
+    let cli = ctx.env();
     let initial_report = match cli.drc(&path) {
         Ok(report) => report,
         Err(e) => return Ok(json!({ "error": format!("kicad-cli pcb drc failed: {e}") })),

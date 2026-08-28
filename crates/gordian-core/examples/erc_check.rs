@@ -4,15 +4,15 @@
 //!
 //! Usage: cargo run --release -p gordian-core --example erc_check -- <design.yaml>
 
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 
 fn main() -> anyhow::Result<()> {
     let path = std::env::args()
         .nth(1)
         .expect("usage: erc_check <design.yaml>");
-    let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let provider = SymbolTable::from_env(&env);
+    let env = KicadInstallation::detect().expect("no KiCAD environment detected");
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let src = std::fs::read_to_string(&path)?;
     let design = circuit_lang::compile(&src, &provider)
         .design

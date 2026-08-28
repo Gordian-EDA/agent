@@ -9,10 +9,10 @@
 //!    appends a custom rule with no edit to the in-house set, and its findings
 //!    land last (after the standard ones).
 
-use drc_core::problem::{
+use drc_core::{DrcCtx, DrcSuite, Finding, Rule};
+use pcb_model::{
     Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem, RouteSolution, Trace,
 };
-use drc_core::{DrcCtx, DrcSuite, Finding, Rule};
 
 fn bounds() -> Rect {
     Rect {

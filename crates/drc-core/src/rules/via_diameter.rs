@@ -1,13 +1,13 @@
 //! `ViaDiameterRule` — a via below KiCAD's minimum diameter for its type.
 //!
 //! Through/blind/buried vias must meet the netclass via diameter
-//! (`problem.via_diameter` — what kicad-cli enforces); only true micro vias get
+//! (`problem.via_diameter` — what kicad enforces); only true micro vias get
 //! the relaxed microvia floor. Iterates `solution.vias` directly (the copper
 //! model drops the span/type), so it's the one rule that knows micro-vs-through.
 
-use crate::problem::ViaSpan;
 use crate::rules::geom::EPS;
 use crate::{DrcCtx, Finding, Rule};
+use pcb_model::ViaSpan;
 
 /// KiCAD's relaxed minimum diameter for a true MICRO via (laser, adjacent-layer).
 /// Matches the netclass `microvia_diameter` the board export writes (= 0.3 mm).

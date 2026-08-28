@@ -14,11 +14,11 @@ use crate::heuristics::{
     connection_crossing_pressures, connection_obstacle_pressure_um,
     connection_segment_obstacle_pressure_um, connection_span_um,
 };
-use crate::problem::{
+use crate::quality::{keep_route_candidate as keep_candidate, route_quality};
+use grid_astar::router::GridAStarRouter;
+use pcb_model::{
     Capabilities, FailedNet, RouteProblem, RouteQuality, RouteResult, RouteSolution, Router,
 };
-use crate::quality::{keep_route_candidate as keep_candidate, route_quality};
-use crate::router::GridAStarRouter;
 
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "sequential-grid";
@@ -136,7 +136,7 @@ fn route_order_once(problem: &RouteProblem, order: &[usize]) -> RouteResult {
         combined.vias.extend(candidate.solution.vias);
         let validation = problem_with_connections(problem, &routed, idx);
         crate::via_cleanup::normalize_redundant_vias(&validation, &mut combined);
-        if !crate::lint::lint(&validation, &combined).is_empty() {
+        if !drc_lint::lint::lint(&validation, &combined).is_empty() {
             failed.push(FailedNet {
                 connection: conn.name.clone(),
                 reason: "sequential grid route conflicted with accepted copper".to_owned(),
@@ -397,7 +397,7 @@ fn problem_with_connections(
 mod tests {
     use super::*;
     use crate::heuristics::connection_crossing_pressure;
-    use crate::problem::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, Trace};
+    use pcb_model::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, Trace};
 
     fn conn(name: &str, pts: &[(f64, f64, &str)]) -> Connection {
         Connection {
@@ -775,7 +775,7 @@ mod tests {
             result.failed
         );
         assert!(
-            crate::lint::lint(&p, &result.solution).is_empty(),
+            drc_lint::lint::lint(&p, &result.solution).is_empty(),
             "accepted sequential copper must be DRC-clean"
         );
     }

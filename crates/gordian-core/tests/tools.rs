@@ -8,7 +8,7 @@
 
 use gordian_core::AgentRuntime;
 use gordian_core::tools::{run_tool, tool_defs};
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 
 /// A tiny self-contained valid design: one resistor between two named nets.
 const TINY_YAML: &str =
@@ -1081,13 +1081,26 @@ fn apply_design_commit_writes_file_and_runs_erc() {
 }
 
 #[test]
+#[cfg(unix)]
 fn apply_design_reports_a_written_commit_when_post_write_erc_cannot_run() {
-    let Some(mut env) = KicadEnv::detect() else {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let Some(detected) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD libraries detected");
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    env.cli_path = dir.path().join("missing-kicad-cli");
+    let cli = dir.path().join("kicad-cli");
+    std::fs::write(&cli, format!("#!/bin/sh\necho {}\n", detected.version())).unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let env = KicadInstallation::detect_with(
+        Some(detected.symbol_dir()),
+        Some(detected.footprint_dir()),
+        Some(&cli),
+        Some(detected.pcbnew_path()),
+    )
+    .unwrap();
+    std::fs::remove_file(cli).unwrap();
     let sch_path = dir.path().join("failure.kicad_sch");
     let ctx = AgentRuntime::new_with_config(
         env,
@@ -1278,7 +1291,7 @@ fn project_info_reports_paths_and_state() {
     assert_eq!(out["sch_exists"], serde_json::json!(true), "got: {out}");
 }
 
-/// The two-resistor fixture board, shared with `kicad-cli`.
+/// The two-resistor fixture board, shared with `kicad`.
 const TWO_RES_PCB: &str = include_str!("fixtures/two_res.kicad_pcb");
 
 #[test]
@@ -2190,14 +2203,14 @@ fn regenerate_board_rejects_unapplied_draft_footprints() {
 #[test]
 #[ignore = "live KiCAD IPC: regenerate_board opens the project board through the session manager"]
 fn regenerate_board_seeds_board_from_schematic_then_assign_footprints() {
-    // Needs a real KiCAD env (lift runs kicad-cli + resolves real footprints).
+    // Needs a real KiCAD env (lift runs kicad + resolves real footprints).
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP regenerate_board: no KiCAD env");
         return;
     };
     // Stage the RC-pair fixture as the project's schematic.
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../kicad-cli/tests/fixtures/rc_pair.kicad_sch");
+        .join("../kicad/tests/fixtures/rc_pair.kicad_sch");
     std::fs::copy(&fixture, ctx.sch_path()).unwrap();
 
     let bounds = serde_json::json!({ "min_x": 0, "max_x": 20, "min_y": 0, "max_y": 12 });
@@ -2210,7 +2223,7 @@ fn regenerate_board_seeds_board_from_schematic_then_assign_footprints() {
     )
     .unwrap();
     if seed.get("error").is_some() {
-        eprintln!("SKIP regenerate_board: lift failed (kicad-cli unavailable?): {seed}");
+        eprintln!("SKIP regenerate_board: lift failed (kicad unavailable?): {seed}");
         return;
     }
     assert_eq!(seed["ok"], serde_json::json!(true), "board seeded: {seed}");
@@ -2397,7 +2410,7 @@ fn skip_unstable_footprint_update(ctx: &AgentRuntime) -> bool {
     }
     let mut nums = ctx
         .env()
-        .cli_version
+        .version()
         .split('.')
         .take(3)
         .map(|part| part.parse::<u32>().unwrap_or(0));
@@ -2407,7 +2420,7 @@ fn skip_unstable_footprint_update(ctx: &AgentRuntime) -> bool {
     if major == 9 && minor == 0 && patch <= 2 {
         eprintln!(
             "SKIP: KiCAD {} has unstable IPC footprint UpdateItems",
-            ctx.env().cli_version
+            ctx.env().version()
         );
         return true;
     }
@@ -2590,7 +2603,7 @@ fn move_parts_persists_across_session_reopen() {
 #[ignore = "live KiCAD IPC: verifies net-class edits survive session restart"]
 fn set_net_width_persists_across_session_reopen() {
     let (ctx, _guard) = placed_board_ctx();
-    let mut version = ctx.env().cli_version.split('.').map(|part| {
+    let mut version = ctx.env().version().split('.').map(|part| {
         part.chars()
             .take_while(|ch| ch.is_ascii_digit())
             .collect::<String>()
@@ -2605,7 +2618,7 @@ fn set_net_width_persists_across_session_reopen() {
     if major < 9 || (major == 9 && minor == 0 && patch < 3) {
         eprintln!(
             "SKIP: KiCAD {} does not reliably support SetNetClasses",
-            ctx.env().cli_version
+            ctx.env().version()
         );
         return;
     }
@@ -2660,11 +2673,11 @@ fn check_board_after_place_and_route_reports_drc() {
 #[ignore = "live KiCAD IPC + KiCAD DRC"]
 fn check_board_e2e_kicad_drc_clean() {
     // Build the fixture-footprint ctx; it carries a real KiCAD env when one is
-    // installed (with_footprint_dir_for_test falls back to KicadEnv::detect).
+    // installed (with_footprint_dir_for_test falls back to KicadInstallation::detect).
     let (ctx, _g) = placed_board_ctx();
     let major: u32 = ctx
         .env()
-        .cli_version
+        .version()
         .split('.')
         .next()
         .and_then(|m| m.parse().ok())
@@ -2719,7 +2732,7 @@ fn check_board_e2e_kicad_drc_clean() {
 
     eprintln!(
         "check_board e2e OK (KiCAD {}): live board DRC copper-clean, 0 unconnected",
-        ctx.env().cli_version
+        ctx.env().version()
     );
 }
 
@@ -2833,6 +2846,7 @@ fn render_board_after_route_returns_ok_and_png_magic() {
 }
 
 #[test]
+#[ignore = "live KiCAD IPC + KiCAD DRC; run through tools/live_kicad_test.sh"]
 fn four_layer_plane_fanout_passes_kicad_drc() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
@@ -2881,6 +2895,6 @@ C2: {part: 'Device:C', footprint: 'Capacitor_SMD:C_0603_1608Metric', pins: {1: V
     assert_eq!(
         checked["ok"],
         serde_json::json!(true),
-        "kicad-cli DRC must accept via-to-plane power connectivity: {checked}"
+        "kicad DRC must accept via-to-plane power connectivity: {checked}"
     );
 }

@@ -1,19 +1,18 @@
 //! Integration tests for pin geometry + lib_symbols definition extraction.
 //!
-//! Gated on a real KiCAD install (`KicadEnv::detect()` → SKIP-graceful); these
+//! Gated on a real KiCAD install (`KicadInstallation::detect()` → SKIP-graceful); these
 //! RUN on the dev machine where KiCAD 10 and its symbol libraries are present.
 
-use kicad_cli::KicadCli;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::geometry::SymbolGeometry;
 
 #[test]
 fn device_r_pin_geometry() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD install detected");
         return;
     };
-    let g = SymbolGeometry::load(&env, "Device:R").unwrap();
+    let g = SymbolGeometry::load(env.symbol_dir(), "Device:R").unwrap();
     assert_eq!(g.pins.len(), 2);
     // Device:R pins are vertical at x=0, y=±3.81, length 1.27 (per spike).
     let ys: Vec<f64> = g.pins.iter().map(|p| p.at.y).collect();
@@ -29,11 +28,11 @@ fn device_r_pin_geometry() {
 
 #[test]
 fn approx_size_scales_with_symbol() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD install detected");
         return;
     };
-    let r = SymbolGeometry::load(&env, "Device:R")
+    let r = SymbolGeometry::load(env.symbol_dir(), "Device:R")
         .unwrap()
         .approx_size();
     assert!(r.y > r.x, "R is taller than wide: {r:?}");
@@ -46,11 +45,11 @@ fn approx_size_scales_with_symbol() {
 /// dual op-amp: its pins span unit 1 and unit 2.
 #[test]
 fn multi_unit_symbol_carries_unit_identity() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD install detected");
         return;
     };
-    let g = SymbolGeometry::load(&env, "Amplifier_Operational:LM358").unwrap();
+    let g = SymbolGeometry::load(env.symbol_dir(), "Amplifier_Operational:LM358").unwrap();
     let max_unit = g.pins.iter().map(|p| p.unit).max().unwrap_or(0);
     assert!(
         max_unit >= 2,
@@ -101,8 +100,7 @@ fn split_symbol_dir_geometry_resolves_extends() {
     )
     .unwrap();
 
-    let env = KicadEnv::with_symbol_dir(dir.path().to_path_buf());
-    let g = SymbolGeometry::load(&env, "Device:Alias").unwrap();
+    let g = SymbolGeometry::load(dir.path(), "Device:Alias").unwrap();
 
     assert_eq!(g.pins.len(), 1);
     assert_eq!(g.pins[0].number, "1");
@@ -146,8 +144,7 @@ fn derived_definition_overlays_child_properties_across_chain() {
     )
     .unwrap();
 
-    let env = KicadEnv::with_symbol_dir(dir.path().to_path_buf());
-    let g = SymbolGeometry::load(&env, "Parts:Child").unwrap();
+    let g = SymbolGeometry::load(dir.path(), "Parts:Child").unwrap();
     let def = g.definition_sexpr();
 
     assert_eq!(g.pins.len(), 1);
@@ -167,11 +164,11 @@ fn derived_definition_overlays_child_properties_across_chain() {
 
 #[test]
 fn installed_derived_definitions_match_child_library_properties() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD install detected");
         return;
     };
-    let g = SymbolGeometry::load(&env, "Regulator_Linear:AP2112K-3.3").unwrap();
+    let g = SymbolGeometry::load(env.symbol_dir(), "Regulator_Linear:AP2112K-3.3").unwrap();
     let def = g.definition_sexpr();
 
     assert!(def.contains("\"Value\" \"AP2112K-3.3\""), "{def}");
@@ -189,7 +186,7 @@ fn installed_derived_definitions_match_child_library_properties() {
         .tempfile()
         .unwrap();
     std::fs::write(tmp.path(), sch).unwrap();
-    let erc = KicadCli::new(&env).erc(tmp.path()).unwrap();
+    let erc = env.erc(tmp.path()).unwrap();
     let mismatches: Vec<_> = erc
         .violations
         .iter()
@@ -197,7 +194,7 @@ fn installed_derived_definitions_match_child_library_properties() {
         .collect();
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 
-    let g = SymbolGeometry::load(&env, "Power_Protection:USBLC6-2SC6").unwrap();
+    let g = SymbolGeometry::load(env.symbol_dir(), "Power_Protection:USBLC6-2SC6").unwrap();
     let def = g.definition_sexpr();
     assert!(def.contains("\"Value\" \"USBLC6-2SC6\""), "{def}");
     assert!(def.contains("Package_TO_SOT_SMD:SOT-23-6"), "{def}");
@@ -207,7 +204,7 @@ fn installed_derived_definitions_match_child_library_properties() {
 
     let sch = build_schematic("Power_Protection:USBLC6-2SC6", def, &g);
     std::fs::write(tmp.path(), sch).unwrap();
-    let erc = KicadCli::new(&env).erc(tmp.path()).unwrap();
+    let erc = env.erc(tmp.path()).unwrap();
     let mismatches: Vec<_> = erc
         .violations
         .iter()
@@ -218,11 +215,11 @@ fn installed_derived_definitions_match_child_library_properties() {
 
 #[test]
 fn lib_symbols_definition_is_embeddable() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD install detected");
         return;
     };
-    let g = SymbolGeometry::load(&env, "Device:R").unwrap();
+    let g = SymbolGeometry::load(env.symbol_dir(), "Device:R").unwrap();
     // The raw (symbol "Device:R" ...) block, ready to splice into (lib_symbols).
     let def = g.definition_sexpr();
     assert!(def.trim_start().starts_with("(symbol"));
@@ -240,11 +237,11 @@ fn lib_symbols_definition_is_embeddable() {
 /// zero nodes, so this guards the flattening contract end-to-end.
 #[test]
 fn derived_symbol_inlines_parent_body() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD install detected");
         return;
     };
-    let g = SymbolGeometry::load(&env, "Device:Filter_EMI_C").unwrap();
+    let g = SymbolGeometry::load(env.symbol_dir(), "Device:Filter_EMI_C").unwrap();
     // C_Feedthrough has three pins; the derived symbol inherits all of them.
     assert_eq!(g.pins.len(), 3, "{:?}", g.pins);
 
@@ -273,7 +270,7 @@ fn derived_symbol_inlines_parent_body() {
         .tempfile()
         .unwrap();
     std::fs::write(tmp.path(), &sch).unwrap();
-    let nl = KicadCli::new(&env).netlist(tmp.path()).unwrap();
+    let nl = env.netlist(tmp.path()).unwrap();
     assert_eq!(nl.components.len(), 1, "one component");
     let total_nodes: usize = nl.nets.iter().map(|n| n.nodes.len()).sum();
     assert_eq!(

@@ -7,7 +7,7 @@
 //! truthfulness oracle (`floorplan_netlist.rs`); this gate guards the *aesthetic*
 //! placement the oracle can't see.
 
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan::{self, LayoutIr};
 use std::path::{Path, PathBuf};
@@ -40,7 +40,7 @@ fn validation_corpus_available() -> bool {
 
 /// Render a fixture exactly as production would: sidecar IR if present, else the
 /// connectivity-inferred frame.
-fn render(env: &KicadEnv, provider: &SymbolTable, name: &str) -> String {
+fn render(env: &KicadInstallation, provider: &SymbolTable, name: &str) -> String {
     let src = std::fs::read_to_string(doc(name, "circuit.yaml")).unwrap();
     let result = circuit_lang::compile(&src, provider);
     assert!(
@@ -64,11 +64,11 @@ fn placement_snapshots_match() {
         eprintln!("docs/validation corpus not present; skipping placement snapshots");
         return;
     }
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("no KiCAD environment; skipping placement snapshots");
         return;
     };
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let bless = std::env::var("UPDATE_SNAPSHOTS").is_ok();
     let mut problems = Vec::new();
     for name in TARGETS {
@@ -101,10 +101,10 @@ fn emit_is_deterministic() {
         eprintln!("docs/validation corpus not present; skipping deterministic emit test");
         return;
     }
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         return;
     };
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     // Emit twice with the same (default) strategy + fixed seed; must be identical.
     // Trivial for the deterministic greedy default today, but this is the guard
     // that catches accidental nondeterminism the moment randomized SA moves land.

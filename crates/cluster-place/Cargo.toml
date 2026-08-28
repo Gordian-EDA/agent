@@ -10,6 +10,7 @@ description = "Cluster-and-pack schematic placement engine: peels 2-pin satellit
 circuit-lang = { path = "../circuit-lang" }
 circuit-graph = { path = "../circuit-graph" }
 geom = { path = "../geom" }
+kicad = { path = "../kicad" }
 sch-place = { path = "../sch-place" }
 sch-floorplan = { path = "../sch-floorplan" }
 anneal-place = { path = "../anneal-place" }

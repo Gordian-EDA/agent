@@ -1,13 +1,13 @@
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::search::SymbolIndex;
 
 #[test]
 fn finds_stm32h743_by_substring() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD installation detected");
         return;
     };
-    let idx = SymbolIndex::build(&env).unwrap();
+    let idx = SymbolIndex::build(env.symbol_dir()).unwrap();
     let hits = idx.search("STM32H743VI", 5);
     assert!(
         hits.iter()
@@ -20,11 +20,11 @@ fn finds_stm32h743_by_substring() {
 
 #[test]
 fn fuzzy_finds_usb_c_receptacle() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD installation detected");
         return;
     };
-    let idx = SymbolIndex::build(&env).unwrap();
+    let idx = SymbolIndex::build(env.symbol_dir()).unwrap();
     let hits = idx.search("usb-c receptacle usb2", 8);
     assert!(
         hits.iter()
@@ -37,12 +37,12 @@ fn fuzzy_finds_usb_c_receptacle() {
 #[test]
 #[ignore]
 fn build_completes_under_two_seconds() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD installation detected");
         return;
     };
     let start = std::time::Instant::now();
-    let idx = SymbolIndex::build(&env).unwrap();
+    let idx = SymbolIndex::build(env.symbol_dir()).unwrap();
     let elapsed = start.elapsed();
     eprintln!("indexed {} symbols in {elapsed:?}", idx.len());
     assert!(elapsed.as_secs_f64() < 2.0, "build took {elapsed:?}");
@@ -66,8 +66,7 @@ fn sub_unit_blocks_are_not_indexed() {
 "#,
     )
     .unwrap();
-    let env = KicadEnv::with_symbol_dir(dir.path().to_path_buf());
-    let idx = SymbolIndex::build(&env).unwrap();
+    let idx = SymbolIndex::build(dir.path()).unwrap();
     let hits = idx.search("OpAmp", 10);
     assert!(hits.iter().any(|h| h.lib_id == "Tiny:OpAmp"), "{hits:?}");
     assert!(

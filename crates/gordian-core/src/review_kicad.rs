@@ -18,10 +18,10 @@
 //! → unbiased; the generating model can't rationalise its own slips). The netlist
 //! pass also unions in the deterministic exact-math ERC.
 
-use circuit_graph::netclass::is_ground;
-use gordian_runtime::config::ReviewConfig;
 use crate::{Binary, Provider};
 use anyhow::Result;
+use circuit_graph::netclass::is_ground;
+use gordian_runtime::config::ReviewConfig;
 use std::collections::BTreeMap;
 
 const NETLIST_REVIEW_SYSTEM: &str = r#"You are a senior electronics engineer reviewing a circuit-YAML NETLIST, not layout.
@@ -449,7 +449,6 @@ fn pc817_inputs_bypassing_series_resistors(
     bypassed
 }
 
-
 fn is_positive_rail_net(net: &str) -> bool {
     if circuit_lang::erc::rail_voltage(net).is_some_and(|volts| volts > 0.0) {
         return true;
@@ -587,8 +586,7 @@ fn has_decoupling(components: &[(&String, &circuit_lang::model::Component)]) -> 
             return false;
         }
         let nets = component_nets(component);
-        nets.iter().any(|net| is_ground(net))
-            && nets.iter().any(|net| is_positive_rail_net(net))
+        nets.iter().any(|net| is_ground(net)) && nets.iter().any(|net| is_positive_rail_net(net))
     })
 }
 
@@ -767,9 +765,7 @@ pub(crate) fn symbol_pin_rail_checks(
                             "- {refdes}: symbol pin {}/{} is tied to ground net {net} — a positive supply pin cannot be grounded",
                             pin.number, pin.name
                         ));
-                    } else if is_ground(&pin.name)
-                        && voltage.is_some_and(|volts| volts > 0.0)
-                    {
+                    } else if is_ground(&pin.name) && voltage.is_some_and(|volts| volts > 0.0) {
                         findings.push(format!(
                             "- {refdes}: symbol pin {}/{} is tied to positive rail {net} — a ground pin cannot be powered",
                             pin.number, pin.name
@@ -858,7 +854,6 @@ fn is_positive_supply_function(name: &str) -> bool {
         "VBUS" | "VBAT" | "VCC" | "VDD" | "VDDA" | "VDDD" | "AVDD" | "DVDD" | "PVDD"
     )
 }
-
 
 fn decoupling_by_parent(design: &circuit_lang::Design) -> BTreeMap<&str, BTreeMap<&str, usize>> {
     let mut out: BTreeMap<&str, BTreeMap<&str, usize>> = BTreeMap::new();

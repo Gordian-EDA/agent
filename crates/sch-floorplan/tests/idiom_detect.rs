@@ -2,7 +2,7 @@
 //! decoupling-bank idioms from connectivity alone (no new YAML syntax) and report
 //! them on `LayoutIr.idioms`, pinning their members in `LayoutIr.frozen`.
 
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan;
 use std::path::Path;
@@ -42,11 +42,11 @@ fn infer_ir_recognizes_crystal_and_decoupling_idioms() {
         eprintln!("docs/validation corpus not present; skipping idiom detection test");
         return;
     }
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("no KiCAD environment; skipping idiom detection test");
         return;
     };
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let design = compile_fixture(&provider, "idiom-stm32");
     let ir = floorplan::infer_ir(&env, &design);
 
@@ -118,11 +118,11 @@ fn decoupling_bank_survives_a_shared_rail_to_a_second_ic() {
         eprintln!("docs/validation corpus not present; skipping idiom detection test");
         return;
     }
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("no KiCAD environment; skipping idiom detection test");
         return;
     };
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let design = compile_fixture(&provider, "idiom-stm32-ldo");
     let ir = floorplan::infer_ir(&env, &design);
 
@@ -144,11 +144,11 @@ fn decoupling_bank_survives_a_shared_rail_to_a_second_ic() {
 
 #[test]
 fn repeated_pc817_channels_are_frozen_as_signal_flow_rows() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("no KiCAD environment; skipping PC817 channel-layout test");
         return;
     };
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let design = compile_source(
         &provider,
         "pc817-bank",
@@ -217,11 +217,11 @@ blocks:
 
 #[test]
 fn large_pc817_bank_folds_into_bounded_channel_columns() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("no KiCAD environment; skipping PC817 channel-layout test");
         return;
     };
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let mut components = String::from(
         "      P1: {part: power:+5V, pins: {1: +5V}}\n      P2: {part: power:GND, pins: {1: FIELD_GND}}\n      P3: {part: power:GND, pins: {1: LOGIC_GND}}\n      J1: {part: Connector:Conn_01x08_Pin, pins: {1: IN1, 2: IN2, 3: IN3, 4: IN4, 5: IN5, 6: IN6, 7: IN7, 8: IN8}}\n      J2: {part: Connector:Conn_01x08_Pin, pins: {1: OUT1, 2: OUT2, 3: OUT3, 4: OUT4, 5: OUT5, 6: OUT6, 7: OUT7, 8: OUT8}}\n      J3: {part: Connector:Conn_01x02_Pin, pins: {1: +5V, 2: FIELD_GND}}\n      C1: {part: Device:C, value: 100n, pins: {1: +5V, 2: LOGIC_GND}}\n      H1: {part: Mechanical:MountingHole}\n",
     );

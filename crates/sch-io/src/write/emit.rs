@@ -339,7 +339,7 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     // with an auto-flip that already keeps 180-rotated text readable. So a
     // 90/270 symbol needs the inverse angle to render horizontal text, while
     // 0/180 symbols take 0 (compensating 180 with 180 renders upside-down —
-    // verified empirically against kicad-cli 10.0.3). The solver models all
+    // verified empirically against kicad 10.0.3). The solver models all
     // field text as horizontal, so this keeps geometry and render in sync.
     let field_angle = match inst.angle.rem_euclid(360.0) as i32 {
         90 => 270,
@@ -441,12 +441,12 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kicad_env::KicadEnv;
+    use kicad::KicadInstallation;
 
     /// `add_symbol` needs a real symbol library to resolve geometry, so these
     /// tests SKIP-gracefully when no KiCAD environment is detected.
-    fn detect_env() -> Option<KicadEnv> {
-        match KicadEnv::detect() {
+    fn detect_env() -> Option<KicadInstallation> {
+        match KicadInstallation::detect() {
             Some(env) => Some(env),
             None => {
                 eprintln!("SKIP: no KiCAD environment detected");
@@ -692,7 +692,7 @@ mod tests {
         // is same-net -> R1's stub must survive (label stays at stub end, not pin
         // endpoint). A horizontal OTHER cluster wire running through R2's stub end
         // (177.8, 55.88) is foreign -> R2's stub retracts (label snaps to pin ep).
-        let Some(env) = KicadEnv::detect() else {
+        let Some(env) = KicadInstallation::detect() else {
             eprintln!("SKIP: no KiCAD environment detected");
             return;
         };
@@ -728,7 +728,7 @@ mod tests {
 
     #[test]
     fn u1_fields_dodge_out_label() {
-        let Some(env) = KicadEnv::detect() else {
+        let Some(env) = KicadInstallation::detect() else {
             eprintln!("SKIP");
             return;
         };

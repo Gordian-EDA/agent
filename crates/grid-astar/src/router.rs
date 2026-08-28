@@ -36,13 +36,10 @@
 
 use crate::astar::{self, AStarCosts, DIAG_COST, State};
 use crate::grid::{self, RouteGrid};
-use crate::problem::{
-    Capabilities, Connection, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult,
+use pcb_model::{
+    Capabilities, Connection, FailedNet, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult,
     RouteSolution, Router, Trace, Via, ViaSpan,
 };
-
-#[doc(inline)]
-pub use crate::problem::FailedNet;
 
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "naive";
@@ -294,8 +291,8 @@ fn reconcile_with_options(
     pull_orthogonal_trace_corners(problem, &mut result.solution);
     drop_duplicate_vias(&mut result.solution);
     drop_covered_vias(problem, &mut result.solution);
-    let mut dropped = crate::lint::drop_violating_copper(problem, &mut result.solution);
-    dropped.extend(crate::lint::drop_unconnected_copper(
+    let mut dropped = drc_lint::lint::drop_violating_copper(problem, &mut result.solution);
+    dropped.extend(drc_lint::lint::drop_unconnected_copper(
         problem,
         &mut result.solution,
     ));
@@ -326,7 +323,7 @@ fn shortcut_octilinear_traces(problem: &RouteProblem, solution: &mut RouteSoluti
         return;
     }
 
-    let mut baseline = crate::lint::lint(problem, solution);
+    let mut baseline = drc_lint::lint::lint(problem, solution);
     let mut lint_budget = 256usize;
 
     loop {
@@ -356,7 +353,7 @@ fn shortcut_octilinear_traces(problem: &RouteProblem, solution: &mut RouteSoluti
 
                     let mut candidate = solution.clone();
                     candidate.traces[ti].path.drain(i + 1..j);
-                    let findings = crate::lint::lint(problem, &candidate);
+                    let findings = drc_lint::lint::lint(problem, &candidate);
                     lint_budget -= 1;
                     if !introduces_new_findings(&baseline, &findings) {
                         *solution = candidate;
@@ -408,7 +405,7 @@ fn pull_orthogonal_trace_corners(problem: &RouteProblem, solution: &mut RouteSol
         return;
     }
 
-    let mut baseline = crate::lint::lint(problem, solution);
+    let mut baseline = drc_lint::lint::lint(problem, solution);
     let mut lint_budget = 256usize;
 
     loop {
@@ -443,7 +440,7 @@ fn pull_orthogonal_trace_corners(problem: &RouteProblem, solution: &mut RouteSol
                             geom::Polyline::new(candidate.traces[ti].path.clone())
                                 .simplify()
                                 .into_points();
-                        let findings = crate::lint::lint(problem, &candidate);
+                        let findings = drc_lint::lint::lint(problem, &candidate);
                         lint_budget -= 1;
                         if !introduces_new_findings(&baseline, &findings)
                             && candidate.metrics().wirelength + 1e-9 < solution.metrics().wirelength
@@ -523,7 +520,7 @@ fn via_span_key(span: &ViaSpan) -> (u32, u32, bool, bool) {
 }
 
 fn drop_covered_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
-    let mut baseline = crate::lint::lint(problem, solution);
+    let mut baseline = drc_lint::lint::lint(problem, solution);
     let mut idx = 0usize;
     while idx < solution.vias.len() {
         if !via_is_covered_by_another(problem, solution, idx) {
@@ -533,7 +530,7 @@ fn drop_covered_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
 
         let mut candidate = solution.clone();
         candidate.vias.remove(idx);
-        let findings = crate::lint::lint(problem, &candidate);
+        let findings = drc_lint::lint::lint(problem, &candidate);
         if !introduces_new_findings(&baseline, &findings)
             && candidate.metrics().via_count < solution.metrics().via_count
         {
@@ -546,8 +543,8 @@ fn drop_covered_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
 }
 
 fn introduces_new_findings(
-    baseline: &[crate::lint::DrcViolation],
-    candidate: &[crate::lint::DrcViolation],
+    baseline: &[drc_lint::lint::DrcViolation],
+    candidate: &[drc_lint::lint::DrcViolation],
 ) -> bool {
     candidate
         .iter()
@@ -1309,7 +1306,7 @@ fn escape_cells(
     grid: &mut RouteGrid,
     problem: &RouteProblem,
     conn_idx: usize,
-    pt: &crate::problem::RoutePoint,
+    pt: &pcb_model::RoutePoint,
     pad_cell: State,
     halo: usize,
     escape_layer: Option<u32>,
@@ -1460,7 +1457,7 @@ fn via_in_pad_escape(
     grid: &mut RouteGrid,
     problem: &RouteProblem,
     conn_idx: usize,
-    pt: &crate::problem::RoutePoint,
+    pt: &pcb_model::RoutePoint,
     pad_cell: State,
     el: usize,
     halo: usize,
@@ -1605,7 +1602,7 @@ fn mark_segment(grid: &mut RouteGrid, conn: usize, a: State, b: State, halo: usi
 }
 
 /// The grid cell + layer of a route point.
-fn point_cell(grid: &RouteGrid, pt: &crate::problem::RoutePoint, layer_count: usize) -> State {
+fn point_cell(grid: &RouteGrid, pt: &pcb_model::RoutePoint, layer_count: usize) -> State {
     let layer = pt
         .layer
         .index(layer_count as u32)
@@ -1784,17 +1781,17 @@ fn grid_candidate_can_skip_orthogonal(problem: &RouteProblem, result: &RouteResu
 /// bounds / invalid layer) — excluding connectivity, which already correlates
 /// with the failed-net count. The router's own DRC authority.
 pub fn geometry_violations(problem: &RouteProblem, solution: &RouteSolution) -> usize {
-    crate::lint::lint(problem, solution)
+    drc_lint::lint::lint(problem, solution)
         .iter()
-        .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+        .filter(|v| !matches!(v, drc_lint::lint::DrcViolation::Connectivity { .. }))
         .count()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connectivity;
-    use crate::problem::{Connection, Obstacle, Rect, RoutePoint};
+    use drc_lint::connectivity;
+    use pcb_model::{Connection, Obstacle, Rect, RoutePoint};
     use std::path::Path;
 
     /// A rect pad owned by `connected_to`, centred at `center`, on `layers`.
@@ -1883,9 +1880,9 @@ mod tests {
             routed >= 1,
             "the escape stub must route at least one enclosed QFP pin"
         );
-        let geom: Vec<_> = crate::lint::lint(&problem, &result.solution)
+        let geom: Vec<_> = drc_lint::lint::lint(&problem, &result.solution)
             .into_iter()
-            .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+            .filter(|v| !matches!(v, drc_lint::lint::DrcViolation::Connectivity { .. }))
             .collect();
         assert!(
             geom.is_empty(),
@@ -2041,9 +2038,9 @@ mod tests {
         let r = route(&p);
         // Whatever routes (the body check may force B onto a non-parallel route) must be
         // geometry-clean — never a sub-clearance diagonal short.
-        let geom: Vec<_> = crate::lint::lint(&p, &r.solution)
+        let geom: Vec<_> = drc_lint::lint::lint(&p, &r.solution)
             .into_iter()
-            .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+            .filter(|v| !matches!(v, drc_lint::lint::DrcViolation::Connectivity { .. }))
             .collect();
         assert!(
             geom.is_empty(),
@@ -2149,9 +2146,9 @@ mod tests {
             "the escape must route on the assigned inner signal layer"
         );
         // The emitted copper is geometry-clean (the lint is the authority).
-        let geom: Vec<_> = crate::lint::lint(&problem, &result.solution)
+        let geom: Vec<_> = drc_lint::lint::lint(&problem, &result.solution)
             .into_iter()
-            .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+            .filter(|v| !matches!(v, drc_lint::lint::DrcViolation::Connectivity { .. }))
             .collect();
         assert!(
             geom.is_empty(),
@@ -2431,7 +2428,7 @@ mod tests {
             "same-layer leg should take the legal planar detour before considering a cheap via hop: {:?}",
             result.solution.vias
         );
-        let violations = crate::lint::lint(&problem, &result.solution);
+        let violations = drc_lint::lint::lint(&problem, &result.solution);
         assert!(violations.is_empty(), "{violations:?}");
     }
 
@@ -2485,7 +2482,7 @@ mod tests {
             !result.solution.vias.is_empty(),
             "foreign residual route copper should keep the via fallback available"
         );
-        let violations = crate::lint::lint(&problem, &result.solution);
+        let violations = drc_lint::lint::lint(&problem, &result.solution);
         assert!(violations.is_empty(), "{violations:?}");
     }
 
@@ -3592,7 +3589,7 @@ mod tests {
         );
         assert!(routed.solution.metrics().wirelength < before);
         assert!(routed.failed.is_empty(), "{:?}", routed.failed);
-        assert!(crate::lint::lint(&p, &routed.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &routed.solution).is_empty());
     }
 
     #[test]
@@ -3654,11 +3651,11 @@ mod tests {
             failed: vec![],
             engine: ENGINE.to_owned(),
         };
-        let before = crate::lint::lint(&p, &routed.solution);
+        let before = drc_lint::lint::lint(&p, &routed.solution);
         assert!(
             before.iter().any(|finding| matches!(
                 finding,
-                crate::lint::DrcViolation::ClearanceTraceObstacle { .. }
+                drc_lint::lint::DrcViolation::ClearanceTraceObstacle { .. }
             )),
             "fixture should start with a trace-obstacle clearance finding: {before:?}"
         );
@@ -3670,7 +3667,7 @@ mod tests {
             vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 4.0, y: 4.0 }]
         );
         assert!(routed.failed.is_empty(), "{:?}", routed.failed);
-        assert!(crate::lint::lint(&p, &routed.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &routed.solution).is_empty());
     }
 
     #[test]
@@ -3741,7 +3738,7 @@ mod tests {
         );
         assert!(routed.solution.metrics().wirelength < before);
         assert!(routed.failed.is_empty(), "{:?}", routed.failed);
-        assert!(crate::lint::lint(&p, &routed.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &routed.solution).is_empty());
     }
 
     fn layer_change_result_with_vias(vias: Vec<Via>) -> (RouteProblem, RouteResult) {
@@ -3863,7 +3860,7 @@ mod tests {
             span: ViaSpan::Through,
         };
         let (layer_problem, via_heavy) = layer_change_result_with_vias(vec![via]);
-        assert!(crate::lint::lint(&layer_problem, &via_heavy.solution).is_empty());
+        assert!(drc_lint::lint::lint(&layer_problem, &via_heavy.solution).is_empty());
         assert!(
             !grid_candidate_can_skip_orthogonal(&layer_problem, &via_heavy),
             "clean via-heavy 8-way result should still compete with orthogonal fallback"
@@ -3896,7 +3893,7 @@ mod tests {
         assert!(routed.failed.is_empty(), "{:?}", routed.failed);
         assert_eq!(routed.solution.vias.len(), 1);
         assert!(matches!(routed.solution.vias[0].span, ViaSpan::Through));
-        assert!(crate::lint::lint(&p, &routed.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &routed.solution).is_empty());
     }
 
     #[test]
@@ -3927,7 +3924,7 @@ mod tests {
         assert!(routed.failed.is_empty(), "{:?}", routed.failed);
         assert_eq!(routed.solution.vias.len(), 1);
         assert!(matches!(routed.solution.vias[0].span, ViaSpan::Through));
-        assert!(crate::lint::lint(&p, &routed.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &routed.solution).is_empty());
     }
 
     #[test]

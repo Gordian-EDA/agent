@@ -1,0 +1,1 @@
+Create a complete USB-C powered environmental data logger PCB from scratch. Use an ESP32-S3, 3.3 V regulation, USB ESD protection, a temperature/humidity sensor, a microSD socket, a status LED, reset and boot controls, programming access, and appropriate decoupling. Produce and route the PCB, run the checks, render the result, and export fabrication files.

@@ -11,14 +11,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use circuit_lang::model::Design;
 use circuit_lang::{PinType, find_pin};
 use geom::{EPS, Point2, Segment};
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 
 use crate::wire::DrawnSegment;
 use crate::write::SchematicWriter;
 
-use sch_place::item::{Incidence, Item};
 use circuit_graph::netclass::is_ground;
+use sch_place::item::{Incidence, Item};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
 // `geom::union_find`, shared with circuit-lang's pin reconciler.
@@ -312,7 +312,7 @@ pub fn grid_order_viol(items: &[Item], ir: &LayoutIr) -> usize {
 /// satellite drifting across the chip to dodge a spacing penalty. A part with no
 /// anchor pin at all (e.g. an IC-less divider) contributes nothing.
 pub fn count_stray(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     w: &SchematicWriter,
     items: &[Item],
     inc: &Incidence,
@@ -335,7 +335,7 @@ pub fn count_stray(
 /// the gentle stray pull, but NOT for hard pin-alignment (which would snap every
 /// decoupling cap onto one power pin and cram them). `None` if no anchor applies.
 pub fn signal_anchor_centroid(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     w: &SchematicWriter,
     items: &[Item],
     inc: &Incidence,
@@ -379,7 +379,7 @@ pub fn signal_anchor_centroid(
 /// non-ground rail with an IC pin (e.g. a pure rail-to-rail divider leg, left to
 /// the rail spread).
 pub fn supply_pin_target(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     w: &SchematicWriter,
     items: &[Item],
     inc: &Incidence,
@@ -422,13 +422,13 @@ pub fn supply_pin_target(
 /// source); empty when nothing drives the net (the common undriven-bus case), so the
 /// caller's existing placement is untouched.
 pub(crate) fn driven_rail_drivers(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     w: &SchematicWriter,
     items: &[Item],
     inc: &Incidence,
     ir: &LayoutIr,
 ) -> BTreeMap<String, [f64; 2]> {
-    let provider = SymbolTable::from_env(env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let mut out: BTreeMap<String, [f64; 2]> = BTreeMap::new();
     for (net, pins) in inc {
         if !ir.rails.contains_key(net) || is_ground(net) {
@@ -590,9 +590,9 @@ pub fn count_crossings(wires: &[DrawnSegment]) -> usize {
 /// DIAGNOSTIC (env-gated): print every short — a pin landing on a foreign net's
 /// wire (endpoint or interior) and every collinear/junction merge — naming the
 /// pin (refdes.num@net) and the offending wire (net + endpoints), so the exact
-/// rail/trunk wire that merges two nets is pinpointable without kicad-cli.
+/// rail/trunk wire that merges two nets is pinpointable without kicad.
 pub(crate) fn diagnose_shorts(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     w: &SchematicWriter,
     items: &[Item],
     inc: &Incidence,
@@ -693,7 +693,7 @@ pub(crate) fn diagnose_shorts(
 /// in KiCAD). A pin merely sitting on a wire's interior is NOT a connection
 /// without a junction, so — matching `count_merges` — those are excluded.
 pub fn count_shorts(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     w: &SchematicWriter,
     items: &[Item],
     inc: &Incidence,

@@ -11,8 +11,8 @@ use super::geometry::{
     PLACE_GRID, PLACEMENT_GRID, SPIRAL_MAX_RING, clamp_center_for_envelope,
     part_placement_bounds_envelope, placement_envelope_at,
 };
+use pcb_model::{Point2, Rect};
 use place_model::PlaceProblem;
-use crate::problem::{Point2, Rect};
 
 pub(crate) use place_model::is_legal;
 

@@ -8,11 +8,6 @@ use super::geometry::{
 };
 use super::hints::{apply_grid_hints, unified_fanout_place};
 use super::legalize::is_legal;
-use geom::Rect;
-use place_model::{
-    Edge, GroupHint, LockedAt, Part, PartPad, PlaceProblem, PlacementHints, derive_nets,
-    series_pairs, to_route_problem,
-};
 use super::route::{
     EdgeLockedPlacer, GridAstarRanker, PlaceOpts, better_place_result,
     edge_seek_position_candidates, fanout_fast_path_accepts, net_centroid_position_candidates,
@@ -26,9 +21,14 @@ use super::route::{
     seat_corner_seek_parts, should_try_full_grid_ranker_fallback, swap_pair_order,
     unique_position_candidates,
 };
-use crate::connectivity;
+use drc_lint::connectivity;
+use geom::Rect;
+use pcb_model::{Connection, LayerRef, Obstacle, Point2, Polygon, RoutePoint, RouteProblem};
+use place_model::{
+    Edge, GroupHint, LockedAt, Part, PartPad, PlaceProblem, PlacementHints, derive_nets,
+    series_pairs, to_route_problem,
+};
 use place_model::{Placer, RouteRanker, compute_hpwl, compute_hpwl_with_rotations};
-use crate::problem::{Connection, LayerRef, Obstacle, Point2, Polygon, RoutePoint, RouteProblem};
 
 fn board(w: f64, h: f64) -> Rect {
     Rect {
@@ -888,7 +888,9 @@ fn greedy_swap_polish_untangles_crossed_two_pin_ratlines() {
     let mut cost = cost_of(&pos);
     assert_eq!(ratline_crossings(&problem, &rotations, &nets, &pos), 1);
 
-    let all_pairs: Vec<(usize, usize)> = (0..4).flat_map(|a| (a + 1..4).map(move |b| (a, b))).collect();
+    let all_pairs: Vec<(usize, usize)> = (0..4)
+        .flat_map(|a| (a + 1..4).map(move |b| (a, b)))
+        .collect();
     greedy_swap_polish_with_order(&problem, &half, &all_pairs, &mut pos, &mut cost, cost_of);
 
     assert_eq!(ratline_crossings(&problem, &rotations, &nets, &pos), 0);
@@ -1133,7 +1135,7 @@ fn position_polish_takes_legal_grid_step_that_lowers_cost() {
         .zip(&rotations)
         .map(|(p, &r)| rotated_courtyard_half(p, r))
         .collect();
-    let copper_bbox: Vec<crate::problem::Rect> = problem
+    let copper_bbox: Vec<pcb_model::Rect> = problem
         .parts
         .iter()
         .zip(&rotations)
@@ -2257,7 +2259,7 @@ fn position_polish_can_take_axis_alignment_when_full_pad_target_is_illegal() {
         .zip(&rotations)
         .map(|(p, &r)| rotated_courtyard_half(p, r))
         .collect();
-    let copper_bbox: Vec<crate::problem::Rect> = problem
+    let copper_bbox: Vec<pcb_model::Rect> = problem
         .parts
         .iter()
         .zip(&rotations)
@@ -2322,7 +2324,7 @@ fn swap_polish_untangles_post_legalized_assignment() {
         .zip(&rotations)
         .map(|(p, &r)| rotated_courtyard_half(p, r))
         .collect();
-    let copper_bbox: Vec<crate::problem::Rect> = problem
+    let copper_bbox: Vec<pcb_model::Rect> = problem
         .parts
         .iter()
         .zip(&rotations)
@@ -3326,7 +3328,7 @@ fn to_route_problem_round_trips_and_oracle_accepts_geometry() {
     // reported Unconnected (their points are not yet joined) but there must be
     // NO CrossNetMerge — the points-on-pads geometry is sound. (A clean route
     // below proves the points are actually reachable.)
-    let empty = crate::problem::RouteSolution {
+    let empty = pcb_model::RouteSolution {
         traces: vec![],
         vias: vec![],
     };
@@ -3428,8 +3430,8 @@ fn grid_ranker_uses_best_orthogonal_strictness_key() {
         escape_layers: Default::default(),
         plane_nets: Default::default(),
     };
-    let strict_key = route_rank_key(&rp, &crate::router::route_orthogonal(&rp));
-    let lenient_key = route_rank_key(&rp, &crate::router::route_orthogonal_lenient(&rp));
+    let strict_key = route_rank_key(&rp, &grid_astar::router::route_orthogonal(&rp));
+    let lenient_key = route_rank_key(&rp, &grid_astar::router::route_orthogonal_lenient(&rp));
     let expected = if route_rank_key_better(lenient_key, strict_key) {
         lenient_key
     } else {
@@ -3940,7 +3942,7 @@ fn impossible_board_returns_not_legal_without_panic() {
 
 #[test]
 fn rotate_offset_matches_kicad_convention() {
-    // Verified against kicad-cli: a SOIC-8 pad at local (-2.475, 1.905) under a
+    // Verified against kicad: a SOIC-8 pad at local (-2.475, 1.905) under a
     // footprint rotated 270° lands at world offset (-1.905, -2.475). The two
     // 90/270 directions must not be swapped, or routing targets the wrong pad.
     let p = Point2::new(-2.475, 1.905).rotate(270.0);

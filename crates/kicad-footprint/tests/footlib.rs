@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_footprint::{
     CourtyardSource, Footprint, FootprintCatalog, FootprintId, LibraryId, PadTechnology,
     SearchQuery,
@@ -377,24 +377,15 @@ fn catalog_propagates_parse_errors_distinctly() {
     assert_eq!(bad.path(), Some(dir.join("Broken.kicad_mod").as_path()));
 }
 
-#[test]
-fn from_env_indexes_the_environment_footprint_dir() {
-    // from_env must read `env.footprint_dir`, NOT a symbol-dir-derived sibling.
-    let (guard, root) = staged_pretty("Resistor_SMD", &["R_0603_1608Metric"]);
-    let env = KicadEnv::with_library_dirs(guard.path().join("symbols"), root);
-    let catalog = FootprintCatalog::from_env(&env).unwrap();
-    assert!(catalog.contains(&fid("Resistor_SMD:R_0603_1608Metric")));
-}
-
 // ── live environment (gated on KiCAD) ────────────────────────────────────────
 
 #[test]
 fn live_catalog_sees_many_libraries() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD installation detected");
         return;
     };
-    let catalog = FootprintCatalog::from_env(&env).unwrap();
+    let catalog = FootprintCatalog::from_root(env.footprint_dir()).unwrap();
     eprintln!(
         "indexed {} footprints across {} libraries",
         catalog.len(),
@@ -406,11 +397,11 @@ fn live_catalog_sees_many_libraries() {
 
 #[test]
 fn live_search_finds_r0603() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD installation detected");
         return;
     };
-    let catalog = FootprintCatalog::from_env(&env).unwrap();
+    let catalog = FootprintCatalog::from_root(env.footprint_dir()).unwrap();
     let hits = catalog.search(SearchQuery::new("R_0603_1608Metric").limit(8));
     assert!(
         hits.iter()
@@ -422,11 +413,11 @@ fn live_search_finds_r0603() {
 
 #[test]
 fn live_search_fuzzy_finds_sot23() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD installation detected");
         return;
     };
-    let catalog = FootprintCatalog::from_env(&env).unwrap();
+    let catalog = FootprintCatalog::from_root(env.footprint_dir()).unwrap();
     let hits = catalog.search(SearchQuery::new("TO_SOT_SMD SOT-23").limit(10));
     assert!(
         hits.iter()

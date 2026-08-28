@@ -10,7 +10,7 @@ use negotiated_mesh::detail::route_cells;
 use negotiated_mesh::mesh::CapacityMesh;
 use negotiated_mesh::pathing::global_route;
 use negotiated_mesh::pipeline::route_detailed;
-use negotiated_mesh::problem::RouteProblem;
+use pcb_model::RouteProblem;
 
 fn main() {
     let name = std::env::args()

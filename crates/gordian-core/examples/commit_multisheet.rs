@@ -4,7 +4,7 @@
 //!
 //! Usage: cargo run --release -p gordian-core --example commit_multisheet -- <draft.yaml> <out_dir>
 
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 
 fn main() -> anyhow::Result<()> {
@@ -14,8 +14,8 @@ fn main() -> anyhow::Result<()> {
     let out = std::env::args()
         .nth(2)
         .expect("usage: commit_multisheet <draft.yaml> <out_dir>");
-    let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let provider = SymbolTable::from_env(&env);
+    let env = KicadInstallation::detect().expect("no KiCAD environment detected");
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let src = std::fs::read_to_string(&yaml)?;
     let result = circuit_lang::compile(&src, &provider);
     let design = result

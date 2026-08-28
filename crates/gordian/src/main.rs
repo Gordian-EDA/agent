@@ -20,7 +20,6 @@ use anyhow::{Context, Result, bail};
 use gordian_core::AgentRuntime;
 use gordian_core::prompts::system_prompt;
 use gordian_core::{Agent, AgentEvent, AutoApprove};
-use kicad_cli::KicadCli;
 
 /// Default project directory when `--project` is omitted.
 const DEFAULT_PROJECT_DIR: &str = "gordian-project";
@@ -329,16 +328,18 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     let loaded = config::load_or_create()?;
     let config = loaded.config;
 
-    // 1. Detect KiCAD (symbol libs + kicad-cli).
+    // 1. Detect KiCAD (symbol libs + kicad).
     let env = config::detect_kicad(&config).context(
         "no KiCAD installation found — install KiCAD 9+/10 or set kicad.symbolDir / \
          kicad.footprintDir / kicad.cliPath in config.toml so the agent can resolve \
          symbols and run ERC",
     )?;
     eprintln!(
-        "kicad: {} (symbols: {})",
-        env.cli_version,
-        env.symbol_dir.display()
+        "kicad: {} (cli: {}, pcbnew: {}, symbols: {})",
+        env.version(),
+        env.cli_path().display(),
+        env.pcbnew_path().display(),
+        env.symbol_dir().display()
     );
     eprintln!("config: {}", loaded.path.display());
 
@@ -431,7 +432,7 @@ fn run_agent_command(args: &[String]) -> Result<()> {
         println!("no schematic was written at {}", sch_path.display());
         bail!("the agent did not produce a schematic");
     }
-    let report = KicadCli::new(&env)
+    let report = env
         .erc(&sch_path)
         .with_context(|| format!("running ERC on {}", sch_path.display()))?;
     println!("errors:   {}", report.error_count());

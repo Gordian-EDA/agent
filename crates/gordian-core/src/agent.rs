@@ -47,9 +47,9 @@ use gordian_llm::{
 };
 
 use crate::AgentRuntime;
-use gordian_runtime::tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
 use crate::tools::{repair_components_tool, run_tool, tool_defs};
 use gordian_runtime::tool::IMAGE_PATH_KEY;
+use gordian_runtime::tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
 
 /// After this many route attempts with failed nets, block further blind PCB
 /// regenerate/place/route retries in the same turn and force an honest report.
@@ -445,6 +445,7 @@ fn is_schematic_phase_tool(name: &str) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn constrain_schematic_tools_for_draft_state(
     defs: &mut Vec<Tool>,
     draft_exists: bool,
@@ -1058,9 +1059,6 @@ impl<P: Provider> Agent<P> {
                 &mut defs,
                 draft_known_invalid || (review_has_defects && !review_needs_full_edit),
             );
-            if !runtime_supports_live_footprint_moves(&self.runtime) {
-                defs.retain(|def| !matches!(def.name.as_str(), "move_parts" | "set_net_width"));
-            }
             if pcb_only_stage {
                 defs.retain(|def| is_pcb_stage_tool(def.name.as_str()));
             }
@@ -3052,23 +3050,6 @@ fn semantic_draft_hash(runtime: &AgentRuntime) -> Option<u64> {
 fn file_content_hash(path: &std::path::Path) -> Option<u64> {
     let bytes = std::fs::read(path).ok()?;
     Some(geom::fnv1a(&bytes))
-}
-
-fn runtime_supports_live_footprint_moves(runtime: &AgentRuntime) -> bool {
-    version_supports_live_footprint_moves(&runtime.env().cli_version)
-}
-
-fn version_supports_live_footprint_moves(version: &str) -> bool {
-    let mut parts = version
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|part| !part.is_empty())
-        .filter_map(|part| part.parse::<u32>().ok());
-    let Some(major) = parts.next() else {
-        return true;
-    };
-    let minor = parts.next().unwrap_or(0);
-    let patch = parts.next().unwrap_or(0);
-    kicad_ipc::footprint_update_supported(major, minor, patch)
 }
 
 /// Return whether a committed apply has ERC findings the model can act on.
@@ -6956,15 +6937,6 @@ blocks:
     }
 
     #[test]
-    fn unstable_kicad_versions_hide_live_footprint_moves() {
-        assert!(!version_supports_live_footprint_moves("9.0.2"));
-        assert!(!version_supports_live_footprint_moves("9.0.2+dfsg-1"));
-        assert!(version_supports_live_footprint_moves("9.0.3"));
-        assert!(version_supports_live_footprint_moves("10.0.0"));
-        assert!(version_supports_live_footprint_moves("unknown"));
-    }
-
-    #[test]
     fn review_intent_always_contains_the_authoritative_user_request() {
         let call = ToolCall {
             call_id: "review-1".into(),
@@ -7345,12 +7317,12 @@ blocks:
         let info = commit_apply_info(&json!({
             "ok": false,
             "written": true,
-            "erc": { "error": "kicad-cli unavailable" }
+            "erc": { "error": "kicad unavailable" }
         }));
 
         assert!(info.ready);
         assert!(info.committed);
-        assert_eq!(info.summary, "written; ERC failed: kicad-cli unavailable");
+        assert_eq!(info.summary, "written; ERC failed: kicad unavailable");
     }
 
     #[test]
@@ -7777,7 +7749,7 @@ blocks:
         assert!(!check_board_requires_route_recovery(
             true,
             &json!({
-                "error": "kicad-cli failed",
+                "error": "kicad failed",
                 "ok": false
             })
         ));

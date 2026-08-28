@@ -1,6 +1,4 @@
-use crate::problem::{
-    LayerRef, Obstacle, Point2, RouteProblem, RouteSolution, Trace, Via, ViaSpan,
-};
+use pcb_model::{LayerRef, Obstacle, Point2, RouteProblem, RouteSolution, Trace, Via, ViaSpan};
 
 pub fn copper_obstacles(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Obstacle> {
     let mut obstacles = Vec::new();
@@ -14,7 +12,7 @@ pub fn copper_obstacles(problem: &RouteProblem, solution: &RouteSolution) -> Vec
 }
 
 pub(crate) fn trace_obstacles(problem: &RouteProblem, trace: &Trace) -> Vec<Obstacle> {
-    let pitch = crate::grid::grid_pitch(problem);
+    let pitch = grid_astar::grid::grid_pitch(problem);
     trace
         .path
         .windows(2)

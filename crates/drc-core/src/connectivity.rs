@@ -45,8 +45,8 @@
 //! fall in the same allowed group. Merges driven by genuine geometric contact
 //! between single-net copper are still reported.
 
-use crate::problem::{LayerRef, RouteProblem, RouteSolution};
 use geom::EPS;
+use pcb_model::{LayerRef, RouteProblem, RouteSolution};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -517,7 +517,7 @@ impl NameGroups {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{
+    use pcb_model::{
         Connection, Obstacle, Point2, Rect, RoutePoint, RouteProblem, RouteSolution, Trace, Via,
         ViaSpan,
     };

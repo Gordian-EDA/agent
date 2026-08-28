@@ -10,6 +10,7 @@ description = "Premium simulated-annealing schematic placement engine: implement
 circuit-lang = { path = "../circuit-lang" }
 circuit-graph = { path = "../circuit-graph" }
 geom = { path = "../geom" }
+kicad = { path = "../kicad" }
 sch-place = { path = "../sch-place" }
 sch-floorplan = { path = "../sch-floorplan" }
 rayon.workspace = true

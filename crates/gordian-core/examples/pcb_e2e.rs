@@ -13,7 +13,7 @@ use std::time::Instant;
 use anyhow::{Context, bail};
 use gordian_core::AgentRuntime;
 use gordian_core::tools::run_tool;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use serde_json::{Value, json};
 
 fn attempt(ctx: &AgentRuntime, name: &str, input: Value) -> anyhow::Result<Value> {
@@ -61,7 +61,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let yaml = std::fs::read_to_string(&fixture)?;
-    let env = KicadEnv::detect().context("no KiCad environment detected")?;
+    let env = KicadInstallation::detect().context("no KiCad environment detected")?;
     let mut config = gordian_runtime::config::GordianConfig::default();
     if let Ok(router) = std::env::var("PCB_E2E_ROUTER") {
         config.engines.pcb_router = serde_json::from_value(json!(router))
@@ -91,7 +91,10 @@ fn main() -> anyhow::Result<()> {
         rule_map.insert("layer_count".into(), json!(layers));
     }
     if let Ok(clearance) = std::env::var("PCB_E2E_CLEARANCE") {
-        rule_map.insert("clearance".into(), json!(clearance.parse::<f64>().unwrap_or(0.2)));
+        rule_map.insert(
+            "clearance".into(),
+            json!(clearance.parse::<f64>().unwrap_or(0.2)),
+        );
     }
     if let Ok(width) = std::env::var("PCB_E2E_TRACE_WIDTH") {
         rule_map.insert(
@@ -99,7 +102,7 @@ fn main() -> anyhow::Result<()> {
             json!(width.parse::<f64>().unwrap_or(0.25)),
         );
     }
-    let rules = (!rule_map.is_empty()).then(|| Value::Object(rule_map));
+    let rules = (!rule_map.is_empty()).then_some(Value::Object(rule_map));
     let with_rules = |mut input: Value| {
         if let (Some(rules), Value::Object(o)) = (&rules, &mut input) {
             o.insert("rules".into(), rules.clone());
@@ -159,9 +162,7 @@ fn main() -> anyhow::Result<()> {
             with_rules(json!({"bounds": [0.0, 0.0, tighter_w, tighter_h]})),
         )?;
         let tightened = attempt(&ctx, "place_board", json!({}))?;
-        if tightened["legal"] == Value::Bool(true) {
-            placed = tightened;
-        } else {
+        if tightened["legal"] != Value::Bool(true) {
             step(
                 &ctx,
                 "regenerate_board",

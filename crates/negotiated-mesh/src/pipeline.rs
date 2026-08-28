@@ -49,14 +49,14 @@ use crate::heuristics::{
 use crate::layer_hop::LayerHopRouter;
 use crate::pathing::{GlobalRouteResult, global_route_with_mesh};
 use crate::pattern::PatternRouter;
-use crate::problem::{
-    Capabilities, Connection, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteQuality,
-    RouteResult, RouteSolution, Router, Trace, Via, ViaSpan,
-};
-use crate::router::{self, GridAStarRouter};
 use crate::sequential::SequentialGridRouter;
 use crate::via_escape::ViaEscapeRouter;
 use geom::JOIN_EPS;
+use grid_astar::router::{self, GridAStarRouter};
+use pcb_model::{
+    Capabilities, Connection, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteQuality,
+    RouteResult, RouteSolution, Router, Trace, Via, ViaSpan,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
@@ -523,7 +523,7 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, RouteSolution)>
     let mut handled_plane_connection = false;
     for c in &plane_conns {
         let plane_layer = problem.plane_nets[&c.name];
-        let reaches_plane = |pt: &crate::problem::RoutePoint| {
+        let reaches_plane = |pt: &pcb_model::RoutePoint| {
             problem.obstacles.iter().any(|ob| {
                 // A same-net zone spans most of the board and is represented as
                 // an obstacle too.  It proves that the plane exists, not that a
@@ -621,7 +621,7 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, RouteSolution)>
             // One crowded pad must not demote an otherwise valid plane net into
             // a board-wide routed tree. Route only the pads that could not take
             // a local stitching via to one already-stitched plane anchor.
-            failed_points.push(crate::problem::RoutePoint {
+            failed_points.push(pcb_model::RoutePoint {
                 x: anchor.x,
                 y: anchor.y,
                 layer,
@@ -792,21 +792,7 @@ pub fn route_auto_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
     with_plane_fanout(problem, route_auto_with_diagnostics_inner)
 }
 
-/// Wall-clock budget for STARTING further auto-portfolio engine attempts. The
-/// cheap tier always runs; expensive stages (sequential, mesh-detailed, grid)
-/// are skipped once the budget is spent, and the targeted rescue still runs on
-/// the best candidate. Keeps a fine-pitch grind from eating fifteen minutes to
-/// deliver the same failed nets the first pass already found.
-fn auto_attempt_deadline() -> std::time::Duration {
-    let secs = std::env::var("ROUTE_AUTO_DEADLINE_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(60);
-    std::time::Duration::from_secs(secs)
-}
-
 fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
-    let attempt_deadline = Instant::now() + auto_attempt_deadline();
     // Large boards make the normal portfolio multiplicative: each specialist,
     // negotiated detail, and the grid fallback may explore several net orders
     // and rip-up retries. Keep automatic routing predictably bounded once the
@@ -939,7 +925,7 @@ fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
         }
     }
 
-    if sequential.can_route(problem) && Instant::now() < attempt_deadline {
+    if sequential.can_route(problem) {
         let started = Instant::now();
         let result = sequential.route(problem);
         let elapsed_ms = started.elapsed().as_millis();
@@ -960,10 +946,7 @@ fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
         }
     }
 
-    if mesh.can_route(problem)
-        && should_try_detailed_in_auto(problem)
-        && Instant::now() < attempt_deadline
-    {
+    if mesh.can_route(problem) && should_try_detailed_in_auto(problem) {
         let started = Instant::now();
         let (mut result, g) = route_detailed_with_global(problem);
         reconcile_connectivity(problem, &mut result.solution, &mut result.failed);
@@ -989,7 +972,7 @@ fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
         }
     }
 
-    if grid.can_route(problem) && Instant::now() < attempt_deadline {
+    if grid.can_route(problem) {
         let started = Instant::now();
         let result = grid.route(problem);
         let elapsed_ms = started.elapsed().as_millis();
@@ -1061,19 +1044,11 @@ fn try_adaptive_grid_rescue(
     let _ = consider_candidate_recording(problem, best, candidate, Some(attempts), elapsed_ms);
 }
 
-/// Wall-clock cap on the rescue's order exploration: refined-grid passes on a
-/// large failed set otherwise grind for minutes delivering nothing new.
-/// ADAPTIVE_RESCUE_DEADLINE_SECS overrides for deep rip-up experiments.
-fn adaptive_rescue_deadline() -> std::time::Duration {
-    let secs = std::env::var("ADAPTIVE_RESCUE_DEADLINE_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(30);
-    std::time::Duration::from_secs(secs)
-}
+/// Deterministic work budget for each adaptive-rescue phase. A fixed candidate
+/// count keeps equal inputs byte-reproducible across fast and slow machines.
+const ADAPTIVE_RESCUE_MAX_ORDERS: usize = 16;
 
 fn adaptive_grid_rescue(problem: &RouteProblem, selected: &RouteResult) -> Option<RouteResult> {
-    let rescue_deadline = Instant::now() + adaptive_rescue_deadline();
     let failed_names: BTreeSet<String> = selected
         .failed
         .iter()
@@ -1086,10 +1061,10 @@ fn adaptive_grid_rescue(problem: &RouteProblem, selected: &RouteResult) -> Optio
 
     let mut best: Option<(RouteResult, RouteQuality)> = None;
     let base = adaptive_rescue_base(problem, selected, &failed_names);
-    for order in adaptive_rescue_orders(problem, &failed_names) {
-        if Instant::now() >= rescue_deadline {
-            break;
-        }
+    for order in adaptive_rescue_orders(problem, &failed_names)
+        .into_iter()
+        .take(ADAPTIVE_RESCUE_MAX_ORDERS)
+    {
         let Some(mut candidate) = adaptive_grid_rescue_order(problem, selected, &base, &order)
         else {
             continue;
@@ -1115,10 +1090,10 @@ fn adaptive_grid_rescue(problem: &RouteProblem, selected: &RouteResult) -> Optio
         selected,
         router::geometry_violations(problem, &selected.solution),
     );
-    for order in adaptive_ripup_rescue_orders(problem, selected, &failed_names) {
-        if Instant::now() >= rescue_deadline {
-            break;
-        }
+    for order in adaptive_ripup_rescue_orders(problem, selected, &failed_names)
+        .into_iter()
+        .take(ADAPTIVE_RESCUE_MAX_ORDERS)
+    {
         let Some(mut candidate) =
             adaptive_grid_ripup_rescue_order(problem, selected, &failed_names, &order)
         else {
@@ -1153,10 +1128,10 @@ fn adaptive_grid_rescue(problem: &RouteProblem, selected: &RouteResult) -> Optio
             .map(|f| f.connection.clone())
             .filter(|name| !name.is_empty())
             .collect();
-        for order in adaptive_ripup_rescue_orders(problem, &residual, &residual_failed_names) {
-            if Instant::now() >= rescue_deadline {
-                break;
-            }
+        for order in adaptive_ripup_rescue_orders(problem, &residual, &residual_failed_names)
+            .into_iter()
+            .take(ADAPTIVE_RESCUE_MAX_ORDERS)
+        {
             let Some(mut candidate) = adaptive_grid_ripup_rescue_order(
                 problem,
                 &residual,
@@ -1259,7 +1234,7 @@ fn adaptive_grid_rescue_order(
         candidate.vias.extend(routed.solution.vias);
         let validation = problem_with_solution_connections(problem, &candidate);
         crate::via_cleanup::normalize_redundant_vias(&validation, &mut candidate);
-        if !crate::lint::lint(&validation, &candidate).is_empty() {
+        if !drc_lint::lint::lint(&validation, &candidate).is_empty() {
             continue;
         }
 
@@ -1333,7 +1308,7 @@ fn adaptive_grid_ripup_rescue_order(
         candidate.vias.extend(routed.solution.vias);
         let validation = problem_with_solution_connections(problem, &candidate);
         crate::via_cleanup::normalize_redundant_vias(&validation, &mut candidate);
-        if !crate::lint::lint(&validation, &candidate).is_empty() {
+        if !drc_lint::lint::lint(&validation, &candidate).is_empty() {
             if !failed.iter().any(|f| f.connection == conn.name) {
                 failed.push(FailedNet {
                     connection: conn.name.clone(),
@@ -1769,7 +1744,7 @@ fn failed_corridor_segments(
     out
 }
 
-fn failed_corridor_tree_pairs(conn: &crate::problem::Connection) -> Vec<(usize, usize)> {
+fn failed_corridor_tree_pairs(conn: &pcb_model::Connection) -> Vec<(usize, usize)> {
     match conn.points_to_connect.as_slice() {
         [] | [_] => Vec::new(),
         [_, _] => vec![(0, 1)],
@@ -1808,7 +1783,7 @@ fn failed_corridor_tree_pairs(conn: &crate::problem::Connection) -> Vec<(usize, 
 }
 
 fn failed_corridor_tree_pair_better(
-    conn: &crate::problem::Connection,
+    conn: &pcb_model::Connection,
     positions: &[Point2],
     a: usize,
     b: usize,
@@ -1834,7 +1809,7 @@ fn failed_corridor_tree_pair_better(
 }
 
 fn failed_corridor_pair_requires_layer_change(
-    conn: &crate::problem::Connection,
+    conn: &pcb_model::Connection,
     a: usize,
     b: usize,
 ) -> bool {
@@ -2004,7 +1979,7 @@ fn drop_redundant_thruhole_vias(problem: &RouteProblem, solution: &mut RouteSolu
 /// fast-path and fallback router output. Every removal is lint-guarded so a via
 /// anchor that preserves connectivity or DRC is kept.
 fn drop_dangling_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
-    let mut baseline = crate::lint::lint(problem, solution);
+    let mut baseline = drc_lint::lint::lint(problem, solution);
     let mut idx = 0usize;
     while idx < solution.vias.len() {
         if via_connected_layers(problem, solution, &solution.vias[idx]).len() >= 2 {
@@ -2014,7 +1989,7 @@ fn drop_dangling_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
 
         let mut candidate = solution.clone();
         candidate.vias.remove(idx);
-        let findings = crate::lint::lint(problem, &candidate);
+        let findings = drc_lint::lint::lint(problem, &candidate);
         if !introduces_new_findings(&baseline, &findings)
             && candidate.metrics().via_count < solution.metrics().via_count
         {
@@ -2027,8 +2002,8 @@ fn drop_dangling_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
 }
 
 fn introduces_new_findings(
-    baseline: &[crate::lint::DrcViolation],
-    candidate: &[crate::lint::DrcViolation],
+    baseline: &[drc_lint::lint::DrcViolation],
+    candidate: &[drc_lint::lint::DrcViolation],
 ) -> bool {
     candidate
         .iter()
@@ -2095,7 +2070,7 @@ fn trace_duplicate_key(trace: &Trace) -> (String, String, i64, Vec<(i64, i64)>) 
 /// lint report is unchanged. This catches equal-length collinear simplifications
 /// that the shortcut pass deliberately skips because they do not reduce wirelength.
 fn simplify_trace_paths(problem: &RouteProblem, solution: &mut RouteSolution) {
-    let mut baseline = crate::lint::lint(problem, solution);
+    let mut baseline = drc_lint::lint::lint(problem, solution);
     for ti in 0..solution.traces.len() {
         let simplified = geom::Polyline::new(solution.traces[ti].path.clone())
             .simplify()
@@ -2105,7 +2080,7 @@ fn simplify_trace_paths(problem: &RouteProblem, solution: &mut RouteSolution) {
         }
         let mut candidate = solution.clone();
         candidate.traces[ti].path = simplified;
-        let findings = crate::lint::lint(problem, &candidate);
+        let findings = drc_lint::lint::lint(problem, &candidate);
         if findings == baseline {
             *solution = candidate;
             baseline = findings;
@@ -2119,7 +2094,7 @@ fn simplify_trace_paths(problem: &RouteProblem, solution: &mut RouteSolution) {
 /// remain protected; a loop may also be accepted when deleting it removes an
 /// existing detour-caused lint finding without adding any new one.
 fn drop_trace_spurs(problem: &RouteProblem, solution: &mut RouteSolution) {
-    let mut baseline = crate::lint::lint(problem, solution);
+    let mut baseline = drc_lint::lint::lint(problem, solution);
     let mut lint_budget = 256usize;
 
     loop {
@@ -2152,7 +2127,7 @@ fn drop_trace_spurs(problem: &RouteProblem, solution: &mut RouteSolution) {
                     {
                         continue;
                     }
-                    let findings = crate::lint::lint(problem, &candidate);
+                    let findings = drc_lint::lint::lint(problem, &candidate);
                     lint_budget -= 1;
                     if !introduces_new_findings(&baseline, &findings) {
                         *solution = candidate;
@@ -2174,13 +2149,13 @@ fn drop_trace_spurs(problem: &RouteProblem, solution: &mut RouteSolution) {
 /// overlapped copper left by pattern/grid retries while preserving every
 /// connectivity and DRC invariant through the lint oracle.
 fn drop_covered_collinear_traces(problem: &RouteProblem, solution: &mut RouteSolution) {
-    let mut baseline = crate::lint::lint(problem, solution);
+    let mut baseline = drc_lint::lint::lint(problem, solution);
     let mut idx = 0usize;
     while idx < solution.traces.len() {
         if trace_is_covered_by_another(solution, idx) {
             let mut candidate = solution.clone();
             candidate.traces.remove(idx);
-            let findings = crate::lint::lint(problem, &candidate);
+            let findings = drc_lint::lint::lint(problem, &candidate);
             if findings == baseline
                 && candidate.metrics().wirelength < solution.metrics().wirelength
             {
@@ -2272,7 +2247,7 @@ fn point_on_segment(p: Point2, a: Point2, b: Point2) -> bool {
 /// constraints remain under the same oracle as the selected route.
 fn merge_touching_traces(problem: &RouteProblem, solution: &mut RouteSolution) {
     loop {
-        let baseline = crate::lint::lint(problem, solution);
+        let baseline = drc_lint::lint::lint(problem, solution);
         let mut groups: BTreeMap<(String, String, i64), Vec<usize>> = BTreeMap::new();
         for (idx, trace) in solution.traces.iter().enumerate() {
             groups
@@ -2320,7 +2295,7 @@ fn merge_touching_traces(problem: &RouteProblem, solution: &mut RouteSolution) {
             }
 
             if candidate.traces.len() < solution.traces.len()
-                && crate::lint::lint(problem, &candidate) == baseline
+                && drc_lint::lint::lint(problem, &candidate) == baseline
             {
                 *solution = candidate;
                 improved = true;
@@ -2344,7 +2319,7 @@ fn shortcut_octilinear_traces(problem: &RouteProblem, solution: &mut RouteSoluti
         return;
     }
 
-    let mut baseline = crate::lint::lint(problem, solution);
+    let mut baseline = drc_lint::lint::lint(problem, solution);
     let mut lint_budget = 256usize;
 
     loop {
@@ -2374,7 +2349,7 @@ fn shortcut_octilinear_traces(problem: &RouteProblem, solution: &mut RouteSoluti
 
                     let mut candidate = solution.clone();
                     candidate.traces[ti].path.drain(i + 1..j);
-                    let findings = crate::lint::lint(problem, &candidate);
+                    let findings = drc_lint::lint::lint(problem, &candidate);
                     lint_budget -= 1;
                     if !introduces_new_findings(&baseline, &findings) {
                         *solution = candidate;
@@ -2427,7 +2402,7 @@ fn pull_orthogonal_trace_corners(problem: &RouteProblem, solution: &mut RouteSol
         return;
     }
 
-    let mut baseline = crate::lint::lint(problem, solution);
+    let mut baseline = drc_lint::lint::lint(problem, solution);
     let mut lint_budget = 256usize;
 
     loop {
@@ -2462,7 +2437,7 @@ fn pull_orthogonal_trace_corners(problem: &RouteProblem, solution: &mut RouteSol
                             geom::Polyline::new(candidate.traces[ti].path.clone())
                                 .simplify()
                                 .into_points();
-                        let findings = crate::lint::lint(problem, &candidate);
+                        let findings = drc_lint::lint::lint(problem, &candidate);
                         lint_budget -= 1;
                         if !introduces_new_findings(&baseline, &findings) {
                             *solution = candidate;
@@ -2537,8 +2512,8 @@ fn reconcile_connectivity(
     solution: &mut RouteSolution,
     failed: &mut Vec<FailedNet>,
 ) {
-    let mut broken = crate::lint::drop_violating_copper(problem, solution);
-    broken.extend(crate::lint::drop_unconnected_copper(problem, solution));
+    let mut broken = drc_lint::lint::drop_violating_copper(problem, solution);
+    broken.extend(drc_lint::lint::drop_unconnected_copper(problem, solution));
     let known: std::collections::BTreeSet<&str> =
         failed.iter().map(|f| f.connection.as_str()).collect();
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -2597,7 +2572,7 @@ fn stitch(
                 }
                 traces.push(Trace {
                     connection: connection.clone(),
-                    layer: crate::problem::LayerRef(layer.clone()),
+                    layer: pcb_model::LayerRef(layer.clone()),
                     width: problem.net_width(&connection), // per-net: fat power, thin signals
                     path: simplified,
                 });
@@ -2851,7 +2826,7 @@ fn assignment_failure_reason(f: &crate::crossing::AssignmentFailure) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lint::lint;
+    use drc_lint::lint::lint;
     use std::path::Path;
     use std::sync::{
         Arc,
@@ -2885,22 +2860,22 @@ mod tests {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],
-            connections: vec![crate::problem::Connection {
+            connections: vec![pcb_model::Connection {
                 name: "N".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 5.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 18.0,
                         y: 5.0,
                         layer: LayerRef::top(),
                     },
                 ],
             }],
-            bounds: crate::problem::Rect {
+            bounds: pcb_model::Rect {
                 min_x: 0.0,
                 max_x: 20.0,
                 min_y: 0.0,
@@ -2922,7 +2897,7 @@ mod tests {
         p.layer_count = 4;
         p.plane_nets.insert("N".to_owned(), 1);
         p.obstacles = vec![
-            crate::problem::Obstacle {
+            pcb_model::Obstacle {
                 kind: "zone".to_owned(),
                 layers: vec![LayerRef("inner1".to_owned())],
                 center: Point2 { x: 10.0, y: 5.0 },
@@ -2930,7 +2905,7 @@ mod tests {
                 height: 10.0,
                 connected_to: vec!["N".to_owned()],
             },
-            crate::problem::Obstacle {
+            pcb_model::Obstacle {
                 kind: "rect".to_owned(),
                 // `pcb-model::place::to_route_problem` represents a plated
                 // through-hole pad by its two outer copper faces; the barrel's
@@ -2941,7 +2916,7 @@ mod tests {
                 height: 1.0,
                 connected_to: vec!["N".to_owned()],
             },
-            crate::problem::Obstacle {
+            pcb_model::Obstacle {
                 kind: "rect".to_owned(),
                 layers: vec![LayerRef::top()],
                 center: Point2 { x: 18.0, y: 5.0 },
@@ -2955,7 +2930,7 @@ mod tests {
         assert!(sub.connections.is_empty());
         assert_eq!(fanout.vias.len(), 1);
         assert_eq!(fanout.vias[0].at, Point2 { x: 18.0, y: 5.0 });
-        assert!(crate::connectivity::check(&p, &fanout).is_empty());
+        assert!(drc_lint::connectivity::check(&p, &fanout).is_empty());
     }
 
     #[test]
@@ -2966,7 +2941,7 @@ mod tests {
         p.obstacles = p.connections[0]
             .points_to_connect
             .iter()
-            .map(|point| crate::problem::Obstacle {
+            .map(|point| pcb_model::Obstacle {
                 kind: "pad".to_owned(),
                 layers: vec![LayerRef::top()],
                 center: point.point(),
@@ -2989,7 +2964,7 @@ mod tests {
         p.layer_count = 2;
         p.plane_nets.insert("N".to_owned(), 1);
         for point in &p.connections[0].points_to_connect {
-            p.obstacles.push(crate::problem::Obstacle {
+            p.obstacles.push(pcb_model::Obstacle {
                 kind: "pad".to_owned(),
                 layers: vec![LayerRef::top()],
                 center: point.point(),
@@ -2999,7 +2974,7 @@ mod tests {
             });
         }
         let blocked = p.connections[0].points_to_connect[1].point();
-        p.obstacles.push(crate::problem::Obstacle {
+        p.obstacles.push(pcb_model::Obstacle {
             kind: "pad".to_owned(),
             layers: vec![LayerRef::top()],
             center: Point2 {
@@ -3029,7 +3004,7 @@ mod tests {
         p.obstacles = p.connections[0]
             .points_to_connect
             .iter()
-            .map(|point| crate::problem::Obstacle {
+            .map(|point| pcb_model::Obstacle {
                 kind: "pad".to_owned(),
                 layers: vec![LayerRef::top()],
                 center: point.point(),
@@ -3038,7 +3013,7 @@ mod tests {
                 connected_to: vec!["N".to_owned()],
             })
             .collect();
-        p.obstacles.push(crate::problem::Obstacle {
+        p.obstacles.push(pcb_model::Obstacle {
             kind: "keepout".to_owned(),
             layers: vec![LayerRef::top(), LayerRef("inner1".to_owned())],
             center: p.connections[0].points_to_connect[0].point(),
@@ -3068,7 +3043,7 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.net_widths.insert("N".to_owned(), 0.5);
         p.obstacles = vec![
-            crate::problem::Obstacle {
+            pcb_model::Obstacle {
                 kind: "pad:U1".to_owned(),
                 layers: vec![LayerRef::top()],
                 center: p.connections[0].points_to_connect[0].point(),
@@ -3076,7 +3051,7 @@ mod tests {
                 height: 0.35,
                 connected_to: vec!["N".to_owned()],
             },
-            crate::problem::Obstacle {
+            pcb_model::Obstacle {
                 kind: "pad:J1".to_owned(),
                 layers: vec![LayerRef::top()],
                 center: p.connections[0].points_to_connect[1].point(),
@@ -3110,7 +3085,7 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.net_widths.insert("N".to_owned(), 0.5);
         let origin = p.connections[0].points_to_connect[0].point();
-        p.obstacles.push(crate::problem::Obstacle {
+        p.obstacles.push(pcb_model::Obstacle {
             kind: "pad:U1".to_owned(),
             layers: vec![LayerRef::top()],
             center: origin,
@@ -3124,7 +3099,7 @@ mod tests {
             (origin.x, origin.y - 0.7, 2.0, 0.4),
             (origin.x, origin.y + 0.7, 2.0, 0.4),
         ] {
-            p.obstacles.push(crate::problem::Obstacle {
+            p.obstacles.push(pcb_model::Obstacle {
                 kind: "pad:X".to_owned(),
                 layers: vec![LayerRef::top()],
                 center: Point2 { x, y },
@@ -3144,7 +3119,7 @@ mod tests {
     fn top_blocked_two_point_problem() -> RouteProblem {
         let mut p = simple_two_point_problem();
         p.obstacles = vec![
-            crate::problem::Obstacle {
+            pcb_model::Obstacle {
                 kind: "rect".to_owned(),
                 layers: vec![LayerRef::top()],
                 center: Point2 { x: 2.0, y: 5.0 },
@@ -3152,7 +3127,7 @@ mod tests {
                 height: 0.6,
                 connected_to: vec!["N".to_owned()],
             },
-            crate::problem::Obstacle {
+            pcb_model::Obstacle {
                 kind: "rect".to_owned(),
                 layers: vec![LayerRef::top()],
                 center: Point2 { x: 18.0, y: 5.0 },
@@ -3160,7 +3135,7 @@ mod tests {
                 height: 0.6,
                 connected_to: vec!["N".to_owned()],
             },
-            crate::problem::Obstacle {
+            pcb_model::Obstacle {
                 kind: "rect".to_owned(),
                 layers: vec![LayerRef::top()],
                 center: Point2 { x: 10.0, y: 5.0 },
@@ -3174,12 +3149,12 @@ mod tests {
 
     fn layer_change_problem() -> RouteProblem {
         let mut p = simple_two_point_problem();
-        p.connections[0].points_to_connect[0] = crate::problem::RoutePoint {
+        p.connections[0].points_to_connect[0] = pcb_model::RoutePoint {
             x: 1.0,
             y: 1.0,
             layer: LayerRef::top(),
         };
-        p.connections[0].points_to_connect[1] = crate::problem::RoutePoint {
+        p.connections[0].points_to_connect[1] = pcb_model::RoutePoint {
             x: 4.0,
             y: 4.0,
             layer: LayerRef::bottom(),
@@ -3190,7 +3165,7 @@ mod tests {
     fn stacked_layer_change_problem() -> RouteProblem {
         let mut p = simple_two_point_problem();
         p.obstacles = vec![
-            crate::problem::Obstacle {
+            pcb_model::Obstacle {
                 kind: "rect".to_owned(),
                 layers: vec![LayerRef::top()],
                 center: Point2 { x: 5.0, y: 5.0 },
@@ -3198,7 +3173,7 @@ mod tests {
                 height: 0.6,
                 connected_to: vec!["N".to_owned()],
             },
-            crate::problem::Obstacle {
+            pcb_model::Obstacle {
                 kind: "rect".to_owned(),
                 layers: vec![LayerRef::bottom()],
                 center: Point2 { x: 5.0, y: 5.0 },
@@ -3208,12 +3183,12 @@ mod tests {
             },
         ];
         p.connections[0].points_to_connect = vec![
-            crate::problem::RoutePoint {
+            pcb_model::RoutePoint {
                 x: 5.0,
                 y: 5.0,
                 layer: LayerRef::top(),
             },
-            crate::problem::RoutePoint {
+            pcb_model::RoutePoint {
                 x: 5.0,
                 y: 5.0,
                 layer: LayerRef::bottom(),
@@ -3222,8 +3197,8 @@ mod tests {
         p
     }
 
-    fn pad_obstacle(net: &str, x: f64, y: f64, layer: LayerRef) -> crate::problem::Obstacle {
-        crate::problem::Obstacle {
+    fn pad_obstacle(net: &str, x: f64, y: f64, layer: LayerRef) -> pcb_model::Obstacle {
+        pcb_model::Obstacle {
             kind: "rect".to_owned(),
             layers: vec![layer],
             center: Point2 { x, y },
@@ -3244,7 +3219,7 @@ mod tests {
                 pad_obstacle("L", 8.0, 6.0, LayerRef::bottom()),
                 pad_obstacle("V", 2.0, 14.0, LayerRef::top()),
                 pad_obstacle("V", 20.0, 14.0, LayerRef::top()),
-                crate::problem::Obstacle {
+                pcb_model::Obstacle {
                     kind: "rect".to_owned(),
                     layers: vec![LayerRef::top()],
                     center: Point2 { x: 11.0, y: 10.0 },
@@ -3254,45 +3229,45 @@ mod tests {
                 },
             ],
             connections: vec![
-                crate::problem::Connection {
+                pcb_model::Connection {
                     name: "D".to_owned(),
                     points_to_connect: vec![
-                        crate::problem::RoutePoint {
+                        pcb_model::RoutePoint {
                             x: 2.0,
                             y: 2.0,
                             layer: LayerRef::top(),
                         },
-                        crate::problem::RoutePoint {
+                        pcb_model::RoutePoint {
                             x: 8.0,
                             y: 2.0,
                             layer: LayerRef::top(),
                         },
                     ],
                 },
-                crate::problem::Connection {
+                pcb_model::Connection {
                     name: "L".to_owned(),
                     points_to_connect: vec![
-                        crate::problem::RoutePoint {
+                        pcb_model::RoutePoint {
                             x: 2.0,
                             y: 6.0,
                             layer: LayerRef::top(),
                         },
-                        crate::problem::RoutePoint {
+                        pcb_model::RoutePoint {
                             x: 8.0,
                             y: 6.0,
                             layer: LayerRef::bottom(),
                         },
                     ],
                 },
-                crate::problem::Connection {
+                pcb_model::Connection {
                     name: "V".to_owned(),
                     points_to_connect: vec![
-                        crate::problem::RoutePoint {
+                        pcb_model::RoutePoint {
                             x: 2.0,
                             y: 14.0,
                             layer: LayerRef::top(),
                         },
-                        crate::problem::RoutePoint {
+                        pcb_model::RoutePoint {
                             x: 20.0,
                             y: 14.0,
                             layer: LayerRef::top(),
@@ -3300,7 +3275,7 @@ mod tests {
                     ],
                 },
             ],
-            bounds: crate::problem::Rect {
+            bounds: pcb_model::Rect {
                 min_x: 0.0,
                 max_x: 30.0,
                 min_y: 0.0,
@@ -3326,7 +3301,7 @@ mod tests {
                 pad_obstacle("BUS", 2.0, 14.0, LayerRef::top()),
                 pad_obstacle("BUS", 8.0, 14.0, LayerRef::top()),
                 pad_obstacle("BUS", 8.0, 18.0, LayerRef::top()),
-                crate::problem::Obstacle {
+                pcb_model::Obstacle {
                     kind: "rect".to_owned(),
                     layers: vec![LayerRef::top()],
                     center: Point2 { x: 8.0, y: 16.0 },
@@ -3336,35 +3311,35 @@ mod tests {
                 },
             ],
             connections: vec![
-                crate::problem::Connection {
+                pcb_model::Connection {
                     name: "L".to_owned(),
                     points_to_connect: vec![
-                        crate::problem::RoutePoint {
+                        pcb_model::RoutePoint {
                             x: 2.0,
                             y: 6.0,
                             layer: LayerRef::top(),
                         },
-                        crate::problem::RoutePoint {
+                        pcb_model::RoutePoint {
                             x: 8.0,
                             y: 6.0,
                             layer: LayerRef::bottom(),
                         },
                     ],
                 },
-                crate::problem::Connection {
+                pcb_model::Connection {
                     name: "BUS".to_owned(),
                     points_to_connect: vec![
-                        crate::problem::RoutePoint {
+                        pcb_model::RoutePoint {
                             x: 2.0,
                             y: 14.0,
                             layer: LayerRef::top(),
                         },
-                        crate::problem::RoutePoint {
+                        pcb_model::RoutePoint {
                             x: 8.0,
                             y: 14.0,
                             layer: LayerRef::top(),
                         },
-                        crate::problem::RoutePoint {
+                        pcb_model::RoutePoint {
                             x: 8.0,
                             y: 18.0,
                             layer: LayerRef::top(),
@@ -3372,7 +3347,7 @@ mod tests {
                     ],
                 },
             ],
-            bounds: crate::problem::Rect {
+            bounds: pcb_model::Rect {
                 min_x: 0.0,
                 max_x: 30.0,
                 min_y: 0.0,
@@ -3528,7 +3503,7 @@ mod tests {
         assert!(auto_route_requires_bounded_pass(&p));
 
         let mut p = simple_two_point_problem();
-        p.bounds = crate::problem::Rect {
+        p.bounds = pcb_model::Rect {
             min_x: 0.0,
             min_y: 0.0,
             max_x: 120.0,
@@ -3555,7 +3530,7 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.connections = (0..=AUTO_BOUNDED_MAX_CONNECTIONS)
             .map(|index| {
-                let point = crate::problem::RoutePoint {
+                let point = pcb_model::RoutePoint {
                     x: 1.0 + (index % 7) as f64 * 2.0,
                     y: 1.0 + (index / 7) as f64,
                     layer: LayerRef::top(),
@@ -3570,14 +3545,16 @@ mod tests {
         let run = route_auto_with_diagnostics(&p);
 
         assert!((1..=6).contains(&run.attempts.len()));
-        assert!(run
-            .attempts
-            .iter()
-            .all(|attempt| attempt.geometry_violations == 0));
-        assert!(run
-            .attempts
-            .iter()
-            .any(|attempt| attempt.engine == run.result.engine));
+        assert!(
+            run.attempts
+                .iter()
+                .all(|attempt| attempt.geometry_violations == 0)
+        );
+        assert!(
+            run.attempts
+                .iter()
+                .any(|attempt| attempt.engine == run.result.engine)
+        );
         assert!(run.global.is_none());
     }
 
@@ -3728,30 +3705,30 @@ mod tests {
     fn adaptive_grid_rescue_routes_failed_net_against_selected_copper() {
         let mut p = simple_two_point_problem();
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "A".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 5.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 18.0,
                         y: 5.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "B".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 2.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 8.0,
                         layer: LayerRef::top(),
@@ -3901,30 +3878,30 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.bounds.max_y = 20.0;
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "SIG".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 18.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "BLOCK".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 2.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 18.0,
                         layer: LayerRef::top(),
@@ -3963,30 +3940,30 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.bounds.max_y = 20.0;
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "SIG".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 18.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "BLOCK".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 1.5,
                         y: 9.4,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.5,
                         y: 9.4,
                         layer: LayerRef::top(),
@@ -4031,30 +4008,30 @@ mod tests {
         p.layer_count = 4;
         p.bounds.max_y = 20.0;
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "SIG".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 2.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 18.0,
                         y: 2.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "BOTTOM_BLOCK".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 8.0,
                         y: 10.0,
                         layer: LayerRef::bottom(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 12.0,
                         y: 10.0,
                         layer: LayerRef::bottom(),
@@ -4109,30 +4086,30 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.bounds.max_y = 20.0;
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "SIG".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 18.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "VIA_BLOCK".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 4.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 16.0,
                         layer: LayerRef::bottom(),
@@ -4172,30 +4149,30 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.bounds.max_y = 20.0;
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "VIA_SIG".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 18.0,
                         y: 10.0,
                         layer: LayerRef::bottom(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "TOP_BLOCK".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 2.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 18.0,
                         layer: LayerRef::top(),
@@ -4234,35 +4211,35 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.bounds.max_y = 20.0;
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "BUS".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 2.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 18.0,
                         y: 2.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 18.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "DIAGONAL_FALSE_BLOCK".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 9.0,
                         y: 9.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 11.0,
                         y: 11.0,
                         layer: LayerRef::top(),
@@ -4298,20 +4275,20 @@ mod tests {
 
     #[test]
     fn adaptive_ripup_failed_corridor_tree_prefers_same_layer_edge_on_tie() {
-        let conn = crate::problem::Connection {
+        let conn = pcb_model::Connection {
             name: "BUS".to_owned(),
             points_to_connect: vec![
-                crate::problem::RoutePoint {
+                pcb_model::RoutePoint {
                     x: 2.0,
                     y: 2.0,
                     layer: LayerRef::top(),
                 },
-                crate::problem::RoutePoint {
+                pcb_model::RoutePoint {
                     x: 12.0,
                     y: 2.0,
                     layer: LayerRef::bottom(),
                 },
-                crate::problem::RoutePoint {
+                pcb_model::RoutePoint {
                     x: 2.0,
                     y: 12.0,
                     layer: LayerRef::top(),
@@ -4333,45 +4310,45 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.bounds.max_y = 20.0;
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "SIG".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 18.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "LONG_BLOCK".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 6.0,
                         y: 6.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 14.0,
                         y: 14.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "SHORT_BLOCK".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 9.5,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 10.5,
                         layer: LayerRef::top(),
@@ -4419,45 +4396,45 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.bounds.max_y = 20.0;
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "SIG".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 18.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "CENTER_TRACE".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 8.0,
                         y: 9.5,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 8.0,
                         y: 10.5,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "EDGE_TRACE".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 12.0,
                         y: 9.95,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 12.0,
                         y: 10.95,
                         layer: LayerRef::top(),
@@ -4505,45 +4482,45 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.bounds.max_y = 20.0;
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "SIG".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 18.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "CENTER_VIA".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 8.0,
                         y: 4.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 8.0,
                         y: 16.0,
                         layer: LayerRef::bottom(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "EDGE_VIA".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 12.0,
                         y: 4.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 12.0,
                         y: 16.0,
                         layer: LayerRef::bottom(),
@@ -4593,45 +4570,45 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.bounds.max_y = 20.0;
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "OPEN".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 1.0,
                         y: 1.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 4.0,
                         y: 1.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "HARD_H".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 18.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "HARD_V".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 2.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 18.0,
                         layer: LayerRef::top(),
@@ -4657,45 +4634,45 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.bounds.max_y = 20.0;
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "OPEN".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 1.0,
                         y: 1.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 4.0,
                         y: 1.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "HARD_H".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 18.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "HARD_V".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 2.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 18.0,
                         layer: LayerRef::top(),
@@ -4739,35 +4716,35 @@ mod tests {
             },
         ];
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "BBOX_ONLY".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 1.0,
                         y: 1.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 1.0,
                         y: 9.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 9.0,
                         y: 9.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "SEGMENT_BLOCKED".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 1.0,
                         y: 1.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 9.0,
                         y: 1.0,
                         layer: LayerRef::top(),
@@ -4795,45 +4772,45 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.bounds.max_y = 20.0;
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "OPEN".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 1.0,
                         y: 1.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 4.0,
                         y: 1.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "HARD_H".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 2.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 18.0,
                         y: 10.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "HARD_V".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 2.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 18.0,
                         layer: LayerRef::top(),
@@ -4863,60 +4840,60 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.bounds.max_y = 25.0;
         p.connections = vec![
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "LONG".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 1.0,
                         y: 22.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 19.0,
                         y: 22.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "SHORT".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 1.0,
                         y: 1.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 3.0,
                         y: 1.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "CROSS_H".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 4.0,
                         y: 5.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 16.0,
                         y: 5.0,
                         layer: LayerRef::top(),
                     },
                 ],
             },
-            crate::problem::Connection {
+            pcb_model::Connection {
                 name: "CROSS_V".to_owned(),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 2.0,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 10.0,
                         y: 18.0,
                         layer: LayerRef::top(),
@@ -4939,15 +4916,15 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.connections.clear();
         for i in 0..=ADAPTIVE_RESCUE_PORTFOLIO_MAX_FAILED {
-            p.connections.push(crate::problem::Connection {
+            p.connections.push(pcb_model::Connection {
                 name: format!("N{i}"),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 1.0,
                         y: 1.0 + i as f64,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 5.0,
                         y: 1.0 + i as f64,
                         layer: LayerRef::top(),
@@ -5123,7 +5100,7 @@ mod tests {
     fn select_best_cleans_candidate_before_short_circuit_return() {
         let mut p = simple_two_point_problem();
         p.obstacles = vec![
-            crate::problem::Obstacle {
+            pcb_model::Obstacle {
                 kind: "rect".to_owned(),
                 layers: vec![LayerRef::top(), LayerRef::bottom()],
                 center: pt(2.0, 5.0),
@@ -5131,7 +5108,7 @@ mod tests {
                 height: 0.8,
                 connected_to: vec!["N".to_owned()],
             },
-            crate::problem::Obstacle {
+            pcb_model::Obstacle {
                 kind: "rect".to_owned(),
                 layers: vec![LayerRef::top(), LayerRef::bottom()],
                 center: pt(18.0, 5.0),
@@ -5248,7 +5225,7 @@ mod tests {
         let mut p = layer_change_problem();
         p.connections[0]
             .points_to_connect
-            .push(crate::problem::RoutePoint {
+            .push(pcb_model::RoutePoint {
                 x: 6.0,
                 y: 4.0,
                 layer: LayerRef::bottom(),
@@ -5402,7 +5379,7 @@ mod tests {
         p.connections[0].points_to_connect[0].y = 1.0;
         p.connections[0].points_to_connect[1].x = 4.0;
         p.connections[0].points_to_connect[1].y = 4.0;
-        p.obstacles.push(crate::problem::Obstacle {
+        p.obstacles.push(pcb_model::Obstacle {
             kind: "rect".to_owned(),
             layers: vec![LayerRef::top()],
             center: pt(2.0, 4.15),
@@ -5423,7 +5400,7 @@ mod tests {
         assert!(
             before.iter().any(|finding| matches!(
                 finding,
-                crate::lint::DrcViolation::ClearanceTraceObstacle { .. }
+                drc_lint::lint::DrcViolation::ClearanceTraceObstacle { .. }
             )),
             "fixture should start with a trace-obstacle clearance finding: {before:?}"
         );
@@ -5478,7 +5455,7 @@ mod tests {
         p.connections[0].points_to_connect[0].y = 1.0;
         p.connections[0].points_to_connect[1].x = 5.0;
         p.connections[0].points_to_connect[1].y = 4.0;
-        p.obstacles.push(crate::problem::Obstacle {
+        p.obstacles.push(pcb_model::Obstacle {
             kind: "rect".to_owned(),
             layers: vec![LayerRef::top()],
             center: pt(2.0, 5.15),
@@ -5505,7 +5482,7 @@ mod tests {
         assert!(
             before.iter().any(|finding| matches!(
                 finding,
-                crate::lint::DrcViolation::ClearanceTraceObstacle { .. }
+                drc_lint::lint::DrcViolation::ClearanceTraceObstacle { .. }
             )),
             "fixture should start with a trace-obstacle clearance finding: {before:?}"
         );
@@ -5738,7 +5715,7 @@ mod tests {
         p.connections[0].points_to_connect[0].y = 1.0;
         p.connections[0].points_to_connect[1].x = 5.0;
         p.connections[0].points_to_connect[1].y = 1.0;
-        p.obstacles.push(crate::problem::Obstacle {
+        p.obstacles.push(pcb_model::Obstacle {
             kind: "rect".to_owned(),
             layers: vec![LayerRef::top()],
             center: pt(2.5, 3.15),
@@ -5766,7 +5743,7 @@ mod tests {
         assert!(
             before.iter().any(|finding| matches!(
                 finding,
-                crate::lint::DrcViolation::ClearanceTraceObstacle { .. }
+                drc_lint::lint::DrcViolation::ClearanceTraceObstacle { .. }
             )),
             "fixture should start with a trace-obstacle clearance finding: {before:?}"
         );
@@ -6152,15 +6129,15 @@ mod tests {
         let mut p = simple_two_point_problem();
         p.layer_count = 4;
         p.connections = (0..=AUTO_DETAILED_MAX_MULTILAYER_CONNECTIONS)
-            .map(|idx| crate::problem::Connection {
+            .map(|idx| pcb_model::Connection {
                 name: format!("N{idx}"),
                 points_to_connect: vec![
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 1.0,
                         y: 1.0 + idx as f64,
                         layer: LayerRef::top(),
                     },
-                    crate::problem::RoutePoint {
+                    pcb_model::RoutePoint {
                         x: 8.0,
                         y: 1.0 + idx as f64,
                         layer: LayerRef::top(),

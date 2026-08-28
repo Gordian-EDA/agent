@@ -8,7 +8,6 @@ description = "KiCAD footprint library reader: .pretty discovery, .kicad_mod par
 
 [dependencies]
 geom = { path = "../geom" }
-kicad-env = { path = "../kicad-env" }
 strsim.workspace = true
 fuzzy-matcher.workspace = true
 serde.workspace = true
@@ -17,4 +16,5 @@ tempfile.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+kicad = { path = "../kicad" }
 tempfile.workspace = true

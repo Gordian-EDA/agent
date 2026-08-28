@@ -1,10 +1,10 @@
 //! Integration tests for solved text positions in emitted documents.
 
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use sch_io::write::SchematicWriter;
 
-fn detect_env() -> Option<KicadEnv> {
-    match KicadEnv::detect() {
+fn detect_env() -> Option<KicadInstallation> {
+    match KicadInstallation::detect() {
         Some(env) => Some(env),
         None => {
             eprintln!("SKIP: no KiCAD environment detected");

@@ -1,7 +1,7 @@
 //! SKIP-graceful smoke tests for the fabrication-export wrappers
-//! ([`KicadCli::export_gerbers`] / `export_drill` / `export_pos`).
+//! ([`export_gerbers`] / `export_drill` / `export_pos`).
 //!
-//! Each detects a real `kicad-cli` via [`KicadEnv::detect`] and SKIPs (prints +
+//! Each detects a real `kicad-cli` via [`KicadInstallation::detect`] and SKIPs (prints +
 //! returns) when none is installed, so they only assert on a machine with KiCAD
 //! on PATH. They drive a tiny vendored two-resistor board through the wrappers
 //! and assert real, non-empty deliverables land on disk — the unit the
@@ -9,8 +9,7 @@
 
 use std::path::PathBuf;
 
-use kicad_cli::KicadCli;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 
 /// The vendored two-resistor board, embedded so the test is self-contained.
 const TWO_RES: &str = include_str!("fixtures/two_res.kicad_pcb");
@@ -26,11 +25,11 @@ fn fixture_board() -> (tempfile::TempDir, PathBuf) {
 
 #[test]
 fn export_pcb_svg_produces_single_board_plot() {
-    let Some(env) = KicadEnv::detect() else {
-        eprintln!("SKIP: no kicad-cli detected");
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no kicad detected");
         return;
     };
-    let cli = KicadCli::new(&env);
+    let cli = env;
     let (dir, board) = fixture_board();
     let svg = dir.path().join("board.svg");
 
@@ -45,11 +44,11 @@ fn export_pcb_svg_produces_single_board_plot() {
 
 #[test]
 fn export_gerbers_produces_layer_files() {
-    let Some(env) = KicadEnv::detect() else {
-        eprintln!("SKIP: no kicad-cli detected");
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no kicad detected");
         return;
     };
-    let cli = KicadCli::new(&env);
+    let cli = env;
     let (dir, board) = fixture_board();
     let out = dir.path().join("fab");
 
@@ -64,11 +63,11 @@ fn export_gerbers_produces_layer_files() {
 
 #[test]
 fn export_drill_produces_excellon_file() {
-    let Some(env) = KicadEnv::detect() else {
-        eprintln!("SKIP: no kicad-cli detected");
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no kicad detected");
         return;
     };
-    let cli = KicadCli::new(&env);
+    let cli = env;
     let (dir, board) = fixture_board();
     let out = dir.path().join("fab");
 
@@ -83,11 +82,11 @@ fn export_drill_produces_excellon_file() {
 
 #[test]
 fn export_pos_produces_csv() {
-    let Some(env) = KicadEnv::detect() else {
-        eprintln!("SKIP: no kicad-cli detected");
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no kicad detected");
         return;
     };
-    let cli = KicadCli::new(&env);
+    let cli = env;
     let (dir, board) = fixture_board();
     let pos = dir.path().join("fab").join("two_res-pos.csv");
 

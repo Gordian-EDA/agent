@@ -7,9 +7,8 @@ use geom::Point2;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
 
-use sch_floorplan::contract::{
-    RawMetrics, RoutedEvaluator, align_idiom_clusters, align_led_chains, decongest,
-};
+use sch_floorplan::contract::{RawMetrics, RoutedEvaluator};
+use sch_floorplan::engine_support::{align_idiom_clusters, align_led_chains, decongest};
 
 /// Cohesion pull on a multi-unit part's units (same refdes, no shared net).
 const SIB_COHESION: f64 = 3.0;

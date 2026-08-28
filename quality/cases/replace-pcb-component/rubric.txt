@@ -1,0 +1,1 @@
+R1 should become 4.7k in an 0603 footprint and remain connected between VIN and SENSE. R2 and the board outline should be preserved. The edit should be local: unrelated placement and routing should not be regenerated gratuitously.

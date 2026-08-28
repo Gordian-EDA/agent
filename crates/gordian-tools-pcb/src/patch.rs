@@ -527,7 +527,10 @@ pub fn patch_placements(text: &str, moves: &[FootprintMove]) -> Result<String, S
             .ok_or_else(|| format!("footprint {reference}: malformed (at …)"))?;
         let old_rot = old_rot.unwrap_or(0.0);
         let new_rot = mv.rotation_deg.unwrap_or(old_rot);
-        let (x, y) = (kicad_ipc::units::nm_to_mm(mv.x_nm), kicad_ipc::units::nm_to_mm(mv.y_nm));
+        let (x, y) = (
+            kicad_ipc::units::nm_to_mm(mv.x_nm),
+            kicad_ipc::units::nm_to_mm(mv.y_nm),
+        );
         let new_at = if new_rot.rem_euclid(360.0).abs() < 1e-9 {
             format!("(at {} {})", fmt_num(x), fmt_num(y))
         } else {

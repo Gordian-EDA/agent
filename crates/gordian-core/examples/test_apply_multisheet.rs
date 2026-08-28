@@ -4,7 +4,7 @@
 
 use gordian_core::AgentRuntime;
 use gordian_core::tools::run_tool;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use serde_json::json;
 
 fn main() -> anyhow::Result<()> {
@@ -12,7 +12,7 @@ fn main() -> anyhow::Result<()> {
         .nth(1)
         .expect("usage: test_apply_multisheet <draft.yaml>");
     let yaml = std::fs::read_to_string(&yaml_path)?;
-    let env = KicadEnv::detect().expect("no KiCAD environment");
+    let env = KicadInstallation::detect().expect("no KiCAD environment");
     let tmp = tempfile::tempdir()?;
     let ctx = AgentRuntime::for_project(env, tmp.path().to_path_buf())?;
 

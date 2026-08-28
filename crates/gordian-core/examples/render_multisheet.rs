@@ -12,8 +12,7 @@
 //!
 //! Usage: cargo run --release -p gordian-core --example render_multisheet -- <draft.yaml> <out_dir>
 
-use kicad_cli::KicadCli;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 
 fn main() -> anyhow::Result<()> {
@@ -26,8 +25,8 @@ fn main() -> anyhow::Result<()> {
         .expect("usage: render_multisheet <draft.yaml> <out_dir>");
     std::fs::create_dir_all(&out_dir)?;
 
-    let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let provider = SymbolTable::from_env(&env);
+    let env = KicadInstallation::detect().expect("no KiCAD environment detected");
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let src = std::fs::read_to_string(&yaml)?;
     let result = circuit_lang::compile(&src, &provider);
     let design = result.design.ok_or_else(|| {
@@ -58,7 +57,7 @@ fn main() -> anyhow::Result<()> {
 
     // Render it to a PNG for the critic.
     let svg_dir = tempfile::tempdir()?;
-    let svg_path = KicadCli::new(&env).export_svg_opts(&root, svg_dir.path(), true)?;
+    let svg_path = env.export_svg_opts(&root, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
     let png = gordian_runtime::render::svg_to_png(&svg, 2400)?;
     let stem = std::path::Path::new(&yaml)
@@ -69,7 +68,7 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(&out_png, png)?;
     println!("rendered -> {out_png}");
 
-    match KicadCli::new(&env).erc(&root) {
+    match env.erc(&root) {
         Ok(r) => println!(
             "ERC: {} errors, {} warnings",
             r.error_count(),

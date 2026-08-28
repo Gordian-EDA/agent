@@ -1,13 +1,12 @@
 //! First emission milestone: a `.kicad_sch` with one placed symbol that KiCAD
 //! loads. SKIP-graceful when no KiCAD is detected; runs against KiCAD 10 here.
 
-use kicad_cli::KicadCli;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use sch_io::write::SchematicWriter;
 
 #[test]
 fn emits_single_symbol_that_kicad_loads() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
@@ -27,10 +26,10 @@ fn emits_single_symbol_that_kicad_loads() {
 
     // 2) KiCAD loads + ERC runs (single unconnected R: connectivity warnings are
     //    fine, but the schematic must LOAD for erc() to return Ok).
-    let report = KicadCli::new(&env).erc(tmp.path()).unwrap();
+    let report = env.erc(tmp.path()).unwrap();
 
     // The netlist is the authoritative proof the component is present.
-    let nl = KicadCli::new(&env).netlist(tmp.path()).unwrap();
+    let nl = env.netlist(tmp.path()).unwrap();
     assert_eq!(nl.components.len(), 1);
     assert_eq!(nl.components[0].reference, "R1");
     let _ = report;
@@ -38,7 +37,7 @@ fn emits_single_symbol_that_kicad_loads() {
 
 #[test]
 fn mounting_hole_instances_are_excluded_from_the_bom() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };

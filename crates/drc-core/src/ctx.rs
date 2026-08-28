@@ -6,7 +6,7 @@
 //! third-party — measures the same copper, and a custom rule can reuse the same
 //! collection instead of re-deriving it.
 
-use crate::problem::{LayerRef, RouteProblem, RouteSolution};
+use pcb_model::{LayerRef, RouteProblem, RouteSolution};
 
 /// The context a [`Rule`](crate::Rule) reads: the routed board plus the shared
 /// copper collection.

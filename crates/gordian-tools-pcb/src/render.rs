@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use kicad_cli::KicadCli;
+use kicad::KicadInstallation;
 use pcb_model::{Point2, Polygon, Rect};
 use serde_json::{Value, json};
 
@@ -66,7 +66,7 @@ pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let tmp = tempfile::tempdir().context("temp dir for PCB SVG export")?;
     let svg_path = tmp.path().join("board.svg");
-    let cli = KicadCli::new(ctx.env());
+    let cli = ctx.env();
     let svg_path = match cli.export_pcb_svg(&pcb_path, &svg_path, BOARD_RENDER_LAYERS, false) {
         Ok(path) => path,
         Err(err) => {
@@ -192,10 +192,10 @@ fn parse_board_render_source(text: &str) -> std::result::Result<BoardRenderSourc
         let block = &text[node.start..node.end];
         match board_node_head(text, &node) {
             "gr_rect" => {
-                let start =
-                    super::sexpr::sexpr_point(block, "start").ok_or("Edge.Cuts rectangle has no start")?;
-                let end =
-                    super::sexpr::sexpr_point(block, "end").ok_or("Edge.Cuts rectangle has no end")?;
+                let start = super::sexpr::sexpr_point(block, "start")
+                    .ok_or("Edge.Cuts rectangle has no start")?;
+                let end = super::sexpr::sexpr_point(block, "end")
+                    .ok_or("Edge.Cuts rectangle has no end")?;
                 let bounds = Rect::new(
                     start.x.min(end.x),
                     start.y.min(end.y),
@@ -236,7 +236,8 @@ fn parse_board_render_source(text: &str) -> std::result::Result<BoardRenderSourc
                     .to_owned(),
             );
         }
-        let start = super::sexpr::sexpr_point(block, "start").ok_or("Edge.Cuts line has no start")?;
+        let start =
+            super::sexpr::sexpr_point(block, "start").ok_or("Edge.Cuts line has no start")?;
         let end = super::sexpr::sexpr_point(block, "end").ok_or("Edge.Cuts line has no end")?;
         segments.push((start, end));
     }
@@ -379,7 +380,7 @@ fn estimated_reference_pixels(board_long_mm: f64, long_edge_px: u32) -> f64 {
 
 #[allow(clippy::too_many_arguments)]
 fn render_side_detail(
-    cli: &KicadCli,
+    cli: &KicadInstallation,
     pcb_path: &Path,
     tmp_dir: &Path,
     side: &str,

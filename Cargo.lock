@@ -57,6 +57,7 @@ dependencies = [
  "circuit-graph",
  "circuit-lang",
  "geom",
+ "kicad",
  "rayon",
  "sch-floorplan",
  "sch-place",
@@ -350,7 +351,7 @@ dependencies = [
  "circuit-graph",
  "geom",
  "indexmap 2.14.0",
- "kicad-env",
+ "kicad",
  "kicad-symbol",
  "saphyr",
  "saphyr-parser",
@@ -365,6 +366,7 @@ dependencies = [
  "circuit-graph",
  "circuit-lang",
  "geom",
+ "kicad",
  "rayon",
  "sch-floorplan",
  "sch-place",
@@ -1019,8 +1021,7 @@ dependencies = [
  "futures",
  "gordian-core",
  "image",
- "kicad-cli",
- "kicad-env",
+ "kicad",
  "libc",
  "pulldown-cmark",
  "ratatui",
@@ -1053,8 +1054,7 @@ dependencies = [
  "gordian-tools-pcb",
  "grid-astar",
  "indexmap 2.14.0",
- "kicad-cli",
- "kicad-env",
+ "kicad",
  "kicad-footprint",
  "kicad-ipc",
  "kicad-symbol",
@@ -1097,8 +1097,7 @@ dependencies = [
  "anyhow",
  "circuit-lang",
  "gordian-llm",
- "kicad-cli",
- "kicad-env",
+ "kicad",
  "kicad-footprint",
  "kicad-ipc",
  "kicad-symbol",
@@ -1121,8 +1120,7 @@ dependencies = [
  "geom",
  "gordian-runtime",
  "grid-astar",
- "kicad-cli",
- "kicad-env",
+ "kicad",
  "kicad-footprint",
  "kicad-ipc",
  "negotiated-mesh",
@@ -1669,20 +1667,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "kicad-cli"
+name = "kicad"
 version = "0.1.0"
 dependencies = [
- "kicad-env",
  "quick-xml",
  "serde",
  "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "kicad-env"
-version = "0.1.0"
-dependencies = [
  "tempfile",
 ]
 
@@ -1692,7 +1682,7 @@ version = "0.1.0"
 dependencies = [
  "fuzzy-matcher",
  "geom",
- "kicad-env",
+ "kicad",
  "kiutils_kicad",
  "serde",
  "strsim",
@@ -1707,11 +1697,10 @@ dependencies = [
  "directories",
  "geom",
  "nng",
- "pcb-model",
- "place-model",
  "prost",
  "prost-build",
  "prost-types",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 
@@ -1721,8 +1710,7 @@ version = "0.1.0"
 dependencies = [
  "fuzzy-matcher",
  "geom",
- "kicad-cli",
- "kicad-env",
+ "kicad",
  "kiutils_kicad",
  "kiutils_sexpr",
  "strsim",
@@ -2963,8 +2951,7 @@ dependencies = [
  "circuit-lang",
  "geom",
  "indexmap 2.14.0",
- "kicad-cli",
- "kicad-env",
+ "kicad",
  "kicad-symbol",
  "rayon",
  "sch-io",
@@ -2980,8 +2967,7 @@ version = "0.1.0"
 dependencies = [
  "circuit-lang",
  "geom",
- "kicad-cli",
- "kicad-env",
+ "kicad",
  "kicad-symbol",
  "kiutils_kicad",
  "sch-place",
@@ -3266,11 +3252,10 @@ dependencies = [
 name = "spine-place"
 version = "0.1.0"
 dependencies = [
- "anneal-place",
  "circuit-graph",
  "circuit-lang",
  "geom",
- "kicad-env",
+ "kicad",
  "kicad-symbol",
  "sch-floorplan",
  "sch-place",

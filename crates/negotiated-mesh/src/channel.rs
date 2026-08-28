@@ -10,13 +10,13 @@
 use crate::heuristics::{
     connection_crossing_pressures, connection_segment_obstacle_pressure_um, connection_span_um,
 };
-use crate::problem::{
-    Capabilities, Connection, FailedNet, LayerRef, Point2, RoutePoint, RouteProblem, RouteQuality,
-    RouteResult, RouteSolution, Router, Trace, Via, ViaSpan,
-};
 use crate::quality::{
     keep_route_candidate as keep_candidate, route_quality, trace_proximity_penalty_um,
     trace_route_cost_um,
+};
+use pcb_model::{
+    Capabilities, Connection, FailedNet, LayerRef, Point2, RoutePoint, RouteProblem, RouteQuality,
+    RouteResult, RouteSolution, Router, Trace, Via, ViaSpan,
 };
 use std::collections::BTreeSet;
 
@@ -212,7 +212,7 @@ fn route_two_pin(
     for mut candidate in two_pin_candidates(problem, solution, conn) {
         let validation = problem_with_connections_and_extra(problem, routed, idx);
         crate::via_cleanup::normalize_redundant_vias(&validation, &mut candidate);
-        if !crate::lint::lint(&validation, &candidate).is_empty() {
+        if !drc_lint::lint::lint(&validation, &candidate).is_empty() {
             continue;
         }
         let key = solution_tree_key(problem, solution, &candidate);
@@ -294,7 +294,7 @@ fn route_multi_pin_from_root(
         remaining.remove(&to);
     }
 
-    crate::lint::lint(validation, &candidate)
+    drc_lint::lint::lint(validation, &candidate)
         .is_empty()
         .then_some(candidate)
 }
@@ -519,9 +519,9 @@ fn trace_length_um(trace: &Trace) -> u64 {
 }
 
 fn geometry_clean(problem: &RouteProblem, solution: &RouteSolution) -> bool {
-    crate::lint::lint(problem, solution)
+    drc_lint::lint::lint(problem, solution)
         .iter()
-        .all(|v| matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+        .all(|v| matches!(v, drc_lint::lint::DrcViolation::Connectivity { .. }))
 }
 
 fn segment_layer(a: Point2, b: Point2, horizontal: &LayerRef, vertical: &LayerRef) -> LayerRef {
@@ -550,7 +550,7 @@ fn preferred_layers(problem: &RouteProblem) -> Option<(LayerRef, LayerRef)> {
 }
 
 fn signal_layers(problem: &RouteProblem) -> Vec<(u32, LayerRef)> {
-    let planes: BTreeSet<u32> = crate::router::plane_layers(problem.layer_count as usize)
+    let planes: BTreeSet<u32> = grid_astar::router::plane_layers(problem.layer_count as usize)
         .into_iter()
         .collect();
     (0..problem.layer_count)
@@ -675,8 +675,8 @@ fn problem_with_connections_and_extra(
 
 fn reconcile(problem: &RouteProblem, solution: &mut RouteSolution, failed: &mut Vec<FailedNet>) {
     crate::via_cleanup::normalize_redundant_vias(problem, solution);
-    let mut dropped = crate::lint::drop_violating_copper(problem, solution);
-    dropped.extend(crate::lint::drop_unconnected_copper(problem, solution));
+    let mut dropped = drc_lint::lint::drop_violating_copper(problem, solution);
+    dropped.extend(drc_lint::lint::drop_unconnected_copper(problem, solution));
     let known: BTreeSet<String> = failed.iter().map(|f| f.connection.clone()).collect();
     let mut seen = BTreeSet::new();
     failed.extend(
@@ -738,7 +738,7 @@ fn quantize_mm(v: f64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Obstacle, Rect, RoutePoint};
+    use pcb_model::{Obstacle, Rect, RoutePoint};
 
     fn conn(name: &str, pts: &[(f64, f64, &str)]) -> Connection {
         Connection {
@@ -815,7 +815,7 @@ mod tests {
 
         assert!(result.failed.is_empty(), "{:?}", result.failed);
         assert_eq!(result.engine, ENGINE);
-        assert!(crate::lint::lint(&p, &result.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &result.solution).is_empty());
         assert!(
             result
                 .solution
@@ -848,7 +848,7 @@ mod tests {
 
         assert!(result.failed.is_empty(), "{:?}", result.failed);
         assert_eq!(result.engine, ENGINE);
-        assert!(crate::lint::lint(&p, &result.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &result.solution).is_empty());
         assert!(
             result
                 .solution
@@ -978,6 +978,6 @@ mod tests {
             "channel should choose the L-bend away from the tight keepout margin: {:?}",
             selected.traces
         );
-        assert!(crate::lint::lint(&p, &selected).is_empty());
+        assert!(drc_lint::lint::lint(&p, &selected).is_empty());
     }
 }

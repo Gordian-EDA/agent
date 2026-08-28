@@ -1,17 +1,16 @@
-//! Integration tests for `KicadCli::netlist` against real `kicad-cli`.
+//! Integration tests for `netlist` against real `kicad-cli`.
 
 use std::path::Path;
 
-use kicad_cli::KicadCli;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 
 #[test]
 fn netlist_export_runs_and_parses() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD environment");
         return;
     };
-    let cli = KicadCli::new(&env);
+    let cli = env;
     let nl = cli
         .netlist(Path::new("tests/fixtures/blank.kicad_sch"))
         .unwrap();
@@ -20,11 +19,11 @@ fn netlist_export_runs_and_parses() {
 
 #[test]
 fn netlist_export_parses_real_components_and_nets() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD environment");
         return;
     };
-    let cli = KicadCli::new(&env);
+    let cli = env;
     let nl = cli
         .netlist(Path::new("tests/fixtures/rc_pair.kicad_sch"))
         .unwrap();

@@ -18,16 +18,12 @@ use super::geometry::{
 };
 use super::hints::{apply_edge_lock, apply_grid_hints, unified_fanout_place};
 use super::legalize::{initial_grid, is_legal, legalize};
+use pcb_model::{LayerRef, Point2, Rect, RouteProblem, Router, failed_pad_weight};
+use place_model::decoupling_pairs;
 use place_model::{
     Edge, Pin, PlaceProblem, PlaceReport, PlaceResult, Placement, PlacementHints, derive_nets,
 };
-use place_model::decoupling_pairs;
 use place_model::{PlacementRankKey, Placer, RoutabilityOracle, RouteRanker};
-use crate::problem::{LayerRef, Point2, Rect, RouteProblem, Router, failed_pad_weight};
-
-/// [`to_route_problem`] now lives in the kernel (`place-model`) so a
-/// third-party placer can build a [`RouteProblem`] from its own placement without
-/// depending on `pcb-place`. Re-exported so callers are unchanged.
 
 /// Per-variant placement toggles a [`LegalizingPlacer`]/[`AnnealingPlacer`] carries.
 #[derive(Debug, Clone, Copy, Default)]
@@ -185,15 +181,15 @@ impl RouteRanker for GridAstarRanker {
             return (0, 0, 0, 0, 0);
         }
         if placement_ranker_uses_bounded_pass(rp) {
-            return route_rank_key(rp, &crate::router::route_orthogonal_single_pass(rp));
+            return route_rank_key(rp, &grid_astar::router::route_orthogonal_single_pass(rp));
         }
-        let routed = crate::router::route_orthogonal(rp);
+        let routed = grid_astar::router::route_orthogonal(rp);
         let strict_key = route_rank_key(rp, &routed);
         if route_rank_key_clean_via_free(strict_key) {
             return strict_key;
         }
 
-        let lenient = crate::router::route_orthogonal_lenient(rp);
+        let lenient = grid_astar::router::route_orthogonal_lenient(rp);
         let lenient_key = route_rank_key(rp, &lenient);
         let orthogonal_key = if route_rank_key_better(lenient_key, strict_key) {
             lenient_key
@@ -207,7 +203,7 @@ impl RouteRanker for GridAstarRanker {
         rank_key_with_full_grid_fallback(
             orthogonal_key,
             should_try_full_grid_ranker_fallback(rp, orthogonal_key),
-            || route_rank_key(rp, &crate::router::GridAStarRouter.route(rp)),
+            || route_rank_key(rp, &grid_astar::router::GridAStarRouter.route(rp)),
         )
     }
 }
@@ -233,11 +229,11 @@ pub(crate) fn placement_ranker_uses_layout_only(problem: &RouteProblem) -> bool 
 
 pub(crate) fn route_rank_key(
     rp: &RouteProblem,
-    routed: &crate::problem::RouteResult,
+    routed: &pcb_model::RouteResult,
 ) -> (usize, usize, usize, usize, u64) {
-    let geom = crate::lint::lint(rp, &routed.solution)
+    let geom = drc_lint::lint::lint(rp, &routed.solution)
         .iter()
-        .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+        .filter(|v| !matches!(v, drc_lint::lint::DrcViolation::Connectivity { .. }))
         .count();
     let metrics = routed.solution.metrics();
     (
@@ -397,22 +393,13 @@ impl Placer for FanoutPlacer {
     fn place(&self, problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
         // Stage 1 — structured fan-out fast-path.
         let mut p = problem.clone();
-        let fanned = std::env::var("NO_UNIFIED").is_err() && unified_fanout_place(&mut p, hints);
-        if std::env::var("FANOUT_DEBUG").is_ok() {
-            eprintln!("[fanout] fanned={fanned}");
-        }
+        let fanned = unified_fanout_place(&mut p, hints);
         if !fanned {
             apply_grid_hints(&mut p, hints);
         }
         if fanned {
             let mut result = place(&p, hints);
             seat_corner_seek_parts(problem, hints, &mut result);
-            if std::env::var("FANOUT_DEBUG").is_ok() {
-                eprintln!(
-                    "[fanout] result legal={} hpwl={:.2} overlaps={}",
-                    result.legal, result.report.hpwl, result.report.overlaps_resolved
-                );
-            }
             if result.legal {
                 let mut base = problem.clone();
                 apply_grid_hints(&mut base, hints);
@@ -428,9 +415,6 @@ impl Placer for FanoutPlacer {
                     .then(|| bounded_fanout_rank(problem, &result))
                     .flatten();
                 if result_rank.as_ref().is_some_and(|(_, strong)| *strong) {
-                    if std::env::var("FANOUT_DEBUG").is_ok() {
-                        eprintln!("[fanout] accepted bounded clean via-free fast path");
-                    }
                     return result;
                 }
 
@@ -443,42 +427,17 @@ impl Placer for FanoutPlacer {
                 } else {
                     better_place_result(problem, result, fallback)
                 };
-                if std::env::var("FANOUT_DEBUG").is_ok() {
-                    eprintln!(
-                        "[fanout] selected legal candidate hpwl={:.2} layout_cost={:.2}",
-                        winner.report.hpwl, winner.report.layout_cost
-                    );
-                }
                 return winner;
             }
-            if std::env::var("FANOUT_DEBUG").is_ok() {
-                debug_overlaps(&p, &result);
-            }
             let optimized = place_best(&p, hints);
-            if std::env::var("FANOUT_DEBUG").is_ok() {
-                eprintln!(
-                    "[fanout] optimized legal={} hpwl={:.2} overlaps={}",
-                    optimized.legal, optimized.report.hpwl, optimized.report.overlaps_resolved
-                );
-                if !optimized.legal {
-                    debug_overlaps(&p, &optimized);
-                }
-            }
             if optimized.legal {
                 return optimized;
             }
             let mut base = problem.clone();
             apply_grid_hints(&mut base, hints);
-            if std::env::var("FANOUT_DEBUG").is_ok() {
-                eprintln!("[fanout] falling back to non-fanned placement");
-            }
             return place_best(&base, hints);
         }
-        let result = place_best(&p, hints);
-        if std::env::var("FANOUT_DEBUG").is_ok() && !result.legal {
-            debug_overlaps(&p, &result);
-        }
-        result
+        place_best(&p, hints)
     }
 }
 
@@ -497,7 +456,7 @@ fn bounded_fanout_rank(
     if placement_ranker_uses_layout_only(&rp) {
         return None;
     }
-    let route_key = route_rank_key(&rp, &crate::router::route_orthogonal_single_pass(&rp));
+    let route_key = route_rank_key(&rp, &grid_astar::router::route_orthogonal_single_pass(&rp));
     let strong = fanout_fast_path_accepts(&rp, route_key);
     Some((
         (
@@ -560,48 +519,6 @@ fn better_place_result_with_keys(
     }
 }
 
-fn debug_overlaps(problem: &PlaceProblem, result: &PlaceResult) {
-    let margin = courtyard_margin(problem.clearance);
-    let mut pos = std::collections::BTreeMap::new();
-    let mut rot = std::collections::BTreeMap::new();
-    for p in &result.placements {
-        pos.insert(p.reference.as_str(), p.at);
-        rot.insert(p.reference.as_str(), p.rotation);
-    }
-    let mut printed = 0usize;
-    for i in 0..problem.parts.len() {
-        let Some(pi) = pos.get(problem.parts[i].reference.as_str()) else {
-            continue;
-        };
-        let hi = rotated_courtyard_half(
-            &problem.parts[i],
-            *rot.get(problem.parts[i].reference.as_str()).unwrap_or(&0.0),
-        );
-        let ri = Rect::from_center_half(*pi, hi).inflate(margin / 2.0);
-        for j in (i + 1)..problem.parts.len() {
-            let Some(pj) = pos.get(problem.parts[j].reference.as_str()) else {
-                continue;
-            };
-            let hj = rotated_courtyard_half(
-                &problem.parts[j],
-                *rot.get(problem.parts[j].reference.as_str()).unwrap_or(&0.0),
-            );
-            let rj = Rect::from_center_half(*pj, hj).inflate(margin / 2.0);
-            let (ox, oy) = ri.axis_penetration(&rj);
-            if ox > 1e-9 && oy > 1e-9 {
-                eprintln!(
-                    "[fanout] overlap {} {} ox={:.2} oy={:.2}",
-                    problem.parts[i].reference, problem.parts[j].reference, ox, oy
-                );
-                printed += 1;
-                if printed >= 12 {
-                    return;
-                }
-            }
-        }
-    }
-}
-
 /// THE PLACEMENT PIPELINE — the single visible entry the tool layer calls.
 ///
 /// All of force / anneal / fan-out are placement; this runs the [`FanoutPlacer`]:
@@ -615,8 +532,7 @@ fn debug_overlaps(problem: &PlaceProblem, result: &PlaceResult) {
 ///    force-directed seed, optionally simulated-annealing-refined, plus idiom
 ///    variants, each routed and the most routable kept.
 ///
-/// `$NO_UNIFIED` forces stage 2 (pure `place_best`). Never worse than the legalizing
-/// baseline: a fan-out that can't seat legally is discarded in favour of `place_best`.
+/// A fan-out that cannot seat legally is discarded in favour of `place_best`.
 pub fn place_board(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
     FanoutPlacer.place(problem, hints)
 }

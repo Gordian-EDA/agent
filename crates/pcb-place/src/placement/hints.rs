@@ -6,9 +6,9 @@ use super::geometry::{
     clamp_center_for_envelope, datum_rotation_for_edge, part_edge_target,
     part_placement_bounds_envelope, rotated_copper_bbox, rotated_courtyard_half,
 };
+use pcb_model::Point2;
 use place_model::{Edge, LockedAt, Part, PlaceProblem, PlacementHints};
 use place_model::{decoupling_pairs, series_pairs};
-use crate::problem::Point2;
 
 /// Lock each member of a `grid` group at a computed cell of a regular grid (row-major,
 /// member order), centred in the group's region. The column count is sized from the
@@ -741,7 +741,6 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem, hints: &PlacementHints) 
     let mut ring_order = cap_ring_ordered;
     ring_order.extend(res_ordered.iter().copied());
     ring_order.extend(others.iter().copied());
-    let original_ring_len = ring_order.len();
     ring_order.retain(|&idx| {
         problem.parts[idx]
             .courtyard_w
@@ -749,12 +748,6 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem, hints: &PlacementHints) 
             + 0.8
             <= 8.0
     });
-    if std::env::var("FANOUT_DEBUG").is_ok() && ring_order.len() != original_ring_len {
-        eprintln!(
-            "[fanout] deferred {} oversized ring parts",
-            original_ring_len - ring_order.len()
-        );
-    }
     let spacing = ring_order
         .iter()
         .map(|&idx| {
@@ -867,7 +860,6 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem, hints: &PlacementHints) 
         }
     };
     for &i in &connectors {
-        let mut steps = 0;
         for _ in 0..60 {
             let (ix, iy, irot) = {
                 let l = problem.parts[i].locked.as_ref().unwrap();
@@ -895,13 +887,6 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem, hints: &PlacementHints) 
             } else {
                 l.at.x += if ix >= 0.0 { 2.0 } else { -2.0 };
             }
-            steps += 1;
-        }
-        if std::env::var("FANOUT_DEBUG").is_ok() {
-            eprintln!(
-                "[nudge] {} pushed {steps} steps",
-                problem.parts[i].reference
-            );
         }
     }
 
@@ -926,12 +911,6 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem, hints: &PlacementHints) 
     let placed_h = (mxy - mny) + 2.0 * margin;
     let board_w = original_bounds.max_x - original_bounds.min_x;
     let board_h = original_bounds.max_y - original_bounds.min_y;
-    if std::env::var("FANOUT_DEBUG").is_ok() {
-        eprintln!(
-            "[fanout] placed {:.1}x{:.1} into board {:.1}x{:.1}",
-            placed_w, placed_h, board_w, board_h
-        );
-    }
     if placed_w > board_w + 1e-9 || placed_h > board_h + 1e-9 {
         *problem = original;
         return false;
@@ -947,30 +926,5 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem, hints: &PlacementHints) 
         }
     }
     problem.bounds = original_bounds;
-    if std::env::var("FANOUT_DEBUG").is_ok() {
-        let rh = |p: &Part, r: f64| {
-            if matches!(geom::snap_quadrant(r) as i32, 90 | 270) {
-                (p.courtyard_h / 2.0, p.courtyard_w / 2.0)
-            } else {
-                (p.courtyard_w / 2.0, p.courtyard_h / 2.0)
-            }
-        };
-        for a in 0..problem.parts.len() {
-            for b in (a + 1)..problem.parts.len() {
-                let (pa, pb) = (&problem.parts[a], &problem.parts[b]);
-                let (Some(la), Some(lb)) = (&pa.locked, &pb.locked) else {
-                    continue;
-                };
-                let (ahw, ahh) = rh(pa, la.rotation);
-                let (bhw, bhh) = rh(pb, lb.rotation);
-                if (la.at.x - lb.at.x).abs() < ahw + bhw && (la.at.y - lb.at.y).abs() < ahh + bhh {
-                    eprintln!(
-                        "[fanout] OVERLAP {} (rot{}) <-> {} (rot{})",
-                        pa.reference, la.rotation, pb.reference, lb.rotation
-                    );
-                }
-            }
-        }
-    }
     true
 }

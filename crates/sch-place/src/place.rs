@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Caller-chosen knobs an engine reads from the placement problem. Replaces the
 /// ad-hoc `std::env` flags the engines used to read directly (`DEBUG_SA_TIME`,
 /// `MULTISHEET_REFINE`, `MOTIF_TILE`) so the engine never touches the environment;
-/// the agent sets these fields, and `sch-floorplan` derives them from the
-/// environment at problem construction.
+/// the caller sets these fields when it constructs the placement problem.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PlaceOptions {

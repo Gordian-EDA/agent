@@ -12,11 +12,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use circuit_graph::netclass::is_connector_like as is_connector_like_part;
 use geom::Point2;
 use sch_place::ir::Orient;
-use sch_place::item::{Incidence, Item};
-use circuit_graph::netclass::is_connector_like as is_connector_like_part;
 use sch_place::item::PinSide;
+use sch_place::item::{Incidence, Item};
 
 use crate::chain::{ChainRole, NodeKind, Reduced};
 use crate::net::NetClass;
@@ -75,7 +75,7 @@ pub(crate) fn orient_for(item: &Item, first_net: &str, dir: Orient) -> f64 {
             Orient::Right => Orient::Left,
         }
     };
-    sch_floorplan::contract::orient_angle(&item.geom, want)
+    sch_floorplan::engine_support::orient_angle(&item.geom, want)
 }
 
 /// World offset of `pin` (by number) for an item rotated to `angle`, relative
@@ -112,7 +112,7 @@ pub(crate) fn half_size(item: &Item, angle: f64) -> Point2 {
 pub(crate) fn placed_rect(items: &[Item], s: &SatPlace) -> geom::Rect {
     let mut tmp = items[s.item].clone();
     tmp.angle = s.angle;
-    sch_floorplan::contract::item_rect(&tmp, [s.offset.x, s.offset.y])
+    sch_floorplan::engine_support::item_rect(&tmp, [s.offset.x, s.offset.y])
 }
 
 /// How one consumed chain hangs off its module.
@@ -263,7 +263,7 @@ fn commit_free_opt(
                 })
             })
         });
-        if ep_on_wire && std::env::var_os("SPINE_DEBUG").is_some() {
+        if ep_on_wire && crate::DEBUG_DIAGNOSTICS {
             let refs: Vec<&str> = sats.iter().map(|s| items[s.item].refdes.as_str()).collect();
             eprintln!("[ep-guard] blocked {refs:?} at ({:.1},{:.1})", at.x, at.y);
         }
@@ -276,7 +276,7 @@ fn commit_free_opt(
                     && !(cnet.is_some() && rnet.is_some() && cnet == rnet)
             });
         if !blocked {
-            if tries > 2 && std::env::var_os("SPINE_DEBUG").is_some() {
+            if tries > 2 && crate::DEBUG_DIAGNOSTICS {
                 let refs: Vec<&str> = sats.iter().map(|s| items[s.item].refdes.as_str()).collect();
                 eprintln!(
                     "[slide] {refs:?} slid {tries} steps: {:?} -> {:?}",
@@ -639,7 +639,10 @@ pub fn form_modules(
         st.claims
             .entry(mi)
             .or_default()
-            .push(sch_floorplan::contract::item_rect(&items[a], [0.0, 0.0]));
+            .push(sch_floorplan::engine_support::item_rect(
+                &items[a],
+                [0.0, 0.0],
+            ));
     }
 
     // Pins that a consumed chain will WIRE to (no label there).
@@ -793,7 +796,7 @@ fn place_bridges(items: &[Item], g: &Reduced, attach: &[Attach], st: &mut FormSt
             // Feedback across the body (op-amp out → in): a HORIZONTAL run
             // ABOVE the anchor, wires looping over the top — a vertical column
             // would drag its approach wire straight through the package.
-            let anchor_rect = sch_floorplan::contract::item_rect(&items[*anchor], [0.0, 0.0]);
+            let anchor_rect = sch_floorplan::engine_support::item_rect(&items[*anchor], [0.0, 0.0]);
             let (parts, nets) = (c.parts.clone(), c.nets.clone());
             let build = |at: Point2| -> Vec<SatPlace> {
                 let mut x = at.x;
@@ -1265,7 +1268,7 @@ fn place_ladders<'a>(
             Point2::new(x0, 0.0),
             Point2::new(outward, 0.0),
         );
-        if std::env::var_os("SPINE_DEBUG").is_some() {
+        if crate::DEBUG_DIAGNOSTICS {
             let refs: Vec<&str> = parts.iter().map(|&p| items[p].refdes.as_str()).collect();
             eprintln!(
                 "[attach] LADDER {refs:?} at {}:{} up={}",
@@ -1849,7 +1852,7 @@ fn recompute_envelopes(items: &[Item], st: &mut FormState) {
     // neighbour bodies (mcp1703).
     const WIRE_MARGIN: f64 = 3.81;
     for (mi, m) in st.form.modules.iter_mut().enumerate() {
-        let anchor_rect = sch_floorplan::contract::item_rect(&items[m.anchor], [0.0, 0.0]);
+        let anchor_rect = sch_floorplan::engine_support::item_rect(&items[m.anchor], [0.0, 0.0]);
         m.env_min.x = anchor_rect.min_x;
         m.env_min.y = anchor_rect.min_y;
         m.env_max.x = anchor_rect.max_x;

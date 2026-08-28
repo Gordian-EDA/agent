@@ -1,5 +1,5 @@
 use circuit_lang::model::Design;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::contract::{PlacementEngine, SchematicPlaceProblem};
 use spine_place::SpinePlace;
@@ -12,11 +12,11 @@ fn compile_source(provider: &SymbolTable, yaml: &str) -> Design {
 
 #[test]
 fn spine_preserves_inferred_pc817_channel_cells() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCad environment detected");
         return;
     };
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let design = compile_source(
         &provider,
         r#"

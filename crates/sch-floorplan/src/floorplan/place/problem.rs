@@ -11,12 +11,12 @@
 use std::io;
 
 use circuit_lang::model::Design;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 
 use sch_place::item::{Incidence, Item};
 use sch_place::place::PlaceOptions;
 
-use super::emit::{gather, incidence, place_options_from_env};
+use super::emit::{gather, incidence};
 use super::refine::SEARCH_SEED;
 
 /// One block (or whole design): gathered parts, connectivity, and search knobs.
@@ -29,14 +29,23 @@ pub struct SchematicPlaceProblem {
 
 impl SchematicPlaceProblem {
     /// Build the neutral placement problem from a compiled design.
-    pub fn from_design(env: &KicadEnv, design: &Design) -> io::Result<Self> {
+    pub fn from_design(env: &KicadInstallation, design: &Design) -> io::Result<Self> {
+        Self::from_design_with_options(env, design, PlaceOptions::default())
+    }
+
+    /// Build the placement problem with explicit caller-owned options.
+    pub fn from_design_with_options(
+        env: &KicadInstallation,
+        design: &Design,
+        options: PlaceOptions,
+    ) -> io::Result<Self> {
         let items = gather(env, design)?;
         let inc = incidence(&items);
         Ok(Self {
             items,
             inc,
             seed: SEARCH_SEED,
-            options: place_options_from_env(),
+            options,
         })
     }
 }

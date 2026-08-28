@@ -1,4 +1,4 @@
-use crate::problem::{Connection, LayerRef, Point2, RouteProblem};
+use pcb_model::{Connection, LayerRef, Point2, RouteProblem};
 
 pub(crate) fn connection_span_um(conn: &Connection) -> u64 {
     let Some((min_x, max_x, min_y, max_y)) = connection_bbox(conn) else {
@@ -251,7 +251,7 @@ fn connection_bbox(conn: &Connection) -> Option<(f64, f64, f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{LayerRef, Obstacle, Rect, RoutePoint};
+    use pcb_model::{LayerRef, Obstacle, Rect, RoutePoint};
 
     fn conn(name: &str, pts: &[(f64, f64, &str)]) -> Connection {
         Connection {

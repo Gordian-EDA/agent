@@ -1,12 +1,17 @@
-//! Live-board adapters from KiCad IPC protobufs into `pcb_model`.
+//! Stable, KiCad-owned views of a live board.
+//!
+//! These DTOs deliberately belong to the bridge crate. Conversion into routing
+//! and placement engine models happens in the application layer, keeping this
+//! crate independent of either engine SDK.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom::Polyline;
+use geom::{Point2, Polygon, Polyline, Rect, Segment};
 
 use crate::units::nm_to_mm;
 use crate::{
-    Error, Kicad, footprint_reference,
+    Error, Kicad,
+    edit::footprint_reference,
     proto::kiapi::{
         board::types::{
             BoardGraphicShape, BoardLayer, DrillProperties, FootprintInstance, Net, Pad, PadStack,
@@ -18,12 +23,6 @@ use crate::{
         },
     },
 };
-use pcb_model::{
-    Connection, LayerRef, Obstacle, Point2, Polygon, Rect, RoutePoint, RouteProblem, RouteSolution,
-    Segment, Trace, Via as ModelVia, ViaSpan,
-};
-use place_model::{LockedAt, Part, PartPad, PlaceProblem};
-
 const DEFAULT_MIN_TRACE_WIDTH_MM: f64 = 0.2;
 const DEFAULT_CLEARANCE_MM: f64 = 0.2;
 const DEFAULT_VIA_DIAMETER_MM: f64 = 0.6;
@@ -38,13 +37,121 @@ struct BoardRules {
     net_widths: BTreeMap<String, f64>,
 }
 
+/// Bridge-local copper-layer reference (`top`, `bottom`, or `innerN`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CopperLayer(pub String);
+
+impl CopperLayer {
+    pub fn top() -> Self {
+        Self("top".to_owned())
+    }
+
+    pub fn bottom() -> Self {
+        Self("bottom".to_owned())
+    }
+
+    pub fn index(&self, layer_count: u32) -> Option<u32> {
+        match self.0.as_str() {
+            "top" => Some(0),
+            "bottom" => layer_count.checked_sub(1),
+            name if name.starts_with("inner") => {
+                let index = name["inner".len()..].parse::<u32>().ok()?;
+                (index > 0 && index < layer_count.saturating_sub(1)).then_some(index)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// KiCad-normalized routing view. This is transport data, not an engine model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoardRouting {
+    pub layer_count: u32,
+    pub min_trace_width: f64,
+    pub obstacles: Vec<BoardObstacle>,
+    pub connections: Vec<BoardConnection>,
+    pub bounds: Rect,
+    pub clearance: f64,
+    pub via_diameter: f64,
+    pub via_drill: f64,
+    pub net_widths: BTreeMap<String, f64>,
+    pub outline: Option<Polygon>,
+    pub plane_nets: BTreeMap<String, u32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoardObstacle {
+    pub kind: String,
+    pub layers: Vec<CopperLayer>,
+    pub center: Point2,
+    pub width: f64,
+    pub height: f64,
+    pub connected_to: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoardConnection {
+    pub name: String,
+    pub points_to_connect: Vec<BoardRoutePoint>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoardRoutePoint {
+    pub x: f64,
+    pub y: f64,
+    pub layer: CopperLayer,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BoardCopper {
+    pub traces: Vec<BoardTrace>,
+    pub vias: Vec<BoardVia>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoardTrace {
+    pub connection: String,
+    pub layer: CopperLayer,
+    pub width: f64,
+    pub path: Vec<Point2>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum BoardViaSpan {
+    #[default]
+    Through,
+    Partial {
+        from: u32,
+        to: u32,
+        micro: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoardVia {
+    pub connection: String,
+    pub at: Point2,
+    pub diameter: f64,
+    pub drill: f64,
+    pub span: BoardViaSpan,
+}
+
+pub(crate) type LayerRef = CopperLayer;
+pub(crate) type RouteProblem = BoardRouting;
+pub(crate) type Obstacle = BoardObstacle;
+pub(crate) type Connection = BoardConnection;
+pub(crate) type RoutePoint = BoardRoutePoint;
+pub(crate) type RouteSolution = BoardCopper;
+pub(crate) type Trace = BoardTrace;
+pub(crate) type ViaSpan = BoardViaSpan;
+pub(crate) type ModelVia = BoardVia;
+
 /// Routing and footprint views of the currently open KiCad board.
 #[derive(Debug, Clone)]
 pub struct IpcBoardSnapshot {
-    pub problem: RouteProblem,
+    pub problem: BoardRouting,
     pub imported: ImportedBoard,
-    pub copper: RouteSolution,
-    pub net_codes: BTreeMap<String, i32>,
+    pub copper: BoardCopper,
     pub layer_names: Vec<String>,
 }
 
@@ -78,86 +185,7 @@ pub struct ImportedPad {
     pub net: Option<String>,
     /// Electrical anchor in board coordinates (not an offset copper-shape center).
     pub at: Point2,
-    pub layers: Vec<LayerRef>,
-}
-
-impl IpcBoardSnapshot {
-    /// Convert the imported footprint view into a placement problem.
-    pub fn place_problem(&self) -> PlaceProblem {
-        let parts = self
-            .imported
-            .parts
-            .iter()
-            .map(|part| {
-                let footprint = self
-                    .problem
-                    .obstacles
-                    .iter()
-                    .filter(|ob| ob.kind == format!("pad:{}", part.reference))
-                    .collect::<Vec<_>>();
-                let (world_w, world_h) = footprint_extents(&footprint).unwrap_or((1.0, 1.0));
-                // IPC pad positions are relative to the footprint, but the
-                // routing obstacles above are world-space.  Part geometry is
-                // defined at rotation zero, so undo the imported footprint
-                // rotation before handing it to the placer.  Otherwise an
-                // already-rotated footprint gets its pad offsets and extents
-                // rotated a second time when the placement is routed.
-                let imported_rotation = part.rotation as f64;
-                let (courtyard_w, courtyard_h) = if rotation_swaps_axes(imported_rotation) {
-                    (world_h, world_w)
-                } else {
-                    (world_w, world_h)
-                };
-                Part {
-                    reference: part.reference.clone(),
-                    courtyard_w,
-                    courtyard_h,
-                    pads: footprint
-                        .into_iter()
-                        .enumerate()
-                        .map(|(idx, ob)| PartPad {
-                            number: part
-                                .pads
-                                .get(idx)
-                                .map(|pad| pad.number.clone())
-                                .unwrap_or_else(|| (idx + 1).to_string()),
-                            offset: Point2 {
-                                x: ob.center.x - part.at.x,
-                                y: ob.center.y - part.at.y,
-                            }
-                            .rotate(-imported_rotation),
-                            width: if rotation_swaps_axes(imported_rotation) {
-                                ob.height
-                            } else {
-                                ob.width
-                            },
-                            height: if rotation_swaps_axes(imported_rotation) {
-                                ob.width
-                            } else {
-                                ob.height
-                            },
-                            layers: ob.layers.clone(),
-                            net: ob.connected_to.first().cloned(),
-                        })
-                        .collect(),
-                    edge_datum: None,
-                    locked: part.locked.then_some(LockedAt {
-                        at: part.at,
-                        rotation: part.rotation as f64,
-                    }),
-                }
-            })
-            .collect();
-        PlaceProblem {
-            bounds: self.imported.bounds,
-            clearance: self.problem.clearance,
-            layer_count: self.problem.layer_count,
-            min_trace_width: self.problem.min_trace_width,
-            parts,
-            keepouts: self.imported.placement_keepouts.clone(),
-            outline: self.problem.outline.clone(),
-        }
-    }
+    pub layers: Vec<CopperLayer>,
 }
 
 impl Kicad {
@@ -182,7 +210,7 @@ impl Kicad {
         let net_class_queries_safe = self
             .version()
             .map(|(major, minor, patch, _)| {
-                crate::client::net_class_queries_supported(major, minor, patch)
+                crate::client::stable_updates_supported(major, minor, patch)
             })
             .unwrap_or(false);
         let rules = if !net_class_queries_safe {
@@ -205,25 +233,11 @@ impl Kicad {
             rules,
         ))
     }
-
-    /// A `pcb_model::RouteProblem` derived from the live IPC board.
-    pub fn route_problem(&mut self) -> Result<RouteProblem, Error> {
-        Ok(self.board_snapshot()?.problem)
-    }
-
-    /// Footprint-level import data derived from the live IPC board.
-    pub fn imported_board(&mut self) -> Result<ImportedBoard, Error> {
-        Ok(self.board_snapshot()?.imported)
-    }
-
-    /// Routed copper derived from the live IPC board.
-    pub fn copper_solution(&mut self) -> Result<RouteSolution, Error> {
-        Ok(self.board_snapshot()?.copper)
-    }
 }
 
-/// Build model snapshots from IPC item payloads.
-pub fn snapshot_from_items(
+/// Build a bridge snapshot from decoded IPC item payloads.
+#[cfg(test)]
+fn snapshot_from_items(
     footprints: Vec<FootprintInstance>,
     tracks: Vec<Track>,
     vias: Vec<Via>,
@@ -474,7 +488,7 @@ impl SnapshotBuilder {
         }
     }
 
-    fn finish(self, nets: &[Net], copper: RouteSolution) -> IpcBoardSnapshot {
+    fn finish(self, _nets: &[Net], copper: RouteSolution) -> IpcBoardSnapshot {
         let layer_count = self.layer_names.len().max(2) as u32;
         let bounds = self
             .outline
@@ -509,7 +523,6 @@ impl SnapshotBuilder {
             via_drill: self.rules.via_drill,
             net_widths: self.rules.net_widths,
             outline: self.outline,
-            escape_layers: BTreeMap::new(),
             plane_nets,
         };
         let imported = ImportedBoard {
@@ -523,7 +536,6 @@ impl SnapshotBuilder {
             problem,
             imported,
             copper,
-            net_codes: net_codes(nets),
             layer_names: self.layer_names,
         }
     }
@@ -534,7 +546,7 @@ fn observed_plane_nets(
     connections: &[Connection],
     copper_zone_layers: &BTreeMap<String, BTreeSet<u32>>,
 ) -> BTreeMap<String, u32> {
-    let mut assigned = pcb_model::default_plane_nets(
+    let mut assigned = default_plane_nets(
         layer_count,
         connections
             .iter()
@@ -557,6 +569,46 @@ fn observed_plane_nets(
         {
             assigned.insert(net.clone(), *layer);
         }
+    }
+    assigned
+}
+
+fn default_plane_nets(
+    layer_count: u32,
+    nets: impl Iterator<Item = (String, usize)>,
+) -> BTreeMap<String, u32> {
+    if layer_count < 4 || layer_count & 1 != 0 {
+        return BTreeMap::new();
+    }
+    let gnd_layer = layer_count / 2 - 1;
+    let power_layer = layer_count / 2;
+    let mut ground: Option<(String, usize)> = None;
+    let mut power: Option<(String, usize)> = None;
+    for (name, pads) in nets {
+        let upper = name.to_ascii_uppercase();
+        let is_ground = upper == "GND"
+            || upper.ends_with("GND")
+            || matches!(upper.as_str(), "VSS" | "AGND" | "PGND");
+        let is_power = upper.starts_with("VCC")
+            || upper.starts_with("VDD")
+            || upper.starts_with("VBUS")
+            || upper.starts_with('+')
+            || (upper.starts_with('V')
+                && upper[1..]
+                    .chars()
+                    .all(|character| character.is_ascii_digit() || character == 'V'));
+        if is_ground && ground.as_ref().is_none_or(|(_, count)| pads > *count) {
+            ground = Some((name, pads));
+        } else if is_power && power.as_ref().is_none_or(|(_, count)| pads > *count) {
+            power = Some((name, pads));
+        }
+    }
+    let mut assigned = BTreeMap::new();
+    if let Some((name, _)) = ground {
+        assigned.insert(name, gnd_layer);
+    }
+    if let Some((name, _)) = power {
+        assigned.insert(name, power_layer);
     }
     assigned
 }
@@ -883,10 +935,6 @@ fn footprint_angle(fp: &FootprintInstance) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn rotation_swaps_axes(rotation: f64) -> bool {
-    matches!(geom::snap_quadrant(rotation) as i32, 90 | 270)
-}
-
 fn pad_angle(fp: &FootprintInstance, pad: &Pad) -> f64 {
     // PadStack.angle is likewise already board-absolute. Fall back to the
     // parent angle only for older or synthetic payloads that omit it.
@@ -1184,15 +1232,6 @@ fn polygon_is_convex(polygon: &Polygon) -> bool {
     direction != 0.0
 }
 
-fn net_codes(nets: &[Net]) -> BTreeMap<String, i32> {
-    nets.iter()
-        .filter_map(|net| {
-            let code = net.code.as_ref()?.value;
-            (code != 0 && !net.name.is_empty()).then(|| (net.name.clone(), code))
-        })
-        .collect()
-}
-
 fn net_name(net: &Net) -> Option<String> {
     (!net.name.is_empty()).then(|| net.name.clone())
 }
@@ -1210,9 +1249,9 @@ fn layer_ref_for(kicad_layer: &str, layer_names: &[String]) -> LayerRef {
     } else if kicad_layer == "B.Cu" {
         LayerRef::bottom()
     } else if let Some(idx) = layer_names.iter().position(|n| n == kicad_layer) {
-        LayerRef(format!("inner{idx}"))
+        CopperLayer(format!("inner{idx}"))
     } else {
-        LayerRef(kicad_layer.to_owned())
+        CopperLayer(kicad_layer.to_owned())
     }
 }
 
@@ -1308,27 +1347,6 @@ fn bounds_from_obstacles(obstacles: &[Obstacle]) -> Option<Rect> {
         });
     }
     Rect::bounding(&points)
-}
-
-fn footprint_extents(obstacles: &[&Obstacle]) -> Option<(f64, f64)> {
-    let bounds = Rect::bounding(
-        &obstacles
-            .iter()
-            .flat_map(|ob| {
-                [
-                    Point2 {
-                        x: ob.center.x - ob.width / 2.0,
-                        y: ob.center.y - ob.height / 2.0,
-                    },
-                    Point2 {
-                        x: ob.center.x + ob.width / 2.0,
-                        y: ob.center.y + ob.height / 2.0,
-                    },
-                ]
-            })
-            .collect::<Vec<_>>(),
-    )?;
-    Some((bounds.max_x - bounds.min_x, bounds.max_y - bounds.min_y))
 }
 
 fn point(v: &Vector2) -> Point2 {
@@ -1462,7 +1480,7 @@ mod tests {
     }
 
     #[test]
-    fn rotated_footprint_pads_round_trip_between_ipc_and_placement_geometry() {
+    fn rotated_footprint_pads_decode_in_board_geometry() {
         // KiCad IPC returns footprint children in board coordinates. This pad
         // began at local (2, 1); after the parent's +90° rotation and move to
         // (10, 20), its serialized world position is (11, 18).
@@ -1479,13 +1497,12 @@ mod tests {
         assert!((pad_obstacle.width - 2.0).abs() < 1e-9);
         assert!((pad_obstacle.height - 4.0).abs() < 1e-9);
 
-        let place = snapshot.place_problem();
-        let part = &place.parts[0];
-        assert!((part.courtyard_w - 4.0).abs() < 1e-9);
-        assert!((part.courtyard_h - 2.0).abs() < 1e-9);
-        assert!(part.pads[0].offset.near_eq(Point2::new(2.0, 1.0), 1e-9));
-        assert!((part.pads[0].width - 4.0).abs() < 1e-9);
-        assert!((part.pads[0].height - 2.0).abs() < 1e-9);
+        assert_eq!(snapshot.imported.parts[0].rotation, 90);
+        assert!(
+            snapshot.imported.parts[0].pads[0]
+                .at
+                .near_eq(Point2::new(11.0, 18.0), 1e-9)
+        );
     }
 
     #[test]
@@ -1661,7 +1678,7 @@ mod tests {
     }
 
     #[test]
-    fn rule_area_flags_survive_into_route_and_place_problems() {
+    fn rule_area_flags_survive_in_bridge_snapshot() {
         use crate::proto::kiapi::board::types::RuleAreaSettings;
 
         let combined = rectangular_zone(zone::Settings::RuleAreaSettings(RuleAreaSettings {
@@ -1691,7 +1708,7 @@ mod tests {
         assert_eq!(snapshot.problem.obstacles[0].kind, "zone");
         assert_eq!(snapshot.imported.keepout_count, 1);
         assert_eq!(
-            snapshot.place_problem().keepouts,
+            snapshot.imported.placement_keepouts,
             vec![Rect::new(2.0, 3.0, 8.0, 7.0)]
         );
     }

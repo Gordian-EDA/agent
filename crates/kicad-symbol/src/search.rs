@@ -24,7 +24,6 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::SymbolTable;
-use kicad_env::KicadEnv;
 
 /// A search hit: a fully qualified `Lib:Name` id and its resolved pin count.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,9 +48,9 @@ pub struct SymbolIndex {
 impl SymbolIndex {
     /// Scan all KiCad symbol libraries under the environment's symbol directory
     /// and index their top-level symbol names. Names only — no AST parsing.
-    pub fn build(env: &KicadEnv) -> io::Result<SymbolIndex> {
+    pub fn build(symbol_dir: &Path) -> io::Result<SymbolIndex> {
         let mut entries = Vec::new();
-        for lib in discover_libraries(&env.symbol_dir)? {
+        for lib in discover_libraries(symbol_dir)? {
             for path in lib.symbol_files() {
                 // A single unreadable file must not take down the whole index.
                 let Ok(text) = fs::read_to_string(&path) else {
@@ -69,7 +68,7 @@ impl SymbolIndex {
 
         Ok(SymbolIndex {
             entries,
-            table: SymbolTable::from_env(env),
+            table: SymbolTable::from_symbol_dir(symbol_dir.to_path_buf()),
         })
     }
 
@@ -341,8 +340,7 @@ mod tests {
             "(kicad_symbol_lib (symbol \"R\"))",
         )
         .expect("write lib");
-        let index = SymbolIndex::build(&KicadEnv::with_symbol_dir(dir.path().to_path_buf()))
-            .expect("build");
+        let index = SymbolIndex::build(dir.path()).expect("build");
 
         assert_eq!(index.entries.len(), 1);
         assert_eq!(index.entries[0].lib_id, "Device:R");
@@ -362,8 +360,7 @@ mod tests {
         std::fs::write(lib.join("C.kicad_sym"), "(kicad_symbol_lib (symbol \"C\"))")
             .expect("write split symbol");
 
-        let index = SymbolIndex::build(&KicadEnv::with_symbol_dir(dir.path().to_path_buf()))
-            .expect("build");
+        let index = SymbolIndex::build(dir.path()).expect("build");
         let lib_ids: std::collections::BTreeSet<_> =
             index.entries.iter().map(|e| e.lib_id.as_str()).collect();
 
@@ -379,8 +376,7 @@ mod tests {
             "(kicad_symbol_lib (symbol \"R\"))",
         )
         .expect("write lib");
-        let index = SymbolIndex::build(&KicadEnv::with_symbol_dir(dir.path().to_path_buf()))
-            .expect("build");
+        let index = SymbolIndex::build(dir.path()).expect("build");
 
         assert!(
             index.search("@@@", 5).is_empty(),

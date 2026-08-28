@@ -6,12 +6,9 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use kicad_footprint::{Footprint, FootprintId, FootprintPad, PadTechnology};
-use kicad_ipc::{
-    FootprintMove,
-    snapshot::{ImportedPad, IpcBoardSnapshot},
-};
 use geom::Rect;
+use kicad_footprint::{Footprint, FootprintId, FootprintPad, PadTechnology};
+use kicad_ipc::FootprintMove;
 use pcb_model::{LayerRef, ViaSpan};
 use place_model::{
     Edge, EdgeDatum, GroupHint, LockedAt, Part, PartPad, PlaceProblem, PlaceResult, Placement,
@@ -19,6 +16,8 @@ use place_model::{
 };
 
 use gordian_runtime::AgentRuntime;
+
+use crate::active::{ImportedPad, ImportedPart, IpcBoardSnapshot};
 
 pub(super) fn part_from_footprint_layers(
     footprint: &Footprint,
@@ -574,12 +573,12 @@ fn placement_hints_from_input(mut input: Value) -> std::result::Result<Placement
     // camelCase serde names so external engine payloads remain language-neutral.
     // Normalize only that boundary here and keep the engine type canonical.
     for (tool_name, sdk_name) in [("edge_seek", "edgeSeek"), ("corner_seek", "cornerSeek")] {
-        if let Some(value) = object.remove(tool_name) {
-            if object.insert(sdk_name.to_owned(), value).is_some() {
-                return Err(format!(
-                    "use {tool_name}, not both snake_case and camelCase"
-                ));
-            }
+        if let Some(value) = object.remove(tool_name)
+            && object.insert(sdk_name.to_owned(), value).is_some()
+        {
+            return Err(format!(
+                "use {tool_name}, not both snake_case and camelCase"
+            ));
         }
     }
     if let Some(groups) = object.get_mut("groups").and_then(Value::as_array_mut) {
@@ -595,12 +594,12 @@ fn placement_hints_from_input(mut input: Value) -> std::result::Result<Placement
                     ("max_x", "maxX"),
                     ("max_y", "maxY"),
                 ] {
-                    if let Some(value) = region.remove(tool_name) {
-                        if region.insert(sdk_name.to_owned(), value).is_some() {
-                            return Err(format!(
-                                "use region.{tool_name}, not both snake_case and camelCase"
-                            ));
-                        }
+                    if let Some(value) = region.remove(tool_name)
+                        && region.insert(sdk_name.to_owned(), value).is_some()
+                    {
+                        return Err(format!(
+                            "use region.{tool_name}, not both snake_case and camelCase"
+                        ));
                     }
                 }
             }
@@ -652,7 +651,6 @@ fn same_net(a: &str, b: &str) -> bool {
     a.trim_start_matches('/') == b.trim_start_matches('/')
 }
 
-
 fn is_817(part: &str) -> bool {
     let part = part.to_ascii_uppercase();
     part.contains("PC817") || part.contains("LTV-817") || part.contains("LTV817")
@@ -669,7 +667,7 @@ fn opto817_channels(
     design: &circuit_lang::model::Design,
     board: &IpcBoardSnapshot,
 ) -> Vec<Opto817Channel> {
-    let imported: BTreeMap<&str, &kicad_ipc::snapshot::ImportedPart> = board
+    let imported: BTreeMap<&str, &ImportedPart> = board
         .imported
         .parts
         .iter()
@@ -730,7 +728,7 @@ fn natural_ref_key(reference: &str) -> (&str, u32) {
     (prefix, suffix.parse().unwrap_or(u32::MAX))
 }
 
-fn part_nets(part: &kicad_ipc::snapshot::ImportedPart) -> Vec<&str> {
+fn part_nets(part: &ImportedPart) -> Vec<&str> {
     part.pads
         .iter()
         .filter_map(|pad| pad.net.as_deref())
@@ -806,16 +804,11 @@ fn add_817_array_hints(
     if channels.len() < 8 {
         return None;
     }
-    let Some(first_part) = problem
+    let first_part = problem
         .parts
         .iter()
-        .find(|part| part.reference == channels[0].reference)
-    else {
-        return None;
-    };
-    let Some(rotation) = opto_input_above_rotation(first_part, &channels[0]) else {
-        return None;
-    };
+        .find(|part| part.reference == channels[0].reference)?;
+    let rotation = opto_input_above_rotation(first_part, &channels[0])?;
     if channels.iter().any(|channel| {
         problem
             .parts
@@ -976,7 +969,7 @@ fn add_817_array_hints(
         .chain(&logic_aux_connectors)
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
-    let eligible_channel_part = |part: &kicad_ipc::snapshot::ImportedPart| {
+    let eligible_channel_part = |part: &ImportedPart| {
         !opto_refs.contains(&part.reference)
             && !connector_refs.contains(&part.reference)
             && !is_mounting_hole(&part.lib_id)
@@ -1957,10 +1950,10 @@ fn write_placement(ctx: &AgentRuntime, moves: &[FootprintMove]) -> std::result::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::active::{ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot};
     use geom::Point2;
-    use kicad_env::KicadEnv;
+    use kicad::KicadInstallation;
     use kicad_footprint::{FootprintCatalog, PadTechnology};
-    use kicad_ipc::snapshot::{ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot};
     use pcb_model::{RouteProblem, RouteSolution, Trace, Via};
 
     fn imported_part(reference: &str, lib_id: &str, pads: Vec<(String, String)>) -> ImportedPart {
@@ -1993,7 +1986,7 @@ mod tests {
         Part {
             reference: imported.reference.clone(),
             courtyard_w: if opto { 8.0 } else { 5.0 },
-            courtyard_h: if opto { 5.0 } else { 5.0 },
+            courtyard_h: 5.0,
             pads: imported
                 .pads
                 .iter()
@@ -2146,7 +2139,6 @@ mod tests {
                 traces: vec![],
                 vias: vec![],
             },
-            net_codes: Default::default(),
             layer_names: vec!["F.Cu".into(), "B.Cu".into()],
         };
         let problem = PlaceProblem {
@@ -2415,10 +2407,9 @@ mod tests {
         }
         for imported in &mut board.imported.parts {
             for pad in &mut imported.pads {
-                if imported.reference.starts_with('U') && pad.number == "2" {
-                    pad.net = Some("FIELD_GND".into());
-                } else if imported.reference == "JF1"
-                    && pad.net.as_deref().is_some_and(|net| net.ends_with("_RET"))
+                if (imported.reference.starts_with('U') && pad.number == "2")
+                    || (imported.reference == "JF1"
+                        && pad.net.as_deref().is_some_and(|net| net.ends_with("_RET")))
                 {
                     pad.net = Some("FIELD_GND".into());
                 }
@@ -2817,11 +2808,12 @@ mod tests {
 
     #[test]
     fn real_817_bank_rejects_73mm_and_forms_one_oriented_row_at_90mm() {
-        let Some(env) = KicadEnv::detect() else {
+        let Some(env) = KicadInstallation::detect() else {
             eprintln!("SKIP: KiCad libraries not installed");
             return;
         };
-        let catalog = FootprintCatalog::from_env(&env).expect("installed footprint catalog");
+        let catalog =
+            FootprintCatalog::from_root(env.footprint_dir()).expect("installed footprint catalog");
         let id =
             FootprintId::parse("Package_SO:SO-4_4.4x3.6mm_P2.54mm").expect("valid footprint id");
         let footprint = catalog.footprint(&id).expect("installed SO-4 footprint");
@@ -3071,7 +3063,6 @@ mod tests {
                     span: ViaSpan::Through,
                 }],
             },
-            net_codes: Default::default(),
             layer_names: vec!["F.Cu".to_owned(), "B.Cu".to_owned()],
         };
 
@@ -3148,7 +3139,6 @@ mod tests {
                 traces: vec![],
                 vias: vec![],
             },
-            net_codes: Default::default(),
             layer_names: vec!["F.Cu".to_owned(), "B.Cu".to_owned()],
         };
 
@@ -3224,11 +3214,12 @@ mod tests {
 
     #[test]
     fn real_palconn_usb_c_datum_locks_exactly_to_every_board_edge() {
-        let Some(env) = KicadEnv::detect() else {
+        let Some(env) = KicadInstallation::detect() else {
             eprintln!("SKIP: KiCad libraries not installed");
             return;
         };
-        let catalog = FootprintCatalog::from_env(&env).expect("installed footprint catalog");
+        let catalog =
+            FootprintCatalog::from_root(env.footprint_dir()).expect("installed footprint catalog");
         let id = FootprintId::parse("Connector_USB:USB_C_Receptacle_Palconn_UTC16-G")
             .expect("valid footprint id");
         let footprint = catalog.footprint(&id).expect("installed Palconn footprint");
@@ -3321,10 +3312,7 @@ mod tests {
                 }
             }
             positions.push(locked.at);
-            half.push(place_model::rotated_courtyard_half(
-                part,
-                locked.rotation,
-            ));
+            half.push(place_model::rotated_courtyard_half(part, locked.rotation));
             copper.push(copper_box);
         }
         assert!(

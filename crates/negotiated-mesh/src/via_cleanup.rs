@@ -1,4 +1,4 @@
-use crate::problem::{RouteProblem, RouteSolution, ViaSpan};
+use pcb_model::{RouteProblem, RouteSolution, ViaSpan};
 
 const VIA_POINT_KEY_SCALE: f64 = 1e9;
 
@@ -28,7 +28,7 @@ fn via_span_key(span: &ViaSpan) -> (u32, u32, bool, bool) {
 }
 
 fn drop_covered_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
-    let mut baseline = crate::lint::lint(problem, solution);
+    let mut baseline = drc_lint::lint::lint(problem, solution);
     let mut idx = 0usize;
     while idx < solution.vias.len() {
         if !via_is_covered_by_another(problem, solution, idx) {
@@ -38,7 +38,7 @@ fn drop_covered_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
 
         let mut candidate = solution.clone();
         candidate.vias.remove(idx);
-        let findings = crate::lint::lint(problem, &candidate);
+        let findings = drc_lint::lint::lint(problem, &candidate);
         if !introduces_new_findings(&baseline, &findings)
             && candidate.metrics().via_count < solution.metrics().via_count
         {
@@ -51,8 +51,8 @@ fn drop_covered_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
 }
 
 fn introduces_new_findings(
-    baseline: &[crate::lint::DrcViolation],
-    candidate: &[crate::lint::DrcViolation],
+    baseline: &[drc_lint::lint::DrcViolation],
+    candidate: &[drc_lint::lint::DrcViolation],
 ) -> bool {
     candidate
         .iter()
@@ -90,7 +90,7 @@ fn via_layer_span(problem: &RouteProblem, span: &ViaSpan) -> Option<(u32, u32)> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Connection, LayerRef, Point2, Rect, RoutePoint, Trace, Via, ViaSpan};
+    use pcb_model::{Connection, LayerRef, Point2, Rect, RoutePoint, Trace, Via, ViaSpan};
 
     fn layer_change_problem() -> RouteProblem {
         RouteProblem {
@@ -169,7 +169,7 @@ mod tests {
 
         assert_eq!(solution.vias.len(), 1);
         assert!(matches!(solution.vias[0].span, ViaSpan::Through));
-        assert!(crate::lint::lint(&problem, &solution).is_empty());
+        assert!(drc_lint::lint::lint(&problem, &solution).is_empty());
     }
 
     #[test]
@@ -193,6 +193,6 @@ mod tests {
 
         assert_eq!(solution.vias.len(), 1);
         assert!(matches!(solution.vias[0].span, ViaSpan::Through));
-        assert!(crate::lint::lint(&problem, &solution).is_empty());
+        assert!(drc_lint::lint::lint(&problem, &solution).is_empty());
     }
 }

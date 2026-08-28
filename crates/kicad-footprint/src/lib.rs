@@ -7,10 +7,8 @@
 //!
 //! - **Discovery & inventory.** [`FootprintCatalog`] indexes the `.pretty`
 //!   libraries reachable from a *resolved* footprint root. Platform/version
-//!   discovery lives in [`kicad_env`]; build with [`FootprintCatalog::from_env`]
-//!   after resolving a [`kicad_env::KicadEnv`], or
-//!   [`FootprintCatalog::from_root`] for an explicit directory (tests, vendored
-//!   fixtures).
+//!   discovery lives in `kicad`; pass the resolved footprint directory to
+//!   [`FootprintCatalog::from_root`].
 //! - **Identity.** Footprints are addressed by [`FootprintId`] (`Nickname:Name`),
 //!   validated once at the boundary instead of threading bare strings.
 //! - **Raw vs parsed.** [`FootprintEntry::source`] returns verbatim

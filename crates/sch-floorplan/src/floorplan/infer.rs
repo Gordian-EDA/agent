@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use circuit_lang::model::Design;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 
 use super::idiom;
 use super::place::{gather, grid_from_layout, grid_occurrences, incidence, unit_place_key};
@@ -78,7 +78,16 @@ fn local_rail_nets(design: &Design) -> BTreeSet<String> {
 /// ports — straight from the netlist + symbol pin geometry, so the engine owns the
 /// whole layout and needs no LLM `place`. The coarse cells it emits are polished
 /// by the same refine/align/decongest passes the LLM-frame path uses.
-pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
+pub fn infer_ir(env: &KicadInstallation, design: &Design) -> LayoutIr {
+    infer_ir_with_options(env, design, sch_place::place::PlaceOptions::default())
+}
+
+/// Infer layout using explicit caller-owned placement options.
+pub fn infer_ir_with_options(
+    env: &KicadInstallation,
+    design: &Design,
+    options: sch_place::place::PlaceOptions,
+) -> LayoutIr {
     let Ok(items) = gather(env, design) else {
         return baseline_ir(design);
     };
@@ -267,6 +276,7 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         &pin_meta,
         &anchor_col,
         &anchor_row,
+        options.force_fast,
     );
     let mut placed: BTreeSet<String> = BTreeSet::new();
     let mut idiom_reports: Vec<sch_place::result::IdiomReport> = Vec::new();
@@ -546,15 +556,6 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         }
     }
 
-    // HYBRID VLM placement: a coarse zone map {refdes:[fx,fy]} from the LLM, applied as a
-    // SOFT bias (zone_bias in proxy_cost). Loaded from $ZONE_FILE for the A/B loop / tests;
-    // absent ⇒ empty ⇒ no bias. (The agent pipeline will pass it directly in future.)
-    let zone = std::env::var("ZONE_FILE")
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<BTreeMap<String, [f64; 2]>>(&s).ok())
-        .unwrap_or_default();
-
     LayoutIr {
         flow: Flow::Lr,
         rails,
@@ -566,7 +567,7 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         frozen: placed,
         rail_locals: local_rail_nets(design),
         rail_force: Default::default(),
-        zone,
+        zone: BTreeMap::new(),
     }
 }
 
@@ -685,6 +686,7 @@ pub(super) fn place_decoupling(
     ai: usize,
     caps: &[usize],
     out: &[idiom::Idiom],
+    multisheet_refine: bool,
 ) -> Option<Vec<(String, Cell)>> {
     // Group qualifying caps by their V+ rail; a cap whose own nets reach a *different*
     // IC is not unambiguously this IC's bypass, so drop it. EXCLUDE connectors: a power
@@ -727,7 +729,7 @@ pub(super) fn place_decoupling(
     // scattered not in a tidy bank"; multi-rail LDO power sheets). The circuit-graph matcher already
     // accepts caps across rails (per-cap power-net binding), so the only blocker was THIS filter.
     // Banking them into one aligned row above the IC reads far cleaner than the scatter.
-    let multisheet = std::env::var("MULTISHEET_REFINE").is_ok();
+    let multisheet = multisheet_refine;
     let mut bank: Vec<usize> = if multisheet {
         by_rail.into_values().flatten().collect()
     } else {
@@ -913,7 +915,6 @@ pub(super) fn place_crystal(
         if ca == cb {
             return None;
         }
-        let dbg = std::env::var("IDIOM_DEBUG").is_ok();
         // Raw pin geometry. `pin_side` (|x| vs |y|) mis-buckets a TALL IC's corner
         // pins — a left-edge pin high on the body has |y|>|x| and reads "North" — so
         // classify the osc port by which EDGE of the IC's pin bounding box it hugs.
@@ -991,17 +992,6 @@ pub(super) fn place_crystal(
                 .map(|i| i as i32 - (n_edge - 1) / 2)
                 .unwrap_or(0)
         };
-        if dbg {
-            eprintln!(
-                "IDIOM crystal {} FIRES (ai={}, caps {}@{} {}@{}, dcol={dcol} drow={drow})",
-                items[yi].refdes,
-                items[ai].refdes,
-                items[ca].refdes,
-                off_of(&pa),
-                items[cb].refdes,
-                off_of(&pb)
-            );
-        }
         // Placement: a tight cluster just off the osc edge. The crystal sits ONE step
         // out, between the two osc pins; each load cap sits one step FURTHER out at
         // its osc pin's offset — the textbook oscillator block hugging the IC.

@@ -1,11 +1,209 @@
-//! Live KiCAD-board views used while KiCAD IPC is the PCB source of truth.
+//! Live KiCAD-board views and the explicit bridge-to-domain conversion seam.
 
 use std::path::PathBuf;
 
-use kicad_ipc::snapshot::{ImportedBoard, IpcBoardSnapshot};
+use geom::{Point2, Rect};
+use pcb_model::{
+    Connection, LayerRef, Obstacle, RoutePoint, RouteProblem, RouteSolution, Trace, Via, ViaSpan,
+};
 use place_model::Placement;
 
 use gordian_runtime::AgentRuntime;
+
+/// Domain view consumed by placement and routing tools.
+#[derive(Debug, Clone)]
+pub struct IpcBoardSnapshot {
+    pub problem: RouteProblem,
+    pub imported: ImportedBoard,
+    pub copper: RouteSolution,
+    pub layer_names: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportedBoard {
+    pub layer_count: u32,
+    pub bounds: Rect,
+    pub parts: Vec<ImportedPart>,
+    pub placement_keepouts: Vec<Rect>,
+    pub keepout_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportedPart {
+    pub reference: String,
+    pub lib_id: String,
+    pub at: Point2,
+    pub rotation: i32,
+    pub locked: bool,
+    pub pads: Vec<ImportedPad>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportedPad {
+    pub number: String,
+    pub net: Option<String>,
+    pub at: Point2,
+    pub layers: Vec<LayerRef>,
+}
+
+pub(super) fn from_bridge(snapshot: kicad_ipc::snapshot::IpcBoardSnapshot) -> IpcBoardSnapshot {
+    let problem = snapshot.problem;
+    IpcBoardSnapshot {
+        problem: RouteProblem {
+            layer_count: problem.layer_count,
+            min_trace_width: problem.min_trace_width,
+            obstacles: problem
+                .obstacles
+                .into_iter()
+                .map(|obstacle| Obstacle {
+                    kind: obstacle.kind,
+                    layers: obstacle.layers.into_iter().map(domain_layer).collect(),
+                    center: obstacle.center,
+                    width: obstacle.width,
+                    height: obstacle.height,
+                    connected_to: obstacle.connected_to,
+                })
+                .collect(),
+            connections: problem
+                .connections
+                .into_iter()
+                .map(|connection| Connection {
+                    name: connection.name,
+                    points_to_connect: connection
+                        .points_to_connect
+                        .into_iter()
+                        .map(|point| RoutePoint {
+                            x: point.x,
+                            y: point.y,
+                            layer: domain_layer(point.layer),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            bounds: problem.bounds,
+            clearance: problem.clearance,
+            via_diameter: problem.via_diameter,
+            via_drill: problem.via_drill,
+            net_widths: problem.net_widths,
+            outline: problem.outline,
+            escape_layers: Default::default(),
+            plane_nets: problem.plane_nets,
+        },
+        imported: ImportedBoard {
+            layer_count: snapshot.imported.layer_count,
+            bounds: snapshot.imported.bounds,
+            parts: snapshot
+                .imported
+                .parts
+                .into_iter()
+                .map(|part| ImportedPart {
+                    reference: part.reference,
+                    lib_id: part.lib_id,
+                    at: part.at,
+                    rotation: part.rotation,
+                    locked: part.locked,
+                    pads: part
+                        .pads
+                        .into_iter()
+                        .map(|pad| ImportedPad {
+                            number: pad.number,
+                            net: pad.net,
+                            at: pad.at,
+                            layers: pad.layers.into_iter().map(domain_layer).collect(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            placement_keepouts: snapshot.imported.placement_keepouts,
+            keepout_count: snapshot.imported.keepout_count,
+        },
+        copper: RouteSolution {
+            traces: snapshot
+                .copper
+                .traces
+                .into_iter()
+                .map(|trace| Trace {
+                    connection: trace.connection,
+                    layer: domain_layer(trace.layer),
+                    width: trace.width,
+                    path: trace.path,
+                })
+                .collect(),
+            vias: snapshot
+                .copper
+                .vias
+                .into_iter()
+                .map(|via| Via {
+                    connection: via.connection,
+                    at: via.at,
+                    diameter: via.diameter,
+                    drill: via.drill,
+                    span: domain_via_span(via.span),
+                })
+                .collect(),
+        },
+        layer_names: snapshot.layer_names,
+    }
+}
+
+pub(super) fn bridge_route(
+    problem: &RouteProblem,
+    solution: &RouteSolution,
+) -> kicad_ipc::RouteWrite {
+    let bridge_solution = kicad_ipc::snapshot::BoardCopper {
+        traces: solution
+            .traces
+            .iter()
+            .map(|trace| kicad_ipc::snapshot::BoardTrace {
+                connection: trace.connection.clone(),
+                layer: bridge_layer(&trace.layer),
+                width: trace.width,
+                path: trace.path.clone(),
+            })
+            .collect(),
+        vias: solution
+            .vias
+            .iter()
+            .map(|via| kicad_ipc::snapshot::BoardVia {
+                connection: via.connection.clone(),
+                at: via.at,
+                diameter: via.diameter,
+                drill: via.drill,
+                span: bridge_via_span(&via.span),
+            })
+            .collect(),
+    };
+    kicad_ipc::RouteWrite {
+        layer_count: problem.layer_count,
+        solution: bridge_solution,
+    }
+}
+
+fn domain_layer(layer: kicad_ipc::snapshot::CopperLayer) -> LayerRef {
+    LayerRef(layer.0)
+}
+
+fn bridge_layer(layer: &LayerRef) -> kicad_ipc::snapshot::CopperLayer {
+    kicad_ipc::snapshot::CopperLayer(layer.0.clone())
+}
+
+fn domain_via_span(span: kicad_ipc::snapshot::BoardViaSpan) -> ViaSpan {
+    match span {
+        kicad_ipc::snapshot::BoardViaSpan::Through => ViaSpan::Through,
+        kicad_ipc::snapshot::BoardViaSpan::Partial { from, to, micro } => {
+            ViaSpan::Partial { from, to, micro }
+        }
+    }
+}
+
+fn bridge_via_span(span: &ViaSpan) -> kicad_ipc::snapshot::BoardViaSpan {
+    match *span {
+        ViaSpan::Through => kicad_ipc::snapshot::BoardViaSpan::Through,
+        ViaSpan::Partial { from, to, micro } => {
+            kicad_ipc::snapshot::BoardViaSpan::Partial { from, to, micro }
+        }
+    }
+}
 
 /// Save the active KiCAD board and return its project PCB path.
 pub fn save_live_board(ctx: &AgentRuntime) -> std::result::Result<PathBuf, String> {
@@ -42,7 +240,8 @@ fn read_snapshot(ctx: &AgentRuntime) -> std::result::Result<IpcBoardSnapshot, St
             .kicad()
             .with_session(&path, |session| session.kicad().board_snapshot())
         {
-            Ok(mut snapshot) => {
+            Ok(snapshot) => {
+                let mut snapshot = from_bridge(snapshot);
                 reconcile_file_stackup(&path, &mut snapshot)?;
                 return Ok(snapshot);
             }
@@ -53,7 +252,7 @@ fn read_snapshot(ctx: &AgentRuntime) -> std::result::Result<IpcBoardSnapshot, St
             Err(err) if err.is_transport_timeout() || err.is_type_mismatch() => {
                 let initial = err.to_string();
                 ctx.close_kicad_session();
-                let mut snapshot = ctx
+                let snapshot = ctx
                     .kicad()
                     .with_session(&path, |session| session.kicad().board_snapshot())
                     .map_err(|retry| {
@@ -61,6 +260,7 @@ fn read_snapshot(ctx: &AgentRuntime) -> std::result::Result<IpcBoardSnapshot, St
                             "could not read live KiCAD board over IPC after reconnect; initial error: {initial}; retry error: {retry}"
                         )
                     })?;
+                let mut snapshot = from_bridge(snapshot);
                 reconcile_file_stackup(&path, &mut snapshot)?;
                 return Ok(snapshot);
             }
@@ -70,10 +270,11 @@ fn read_snapshot(ctx: &AgentRuntime) -> std::result::Result<IpcBoardSnapshot, St
     if let Some(err) = last_ready_err {
         Err(format!("could not read live KiCAD board over IPC: {err}"))
     } else {
-        let mut snapshot = ctx
+        let snapshot = ctx
             .kicad()
             .with_session(&path, |session| session.kicad().board_snapshot())
             .map_err(|err| format!("could not read live KiCAD board over IPC: {err}"))?;
+        let mut snapshot = from_bridge(snapshot);
         reconcile_file_stackup(&path, &mut snapshot)?;
         Ok(snapshot)
     }
@@ -268,7 +469,6 @@ mod tests {
                 }],
                 vias: vec![],
             },
-            net_codes: BTreeMap::new(),
             layer_names: std::iter::once("F.Cu".to_owned())
                 .chain((1..=30).map(|index| format!("In{index}.Cu")))
                 .chain(std::iter::once("B.Cu".to_owned()))
@@ -285,6 +485,70 @@ mod tests {
             snapshot.copper.traces.len(),
             1,
             "stale copper must remain visible so route_board clears it"
+        );
+    }
+
+    #[test]
+    fn bridge_snapshot_conversion_preserves_layers_and_via_spans() {
+        use kicad_ipc::snapshot as bridge;
+
+        let bounds = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let snapshot = from_bridge(bridge::IpcBoardSnapshot {
+            problem: bridge::BoardRouting {
+                layer_count: 4,
+                min_trace_width: 0.2,
+                obstacles: vec![],
+                connections: vec![],
+                bounds,
+                clearance: 0.2,
+                via_diameter: 0.6,
+                via_drill: 0.3,
+                net_widths: BTreeMap::new(),
+                outline: None,
+                plane_nets: BTreeMap::new(),
+            },
+            imported: bridge::ImportedBoard {
+                layer_count: 4,
+                bounds,
+                parts: vec![],
+                placement_keepouts: vec![],
+                keepout_count: 0,
+            },
+            copper: bridge::BoardCopper {
+                traces: vec![bridge::BoardTrace {
+                    connection: "SIG".to_owned(),
+                    layer: bridge::CopperLayer("inner1".to_owned()),
+                    width: 0.2,
+                    path: vec![Point2::new(1.0, 1.0), Point2::new(2.0, 2.0)],
+                }],
+                vias: vec![bridge::BoardVia {
+                    connection: "SIG".to_owned(),
+                    at: Point2::new(2.0, 2.0),
+                    diameter: 0.5,
+                    drill: 0.2,
+                    span: bridge::BoardViaSpan::Partial {
+                        from: 0,
+                        to: 1,
+                        micro: true,
+                    },
+                }],
+            },
+            layer_names: vec![
+                "F.Cu".into(),
+                "In1.Cu".into(),
+                "In2.Cu".into(),
+                "B.Cu".into(),
+            ],
+        });
+
+        assert_eq!(snapshot.copper.traces[0].layer, LayerRef("inner1".into()));
+        assert_eq!(
+            snapshot.copper.vias[0].span,
+            ViaSpan::Partial {
+                from: 0,
+                to: 1,
+                micro: true
+            }
         );
     }
 }

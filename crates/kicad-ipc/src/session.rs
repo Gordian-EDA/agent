@@ -4,11 +4,12 @@
 //! and tears it down for existing callers. Keep launch/headless policy isolated
 //! here; the crate-level IPC boundary should remain a socket/protocol adapter.
 //!
-//! - **Cloud / headless:** `xvfb-run pcbnew <board>` on KiCAD 9 (this box), or
-//!   `kicad-cli api-server` on KiCAD 11+ (no display).
+//! - **Cloud / headless:** `Xvfb` + `pcbnew <board>` on supported KiCAD 9/10.
 //! - **Local:** [`Session::connect_running`] attaches to the user's open GUI.
 //!
-//! The launched process is killed and the stale socket removed on drop.
+//! A managed session owns only the child processes and socket it created. It
+//! never kills an unrelated `pcbnew`, removes another process' board lock, or
+//! rewrites KiCAD preferences unless the caller explicitly opts in.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -24,8 +25,24 @@ const SOCKET_FILE: &str = "/tmp/kicad/api.sock";
 pub struct Session {
     child: Option<Child>,
     xvfb: Option<Child>,
-    owned_board: Option<PathBuf>,
+    owned_socket: Option<SocketIdentity>,
+    owned_board_lock: Option<OwnedBoardLock>,
     kicad: Kicad,
+}
+
+struct OwnedBoardLock {
+    path: PathBuf,
+    last_identity: Option<SocketIdentity>,
+}
+
+impl OwnedBoardLock {
+    fn refresh(&mut self, child: &mut Child) {
+        if matches!(child.try_wait(), Ok(None))
+            && let Some(identity) = socket_identity(&self.path)
+        {
+            self.last_identity = Some(identity);
+        }
+    }
 }
 
 /// The single KiCAD board session owner for an agent process.
@@ -35,6 +52,9 @@ pub struct Session {
 pub struct SessionManager {
     session: Mutex<Option<ManagedSession>>,
     attach_running: bool,
+    pcbnew_path: PathBuf,
+    expected_major: Option<u32>,
+    enable_api_config: bool,
 }
 
 struct ManagedSession {
@@ -42,21 +62,19 @@ struct ManagedSession {
     session: Session,
 }
 
-impl Default for SessionManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl SessionManager {
-    pub fn new() -> Self {
-        Self::with_attach_running(false)
-    }
-
-    pub fn with_attach_running(attach_running: bool) -> Self {
+    pub fn with_installation(
+        pcbnew_path: PathBuf,
+        expected_major: Option<u32>,
+        attach_running: bool,
+        enable_api_config: bool,
+    ) -> Self {
         Self {
             session: Mutex::new(None),
             attach_running,
+            pcbnew_path,
+            expected_major,
+            enable_api_config,
         }
     }
 
@@ -65,7 +83,6 @@ impl SessionManager {
     }
 
     pub fn open(&self, board: &Path) -> Result<(), Error> {
-        remove_board_lock(board);
         let mut session = self
             .session
             .lock()
@@ -79,13 +96,14 @@ impl SessionManager {
         board: &Path,
         f: impl FnOnce(&mut Session) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        remove_board_lock(board);
         let mut session = self
             .session
             .lock()
             .map_err(|_| Error::Spawn("KiCAD session manager mutex poisoned".to_string()))?;
         self.ensure_bound(&mut session, board)?;
-        f(&mut session.as_mut().expect("session initialized").session)
+        let session = &mut session.as_mut().expect("session initialized").session;
+        session.refresh_owned_board_lock();
+        f(session)
     }
 
     /// Bind the manager to `board`, relaunching when the managed server process
@@ -134,42 +152,68 @@ impl SessionManager {
 
     pub fn close(&self) {
         if let Ok(mut session) = self.session.lock() {
-            if let Some(existing) = session.as_ref() {
-                remove_board_lock(&existing.board);
-            }
             *session = None;
         }
     }
 
     fn attach_or_launch(&self, board: &Path) -> Result<Session, Error> {
         if self.attach_running
-            && let Ok(session) = Session::connect_running_board(board)
+            && let Ok(mut session) = Session::connect_running_board(board)
         {
+            session.ensure_major(self.expected_major)?;
             return Ok(session);
         }
-        Session::launch_headless(board)
+        let mut session = Session::launch_headless_with_major(
+            &self.pcbnew_path,
+            board,
+            self.expected_major,
+            self.enable_api_config,
+        )?;
+        session.ensure_major(self.expected_major)?;
+        Ok(session)
     }
 }
 
 impl Session {
-    /// Launch a headless KiCAD (`Xvfb` + `pcbnew <board>`), wait for the IPC
-    /// socket, connect, and open the board. The board file must exist.
-    pub fn launch_headless(board: &Path) -> Result<Self, Error> {
+    /// Launch the selected PCB editor headlessly and bind it to `board`.
+    pub fn launch_headless_with(pcbnew_path: &Path, board: &Path) -> Result<Self, Error> {
+        Self::launch_headless_with_major(pcbnew_path, board, None, false)
+    }
+
+    fn launch_headless_with_major(
+        pcbnew_path: &Path,
+        board: &Path,
+        expected_major: Option<u32>,
+        enable_api_config: bool,
+    ) -> Result<Self, Error> {
         if !board.exists() {
             return Err(Error::Spawn(format!(
                 "board not found: {}",
                 board.display()
             )));
         }
-        kill_board_pcbnew(board);
-        remove_board_lock(board);
-        ensure_api_enabled();
-        // A killed prior instance can leave a stale socket → ConnectionRefused.
-        let _ = std::fs::remove_file(SOCKET_FILE);
+        if Path::new(SOCKET_FILE).exists() {
+            return Err(Error::Spawn(format!(
+                "KiCAD IPC socket {SOCKET_FILE} is already present; attach to the running KiCAD instance or stop its owner before launching a managed session"
+            )));
+        }
+        if board_lock_path(board).is_some_and(|lock| lock.exists()) {
+            return Err(Error::Spawn(format!(
+                "board {} is locked by another KiCAD process; refusing to remove its lock or launch a competing editor",
+                board.display()
+            )));
+        }
+        if enable_api_config {
+            enable_api_for_major(expected_major.ok_or_else(|| {
+                Error::Spawn(
+                    "enable_api_config requires a selected KiCAD major version".to_string(),
+                )
+            })?);
+        }
 
         let launch_cwd = board.parent().unwrap_or_else(|| Path::new("/tmp"));
         let (display, xvfb) = launch_xvfb()?;
-        let mut child = Command::new("pcbnew")
+        let mut child = Command::new(pcbnew_path)
             .arg(board)
             .current_dir(launch_cwd)
             .env("DISPLAY", &display)
@@ -178,19 +222,28 @@ impl Session {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| Error::Spawn(format!("launch pcbnew: {e}")))?;
+            .map_err(|e| {
+                Error::Spawn(format!("launch pcbnew at {}: {e}", pcbnew_path.display()))
+            })?;
+        let mut owned_board_lock = board_lock_path(board).map(|path| OwnedBoardLock {
+            last_identity: socket_identity(&path),
+            path,
+        });
 
-        if let Err(err) = Self::await_socket(Duration::from_secs(90)) {
-            cleanup_launch(&mut child, xvfb);
+        if let Err(err) =
+            Self::await_socket(&mut child, &mut owned_board_lock, Duration::from_secs(90))
+        {
+            cleanup_launch(&mut child, xvfb, owned_board_lock, None);
             return Err(err);
         }
+        let owned_socket = socket_identity(Path::new(SOCKET_FILE));
         // Let the server finish binding before the first request.
         std::thread::sleep(Duration::from_millis(500));
 
         let mut kicad = match Kicad::connect_launch_probe() {
             Ok(kicad) => kicad,
             Err(err) => {
-                cleanup_launch(&mut child, xvfb);
+                cleanup_launch(&mut child, xvfb, owned_board_lock, owned_socket);
                 return Err(err);
             }
         };
@@ -208,7 +261,7 @@ impl Session {
                 {
                     match child.try_wait() {
                         Ok(Some(status)) => {
-                            cleanup_launch(&mut child, xvfb);
+                            cleanup_launch(&mut child, xvfb, owned_board_lock, owned_socket);
                             return Err(Error::Spawn(format!(
                                 "pcbnew exited with {status} before opening {}",
                                 board.display()
@@ -216,14 +269,14 @@ impl Session {
                         }
                         Ok(None) => {}
                         Err(wait_err) => {
-                            cleanup_launch(&mut child, xvfb);
+                            cleanup_launch(&mut child, xvfb, owned_board_lock, owned_socket);
                             return Err(Error::Spawn(format!(
                                 "checking pcbnew readiness: {wait_err}"
                             )));
                         }
                     }
                     if Instant::now() >= document_deadline {
-                        cleanup_launch(&mut child, xvfb);
+                        cleanup_launch(&mut child, xvfb, owned_board_lock, owned_socket);
                         return Err(Error::Spawn(format!(
                             "timed out waiting for pcbnew to open {}: {err}",
                             board.display()
@@ -232,22 +285,30 @@ impl Session {
                     std::thread::sleep(Duration::from_millis(100));
                 }
                 Err(err) => {
-                    cleanup_launch(&mut child, xvfb);
+                    cleanup_launch(&mut child, xvfb, owned_board_lock, owned_socket);
                     return Err(err);
                 }
             }
         }
         kicad.use_default_timeouts();
         std::thread::sleep(Duration::from_millis(1_500));
+        // Remember the only lock path this child may create. We capture its
+        // identity immediately before terminating the still-running child in
+        // `Drop`: KiCAD can create the lock slightly after the API reports the
+        // board open, so sampling it here alone would leave a late lock stale.
+        if let Some(owned) = owned_board_lock.as_mut() {
+            owned.refresh(&mut child);
+        }
         Ok(Self {
             child: Some(child),
             xvfb: Some(xvfb),
-            owned_board: Some(board.to_path_buf()),
+            owned_socket,
+            owned_board_lock,
             kicad,
         })
     }
 
-    /// Attach to an already-running KiCAD (the local GUI, or a `kicad-cli
+    /// Attach to an already-running KiCAD (the local GUI, or a `kicad
     /// api-server`). Does not own the process.
     pub fn connect_running() -> Result<Self, Error> {
         let mut kicad = Kicad::connect()?;
@@ -255,7 +316,8 @@ impl Session {
         Ok(Self {
             child: None,
             xvfb: None,
-            owned_board: None,
+            owned_socket: None,
+            owned_board_lock: None,
             kicad,
         })
     }
@@ -267,7 +329,8 @@ impl Session {
         Ok(Self {
             child: None,
             xvfb: None,
-            owned_board: None,
+            owned_socket: None,
+            owned_board_lock: None,
             kicad,
         })
     }
@@ -275,6 +338,19 @@ impl Session {
     /// The connected client (board read/edit ops).
     pub fn kicad(&mut self) -> &mut Kicad {
         &mut self.kicad
+    }
+
+    fn ensure_major(&mut self, expected: Option<u32>) -> Result<(), Error> {
+        let Some(expected) = expected else {
+            return Ok(());
+        };
+        let (actual, _, _, full) = self.kicad.version()?;
+        if actual != expected {
+            return Err(Error::Unsupported(format!(
+                "configured kicad is KiCAD {expected}, but the selected/running PCB editor is KiCAD {full}"
+            )));
+        }
+        Ok(())
     }
 
     /// Whether the managed server process has exited. Attached sessions own no
@@ -285,9 +361,24 @@ impl Session {
             .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
     }
 
-    fn await_socket(timeout: Duration) -> Result<(), Error> {
+    fn refresh_owned_board_lock(&mut self) {
+        if let Some(child) = self.child.as_mut()
+            && let Some(owned) = self.owned_board_lock.as_mut()
+        {
+            owned.refresh(child);
+        }
+    }
+
+    fn await_socket(
+        child: &mut Child,
+        owned_board_lock: &mut Option<OwnedBoardLock>,
+        timeout: Duration,
+    ) -> Result<(), Error> {
         let deadline = Instant::now() + timeout;
         while !Path::new(SOCKET_FILE).exists() {
+            if let Some(owned) = owned_board_lock.as_mut() {
+                owned.refresh(child);
+            }
             if Instant::now() > deadline {
                 return Err(Error::LaunchTimeout);
             }
@@ -297,11 +388,25 @@ impl Session {
     }
 }
 
-fn cleanup_launch(child: &mut Child, mut xvfb: Child) {
+fn cleanup_launch(
+    child: &mut Child,
+    mut xvfb: Child,
+    mut owned_board_lock: Option<OwnedBoardLock>,
+    owned_socket: Option<SocketIdentity>,
+) {
+    if let Some(owned) = owned_board_lock.as_mut() {
+        owned.refresh(child);
+    }
+    let owned_board_lock = owned_board_lock
+        .and_then(|owned| owned.last_identity.map(|identity| (owned.path, identity)));
     let _ = child.kill();
     let _ = child.wait();
     let _ = xvfb.kill();
     let _ = xvfb.wait();
+    remove_if_same_identity(Path::new(SOCKET_FILE), owned_socket);
+    if let Some((path, identity)) = owned_board_lock {
+        remove_if_same_identity(&path, Some(identity));
+    }
 }
 
 fn same_board(a: &Path, b: &Path) -> bool {
@@ -313,10 +418,15 @@ fn same_board(a: &Path, b: &Path) -> bool {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        if let Some(board) = self.owned_board.as_deref() {
-            kill_board_pcbnew(board);
-            remove_board_lock(board);
-        }
+        // The lock was absent before this managed child launched. While that
+        // child is still alive, a lock at this exact board path belongs to its
+        // session. Capture the identity before termination, then remove only
+        // that same file afterward so a newly acquired lock is never touched.
+        self.refresh_owned_board_lock();
+        let owned_board_lock = self
+            .owned_board_lock
+            .take()
+            .and_then(|owned| owned.last_identity.map(|identity| (owned.path, identity)));
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -325,7 +435,10 @@ impl Drop for Session {
             let _ = child.kill();
             let _ = child.wait();
         }
-        let _ = std::fs::remove_file(SOCKET_FILE);
+        remove_if_same_identity(Path::new(SOCKET_FILE), self.owned_socket);
+        if let Some((path, owned)) = owned_board_lock {
+            remove_if_same_identity(&path, Some(owned));
+        }
     }
 }
 
@@ -360,101 +473,172 @@ fn launch_xvfb() -> Result<(String, Child), Error> {
     ))
 }
 
-fn kill_board_pcbnew(board: &Path) {
-    let needles = board_needles(board);
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return;
-    };
-    let mut pids = Vec::new();
-    for entry in entries.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|s| s.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        if pid == std::process::id() {
-            continue;
-        }
-        let cmdline = entry.path().join("cmdline");
-        let Ok(bytes) = std::fs::read(&cmdline) else {
-            continue;
-        };
-        let text = String::from_utf8_lossy(&bytes).replace('\0', " ");
-        if text.contains("pcbnew") && needles.iter().any(|needle| text.contains(needle)) {
-            pids.push(pid);
-        }
-    }
-    if pids.is_empty() {
-        return;
-    }
-    kill_pids("TERM", &pids);
-    std::thread::sleep(Duration::from_millis(500));
-    kill_pids("KILL", &pids);
+fn board_lock_path(board: &Path) -> Option<PathBuf> {
+    let name = board.file_name().and_then(|s| s.to_str())?;
+    Some(board.with_file_name(format!("~{name}.lck")))
 }
 
-fn board_needles(board: &Path) -> Vec<String> {
-    let mut needles = vec![board.display().to_string()];
-    if let Ok(canonical) = board.canonicalize() {
-        let canonical = canonical.display().to_string();
-        if !needles.contains(&canonical) {
-            needles.push(canonical);
-        }
-    }
-    needles
-}
-
-fn kill_pids(signal: &str, pids: &[u32]) {
-    let mut cmd = Command::new("kill");
-    cmd.arg(format!("-{signal}"));
-    for pid in pids {
-        cmd.arg(pid.to_string());
-    }
-    let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
-}
-
-fn remove_board_lock(board: &Path) {
-    let Some(name) = board.file_name().and_then(|s| s.to_str()) else {
-        return;
-    };
-    let lock = board.with_file_name(format!("~{name}.lck"));
-    if lock.exists() {
-        let _ = std::fs::remove_file(lock);
-    }
-}
-
-/// Best-effort: flip `api.enable_server` to true in the KiCAD config so the
-/// server actually binds. Idempotent; silent on any failure (the connect step
-/// surfaces a clear error if the server never comes up).
-fn ensure_api_enabled() {
+/// Explicitly enable the API server for one selected KiCAD major version.
+///
+/// This is called only when the frontend opted into `enableApiConfig`; ordinary
+/// IPC connection and launch paths never rewrite user preferences.
+fn enable_api_for_major(major: u32) {
     let Some(base_dirs) = directories::BaseDirs::new() else {
         return;
     };
     let cfg_root = base_dirs.config_dir().join("kicad");
-    let Ok(versions) = std::fs::read_dir(&cfg_root) else {
+    let cfg = cfg_root.join(format!("{major}.0/kicad_common.json"));
+    if cfg.exists() {
+        enable_api_in_config(&cfg);
+    } else {
+        let _ = std::fs::create_dir_all(cfg.parent().expect("version config has parent"));
+        let _ = std::fs::write(
+            &cfg,
+            "{\n  \"api\": {\n    \"enable_server\": true\n  }\n}\n",
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SocketIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(unix)]
+fn socket_identity(path: &Path) -> Option<SocketIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(SocketIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+fn socket_identity(_path: &Path) -> Option<SocketIdentity> {
+    None
+}
+
+fn remove_if_same_identity(path: &Path, owned: Option<SocketIdentity>) {
+    if owned.is_some_and(|owned| socket_identity(path) == Some(owned)) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn enable_api_in_config(cfg: &Path) {
+    let Ok(text) = std::fs::read_to_string(cfg) else {
         return;
     };
-    for v in versions.flatten() {
-        let cfg = v.path().join("kicad_common.json");
-        let Ok(text) = std::fs::read_to_string(&cfg) else {
-            continue;
-        };
-        if text.contains("\"enable_server\": false") {
-            let patched = text.replace("\"enable_server\": false", "\"enable_server\": true");
-            let _ = std::fs::write(&cfg, patched);
-        }
+    if text.contains("\"enable_server\": false") {
+        let patched = text.replace("\"enable_server\": false", "\"enable_server\": true");
+        let _ = std::fs::write(cfg, patched);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::SessionManager;
+    use super::{
+        OwnedBoardLock, SessionManager, SocketIdentity, cleanup_launch, enable_api_in_config,
+        remove_if_same_identity, socket_identity,
+    };
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
 
     #[test]
     fn manager_starts_without_open_session() {
-        let manager = SessionManager::new();
+        let manager =
+            SessionManager::with_installation(PathBuf::from("pcbnew"), None, false, false);
 
         assert!(!manager.is_open());
+    }
+
+    #[test]
+    fn manager_retains_the_selected_installation() {
+        let manager = SessionManager::with_installation(
+            PathBuf::from("/opt/kicad10/bin/pcbnew"),
+            Some(10),
+            false,
+            false,
+        );
+
+        assert_eq!(
+            manager.pcbnew_path,
+            PathBuf::from("/opt/kicad10/bin/pcbnew")
+        );
+        assert_eq!(manager.expected_major, Some(10));
+    }
+
+    #[test]
+    fn enables_api_in_existing_kicad_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("kicad_common.json");
+        std::fs::write(
+            &config,
+            "{\n  \"api\": {\n    \"enable_server\": false\n  }\n}\n",
+        )
+        .unwrap();
+
+        enable_api_in_config(&config);
+
+        let updated = std::fs::read_to_string(config).unwrap();
+        assert!(updated.contains("\"enable_server\": true"));
+        assert!(!updated.contains("\"enable_server\": false"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_managed_launch_removes_only_its_observed_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("~board.kicad_pcb.lck");
+        std::fs::write(&lock, "owned").unwrap();
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let xvfb = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        cleanup_launch(
+            &mut child,
+            xvfb,
+            Some(OwnedBoardLock {
+                path: lock.clone(),
+                last_identity: None,
+            }),
+            None,
+        );
+
+        assert!(!lock.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_cleanup_preserves_a_replacement_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("~board.kicad_pcb.lck");
+        std::fs::write(&lock, "old").unwrap();
+        let old = socket_identity(&lock).unwrap();
+        std::fs::remove_file(&lock).unwrap();
+        std::fs::write(&lock, "replacement").unwrap();
+
+        remove_if_same_identity(&lock, Some(old));
+
+        assert_eq!(std::fs::read_to_string(lock).unwrap(), "replacement");
+    }
+
+    #[test]
+    fn identity_cleanup_requires_an_owned_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("~board.kicad_pcb.lck");
+        std::fs::write(&lock, "unowned").unwrap();
+
+        remove_if_same_identity(&lock, None::<SocketIdentity>);
+
+        assert!(lock.exists());
     }
 }

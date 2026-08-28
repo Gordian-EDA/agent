@@ -21,7 +21,8 @@ use geom::Point2;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
 
-use sch_floorplan::contract::{RoutedEvaluator, build_anchor_blocks, decongest};
+use sch_floorplan::contract::RoutedEvaluator;
+use sch_floorplan::engine_support::{build_anchor_blocks, decongest};
 
 use crate::eval::{restore, save, score};
 

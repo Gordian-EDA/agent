@@ -124,7 +124,15 @@ mod tests {
 
     #[test]
     fn recognizes_named_ground_domains_without_matching_signal_suffixes() {
-        for net in ["FIELD_GND", "LOGIC_GND", "CHASSIS_GND", "PGND", "SGND", "VSSA", "GNDA"] {
+        for net in [
+            "FIELD_GND",
+            "LOGIC_GND",
+            "CHASSIS_GND",
+            "PGND",
+            "SGND",
+            "VSSA",
+            "GNDA",
+        ] {
             assert!(is_ground(net), "{net}");
             assert!(is_power_net(net), "{net}");
         }

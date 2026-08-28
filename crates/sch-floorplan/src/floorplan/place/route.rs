@@ -5,14 +5,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 
 use crate::write::SchematicWriter;
 use geom::{Dir, EPS, ParentForest, Rect};
 
 use super::*;
-use sch_place::item::{Incidence, Item};
 use circuit_graph::netclass::{is_connector_like, is_ground};
+use sch_place::item::{Incidence, Item};
 
 use sch_place::ir::{Band, LayoutIr, Side};
 
@@ -22,7 +22,7 @@ use sch_place::ir::{Band, LayoutIr, Side};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn wire(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     w: &mut SchematicWriter,
     items: &[Item],
     inc: &Incidence,
@@ -30,6 +30,7 @@ pub(crate) fn wire(
     needs_flag: &BTreeSet<String>,
     flag_points: &mut BTreeMap<String, ([f64; 2], f64)>,
     fan_risers: bool,
+    multisheet_refine: bool,
 ) -> io::Result<()> {
     let refdes_of = |i: usize| items[i].refdes.clone();
     // Auto-distributing a spread rail into local power symbols only applies to LARGER
@@ -104,7 +105,7 @@ pub(crate) fn wire(
     // or a bypass cap — making the regulated rail's exit unambiguous. Multi-sheet only
     // (and finalize-only via `fan_risers`): the per-move scorer and every single-sheet
     // reference snapshot pass an empty map ⇒ their power-symbol placement is byte-identical.
-    let rail_drivers = if fan_risers && std::env::var_os("MULTISHEET_REFINE").is_some() {
+    let rail_drivers = if fan_risers && multisheet_refine {
         driven_rail_drivers(env, w, items, inc, ir)
     } else {
         BTreeMap::new()
@@ -132,17 +133,16 @@ pub(crate) fn wire(
             // as a "bare stub" at a far pin (rule 3 violation, the CAN-node VDD defect). Give
             // such a net distributed LOCAL symbols at each pin. Span-gated so tight 2-pin taps
             // keep their clean short trunk. Gated on MULTISHEET_REFINE ⇒ refs byte-identical.
-            let multisheet_spread =
-                std::env::var("MULTISHEET_REFINE").is_ok() && eps.len() >= 2 && {
-                    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-                    for (p, _) in eps {
-                        lo[0] = lo[0].min(p[0]);
-                        lo[1] = lo[1].min(p[1]);
-                        hi[0] = hi[0].max(p[0]);
-                        hi[1] = hi[1].max(p[1]);
-                    }
-                    (hi[0] - lo[0]) + (hi[1] - lo[1]) > 38.0
-                };
+            let multisheet_spread = multisheet_refine && eps.len() >= 2 && {
+                let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+                for (p, _) in eps {
+                    lo[0] = lo[0].min(p[0]);
+                    lo[1] = lo[1].min(p[1]);
+                    hi[0] = hi[0].max(p[0]);
+                    hi[1] = hi[1].max(p[1]);
+                }
+                (hi[0] - lo[0]) + (hi[1] - lo[1]) > 38.0
+            };
             let distribute = !ir.rail_force.contains(net)
                 && (ir.rail_locals.contains(net)
                     || (pin_total > FAST_PINS && rail_should_distribute(eps))
@@ -162,6 +162,7 @@ pub(crate) fn wire(
                 &power_keepouts,
                 driver,
                 fan_risers,
+                multisheet_refine,
                 &mut used_lanes,
             )?;
         }
@@ -205,7 +206,7 @@ pub(crate) fn wire(
     // and applies to EVERY board, not just dense ones: the wire-dense small references
     // (555/uart/grid) are exactly where literal long crossing wires read worst. Mirrors
     // the spread-rail → local-power-symbol distribution above.
-    let label_policy = fan_risers.then(LabelPolicy::from_env);
+    let label_policy = fan_risers.then(LabelPolicy::default);
     for (net, eps) in &net_eps {
         if ir.rails.contains_key(net) {
             continue;
@@ -257,18 +258,10 @@ pub(crate) struct LabelPolicy {
 }
 
 impl LabelPolicy {
-    /// Thresholds, overridable for sweeps via `SIGNAL_LABEL_SPAN_MM` (length) and
-    /// `SIGNAL_CROSS_SPAN_MM` (crossing) — set length very high to disable entirely.
-    pub(crate) fn from_env() -> Self {
-        let env = |k: &str, d: f64| {
-            std::env::var(k)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(d)
-        };
+    pub(crate) fn default() -> Self {
         LabelPolicy {
-            len_mm: env("SIGNAL_LABEL_SPAN_MM", LABEL_LEN_MM),
-            cross_len_mm: env("SIGNAL_CROSS_SPAN_MM", CROSS_LABEL_LEN_MM),
+            len_mm: LABEL_LEN_MM,
+            cross_len_mm: CROSS_LABEL_LEN_MM,
         }
     }
 }
@@ -278,7 +271,7 @@ impl LabelPolicy {
 /// on the named side, then a label there; failure falls back to per-pin labels.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn route_signal(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     w: &mut SchematicWriter,
     items: &[Item],
     inc: &Incidence,
@@ -330,8 +323,7 @@ pub(crate) fn route_signal(
     // through every intervening pin before the obstacle-aware router gets a say.
     let local_tee_safe = port_idx.is_none_or(|pi| {
         eps.len() != 1
-            || (terms[0].0[0] - terms[pi].0[0]).abs()
-                + (terms[0].0[1] - terms[pi].0[1]).abs()
+            || (terms[0].0[0] - terms[pi].0[0]).abs() + (terms[0].0[1] - terms[pi].0[1]).abs()
                 <= 2.54 + EPS
     });
     if local_tee_safe && route_local_tee(w, net, &terms, scene) {
@@ -627,15 +619,6 @@ pub(crate) fn route_signal(
         }
     }
     let port_root = port_idx.map(|pi| uf.find(pi));
-    if std::env::var_os("ROUTE_DEBUG").is_some() {
-        let unlabeled = roots.values().filter(|p| p.is_none()).count();
-        eprintln!(
-            "[route] net {net}: uf-components={} terms={} unlabeled(no-pin)={}",
-            roots.len(),
-            terms.len(),
-            unlabeled
-        );
-    }
     if roots.len() > 1 {
         for (root, pin) in &roots {
             if Some(*root) == port_root {
@@ -897,7 +880,7 @@ pub(crate) fn effective_port_side(port: Option<Side>, eps: &[([f64; 2], Dir)]) -
 /// exit JOIN the IC pin's routed component — so the net reads as ONE clean port
 /// label, never the redundant junction-label-plus-body-label pair.
 pub(crate) fn ic_port_exit_override(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     w: &SchematicWriter,
     items: &[Item],
     inc: &Incidence,
@@ -1267,16 +1250,6 @@ pub(crate) fn plan_riser_offsets(
             nets.insert(nb.clone());
         }
     }
-    if std::env::var_os("RISER_DEBUG").is_some() {
-        eprintln!(
-            "[riser] {} risers, contested: {:?}",
-            risers.len(),
-            contested
-        );
-        for r in &risers {
-            eprintln!("[riser]   {:?}", r);
-        }
-    }
     let mut offsets = BTreeMap::new();
     for (col, nets) in &contested {
         // Fan the contested nets into distinct lanes, deterministic by name:
@@ -1361,7 +1334,7 @@ pub(crate) fn riser_hits_body(x: f64, ylo: f64, yhi: f64, bodies: &[([f64; 2], [
 /// implicit-net island.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_rail(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     w: &mut SchematicWriter,
     net: &str,
     eps: &[([f64; 2], Dir)],
@@ -1373,6 +1346,7 @@ pub(crate) fn emit_rail(
     power_keepouts: &[Rect],
     driver: Option<[f64; 2]>,
     fan_risers: bool,
+    multisheet_refine: bool,
     used_lanes: &mut Vec<(f64, f64, f64, String)>,
 ) -> io::Result<()> {
     let lib = power_lib_id(net);
@@ -1452,8 +1426,7 @@ pub(crate) fn emit_rail(
         // passes `fan_risers = false` so its cost landscape is byte-identical and the placement is never
         // perturbed, and every single-sheet reference snapshot keeps its exact per-pin placement. Only
         // ground (the recurring eyesore); V+ side ties keep their outward arrow.
-        let drop_side_gnd =
-            is_ground(net) && fan_risers && std::env::var_os("MULTISHEET_REFINE").is_some();
+        let drop_side_gnd = is_ground(net) && fan_risers && multisheet_refine;
         let split_flag = flag
             .as_ref()
             .and_then(|_| split_flag_power_pair(eps, MERGE));
@@ -1547,9 +1520,6 @@ pub(crate) fn emit_rail(
                     lnet != net && (lx - x).abs() < EPS && rlo < hi - EPS && *lo < rhi - EPS
                 })
             };
-            if conflict(ax, used_lanes) && std::env::var_os("RISER_DEBUG").is_some() {
-                eprintln!("[lane] conflict for {net} at x={ax}");
-            }
             if conflict(ax, used_lanes)
                 && let Some(clear) = (1..=8)
                     .flat_map(|k| [k as f64, -(k as f64)])

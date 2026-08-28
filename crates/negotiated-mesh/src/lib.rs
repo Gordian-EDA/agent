@@ -11,10 +11,6 @@
 //! Builds on `grid-astar` (the fallback router + grid/astar primitives); DRC via
 //! `drc-lint`; shared types from `pcb-model`.
 
-pub use drc_lint::{connectivity, lint};
-pub use grid_astar::{astar, grid, router};
-pub use pcb_model as problem;
-
 pub(crate) mod channel;
 pub mod copper;
 pub mod crossing;

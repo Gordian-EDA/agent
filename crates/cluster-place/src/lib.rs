@@ -12,8 +12,8 @@
 //! result is strictly additive — never worse than the SA, better where an IC was facing
 //! the wrong way.
 //!
-//! Beyond pose it runs a DE-SPRAWL floorplanner ([`compact`], DEFAULT-ON; `CLUSTER_NO_COMPACT`
-//! opts out): each module is laid out cleanly IN ISOLATION (hub + a single-row decoupling bank)
+//! Beyond pose it runs a DE-SPRAWL floorplanner ([`compact`]): each module is laid out cleanly
+//! IN ISOLATION (hub + a single-row decoupling bank)
 //! and the footprints re-packed, kept only when it strictly out-de-sprawls the SA on BOTH sprawl
 //! measures (label-inclusive rendered extent AND part-origin spread) with no new warnings or
 //! crossings — else it reverts, so the result is never worse. On repetitive power-IC ARRAYS it
@@ -28,15 +28,18 @@ mod compact;
 mod eval;
 mod pose;
 
+const DEBUG_DIAGNOSTICS: bool = false;
+
 use circuit_lang::model::Design;
+use kicad::KicadInstallation;
 use sch_place::ir::LayoutIr;
 use sch_place::item::Item;
 use sch_place::place::{Crossings, PlaceResult};
 
 use sch_floorplan::contract::{
-    FAST_PINS, KicadEnv, PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer,
-    SchematicPlaceProblem,
+    PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
 };
+use sch_floorplan::engine_support::FAST_PINS;
 
 /// Cluster-pose placement: the SA's leaf seating + a strictly-additive rigid hub-pose search.
 pub struct ClusterPlace;
@@ -48,7 +51,7 @@ impl PlacementEngine for ClusterPlace {
 
     fn place(
         &self,
-        env: &KicadEnv,
+        env: &KicadInstallation,
         design: &Design,
         problem: &mut SchematicPlaceProblem,
         ir: Option<LayoutIr>,
@@ -81,7 +84,7 @@ impl PlacementEngine for ClusterPlace {
         if problem.items.is_empty() || problem.items.len() > 70 {
             return out;
         }
-        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir);
+        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir, problem.options);
         let eval = RoutedEvaluator::new(&realizer);
         // The SA's RENDERED sprawl (post text-solve + orphan label-columns), captured BEFORE
         // pose, is the baseline the de-sprawl floorplanner must beat outright — measured the
@@ -103,20 +106,18 @@ impl PlacementEngine for ClusterPlace {
         if sa_crossings > 0 {
             pose::search_hub_poses(&eval, &mut problem.items, &problem.inc, &out.ir);
         }
-        // 3. De-sprawl floorplanner (DEFAULT-ON; `CLUSTER_NO_COMPACT` opts out): lay each module
+        // 3. De-sprawl floorplanner: lay each module
         //    out in isolation + pack, kept only when it strictly out-de-sprawls the SA on both
         //    sprawl measures without regressing warnings/crossings — else it reverts.
-        if std::env::var_os("CLUSTER_NO_COMPACT").is_none() {
-            compact::compact_clusters(
-                &eval,
-                design,
-                &mut problem.items,
-                &problem.inc,
-                &out.ir,
-                baseline_rendered,
-                sa_warnings,
-            );
-        }
+        compact::compact_clusters(
+            &eval,
+            design,
+            &mut problem.items,
+            &problem.inc,
+            &out.ir,
+            baseline_rendered,
+            sa_warnings,
+        );
         // 4. SAFETY NET: pose gates on gate-time (truthfulness, warnings, crossings), which is
         //    blind to the emit's orphan label-columns — so it can chase a phantom gate-time win
         //    that ships a MORE-SPRAWLED or MORE-COLLIDING sheet (a dense board: 54→78 sprawl, or
@@ -142,7 +143,7 @@ impl PlacementEngine for ClusterPlace {
         if !earned_keep {
             crate::eval::restore(&mut problem.items, &sa_snap);
         }
-        if std::env::var_os("CLUSTER_DEBUG").is_some() {
+        if DEBUG_DIAGNOSTICS {
             eprintln!(
                 "[cluster] x {sa_crossings}->{final_crossings}  w {sa_warnings}->{final_warnings}  rendered {baseline_rendered:.1}->{final_rendered:.1}  parts {baseline_parts:.1}->{final_parts:.1}  keep={earned_keep}"
             );
@@ -163,13 +164,13 @@ impl PlacementEngine for ClusterPlace {
             if let Some(rail) = compact::rail_relayout(&mut problem.items, &problem.inc, &out.ir) {
                 let mut ir_rail = out.ir.clone();
                 ir_rail.rail_force.insert(rail);
-                let rz = RoutedSheetRealizer::new(env, &problem.inc, &ir_rail);
+                let rz = RoutedSheetRealizer::new(env, &problem.inc, &ir_rail, problem.options);
                 let ev = RoutedEvaluator::new(&rz);
                 let got = ev
                     .shipped(design, &problem.items)
                     .map(|(cr, w, r)| (cr.total(), w, compact::rendered_sprawl(&r, n)));
                 let keep = rail_candidate_wins((cur_x, cur_w, cur_spr), got);
-                if std::env::var_os("CLUSTER_DEBUG").is_some() {
+                if DEBUG_DIAGNOSTICS {
                     eprintln!(
                         "[cluster] rails: {cur_spr:.1} -> {:?}  keep={keep}",
                         got.map(|g| g.2)
@@ -184,7 +185,7 @@ impl PlacementEngine for ClusterPlace {
                 crate::eval::restore(&mut problem.items, &pre);
             }
         }
-        let final_realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir);
+        let final_realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir, problem.options);
         let final_eval = RoutedEvaluator::new(&final_realizer);
         out.result = report(self.name(), &problem.items, &final_eval);
         out
@@ -292,7 +293,7 @@ fn spine_fast_path_pin_profile<'a>(pin_profiles: impl Iterator<Item = (&'a str, 
             .filter(|&&(part, _)| circuit_graph::netclass::is_connector_like(part))
             .count()
             >= 4;
-    if std::env::var_os("CLUSTER_DEBUG").is_some() {
+    if DEBUG_DIAGNOSTICS {
         eprintln!("[cluster] pin profile {counts:?} total={pins}");
     }
     single_anchor

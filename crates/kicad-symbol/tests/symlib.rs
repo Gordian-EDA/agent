@@ -2,12 +2,13 @@
 //! validated ground truth from the installed KiCAD libraries. Everything is
 //! exercised through the public [`SymbolTable`] oracle.
 
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::{PinType, SymbolTable};
 
 /// A table over the installed KiCAD symbol directory, or `None` to SKIP.
 fn installed() -> Option<SymbolTable> {
-    Some(SymbolTable::from_env(&KicadEnv::detect()?))
+    let env = KicadInstallation::detect()?;
+    Some(SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf()))
 }
 
 #[test]

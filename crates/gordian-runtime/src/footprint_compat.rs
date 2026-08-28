@@ -54,7 +54,7 @@ pub fn design_pin_mismatches(
 /// Validate footprint assignments exported by KiCAD before board creation.
 pub fn netlist_pin_mismatches(
     ctx: &AgentRuntime,
-    netlist: &kicad_cli::Netlist,
+    netlist: &kicad::Netlist,
 ) -> Result<Vec<FootprintPinMismatch>> {
     assignment_mismatches(
         ctx,

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use gordian_core::GordianConfig;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 
 const CONFIG_FILE: &str = "config.toml";
 
@@ -35,11 +35,12 @@ pub fn load_or_create() -> Result<LoadedConfig> {
     Ok(LoadedConfig { path, config })
 }
 
-pub fn detect_kicad(config: &GordianConfig) -> Option<KicadEnv> {
-    KicadEnv::detect_with(
+pub fn detect_kicad(config: &GordianConfig) -> Option<KicadInstallation> {
+    KicadInstallation::detect_with(
         config.kicad.symbol_dir.as_deref(),
         config.kicad.footprint_dir.as_deref(),
         config.kicad.cli_path.as_deref(),
+        config.kicad.pcbnew_path.as_deref(),
     )
 }
 

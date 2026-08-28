@@ -135,7 +135,7 @@ impl Kicad {
     }
 
     /// Send a command and decode the typed reply (unpacked from the response `Any`).
-    pub fn call<C, R>(&mut self, cmd: &C) -> Result<R, Error>
+    pub(crate) fn call<C, R>(&mut self, cmd: &C) -> Result<R, Error>
     where
         C: Message + Name,
         R: Message + Name + Default,
@@ -146,7 +146,7 @@ impl Kicad {
     }
 
     /// Send a command whose response carries no payload (just check status).
-    pub fn call_void<C: Message + Name>(&mut self, cmd: &C) -> Result<(), Error> {
+    pub(crate) fn call_void<C: Message + Name>(&mut self, cmd: &C) -> Result<(), Error> {
         self.send_request(cmd)?;
         Ok(())
     }
@@ -158,48 +158,29 @@ impl Kicad {
         Ok((v.major, v.minor, v.patch, v.full_version))
     }
 
-    /// Fail before reading or editing board geometry when this KiCad version's
-    /// `FootprintInstance` updates are known to be unstable.
-    pub fn ensure_footprint_update_supported(&mut self) -> Result<(), Error> {
+    pub(crate) fn ensure_stable_updates(&mut self, operation: &str) -> Result<(), Error> {
         let (major, minor, patch, full) = self.version()?;
-        if !footprint_update_supported(major, minor, patch) {
+        if !stable_updates_supported(major, minor, patch) {
             return Err(Error::Unsupported(format!(
-                "KiCAD {full} has unstable IPC FootprintInstance UpdateItems; \
-                 footprint placement requires KiCAD 9.0.3+ or KiCAD 10"
+                "KiCAD {full} does not safely support IPC {operation}; use KiCAD 9.0.3+ or KiCAD 10"
             )));
         }
         Ok(())
     }
 }
 
-/// Whether this KiCad release safely supports IPC footprint updates.
-pub fn footprint_update_supported(major: u32, minor: u32, patch: u32) -> bool {
-    !(major == 9 && minor == 0 && patch <= 2)
-}
-
-/// Whether this KiCad release survives `GetNetClassForNets`. KiCad 9.0.2's
-/// pcbnew answers the call and then crashes, killing the session for every
-/// later request.
-pub fn net_class_queries_supported(major: u32, minor: u32, patch: u32) -> bool {
+pub(crate) fn stable_updates_supported(major: u32, minor: u32, patch: u32) -> bool {
     !(major == 9 && minor == 0 && patch <= 2)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{footprint_update_supported, net_class_queries_supported};
+    use super::stable_updates_supported;
 
     #[test]
-    fn footprint_updates_gate_known_unstable_kicad_902() {
-        assert!(!footprint_update_supported(9, 0, 0));
-        assert!(!footprint_update_supported(9, 0, 2));
-        assert!(footprint_update_supported(9, 0, 3));
-        assert!(footprint_update_supported(10, 0, 0));
-    }
-
-    #[test]
-    fn net_class_queries_gate_session_killing_kicad_902() {
-        assert!(!net_class_queries_supported(9, 0, 2));
-        assert!(net_class_queries_supported(9, 0, 3));
-        assert!(net_class_queries_supported(10, 0, 0));
+    fn guards_known_unstable_kicad_updates() {
+        assert!(!stable_updates_supported(9, 0, 2));
+        assert!(stable_updates_supported(9, 0, 3));
+        assert!(stable_updates_supported(10, 0, 0));
     }
 }

@@ -81,7 +81,7 @@ mod grid_tests {
 
     #[test]
     fn composed_groups_namespace_generated_power_references() {
-        let Some(env) = kicad_env::KicadEnv::detect() else {
+        let Some(env) = kicad::KicadInstallation::detect() else {
             eprintln!("SKIP: no KiCad environment detected");
             return;
         };
@@ -104,14 +104,13 @@ mod grid_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("composed.kicad_sch");
         std::fs::write(&path, schematic).unwrap();
-        kicad_cli::KicadCli::new(&env)
-            .erc(&path)
+        env.erc(&path)
             .expect("KiCad must load the composed hidden references");
     }
 
     #[test]
     fn composition_identity_is_safe_unique_and_deterministic() {
-        let Some(env) = kicad_env::KicadEnv::detect() else {
+        let Some(env) = kicad::KicadInstallation::detect() else {
             eprintln!("SKIP: no KiCad environment detected");
             return;
         };
@@ -166,14 +165,13 @@ mod grid_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("identity.kicad_sch");
         std::fs::write(&path, first).unwrap();
-        kicad_cli::KicadCli::new(&env)
-            .erc(&path)
+        env.erc(&path)
             .expect("KiCad must load arbitrary composed group identities");
     }
 
     #[test]
     fn composition_deduplicates_arbitrarily_named_power_flags_by_labeled_net() {
-        let Some(env) = kicad_env::KicadEnv::detect() else {
+        let Some(env) = kicad::KicadInstallation::detect() else {
             eprintln!("SKIP: no KiCad environment detected");
             return;
         };
@@ -205,7 +203,7 @@ mod grid_tests {
 
     #[test]
     fn composition_relinks_repeated_flag_refdes_by_instance_position() {
-        let Some(env) = kicad_env::KicadEnv::detect() else {
+        let Some(env) = kicad::KicadInstallation::detect() else {
             eprintln!("SKIP: no KiCad environment detected");
             return;
         };
@@ -243,8 +241,7 @@ mod grid_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("repeated-flags.kicad_sch");
         std::fs::write(&path, schematic).unwrap();
-        kicad_cli::KicadCli::new(&env)
-            .erc(&path)
+        env.erc(&path)
             .expect("KiCad must load relinked repeated hidden references");
     }
 

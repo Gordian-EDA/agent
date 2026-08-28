@@ -20,8 +20,7 @@ fn root_exports_and_existing_modules_remain_importable() {
     assert_eq!(find_pin(&meta.pins, "1").unwrap().name, "A");
     assert!(SymbolTable::with_basics().symbol("Device:R").is_some());
 
-    let _geometry_loader: fn(&kicad_env::KicadEnv, &str) -> std::io::Result<SymbolGeometry> =
+    let _geometry_loader: fn(&std::path::Path, &str) -> std::io::Result<SymbolGeometry> =
         SymbolGeometry::load;
-    let _search_builder: fn(&kicad_env::KicadEnv) -> std::io::Result<SymbolIndex> =
-        SymbolIndex::build;
+    let _search_builder: fn(&std::path::Path) -> std::io::Result<SymbolIndex> = SymbolIndex::build;
 }

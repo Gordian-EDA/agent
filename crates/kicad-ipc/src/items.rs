@@ -20,18 +20,11 @@ impl Kicad {
         })
     }
 
-    fn header_with_mask(&self, paths: &[&str]) -> Result<ItemHeader, Error> {
-        Ok(ItemHeader {
-            document: Some(self.board_doc.clone().ok_or(Error::NoBoard)?),
-            container: None,
-            field_mask: Some(prost_types::FieldMask {
-                paths: paths.iter().map(|p| (*p).to_owned()).collect(),
-            }),
-        })
-    }
-
     /// Raw board items of the given object types (packed in `Any`).
-    pub fn get_items(&mut self, types: &[KiCadObjectType]) -> Result<Vec<prost_types::Any>, Error> {
+    pub(crate) fn get_items(
+        &mut self,
+        types: &[KiCadObjectType],
+    ) -> Result<Vec<prost_types::Any>, Error> {
         let header = self.header()?;
         let resp: GetItemsResponse = self.call(&GetItems {
             header: Some(header),
@@ -41,7 +34,7 @@ impl Kicad {
     }
 
     /// All footprints on the board.
-    pub fn footprints(&mut self) -> Result<Vec<FootprintInstance>, Error> {
+    pub(crate) fn footprints(&mut self) -> Result<Vec<FootprintInstance>, Error> {
         self.get_items(&[KiCadObjectType::KotPcbFootprint])?
             .into_iter()
             .map(|a| {
@@ -52,17 +45,17 @@ impl Kicad {
     }
 
     /// All track segments on the board.
-    pub fn tracks(&mut self) -> Result<Vec<Track>, Error> {
+    pub(crate) fn tracks(&mut self) -> Result<Vec<Track>, Error> {
         decode_tracks(self.get_items(&[KiCadObjectType::KotPcbTrace])?)
     }
 
     /// All vias on the board.
-    pub fn vias(&mut self) -> Result<Vec<Via>, Error> {
+    pub(crate) fn vias(&mut self) -> Result<Vec<Via>, Error> {
         decode_vias(self.get_items(&[KiCadObjectType::KotPcbVia])?)
     }
 
     /// All zones on the board.
-    pub fn zones(&mut self) -> Result<Vec<Zone>, Error> {
+    pub(crate) fn zones(&mut self) -> Result<Vec<Zone>, Error> {
         self.get_items(&[KiCadObjectType::KotPcbZone])?
             .into_iter()
             .map(|a| a.to_msg::<Zone>().map_err(|_| Error::TypeMismatch("Zone")))
@@ -70,7 +63,7 @@ impl Kicad {
     }
 
     /// All board drawing shapes, including `Edge.Cuts`.
-    pub fn board_shapes(&mut self) -> Result<Vec<BoardGraphicShape>, Error> {
+    pub(crate) fn board_shapes(&mut self) -> Result<Vec<BoardGraphicShape>, Error> {
         self.get_items(&[KiCadObjectType::KotPcbShape])?
             .into_iter()
             .map(|a| {
@@ -81,14 +74,14 @@ impl Kicad {
     }
 
     /// Enabled board layers, including the authoritative copper-layer count.
-    pub fn enabled_layers(&mut self) -> Result<BoardEnabledLayersResponse, Error> {
+    pub(crate) fn enabled_layers(&mut self) -> Result<BoardEnabledLayersResponse, Error> {
         let board = Some(self.board_doc.clone().ok_or(Error::NoBoard)?);
         self.call(&GetBoardEnabledLayers { board })
     }
 
     /// Create new board items (tracks, vias, zones, ...). Pack each with
     /// `prost_types::Any::from_msg(&item)`.
-    pub fn create_items(&mut self, items: Vec<prost_types::Any>) -> Result<(), Error> {
+    pub(crate) fn create_items(&mut self, items: Vec<prost_types::Any>) -> Result<(), Error> {
         let header = self.header()?;
         let resp: CreateItemsResponse = self.call(&CreateItems {
             header: Some(header),
@@ -102,18 +95,8 @@ impl Kicad {
     }
 
     /// Update existing board items (e.g. a moved footprint).
-    pub fn update_items(&mut self, items: Vec<prost_types::Any>) -> Result<(), Error> {
+    pub(crate) fn update_items(&mut self, items: Vec<prost_types::Any>) -> Result<(), Error> {
         let header = self.header()?;
-        self.update_items_with_header(header, items)
-    }
-
-    /// Update existing board items with an explicit field mask.
-    pub fn update_items_masked(
-        &mut self,
-        paths: &[&str],
-        items: Vec<prost_types::Any>,
-    ) -> Result<(), Error> {
-        let header = self.header_with_mask(paths)?;
         self.update_items_with_header(header, items)
     }
 
@@ -139,7 +122,7 @@ impl Kicad {
     }
 
     /// Delete board items by KIID.
-    pub fn delete_items(&mut self, item_ids: Vec<Kiid>) -> Result<(), Error> {
+    pub(crate) fn delete_items(&mut self, item_ids: Vec<Kiid>) -> Result<(), Error> {
         if item_ids.is_empty() {
             return Ok(());
         }
@@ -165,7 +148,7 @@ impl Kicad {
     }
 
     /// Delete packed board items that carry a supported KIID-bearing type.
-    pub fn delete_packed_items(&mut self, items: &[prost_types::Any]) -> Result<(), Error> {
+    pub(crate) fn delete_packed_items(&mut self, items: &[prost_types::Any]) -> Result<(), Error> {
         let ids = items.iter().filter_map(item_id_from_any).collect();
         self.delete_items(ids)
     }

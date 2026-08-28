@@ -1,7 +1,7 @@
 //! The schematic + PCB tool registry the agent drives.
 //!
 //! Each tool is a thin, deterministic wrapper over logic that already lives in
-//! `circuit-lang`, `kicad-footprint`/`kicad-cli`, and `sch-floorplan`/`sch-io`. The registry
+//! `circuit-lang`, `kicad-footprint`/`kicad`, and `sch-floorplan`/`sch-io`. The registry
 //! exposes two free functions, both driven directly by the [`crate::Agent`] loop:
 //!
 //! - [`tool_defs`] — the JSON-Schema genai [`Tool`]s handed to the LLM.
@@ -47,7 +47,7 @@ use serde_json::{Value, json};
 
 use circuit_lang::compile;
 use circuit_lang::model::{Block, Component, Design, Origin, PinTarget};
-use kicad_cli::{ErcReport, KicadCli};
+use kicad::ErcReport;
 use kicad_footprint::FootprintId;
 use sch_io::read::lift;
 
@@ -659,8 +659,6 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 }
 
-
-
 // ── 1. search_symbols ──────────────────────────────────────────────────────
 
 fn search_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -839,7 +837,6 @@ fn pin_type_str(t: circuit_lang::PinType) -> &'static str {
 }
 
 // ── 3. read_schematic helpers ──────────────────────────────────────────────
-
 
 struct DraftRead {
     yaml: String,
@@ -1056,7 +1053,6 @@ fn authoring_report_quality(report: &Value) -> (u64, u64) {
     )
 }
 
-
 /// Returns `true` when at least one incompatible assignment was found.
 fn add_footprint_compatibility(
     report: &mut Value,
@@ -1228,8 +1224,12 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     }
 
-    let composed =
-        crate::multisheet::compose_design(ctx.env(), &design).context("composing schematic")?;
+    let composed = crate::multisheet::compose_design_with_engine(
+        ctx.env(),
+        &design,
+        ctx.config().engines.schematic_placer,
+    )
+    .context("composing schematic")?;
 
     let detected_idioms = serde_json::to_value(&composed.detected_idioms).ok();
 
@@ -1265,7 +1265,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(None) => None,
         Err(err) => Some(format!("reading applied draft: {err}")),
     };
-    let erc = KicadCli::new(ctx.env()).erc(ctx.sch_path());
+    let erc = ctx.env().erc(ctx.sch_path());
 
     let mut out = json!({
         "ok": true,
@@ -1321,16 +1321,22 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(out)
 }
 
-pub(crate) fn schematic_placement_engine() -> Box<dyn sch_floorplan::contract::PlacementEngine> {
+pub(crate) fn schematic_placement_engine(
+    selected: gordian_runtime::config::SchematicPlacementEngine,
+) -> Box<dyn sch_floorplan::contract::PlacementEngine> {
     // The cluster engine is the DEFAULT: it runs the annealer, then a strictly-additive
     // pose+floorplanner pass (and the "modules between rails" idiom on power-IC arrays) that
     // PARETO-DOMINATES it. Full-dataset validation: of 40 liftable boards, 13 de-sprawl (the
     // gate-driver array 0cdac −84%) and ZERO regress on warnings/crossings/sprawl — it can only
-    // revert to the anneal result, never ship worse. `SCH_ENGINE=anneal` opts back to the bare SA.
-    match std::env::var("SCH_ENGINE").as_deref() {
-        Ok("anneal") | Ok("sa") => Box::new(anneal_place::Anneal),
-        Ok("spine") => Box::new(spine_place::SpinePlace),
-        _ => Box::new(cluster_place::ClusterPlace),
+    // revert to the anneal result, never ship worse. Selection is typed config.
+    match selected {
+        gordian_runtime::config::SchematicPlacementEngine::Anneal => Box::new(anneal_place::Anneal),
+        gordian_runtime::config::SchematicPlacementEngine::Spine => {
+            Box::new(spine_place::SpinePlace)
+        }
+        gordian_runtime::config::SchematicPlacementEngine::Cluster => {
+            Box::new(cluster_place::ClusterPlace)
+        }
     }
 }
 
@@ -1539,7 +1545,8 @@ fn run_erc(ctx: &AgentRuntime) -> Result<Value> {
             ctx.sch_path().display()
         );
     }
-    let report = KicadCli::new(ctx.env())
+    let report = ctx
+        .env()
         .erc(ctx.sch_path())
         .with_context(|| format!("running ERC on {}", ctx.sch_path().display()))?;
 
@@ -2680,8 +2687,8 @@ fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// A model can echo the history-elision placeholder back as its document; that
 /// text must never become the draft.
 fn elided_placeholder_rejection(text: &str) -> Option<Value> {
-    (text.contains("[omitted ") && text.contains(" chars from"))
-        .then(|| json!({
+    (text.contains("[omitted ") && text.contains(" chars from")).then(|| {
+        json!({
             "ok": false,
             "error": "this text is the history-elision placeholder, not design content; \
                       the full draft is preserved on disk — recover it with \
@@ -2692,7 +2699,8 @@ fn elided_placeholder_rejection(text: &str) -> Option<Value> {
             "draft_changed": false,
             "electrical_design_changed": false,
             "next_tool": "edit_design",
-        }))
+        })
+    })
 }
 
 fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -2859,7 +2867,7 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let count = draft.matches(&*old).count();
+    let count = draft.matches(old).count();
     if count == 0 {
         return Ok(json!({
             "error": "old_string not found in the current draft",
@@ -2875,9 +2883,9 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     }
     let edited = if replace_all {
-        draft.replace(&*old, &new)
+        draft.replace(old, new)
     } else {
-        draft.replacen(&*old, &new, 1)
+        draft.replacen(old, new, 1)
     };
     let result = compile(&edited, ctx.provider());
     let prior_result = compile(&draft, ctx.provider());
@@ -2995,15 +3003,17 @@ fn add_draft_next_step(report: &mut Value) {
 
 /// Result key carrying a PNG path for the agent loop to attach as an image
 /// block (and strip from the JSON the model sees as text).
-
 fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
     if !ctx.sch_path().exists() {
         return Ok(json!({
             "error": "no schematic yet — apply a design first",
         }));
     }
-    let png =
-        gordian_runtime::render::schematic_png(ctx.env(), ctx.sch_path(), ctx.config().tools.render_max_px)?;
+    let png = gordian_runtime::render::schematic_png(
+        ctx.env(),
+        ctx.sch_path(),
+        ctx.config().tools.render_max_px,
+    )?;
     let path = ctx.workspace().write_render(&png)?;
     let mut obj = json!({
         "ok": true,
@@ -3191,9 +3201,8 @@ blocks:
         let components = (1..=40)
             .map(|n| {
                 if n == 1 {
-                    format!(
-                        "      R1: {{part: Device:R, footprint: Custom:R1, between: [N1, GND]}}"
-                    )
+                    "      R1: {part: Device:R, footprint: Custom:R1, between: [N1, GND]}"
+                        .to_owned()
                 } else {
                     format!("      R{n}: {{part: Device:R, between: [N{n}, GND]}}")
                 }
@@ -3533,7 +3542,7 @@ blocks:
         let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
             .expect("test runtime");
         let prior = "version: 1\nblocks: {main: {components: {R1: {part: Device:R, footprint: Missing:One, between: [A, B]}, R2: {part: Device:R, footprint: Missing:Two, between: [A, B]}}}}\n";
-        runtime.workspace().write_draft(&prior, None).unwrap();
+        runtime.workspace().write_draft(prior, None).unwrap();
 
         let report = repair_components(json!({"remove": ["R1"]}), &runtime).unwrap();
 
@@ -3599,7 +3608,7 @@ blocks:
             json!({"update": {"R1": {"value": "changed"}}}),
             json!({"components": {"R2": {"part": "Device:R", "footprint": "Missing:Two", "between": ["A", "B"]}}}),
         ] {
-            runtime.workspace().write_draft(&prior, None).unwrap();
+            runtime.workspace().write_draft(prior, None).unwrap();
 
             let report = repair_components(input, &runtime).unwrap();
 

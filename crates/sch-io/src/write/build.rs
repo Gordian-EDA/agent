@@ -5,7 +5,7 @@
 use std::io;
 
 use geom::{GRID_50_MIL, Point2, Rect, Segment};
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
 
 use crate::wire::{DrawnSegment, NetSegment};
@@ -26,7 +26,7 @@ impl SchematicWriter {
     /// resolved.
     pub fn add_symbol(
         &mut self,
-        env: &KicadEnv,
+        env: &KicadInstallation,
         lib_id: &str,
         refdes: &str,
         value: &str,
@@ -62,7 +62,7 @@ impl SchematicWriter {
     #[allow(clippy::too_many_arguments)]
     pub fn add_symbol_full(
         &mut self,
-        env: &KicadEnv,
+        env: &KicadInstallation,
         lib_id: &str,
         refdes: &str,
         value: &str,
@@ -77,7 +77,7 @@ impl SchematicWriter {
         // caches the symbol's approximate size by lib_id so field placement need
         // not reload geometry per instance.
         if !self.lib_symbols.contains_key(lib_id) {
-            let geom = SymbolGeometry::load(env, lib_id)?;
+            let geom = SymbolGeometry::load(env.symbol_dir(), lib_id)?;
             self.sym_sizes
                 .insert(lib_id.to_string(), geom.approx_size());
             self.sym_pins.insert(lib_id.to_string(), geom.pins.clone());
@@ -153,7 +153,7 @@ impl SchematicWriter {
     /// loaded, or if no pin matches `pin` by number or name.
     pub fn add_pin_label(
         &mut self,
-        env: &KicadEnv,
+        env: &KicadInstallation,
         refdes: &str,
         pin: &str,
         net: &str,
@@ -190,7 +190,7 @@ impl SchematicWriter {
     /// proven connectivity-safe.
     pub fn add_signal_label(
         &mut self,
-        env: &KicadEnv,
+        env: &KicadInstallation,
         refdes: &str,
         pin: &str,
         net: &str,
@@ -202,7 +202,7 @@ impl SchematicWriter {
     /// extends the stub past whatever body the default landing would cover.
     pub fn add_signal_label_stub(
         &mut self,
-        env: &KicadEnv,
+        env: &KicadInstallation,
         refdes: &str,
         pin: &str,
         net: &str,
@@ -234,7 +234,7 @@ impl SchematicWriter {
     /// point. `refdes` must be `#`-prefixed (hidden, netlist-excluded).
     pub fn add_power_symbol(
         &mut self,
-        env: &KicadEnv,
+        env: &KicadInstallation,
         lib_id: &str,
         refdes: &str,
         net: &str,
@@ -256,7 +256,7 @@ impl SchematicWriter {
     /// power-port connection point.
     pub fn add_power_flag_at(
         &mut self,
-        env: &KicadEnv,
+        env: &KicadInstallation,
         refdes: &str,
         at: impl Into<Point2>,
         angle: f64,
@@ -366,7 +366,7 @@ impl SchematicWriter {
     /// (mirror -> instance rotation -> sheet Y-flip) and quantized to an axis.
     pub fn pin_dirs(
         &self,
-        env: &KicadEnv,
+        env: &KicadInstallation,
         refdes: &str,
         pin: &str,
     ) -> io::Result<Vec<([f64; 2], Dir)>> {
@@ -391,7 +391,7 @@ impl SchematicWriter {
         // `.kicad_sym` from disk. Fall back to a load only if somehow uncached.
         let pins: Vec<PinGeom> = match self.sym_pins.get(&lib_id).cloned() {
             Some(p) => p,
-            None => SymbolGeometry::load(env, &lib_id)?.pins,
+            None => SymbolGeometry::load(env.symbol_dir(), &lib_id)?.pins,
         };
 
         let matches: Vec<&PinGeom> = {
@@ -444,7 +444,12 @@ impl SchematicWriter {
     ///
     /// Returns an error if `refdes` was never placed, if its geometry cannot be
     /// loaded, or if no pin matches `pin` by number or name.
-    pub fn add_no_connect(&mut self, env: &KicadEnv, refdes: &str, pin: &str) -> io::Result<()> {
+    pub fn add_no_connect(
+        &mut self,
+        env: &KicadInstallation,
+        refdes: &str,
+        pin: &str,
+    ) -> io::Result<()> {
         let endpoints = self.pin_endpoints(env, refdes, pin)?;
         for (idx, at) in endpoints.into_iter().enumerate() {
             self.no_connects.push(NoConnect {
@@ -472,7 +477,7 @@ impl SchematicWriter {
     /// `power:PWR_FLAG` symbol cannot be resolved from `env`.
     pub fn add_power_flag(
         &mut self,
-        env: &KicadEnv,
+        env: &KicadInstallation,
         net: &str,
         refdes: &str,
         at: [f64; 2],
@@ -502,7 +507,12 @@ impl SchematicWriter {
     /// position/orientation/mirror into a grid-snapped sheet point. Shared by
     /// label, no-connect, and power-flag emission so they always agree on where a
     /// pin's connection point lands.
-    fn pin_endpoints(&self, env: &KicadEnv, refdes: &str, pin: &str) -> io::Result<Vec<Point2>> {
+    fn pin_endpoints(
+        &self,
+        env: &KicadInstallation,
+        refdes: &str,
+        pin: &str,
+    ) -> io::Result<Vec<Point2>> {
         let any = self
             .instances
             .iter()
@@ -514,7 +524,7 @@ impl SchematicWriter {
                 )
             })?;
 
-        let geom = SymbolGeometry::load(env, &any.lib_id)?;
+        let geom = SymbolGeometry::load(env.symbol_dir(), &any.lib_id)?;
 
         // Resolve the pin: number first, then name. A name may match several
         // physical pins (e.g. multiple GND pins), so collect all matches.
@@ -933,8 +943,8 @@ impl SchematicWriter {
 /// by anchor-pin slotting (offset + [`quantize_dir`]). A pin *name* can match
 /// several physical pins, so a `Vec` is returned. The offset is
 /// `pin.at.transform_offset(0.0, false)`, i.e. `[pin.x, -pin.y]`.
-pub fn pin_end0(env: &KicadEnv, lib_id: &str, pin: &str) -> io::Result<Vec<[f64; 2]>> {
-    let geom = SymbolGeometry::load(env, lib_id)?;
+pub fn pin_end0(env: &KicadInstallation, lib_id: &str, pin: &str) -> io::Result<Vec<[f64; 2]>> {
+    let geom = SymbolGeometry::load(env.symbol_dir(), lib_id)?;
     let matches: Vec<&PinGeom> = {
         let by_number: Vec<&PinGeom> = geom.pins.iter().filter(|p| p.number == pin).collect();
         if !by_number.is_empty() {
@@ -1025,8 +1035,8 @@ mod tests {
 
     /// `add_symbol` needs a real symbol library to resolve geometry, so these
     /// tests SKIP-gracefully when no KiCAD environment is detected.
-    fn detect_env() -> Option<KicadEnv> {
-        match KicadEnv::detect() {
+    fn detect_env() -> Option<KicadInstallation> {
+        match KicadInstallation::detect() {
             Some(env) => Some(env),
             None => {
                 eprintln!("SKIP: no KiCAD environment detected");

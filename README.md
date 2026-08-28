@@ -26,9 +26,26 @@ part of design — intent, part selection, and triage.
 
 ## Quick start
 
-Requires a recent **Rust** toolchain (edition 2024, rustc ≥ 1.85) and an installed **KiCAD ≥ 8**
+Requires a recent **Rust** toolchain (edition 2024, rustc ≥ 1.85) and an installed **KiCAD 9 or 10**
 (for its symbol/footprint libraries and `kicad-cli` ERC/DRC). The engines auto-detect KiCAD's
 libraries (e.g. `/usr/share/kicad/symbols`).
+
+Auto-detection uses the single KiCAD installation selected by the current
+environment. On machines with multiple majors installed, configure one coherent
+installation explicitly:
+
+```toml
+[kicad]
+symbolDir = "/opt/kicad10/share/kicad/symbols"
+footprintDir = "/opt/kicad10/share/kicad/footprints"
+cliPath = "/opt/kicad10/bin/kicad-cli"
+pcbnewPath = "/opt/kicad10/bin/pcbnew"
+attachRunning = false
+enableApiConfig = true # explicit opt-in if managed launch should enable IPC
+```
+
+The live IPC connection verifies that the selected/running PCB editor has the
+same major version as `kicad-cli`.
 
 ```sh
 # Build
@@ -48,6 +65,7 @@ The default PCB router is the production `auto` portfolio. To isolate a routing 
 
 ```toml
 [engines]
+schematicPlacer = "cluster" # cluster | anneal | spine
 pcbRouter = "auto"        # auto | mesh | sequential | astar
 ```
 
@@ -67,12 +85,13 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | `sch-floorplan` / `sch-io` / `sch-place` | Deterministic schematic floorplan core (`Design` → `.kicad_sch` and back), over the anneal/constraint placement engines, with the shared model + I/O layers |
 | `grid-astar` / `pcb-place` / `negotiated-mesh` | Deterministic placement + grid-A\* escape + capacity-mesh copper routing |
 | `drc-lint` | PCB DRC lint |
-| `kicad-cli` / `kicad-ipc` / `specctra` | KiCAD file I/O, `kicad-cli` driver, live IPC session, Specctra DSN/SES |
+| `kicad` / `kicad-ipc` / `specctra` | KiCAD discovery and CLI driver, live IPC session, Specctra DSN/SES |
 
 ## Testing
 
 ```sh
 cargo test --workspace --quiet  # unit + integration tests
+tools/live_kicad_test.sh 9      # live pcbnew IPC suite; also accepts 10
 cargo clippy --workspace --all-targets -- -D warnings
                                # lints for libs, bins, examples, tests, and doctests
 cargo run -p gordian-core --example validate_pcb_corpus --quiet
@@ -100,6 +119,21 @@ cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router mesh
 cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router mesh-assign --inspect-detail-jobs --inspect-net S4,VCC bga25-route
                                # Detailed crossing/cell-job inspection for dense-placement routing pressure
 ```
+
+Live product quality is evaluated separately from correctness tests. The small
+VLM-judged suite under `quality/` runs natural-language create/edit/replace cases:
+
+```sh
+python3 quality/run.py --list
+python3 quality/run.py create-hard-pcb
+```
+
+The runner uses the same `llm.endpoint`, `llm.apiKey`, and `llm.model` from the
+platform Gordian config as normal agent runs; it does not maintain separate
+quality credentials.
+
+Each run records KiCAD ERC/DRC facts, before/after renders, the agent transcript,
+and a judge verdict containing only `score` and `issues` under `quality/runs/`.
 
 PCB changes should be exercised through the same schematic-derived and current-board tools the
 agent uses; avoid privileged JSON-only board construction paths in tests.

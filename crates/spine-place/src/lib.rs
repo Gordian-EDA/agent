@@ -15,6 +15,10 @@ mod scene;
 
 pub use engine::SpinePlace;
 
+/// Library diagnostics are controlled by the caller-facing placement options;
+/// deep internal trace spam remains disabled in production code.
+pub(crate) const DEBUG_DIAGNOSTICS: bool = false;
+
 /// The 50 mil schematic grid, shared by every typesetting stage.
 pub(crate) const GRID: f64 = geom::GRID_50_MIL.pitch();
 

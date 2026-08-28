@@ -10,8 +10,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use kicad_cli::KicadCli;
-
 use gordian_runtime::AgentRuntime;
 
 /// Run the routed board through the fabrication exporters into `<project>/fab/`
@@ -46,7 +44,7 @@ pub fn export_fab(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     }
 
-    let cli = KicadCli::new(ctx.env());
+    let cli = ctx.env();
     let drc = match cli.drc(&board) {
         Ok(report) => report,
         Err(e) => {

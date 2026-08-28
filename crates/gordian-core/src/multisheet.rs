@@ -3,9 +3,9 @@
 //! bounding-box regions. Cross-block nets connect via global labels only.
 
 use circuit_lang::model::{Block, Design, PinTarget};
+use gordian_runtime::config::SchematicPlacementEngine;
 use indexmap::IndexMap;
-use kicad_cli::KicadCli;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use sch_place::result::EmitOutput;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -29,10 +29,10 @@ pub fn sanitize(name: &str) -> String {
 fn block_nets(b: &Block) -> HashSet<String> {
     let mut s = HashSet::new();
     let mut add = |t: &PinTarget| {
-        if let PinTarget::Net(n) = t {
-            if !circuit_graph::netclass::is_ground(n) {
-                s.insert(n.clone());
-            }
+        if let PinTarget::Net(n) = t
+            && !circuit_graph::netclass::is_ground(n)
+        {
+            s.insert(n.clone());
         }
     };
     for c in b.components.values() {
@@ -68,13 +68,22 @@ pub fn authored_groups(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
 }
 
 /// Lay out `design` block-by-block and compose one `.kicad_sch`.
-pub fn compose_design(env: &KicadEnv, design: &Design) -> anyhow::Result<EmitOutput> {
+pub fn compose_design(env: &KicadInstallation, design: &Design) -> anyhow::Result<EmitOutput> {
+    compose_design_with_engine(env, design, SchematicPlacementEngine::default())
+}
+
+/// Lay out `design` with an explicitly selected placement engine.
+pub fn compose_design_with_engine(
+    env: &KicadInstallation,
+    design: &Design,
+    selected: SchematicPlacementEngine,
+) -> anyhow::Result<EmitOutput> {
     let groups = authored_groups(&design.blocks);
     if groups.is_empty() {
         return sch_floorplan::floorplan::emit_strategy(
             env,
             design,
-            crate::tools::schematic_placement_engine(),
+            crate::tools::schematic_placement_engine(selected),
             None,
         )
         .map_err(|e| anyhow::anyhow!("emit: {e}"));
@@ -85,7 +94,7 @@ pub fn compose_design(env: &KicadEnv, design: &Design) -> anyhow::Result<EmitOut
     let mut layout_warnings = Vec::new();
     let mut crossings = sch_place::place::Crossings::default();
     let mut detected_idioms = Vec::new();
-    let placer = crate::tools::schematic_placement_engine();
+    let placer = crate::tools::schematic_placement_engine(selected);
     for (gname, block) in groups {
         let mut sub = design.clone();
         sub.blocks = std::iter::once((gname.clone(), block)).collect();
@@ -94,7 +103,7 @@ pub fn compose_design(env: &KicadEnv, design: &Design) -> anyhow::Result<EmitOut
         let (w, out) = sch_floorplan::floorplan::emit_group(
             env,
             &sub,
-            crate::tools::schematic_placement_engine(),
+            crate::tools::schematic_placement_engine(selected),
         )
         .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
         eprintln!("  [emit] group '{gname}' done");
@@ -117,7 +126,7 @@ pub fn compose_design(env: &KicadEnv, design: &Design) -> anyhow::Result<EmitOut
 /// Emit a multi-block `Design` as ONE composed `.kicad_sch` under `out_dir` (file
 /// `root.kicad_sch`). Returns the composed `.kicad_sch` path.
 pub fn compose_single_sheet(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     design: &Design,
     out_dir: &Path,
 ) -> anyhow::Result<PathBuf> {
@@ -159,12 +168,12 @@ pub fn mark_cross_sheet_ports(sub: &mut Design, cross_sheet: &HashSet<String>) {
 
 /// Convenience: compose + run ERC, returning (sheet_path, erc_errors, erc_warnings).
 pub fn emit_and_check(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     design: &Design,
     out_dir: &Path,
 ) -> anyhow::Result<(PathBuf, usize, usize)> {
     let root = compose_single_sheet(env, design, out_dir)?;
-    let (e, w) = match KicadCli::new(env).erc(&root) {
+    let (e, w) = match env.erc(&root) {
         Ok(r) => (r.error_count(), r.warning_count()),
         Err(_) => (usize::MAX, 0),
     };

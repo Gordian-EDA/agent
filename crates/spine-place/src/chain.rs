@@ -10,8 +10,8 @@
 
 use std::collections::BTreeMap;
 
-use sch_place::item::{Incidence, Item};
 use circuit_graph::netclass::is_connector_like;
+use sch_place::item::{Incidence, Item};
 
 use crate::net::NetClass;
 

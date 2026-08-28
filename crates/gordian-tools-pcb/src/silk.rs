@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
-use kicad_cli::{DrcReport, KicadCli, Violation};
+use kicad::{DrcReport, KicadInstallation, Violation};
 
 use super::export::gate_drc;
 use super::patch::{
-    FieldPosition, board_outline_bbox, field_position, footprint_placement, patch_field_hidden, patch_field_position,
-    patch_field_text_size, silk_field_owners,
+    FieldPosition, board_outline_bbox, field_position, footprint_placement, patch_field_hidden,
+    patch_field_position, patch_field_text_size, silk_field_owners,
 };
 
 const MAX_DRC_RETRIES: usize = 16;
@@ -60,7 +60,7 @@ pub(super) fn silk_warning_count(report: &DrcReport) -> usize {
 
 pub(super) fn cleanup_silk_text(
     path: &Path,
-    cli: &KicadCli,
+    cli: &KicadInstallation,
     initial_report: DrcReport,
 ) -> Result<SilkCleanup, String> {
     let initial_warnings = silk_warning_count(&initial_report);
@@ -469,7 +469,7 @@ fn write_board_text(path: &Path, text: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kicad_cli::ViolationItem;
+    use kicad::ViolationItem;
 
     fn violation(kind: &str, items: &[&str]) -> Violation {
         Violation {

@@ -7,8 +7,8 @@
 use super::geometry::{
     part_edge_distance, part_placement_bounds_envelope, placement_envelope_at, rotated_copper_bbox,
 };
+use pcb_model::{LayerRef, Point2, Rect};
 use place_model::{LogicalNet, Pin, PlaceProblem};
-use crate::problem::{LayerRef, Point2, Rect};
 
 pub(crate) use place_model::compute_hpwl_with_rotations;
 
@@ -480,9 +480,9 @@ pub(crate) fn place_cost(
 mod tests {
     use super::*;
     use crate::placement::geometry::courtyard_margin;
-    use place_model::{Part, PartPad};
     use geom::Rect;
-    use crate::problem::LayerRef;
+    use pcb_model::LayerRef;
+    use place_model::{Part, PartPad};
 
     fn part(reference: &str, net: &str) -> Part {
         part_on(reference, net, vec![LayerRef::top()])

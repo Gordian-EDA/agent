@@ -35,8 +35,6 @@
 //!     .run(&problem, &solution);
 //! ```
 
-pub use pcb_model as problem;
-
 pub mod connectivity;
 mod ctx;
 pub mod rules;
@@ -44,7 +42,7 @@ pub mod rules;
 pub use connectivity::Violation;
 pub use ctx::{CopperGeom, CopperItem, DrcCtx, collect_copper};
 
-use problem::{Point2, RouteProblem, RouteSolution};
+use pcb_model::{Point2, RouteProblem, RouteSolution};
 use serde::Serialize;
 
 /// A single design-rule violation in a [`RouteSolution`] relative to its problem.
@@ -135,7 +133,7 @@ pub enum Finding {
     },
     /// A via's diameter is below KiCAD's minimum for its type. Through/blind/buried vias
     /// must meet the netclass via diameter (`problem.via_diameter`); only true micro vias
-    /// get the relaxed microvia floor. kicad-cli flags this as `via_diameter`; the in-house
+    /// get the relaxed microvia floor. kicad flags this as `via_diameter`; the in-house
     /// lint must too, or the engine would ship a fault (it once shipped 56 — an HDI blind
     /// via emitted below the netclass min before this check existed).
     ViaDiameterBelowMin {

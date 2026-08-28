@@ -29,7 +29,7 @@
 //! single-owner pads, so this is exact for them; the DRC lint (a later task) is
 //! the precision authority regardless.
 
-use crate::problem::{Point2, Polygon, RouteProblem};
+use pcb_model::{Point2, Polygon, RouteProblem};
 use std::collections::BTreeMap;
 
 /// Minimum grid pitch, mm. Keeps the grid from exploding on tiny design rules.
@@ -182,7 +182,7 @@ impl RouteGrid {
     /// each terminal endpoint to its exact mm position, not by aligning window
     /// lattices (floating-point floor mismatches make exact lattice alignment
     /// unreliable, and snapping is exact regardless).
-    pub fn build_window(problem: &RouteProblem, window: &crate::problem::Rect) -> RouteGrid {
+    pub fn build_window(problem: &RouteProblem, window: &pcb_model::Rect) -> RouteGrid {
         Self::build_window_with_pitch(problem, window, grid_pitch(problem))
     }
 
@@ -191,7 +191,7 @@ impl RouteGrid {
     /// grid-snap distortion). See [`Self::build_with_pitch`].
     pub fn build_window_with_pitch(
         problem: &RouteProblem,
-        window: &crate::problem::Rect,
+        window: &pcb_model::Rect,
         pitch: f64,
     ) -> RouteGrid {
         let pitch = pitch.max(MIN_PITCH_MM);
@@ -310,7 +310,10 @@ impl RouteGrid {
     fn combine_cells(&self, existing: Cell, incoming: Cell) -> Cell {
         match (existing, incoming) {
             (Cell::Shared(region), Cell::Net(net)) | (Cell::Net(net), Cell::Shared(region)) => {
-                if self.shared_regions[region as usize].binary_search(&net).is_ok() {
+                if self.shared_regions[region as usize]
+                    .binary_search(&net)
+                    .is_ok()
+                {
                     Cell::Net(net)
                 } else {
                     Cell::BlockedAll
@@ -335,7 +338,10 @@ impl RouteGrid {
             Cell::Net(owner) if owner == conn => Cell::Net(conn),
             Cell::Net(_) => Cell::BlockedAll,
             Cell::Shared(region) => {
-                if self.shared_regions[region as usize].binary_search(&conn).is_ok() {
+                if self.shared_regions[region as usize]
+                    .binary_search(&conn)
+                    .is_ok()
+                {
                     Cell::Net(conn)
                 } else {
                     Cell::BlockedAll
@@ -517,7 +523,7 @@ impl RouteGrid {
     /// of the four `bounds` edges), on every layer. Used by [`Self::build_window`]
     /// so a sub-window blocks only physical board edges, not the artificial
     /// window edges introduced by per-cell decomposition.
-    fn block_true_board_edge(&mut self, inflation: f64, bounds: &crate::problem::Rect) {
+    fn block_true_board_edge(&mut self, inflation: f64, bounds: &pcb_model::Rect) {
         for ix in 0..self.nx {
             for iy in 0..self.ny {
                 let cx = self.cell_center_x(ix);
@@ -540,7 +546,7 @@ impl RouteGrid {
     /// occupies. The obstacle is treated as an axis-aligned rect (oval → its
     /// bounding rect, per the v1 model); a cell is blocked when its centre lies
     /// within the inflated rect.
-    fn rasterize_obstacle(&mut self, ob: &crate::problem::Obstacle, inflation: f64) {
+    fn rasterize_obstacle(&mut self, ob: &pcb_model::Obstacle, inflation: f64) {
         let hw = ob.width / 2.0 + inflation;
         let hh = ob.height / 2.0 + inflation;
         let min_x = ob.center.x - hw;
@@ -610,7 +616,7 @@ impl RouteGrid {
     /// A true keepout / off-board cell (a `BlockedAll` NOT covered by this pad's own
     /// real copper) is untouched, and a genuine two-net copper overlap stays
     /// `BlockedAll` (a real short the lint must see).
-    fn assert_pad_copper(&mut self, obstacles: &[crate::problem::Obstacle]) {
+    fn assert_pad_copper(&mut self, obstacles: &[pcb_model::Obstacle]) {
         for ob in obstacles {
             let Some(owner) = ob
                 .connected_to
@@ -673,7 +679,7 @@ impl RouteGrid {
     fn assert_fine_pitch_escape_lanes(
         &mut self,
         problem: &RouteProblem,
-        obstacles: &[crate::problem::Obstacle],
+        obstacles: &[pcb_model::Obstacle],
     ) {
         const FINE_PITCH_MM: f64 = 0.66;
         let clear = problem.clearance + problem.min_trace_width / 2.0;
@@ -744,31 +750,30 @@ impl RouteGrid {
                             if self.cells[i] != Cell::BlockedAll {
                                 continue;
                             }
-                            let legal = !obstacles.iter().any(|other| {
-                                let other_owner = other
-                                    .connected_to
-                                    .iter()
-                                    .find_map(|n| self.connection_index(n));
-                                if other_owner == Some(owner) {
-                                    return false;
-                                }
-                                if !other
-                                    .layers
-                                    .iter()
-                                    .any(|l| l.index(self.layer_count as u32) == Some(layer as u32))
-                                {
-                                    return false;
-                                }
-                                let dx = (cx - other.center.x).abs() - other.width / 2.0;
-                                let dy = (cy - other.center.y).abs() - other.height / 2.0;
-                                let gap = match (dx > 0.0, dy > 0.0) {
-                                    (true, true) => (dx * dx + dy * dy).sqrt(),
-                                    (true, false) => dx,
-                                    (false, true) => dy,
-                                    (false, false) => f64::NEG_INFINITY,
-                                };
-                                gap < clear
-                            });
+                            let legal =
+                                !obstacles.iter().any(|other| {
+                                    let other_owner = other
+                                        .connected_to
+                                        .iter()
+                                        .find_map(|n| self.connection_index(n));
+                                    if other_owner == Some(owner) {
+                                        return false;
+                                    }
+                                    if !other.layers.iter().any(|l| {
+                                        l.index(self.layer_count as u32) == Some(layer as u32)
+                                    }) {
+                                        return false;
+                                    }
+                                    let dx = (cx - other.center.x).abs() - other.width / 2.0;
+                                    let dy = (cy - other.center.y).abs() - other.height / 2.0;
+                                    let gap = match (dx > 0.0, dy > 0.0) {
+                                        (true, true) => (dx * dx + dy * dy).sqrt(),
+                                        (true, false) => dx,
+                                        (false, true) => dy,
+                                        (false, false) => f64::NEG_INFINITY,
+                                    };
+                                    gap < clear
+                                });
                             if legal {
                                 self.cells[i] = Cell::Net(owner);
                             }
@@ -781,7 +786,7 @@ impl RouteGrid {
 
     fn foreign_pad_copper(
         &self,
-        obstacles: &[crate::problem::Obstacle],
+        obstacles: &[pcb_model::Obstacle],
         owner: usize,
         layer: usize,
         cx: f64,
@@ -850,7 +855,7 @@ fn combine(existing: Cell, incoming: Cell) -> Cell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem};
+    use pcb_model::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem};
 
     fn problem(obstacles: Vec<Obstacle>) -> RouteProblem {
         RouteProblem {
@@ -1008,7 +1013,7 @@ mod tests {
 
     #[test]
     fn window_blocks_true_board_edges_but_not_interior_window_edges() {
-        use crate::problem::Rect;
+        use pcb_model::Rect;
         // A 20x20 board. Take a window in the middle that touches the LEFT board
         // edge but whose right/top/bottom edges are interior to the board.
         let p = problem(vec![]);
@@ -1041,7 +1046,7 @@ mod tests {
 
     #[test]
     fn window_covers_its_rect_and_maps_interior_points() {
-        use crate::problem::Rect;
+        use pcb_model::Rect;
         // A window must contain a cell for every interior point, and the cell↔mm
         // mapping round-trips within the window (the per-cell stitching contract
         // relies on endpoint snapping, not lattice alignment, so we only require

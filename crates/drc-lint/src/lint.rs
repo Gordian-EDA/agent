@@ -26,8 +26,8 @@
 //! - [`DrcViolation::Connectivity`] — the connectivity oracle's defects, folded
 //!   in last so `lint` is the single one-stop report.
 
-use crate::problem::{RouteProblem, RouteSolution};
 use drc_core::DrcSuite;
+use pcb_model::{RouteProblem, RouteSolution};
 
 /// A design-rule violation. Historical alias for the engine kernel's
 /// [`drc_core::Finding`]; the variants and serde shape are identical.
@@ -141,7 +141,7 @@ fn violation_nets(v: &DrcViolation) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::connectivity::Violation;
-    use crate::problem::{
+    use pcb_model::{
         Connection, LayerRef, Obstacle, Point2, Polygon, Rect, RoutePoint, RouteProblem,
         RouteSolution, Trace, Via, ViaSpan,
     };

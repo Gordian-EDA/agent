@@ -5,7 +5,7 @@ Thanks for your interest! This document covers how to build, test, and submit ch
 ## Development setup
 
 - **Rust** edition 2024 (rustc ≥ 1.85) — `rustup` is recommended.
-- **KiCAD ≥ 8** installed, for its symbol/footprint libraries and `kicad-cli` ERC/DRC. The engines
+- **KiCad 9 or 10** installed, for its symbol/footprint libraries and `kicad-cli` ERC/DRC. The engines
   auto-detect the libraries (e.g. `/usr/share/kicad/symbols`).
 - A model provider for the agent itself (only needed to run the LLM loop, not for the engines or
   most tests). Run `gordian tui` once to create the platform `config.toml`, then set `llm.model`,

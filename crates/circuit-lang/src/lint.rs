@@ -1,9 +1,9 @@
 //! Semantic lints over the kernel model.
 
-use circuit_graph::netclass::is_power_net as is_power_like_net_name;
 use crate::diag::{Diagnostic, Diagnostics};
 use crate::model::*;
 use crate::provider::{PinType, SymbolTable};
+use circuit_graph::netclass::is_power_net as is_power_like_net_name;
 
 pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
     let mut diags = Diagnostics::default();
@@ -411,7 +411,6 @@ fn passive_series_fuse_nets(
     }
     (nets[0] != nets[1]).then(|| (nets[0].clone(), nets[1].clone()))
 }
-
 
 /// Resolve a component pin map key to its `PinTarget`, searching the top-level
 /// pin map first and then any unit pin maps.

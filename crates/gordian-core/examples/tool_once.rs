@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use anyhow::{Context, bail};
 use gordian_core::AgentRuntime;
 use gordian_core::tools::run_tool;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use serde_json::Value;
 
 fn main() -> anyhow::Result<()> {
@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
         bail!("usage: tool_once <project-directory> <tool-name> [json-input]");
     }
 
-    let env = KicadEnv::detect().context("no KiCad environment detected")?;
+    let env = KicadInstallation::detect().context("no KiCad environment detected")?;
     let ctx = AgentRuntime::for_project(env, project)?;
     let result = run_tool(&tool, input, &ctx).with_context(|| format!("running {tool}"))?;
     println!("{}", serde_json::to_string_pretty(&result)?);

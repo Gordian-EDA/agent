@@ -14,10 +14,9 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use drc_lint::lint::lint;
 use gordian_tools_pcb::apply_direct_rescue_fallback;
-use gordian_tools_pcb::corpus::{
-    load_corpus_board, route_problem_for_placement, run_kicad_drc,
-};
-use kicad_env::KicadEnv;
+use gordian_tools_pcb::corpus::{load_corpus_board, route_problem_for_placement, run_kicad_drc};
+use grid_astar::router::{GridAStarRouter, geometry_violations};
+use kicad::KicadInstallation;
 use kicad_footprint::FootprintCatalog;
 use negotiated_mesh::crossing::{
     AssignedCrossing, AssignmentFailure, CellJob, CrossingAssignment, TerminalKind,
@@ -30,8 +29,7 @@ use negotiated_mesh::pipeline::{
     RouteAutoRun, RouteEngineAttempt, route_auto_with_diagnostics, route_detailed_with_global,
     route_mesh_with_diagnostics, route_sequential_with_diagnostics,
 };
-use negotiated_mesh::problem::{Point2, RouteProblem, RouteQuality, RouteResult, Router};
-use negotiated_mesh::router::{GridAStarRouter, geometry_violations};
+use pcb_model::{Point2, RouteProblem, RouteQuality, RouteResult, Router};
 
 const DEFAULT_BOARDS: &[&str] = &[
     "rc-divider",
@@ -51,12 +49,10 @@ const REQUIRED_BOARDS: &[&str] = &[
 
 fn main() -> Result<()> {
     let args = Args::parse(std::env::args().skip(1))?;
-    let env = KicadEnv::detect().ok_or_else(|| {
-        anyhow!(
-            "KiCad libraries not found; set KICAD_SYMBOL_DIR/KICAD_FOOTPRINT_DIR or install KiCad"
-        )
-    })?;
-    let catalog = FootprintCatalog::from_env(&env).context("loading footprint catalog")?;
+    let env = KicadInstallation::detect()
+        .ok_or_else(|| anyhow!("KiCad 9 or 10 was not found in the standard installation paths"))?;
+    let catalog =
+        FootprintCatalog::from_root(env.footprint_dir()).context("loading footprint catalog")?;
     let corpus_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/pcb_circuits");
     let boards = resolve_boards(&corpus_dir, &args)?;
 
@@ -928,7 +924,7 @@ fn obstacle_owner(net_name: &str, owners: &[String]) -> String {
     }
 }
 
-fn layer_list(layers: &[negotiated_mesh::problem::LayerRef]) -> String {
+fn layer_list(layers: &[pcb_model::LayerRef]) -> String {
     layers
         .iter()
         .map(|layer| layer.0.as_str())
@@ -1020,10 +1016,7 @@ impl RouterMode {
     }
 }
 
-fn route_with_mode(
-    problem: &negotiated_mesh::problem::RouteProblem,
-    mode: RouterMode,
-) -> RouteAutoRun {
+fn route_with_mode(problem: &pcb_model::RouteProblem, mode: RouterMode) -> RouteAutoRun {
     match mode {
         RouterMode::Auto => route_auto_with_diagnostics(problem),
         RouterMode::Mesh => route_mesh_with_diagnostics(problem),
@@ -1036,9 +1029,7 @@ fn route_with_mode(
     }
 }
 
-fn route_mesh_detail_with_diagnostics(
-    problem: &negotiated_mesh::problem::RouteProblem,
-) -> RouteAutoRun {
+fn route_mesh_detail_with_diagnostics(problem: &pcb_model::RouteProblem) -> RouteAutoRun {
     let started = Instant::now();
     let (result, global) = route_detailed_with_global(problem);
     let elapsed_ms = started.elapsed().as_millis();
@@ -1050,7 +1041,7 @@ fn route_mesh_detail_with_diagnostics(
     }
 }
 
-fn route_grid_with_diagnostics(problem: &negotiated_mesh::problem::RouteProblem) -> RouteAutoRun {
+fn route_grid_with_diagnostics(problem: &pcb_model::RouteProblem) -> RouteAutoRun {
     let grid = GridAStarRouter;
     let started = Instant::now();
     let result = grid.route(problem);
@@ -1064,7 +1055,7 @@ fn route_grid_with_diagnostics(problem: &negotiated_mesh::problem::RouteProblem)
 }
 
 fn attempt_summary(
-    problem: &negotiated_mesh::problem::RouteProblem,
+    problem: &pcb_model::RouteProblem,
     result: &RouteResult,
     elapsed_ms: u128,
 ) -> RouteEngineAttempt {

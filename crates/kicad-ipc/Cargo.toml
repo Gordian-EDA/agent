@@ -9,12 +9,13 @@ description = "Native Rust client for the KiCAD IPC API (protobuf over NNG) — 
 [dependencies]
 geom = { path = "../geom" }
 nng = "1.0"
-pcb-model = { path = "../pcb-model" }
-place-model = { path = "../place-model" }
 prost = "0.13"
 prost-types = "0.13"
 thiserror.workspace = true
 directories.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [build-dependencies]
 prost-build = "0.13"

@@ -1,5 +1,5 @@
 //! The holistic floorplanner — the single-sheet DE-SPRAWL pass. DEFAULT-ON in the `cluster`
-//! engine (`CLUSTER_NO_COMPACT` opts out); validated full-dataset (13/40 liftable boards
+//! engine; validated full-dataset (13/40 liftable boards
 //! de-sprawl, 0 regressions). Repetitive power-IC arrays go a step further via the rail idiom
 //! ([`rail_relayout`]); everything else stops here.
 //!
@@ -32,9 +32,9 @@ use geom::{Point2, Rect};
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
 
-use sch_floorplan::contract::{
-    RoutedEvaluator, align_idiom_clusters, align_led_chains, build_anchor_blocks, decongest,
-    item_rect, orient_angle,
+use sch_floorplan::contract::RoutedEvaluator;
+use sch_floorplan::engine_support::{
+    align_idiom_clusters, align_led_chains, build_anchor_blocks, decongest, item_rect, orient_angle,
 };
 
 use crate::eval::{restore, save, score};
@@ -741,8 +741,8 @@ pub(crate) fn compact_clusters(
     sa_warnings: usize,
 ) {
     use circuit_graph::netclass::is_power_net;
-    let force = std::env::var_os("CLUSTER_FORCE").is_some();
-    let debug = std::env::var_os("CLUSTER_DEBUG").is_some();
+    let force = false;
+    let debug = super::DEBUG_DIAGNOSTICS;
     let base = save(items);
     let s0 = score(eval, inc, ir, items);
     let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);

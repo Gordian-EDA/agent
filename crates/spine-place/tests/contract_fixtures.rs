@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::contract::SchematicPlaceProblem;
 use sch_place::ir::LayoutIr;
@@ -26,11 +26,11 @@ fn fixtures() -> Vec<std::path::PathBuf> {
 
 #[test]
 fn fixtures_contract_cleanly() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     for path in fixtures() {
         let yaml = std::fs::read_to_string(&path).unwrap();
         let Some(design) = circuit_lang::compile(&yaml, &provider).design else {

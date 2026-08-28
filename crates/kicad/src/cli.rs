@@ -7,25 +7,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use kicad_env::KicadEnv;
+use crate::KicadInstallation;
 
 use crate::export::{check_status, files_with_ext, with_trailing_sep};
 use crate::netlist::{Netlist, parse_netlist_xml};
 use crate::reports::{DrcReport, ErcReport};
 
-/// A handle to `kicad-cli` for running schematic/PCB checks and exports.
-pub struct KicadCli {
-    cli_path: PathBuf,
-}
-
-impl KicadCli {
-    /// Build a CLI wrapper from a discovered environment.
-    pub fn new(env: &KicadEnv) -> Self {
-        Self {
-            cli_path: env.cli_path.clone(),
-        }
-    }
-
+impl KicadInstallation {
     /// Run `kicad-cli sch erc` on `schematic` and parse the JSON report.
     ///
     /// Returns `Ok(report)` whether or not violations were found. A nonzero
@@ -36,7 +24,7 @@ impl KicadCli {
             .suffix(".json")
             .tempfile()?;
 
-        let output = Command::new(&self.cli_path)
+        let output = Command::new(self.cli_path())
             .args(["sch", "erc", "--format", "json"])
             .arg("--output")
             .arg(out.path())
@@ -74,7 +62,7 @@ impl KicadCli {
         let board_has_zones = std::fs::read_to_string(pcb)
             .map(|text| text.contains("\n\t(zone") || text.contains("\n  (zone"))
             .unwrap_or(false);
-        let mut cmd = Command::new(&self.cli_path);
+        let mut cmd = Command::new(self.cli_path());
         cmd.args(["pcb", "drc", "--format", "json", "--all-track-errors"]);
         if board_has_zones && self.supports_pcb_drc_refill_zones() {
             cmd.arg("--refill-zones");
@@ -103,7 +91,7 @@ impl KicadCli {
     }
 
     fn supports_pcb_drc_refill_zones(&self) -> bool {
-        Command::new(&self.cli_path)
+        Command::new(self.cli_path())
             .args(["pcb", "drc", "--help"])
             .output()
             .ok()
@@ -121,7 +109,7 @@ impl KicadCli {
             .suffix(".xml")
             .tempfile()?;
 
-        let output = Command::new(&self.cli_path)
+        let output = Command::new(self.cli_path())
             .args(["sch", "export", "netlist", "--format", "kicadxml"])
             .arg("--output")
             .arg(out.path())
@@ -156,7 +144,7 @@ impl KicadCli {
         exclude_sheet: bool,
     ) -> io::Result<PathBuf> {
         std::fs::create_dir_all(out_dir)?;
-        let mut cmd = Command::new(&self.cli_path);
+        let mut cmd = Command::new(self.cli_path());
         cmd.args(["sch", "export", "svg"])
             .arg("--output")
             .arg(out_dir);
@@ -197,7 +185,7 @@ impl KicadCli {
         if let Some(parent) = out_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut cmd = Command::new(&self.cli_path);
+        let mut cmd = Command::new(self.cli_path());
         cmd.args([
             "pcb",
             "export",
@@ -229,7 +217,7 @@ impl KicadCli {
     /// Run `kicad-cli pcb export gerbers` on `pcb`.
     pub fn export_gerbers(&self, pcb: &Path, out_dir: &Path) -> io::Result<Vec<PathBuf>> {
         std::fs::create_dir_all(out_dir)?;
-        let output = Command::new(&self.cli_path)
+        let output = Command::new(self.cli_path())
             .args(["pcb", "export", "gerbers", "--no-protel-ext"])
             .arg("--output")
             .arg(out_dir)
@@ -249,7 +237,7 @@ impl KicadCli {
     /// Run `kicad-cli pcb export drill` on `pcb`.
     pub fn export_drill(&self, pcb: &Path, out_dir: &Path) -> io::Result<Vec<PathBuf>> {
         std::fs::create_dir_all(out_dir)?;
-        let output = Command::new(&self.cli_path)
+        let output = Command::new(self.cli_path())
             .args([
                 "pcb",
                 "export",
@@ -279,7 +267,7 @@ impl KicadCli {
         if let Some(parent) = out_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let output = Command::new(&self.cli_path)
+        let output = Command::new(self.cli_path())
             .args([
                 "pcb", "export", "pos", "--format", "csv", "--side", "both", "--units", "mm",
             ])
@@ -303,7 +291,7 @@ impl KicadCli {
         if let Some(parent) = out_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let output = Command::new(&self.cli_path)
+        let output = Command::new(self.cli_path())
             .args([
                 "sch",
                 "export",

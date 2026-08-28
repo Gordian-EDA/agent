@@ -15,13 +15,14 @@ use std::collections::BTreeMap;
 
 use circuit_lang::model::Design;
 use geom::{EPS, Point2, Rect};
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 
 use crate::write::SchematicWriter;
+use circuit_graph::netclass::is_ground;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
-use circuit_graph::netclass::is_ground;
 use sch_place::place::Crossings;
+use sch_place::place::PlaceOptions;
 
 use sch_place::place::PlaceResult;
 
@@ -53,7 +54,7 @@ pub trait PlacementEngine {
     /// Engines may use `ir` as hints/constraints, or ignore it entirely.
     fn place(
         &self,
-        env: &KicadEnv,
+        env: &KicadInstallation,
         design: &Design,
         problem: &mut SchematicPlaceProblem,
         ir: Option<LayoutIr>,
@@ -84,17 +85,28 @@ impl RouteRealization {
 
 /// Builds/routes a candidate placement into a [`SchematicWriter`].
 pub struct RoutedSheetRealizer<'a> {
-    env: &'a KicadEnv,
+    env: &'a KicadInstallation,
     inc: &'a Incidence,
     ir: &'a LayoutIr,
+    options: PlaceOptions,
 }
 
 impl<'a> RoutedSheetRealizer<'a> {
-    pub fn new(env: &'a KicadEnv, inc: &'a Incidence, ir: &'a LayoutIr) -> Self {
-        Self { env, inc, ir }
+    pub fn new(
+        env: &'a KicadInstallation,
+        inc: &'a Incidence,
+        ir: &'a LayoutIr,
+        options: PlaceOptions,
+    ) -> Self {
+        Self {
+            env,
+            inc,
+            ir,
+            options,
+        }
     }
 
-    pub fn env(&self) -> &'a KicadEnv {
+    pub fn env(&self) -> &'a KicadInstallation {
         self.env
     }
 
@@ -113,6 +125,7 @@ impl<'a> RoutedSheetRealizer<'a> {
             self.ir,
             &needs_flag,
             mode.fan_risers(),
+            self.options.force_fast,
         )
     }
 }
@@ -286,7 +299,11 @@ pub struct RawMetrics {
 }
 
 /// Body / IC / wire crossing triple read from a shipped (`fan_risers=true`) writer.
-pub(crate) fn shipped_crossings(env: &KicadEnv, w: &SchematicWriter, items: &[Item]) -> Crossings {
+pub(crate) fn shipped_crossings(
+    env: &KicadInstallation,
+    w: &SchematicWriter,
+    items: &[Item],
+) -> Crossings {
     let wires = w.wires_with_nets();
     let (bodies, ic_rects) = bodies_and_ic_rects(env, w, items);
     Crossings {
@@ -304,7 +321,11 @@ pub(crate) fn shipped_crossings(env: &KicadEnv, w: &SchematicWriter, items: &[It
 type BodyAxis = ([f64; 2], [f64; 2]);
 type BodyObstacles = (Vec<BodyAxis>, Vec<Rect>);
 
-fn bodies_and_ic_rects(env: &KicadEnv, w: &SchematicWriter, items: &[Item]) -> BodyObstacles {
+fn bodies_and_ic_rects(
+    env: &KicadInstallation,
+    w: &SchematicWriter,
+    items: &[Item],
+) -> BodyObstacles {
     let bodies: Vec<BodyAxis> = items
         .iter()
         .filter(|i| i.geom.pins.len() == 2)
@@ -351,7 +372,7 @@ fn bodies_and_ic_rects(env: &KicadEnv, w: &SchematicWriter, items: &[Item]) -> B
 /// Read the raw 16 measurement terms off a built (`fan_risers=false`) writer,
 /// returned unweighted for an engine to weight.
 pub fn raw_metrics(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     w: &SchematicWriter,
     items: &[Item],
     inc: &Incidence,

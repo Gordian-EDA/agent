@@ -3,18 +3,18 @@
 //! This is the path the harnesses miss (they build PCB drafts from standalone
 //! JSON, never through the schematic).
 
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan;
 use sch_io::read::lift;
 
 #[test]
 fn footprint_survives_emit_then_lift() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("no KiCAD environment — skipping footprint round-trip test");
         return;
     };
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
 
     // Minimal design: one capacitor carrying a footprint assignment.
     let yaml = r#"

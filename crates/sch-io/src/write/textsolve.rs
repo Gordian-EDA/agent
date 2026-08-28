@@ -1132,13 +1132,13 @@ mod tests {
     use super::*;
     use crate::write::{Dir, Instance};
     use geom::Point2;
-    use kicad_env::KicadEnv;
+    use kicad::KicadInstallation;
     use kicad_symbol::geometry::PinGeom;
 
     /// `add_symbol` needs a real symbol library to resolve geometry, so these
     /// tests SKIP-gracefully when no KiCAD environment is detected.
-    fn detect_env() -> Option<KicadEnv> {
-        match KicadEnv::detect() {
+    fn detect_env() -> Option<KicadInstallation> {
+        match KicadInstallation::detect() {
             Some(env) => Some(env),
             None => {
                 eprintln!("SKIP: no KiCAD environment detected");

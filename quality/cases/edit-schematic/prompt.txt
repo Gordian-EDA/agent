@@ -1,0 +1,1 @@
+Edit the existing RC input circuit. Add reverse-polarity protection and a TVS clamp at VIN while preserving the existing filter and its component references. Keep the schematic compact and easy to follow, then apply and render the change.

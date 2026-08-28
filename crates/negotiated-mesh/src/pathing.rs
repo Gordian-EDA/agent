@@ -1,6 +1,6 @@
 //! Congestion-costed global pathing with negotiated rip-up & reroute.
 //!
-//! Slice 2's global routing stage. Where the slice-1 grid router ([`crate::router`])
+//! Slice 2's global routing stage. Where the slice-1 grid router ([`grid_astar::router`])
 //! commits each net's copper greedily — and so walls off later nets on congested
 //! boards — this stage routes every net as a coarse *cell path* over the
 //! [`CapacityMesh`] and then negotiates: nets that overload a shared boundary pay
@@ -10,7 +10,7 @@
 //! cell paths into copper; this stage only proves a feasible coarse assignment
 //! exists and reports congestion when it does not.
 //!
-//! This module is deliberately independent of [`crate::grid`] / [`crate::astar`]:
+//! This module is deliberately independent of [`grid_astar::grid`] / [`grid_astar::astar`]:
 //! it shares only the [`RouteProblem`] model, the [`CapacityMesh`], and
 //! [`FailedNet`] (the cross-stage failure type). The always-correct slice-1
 //! fallback stays untouched.
@@ -49,8 +49,8 @@ use crate::heuristics::{
     connection_segment_obstacle_pressure_um, connection_span_um,
 };
 use crate::mesh::{CapacityMesh, LeafId};
-use crate::problem::{FailedNet, Point2, Rect, RouteProblem};
 use geom::STRICT_EPS;
+use pcb_model::{FailedNet, Point2, Rect, RouteProblem};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -1189,7 +1189,7 @@ fn build_via_allowed(
 ) -> Vec<Vec<bool>> {
     let obstacles = ViaClearanceObstacles::build(problem, layer_count);
     let clearance = problem.clearance + problem.via_diameter / 2.0;
-    let pitch = crate::grid::grid_pitch(problem);
+    let pitch = grid_astar::grid::grid_pitch(problem);
     (0..problem.connections.len())
         .map(|conn| {
             mesh.leaves
@@ -1326,7 +1326,7 @@ fn victim_pressure(
 }
 
 /// Connection indices in routing order: ascending bounding-box half-perimeter,
-/// ties by name. The slice-1 order ([`crate::router`]), reproduced so pathing
+/// ties by name. The slice-1 order ([`grid_astar::router`]), reproduced so pathing
 /// does not depend on the router's internals.
 fn net_order(problem: &RouteProblem) -> Vec<usize> {
     let mut order: Vec<usize> = (0..problem.connections.len()).collect();
@@ -1491,7 +1491,7 @@ fn push_unique_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Connection, LayerRef, Obstacle, Rect, RoutePoint};
+    use pcb_model::{Connection, LayerRef, Obstacle, Rect, RoutePoint};
     use std::path::Path;
 
     fn base(bounds: Rect, obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RouteProblem {

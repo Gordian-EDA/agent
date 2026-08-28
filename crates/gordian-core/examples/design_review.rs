@@ -9,8 +9,7 @@
 mod config_support;
 
 use gordian_core::{Agent, AgentEvent, AutoApprove};
-use kicad_cli::KicadCli;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use tokio::sync::mpsc;
 
 #[tokio::main]
@@ -24,10 +23,11 @@ async fn main() -> anyhow::Result<()> {
         .expect("usage: design_review <out.png> <prompt>");
 
     let config = config_support::load_config()?;
-    let env = KicadEnv::detect_with(
+    let env = KicadInstallation::detect_with(
         config.kicad.symbol_dir.as_deref(),
         config.kicad.footprint_dir.as_deref(),
         config.kicad.cli_path.as_deref(),
+        config.kicad.pcbnew_path.as_deref(),
     )
     .expect("no KiCAD environment detected");
     let tmp = tempfile::tempdir()?;
@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let svg_dir = tempfile::tempdir()?;
-    let svg_path = KicadCli::new(&env).export_svg_opts(&sch_path, svg_dir.path(), true)?;
+    let svg_path = env.export_svg_opts(&sch_path, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
     let png = gordian_runtime::render::svg_to_png(&svg, 1600)?;
     std::fs::write(&out, png)?;

@@ -1,6 +1,6 @@
 //! Connectivity regression oracle for the FLOORPLAN engine (the active layout
 //! path). For each reference fixture, compile the YAML, lay it out per its
-//! `*.layout.json` IR sidecar, emit, export the netlist via kicad-cli, and
+//! `*.layout.json` IR sidecar, emit, export the netlist via kicad, and
 //! assert the netlist is TRUTHFUL: every authored pin lands connected, no
 //! authored net is split across netlist nets, and no two authored nets are
 //! shorted onto one.
@@ -24,8 +24,8 @@ use std::sync::Mutex;
 /// serialize, but each is the same ~8 min either way — correctness over parallelism.)
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-use kicad_cli::{KicadCli, Netlist};
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
+use kicad::Netlist;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan::{self, LayoutIr};
 
@@ -85,11 +85,11 @@ fn floorplan_reference_fixtures_emit_truthful_netlists() {
         eprintln!("SKIP: docs/validation corpus not present");
         return;
     }
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     for name in REFERENCE_FIXTURES {
         validate_fixture(&env, &provider, name, /* strict_warnings */ true);
     }
@@ -107,11 +107,11 @@ fn run_challenge_fixtures() {
         eprintln!("SKIP: docs/validation corpus not present");
         return;
     }
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     // Collect EVERY fixture's verdict (don't stop at the first failure) so one run
     // reports the full coverage picture across all hard circuit classes. A fixture
     // that panics on a real truthfulness/ERC defect is recorded; the test fails at
@@ -196,7 +196,12 @@ const TOLERATED_ERC_KINDS: &[&str] = &[
 /// present, else `baseline_ir`), and assert the emitted sheet is electrically
 /// TRUTHFUL + on-grid + ERC-clean. With `strict_warnings`, also assert zero
 /// layout warnings (tier-1 readability bar).
-fn validate_fixture(env: &KicadEnv, provider: &SymbolTable, name: &str, strict_warnings: bool) {
+fn validate_fixture(
+    env: &KicadInstallation,
+    provider: &SymbolTable,
+    name: &str,
+    strict_warnings: bool,
+) {
     {
         let src = std::fs::read_to_string(doc(name, "circuit.yaml")).unwrap();
         let result = circuit_lang::compile(&src, provider);
@@ -253,7 +258,7 @@ fn validate_fixture(env: &KicadEnv, provider: &SymbolTable, name: &str, strict_w
         // below: no rail merges, every pin connected). The reference tier still
         // forbids it. KNOWN-ENGINE-GAP: suppress the flag when a power-output pin
         // (resolved through the extends chain) already drives the rail.
-        let erc = KicadCli::new(env).erc(&sch).unwrap();
+        let erc = env.erc(&sch).unwrap();
         let tolerated = |kind: &str| {
             kind == "lib_symbol_issues" || (!strict_warnings && TOLERATED_ERC_KINDS.contains(&kind))
         };
@@ -282,7 +287,7 @@ fn validate_fixture(env: &KicadEnv, provider: &SymbolTable, name: &str, strict_w
 
         // Truthfulness: every authored pin lands on exactly one netlist net;
         // authored nets neither split nor merge.
-        let nl: Netlist = KicadCli::new(env).netlist(&sch).unwrap();
+        let nl: Netlist = env.netlist(&sch).unwrap();
         let mut authored_to_nl: HashMap<&str, Option<usize>> = HashMap::new();
         for block in design.blocks.values() {
             for (refdes, comp) in &block.components {

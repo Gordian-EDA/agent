@@ -1,13 +1,12 @@
 [package]
-name = "kicad-cli"
+name = "kicad"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Typed Rust wrapper over the kicad-cli binary (DRC/ERC/plot/export)."
+description = "KiCad installation discovery and typed kicad-cli operations."
 
 [dependencies]
-kicad-env = { path = "../kicad-env" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 quick-xml.workspace = true

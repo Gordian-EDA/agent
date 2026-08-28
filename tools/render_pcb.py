@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Render a .kicad_pcb to a clean, professional 2D board PNG using KiCAD's own
-plotter (kicad-cli) plus a cairosvg rasterizer.
+plotter (`kicad-cli`) plus a cairosvg rasterizer.
 
 This is the *artifact* render the PCB visual critic evaluates: copper traces and
 pads are visible (unlike a 3D soldermask shot), silkscreen shows references and
@@ -11,7 +11,7 @@ Usage:
     python3 tools/render_pcb.py BOARD.kicad_pcb [-o OUT.png] [--scale N]
                                 [--layers L1,L2,...] [--side front|back]
 
-Requires: kicad-cli (KiCAD >= 8) on PATH, and `cairosvg` (pip/uv install).
+Requires: `kicad-cli` (KiCad 9 or 10) on PATH, and `cairosvg` (pip/uv install).
 """
 import argparse
 import os
@@ -28,7 +28,7 @@ BACK_LAYERS = "B.Cu,F.Cu,B.SilkS,Edge.Cuts"
 
 def render_3d(board: str, out: str, side: str, width: int, height: int) -> None:
     """Photorealistic 3D 'beauty' render via KiCAD's raytracer — green soldermask,
-    ENIG pads, white silk. No SVG/cairosvg step (kicad-cli writes the PNG)."""
+    ENIG pads, white silk. No SVG/cairosvg step (`kicad-cli` writes the PNG)."""
     cmd = [
         "kicad-cli", "pcb", "render",
         "--side", side,

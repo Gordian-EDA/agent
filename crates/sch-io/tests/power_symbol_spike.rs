@@ -1,13 +1,12 @@
 //! SPIKE (spec "day-one"): KiCAD power symbols drive nets by their Value.
 //! If this fails, STOP and re-design Phase 2's power-symbol approach.
 
-use kicad_cli::KicadCli;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use sch_io::write::SchematicWriter;
 
 #[test]
 fn power_symbol_value_names_the_net() {
-    let Some(env) = KicadEnv::detect() else {
+    let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
@@ -37,7 +36,7 @@ fn power_symbol_value_names_the_net() {
     let sch = tmp.path().join("spike.kicad_sch");
     std::fs::write(&sch, w.finish()).unwrap();
 
-    let nl = KicadCli::new(&env).netlist(&sch).expect("netlist");
+    let nl = env.netlist(&sch).expect("netlist");
 
     eprintln!("--- netlist components ---");
     for c in &nl.components {
@@ -72,7 +71,7 @@ fn power_symbol_value_names_the_net() {
     );
 
     // (d) the coincident PWR_FLAG drives GND -> zero ERC errors on that net.
-    let erc = KicadCli::new(&env).erc(&sch).expect("erc");
+    let erc = env.erc(&sch).expect("erc");
 
     eprintln!("--- ERC violations ---");
     for v in &erc.violations {

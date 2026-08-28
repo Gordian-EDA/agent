@@ -11,8 +11,8 @@ sch-place = { path = "../sch-place" }
 sch-io = { path = "../sch-io" }
 circuit-lang = { path = "../circuit-lang" }
 circuit-graph = { path = "../circuit-graph" }
-kicad-env = { path = "../kicad-env" }
 kicad-symbol = { path = "../kicad-symbol" }
+kicad = { path = "../kicad" }
 geom = { path = "../geom" }
 indexmap.workspace = true
 serde_json.workspace = true
@@ -21,5 +21,4 @@ rayon.workspace = true
 [dev-dependencies]
 anneal-place = { path = "../anneal-place" }
 spine-place = { path = "../spine-place" }
-kicad-cli = { path = "../kicad-cli" }
 tempfile.workspace = true

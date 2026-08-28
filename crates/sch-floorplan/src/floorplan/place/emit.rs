@@ -3,12 +3,14 @@
 //! (`emit_strategy`/`prepare_writer`), and assemble the routed `SchematicWriter`
 //! (`build_writer`, `compose_writers`).
 
+#![allow(clippy::items_after_test_module)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use circuit_lang::model::{Component, Design, PinTarget};
 use circuit_lang::{PinType, find_pin};
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::SymbolGeometry;
 
@@ -22,18 +24,6 @@ use sch_place::item::{Incidence, Item};
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
 // `geom::union_find`, shared with circuit-lang's pin reconciler.
 use sch_place::ir::{Cell, LayoutIr, Orient};
-
-/// Read the engine [`PlaceOptions`] from the environment at problem construction —
-/// the env coupling stays here at the composition root, so the engines themselves
-/// never touch `std::env`. (Other `MULTISHEET_REFINE` reads scattered through this
-/// crate steer non-engine layout passes and stay as direct env reads.)
-pub(crate) fn place_options_from_env() -> sch_place::place::PlaceOptions {
-    sch_place::place::PlaceOptions {
-        debug_timing: std::env::var("DEBUG_SA_TIME").is_ok(),
-        force_fast: std::env::var("MULTISHEET_REFINE").is_ok(),
-        motif_tile: std::env::var("MOTIF_TILE").is_ok(),
-    }
-}
 
 /// Compose every block's per-block `layout:` grid into one global relative seed:
 /// refdes → (grid col, grid row). Each gridded block occupies its own column band
@@ -262,7 +252,7 @@ mod resolve_pin_tests {
 /// Emit a complete `.kicad_sch`. Pass `ir: None` for connectivity inference (production);
 /// `Some(ir)` for a hand-tuned / sidecar frame (validation fixtures).
 pub fn emit_strategy(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     design: &Design,
     engine: Box<dyn PlacementEngine>,
     ir: Option<LayoutIr>,
@@ -279,27 +269,27 @@ pub fn emit_strategy(
 /// This is the shared body of `emit_strategy` and the multi-block
 /// `emit_anneal_writer` compose entry, so both judge the same geometry.
 pub(crate) fn prepare_writer(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     design: &Design,
     ir: Option<LayoutIr>,
     engine: Box<dyn PlacementEngine>,
 ) -> io::Result<(SchematicWriter, EmitOutput)> {
     let mut problem = SchematicPlaceProblem::from_design(env, design)?;
-    if std::env::var("DEBUG_PLACE").is_ok() {
+    if problem.options.debug_timing {
         eprintln!("[place] engine = {}", engine.name());
     }
     let placement = engine.place(env, design, &mut problem, ir);
     let ir = placement.ir;
 
     let detected_idioms = ir.idioms.clone();
-    let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
+    let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir, problem.options);
     let evaluator = RoutedEvaluator::new(&realizer);
     let mut w = realizer.realize_writer(
         design.name.as_deref(),
         &problem.items,
         RouteRealization::ShippedSheet,
     )?;
-    if std::env::var_os("FLOORPLAN_SHORT_DIAG").is_some() {
+    if problem.options.debug_timing {
         diagnose_shorts(env, &w, &problem.items, &problem.inc, design);
     }
     add_orphan_label_columns(&mut w, design, &problem.inc);
@@ -320,7 +310,7 @@ pub(crate) fn prepare_writer(
 
 /// Lay out one block group and return its finalized writer plus readability metadata.
 pub fn emit_group(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     design: &Design,
     engine: Box<dyn PlacementEngine>,
 ) -> io::Result<(SchematicWriter, EmitOutput)> {
@@ -334,7 +324,7 @@ pub fn emit_group(
 /// each writer to its tile and folds them into one. Forces the premium anneal so
 /// composed groups match the agent's single-block quality.
 pub fn emit_writer(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     design: &Design,
     engine: Box<dyn PlacementEngine>,
 ) -> io::Result<SchematicWriter> {
@@ -554,14 +544,16 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
 /// (like `prepare`'s wire-split): two rails whose risers are collinear short, so
 /// the shipped sheet fans them apart, but the per-move scorer skips it (the fan
 /// is a transient mid-search artifact that would churn the placement otherwise).
+#[allow(clippy::too_many_arguments)]
 pub fn build_writer(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     title: Option<&str>,
     items: &[Item],
     inc: &Incidence,
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
     fan_risers: bool,
+    multisheet_refine: bool,
 ) -> io::Result<SchematicWriter> {
     let mut w = SchematicWriter::new();
     if let Some(name) = title {
@@ -603,6 +595,7 @@ pub fn build_writer(
         needs_flag,
         &mut flag_points,
         fan_risers,
+        multisheet_refine,
     )?;
     for net in needs_flag {
         if let Some((at, angle)) = flag_points.get(net) {
@@ -617,11 +610,11 @@ pub fn build_writer(
 /// say). KiCAD flags an undriven power-input pin as an error, so each such net
 /// gets exactly one flag.
 pub(crate) fn compute_needs_flag(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     items: &[Item],
     ir: &LayoutIr,
 ) -> BTreeSet<String> {
-    let provider = SymbolTable::from_env(env);
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let (mut driven, mut power_input) = (BTreeSet::new(), BTreeSet::new());
     for it in items {
         let Some(meta) = provider.symbol(&it.part) else {
@@ -653,7 +646,7 @@ pub(crate) fn compute_needs_flag(
 // Gather + incidence.
 // ---------------------------------------------------------------------------
 
-pub(crate) fn gather(env: &KicadEnv, design: &Design) -> io::Result<Vec<Item>> {
+pub(crate) fn gather(env: &KicadInstallation, design: &Design) -> io::Result<Vec<Item>> {
     let mut items = Vec::new();
     for block in design.blocks.values() {
         for (refdes, comp) in &block.components {
@@ -669,7 +662,7 @@ pub(crate) fn gather(env: &KicadEnv, design: &Design) -> io::Result<Vec<Item>> {
             if comp.part.starts_with("power:") || comp.part.starts_with("label:") {
                 continue;
             }
-            let geom = SymbolGeometry::load(env, &comp.part)?;
+            let geom = SymbolGeometry::load(env.symbol_dir(), &comp.part)?;
             let pins = resolve_pins(comp, &geom); // same order/len as geom.pins
             // An IC/connector (>=3 pins) with no authored value shows its part
             // name (the MPN) so the part is identifiable on the sheet — the

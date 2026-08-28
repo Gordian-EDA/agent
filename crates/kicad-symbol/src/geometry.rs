@@ -41,8 +41,6 @@ use geom::{Point2, Rect};
 use kiutils_kicad::{SymPin, Symbol, SymbolLibFile};
 use kiutils_sexpr::{Atom, Node, parse_one};
 
-use kicad_env::KicadEnv;
-
 /// Local geometry of a single symbol pin, in symbol coordinates.
 ///
 /// `at` is the pin's connection-point root in millimetres (symbol Y grows
@@ -100,21 +98,21 @@ impl SymbolGeometry {
     /// Load pin geometry and the embeddable definition for `lib_id`
     /// (`"Lib:Name"`) from the detected KiCAD symbol libraries. Memoized per
     /// thread by (symbol dir, lib_id).
-    pub fn load(env: &KicadEnv, lib_id: &str) -> io::Result<SymbolGeometry> {
+    pub fn load(symbol_dir: &Path, lib_id: &str) -> io::Result<SymbolGeometry> {
         let key = (
-            env.symbol_dir.to_string_lossy().into_owned(),
+            symbol_dir.to_string_lossy().into_owned(),
             lib_id.to_string(),
         );
         if let Some(g) = GEOM_CACHE.with(|c| c.borrow().get(&key).cloned()) {
             return Ok(g);
         }
-        let g = Self::load_uncached(env, lib_id)?;
+        let g = Self::load_uncached(symbol_dir, lib_id)?;
         GEOM_CACHE.with(|c| c.borrow_mut().insert(key, g.clone()));
         Ok(g)
     }
 
     /// The actual library read + resolve (uncached). See [`Self::load`].
-    fn load_uncached(env: &KicadEnv, lib_id: &str) -> io::Result<SymbolGeometry> {
+    fn load_uncached(symbol_dir: &Path, lib_id: &str) -> io::Result<SymbolGeometry> {
         let (lib, name) = lib_id.split_once(':').ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -122,7 +120,7 @@ impl SymbolGeometry {
             )
         })?;
 
-        let library = load_symbol_library(&env.symbol_dir, lib)?;
+        let library = load_symbol_library(symbol_dir, lib)?;
         let symbols = &library.symbols;
 
         let sym = find_symbol(symbols, name).ok_or_else(|| {

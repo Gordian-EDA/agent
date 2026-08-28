@@ -14,8 +14,8 @@ const SUGGEST_LIMIT: usize = 3;
 
 /// The single concrete symbol oracle: resolves `Lib:Name` ids to pin metadata.
 ///
-/// Backed either by the installed KiCAD symbol libraries ([`SymbolTable::from_env`]
-/// / [`from_symbol_dir`](SymbolTable::from_symbol_dir)) -- each KiCad 9 flat
+/// Backed either by installed KiCAD symbol libraries
+/// ([`from_symbol_dir`](SymbolTable::from_symbol_dir)) -- each KiCad 9 flat
 /// `.kicad_sym` or KiCad 10 split `.kicad_symdir` library is parsed once on
 /// first reference and cached -- or by an in-memory fixture set for tests
 /// ([`mock`](SymbolTable::mock) / [`with_basics`](SymbolTable::with_basics)).
@@ -40,11 +40,6 @@ impl SymbolTable {
             symbol_dir: Some(symbol_dir),
             ..Default::default()
         }
-    }
-
-    /// A table over a detected KiCAD installation's symbol directory.
-    pub fn from_env(env: &kicad_env::KicadEnv) -> Self {
-        Self::from_symbol_dir(env.symbol_dir.clone())
     }
 
     /// An empty in-memory table (no disk backing); seed it with [`mock_add`](Self::mock_add).

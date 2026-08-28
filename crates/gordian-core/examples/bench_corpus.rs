@@ -4,14 +4,13 @@
 //!
 //! Usage: cargo run --release -p gordian-core --example bench_corpus -- [--out DIR] FILE.circuit.yaml ...
 
-use kicad_cli::KicadCli;
-use kicad_env::KicadEnv;
+use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use std::path::{Path, PathBuf};
 
 fn main() -> anyhow::Result<()> {
-    let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let provider = SymbolTable::from_env(&env);
+    let env = KicadInstallation::detect().expect("no KiCAD environment detected");
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
 
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut out_dir = PathBuf::from("/tmp/bench");
@@ -56,7 +55,7 @@ fn main() -> anyhow::Result<()> {
 
 #[allow(clippy::type_complexity)] // example harness: a flat metrics tuple is clearer than a one-off struct
 fn bench_one(
-    env: &KicadEnv,
+    env: &KicadInstallation,
     provider: &SymbolTable,
     yaml_path: &Path,
     out_dir: &Path,
@@ -107,7 +106,7 @@ fn bench_one(
         }
     }
     let svg_dir = tempfile::tempdir()?;
-    let svg_path = KicadCli::new(env).export_svg_opts(&sch_path, svg_dir.path(), true)?;
+    let svg_path = env.export_svg_opts(&sch_path, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
     let png = gordian_runtime::render::svg_to_png(&svg, 1600)?;
     std::fs::write(out_dir.join(format!("{stem}.png")), png)?;

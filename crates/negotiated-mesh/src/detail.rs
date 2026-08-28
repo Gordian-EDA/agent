@@ -43,18 +43,16 @@
 //! reported as a [`FailedNet`] carrying the leaf id — never panicked, never
 //! silently dropped. The result is serializable and byte-stable across runs.
 
-use crate::astar::{self, AStarCosts, DIAG_COST, State};
 use crate::crossing::{CellJob, CrossingAssignment, Terminal, TerminalKind};
-use crate::grid::{self, Cell, RouteGrid};
 use crate::heuristics::{
     connection_crossing_pressures, connection_obstacle_pressure_um,
     connection_segment_obstacle_pressure_um, connection_span_um,
 };
 use crate::mesh::{CapacityMesh, LeafId};
-use crate::problem::Rect;
-use crate::problem::{
-    FailedNet, LayerRef, Point2, RouteProblem, RouteSolution, Trace, Via, ViaSpan,
-};
+use grid_astar::astar::{self, AStarCosts, DIAG_COST, State};
+use grid_astar::grid::{self, Cell, RouteGrid};
+use pcb_model::Rect;
+use pcb_model::{FailedNet, LayerRef, Point2, RouteProblem, RouteSolution, Trace, Via, ViaSpan};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -77,7 +75,7 @@ pub struct CellTrace {
 }
 
 /// A via site dropped inside a cell where the routed path changed layer. The via
-/// is through-hole (joins every layer); Task 3 emits the [`crate::problem::Via`].
+/// is through-hole (joins every layer); Task 3 emits the [`pcb_model::Via`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CellVia {
@@ -877,9 +875,9 @@ fn cell_route_candidate_key(
         .collect();
     let solution = cell_routes_to_solution(problem, routes, &failed_names);
     DetailPassCandidateKey {
-        geometry: crate::router::geometry_violations(problem, &solution),
+        geometry: grid_astar::router::geometry_violations(problem, &solution),
         fail_count: failures.len(),
-        failed_pad_weight: crate::problem::failed_pad_weight(problem, failures),
+        failed_pad_weight: pcb_model::failed_pad_weight(problem, failures),
     }
 }
 
@@ -1179,7 +1177,7 @@ impl FinishAttempt {
     }
 }
 
-fn finisher_attempts(conn: &crate::problem::Connection, has_waypoints: bool) -> Vec<FinishAttempt> {
+fn finisher_attempts(conn: &pcb_model::Connection, has_waypoints: bool) -> Vec<FinishAttempt> {
     let mut attempts = Vec::with_capacity(3);
     if same_terminal_layer(conn) {
         attempts.push(FinishAttempt::Planar);
@@ -1191,7 +1189,7 @@ fn finisher_attempts(conn: &crate::problem::Connection, has_waypoints: bool) -> 
     attempts
 }
 
-fn same_terminal_layer(conn: &crate::problem::Connection) -> bool {
+fn same_terminal_layer(conn: &pcb_model::Connection) -> bool {
     conn.points_to_connect.first().is_none_or(|first| {
         conn.points_to_connect
             .iter()
@@ -1225,7 +1223,7 @@ fn finisher_candidate_key(
 ) -> FinisherCandidateKey {
     FinisherCandidateKey {
         fail_count: failures.len(),
-        failed_pad_weight: crate::problem::failed_pad_weight(problem, failures),
+        failed_pad_weight: pcb_model::failed_pad_weight(problem, failures),
         via_count: cell_route_via_count(routes),
         wirelength_um: cell_route_wirelength_um(routes),
     }
@@ -1364,7 +1362,7 @@ fn mark_path_capsule(grid: &mut RouteGrid, path: &[State], conn: usize, halo: f6
 /// Re-route one failed net on the shared full-board `grid` — the hotspot finisher
 /// (slice 3, Task 3.5).
 ///
-/// Mirrors the slice-1 per-net tree routing ([`crate::router::route`]) on the
+/// Mirrors the slice-1 per-net tree routing ([`grid_astar::router::route`]) on the
 /// detailed stage's fine grid with the diagonal-safe swept-clearance capsule
 /// ([`mark_segment_capsule`]): route point 0 seeds a routed tree; each further
 /// `points_to_connect` (and, when `waypoints` is non-empty, each wall-gap waypoint
@@ -1379,7 +1377,7 @@ fn mark_path_capsule(grid: &mut RouteGrid, path: &[State], conn: usize, halo: f6
 /// board, not one leaf, and Task 3 stitches purely by net + endpoint identity.
 #[allow(clippy::too_many_arguments)]
 fn finish_net(
-    conn: &crate::problem::Connection,
+    conn: &pcb_model::Connection,
     waypoints: &[Waypoint],
     grid: &mut RouteGrid,
     layer_count: usize,
@@ -2169,11 +2167,7 @@ fn terminal_cell(grid: &RouteGrid, t: &Terminal, layer_count: usize) -> State {
 }
 
 /// The grid cell + layer of a connection route point (the finisher's terminals).
-fn route_point_cell(
-    grid: &RouteGrid,
-    pt: &crate::problem::RoutePoint,
-    layer_count: usize,
-) -> State {
+fn route_point_cell(grid: &RouteGrid, pt: &pcb_model::RoutePoint, layer_count: usize) -> State {
     let layer = pt
         .layer
         .index(layer_count as u32)
@@ -2185,7 +2179,7 @@ fn route_point_cell(
 
 /// Connection name → slice-1 global net rank (ascending bounding-box
 /// half-perimeter, ties by name). Lower rank routes first. Matches
-/// [`crate::router`]'s `net_order` so the per-cell order is consistent with the
+/// [`grid_astar::router`]'s `net_order` so the per-cell order is consistent with the
 /// full-board router.
 fn net_rank(problem: &RouteProblem) -> BTreeMap<String, usize> {
     let mut order: Vec<usize> = (0..problem.connections.len()).collect();
@@ -2226,7 +2220,7 @@ mod tests {
     use super::*;
     use crate::crossing::assign_crossings;
     use crate::pathing::global_route;
-    use crate::problem::{Connection, Obstacle, Rect, RoutePoint};
+    use pcb_model::{Connection, Obstacle, Rect, RoutePoint};
     use std::path::Path;
 
     fn load(name: &str) -> RouteProblem {
@@ -3471,7 +3465,7 @@ mod tests {
         // The whole detailed solution (per-cell + finisher copper) lints CLEAN: the
         // capsule MARK kept the diagonal finisher runs the full clearance apart.
         let r = crate::pipeline::route_detailed(&p);
-        let vs = crate::lint::lint(&p, &r.solution);
+        let vs = drc_lint::lint::lint(&p, &r.solution);
         assert!(
             vs.is_empty(),
             "finisher diagonals must lint clean, got {vs:?}"

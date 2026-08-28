@@ -19,5 +19,5 @@ mod idiom;
 mod infer;
 pub(crate) mod place;
 
-pub use infer::{baseline_ir, infer_ir};
+pub use infer::{baseline_ir, infer_ir, infer_ir_with_options};
 pub use place::{SchematicPlaceProblem, compose_writers, emit_group, emit_strategy, emit_writer};

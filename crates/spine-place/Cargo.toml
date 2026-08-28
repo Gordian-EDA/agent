@@ -10,8 +10,7 @@ description = "Deterministic grammar-typesetting schematic placement engine: par
 circuit-lang = { path = "../circuit-lang" }
 circuit-graph = { path = "../circuit-graph" }
 geom = { path = "../geom" }
-anneal-place = { path = "../anneal-place" }
-kicad-env = { path = "../kicad-env" }
+kicad = { path = "../kicad" }
 kicad-symbol = { path = "../kicad-symbol" }
 sch-place = { path = "../sch-place" }
 sch-floorplan = { path = "../sch-floorplan" }

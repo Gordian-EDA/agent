@@ -12,9 +12,9 @@
 //! prompt. JSON retries are caller-controlled; a total parse failure degrades to
 //! `(0.0, [])` (conservative — nothing actionable).
 
-use gordian_llm::{Binary, ChatMessage, ContentPart, MessageContent, Provider, completed_text};
 use anyhow::Result;
 use futures::future::join_all;
+use gordian_llm::{Binary, ChatMessage, ContentPart, MessageContent, Provider, completed_text};
 use serde_json::Value;
 
 /// One independent NETLIST review pass, generalized: the DOMAIN passes the review

@@ -7,9 +7,9 @@
 //! so any layer). Same-owner pairs and obstacle↔obstacle pairs never conflict.
 
 use crate::ctx::{CopperGeom, CopperItem};
-use crate::problem::LayerRef;
 use crate::rules::geom::{EPS, share_owner};
 use crate::{DrcCtx, Finding, Rule};
+use pcb_model::LayerRef;
 
 /// Flags any foreign copper pair whose edges are closer than `problem.clearance`.
 pub struct PairClearanceRule;

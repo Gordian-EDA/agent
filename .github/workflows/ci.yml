@@ -10,18 +10,22 @@ env:
 
 jobs:
   test:
-    name: build · test
+    name: build · test · KiCAD ${{ matrix.kicad }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        kicad: [9, 10]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The engines and many tests resolve real KiCAD symbol/footprint libraries; install KiCAD.
       # Tests that need a model provider (the LLM agent loop) skip gracefully without API keys.
-      - name: Install KiCAD
+      - name: Install KiCAD ${{ matrix.kicad }}
         run: |
-          sudo add-apt-repository --yes ppa:kicad/kicad-9.0-releases
+          sudo add-apt-repository --yes ppa:kicad/kicad-${{ matrix.kicad }}.0-releases
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends kicad
       - name: Build
@@ -45,3 +49,23 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  live-kicad:
+    name: live KiCAD ${{ matrix.kicad }} IPC
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        kicad: [9, 10]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install KiCAD ${{ matrix.kicad }} and headless display
+        run: |
+          sudo add-apt-repository --yes ppa:kicad/kicad-${{ matrix.kicad }}.0-releases
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends kicad xvfb
+      - name: Live IPC integration tests
+        run: tools/live_kicad_test.sh ${{ matrix.kicad }}

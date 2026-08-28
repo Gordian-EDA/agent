@@ -12,14 +12,15 @@
 //! - [`floorplan`] — the pipeline ENTRY POINTS callers run (`infer_ir` / `emit_strategy`
 //!   / `emit_writer` / `compose_writers`). The `place` submodule's internals are
 //!   `pub(crate)`: a caller cannot reach `floorplan::place::<internal>`.
-//! - [`contract`] — THE engine API. The measurement-based engines import ONLY from here;
-//!   it re-publishes the realization library + the stable layout geometry they need, so a
-//!   `place`-internal rename never touches an engine crate. See the module docs.
+//! - [`contract`] — the small stable engine API.
+//! - [`engine_support`] — lower-level geometry and realization helpers for engine
+//!   implementations; public because engines live in separate crates.
 //!
 //! The shared placement vocabulary lives in `sch-place`; pure geometry and grid
 //! snapping live in `geom`; schematic I/O lives in `sch-io`.
 
 pub mod contract;
+pub mod engine_support;
 pub mod floorplan;
 
 pub use sch_io::{label, read, wire, write};

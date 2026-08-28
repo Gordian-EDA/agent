@@ -5,9 +5,9 @@
 //! they are never flagged — only emitted traces and vias.
 
 use crate::ctx::{CopperGeom, CopperItem};
-use crate::problem::RouteProblem;
 use crate::rules::geom::EPS;
 use crate::{DrcCtx, Finding, Rule};
+use pcb_model::RouteProblem;
 
 /// Flags any trace or via whose copper extent (segment fattened by its
 /// half-width, via by its radius) pokes past the board's `bounds`.

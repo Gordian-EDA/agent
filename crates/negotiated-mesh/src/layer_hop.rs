@@ -9,13 +9,13 @@
 use crate::heuristics::{
     connection_crossing_pressures, connection_segment_obstacle_pressure_um, connection_span_um,
 };
-use crate::problem::{
-    Capabilities, FailedNet, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult,
-    RouteSolution, Router, Trace, Via, ViaSpan,
-};
 use crate::quality::{
     keep_route_candidate as keep_candidate, route_quality, trace_proximity_penalty_um,
     trace_route_cost_um,
+};
+use pcb_model::{
+    Capabilities, FailedNet, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult,
+    RouteSolution, Router, Trace, Via, ViaSpan,
 };
 use std::collections::BTreeSet;
 
@@ -203,7 +203,7 @@ fn failed_priority_cmp_with_metrics(
 fn route_mixed_layer_tree(
     problem: &RouteProblem,
     solution: &RouteSolution,
-    conn: &crate::problem::Connection,
+    conn: &pcb_model::Connection,
 ) -> Option<RouteSolution> {
     if conn.points_to_connect.len() < 2 {
         return None;
@@ -245,7 +245,7 @@ fn route_mixed_layer_tree(
 fn route_tree_on_layer(
     problem: &RouteProblem,
     solution: &RouteSolution,
-    conn: &crate::problem::Connection,
+    conn: &pcb_model::Connection,
     layer: &LayerRef,
 ) -> Option<RouteSolution> {
     let mut best: Option<(RouteSolution, LayerHopSolutionKey)> = None;
@@ -269,7 +269,7 @@ fn route_tree_on_layer(
 fn route_tree_on_layer_from_root(
     problem: &RouteProblem,
     solution: &RouteSolution,
-    conn: &crate::problem::Connection,
+    conn: &pcb_model::Connection,
     layer: &LayerRef,
     root: usize,
 ) -> Option<RouteSolution> {
@@ -319,7 +319,7 @@ fn route_tree_on_layer_from_root(
 fn route_leg_on_layer(
     problem: &RouteProblem,
     solution: &RouteSolution,
-    conn: &crate::problem::Connection,
+    conn: &pcb_model::Connection,
     layer: &LayerRef,
     a: Point2,
     b: Point2,
@@ -408,7 +408,7 @@ fn trace_bends(trace: &Trace) -> u32 {
         .count() as u32
 }
 
-fn mixed_layers(points: &[crate::problem::RoutePoint]) -> bool {
+fn mixed_layers(points: &[pcb_model::RoutePoint]) -> bool {
     points
         .first()
         .is_some_and(|first| points.iter().any(|pt| pt.layer != first.layer))
@@ -448,7 +448,7 @@ fn push_via_if_layer_differs(
 
 fn candidate_layers(problem: &RouteProblem, terminal_layers: &[u32]) -> Vec<LayerRef> {
     let layer_count = problem.layer_count.max(1);
-    let plane_layers: BTreeSet<u32> = crate::router::plane_layers(layer_count as usize)
+    let plane_layers: BTreeSet<u32> = grid_astar::router::plane_layers(layer_count as usize)
         .into_iter()
         .collect();
     let mut layer_idxs = Vec::new();
@@ -569,7 +569,7 @@ fn push_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
     }
 }
 
-fn estimated_required_vias(problem: &RouteProblem, conn: &crate::problem::Connection) -> usize {
+fn estimated_required_vias(problem: &RouteProblem, conn: &pcb_model::Connection) -> usize {
     if !mixed_layers(&conn.points_to_connect) || conn.points_to_connect.len() < 2 {
         return usize::MAX;
     }
@@ -704,12 +704,12 @@ fn candidate_is_geometry_clean(
     solution: &RouteSolution,
     connection: &str,
 ) -> bool {
-    for violation in crate::lint::lint(problem, solution) {
+    for violation in drc_lint::lint::lint(problem, solution) {
         match violation {
-            crate::lint::DrcViolation::Connectivity {
-                violation: crate::connectivity::Violation::CrossNetMerge { ref a, ref b },
+            drc_lint::lint::DrcViolation::Connectivity {
+                violation: drc_lint::connectivity::Violation::CrossNetMerge { ref a, ref b },
             } if a == connection || b == connection => return false,
-            crate::lint::DrcViolation::Connectivity { .. } => {}
+            drc_lint::lint::DrcViolation::Connectivity { .. } => {}
             _ => return false,
         }
     }
@@ -718,8 +718,8 @@ fn candidate_is_geometry_clean(
 
 fn reconcile(problem: &RouteProblem, solution: &mut RouteSolution, failed: &mut Vec<FailedNet>) {
     crate::via_cleanup::normalize_redundant_vias(problem, solution);
-    let mut dropped = crate::lint::drop_violating_copper(problem, solution);
-    dropped.extend(crate::lint::drop_unconnected_copper(problem, solution));
+    let mut dropped = drc_lint::lint::drop_violating_copper(problem, solution);
+    dropped.extend(drc_lint::lint::drop_unconnected_copper(problem, solution));
 
     let known: BTreeSet<String> = failed.iter().map(|f| f.connection.clone()).collect();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -747,7 +747,7 @@ fn layer_ref(layer: u32, layer_count: u32) -> LayerRef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Connection, Obstacle, Rect, RoutePoint, Trace};
+    use pcb_model::{Connection, Obstacle, Rect, RoutePoint, Trace};
 
     fn conn(name: &str, pts: &[(f64, f64, &str)]) -> Connection {
         Connection {
@@ -886,7 +886,7 @@ mod tests {
         assert!(r.failed.is_empty(), "{:?}", r.failed);
         assert_eq!(r.solution.traces.len(), 1);
         assert_eq!(r.solution.vias.len(), 1);
-        assert!(crate::lint::lint(&p, &r.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1017,7 +1017,7 @@ mod tests {
         assert!(r.failed.is_empty(), "{:?}", r.failed);
         assert!(r.solution.traces.is_empty());
         assert_eq!(r.solution.vias.len(), 1);
-        assert!(crate::lint::lint(&p, &r.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1034,7 +1034,7 @@ mod tests {
         assert_eq!(r.solution.traces.len(), 1);
         assert_eq!(r.solution.traces[0].layer, LayerRef::bottom());
         assert_eq!(r.solution.vias.len(), 1);
-        assert!(crate::lint::lint(&p, &r.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1071,7 +1071,7 @@ mod tests {
             r.solution.traces
         );
         assert_eq!(r.solution.vias.len(), 1);
-        assert!(crate::lint::lint(&p, &r.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1100,7 +1100,7 @@ mod tests {
             "layer-hop tree should avoid the 24mm fixed-root star: {:?}",
             r.solution
         );
-        assert!(crate::lint::lint(&p, &r.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1143,7 +1143,7 @@ mod tests {
             "expected bottom-layer detour, got {:?}",
             r.solution
         );
-        assert!(crate::lint::lint(&p, &r.solution).is_empty());
+        assert!(drc_lint::lint::lint(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1191,7 +1191,7 @@ mod tests {
             trace.path
         );
         solution.traces.push(trace);
-        assert_eq!(crate::router::geometry_violations(&p, &solution), 0);
+        assert_eq!(grid_astar::router::geometry_violations(&p, &solution), 0);
     }
 
     #[test]

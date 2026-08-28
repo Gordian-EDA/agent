@@ -16,4 +16,4 @@ indexmap.workspace = true
 strsim.workspace = true
 
 [dev-dependencies]
-kicad-env = { path = "../kicad-env" }
+kicad = { path = "../kicad" }

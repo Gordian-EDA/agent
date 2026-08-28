@@ -9,10 +9,10 @@ use super::geometry::{
     rotated_copper_bbox, sign_nonzero,
 };
 use super::legalize::collides;
-use place_model::{LogicalNet, PlaceProblem, PlacementHints};
-use place_model::decoupling_pairs;
 use super::route::PlaceOpts;
-use crate::problem::{Point2, Rect};
+use pcb_model::{Point2, Rect};
+use place_model::decoupling_pairs;
+use place_model::{LogicalNet, PlaceProblem, PlacementHints};
 
 /// Force-directed iteration count.
 const FORCE_ITERS: usize = 200;
