@@ -12,26 +12,26 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
-use drc_lint::lint::lint;
+use pcb_drc::lint::lint;
 use gordian_tools_pcb::apply_direct_rescue_fallback;
 use gordian_tools_pcb::corpus::{
     load_corpus_board, route_problem_for_placement, run_kicad_drc,
 };
 use kicad_env::KicadEnv;
 use kicad_footprint::FootprintCatalog;
-use negotiated_mesh::crossing::{
+use pcb_route_mesh::crossing::{
     AssignedCrossing, AssignmentFailure, CellJob, CrossingAssignment, TerminalKind,
     assign_crossings,
 };
-use negotiated_mesh::detail::{self, DetailPassDiagnostic};
-use negotiated_mesh::mesh::CapacityMesh;
-use negotiated_mesh::pathing::global_route_with_mesh;
-use negotiated_mesh::pipeline::{
+use pcb_route_mesh::detail::{self, DetailPassDiagnostic};
+use pcb_route_mesh::mesh::CapacityMesh;
+use pcb_route_mesh::pathing::global_route_with_mesh;
+use pcb_route_mesh::pipeline::{
     RouteAutoRun, RouteEngineAttempt, route_auto_with_diagnostics, route_detailed_with_global,
     route_mesh_with_diagnostics, route_sequential_with_diagnostics,
 };
-use negotiated_mesh::problem::{Point2, RouteProblem, RouteQuality, RouteResult, Router};
-use negotiated_mesh::router::{GridAStarRouter, geometry_violations};
+use pcb_route_mesh::problem::{Point2, RouteProblem, RouteQuality, RouteResult, Router};
+use pcb_route_mesh::router::{GridAStarRouter, geometry_violations};
 
 const DEFAULT_BOARDS: &[&str] = &[
     "rc-divider",
@@ -928,7 +928,7 @@ fn obstacle_owner(net_name: &str, owners: &[String]) -> String {
     }
 }
 
-fn layer_list(layers: &[negotiated_mesh::problem::LayerRef]) -> String {
+fn layer_list(layers: &[pcb_route_mesh::problem::LayerRef]) -> String {
     layers
         .iter()
         .map(|layer| layer.0.as_str())
@@ -1021,7 +1021,7 @@ impl RouterMode {
 }
 
 fn route_with_mode(
-    problem: &negotiated_mesh::problem::RouteProblem,
+    problem: &pcb_route_mesh::problem::RouteProblem,
     mode: RouterMode,
 ) -> RouteAutoRun {
     match mode {
@@ -1037,7 +1037,7 @@ fn route_with_mode(
 }
 
 fn route_mesh_detail_with_diagnostics(
-    problem: &negotiated_mesh::problem::RouteProblem,
+    problem: &pcb_route_mesh::problem::RouteProblem,
 ) -> RouteAutoRun {
     let started = Instant::now();
     let (result, global) = route_detailed_with_global(problem);
@@ -1050,7 +1050,7 @@ fn route_mesh_detail_with_diagnostics(
     }
 }
 
-fn route_grid_with_diagnostics(problem: &negotiated_mesh::problem::RouteProblem) -> RouteAutoRun {
+fn route_grid_with_diagnostics(problem: &pcb_route_mesh::problem::RouteProblem) -> RouteAutoRun {
     let grid = GridAStarRouter;
     let started = Instant::now();
     let result = grid.route(problem);
@@ -1064,7 +1064,7 @@ fn route_grid_with_diagnostics(problem: &negotiated_mesh::problem::RouteProblem)
 }
 
 fn attempt_summary(
-    problem: &negotiated_mesh::problem::RouteProblem,
+    problem: &pcb_route_mesh::problem::RouteProblem,
     result: &RouteResult,
     elapsed_ms: u128,
 ) -> RouteEngineAttempt {

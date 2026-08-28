@@ -1,16 +1,16 @@
 //! Stage-by-stage timing of the detailed router on a fixture, to find where the
-//! time actually goes. Usage: cargo run --release -p negotiated-mesh --example
+//! time actually goes. Usage: cargo run --release -p pcb-route-mesh --example
 //! profile_congested -- [fixture-name]  (default congested.json).
 
 use std::path::Path;
 use std::time::Instant;
 
-use negotiated_mesh::crossing::assign_crossings;
-use negotiated_mesh::detail::route_cells;
-use negotiated_mesh::mesh::CapacityMesh;
-use negotiated_mesh::pathing::global_route;
-use negotiated_mesh::pipeline::route_detailed;
-use negotiated_mesh::problem::RouteProblem;
+use pcb_route_mesh::crossing::assign_crossings;
+use pcb_route_mesh::detail::route_cells;
+use pcb_route_mesh::mesh::CapacityMesh;
+use pcb_route_mesh::pathing::global_route;
+use pcb_route_mesh::pipeline::route_detailed;
+use pcb_route_mesh::problem::RouteProblem;
 
 fn main() {
     let name = std::env::args()

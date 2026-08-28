@@ -1,4 +1,4 @@
-//! `negotiated-mesh` — the premium detailed PCB router.
+//! `pcb-route-mesh` — the premium detailed PCB router.
 //!
 //! A quadtree **capacity mesh** with **negotiated rip-up/reroute** global pathing
 //! (`mesh` + `pathing`), boundary `crossing` assignment, and per-cell `detail`
@@ -6,13 +6,13 @@
 //! `pcb-model` [`Router`](pcb_model::Router) trait. The generic
 //! [`pipeline::select_best`] selector ranks any injected `&[&dyn Router]` by
 //! routability then tidiness; [`pipeline::route_auto`] is the premium-portfolio
-//! convenience (direct line-of-sight + via-escape + channel + negotiated-mesh +
-//! grid-astar).
-//! Builds on `grid-astar` (the fallback router + grid/astar primitives); DRC via
-//! `drc-lint`; shared types from `pcb-model`.
+//! convenience (direct line-of-sight + via-escape + channel + pcb-route-mesh +
+//! pcb-route-grid).
+//! Builds on `pcb-route-grid` (the fallback router + grid/astar primitives); DRC via
+//! `pcb-drc`; shared types from `pcb-model`.
 
-pub use drc_lint::{connectivity, lint};
-pub use grid_astar::{astar, grid, router};
+pub use pcb_drc::{connectivity, lint};
+pub use pcb_route_grid::{astar, grid, router};
 pub use pcb_model as problem;
 
 pub(crate) mod channel;

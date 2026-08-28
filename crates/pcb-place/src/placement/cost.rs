@@ -2,15 +2,15 @@
 //! secondary selection key). The cost carries a SILK-GAP term so parts keep room
 //! for their reference designators (the recurring critic complaint). HPWL — the
 //! cheap quality number every engine reports — lives in the kernel
-//! ([`place_model::compute_hpwl`]) and is re-exported here.
+//! ([`pcb_place_api::compute_hpwl`]) and is re-exported here.
 
 use super::geometry::{
     part_edge_distance, part_placement_bounds_envelope, placement_envelope_at, rotated_copper_bbox,
 };
-use place_model::{LogicalNet, Pin, PlaceProblem};
+use pcb_place_api::{LogicalNet, Pin, PlaceProblem};
 use crate::problem::{LayerRef, Point2, Rect};
 
-pub(crate) use place_model::compute_hpwl_with_rotations;
+pub(crate) use pcb_place_api::compute_hpwl_with_rotations;
 
 /// SA cost weights (mm units), scaled like the schematic floorplan cost.
 pub(crate) const SA_OVERLAP_W: f64 = 1000.0; // hard: courtyard collision
@@ -480,7 +480,7 @@ pub(crate) fn place_cost(
 mod tests {
     use super::*;
     use crate::placement::geometry::courtyard_margin;
-    use place_model::{Part, PartPad};
+    use pcb_place_api::{Part, PartPad};
     use geom::Rect;
     use crate::problem::LayerRef;
 
@@ -528,7 +528,7 @@ mod tests {
             ],
             outline: None,
         };
-        let nets = place_model::derive_nets(&problem);
+        let nets = pcb_place_api::derive_nets(&problem);
         let rotations = vec![0.0; problem.parts.len()];
         let half = vec![(0.5, 0.5); problem.parts.len()];
         let margin = courtyard_margin(problem.clearance);
@@ -575,7 +575,7 @@ mod tests {
             ],
             outline: None,
         };
-        let nets = place_model::derive_nets(&problem);
+        let nets = pcb_place_api::derive_nets(&problem);
         let rotations = vec![0.0; problem.parts.len()];
         let pos = vec![
             Point2 { x: 5.0, y: 15.0 },
@@ -616,7 +616,7 @@ mod tests {
             ],
             outline: None,
         };
-        let nets = place_model::derive_nets(&problem);
+        let nets = pcb_place_api::derive_nets(&problem);
         let rotations = vec![0.0; problem.parts.len()];
         let pos = vec![
             Point2 { x: 5.0, y: 5.0 },
@@ -654,7 +654,7 @@ mod tests {
             ],
             outline: None,
         };
-        let nets = place_model::derive_nets(&problem);
+        let nets = pcb_place_api::derive_nets(&problem);
         let rotations = vec![0.0; problem.parts.len()];
         let pos = vec![
             Point2 { x: 5.0, y: 5.0 },
@@ -701,8 +701,8 @@ mod tests {
         let half = vec![(0.5, 0.5), (0.5, 0.5)];
         let margin = courtyard_margin(same_layer.clearance);
         let pos = vec![Point2 { x: 5.0, y: 5.0 }, Point2 { x: 15.0, y: 5.0 }];
-        let same_nets = place_model::derive_nets(&same_layer);
-        let split_nets = place_model::derive_nets(&split_layer);
+        let same_nets = pcb_place_api::derive_nets(&same_layer);
+        let split_nets = pcb_place_api::derive_nets(&split_layer);
 
         let same_cost = place_cost(
             &same_layer,

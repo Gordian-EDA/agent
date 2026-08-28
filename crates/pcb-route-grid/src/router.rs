@@ -99,7 +99,7 @@ pub fn via_clear_radius_cells(problem: &RouteProblem) -> usize {
 /// Route `problem` with the default design constants, but with the via-barrel
 /// clearance radius derived from the design rules so the slice-1 router does not
 /// drop a via that overhangs a foreign pad/trace. It can still produce other
-/// congestion artifacts; the selector (`negotiated-mesh`'s `select_best`)
+/// congestion artifacts; the selector (`pcb-route-mesh`'s `select_best`)
 /// reconciles connectivity and lints both engines, so a violating or phantom
 /// route never ships when a cleaner one exists.
 pub fn route(problem: &RouteProblem) -> RouteResult {

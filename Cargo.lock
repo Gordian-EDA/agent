@@ -633,25 +633,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "drc-core"
-version = "0.1.0"
-dependencies = [
- "geom",
- "pcb-model",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "drc-lint"
-version = "0.1.0"
-dependencies = [
- "drc-core",
- "pcb-model",
- "serde",
-]
-
-[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1044,24 +1025,24 @@ dependencies = [
  "circuit-lang",
  "cluster-place",
  "directories",
- "drc-lint",
  "futures",
  "genai",
  "geom",
  "gordian-llm",
  "gordian-runtime",
  "gordian-tools-pcb",
- "grid-astar",
  "indexmap 2.14.0",
  "kicad-cli",
  "kicad-env",
  "kicad-footprint",
  "kicad-ipc",
  "kicad-symbol",
- "negotiated-mesh",
+ "pcb-drc",
  "pcb-model",
  "pcb-place",
- "place-model",
+ "pcb-place-api",
+ "pcb-route-grid",
+ "pcb-route-mesh",
  "prost",
  "prost-types",
  "rayon",
@@ -1117,34 +1098,23 @@ dependencies = [
  "anyhow",
  "circuit-graph",
  "circuit-lang",
- "drc-lint",
  "geom",
  "gordian-runtime",
- "grid-astar",
  "kicad-cli",
  "kicad-env",
  "kicad-footprint",
  "kicad-ipc",
- "negotiated-mesh",
+ "pcb-drc",
  "pcb-model",
  "pcb-place",
- "place-model",
+ "pcb-place-api",
+ "pcb-route-grid",
+ "pcb-route-mesh",
  "prost-types",
  "sch-io",
  "serde",
  "serde_json",
  "tempfile",
-]
-
-[[package]]
-name = "grid-astar"
-version = "0.1.0"
-dependencies = [
- "drc-lint",
- "geom",
- "pcb-model",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1708,7 +1678,7 @@ dependencies = [
  "geom",
  "nng",
  "pcb-model",
- "place-model",
+ "pcb-place-api",
  "prost",
  "prost-build",
  "prost-types",
@@ -1948,19 +1918,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
-name = "negotiated-mesh"
-version = "0.1.0"
-dependencies = [
- "drc-lint",
- "geom",
- "grid-astar",
- "pcb-model",
- "rayon",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2145,6 +2102,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 
 [[package]]
+name = "pcb-drc"
+version = "0.1.0"
+dependencies = [
+ "geom",
+ "pcb-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pcb-model"
 version = "0.1.0"
 dependencies = [
@@ -2160,11 +2127,46 @@ name = "pcb-place"
 version = "0.1.0"
 dependencies = [
  "circuit-graph",
- "drc-lint",
  "geom",
- "grid-astar",
+ "pcb-drc",
  "pcb-model",
- "place-model",
+ "pcb-place-api",
+ "pcb-route-grid",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pcb-place-api"
+version = "0.1.0"
+dependencies = [
+ "geom",
+ "pcb-model",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pcb-route-grid"
+version = "0.1.0"
+dependencies = [
+ "geom",
+ "pcb-drc",
+ "pcb-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pcb-route-mesh"
+version = "0.1.0"
+dependencies = [
+ "geom",
+ "pcb-drc",
+ "pcb-model",
+ "pcb-route-grid",
  "rayon",
  "serde",
  "serde_json",
@@ -2203,17 +2205,6 @@ name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
-
-[[package]]
-name = "place-model"
-version = "0.1.0"
-dependencies = [
- "geom",
- "pcb-model",
- "rayon",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "png"

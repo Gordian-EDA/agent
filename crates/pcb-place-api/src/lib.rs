@@ -1,9 +1,9 @@
 //! The PCB placement-engine SDK: the [`PlaceProblem`] an engine reads, the
 //! [`PlacementHints`] that steer it, the [`PlaceResult`] it returns, and the
 //! [`Placer`] contract it implements — a neutral kernel, so a THIRD-PARTY placer
-//! can be written against `place-model` ALONE. It never touches the incumbent
+//! can be written against `pcb-place-api` ALONE. It never touches the incumbent
 //! engine crate (`pcb-place`) nor any KiCAD CLI. A placer: depends on
-//! `place-model`, `impl Placer for MyPlacer`, reads `problem.parts`/`problem.bounds`
+//! `pcb-place-api`, `impl Placer for MyPlacer`, reads `problem.parts`/`problem.bounds`
 //! plus [`derive_nets`], produces [`Placement`]s, self-verifies with the shared
 //! [`is_legal`], sets [`PlaceResult::legal`] + `hpwl` honestly, and returns. To pick
 //! among placers by routability it drops `Box::new(MyPlacer)` into a
@@ -850,7 +850,7 @@ pub trait Placer {
 
 /// The routability EVALUATOR a [`RoutabilityOracle`] ranks candidate placements
 /// against — the boundary that keeps the router INJECTABLE, not hardwired into the
-/// placer. An implementation wraps a router (`pcb-place` ships a grid-astar-backed
+/// placer. An implementation wraps a router (`pcb-place` ships a pcb-route-grid-backed
 /// default); a third party supplies its own to score with its own router. The
 /// oracle calls it on each candidate's [`to_route_problem`] and keeps the candidate
 /// with the fewest faults.

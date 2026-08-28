@@ -1,8 +1,8 @@
-//! `drc-core` — the pluggable-rule DRC engine SDK.
+//! `pcb-drc` — PCB design-rule checking.
 //!
-//! A Gordian engine kernel: it depends only on [`pcb_model`] and exposes a
-//! composable design-rule check that a third party can extend without touching
-//! the in-house rule set.
+//! This crate owns both the extensible rule API and Gordian's standard PCB DRC
+//! implementation. It checks route geometry and connectivity, and provides
+//! cleanup helpers that remove copper which cannot be shipped honestly.
 //!
 //! ## The engine-SDK shape
 //!
@@ -27,7 +27,7 @@
 //!
 //! ## Adding a third-party rule
 //!
-//! Depend on `drc-core` alone, `impl Rule for MyRule`, then:
+//! Depend on `pcb-drc` alone, `impl Rule for MyRule`, then:
 //!
 //! ```ignore
 //! let findings = DrcSuite::standard()
@@ -39,10 +39,12 @@ pub use pcb_model as problem;
 
 pub mod connectivity;
 mod ctx;
+pub mod lint;
 pub mod rules;
 
 pub use connectivity::Violation;
 pub use ctx::{CopperGeom, CopperItem, DrcCtx, collect_copper};
+pub use lint::DrcViolation;
 
 use problem::{Point2, RouteProblem, RouteSolution};
 use serde::Serialize;

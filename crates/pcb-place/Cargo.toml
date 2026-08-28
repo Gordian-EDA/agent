@@ -10,9 +10,9 @@ description = "PCB placement engine: force-directed seed + simulated-annealing +
 circuit-graph = { path = "../circuit-graph" }
 geom = { path = "../geom" }
 pcb-model = { path = "../pcb-model" }
-place-model = { path = "../place-model" }
-drc-lint = { path = "../drc-lint" }
-grid-astar = { path = "../grid-astar" }
+pcb-place-api = { path = "../pcb-place-api" }
+pcb-drc = { path = "../pcb-drc" }
+pcb-route-grid = { path = "../pcb-route-grid" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 rayon.workspace = true

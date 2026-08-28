@@ -1,16 +1,16 @@
 [package]
-name = "negotiated-mesh"
+name = "pcb-place-api"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Premium detailed PCB router: quadtree capacity mesh + negotiated rip-up/reroute global pathing + per-cell detail."
+description = "The PCB placement-engine SDK: problem/result DTOs, legality and HPWL helpers, and the Placer/RouteRanker contracts."
 
 [dependencies]
 geom = { path = "../geom" }
 pcb-model = { path = "../pcb-model" }
-drc-lint = { path = "../drc-lint" }
-grid-astar = { path = "../grid-astar" }
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
 rayon.workspace = true
+
+[dev-dependencies]
+serde_json = { workspace = true }

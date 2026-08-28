@@ -29,10 +29,10 @@
 //!
 //! The placement TRAIT seam — the [`Placer`] contract, the [`PlaceProblem`] it
 //! reads, the [`PlaceResult`] it returns, the [`RouteRanker`] evaluator, and the
-//! [`RoutabilityOracle`] selector — lives in the KERNEL (`place-model`) so a
+//! [`RoutabilityOracle`] selector — lives in the KERNEL (`pcb-place-api`) so a
 //! third party implements it against `pcb-model` ALONE. This crate supplies the
 //! BUILT-IN implementations: [`LegalizingPlacer`], [`AnnealingPlacer`],
-//! [`FanoutPlacer`], and the grid-astar-backed [`GridAstarRanker`]. The model types
+//! [`FanoutPlacer`], and the pcb-route-grid-backed [`GridAstarRanker`]. The model types
 //! are re-exported VERBATIM so every external `pcb_place::placement::…` path resolves
 //! unchanged.
 //!
@@ -52,8 +52,8 @@
 //! - [`route`]   — the pipeline entries ([`place`], [`place_best`], [`place_board`])
 //!   + the built-in [`Placer`]s and the [`GridAstarRanker`].
 //!
-//! Routing for the ranking comes from `grid-astar`; DRC from `drc-lint`; the engine
-//! kernel from `place-model`; shared geometry from `geom`.
+//! Routing for the ranking comes from `pcb-route-grid`; DRC from `pcb-drc`; the engine
+//! kernel from `pcb-place-api`; shared geometry from `geom`.
 
 mod anneal;
 mod cost;
@@ -65,7 +65,7 @@ mod pairs;
 mod route;
 
 // The problem/result DTOs, legality, HPWL, and the Placer/RouteRanker contracts
-// live in `place-model`; import them from there. This module exports the ENGINES.
+// live in `pcb-place-api`; import them from there. This module exports the ENGINES.
 pub use hints::{
     apply_edge_lock, apply_grid_hints, apply_surround, fan_out_rings, unified_fanout_place,
 };

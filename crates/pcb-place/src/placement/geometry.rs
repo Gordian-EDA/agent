@@ -1,10 +1,10 @@
 //! Engine-private placement geometry constants and edge affinity.
 
-use place_model::{Edge, EdgeDatum, Part};
+use pcb_place_api::{Edge, EdgeDatum, Part};
 use crate::problem::{Point2, Rect};
 
 // Shared placement geometry.
-pub(crate) use place_model::{
+pub(crate) use pcb_place_api::{
     clamp_center_for_envelope, courtyard_margin, pad_world, part_edge_distance,
     part_placement_bounds_envelope, placement_envelope_at, rotated_copper_bbox,
     rotated_courtyard_half,

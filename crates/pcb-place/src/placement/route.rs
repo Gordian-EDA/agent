@@ -3,10 +3,10 @@
 //!
 //! [`to_route_problem`] (the bridge from a placement to the router) and the
 //! [`Placer`]/[`RouteRanker`]/[`RoutabilityOracle`] trait seam all live in the
-//! kernel (`place-model`); this module supplies the BUILT-IN implementations:
+//! kernel (`pcb-place-api`); this module supplies the BUILT-IN implementations:
 //! [`LegalizingPlacer`] (force + legalize, the baseline + spring idioms),
 //! [`AnnealingPlacer`] (SA refine), [`FanoutPlacer`] (the structured radial
-//! fast-path), and [`GridAstarRanker`] (a grid-astar-backed default [`RouteRanker`]
+//! fast-path), and [`GridAstarRanker`] (a pcb-route-grid-backed default [`RouteRanker`]
 //! so the router stays injectable, not hardwired).
 
 use super::anneal::anneal_placement;
@@ -18,16 +18,12 @@ use super::geometry::{
 };
 use super::hints::{apply_edge_lock, apply_grid_hints, unified_fanout_place};
 use super::legalize::{initial_grid, is_legal, legalize};
-use place_model::{
+use pcb_place_api::{
     Edge, Pin, PlaceProblem, PlaceReport, PlaceResult, Placement, PlacementHints, derive_nets,
 };
-use place_model::decoupling_pairs;
-use place_model::{PlacementRankKey, Placer, RoutabilityOracle, RouteRanker};
+use pcb_place_api::decoupling_pairs;
+use pcb_place_api::{PlacementRankKey, Placer, RoutabilityOracle, RouteRanker};
 use crate::problem::{LayerRef, Point2, Rect, RouteProblem, Router, failed_pad_weight};
-
-/// [`to_route_problem`] now lives in the kernel (`place-model`) so a
-/// third-party placer can build a [`RouteProblem`] from its own placement without
-/// depending on `pcb-place`. Re-exported so callers are unchanged.
 
 /// Per-variant placement toggles a [`LegalizingPlacer`]/[`AnnealingPlacer`] carries.
 #[derive(Debug, Clone, Copy, Default)]
@@ -136,7 +132,7 @@ impl Placer for EdgeLockedPlacer {
     }
 }
 
-/// A [`RouteRanker`] backed by the FAST grid-astar router + the shared DRC lint —
+/// A [`RouteRanker`] backed by the FAST pcb-route-grid router + the shared DRC lint —
 /// the built-in routability scorer the oracle uses by default. Lives here (not in
 /// the kernel) so the router stays INJECTABLE: a third party supplies its own
 /// `RouteRanker` to rank with its own router instead.
@@ -493,7 +489,7 @@ fn bounded_fanout_rank(
     if !result.legal {
         return None;
     }
-    let rp = place_model::to_route_problem(problem, &result.placements);
+    let rp = pcb_place_api::to_route_problem(problem, &result.placements);
     if placement_ranker_uses_layout_only(&rp) {
         return None;
     }
@@ -528,7 +524,7 @@ fn place_rank_key(problem: &PlaceProblem, result: &PlaceResult) -> PlacementRank
             u64::MAX,
         );
     }
-    let rp = place_model::to_route_problem(problem, &result.placements);
+    let rp = pcb_place_api::to_route_problem(problem, &result.placements);
     (
         GridAstarRanker.rank_key(&rp),
         0,
@@ -1000,7 +996,7 @@ pub(crate) fn place_variant(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn polish_positions(
     problem: &PlaceProblem,
-    nets: &[place_model::LogicalNet],
+    nets: &[pcb_place_api::LogicalNet],
     margin: f64,
     pairs: &[(usize, usize)],
     edge_idx: &[usize],
@@ -1060,7 +1056,7 @@ pub(crate) fn polish_positions(
 #[allow(clippy::too_many_arguments)]
 fn polish_positions_in_order(
     problem: &PlaceProblem,
-    nets: &[place_model::LogicalNet],
+    nets: &[pcb_place_api::LogicalNet],
     margin: f64,
     pairs: &[(usize, usize)],
     edge_idx: &[usize],
@@ -1150,7 +1146,7 @@ fn polish_positions_in_order(
 
 pub(crate) fn position_polish_part_order(
     problem: &PlaceProblem,
-    nets: &[place_model::LogicalNet],
+    nets: &[pcb_place_api::LogicalNet],
     rotations: &[f64],
     half: &[(f64, f64)],
     margin: f64,
@@ -1347,7 +1343,7 @@ pub(crate) fn edge_seek_position_candidates(
 
 pub(crate) fn net_centroid_position_candidates(
     problem: &PlaceProblem,
-    nets: &[place_model::LogicalNet],
+    nets: &[pcb_place_api::LogicalNet],
     rotations: &[f64],
     pos: &[Point2],
     part_idx: usize,
@@ -1499,7 +1495,7 @@ fn median_coord(values: impl Iterator<Item = f64>) -> f64 {
 #[cfg(test)]
 pub(crate) fn ratline_crossing_position_candidates(
     problem: &PlaceProblem,
-    nets: &[place_model::LogicalNet],
+    nets: &[pcb_place_api::LogicalNet],
     rotations: &[f64],
     pos: &[Point2],
     part_idx: usize,
@@ -1575,7 +1571,7 @@ pub(crate) fn ratline_crossing_position_candidates_from_edges(
 #[cfg(test)]
 pub(crate) fn ratline_obstruction_position_candidates(
     problem: &PlaceProblem,
-    nets: &[place_model::LogicalNet],
+    nets: &[pcb_place_api::LogicalNet],
     rotations: &[f64],
     half: &[(f64, f64)],
     margin: f64,
@@ -1638,7 +1634,7 @@ pub(crate) fn ratline_obstruction_position_candidates_from_edges(
 #[cfg(test)]
 pub(crate) fn obstructing_part_position_candidates(
     problem: &PlaceProblem,
-    nets: &[place_model::LogicalNet],
+    nets: &[pcb_place_api::LogicalNet],
     rotations: &[f64],
     half: &[(f64, f64)],
     margin: f64,
@@ -1812,7 +1808,7 @@ fn edge_for_part<'a>(
 
 pub(crate) fn ratline_tree_edge_list<'a>(
     problem: &PlaceProblem,
-    nets: &'a [place_model::LogicalNet],
+    nets: &'a [pcb_place_api::LogicalNet],
     rotations: &[f64],
     pos: &[Point2],
 ) -> Vec<RatlineEdge<'a>> {
@@ -1827,7 +1823,7 @@ fn ratline_tree_edges<'a>(
     rotations: &[f64],
     pos: &[Point2],
     net_idx: usize,
-    net: &'a place_model::LogicalNet,
+    net: &'a pcb_place_api::LogicalNet,
 ) -> Vec<RatlineEdge<'a>> {
     match net.pins.as_slice() {
         [] | [_] => Vec::new(),
@@ -1954,7 +1950,7 @@ fn pin_world_pos(
     problem: &PlaceProblem,
     rotations: &[f64],
     pos: &[Point2],
-    pin: &place_model::Pin,
+    pin: &pcb_place_api::Pin,
 ) -> Point2 {
     let off = problem.parts[pin.part].pads[pin.pad]
         .offset
@@ -1997,7 +1993,7 @@ fn move_point_just_past_line(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn polish_swaps(
     problem: &PlaceProblem,
-    nets: &[place_model::LogicalNet],
+    nets: &[pcb_place_api::LogicalNet],
     margin: f64,
     pairs: &[(usize, usize)],
     edge_idx: &[usize],
@@ -2032,7 +2028,7 @@ pub(crate) fn polish_swaps(
 
 pub(crate) fn swap_pair_order(
     problem: &PlaceProblem,
-    nets: &[place_model::LogicalNet],
+    nets: &[pcb_place_api::LogicalNet],
     rotations: &[f64],
     pos: &[Point2],
 ) -> Vec<(usize, usize)> {
@@ -2138,7 +2134,7 @@ fn push_pair(set: &mut std::collections::BTreeSet<(usize, usize)>, a: usize, b: 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn polish_rotations(
     problem: &PlaceProblem,
-    nets: &[place_model::LogicalNet],
+    nets: &[pcb_place_api::LogicalNet],
     margin: f64,
     pairs: &[(usize, usize)],
     edge_idx: &[usize],

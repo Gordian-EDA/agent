@@ -1,15 +1,14 @@
 [package]
-name = "drc-core"
+name = "pcb-route-grid"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Pluggable-rule DRC engine SDK for PCB routing: a Rule trait, a composable DrcSuite, and the shared DrcCtx + copper collection rules read."
+description = "Sequential grid-A* PCB router: one shortest-net-first A* per net over a per-layer occupancy grid."
 
 [dependencies]
 geom = { path = "../geom" }
 pcb-model = { path = "../pcb-model" }
+pcb-drc = { path = "../pcb-drc" }
 serde = { workspace = true, features = ["derive"] }
-
-[dev-dependencies]
-serde_json = { workspace = true }
+serde_json.workspace = true

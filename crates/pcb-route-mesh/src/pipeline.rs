@@ -184,7 +184,7 @@ fn route_detailed_from_global(
 
 // ── NegotiatedMeshRouter (the SDK Router impl) ───────────────────────────────────
 
-/// The premium detailed [`Router`]: the negotiated-mesh pipeline ([`route_detailed`])
+/// The premium detailed [`Router`]: the pcb-route-mesh pipeline ([`route_detailed`])
 /// behind the SDK trait, with its copper reconciled through the DRC oracle so the
 /// returned result is geometry-clean.
 ///
@@ -379,7 +379,7 @@ fn better(_problem: &RouteProblem, incumbent: &RouteQuality, challenger: &RouteQ
 /// same-layer escapes, a composite pattern router for heterogeneous simple
 /// boards, a directional channel router for crossing/channel cases, a
 /// contextual sequential-grid router for ordering-sensitive boards, the
-/// negotiated-mesh detailed router as the primary engine, and the free grid router
+/// pcb-route-mesh detailed router as the primary engine, and the free grid router
 /// as the fallback baseline. Cheap clean via-free candidates stop immediately;
 /// cheap clean via-heavy candidates keep competing with the remaining cheap
 /// routers for fewer vias/shorter copper, but still avoid paying the detailed mesh.
@@ -389,7 +389,7 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     route_auto_with_diagnostics(problem).result
 }
 
-/// Route only the negotiated-mesh detailed engine, returning the global report it
+/// Route only the pcb-route-mesh detailed engine, returning the global report it
 /// already computed. This is the diagnostics-preserving equivalent of injecting
 /// only [`NegotiatedMeshRouter`] into [`select_best`].
 pub fn route_mesh_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
@@ -1030,7 +1030,7 @@ fn auto_route_requires_bounded_pass(problem: &RouteProblem) -> bool {
 }
 
 fn estimated_grid_cells(problem: &RouteProblem) -> usize {
-    let pitch = grid_astar::grid::grid_pitch(problem);
+    let pitch = pcb_route_grid::grid::grid_pitch(problem);
     let cells = |span: f64| ((span.max(0.0) / pitch).ceil() as usize).max(1);
     cells(problem.bounds.width())
         .saturating_mul(cells(problem.bounds.height()))

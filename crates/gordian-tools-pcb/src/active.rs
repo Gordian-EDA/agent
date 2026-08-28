@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use kicad_ipc::snapshot::{ImportedBoard, IpcBoardSnapshot};
-use place_model::Placement;
+use pcb_place_api::Placement;
 
 use gordian_runtime::AgentRuntime;
 

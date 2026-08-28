@@ -21,14 +21,14 @@
 //!
 //! Every stage shares one legalizer + geometry scaffold (`legalize`, `collides`,
 //! `rotated_*`, …) and the place types. Routing for the ranking comes from
-//! `grid-astar`; DRC from `drc-lint`; shared geometry types from `pcb-model`.
+//! `pcb-route-grid`; DRC from `pcb-drc`; shared geometry types from `pcb-model`.
 
-pub use drc_lint::{connectivity, lint};
-pub use grid_astar::{astar, grid, router};
+pub use pcb_drc::{connectivity, lint};
+pub use pcb_route_grid::{astar, grid, router};
 pub use pcb_model as problem;
 
 pub mod placement;
 
 pub use placement::place_board;
-// The built-in engines a `place-model` RoutabilityOracle can drive.
+// The built-in engines a `pcb-place-api` RoutabilityOracle can drive.
 pub use placement::{AnnealingPlacer, FanoutPlacer, GridAstarRanker, LegalizingPlacer};
