@@ -95,7 +95,7 @@ pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             ("back", BOARD_BACK_DETAIL_LAYERS, true),
         ] {
             match render_side_detail(
-                &cli,
+                cli,
                 &pcb_path,
                 tmp.path(),
                 side,

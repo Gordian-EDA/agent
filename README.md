@@ -83,8 +83,12 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | `circuit-lang` | Parser, linter, and canonical emitter for the circuit markup language |
 | `circuit-graph` | Attributed circuit graph + a declarative idiom matcher |
 | `sch-floorplan` / `sch-io` / `sch-place` | Deterministic schematic floorplan core (`Design` → `.kicad_sch` and back), over the anneal/constraint placement engines, with the shared model + I/O layers |
-| `grid-astar` / `pcb-place` / `negotiated-mesh` | Deterministic placement + grid-A\* escape + capacity-mesh copper routing |
-| `drc-lint` | PCB DRC lint |
+| `pcb-model` | Shared PCB placement/routing geometry and problem/result types |
+| `pcb-place-api` | Stable PCB placement contracts, legality checks, and routability ranking |
+| `pcb-place` | Built-in force-directed, annealing, fan-out, and legalization placement engines |
+| `pcb-route-grid` | Sequential grid-A\* PCB router |
+| `pcb-route-mesh` | Capacity-mesh negotiated PCB router |
+| `pcb-drc` | Extensible PCB geometry and connectivity DRC |
 | `kicad` / `kicad-ipc` / `specctra` | KiCAD discovery and CLI driver, live IPC session, Specctra DSN/SES |
 
 ## Testing

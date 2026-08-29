@@ -7,8 +7,8 @@ use super::geometry::{
     part_placement_bounds_envelope, rotated_copper_bbox, rotated_courtyard_half,
 };
 use pcb_model::Point2;
-use place_model::{Edge, LockedAt, Part, PlaceProblem, PlacementHints};
-use place_model::{decoupling_pairs, series_pairs};
+use pcb_place_api::{Edge, LockedAt, Part, PlaceProblem, PlacementHints};
+use pcb_place_api::{decoupling_pairs, series_pairs};
 
 /// Lock each member of a `grid` group at a computed cell of a regular grid (row-major,
 /// member order), centred in the group's region. The column count is sized from the

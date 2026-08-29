@@ -714,7 +714,7 @@ fn route_leg(
     let grid_to = snapped_route_point(&exact_problem, to);
     let grid_problem =
         single_connection_problem(base, net, width, grid_from, from_layer, grid_to, to_layer);
-    let router = grid_astar::router::GridAStarRouter;
+    let router = pcb_route_grid::router::GridAStarRouter;
     let result = router.route(&grid_problem);
     if !result.failed.is_empty() {
         let reasons = result
@@ -732,7 +732,7 @@ fn route_leg(
 }
 
 fn snapped_route_point(problem: &RouteProblem, point: Point2) -> Point2 {
-    let pitch = grid_astar::grid::grid_pitch(problem);
+    let pitch = pcb_route_grid::grid::grid_pitch(problem);
     Point2::new(
         route_cell_center(problem.bounds.min_x, point.x, pitch),
         route_cell_center(problem.bounds.min_y, point.y, pitch),
@@ -787,7 +787,7 @@ fn extend_solution(dst: &mut RouteSolution, src: RouteSolution) {
 }
 
 fn add_manual_terminal_stubs(problem: &RouteProblem, solution: &mut RouteSolution) {
-    let pitch = grid_astar::grid::grid_pitch(problem);
+    let pitch = pcb_route_grid::grid::grid_pitch(problem);
     for conn in &problem.connections {
         let width = problem.net_width(&conn.name);
         for point in &conn.points_to_connect {
@@ -823,14 +823,14 @@ fn validate_manual_solution(
         .first()
         .map(|connection| connection.name.as_str())
         .unwrap_or_default();
-    let baseline = drc_lint::lint::lint(
+    let baseline = pcb_drc::lint::lint(
         problem,
         &RouteSolution {
             traces: Vec::new(),
             vias: Vec::new(),
         },
     );
-    let violations = drc_lint::lint::lint(problem, solution);
+    let violations = pcb_drc::lint::lint(problem, solution);
     let mut baseline_counts = BTreeMap::<String, usize>::new();
     for violation in baseline {
         let key = serde_json::to_string(&violation).unwrap_or_else(|_| format!("{violation:?}"));
@@ -846,8 +846,8 @@ fn validate_manual_solution(
         // cross-net merge still has no baseline match and is rejected below.
         if matches!(
             &violation,
-            drc_lint::DrcViolation::Connectivity {
-                violation: drc_lint::connectivity::Violation::Unconnected { connection, .. }
+            pcb_drc::DrcViolation::Connectivity {
+                violation: pcb_drc::connectivity::Violation::Unconnected { connection, .. }
             } if connection == target_net
         ) {
             introduced.push(violation);
@@ -908,7 +908,7 @@ fn route_track_output(
     let metrics = solution.metrics();
     json!({
         "ok": true,
-        "router": "grid-astar",
+        "router": "pcb-route-grid",
         "net": request.net,
         "from_layer": route_layer_name(&request.from_layer, problem.layer_count),
         "to_layer": route_layer_name(&request.to_layer, problem.layer_count),
@@ -1366,7 +1366,7 @@ mod tests {
         let (routed_problem, solution) = manual_route_solution(&problem, &request).unwrap();
 
         assert!(
-            drc_lint::lint::lint(&routed_problem, &solution).is_empty(),
+            pcb_drc::lint::lint(&routed_problem, &solution).is_empty(),
             "manual route must validate cleanly"
         );
         assert!(
@@ -1395,7 +1395,7 @@ mod tests {
         let (routed_problem, solution) = manual_route_solution(&problem, &request).unwrap();
 
         assert!(
-            drc_lint::lint::lint(&routed_problem, &solution).is_empty(),
+            pcb_drc::lint::lint(&routed_problem, &solution).is_empty(),
             "explicit-via route must validate cleanly"
         );
         let via = solution
@@ -1424,7 +1424,7 @@ mod tests {
 
         let (routed_problem, solution) = manual_route_solution(&problem, &request).unwrap();
 
-        assert!(drc_lint::lint::lint(&routed_problem, &solution).is_empty());
+        assert!(pcb_drc::lint::lint(&routed_problem, &solution).is_empty());
         assert!(solution.traces.is_empty());
         assert_eq!(solution.vias.len(), 1);
         assert_eq!(solution.vias[0].span, ViaSpan::Through);
@@ -1505,12 +1505,12 @@ mod tests {
             vias: Vec::new(),
         };
         assert!(
-            drc_lint::lint::lint(&problem, &empty)
+            pcb_drc::lint::lint(&problem, &empty)
                 .iter()
                 .any(|finding| matches!(
                     finding,
-                    drc_lint::DrcViolation::Connectivity {
-                        violation: drc_lint::connectivity::Violation::CrossNetMerge { .. }
+                    pcb_drc::DrcViolation::Connectivity {
+                        violation: pcb_drc::connectivity::Violation::CrossNetMerge { .. }
                     }
                 ))
         );

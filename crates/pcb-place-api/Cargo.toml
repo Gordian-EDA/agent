@@ -1,0 +1,16 @@
+[package]
+name = "pcb-place-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The PCB placement-engine SDK: problem/result DTOs, legality and HPWL helpers, and the Placer/RouteRanker contracts."
+
+[dependencies]
+geom = { path = "../geom" }
+pcb-model = { path = "../pcb-model" }
+serde = { workspace = true, features = ["derive"] }
+rayon.workspace = true
+
+[dev-dependencies]
+serde_json = { workspace = true }

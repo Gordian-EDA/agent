@@ -6,7 +6,7 @@
 use super::sexpr::{sexpr_end, sexpr_point};
 use anyhow::{Context, Result};
 use pcb_model::{Point2, Polygon, Rect, RouteSolution};
-use place_model::{Part, PlaceProblem};
+use pcb_place_api::{Part, PlaceProblem};
 use serde_json::{Value, json};
 
 use gordian_runtime::AgentRuntime;
@@ -396,7 +396,7 @@ fn suffix(kind: &str) -> &'static str {
 mod tests {
     use super::*;
     use pcb_model::{LayerRef, Trace, Via, ViaSpan};
-    use place_model::PartPad;
+    use pcb_place_api::PartPad;
 
     #[test]
     fn fit_bounds_include_rotated_courtyard_and_off_center_pad_extents() {

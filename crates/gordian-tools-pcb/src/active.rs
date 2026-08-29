@@ -6,7 +6,7 @@ use geom::{Point2, Rect};
 use pcb_model::{
     Connection, LayerRef, Obstacle, RoutePoint, RouteProblem, RouteSolution, Trace, Via, ViaSpan,
 };
-use place_model::Placement;
+use pcb_place_api::Placement;
 
 use gordian_runtime::AgentRuntime;
 

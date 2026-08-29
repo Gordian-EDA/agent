@@ -10,7 +10,7 @@ use geom::Rect;
 use kicad_footprint::{Footprint, FootprintId, FootprintPad, PadTechnology};
 use kicad_ipc::FootprintMove;
 use pcb_model::{LayerRef, ViaSpan};
-use place_model::{
+use pcb_place_api::{
     Edge, EdgeDatum, GroupHint, LockedAt, Part, PartPad, PlaceProblem, PlaceResult, Placement,
     PlacementHints,
 };
@@ -506,7 +506,7 @@ fn placement_json(p: &Placement) -> Value {
 }
 
 fn placement_overlap_pairs(problem: &PlaceProblem, result: &PlaceResult) -> Vec<Value> {
-    let margin = place_model::courtyard_margin(problem.clearance) / 2.0;
+    let margin = pcb_place_api::courtyard_margin(problem.clearance) / 2.0;
     let positions: BTreeMap<_, _> = result
         .placements
         .iter()
@@ -517,13 +517,13 @@ fn placement_overlap_pairs(problem: &PlaceProblem, result: &PlaceResult) -> Vec<
         let Some(pa) = positions.get(a.reference.as_str()) else {
             continue;
         };
-        let ah = place_model::rotated_courtyard_half(a, pa.rotation);
+        let ah = pcb_place_api::rotated_courtyard_half(a, pa.rotation);
         let ar = Rect::from_center_half(pa.at, ah).inflate(margin);
         for b in problem.parts.iter().skip(i + 1) {
             let Some(pb) = positions.get(b.reference.as_str()) else {
                 continue;
             };
-            let bh = place_model::rotated_courtyard_half(b, pb.rotation);
+            let bh = pcb_place_api::rotated_courtyard_half(b, pb.rotation);
             let br = Rect::from_center_half(pb.at, bh).inflate(margin);
             let (x, y) = ar.axis_penetration(&br);
             if x > geom::EPS && y > geom::EPS {
@@ -913,7 +913,7 @@ fn add_817_array_hints(
             .iter()
             .find(|part| &part.reference == reference)
             .expect("verified board part");
-        let half = place_model::rotated_courtyard_half(part, rotation);
+        let half = pcb_place_api::rotated_courtyard_half(part, rotation);
         opto_w = opto_w.max(half.0 * 2.0);
         opto_h = opto_h.max(half.1 * 2.0);
     }
@@ -1141,7 +1141,7 @@ fn add_817_array_hints(
                 .iter()
                 .find(|part| &part.reference == reference)
         })
-        .map(|part| place_model::rotated_courtyard_half(part, 90.0).1 * 2.0)
+        .map(|part| pcb_place_api::rotated_courtyard_half(part, 90.0).1 * 2.0)
         .fold(0.0, f64::max);
     let field_connector_aux_strip = Rect::new(
         center_region.min_x,
@@ -1222,7 +1222,7 @@ fn add_817_array_hints(
                 .iter()
                 .find(|part| &part.reference == reference)
         })
-        .map(|part| place_model::rotated_courtyard_half(part, 90.0).1 * 2.0)
+        .map(|part| pcb_place_api::rotated_courtyard_half(part, 90.0).1 * 2.0)
         .fold(0.0, f64::max);
     let aux_bottom = Rect::new(
         bottom.min_x,
@@ -1240,7 +1240,7 @@ fn add_817_array_hints(
                     .iter()
                     .find(|part| &part.reference == reference)
             })
-            .map(|part| place_model::rotated_courtyard_half(part, 90.0).1 * 2.0)
+            .map(|part| pcb_place_api::rotated_courtyard_half(part, 90.0).1 * 2.0)
             .fold(0.0, f64::max)
     };
     let top_depth = margin
@@ -1786,7 +1786,7 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // hint so the agent can ring them into a tidy decoupling cluster.
     let mut hint_suggestions: Vec<Value> = Vec::new();
     if result.legal {
-        let pairs = place_model::decoupling_pairs(&problem);
+        let pairs = pcb_place_api::decoupling_pairs(&problem);
         let mut by_ic: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (cap, ic) in pairs {
             by_ic.entry(ic).or_default().push(cap);
@@ -1841,7 +1841,7 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             let Some(placement) = by_ref.get(part.reference.as_str()) else {
                 continue;
             };
-            let half = place_model::rotated_courtyard_half(part, placement.rotation);
+            let half = pcb_place_api::rotated_courtyard_half(part, placement.rotation);
             let rect = Rect::from_center_half(placement.at, half);
             envelope = Some(match envelope {
                 None => rect,
@@ -2763,9 +2763,9 @@ mod tests {
             let locked = part.locked.as_ref().unwrap();
             Rect::from_center_half(
                 locked.at,
-                place_model::rotated_courtyard_half(part, locked.rotation),
+                pcb_place_api::rotated_courtyard_half(part, locked.rotation),
             )
-            .inflate(place_model::courtyard_margin(problem.clearance) / 2.0)
+            .inflate(pcb_place_api::courtyard_margin(problem.clearance) / 2.0)
         };
         for (a, b) in [(jlog1, jlog2), (jlog1, jpwr), (jlog2, jpwr)] {
             let (x, y) = placed_rect(a).axis_penetration(&placed_rect(b));
@@ -2932,7 +2932,7 @@ mod tests {
         let group = &hints.groups[0];
         assert_eq!(group.members, ["U1", "C1", "C2"]);
         assert_eq!(group.region, Some(Rect::new(2.0, 3.0, 18.0, 12.0)));
-        assert_eq!(group.edge, Some(place_model::Edge::W));
+        assert_eq!(group.edge, Some(pcb_place_api::Edge::W));
         assert!(group.grid);
         assert_eq!(group.rotation, Some(180.0));
         assert_eq!(group.surround.as_deref(), Some("U1"));
@@ -3246,10 +3246,10 @@ mod tests {
         pcb_place::placement::apply_edge_lock(&mut problem, &refs);
 
         let expected_edges = [
-            place_model::Edge::N,
-            place_model::Edge::E,
-            place_model::Edge::S,
-            place_model::Edge::W,
+            pcb_place_api::Edge::N,
+            pcb_place_api::Edge::E,
+            pcb_place_api::Edge::S,
+            pcb_place_api::Edge::W,
         ];
         let mut positions = Vec::new();
         let mut half = Vec::new();
@@ -3268,7 +3268,7 @@ mod tests {
                 locked.at.x + placed_datum.end.x,
                 locked.at.y + placed_datum.end.y,
             );
-            let copper_box = place_model::rotated_copper_bbox(part, locked.rotation);
+            let copper_box = pcb_place_api::rotated_copper_bbox(part, locked.rotation);
             let copper_center = Point2::new(
                 locked.at.x + copper_box.center().x,
                 locked.at.y + copper_box.center().y,
@@ -3278,7 +3278,7 @@ mod tests {
                 (world_start.y + world_end.y) / 2.0,
             );
             match edge {
-                place_model::Edge::N => {
+                pcb_place_api::Edge::N => {
                     assert!((world_start.y - bounds.min_y).abs() < 1e-9);
                     assert!((world_end.y - bounds.min_y).abs() < 1e-9);
                     assert!(
@@ -3286,7 +3286,7 @@ mod tests {
                         "north copper must point inward"
                     );
                 }
-                place_model::Edge::S => {
+                pcb_place_api::Edge::S => {
                     assert!((world_start.y - bounds.max_y).abs() < 1e-9);
                     assert!((world_end.y - bounds.max_y).abs() < 1e-9);
                     assert!(
@@ -3294,7 +3294,7 @@ mod tests {
                         "south copper must point inward"
                     );
                 }
-                place_model::Edge::W => {
+                pcb_place_api::Edge::W => {
                     assert!((world_start.x - bounds.min_x).abs() < 1e-9);
                     assert!((world_end.x - bounds.min_x).abs() < 1e-9);
                     assert!(
@@ -3302,7 +3302,7 @@ mod tests {
                         "west copper must point inward"
                     );
                 }
-                place_model::Edge::E => {
+                pcb_place_api::Edge::E => {
                     assert!((world_start.x - bounds.max_x).abs() < 1e-9);
                     assert!((world_end.x - bounds.max_x).abs() < 1e-9);
                     assert!(
@@ -3312,15 +3312,15 @@ mod tests {
                 }
             }
             positions.push(locked.at);
-            half.push(place_model::rotated_courtyard_half(part, locked.rotation));
+            half.push(pcb_place_api::rotated_courtyard_half(part, locked.rotation));
             copper.push(copper_box);
         }
         assert!(
-            place_model::is_legal(
+            pcb_place_api::is_legal(
                 &problem,
                 &half,
                 &copper,
-                place_model::courtyard_margin(problem.clearance),
+                pcb_place_api::courtyard_margin(problem.clearance),
                 &positions,
             ),
             "datum-aligned connector bodies may overhang, but all pad copper must remain legal"
@@ -3344,9 +3344,9 @@ mod tests {
             .iter()
             .zip(&result.placements)
             .map(|(part, placed)| {
-                let half = place_model::rotated_courtyard_half(part, placed.rotation);
+                let half = pcb_place_api::rotated_courtyard_half(part, placed.rotation);
                 assert!(
-                    place_model::part_edge_distance(
+                    pcb_place_api::part_edge_distance(
                         part,
                         placed.rotation,
                         placed.at,
@@ -3363,13 +3363,13 @@ mod tests {
             .parts
             .iter()
             .zip(&result.placements)
-            .map(|(part, placed)| place_model::rotated_copper_bbox(part, placed.rotation))
+            .map(|(part, placed)| pcb_place_api::rotated_copper_bbox(part, placed.rotation))
             .collect();
-        assert!(place_model::is_legal(
+        assert!(pcb_place_api::is_legal(
             &problem,
             &auto_half,
             &auto_copper,
-            place_model::courtyard_margin(problem.clearance),
+            pcb_place_api::courtyard_margin(problem.clearance),
             &auto_positions,
         ));
     }

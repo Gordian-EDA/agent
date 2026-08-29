@@ -11,7 +11,7 @@ use super::cost::place_cost;
 use super::geometry::{PLACEMENT_GRID, courtyard_margin, rotated_courtyard_half};
 use super::pairs::coplacement_pairs;
 use pcb_model::{LayerRef, Point2, Rect};
-use place_model::{LogicalNet, Pin, PlaceProblem, PlacementHints};
+use pcb_place_api::{LogicalNet, Pin, PlaceProblem, PlacementHints};
 
 /// Fixed seed — placement is deterministic (same board → same layout).
 const SA_SEED: u64 = 0xB5AD_C0DE_1234_5678;

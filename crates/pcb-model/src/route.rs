@@ -3,7 +3,7 @@
 //! a selector queries, and the pure [`RouteQuality`] key that ranks results.
 //!
 //! A third party builds a router against this module and `pcb-model` ALONE — no
-//! dependency on the in-house engines (`grid-astar`, `negotiated-mesh`) — impls
+//! dependency on the in-house engines (`pcb-route-grid`, `pcb-route-mesh`) — impls
 //! [`Router`], reads a [`RouteProblem`], builds a [`RouteSolution`] of
 //! [`Trace`](crate::Trace)/[`Via`](crate::Via) in mm, declares its limits via
 //! [`capabilities`](Router::capabilities), and returns a [`RouteResult`]. The
@@ -175,7 +175,7 @@ pub fn failed_pad_weight(problem: &RouteProblem, failed: &[FailedNet]) -> usize 
 /// are the manufacturability/tidiness tiebreakers.
 ///
 /// `geom` (geometry DRC violations) is supplied by the caller because the DRC
-/// oracle lives in `drc-lint`, which depends on `pcb-model` — so this kernel
+/// oracle lives in `pcb-drc`, which depends on `pcb-model` — so this kernel
 /// crate cannot compute it without a dependency cycle. An engine that has
 /// already reconciled its copper to be DRC-clean passes `0`.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -1,6 +1,6 @@
 //! The legalizer (the spiral overlap-resolver + deterministic initial grid). The
 //! exact-geometry legality check ([`is_legal`]) lives in the kernel
-//! (`place-model`) so a third-party placer self-verifies with it; it is
+//! (`pcb-place-api`) so a third-party placer self-verifies with it; it is
 //! re-exported here.
 //!
 //! `legalize` snaps movable parts to the grid then resolves residual courtyard
@@ -12,9 +12,9 @@ use super::geometry::{
     part_placement_bounds_envelope, placement_envelope_at,
 };
 use pcb_model::{Point2, Rect};
-use place_model::PlaceProblem;
+use pcb_place_api::PlaceProblem;
 
-pub(crate) use place_model::is_legal;
+pub(crate) use pcb_place_api::is_legal;
 
 /// Outcome counters from [`legalize`].
 pub(crate) struct LegalizeStats {

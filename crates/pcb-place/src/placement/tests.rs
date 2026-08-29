@@ -21,14 +21,14 @@ use super::route::{
     seat_corner_seek_parts, should_try_full_grid_ranker_fallback, swap_pair_order,
     unique_position_candidates,
 };
-use drc_lint::connectivity;
+use pcb_drc::connectivity;
 use geom::Rect;
 use pcb_model::{Connection, LayerRef, Obstacle, Point2, Polygon, RoutePoint, RouteProblem};
-use place_model::{
+use pcb_place_api::{
     Edge, GroupHint, LockedAt, Part, PartPad, PlaceProblem, PlacementHints, derive_nets,
     series_pairs, to_route_problem,
 };
-use place_model::{Placer, RouteRanker, compute_hpwl, compute_hpwl_with_rotations};
+use pcb_place_api::{Placer, RouteRanker, compute_hpwl, compute_hpwl_with_rotations};
 
 fn board(w: f64, h: f64) -> Rect {
     Rect {
@@ -155,20 +155,20 @@ fn mechanical(reference: &str, size: f64) -> Part {
     }
 }
 
-fn placed_result(problem: &PlaceProblem, positions: &[Point2]) -> place_model::PlaceResult {
-    place_model::PlaceResult {
+fn placed_result(problem: &PlaceProblem, positions: &[Point2]) -> pcb_place_api::PlaceResult {
+    pcb_place_api::PlaceResult {
         placements: problem
             .parts
             .iter()
             .zip(positions)
-            .map(|(part, &at)| place_model::Placement {
+            .map(|(part, &at)| pcb_place_api::Placement {
                 reference: part.reference.clone(),
                 at,
                 rotation: 0.0,
             })
             .collect(),
         legal: true,
-        report: place_model::PlaceReport {
+        report: pcb_place_api::PlaceReport {
             overlaps_resolved: 0,
             out_of_bounds_clamps: 0,
             hpwl: 0.0,
@@ -3341,7 +3341,7 @@ fn to_route_problem_round_trips_and_oracle_accepts_geometry() {
 }
 
 // Keep place→route→lint integration outside this crate; a duplicate single-board
-// smoke here would pull the negotiated-mesh router into pcb-place's dev-deps.
+// smoke here would pull the pcb-route-mesh router into pcb-place's dev-deps.
 
 #[test]
 fn grid_ranker_weights_failed_net_by_pin_count() {
@@ -3430,8 +3430,8 @@ fn grid_ranker_uses_best_orthogonal_strictness_key() {
         escape_layers: Default::default(),
         plane_nets: Default::default(),
     };
-    let strict_key = route_rank_key(&rp, &grid_astar::router::route_orthogonal(&rp));
-    let lenient_key = route_rank_key(&rp, &grid_astar::router::route_orthogonal_lenient(&rp));
+    let strict_key = route_rank_key(&rp, &pcb_route_grid::router::route_orthogonal(&rp));
+    let lenient_key = route_rank_key(&rp, &pcb_route_grid::router::route_orthogonal_lenient(&rp));
     let expected = if route_rank_key_better(lenient_key, strict_key) {
         lenient_key
     } else {
@@ -3688,26 +3688,26 @@ fn place_result_selector_keeps_routable_layout_over_lower_cost_unroutable_one() 
         parts: vec![sig("A"), sig("B"), blocker],
         outline: None,
     };
-    let result = |ax, ay, bx, by, layout_cost| place_model::PlaceResult {
+    let result = |ax, ay, bx, by, layout_cost| pcb_place_api::PlaceResult {
         placements: vec![
-            place_model::Placement {
+            pcb_place_api::Placement {
                 reference: "A".to_owned(),
                 at: Point2 { x: ax, y: ay },
                 rotation: 0.0,
             },
-            place_model::Placement {
+            pcb_place_api::Placement {
                 reference: "B".to_owned(),
                 at: Point2 { x: bx, y: by },
                 rotation: 0.0,
             },
-            place_model::Placement {
+            pcb_place_api::Placement {
                 reference: "W".to_owned(),
                 at: Point2 { x: 10.0, y: 10.0 },
                 rotation: 0.0,
             },
         ],
         legal: true,
-        report: place_model::PlaceReport {
+        report: pcb_place_api::PlaceReport {
             overlaps_resolved: 0,
             out_of_bounds_clamps: 0,
             hpwl: layout_cost,
@@ -3767,26 +3767,26 @@ fn place_result_selector_prefers_lower_via_route_before_layout_cost() {
         parts: vec![sig("A"), sig("B"), top_wall],
         outline: None,
     };
-    let result = |ax, ay, bx, by, layout_cost| place_model::PlaceResult {
+    let result = |ax, ay, bx, by, layout_cost| pcb_place_api::PlaceResult {
         placements: vec![
-            place_model::Placement {
+            pcb_place_api::Placement {
                 reference: "A".to_owned(),
                 at: Point2 { x: ax, y: ay },
                 rotation: 0.0,
             },
-            place_model::Placement {
+            pcb_place_api::Placement {
                 reference: "B".to_owned(),
                 at: Point2 { x: bx, y: by },
                 rotation: 0.0,
             },
-            place_model::Placement {
+            pcb_place_api::Placement {
                 reference: "W".to_owned(),
                 at: Point2 { x: 10.0, y: 10.0 },
                 rotation: 0.0,
             },
         ],
         legal: true,
-        report: place_model::PlaceReport {
+        report: pcb_place_api::PlaceReport {
             overlaps_resolved: 0,
             out_of_bounds_clamps: 0,
             hpwl: layout_cost,
@@ -3831,14 +3831,14 @@ fn place_result_selector_keeps_incumbent_on_exact_rank_tie() {
         parts: vec![r0603("R1", None, None)],
         outline: None,
     };
-    let mk = |x| place_model::PlaceResult {
-        placements: vec![place_model::Placement {
+    let mk = |x| pcb_place_api::PlaceResult {
+        placements: vec![pcb_place_api::Placement {
             reference: "R1".to_owned(),
             at: Point2 { x, y: 10.0 },
             rotation: 0.0,
         }],
         legal: true,
-        report: place_model::PlaceReport {
+        report: pcb_place_api::PlaceReport {
             overlaps_resolved: 0,
             out_of_bounds_clamps: 0,
             hpwl: 1.0,

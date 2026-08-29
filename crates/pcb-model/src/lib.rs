@@ -245,7 +245,7 @@ impl RoutePoint {
 ///
 /// The single failure-provenance type every [`Router`](crate::Router) reports in
 /// [`RouteResult::failed`](crate::RouteResult) — shared across the grid and
-/// negotiated-mesh engines so failures have one shape. Serializable: a router's
+/// pcb-route-mesh engines so failures have one shape. Serializable: a router's
 /// congestion report carries these as data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -311,7 +311,7 @@ pub struct Via {
 
 /// The inner copper layers that carry solid GND/VCC planes, centred in the
 /// stack: 4-layer → {1,2}, 6-layer → {2,3}, odd or <4 → none. The routing
-/// stack masks these against signal traces; `grid-astar` re-exports this.
+/// stack masks these against signal traces; `pcb-route-grid` re-exports this.
 pub fn plane_layers(layer_count: u32) -> Vec<u32> {
     if layer_count >= 4 && layer_count & 1 == 0 {
         vec![layer_count / 2 - 1, layer_count / 2]

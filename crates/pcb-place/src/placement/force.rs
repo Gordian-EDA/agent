@@ -11,8 +11,8 @@ use super::geometry::{
 use super::legalize::collides;
 use super::route::PlaceOpts;
 use pcb_model::{Point2, Rect};
-use place_model::decoupling_pairs;
-use place_model::{LogicalNet, PlaceProblem, PlacementHints};
+use pcb_place_api::decoupling_pairs;
+use pcb_place_api::{LogicalNet, PlaceProblem, PlacementHints};
 
 /// Force-directed iteration count.
 const FORCE_ITERS: usize = 200;

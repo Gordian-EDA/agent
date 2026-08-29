@@ -1,0 +1,15 @@
+[package]
+name = "pcb-drc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Extensible PCB design-rule checking: standard geometry and connectivity rules, composable custom rules, and copper cleanup."
+
+[dependencies]
+geom = { path = "../geom" }
+pcb-model = { path = "../pcb-model" }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

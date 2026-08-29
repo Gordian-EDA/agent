@@ -12,20 +12,20 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
-use drc_lint::lint::lint;
+use pcb_drc::lint::lint;
 use gordian_tools_pcb::apply_direct_rescue_fallback;
 use gordian_tools_pcb::corpus::{load_corpus_board, route_problem_for_placement, run_kicad_drc};
-use grid_astar::router::{GridAStarRouter, geometry_violations};
+use pcb_route_grid::router::{GridAStarRouter, geometry_violations};
 use kicad::KicadInstallation;
 use kicad_footprint::FootprintCatalog;
-use negotiated_mesh::crossing::{
+use pcb_route_mesh::crossing::{
     AssignedCrossing, AssignmentFailure, CellJob, CrossingAssignment, TerminalKind,
     assign_crossings,
 };
-use negotiated_mesh::detail::{self, DetailPassDiagnostic};
-use negotiated_mesh::mesh::CapacityMesh;
-use negotiated_mesh::pathing::global_route_with_mesh;
-use negotiated_mesh::pipeline::{
+use pcb_route_mesh::detail::{self, DetailPassDiagnostic};
+use pcb_route_mesh::mesh::CapacityMesh;
+use pcb_route_mesh::pathing::global_route_with_mesh;
+use pcb_route_mesh::pipeline::{
     RouteAutoRun, RouteEngineAttempt, route_auto_with_diagnostics, route_detailed_with_global,
     route_mesh_with_diagnostics, route_sequential_with_diagnostics,
 };

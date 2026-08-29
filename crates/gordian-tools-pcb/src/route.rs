@@ -9,11 +9,11 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use crate::active::ImportedPart;
-use drc_lint::connectivity::Violation as ConnViolation;
-use drc_lint::lint::{DrcViolation, lint};
-use negotiated_mesh::copper::copper_obstacles;
-use negotiated_mesh::pathing::GlobalRouteResult;
-use negotiated_mesh::pipeline::{
+use pcb_drc::connectivity::Violation as ConnViolation;
+use pcb_drc::lint::{DrcViolation, lint};
+use pcb_route_mesh::copper::copper_obstacles;
+use pcb_route_mesh::pathing::GlobalRouteResult;
+use pcb_route_mesh::pipeline::{
     RouteEngineAttempt, postroute_cleanup, prepare_wide_terminal_escapes,
     route_auto_with_diagnostics, route_mesh_with_diagnostics, route_sequential_with_diagnostics,
     select_best,
@@ -545,7 +545,7 @@ fn add_terminal_stubs(
     solution: &mut RouteSolution,
     skip_connections: &BTreeSet<String>,
 ) {
-    let pitch = grid_astar::grid::grid_pitch(rp);
+    let pitch = pcb_route_grid::grid::grid_pitch(rp);
     for conn in &rp.connections {
         if skip_connections.contains(&conn.name) {
             continue;
@@ -665,7 +665,7 @@ fn route_with_engine(rp: &RouteProblem, engine: PcbRouterEngine) -> RouteRun {
             }
         }
         PcbRouterEngine::Astar => {
-            let grid = grid_astar::router::GridAStarRouter;
+            let grid = pcb_route_grid::router::GridAStarRouter;
             let result = select_best(rp, &[&grid]);
             RouteRun {
                 attempts: vec![route_engine_attempt(rp, &result)],
@@ -696,7 +696,7 @@ fn route_with_engine(rp: &RouteProblem, engine: PcbRouterEngine) -> RouteRun {
 }
 
 fn route_engine_attempt(rp: &RouteProblem, result: &RouteResult) -> RouteEngineAttempt {
-    let geometry_violations = grid_astar::router::geometry_violations(rp, &result.solution);
+    let geometry_violations = pcb_route_grid::router::geometry_violations(rp, &result.solution);
     let quality = RouteQuality::of(rp, result, geometry_violations);
     RouteEngineAttempt {
         engine: result.engine.clone(),
@@ -809,10 +809,10 @@ fn reserve_wide_multi_pin_routes(rp: &RouteProblem) -> (RouteProblem, RouteSolut
         isolated
             .obstacles
             .extend(copper_obstacles(rp, &reservation.solution));
-        let router = grid_astar::router::GridAStarRouter;
+        let router = pcb_route_grid::router::GridAStarRouter;
         let candidate = pcb_model::Router::route(&router, &isolated);
         if candidate.failed.is_empty()
-            && grid_astar::router::geometry_violations(&isolated, &candidate.solution) == 0
+            && pcb_route_grid::router::geometry_violations(&isolated, &candidate.solution) == 0
             && direct_candidate_is_clean(&isolated, &candidate.solution, &name)
         {
             reservation
@@ -1422,7 +1422,7 @@ fn simplify_candidate_paths(solution: &mut RouteSolution) {
 }
 
 fn direct_candidate_layers(layer_count: u32) -> Vec<LayerRef> {
-    let plane_layers: BTreeSet<u32> = grid_astar::router::plane_layers(layer_count as usize)
+    let plane_layers: BTreeSet<u32> = pcb_route_grid::router::plane_layers(layer_count as usize)
         .into_iter()
         .collect();
     let mut layers = Vec::new();
@@ -1522,7 +1522,7 @@ fn direct_rescued_connections_are_clean(
                 .cloned()
                 .collect(),
         };
-        if !drc_lint::connectivity::check(&net_problem, &net_solution).is_empty() {
+        if !pcb_drc::connectivity::check(&net_problem, &net_solution).is_empty() {
             return false;
         }
     }
@@ -2225,8 +2225,8 @@ mod escape_bottleneck_tests {
         assert_eq!(route_congestion_json(None, true), Value::Null);
 
         let global = GlobalRouteResult {
-            plan: negotiated_mesh::pathing::GlobalPlan { nets: Vec::new() },
-            report: negotiated_mesh::pathing::CongestionReport {
+            plan: pcb_route_mesh::pathing::GlobalPlan { nets: Vec::new() },
+            report: pcb_route_mesh::pathing::CongestionReport {
                 iterations: 3,
                 final_overflow: 2,
                 edge_hotspots: Vec::new(),
@@ -2982,7 +2982,7 @@ mod escape_bottleneck_tests {
             escape_layers: Default::default(),
             plane_nets: Default::default(),
         };
-        let direct = negotiated_mesh::direct::route_direct(&problem);
+        let direct = pcb_route_mesh::direct::route_direct(&problem);
         assert!(!direct.failed.is_empty(), "direct router must not add vias");
         assert!(direct.solution.vias.is_empty());
 

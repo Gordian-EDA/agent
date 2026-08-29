@@ -1,18 +1,14 @@
 [package]
-name = "pcb-place"
+name = "pcb-route-grid"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "PCB placement engine: force-directed seed + simulated-annealing + radial fan-out over a shared legalizer."
+description = "Sequential grid-A* PCB router: one shortest-net-first A* per net over a per-layer occupancy grid."
 
 [dependencies]
-circuit-graph = { path = "../circuit-graph" }
 geom = { path = "../geom" }
 pcb-model = { path = "../pcb-model" }
-pcb-place-api = { path = "../pcb-place-api" }
 pcb-drc = { path = "../pcb-drc" }
-pcb-route-grid = { path = "../pcb-route-grid" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-rayon.workspace = true
