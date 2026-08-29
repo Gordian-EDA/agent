@@ -21,7 +21,6 @@ gordian-runtime = { path = "../gordian-runtime" }
 gordian-tools-pcb = { path = "../gordian-tools-pcb" }
 geom = { path = "../geom" }
 pcb-model = { path = "../pcb-model" }
-pcb-place-api = { path = "../pcb-place-api" }
 pcb-place = { path = "../pcb-place" }
 sch-floorplan = { path = "../sch-floorplan" }
 sch-io = { path = "../sch-io" }

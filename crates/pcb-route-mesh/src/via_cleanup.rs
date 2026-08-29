@@ -1,8 +1,8 @@
-use pcb_model::{RouteProblem, RouteSolution, ViaSpan};
+use pcb_model::{RouteSolution, RoutingView, ViaSpan};
 
 const VIA_POINT_KEY_SCALE: f64 = 1e9;
 
-pub(crate) fn normalize_redundant_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
+pub(crate) fn normalize_redundant_vias(problem: &RoutingView, solution: &mut RouteSolution) {
     drop_duplicate_vias(solution);
     drop_covered_vias(problem, solution);
 }
@@ -27,7 +27,7 @@ fn via_span_key(span: &ViaSpan) -> (u32, u32, bool, bool) {
     }
 }
 
-fn drop_covered_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
+fn drop_covered_vias(problem: &RoutingView, solution: &mut RouteSolution) {
     let mut baseline = pcb_drc::lint::lint(problem, solution);
     let mut idx = 0usize;
     while idx < solution.vias.len() {
@@ -59,7 +59,7 @@ fn introduces_new_findings(
         .any(|finding| !baseline.iter().any(|known| known == finding))
 }
 
-fn via_is_covered_by_another(problem: &RouteProblem, solution: &RouteSolution, idx: usize) -> bool {
+fn via_is_covered_by_another(problem: &RoutingView, solution: &RouteSolution, idx: usize) -> bool {
     let via = &solution.vias[idx];
     let Some(span) = via_layer_span(problem, &via.span) else {
         return false;
@@ -76,7 +76,7 @@ fn via_is_covered_by_another(problem: &RouteProblem, solution: &RouteSolution, i
     })
 }
 
-fn via_layer_span(problem: &RouteProblem, span: &ViaSpan) -> Option<(u32, u32)> {
+fn via_layer_span(problem: &RoutingView, span: &ViaSpan) -> Option<(u32, u32)> {
     match span {
         ViaSpan::Through => Some((0, problem.layer_count.saturating_sub(1))),
         ViaSpan::Partial { from, to, .. } => {
@@ -92,8 +92,8 @@ mod tests {
     use super::*;
     use pcb_model::{Connection, LayerRef, Point2, Rect, RoutePoint, Trace, Via, ViaSpan};
 
-    fn layer_change_problem() -> RouteProblem {
-        RouteProblem {
+    fn layer_change_problem() -> RoutingView {
+        RoutingView {
             layer_count: 4,
             min_trace_width: 0.2,
             obstacles: vec![],
@@ -128,7 +128,7 @@ mod tests {
         }
     }
 
-    fn solution_with_vias(vias: Vec<Via>) -> (RouteProblem, RouteSolution) {
+    fn solution_with_vias(vias: Vec<Via>) -> (RoutingView, RouteSolution) {
         let problem = layer_change_problem();
         let solution = RouteSolution {
             traces: vec![

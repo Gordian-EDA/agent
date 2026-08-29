@@ -2,7 +2,7 @@
 //!
 //! Slice 2's global stage cannot reason cell-by-cell over the slice-1 grid —
 //! that is what defeats it on congested boards. Instead it builds a *capacity
-//! mesh*: an XY quadtree over [`RouteProblem::bounds`] that subdivides only
+//! mesh*: an XY quadtree over [`RoutingView::bounds`] that subdivides only
 //! where it must (around obstacle boundaries), so open board area stays one big
 //! cheap leaf while pin fields refine down to fine leaves. Each leaf carries,
 //! **per copper layer**, how many tracks can pass through it (its capacity) and
@@ -13,7 +13,7 @@
 //!
 //! This module is deliberately independent of [`pcb_route_grid::grid`] / [`pcb_route_grid::astar`]
 //! / [`pcb_route_grid::router`]: the slice-1 fallback path stays untouched and
-//! always-correct. The mesh shares only the [`RouteProblem`] model and the
+//! always-correct. The mesh shares only the [`RoutingView`] model and the
 //! obstacle/net-attribution convention (a net's own pads never block it).
 //!
 //! ## Design constants
@@ -39,7 +39,7 @@
 //! determinism tests serialize the mesh twice and compare byte-for-byte.
 
 use geom::{BoundaryAxis, SharedBoundary};
-use pcb_model::{Point2, Rect, RouteProblem};
+use pcb_model::{Point2, Rect, RoutingView};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -142,7 +142,7 @@ pub struct MeshEdge {
     pub capacity: Vec<u32>,
 }
 
-/// The quadtree capacity mesh over a [`RouteProblem`].
+/// The quadtree capacity mesh over a [`RoutingView`].
 ///
 /// Built by [`CapacityMesh::build`]. Leaves are id-ordered (== vector index);
 /// edges are sorted by `(a, b)`. Everything is serde-serializable — the slice's
@@ -184,7 +184,7 @@ impl CapacityMesh {
     /// stays ≥ `4 × track_pitch` on its short side). Leaves then get per-layer
     /// free-area fractions and capacities, per-net blocking lists, and the
     /// adjacency graph with per-layer edge capacities.
-    pub fn build(problem: &RouteProblem) -> CapacityMesh {
+    pub fn build(problem: &RoutingView) -> CapacityMesh {
         let layer_count = problem.layer_count.max(1) as usize;
         let track_pitch = track_pitch(problem);
 
@@ -272,7 +272,7 @@ impl CapacityMesh {
 }
 
 /// The capacity unit: `min_trace_width + clearance` (mm).
-pub fn track_pitch(problem: &RouteProblem) -> f64 {
+pub fn track_pitch(problem: &RoutingView) -> f64 {
     problem.min_trace_width + problem.clearance
 }
 
@@ -291,7 +291,7 @@ pub fn max_depth(bounds: &Rect, track_pitch: f64) -> u32 {
 
 /// Connection name → dense index (connections order), first-wins (matches
 /// [`pcb_route_grid::grid`]).
-fn name_index(problem: &RouteProblem) -> BTreeMap<String, usize> {
+fn name_index(problem: &RoutingView) -> BTreeMap<String, usize> {
     let mut m = BTreeMap::new();
     for (i, c) in problem.connections.iter().enumerate() {
         m.entry(c.name.clone()).or_insert(i);
@@ -302,7 +302,7 @@ fn name_index(problem: &RouteProblem) -> BTreeMap<String, usize> {
 /// Flatten every obstacle into per-layer rectangles tagged with owning-net
 /// indices. `out[layer]` lists the obstacles on that copper layer.
 fn flatten_obstacles(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     layer_count: usize,
     name_index: &BTreeMap<String, usize>,
 ) -> Vec<Vec<LayerObstacle>> {
@@ -575,11 +575,11 @@ fn union_length(intervals: &mut [(f64, f64)]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pcb_model::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem};
+    use pcb_model::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RoutingView};
     use std::path::Path;
 
-    fn base(obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RouteProblem {
-        RouteProblem {
+    fn base(obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles,
@@ -628,7 +628,7 @@ mod tests {
         }
     }
 
-    fn load(name: &str) -> RouteProblem {
+    fn load(name: &str) -> RoutingView {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures")
             .join(name);

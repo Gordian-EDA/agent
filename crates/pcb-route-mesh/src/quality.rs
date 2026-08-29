@@ -1,6 +1,6 @@
-use pcb_model::{RouteProblem, RouteQuality, RouteResult, RouteSolution, Trace};
+use pcb_model::{RouteQuality, RouteResult, RouteSolution, RoutingView, Trace};
 
-pub(crate) fn route_quality(problem: &RouteProblem, result: &RouteResult) -> RouteQuality {
+pub(crate) fn route_quality(problem: &RoutingView, result: &RouteResult) -> RouteQuality {
     RouteQuality::of(
         problem,
         result,
@@ -21,7 +21,7 @@ pub(crate) fn keep_route_candidate(incumbent: &RouteQuality, challenger: &RouteQ
 }
 
 pub(crate) fn trace_route_cost_um(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     trace: &Trace,
     length_um: u64,
@@ -30,7 +30,7 @@ pub(crate) fn trace_route_cost_um(
 }
 
 pub(crate) fn trace_proximity_penalty_um(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     trace: &Trace,
 ) -> u64 {
@@ -100,7 +100,7 @@ fn clearance_margin_penalty_um(
     distance: f64,
     required_clearance: f64,
     segment_len: f64,
-    problem: &RouteProblem,
+    problem: &RoutingView,
 ) -> u64 {
     let margin = distance - required_clearance;
     let window = (problem.clearance + problem.min_trace_width).max(0.1);

@@ -6,9 +6,9 @@
 //! the swept-body clearance check ([`astar::diag_body_clear`]) — the 45° segment
 //! keeps its whole body clear of foreign copper, not just its cell centres — so two
 //! parallel diagonal runs one pitch apart can never dip under clearance. The strict
-//! ORTHOGONAL twin ([`route_orthogonal`]) is the [`GridAStarRouter`]'s per-board
-//! fallback for dense lattice-aligned via fields where a 45° run costs more lateral
-//! room than an axis-aligned one — so diagonals only ever ADD routed nets.
+//! ORTHOGONAL twin ([`route_orthogonal`]) is available to the tuned pipeline for
+//! dense lattice-aligned via fields where a 45° run costs more lateral room than
+//! an axis-aligned one.
 //!
 //! Nets are routed one at a time in a deterministic order
 //! (ascending bounding-box half-perimeter, ties by name — short local nets
@@ -25,9 +25,6 @@
 //! plus a list of [`FailedNet`]s. A net that cannot be routed is reported, never
 //! silently dropped, and the router never panics.
 //!
-//! [`GridAStarRouter`] is the [`Router`] impl, wrapping the strict/lenient/rip-up
-//! portfolio behind the SDK trait.
-//!
 //! ## Design constants
 //!
 //! The tunables are the [`AStarCosts`] bend/via weights plus the grid pitch and
@@ -37,8 +34,8 @@
 use crate::astar::{self, AStarCosts, DIAG_COST, State};
 use crate::grid::{self, RouteGrid};
 use pcb_model::{
-    Capabilities, Connection, FailedNet, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult,
-    RouteSolution, Router, Trace, Via, ViaSpan,
+    Connection, FailedNet, LayerRef, Point2, RouteQuality, RouteResult, RouteSolution, RoutingView,
+    Trace, Via, ViaSpan,
 };
 
 /// This engine's [`RouteResult::engine`] provenance tag.
@@ -79,7 +76,7 @@ pub fn plane_mask_for(layer_count: usize) -> u32 {
 /// vias exactly at cell centres (grid-aligned), so — unlike the detailed router's
 /// sub-cell placement — no snap-displacement slack is needed; the A* applies the
 /// halo as a EUCLIDEAN disc, so it does not over-block on the diagonal.
-pub fn via_clear_radius_cells(problem: &RouteProblem) -> usize {
+pub fn via_clear_radius_cells(problem: &RoutingView) -> usize {
     let pitch = grid::grid_pitch(problem);
     // The grid is ALREADY inflated by (clearance + trace_half) around every obstacle,
     // so a trace-free cell already guarantees a *trace's* clearance. A via is wider
@@ -96,10 +93,10 @@ pub fn via_clear_radius_cells(problem: &RouteProblem) -> usize {
 /// Route `problem` with the default design constants, but with the via-barrel
 /// clearance radius derived from the design rules so the slice-1 router does not
 /// drop a via that overhangs a foreign pad/trace. It can still produce other
-/// congestion artifacts; the selector (`pcb-route-mesh`'s `select_best`)
+/// congestion artifacts; the tuned routing pipeline
 /// reconciles connectivity and lints both engines, so a violating or phantom
 /// route never ships when a cleaner one exists.
-pub fn route(problem: &RouteProblem) -> RouteResult {
+pub fn route(problem: &RoutingView) -> RouteResult {
     let costs = AStarCosts {
         via_clear_radius_cells: via_clear_radius_cells(problem),
         diag: DIAG_COST, // 8-way: octilinear is the default (the per-net swept-body
@@ -121,7 +118,7 @@ pub fn route(problem: &RouteProblem) -> RouteResult {
 /// routed nets, never regress a via-field board. The placement [`crate::router`] ranker
 /// (`pcb-place`'s `GridAstarRanker`) also routes through this so the layout choice stays
 /// invariant to the routing diagonal default.
-pub fn route_orthogonal(problem: &RouteProblem) -> RouteResult {
+pub fn route_orthogonal(problem: &RoutingView) -> RouteResult {
     let costs = AStarCosts {
         via_clear_radius_cells: via_clear_radius_cells(problem),
         ..AStarCosts::default() // diag = u32::MAX (orthogonal), diag_body_radius inert
@@ -137,7 +134,7 @@ pub fn route_orthogonal(problem: &RouteProblem) -> RouteResult {
 /// candidate multiplies badly on high-terminal boards, while this pass preserves
 /// the same shortest-first order, clearance model, and DRC reconciliation as the
 /// first (and normally winning) strict pass.
-pub fn route_orthogonal_single_pass(problem: &RouteProblem) -> RouteResult {
+pub fn route_orthogonal_single_pass(problem: &RoutingView) -> RouteResult {
     let costs = AStarCosts {
         via_clear_radius_cells: via_clear_radius_cells(problem),
         ..AStarCosts::default()
@@ -156,7 +153,7 @@ pub fn route_orthogonal_single_pass(problem: &RouteProblem) -> RouteResult {
 /// clearance scan (the orthogonal twin of [`route_lenient`]). The other orthogonal
 /// candidate [`GridAStarRouter`]'s arbiter scores against [`route_orthogonal`]; a board
 /// whose orthogonal win needs the no-via-scan variant is not lost to a strict-only one.
-pub fn route_orthogonal_lenient(problem: &RouteProblem) -> RouteResult {
+pub fn route_orthogonal_lenient(problem: &RoutingView) -> RouteResult {
     route_iterated(problem, AStarCosts::default()) // diag = u32::MAX, no via-scan
 }
 
@@ -166,7 +163,7 @@ pub fn route_orthogonal_lenient(problem: &RouteProblem) -> RouteResult {
 /// retry may replace the incumbent only when it improves faults/failed-net count, or
 /// ties those and reduces vias/wirelength. This relieves the greedy router's corridor
 /// contention without a full rip-up engine.
-fn route_iterated(problem: &RouteProblem, costs: AStarCosts) -> RouteResult {
+fn route_iterated(problem: &RoutingView, costs: AStarCosts) -> RouteResult {
     let metrics = net_order_metrics(problem);
     let empty = std::collections::BTreeSet::new();
     let mut best = route_order_portfolio(problem, costs, &empty, &metrics);
@@ -193,7 +190,7 @@ fn route_iterated(problem: &RouteProblem, costs: AStarCosts) -> RouteResult {
 /// portfolio" idea used by negotiated routing while preserving the grid router's
 /// greedy semantics and fast clean, via-free board path.
 fn route_order_portfolio(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     costs: AStarCosts,
     priority: &std::collections::BTreeSet<String>,
     metrics: &[NetOrderMetric],
@@ -226,7 +223,7 @@ fn grid_portfolio_can_short_circuit(result: &RouteResult) -> bool {
     result.failed.is_empty() && result.solution.vias.is_empty()
 }
 
-fn grid_quality(problem: &RouteProblem, result: &RouteResult) -> RouteQuality {
+fn grid_quality(problem: &RoutingView, result: &RouteResult) -> RouteQuality {
     RouteQuality::of(
         problem,
         result,
@@ -238,7 +235,7 @@ fn grid_quality(problem: &RouteProblem, result: &RouteResult) -> RouteQuality {
 /// primary, then failed-net count, then fewer vias, then shorter copper. Exact
 /// ties keep the incumbent so the baseline order remains the deterministic path.
 fn grid_candidate_better(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     candidate: &RouteResult,
     incumbent: &RouteResult,
 ) -> bool {
@@ -262,7 +259,7 @@ fn grid_candidate_better(
 /// strict [`route`] and keeps whichever the lint scores cleanest, and the cross-engine
 /// selector lints both engines. The board picks the strictness it needs. Also 8-way
 /// (diagonals on), kept DRC-safe by the per-net swept-body radius set in `route_with`.
-pub fn route_lenient(problem: &RouteProblem) -> RouteResult {
+pub fn route_lenient(problem: &RoutingView) -> RouteResult {
     let costs = AStarCosts {
         diag: DIAG_COST,
         ..AStarCosts::default()
@@ -276,12 +273,12 @@ pub fn route_lenient(problem: &RouteProblem) -> RouteResult {
 /// unconnected or shorted. Every dropped net is reported failed, so `failed`
 /// never undercounts and the surviving copper is DRC-clean.
 #[cfg(test)]
-fn reconcile(problem: &RouteProblem, result: &mut RouteResult) {
+fn reconcile(problem: &RoutingView, result: &mut RouteResult) {
     reconcile_with_options(problem, result, false);
 }
 
 fn reconcile_with_options(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     result: &mut RouteResult,
     allow_octilinear_shortcuts: bool,
 ) {
@@ -318,7 +315,7 @@ fn reconcile_with_options(
 /// Pull grid trace corners tight with conservative straight/45-degree shortcuts.
 /// A candidate replaces `p[i]..p[j]` with the direct segment only when it shortens
 /// copper and introduces no new lint finding.
-fn shortcut_octilinear_traces(problem: &RouteProblem, solution: &mut RouteSolution) {
+fn shortcut_octilinear_traces(problem: &RoutingView, solution: &mut RouteSolution) {
     if !has_octilinear_shortcut_candidate_shape(solution) {
         return;
     }
@@ -400,7 +397,7 @@ fn has_octilinear_shortcut_candidate_shape(solution: &RouteSolution) -> bool {
 /// one of the two Manhattan L-shapes and is accepted only when it shortens copper
 /// without introducing any new lint finding, so via anchors and existing DRC
 /// semantics remain under the same oracle as reconciliation.
-fn pull_orthogonal_trace_corners(problem: &RouteProblem, solution: &mut RouteSolution) {
+fn pull_orthogonal_trace_corners(problem: &RoutingView, solution: &mut RouteSolution) {
     if !has_orthogonal_pull_candidate_shape(solution) {
         return;
     }
@@ -519,7 +516,7 @@ fn via_span_key(span: &ViaSpan) -> (u32, u32, bool, bool) {
     }
 }
 
-fn drop_covered_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
+fn drop_covered_vias(problem: &RoutingView, solution: &mut RouteSolution) {
     let mut baseline = pcb_drc::lint::lint(problem, solution);
     let mut idx = 0usize;
     while idx < solution.vias.len() {
@@ -551,7 +548,7 @@ fn introduces_new_findings(
         .any(|finding| !baseline.iter().any(|known| known == finding))
 }
 
-fn via_is_covered_by_another(problem: &RouteProblem, solution: &RouteSolution, idx: usize) -> bool {
+fn via_is_covered_by_another(problem: &RoutingView, solution: &RouteSolution, idx: usize) -> bool {
     let via = &solution.vias[idx];
     let Some(span) = via_layer_span(problem, &via.span) else {
         return false;
@@ -568,7 +565,7 @@ fn via_is_covered_by_another(problem: &RouteProblem, solution: &RouteSolution, i
     })
 }
 
-fn via_layer_span(problem: &RouteProblem, span: &ViaSpan) -> Option<(u32, u32)> {
+fn via_layer_span(problem: &RoutingView, span: &ViaSpan) -> Option<(u32, u32)> {
     match span {
         ViaSpan::Through => Some((0, problem.layer_count.saturating_sub(1))),
         ViaSpan::Partial { from, to, .. } => {
@@ -582,14 +579,14 @@ fn via_layer_span(problem: &RouteProblem, span: &ViaSpan) -> Option<(u32, u32)> 
 /// Route `problem` with explicit design constants and an optional `priority` set of
 /// net names to route first (empty = the default shortest-first order).
 pub fn route_with(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     costs: AStarCosts,
     priority: &std::collections::BTreeSet<String>,
 ) -> RouteResult {
     route_with_order(problem, costs, net_order(problem, priority))
 }
 
-fn route_with_order(problem: &RouteProblem, costs: AStarCosts, order: Vec<usize>) -> RouteResult {
+fn route_with_order(problem: &RoutingView, costs: AStarCosts, order: Vec<usize>) -> RouteResult {
     let mut grid = RouteGrid::build(problem);
     let layer_count = problem.layer_count.max(1) as usize;
 
@@ -743,6 +740,40 @@ fn route_with_order(problem: &RouteProblem, costs: AStarCosts, order: Vec<usize>
                 connection: conn.name.clone(),
                 reason,
             });
+        } else {
+            // Grid paths run through cell centres. Anchor every successful path
+            // to the terminal's exact world coordinate so fixed terminals remain
+            // connected even when they are not backed by a pad obstacle.
+            for terminal in &conn.points_to_connect {
+                let cell = point_cell(&grid, terminal, layer_count);
+                let center = Point2 {
+                    x: grid.cell_center_x(cell.ix),
+                    y: grid.cell_center_y(cell.iy),
+                };
+                let exact = terminal.point();
+                if !exact.near_eq(center, geom::EPS) {
+                    let path = if (exact.x - center.x).abs() < geom::EPS
+                        || (exact.y - center.y).abs() < geom::EPS
+                    {
+                        vec![exact, center]
+                    } else {
+                        vec![
+                            exact,
+                            Point2 {
+                                x: center.x,
+                                y: exact.y,
+                            },
+                            center,
+                        ]
+                    };
+                    traces.push(Trace {
+                        connection: conn.name.clone(),
+                        layer: terminal.layer.clone(),
+                        width: nw,
+                        path,
+                    });
+                }
+            }
         }
     }
 
@@ -779,7 +810,7 @@ fn same_layer_reachable(starts: &[State], targets: &[State]) -> bool {
         .any(|start| targets.iter().any(|target| start.layer == target.layer))
 }
 
-fn prefer_planar_tree_leg(problem: &RouteProblem, connection: &str) -> bool {
+fn prefer_planar_tree_leg(problem: &RoutingView, connection: &str) -> bool {
     !problem.obstacles.iter().any(|obstacle| {
         obstacle.kind.starts_with("route-")
             && !obstacle
@@ -811,7 +842,7 @@ fn terminal_tree_route_key(tree_cells: &[State], terminal: State) -> (usize, u64
 /// can give the previously-failed nets the empty grid), then ascending bounding-box
 /// half-perimeter, ties by name. Deterministic. With an empty `priority` this is exactly
 /// the shortest-half-perimeter-first order.
-fn net_order(problem: &RouteProblem, priority: &std::collections::BTreeSet<String>) -> Vec<usize> {
+fn net_order(problem: &RoutingView, priority: &std::collections::BTreeSet<String>) -> Vec<usize> {
     net_order_by(problem, priority, NetOrderKind::ShortestFirst)
 }
 
@@ -824,7 +855,7 @@ struct NetOrderMetric {
     crossing_pressure: usize,
 }
 
-fn net_order_metrics(problem: &RouteProblem) -> Vec<NetOrderMetric> {
+fn net_order_metrics(problem: &RoutingView) -> Vec<NetOrderMetric> {
     let crossing_pressures = connection_crossing_pressures(problem);
     problem
         .connections
@@ -852,7 +883,7 @@ enum NetOrderKind {
 }
 
 fn net_order_by(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     priority: &std::collections::BTreeSet<String>,
     kind: NetOrderKind,
 ) -> Vec<usize> {
@@ -861,7 +892,7 @@ fn net_order_by(
 }
 
 fn net_order_by_with_metrics(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     priority: &std::collections::BTreeSet<String>,
     kind: NetOrderKind,
     metrics: &[NetOrderMetric],
@@ -882,7 +913,7 @@ fn net_order_by_with_metrics(
 }
 
 fn priority_net_cmp(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     metrics: &[NetOrderMetric],
     a: usize,
     b: usize,
@@ -918,7 +949,7 @@ fn priority_net_cmp(
 }
 
 fn net_order_kind_cmp(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     metrics: &[NetOrderMetric],
     kind: NetOrderKind,
     a: usize,
@@ -1016,7 +1047,7 @@ fn net_order_kind_cmp(
 
 #[cfg(test)]
 fn net_order_portfolio(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     priority: &std::collections::BTreeSet<String>,
 ) -> std::vec::IntoIter<Vec<usize>> {
     let metrics = net_order_metrics(problem);
@@ -1024,7 +1055,7 @@ fn net_order_portfolio(
 }
 
 fn net_order_portfolio_with_metrics(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     priority: &std::collections::BTreeSet<String>,
     metrics: &[NetOrderMetric],
 ) -> std::vec::IntoIter<Vec<usize>> {
@@ -1046,7 +1077,7 @@ fn net_order_portfolio_with_metrics(
     orders.into_iter()
 }
 
-fn connection_obstacle_pressure(problem: &RouteProblem, conn: &Connection) -> u64 {
+fn connection_obstacle_pressure(problem: &RoutingView, conn: &Connection) -> u64 {
     let Some(first) = conn.points_to_connect.first() else {
         return 0;
     };
@@ -1093,7 +1124,7 @@ fn connection_obstacle_pressure(problem: &RouteProblem, conn: &Connection) -> u6
     pressure
 }
 
-fn connection_segment_obstacle_pressure(problem: &RouteProblem, conn: &Connection) -> u64 {
+fn connection_segment_obstacle_pressure(problem: &RoutingView, conn: &Connection) -> u64 {
     let expand = problem.clearance + problem.net_width(&conn.name) / 2.0;
     let mut pressure = 0;
     for segment in connection_tree_segments_for_pressure(conn) {
@@ -1123,7 +1154,7 @@ fn connection_segment_obstacle_pressure(problem: &RouteProblem, conn: &Connectio
     pressure
 }
 
-fn connection_crossing_pressures(problem: &RouteProblem) -> Vec<usize> {
+fn connection_crossing_pressures(problem: &RoutingView) -> Vec<usize> {
     let segments: Vec<Vec<TreeSegment>> = problem
         .connections
         .iter()
@@ -1304,7 +1335,7 @@ fn push_unique_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
 #[allow(clippy::too_many_arguments)] // one cohesive escape primitive; flat args keep it inline-able
 fn escape_cells(
     grid: &mut RouteGrid,
-    problem: &RouteProblem,
+    problem: &RoutingView,
     conn_idx: usize,
     pt: &pcb_model::RoutePoint,
     pad_cell: State,
@@ -1455,7 +1486,7 @@ fn escape_cells(
 #[allow(clippy::too_many_arguments)]
 fn via_in_pad_escape(
     grid: &mut RouteGrid,
-    problem: &RouteProblem,
+    problem: &RoutingView,
     conn_idx: usize,
     pt: &pcb_model::RoutePoint,
     pad_cell: State,
@@ -1615,7 +1646,7 @@ fn point_cell(grid: &RouteGrid, pt: &pcb_model::RoutePoint, layer_count: usize) 
 /// Convert one cell path into mm copper: per-layer polylines (collinear runs
 /// merged) plus a via at each layer transition.
 fn emit_path(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     grid: &RouteGrid,
     connection: &str,
     path: &[State],
@@ -1704,9 +1735,9 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
     }
 }
 
-// ── GridAStarRouter (the SDK Router impl) ───────────────────────────────────────
+// ── Combined grid route ─────────────────────────────────────────────
 
-/// The free-tier grid-A* [`Router`]: a sequential shortest-net-first A* per net
+/// Internal combined grid strategy: a sequential shortest-net-first A* per net
 /// with a rip-up retry, run 8-way (octilinear) in both a STRICT (via-barrel
 /// clearance scan) and a LENIENT (no scan) variant — the better of the two is the
 /// 8-way candidate.
@@ -1725,25 +1756,10 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
 /// capability ADD, never a via-field regression. Paid only on a board the 8-way
 /// pass did not already ace without vias.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct GridAStarRouter;
+struct GridAStarRouter;
 
-impl Router for GridAStarRouter {
-    fn name(&self) -> &'static str {
-        ENGINE
-    }
-
-    /// The always-correct baseline supports any board: it honours per-net widths,
-    /// custom outlines, inner-layer escape assignments, and any layer count.
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            max_layers: u32::MAX,
-            honors_escape_layers: true,
-            honors_net_widths: true,
-            honors_outline: true,
-        }
-    }
-
-    fn route(&self, problem: &RouteProblem) -> RouteResult {
+impl GridAStarRouter {
+    fn route(&self, problem: &RoutingView) -> RouteResult {
         let strict = route(problem);
         let lenient = route_lenient(problem);
         let diag = if grid_candidate_better(problem, &lenient, &strict) {
@@ -1772,7 +1788,13 @@ impl Router for GridAStarRouter {
     }
 }
 
-fn grid_candidate_can_skip_orthogonal(problem: &RouteProblem, result: &RouteResult) -> bool {
+/// Run the concrete grid routing primitive used by the Gordian engine's rescue
+/// phase. This is an implementation function, not an engine contract.
+pub fn route_grid(problem: &RoutingView) -> RouteResult {
+    GridAStarRouter.route(problem)
+}
+
+fn grid_candidate_can_skip_orthogonal(problem: &RoutingView, result: &RouteResult) -> bool {
     let q = grid_quality(problem, result);
     q.faults() == 0 && q.via_count == 0
 }
@@ -1780,7 +1802,7 @@ fn grid_candidate_can_skip_orthogonal(problem: &RouteProblem, result: &RouteResu
 /// Count the GEOMETRY DRC violations of a solution (clearance / width / via /
 /// bounds / invalid layer) — excluding connectivity, which already correlates
 /// with the failed-net count. The router's own DRC authority.
-pub fn geometry_violations(problem: &RouteProblem, solution: &RouteSolution) -> usize {
+pub fn geometry_violations(problem: &RoutingView, solution: &RouteSolution) -> usize {
     pcb_drc::lint::lint(problem, solution)
         .iter()
         .filter(|v| !matches!(v, pcb_drc::lint::DrcViolation::Connectivity { .. }))
@@ -1851,7 +1873,7 @@ mod tests {
                 ],
             });
         }
-        let problem = RouteProblem {
+        let problem = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles,
@@ -1910,7 +1932,7 @@ mod tests {
     /// connectivity oracle joins a trace to a pad it lands in).
     #[test]
     fn default_route_is_octilinear() {
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![
@@ -2011,7 +2033,7 @@ mod tests {
         };
         let (ax0, ay0, ax1, ay1) = (3.0, 3.0, 13.0, 13.0);
         let (bx0, by0, bx1, by1) = (3.6, 3.0, 13.6, 13.0);
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![
@@ -2105,7 +2127,7 @@ mod tests {
         }];
         let mut escape_layers = std::collections::BTreeMap::new();
         escape_layers.insert("S".to_string(), 2u32); // an inner SIGNAL layer
-        let problem = RouteProblem {
+        let problem = RoutingView {
             layer_count: 8,
             min_trace_width: 0.2,
             obstacles,
@@ -2196,7 +2218,7 @@ mod tests {
                 },
             ],
         }];
-        let problem = RouteProblem {
+        let problem = RoutingView {
             layer_count: 8,
             min_trace_width: 0.2,
             obstacles,
@@ -2236,7 +2258,7 @@ mod tests {
         assert_eq!(plane_layers(5), Vec::<u32>::new());
     }
 
-    fn load(name: &str) -> RouteProblem {
+    fn load(name: &str) -> RoutingView {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures")
             .join(name);
@@ -2287,7 +2309,7 @@ mod tests {
 
     #[test]
     fn multi_terminal_net_routes_nearest_remaining_terminal_first() {
-        let problem = RouteProblem {
+        let problem = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],
@@ -2371,7 +2393,7 @@ mod tests {
 
     #[test]
     fn same_layer_tree_leg_tries_planar_before_cheap_via_hop() {
-        let problem = RouteProblem {
+        let problem = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![Obstacle {
@@ -2434,7 +2456,7 @@ mod tests {
 
     #[test]
     fn residual_route_copper_keeps_via_fallback_available() {
-        let problem = RouteProblem {
+        let problem = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![Obstacle {
@@ -2557,7 +2579,7 @@ mod tests {
 
     #[test]
     fn net_order_portfolio_includes_obstacle_pressure_order() {
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![pad(&[], (7.0, 10.0), 1.0, 4.0, &["top"])],
@@ -2643,7 +2665,7 @@ mod tests {
 
     #[test]
     fn net_order_portfolio_includes_crossing_pressure_order() {
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],
@@ -2743,7 +2765,7 @@ mod tests {
 
     #[test]
     fn obstacle_pressure_uses_active_net_width_and_ignores_own_pads() {
-        let mut p = RouteProblem {
+        let mut p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![
@@ -2796,7 +2818,7 @@ mod tests {
 
     #[test]
     fn segment_obstacle_pressure_tracks_tree_corridors_not_whole_bbox() {
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![pad(&[], (8.0, 2.0), 0.5, 0.5, &["top"])],
@@ -2877,7 +2899,7 @@ mod tests {
 
     #[test]
     fn net_order_portfolio_includes_segment_obstacle_pressure_order() {
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![
@@ -2956,7 +2978,7 @@ mod tests {
 
     #[test]
     fn net_order_metrics_cache_grid_order_signals() {
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![pad(&[], (7.0, 10.0), 1.0, 4.0, &["top"])],
@@ -3022,7 +3044,7 @@ mod tests {
 
     #[test]
     fn net_order_metrics_count_multi_pin_tree_crossings() {
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],
@@ -3123,7 +3145,7 @@ mod tests {
 
     #[test]
     fn net_order_portfolio_prioritizes_higher_impact_failed_nets() {
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],
@@ -3208,7 +3230,7 @@ mod tests {
 
     #[test]
     fn net_order_portfolio_prioritizes_failed_crossing_nets_after_pressure() {
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],
@@ -3294,7 +3316,7 @@ mod tests {
 
     #[test]
     fn crossing_pressure_ignores_disjoint_layer_crossings() {
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],
@@ -3407,7 +3429,7 @@ mod tests {
 
     #[test]
     fn grid_candidate_quality_prefers_fewer_vias_then_wirelength() {
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],
@@ -3529,7 +3551,7 @@ mod tests {
 
     #[test]
     fn reconcile_shortcuts_clean_octilinear_detour() {
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],
@@ -3594,7 +3616,7 @@ mod tests {
 
     #[test]
     fn reconcile_octilinear_shortcut_can_remove_existing_clearance_finding() {
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![Obstacle {
@@ -3672,7 +3694,7 @@ mod tests {
 
     #[test]
     fn reconcile_pulls_clean_orthogonal_detour() {
-        let p = RouteProblem {
+        let p = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],
@@ -3741,8 +3763,8 @@ mod tests {
         assert!(pcb_drc::lint::lint(&p, &routed.solution).is_empty());
     }
 
-    fn layer_change_result_with_vias(vias: Vec<Via>) -> (RouteProblem, RouteResult) {
-        let p = RouteProblem {
+    fn layer_change_result_with_vias(vias: Vec<Via>) -> (RoutingView, RouteResult) {
+        let p = RoutingView {
             layer_count: 4,
             min_trace_width: 0.2,
             obstacles: vec![],
@@ -3801,7 +3823,7 @@ mod tests {
 
     #[test]
     fn top_level_arbiter_skips_orthogonal_only_for_clean_via_free() {
-        let top_problem = RouteProblem {
+        let top_problem = RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],

@@ -2523,7 +2523,7 @@ fn full_flow_create_place_route_is_clean() {
         "{out}"
     );
     assert!(out["metrics"]["traces"].as_u64().unwrap() > 0, "{out}");
-    // Any portfolio engine may win (route_auto picks the fewer-failed result); just
+    // Any portfolio engine may win (route_tuned picks the fewer-failed result); just
     // assert the provenance tag is one of the known honest values.
     assert!(
         matches!(

@@ -15,10 +15,10 @@ use crate::heuristics::{
     connection_segment_obstacle_pressure_um, connection_span_um,
 };
 use crate::quality::{keep_route_candidate as keep_candidate, route_quality};
-use pcb_route_grid::router::GridAStarRouter;
 use pcb_model::{
-    Capabilities, FailedNet, RouteProblem, RouteQuality, RouteResult, RouteSolution, Router,
+    FailedNet, RouteQuality, RouteResult, RouteSolution, RoutingCapabilities, RoutingView,
 };
+use pcb_route_grid::router::route_grid;
 
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "sequential-grid";
@@ -28,13 +28,13 @@ const SEQUENTIAL_ORDER_PORTFOLIO_MAX_CONNECTIONS: usize = 6;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SequentialGridRouter;
 
-impl Router for SequentialGridRouter {
-    fn name(&self) -> &'static str {
+impl SequentialGridRouter {
+    pub fn name(&self) -> &'static str {
         ENGINE
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
+    pub fn capabilities(&self) -> RoutingCapabilities {
+        RoutingCapabilities {
             max_layers: u32::MAX,
             honors_escape_layers: true,
             honors_net_widths: true,
@@ -42,18 +42,18 @@ impl Router for SequentialGridRouter {
         }
     }
 
-    fn can_route(&self, problem: &RouteProblem) -> bool {
+    pub fn can_route(&self, problem: &RoutingView) -> bool {
         self.capabilities().can_route(problem)
             && problem.connections.len() <= SEQUENTIAL_ORDER_PORTFOLIO_MAX_CONNECTIONS
     }
 
-    fn route(&self, problem: &RouteProblem) -> RouteResult {
+    pub fn route(&self, problem: &RoutingView) -> RouteResult {
         route_sequential(problem)
     }
 }
 
 /// Route `problem` with the contextual sequential grid portfolio.
-pub fn route_sequential(problem: &RouteProblem) -> RouteResult {
+pub fn route_sequential(problem: &RoutingView) -> RouteResult {
     let mut best: Option<(RouteResult, RouteQuality)> = None;
     for order in net_order_portfolio(problem) {
         let result = route_order(problem, &order);
@@ -75,7 +75,7 @@ pub fn route_sequential(problem: &RouteProblem) -> RouteResult {
         })
 }
 
-fn route_order(problem: &RouteProblem, order: &[usize]) -> RouteResult {
+fn route_order(problem: &RoutingView, order: &[usize]) -> RouteResult {
     let mut best = route_order_once(problem, order);
     let mut current_order = order.to_vec();
     let mut tried = vec![current_order.clone()];
@@ -104,8 +104,7 @@ fn route_order(problem: &RouteProblem, order: &[usize]) -> RouteResult {
     best
 }
 
-fn route_order_once(problem: &RouteProblem, order: &[usize]) -> RouteResult {
-    let grid = GridAStarRouter;
+fn route_order_once(problem: &RoutingView, order: &[usize]) -> RouteResult {
     let mut solution = RouteSolution {
         traces: Vec::new(),
         vias: Vec::new(),
@@ -122,7 +121,7 @@ fn route_order_once(problem: &RouteProblem, order: &[usize]) -> RouteResult {
         }
 
         let subproblem = problem_with_single_connection_and_copper(problem, idx, &solution);
-        let candidate = grid.route(&subproblem);
+        let candidate = route_grid(&subproblem);
         if !candidate.failed.is_empty() {
             failed.push(FailedNet {
                 connection: conn.name.clone(),
@@ -156,7 +155,7 @@ fn route_order_once(problem: &RouteProblem, order: &[usize]) -> RouteResult {
 }
 
 fn failed_priority_order(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     order: &[usize],
     failed: &[FailedNet],
 ) -> Vec<usize> {
@@ -186,7 +185,7 @@ fn failed_priority_order(
 }
 
 fn failed_priority_cmp_with_metrics(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     metrics: &[NetOrderMetric],
     a: usize,
     b: usize,
@@ -217,7 +216,7 @@ fn failed_priority_cmp_with_metrics(
         })
 }
 
-fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
+fn net_order_portfolio(problem: &RoutingView) -> Vec<Vec<usize>> {
     let base: Vec<usize> = (0..problem.connections.len()).collect();
     let mut orders = Vec::new();
     push_order(&mut orders, base.clone());
@@ -340,7 +339,7 @@ struct NetOrderMetric {
     crossing_pressure: usize,
 }
 
-fn net_order_metrics(problem: &RouteProblem) -> Vec<NetOrderMetric> {
+fn net_order_metrics(problem: &RoutingView) -> Vec<NetOrderMetric> {
     let crossing_pressures = connection_crossing_pressures(problem);
     problem
         .connections
@@ -363,10 +362,10 @@ fn push_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
 }
 
 fn problem_with_single_connection_and_copper(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     idx: usize,
     solution: &RouteSolution,
-) -> RouteProblem {
+) -> RoutingView {
     let mut out = problem.clone();
     out.connections = problem
         .connections
@@ -378,11 +377,7 @@ fn problem_with_single_connection_and_copper(
     out
 }
 
-fn problem_with_connections(
-    problem: &RouteProblem,
-    indices: &[usize],
-    extra: usize,
-) -> RouteProblem {
+fn problem_with_connections(problem: &RoutingView, indices: &[usize], extra: usize) -> RoutingView {
     let mut all = indices.to_vec();
     all.push(extra);
     let mut out = problem.clone();
@@ -424,8 +419,8 @@ mod tests {
         }
     }
 
-    fn base() -> RouteProblem {
-        RouteProblem {
+    fn base() -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: Vec::new(),

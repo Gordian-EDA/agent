@@ -10,16 +10,9 @@
 //!
 //! [`route_detailed`] folds every stage's failures into one [`RouteResult`] with
 //! provenance in the reason string (`"global: …"`, `"assign: …"`, `"cell N: …"`),
-//! and stitches only the *fully successful* nets into copper. [`NegotiatedMeshRouter`]
-//! is the [`Router`] impl wrapping it. The generic selector [`select_best`] runs
-//! the offered [`Router`]s and keeps the best by a [`RouteQuality`] key (faults,
-//! then via count, then wirelength): faults are primary (never trade routability),
-//! then the lower-risk/tidier copper wins — so the detailed router's
-//! capacity-aware routing is kept where it reduces faults, and a lighter router is
-//! kept where it is cleaner on a board both can route. The earlier-injected router
-//! wins exact ties as the
-//! battle-tested path. [`RouteResult::engine`] records which engine produced the
-//! returned result.
+//! and stitches only the *fully successful* nets into copper. It remains an
+//! implementation primitive; [`route_tuned`] is the single production routing
+//! entry point used by the PCB engine.
 //!
 //! ## Stitching (the connectivity contract)
 //!
@@ -37,26 +30,24 @@
 //! copper at all: a half-routed net would (rightly) trip the connectivity lint,
 //! so its cell routes are dropped and it is reported failed.
 
-use crate::channel::ChannelRouter;
 use crate::copper::copper_obstacles;
 use crate::crossing::assign_crossings;
 use crate::detail::{self, CellRoute, CellRouteResult};
-use crate::direct::DirectLineRouter;
 use crate::heuristics::{
     connection_crossing_pressures, connection_obstacle_pressure_um,
     connection_segment_obstacle_pressure_um, connection_span_um,
 };
-use crate::layer_hop::LayerHopRouter;
 use crate::pathing::{GlobalRouteResult, global_route_with_mesh};
-use crate::pattern::PatternRouter;
+#[cfg(test)]
 use crate::sequential::SequentialGridRouter;
-use crate::via_escape::ViaEscapeRouter;
 use geom::JOIN_EPS;
-use pcb_route_grid::router::{self, GridAStarRouter};
+#[cfg(test)]
+use pcb_model::RoutingCapabilities;
 use pcb_model::{
-    Capabilities, Connection, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteQuality,
-    RouteResult, RouteSolution, Router, Trace, Via, ViaSpan,
+    Connection, FailedNet, LayerRef, Obstacle, Point2, RouteQuality, RouteResult, RouteSolution,
+    RoutingView, Trace, Via, ViaSpan,
 };
+use pcb_route_grid::router::{self, route_grid};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
@@ -66,10 +57,6 @@ const ADAPTIVE_GRID_RESCUE_ENGINE: &str = "adaptive-grid-rescue";
 const ADAPTIVE_GRID_RIPUP_RESCUE_ENGINE: &str = "adaptive-grid-ripup-rescue";
 const ADAPTIVE_RESCUE_PORTFOLIO_MAX_FAILED: usize = 8;
 const ADAPTIVE_RIPUP_MAX_BLOCKERS: usize = 3;
-const AUTO_DETAILED_MAX_MULTILAYER_CONNECTIONS: usize = 11;
-const AUTO_BOUNDED_MAX_CONNECTIONS: usize = 48;
-const AUTO_BOUNDED_MAX_TERMINALS: usize = 160;
-const AUTO_BOUNDED_MAX_GRID_CELLS: usize = 725_000;
 
 // ── pipeline entry points ──────────────────────────────────────────────────────
 
@@ -78,14 +65,14 @@ const AUTO_BOUNDED_MAX_GRID_CELLS: usize = 725_000;
 /// [`RouteResult::failed`] with provenance in the reason, and a net that fails at
 /// *any* stage contributes no copper to the returned solution. The result is
 /// tagged with [`ENGINE`] (`"detailed"`).
-pub fn route_detailed(problem: &RouteProblem) -> RouteResult {
+pub fn route_detailed(problem: &RoutingView) -> RouteResult {
     route_detailed_with_global(problem).0
 }
 
 /// As [`route_detailed`], but also returns the negotiated global-routing result
 /// that the detailed pipeline already computed. This lets callers surface
 /// congestion diagnostics without rerunning global routing on the failure path.
-pub fn route_detailed_with_global(problem: &RouteProblem) -> (RouteResult, GlobalRouteResult) {
+pub fn route_detailed_with_global(problem: &RoutingView) -> (RouteResult, GlobalRouteResult) {
     let mesh = crate::mesh::CapacityMesh::build(problem);
     let global: GlobalRouteResult = global_route_with_mesh(problem, &mesh);
     let route = route_detailed_from_global(problem, &mesh, &global);
@@ -93,7 +80,7 @@ pub fn route_detailed_with_global(problem: &RouteProblem) -> (RouteResult, Globa
 }
 
 fn route_detailed_from_global(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     mesh: &crate::mesh::CapacityMesh,
     global: &GlobalRouteResult,
 ) -> RouteResult {
@@ -189,21 +176,19 @@ fn route_detailed_from_global(
 /// returned result is geometry-clean.
 ///
 /// It DECLINES (`can_route` = `false`) a board carrying a per-net inner-layer escape
-/// assignment ([`RouteProblem::escape_layers`]): the detailed engine free-mazes every
+/// assignment ([`RoutingView::escape_layers`]): the detailed engine free-mazes every
 /// net over all layers and has no per-net layer restriction, so it would defeat the
 /// structured escape (self-blocking, runtime-exploding) the assignment exists to
 /// enable. On such a board only the grid router is offered, exactly as the old
 /// `skip_detailed` flag intended.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct NegotiatedMeshRouter;
+#[cfg(test)]
+struct NegotiatedMeshRouter;
 
-impl Router for NegotiatedMeshRouter {
-    fn name(&self) -> &'static str {
-        ENGINE
-    }
-
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
+#[cfg(test)]
+impl NegotiatedMeshRouter {
+    pub fn capabilities(&self) -> RoutingCapabilities {
+        RoutingCapabilities {
             max_layers: u32::MAX,
             // Cannot honour a per-net inner-layer escape restriction (free-mazes).
             honors_escape_layers: false,
@@ -216,63 +201,18 @@ impl Router for NegotiatedMeshRouter {
         }
     }
 
-    fn route(&self, problem: &RouteProblem) -> RouteResult {
-        let mut detailed = route_detailed(problem);
-        reconcile_connectivity(problem, &mut detailed.solution, &mut detailed.failed);
-        detailed
+    pub fn can_route(&self, problem: &RoutingView) -> bool {
+        self.capabilities().can_route(problem)
     }
 }
 
-/// Route `problem` with the best of the offered `routers`.
-///
-/// The PCB instantiation of the kernel selector: it supplies the DRC-aware
-/// [`RouteQuality`] scorer (the geometry-violation count lives outside the kernel),
-/// the routability-then-tidiness [`better`] rule, and the clean-route
-/// short-circuit. The selector filters by [`Router::can_route`], runs each
-/// surviving router in injection order, and keeps the best: a clean via-free
-/// result after shared postroute cleanup short-circuits the rest, while a clean
-/// via-heavy result may still be beaten by a later injected router with fewer
-/// vias or shorter copper. Candidates are cleaned before scoring, so injected
-/// router portfolios use the same quality key as [`route_auto`].
-///
-/// `routers` is injected by the caller, mirroring `Box<dyn PlacementEngine>`:
-/// free tier = `[&GridAStarRouter]`; premium =
-/// `[&DirectLineRouter, &LayerHopRouter, &ViaEscapeRouter, &PatternRouter,
-/// &NegotiatedMeshRouter, &GridAStarRouter]`.
-/// Returns an empty-solution result tagged `"none"` if no router can route the
-/// problem (never for a non-empty list containing the always-routable grid baseline).
-pub fn select_best(problem: &RouteProblem, routers: &[&dyn Router]) -> RouteResult {
-    let mut best: Option<(RouteResult, RouteQuality)> = None;
-    for router in routers {
-        if !router.can_route(problem) {
-            continue;
-        }
-        let result = router.route(problem);
-        let _ = consider_candidate(problem, &mut best, result);
-        if route_best_is_clean_via_free(&best) {
-            break;
-        }
-    }
-    best.map(|(result, _)| result)
-        .unwrap_or_else(|| RouteResult {
-            solution: RouteSolution {
-                traces: vec![],
-                vias: vec![],
-            },
-            failed: vec![],
-            engine: "none".to_owned(),
-        })
-}
-
-/// `route_auto` plus diagnostic side data captured from engines that expose it.
+/// Diagnostic side data from the tuned routing algorithm.
 #[derive(Debug, Clone)]
-pub struct RouteAutoRun {
+pub struct TunedRouteRun {
     pub result: RouteResult,
-    /// Per-engine candidate summaries in the order `route_auto` tried them. Each
-    /// entry is captured after the same postroute cleanup and quality scoring used
-    /// by the selector, so failure reports can show which engines were actually
-    /// attempted and why the selected result still failed.
-    pub attempts: Vec<RouteEngineAttempt>,
+    /// Pass summaries in execution order. Each entry is captured after shared
+    /// post-route cleanup and quality scoring.
+    pub passes: Vec<RoutePassReport>,
     /// Negotiated global-routing result from the detailed primary candidate, when
     /// that candidate ran. Failure callers can use this instead of rerunning
     /// global routing just to recover congestion hotspots.
@@ -280,7 +220,7 @@ pub struct RouteAutoRun {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct RouteEngineAttempt {
+pub struct RoutePassReport {
     pub engine: String,
     pub failed: Vec<FailedNet>,
     pub elapsed_ms: u128,
@@ -291,24 +231,16 @@ pub struct RouteEngineAttempt {
     pub wirelength: f64,
 }
 
-fn consider_candidate(
-    problem: &RouteProblem,
-    best: &mut Option<(RouteResult, RouteQuality)>,
-    result: RouteResult,
-) -> bool {
-    consider_candidate_recording(problem, best, result, None, 0)
-}
-
 fn consider_candidate_recording(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     best: &mut Option<(RouteResult, RouteQuality)>,
     mut result: RouteResult,
-    attempts: Option<&mut Vec<RouteEngineAttempt>>,
+    passes: Option<&mut Vec<RoutePassReport>>,
     elapsed_ms: u128,
 ) -> bool {
     let (q, geometry_violations) = cleaned_route_quality(problem, &mut result);
-    if let Some(attempts) = attempts {
-        attempts.push(RouteEngineAttempt {
+    if let Some(passes) = passes {
+        passes.push(RoutePassReport {
             engine: result.engine.clone(),
             failed: result.failed.clone(),
             elapsed_ms,
@@ -328,10 +260,7 @@ fn consider_candidate_recording(
     stop
 }
 
-fn cleaned_route_quality(
-    problem: &RouteProblem,
-    result: &mut RouteResult,
-) -> (RouteQuality, usize) {
+fn cleaned_route_quality(problem: &RoutingView, result: &mut RouteResult) -> (RouteQuality, usize) {
     postroute_cleanup(problem, &mut result.solution);
     let geometry_violations = router::geometry_violations(problem, &result.solution);
     (
@@ -343,11 +272,6 @@ fn cleaned_route_quality(
 fn route_best_is_clean(best: &Option<(RouteResult, RouteQuality)>) -> bool {
     best.as_ref()
         .is_some_and(|(_, quality)| quality.faults() == 0)
-}
-
-fn route_best_is_clean_via_free(best: &Option<(RouteResult, RouteQuality)>) -> bool {
-    best.as_ref()
-        .is_some_and(|(_, quality)| quality.faults() == 0 && quality.via_count == 0)
 }
 
 /// Keep the incumbent? Routability is primary (fewer total faults wins outright);
@@ -362,7 +286,7 @@ fn route_best_is_clean_via_free(best: &Option<(RouteResult, RouteQuality)>) -> b
 /// favour, so the selector is a left-fold in injection order, not a global argmin.
 /// The `_problem` arg matches the kernel selector's `better` signature (the rule
 /// is problem-independent here).
-fn better(_problem: &RouteProblem, incumbent: &RouteQuality, challenger: &RouteQuality) -> bool {
+fn better(_problem: &RoutingView, incumbent: &RouteQuality, challenger: &RouteQuality) -> bool {
     if incumbent.faults() != challenger.faults() {
         incumbent.faults() < challenger.faults()
     } else if incumbent.failed_nets != challenger.failed_nets {
@@ -374,31 +298,51 @@ fn better(_problem: &RouteProblem, incumbent: &RouteQuality, challenger: &RouteQ
     }
 }
 
-/// Route `problem` with the premium portfolio: direct line-of-sight for trivial
-/// clean nets, layer-hop for trivial different-layer nets, via-escape for simple
-/// same-layer escapes, a composite pattern router for heterogeneous simple
-/// boards, a directional channel router for crossing/channel cases, a
-/// contextual sequential-grid router for ordering-sensitive boards, the
-/// pcb-route-mesh detailed router as the primary engine, and the free grid router
-/// as the fallback baseline. Cheap clean via-free candidates stop immediately;
-/// cheap clean via-heavy candidates keep competing with the remaining cheap
-/// routers for fewer vias/shorter copper, but still avoid paying the detailed mesh.
-/// The convenience entry the agent's PCB tool uses; a free-tier caller injects only
-/// `[&GridAStarRouter]`.
-pub fn route_auto(problem: &RouteProblem) -> RouteResult {
-    route_auto_with_diagnostics(problem).result
+/// The single tuned routing algorithm used by the unified PCB engine.
+///
+/// It performs one deterministic orthogonal grid pass followed by targeted
+/// adaptive rip-up/rescue for any failed nets.  The rescue is a phase of the
+/// same algorithm, not selection among independent routers.
+pub fn route_tuned(problem: &RoutingView) -> RouteResult {
+    route_tuned_with_diagnostics(problem).result
 }
 
-/// Route only the pcb-route-mesh detailed engine, returning the global report it
-/// already computed. This is the diagnostics-preserving equivalent of injecting
-/// only [`NegotiatedMeshRouter`] into [`select_best`].
-pub fn route_mesh_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
+pub fn route_tuned_with_diagnostics(problem: &RoutingView) -> TunedRouteRun {
+    with_plane_fanout(problem, route_tuned_inner)
+}
+
+fn route_tuned_inner(problem: &RoutingView) -> TunedRouteRun {
+    let started = Instant::now();
+    let initial = router::route_orthogonal_single_pass(problem);
+    let mut best = None;
+    let mut passes = Vec::new();
+    let _ = consider_candidate_recording(
+        problem,
+        &mut best,
+        initial,
+        Some(&mut passes),
+        started.elapsed().as_millis(),
+    );
+    if !route_best_is_clean(&best) {
+        try_adaptive_grid_rescue(problem, &mut best, &mut passes);
+    }
+    TunedRouteRun {
+        result: best.expect("tuned grid pass populated a candidate").0,
+        passes,
+        global: None,
+    }
+}
+
+/// Route only the detailed implementation primitive for regression diagnostics.
+#[cfg(test)]
+pub fn route_mesh_with_diagnostics(problem: &RoutingView) -> TunedRouteRun {
     with_plane_fanout(problem, route_mesh_with_diagnostics_inner)
 }
 
-fn route_mesh_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
+#[cfg(test)]
+fn route_mesh_with_diagnostics_inner(problem: &RoutingView) -> TunedRouteRun {
     if !NegotiatedMeshRouter.can_route(problem) {
-        return RouteAutoRun {
+        return TunedRouteRun {
             result: RouteResult {
                 solution: RouteSolution {
                     traces: vec![],
@@ -407,7 +351,7 @@ fn route_mesh_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
                 failed: vec![],
                 engine: "none".to_owned(),
             },
-            attempts: vec![],
+            passes: vec![],
             global: None,
         };
     }
@@ -417,34 +361,35 @@ fn route_mesh_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
     reconcile_connectivity(problem, &mut result.solution, &mut result.failed);
     let elapsed_ms = started.elapsed().as_millis();
     let mut best = None;
-    let mut attempts = Vec::new();
-    let _ =
-        consider_candidate_recording(problem, &mut best, result, Some(&mut attempts), elapsed_ms);
-    try_adaptive_grid_rescue(problem, &mut best, &mut attempts);
+    let mut passes = Vec::new();
+    let _ = consider_candidate_recording(problem, &mut best, result, Some(&mut passes), elapsed_ms);
+    try_adaptive_grid_rescue(problem, &mut best, &mut passes);
     let result = best
         .map(|(result, _)| result)
         .expect("mesh candidate just populated best");
-    RouteAutoRun {
+    TunedRouteRun {
         result,
-        attempts,
+        passes,
         global: Some(global),
     }
 }
 
 /// Route only the contextual sequential-grid engine, preserving one-pass attempt
 /// diagnostics for callers that explicitly select this strategy.
-pub fn route_sequential_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
+#[cfg(test)]
+pub fn route_sequential_with_diagnostics(problem: &RoutingView) -> TunedRouteRun {
     with_plane_fanout(problem, route_sequential_with_diagnostics_inner)
 }
 
-fn route_sequential_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
+#[cfg(test)]
+fn route_sequential_with_diagnostics_inner(problem: &RoutingView) -> TunedRouteRun {
     let sequential = SequentialGridRouter;
     let started = Instant::now();
     let result = sequential.route(problem);
     let elapsed_ms = started.elapsed().as_millis();
     let geometry_violations = router::geometry_violations(problem, &result.solution);
     let quality = RouteQuality::of(problem, &result, geometry_violations);
-    let attempts = vec![RouteEngineAttempt {
+    let passes = vec![RoutePassReport {
         engine: result.engine.clone(),
         failed: result.failed.clone(),
         elapsed_ms,
@@ -454,9 +399,9 @@ fn route_sequential_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoR
         vias: quality.via_count,
         wirelength: quality.wirelength,
     }];
-    RouteAutoRun {
+    TunedRouteRun {
         result,
-        attempts,
+        passes,
         global: None,
     }
 }
@@ -467,7 +412,7 @@ fn route_sequential_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoR
 /// O(pads) instead of a board-wide multi-terminal search. Returns the
 /// engines' subproblem and the fanout copper to merge into its solution, or
 /// None when the problem has no routable plane connections.
-fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, RouteSolution)> {
+fn plane_fanout(problem: &RoutingView) -> Option<(RoutingView, RouteSolution)> {
     if problem.plane_nets.is_empty() {
         return None;
     }
@@ -650,7 +595,7 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, RouteSolution)>
 /// width between adjacent pads.  Escape copper is validated cumulatively and
 /// exposed as obstacles to later routing stages.  A net is transformed only
 /// when every narrow terminal on that net has a legal escape.
-pub fn prepare_wide_terminal_escapes(problem: &RouteProblem) -> (RouteProblem, RouteSolution) {
+pub fn prepare_wide_terminal_escapes(problem: &RoutingView) -> (RoutingView, RouteSolution) {
     const SITE_STEP_MM: f64 = 0.1;
     const SITE_RADIUS_MM: f64 = 1.5;
     const LANDING_MM: f64 = 0.1;
@@ -776,9 +721,9 @@ pub fn prepare_wide_terminal_escapes(problem: &RouteProblem) -> (RouteProblem, R
 }
 
 fn with_plane_fanout(
-    problem: &RouteProblem,
-    route: impl Fn(&RouteProblem) -> RouteAutoRun,
-) -> RouteAutoRun {
+    problem: &RoutingView,
+    route: impl Fn(&RoutingView) -> TunedRouteRun,
+) -> TunedRouteRun {
     let Some((sub, fanout)) = plane_fanout(problem) else {
         return route(problem);
     };
@@ -788,247 +733,10 @@ fn with_plane_fanout(
     run
 }
 
-pub fn route_auto_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
-    with_plane_fanout(problem, route_auto_with_diagnostics_inner)
-}
-
-fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
-    // Large boards make the normal portfolio multiplicative: each specialist,
-    // negotiated detail, and the grid fallback may explore several net orders
-    // and rip-up retries. Keep automatic routing predictably bounded once the
-    // board crosses either complexity limit. The existing single-pass router
-    // retains the strict clearance model and connectivity reconciliation; the
-    // shared candidate path below still performs normal cleanup, lint-quality
-    // scoring, and diagnostic recording. Any nets it cannot route remain honest
-    // failures rather than triggering another portfolio.
-    if auto_route_requires_bounded_pass(problem) {
-        let mut best = None;
-        let mut attempts = Vec::with_capacity(6);
-        let direct = DirectLineRouter;
-        let layer_hop = LayerHopRouter;
-        let via_escape = ViaEscapeRouter;
-        let pattern = PatternRouter;
-        let channel = ChannelRouter;
-        let specialists: [&dyn Router; 5] = [&direct, &layer_hop, &via_escape, &pattern, &channel];
-        for engine in specialists {
-            if !engine.can_route(problem) {
-                continue;
-            }
-            let started = Instant::now();
-            let result = engine.route(problem);
-            let elapsed_ms = started.elapsed().as_millis();
-            let _ = consider_candidate_recording(
-                problem,
-                &mut best,
-                result,
-                Some(&mut attempts),
-                elapsed_ms,
-            );
-            if route_best_is_clean_via_free(&best) {
-                return RouteAutoRun {
-                    result: best.expect("bounded specialist populated best").0,
-                    attempts,
-                    global: None,
-                };
-            }
-        }
-        let started = Instant::now();
-        let result = router::route_orthogonal_single_pass(problem);
-        let elapsed_ms = started.elapsed().as_millis();
-        let _ = consider_candidate_recording(
-            problem,
-            &mut best,
-            result,
-            Some(&mut attempts),
-            elapsed_ms,
-        );
-        // The rescue only re-routes the failed nets on a refined grid, so it
-        // stays bounded; without it a single walled-in pin ships as a failure
-        // with the whole tool budget unspent.
-        try_adaptive_grid_rescue(problem, &mut best, &mut attempts);
-        return RouteAutoRun {
-            result: best.expect("bounded candidate just populated best").0,
-            attempts,
-            global: None,
-        };
-    }
-
-    let direct = DirectLineRouter;
-    let layer_hop = LayerHopRouter;
-    let via_escape = ViaEscapeRouter;
-    let pattern = PatternRouter;
-    let channel = ChannelRouter;
-    let sequential = SequentialGridRouter;
-    let mesh = NegotiatedMeshRouter;
-    let grid = GridAStarRouter;
-
-    let mut best: Option<(RouteResult, RouteQuality)> = None;
-    let mut attempts = Vec::new();
-    let mut global = None;
-
-    // The cheap-engine ladder: each specialist targets a different failure
-    // mode (straight lines, layer hops, blocked-pad via escapes, composites,
-    // channels), so every one gets its shot, cheapest first — one engine's
-    // failure never predicts the next's. A clean via-free result ships
-    // immediately; sequential-grid then closes the cheap tier.
-    let specialists: [&dyn Router; 5] = [&direct, &layer_hop, &via_escape, &pattern, &channel];
-    for engine in specialists {
-        if !engine.can_route(problem) {
-            continue;
-        }
-        let started = Instant::now();
-        let result = engine.route(problem);
-        let elapsed_ms = started.elapsed().as_millis();
-        let _ = consider_candidate_recording(
-            problem,
-            &mut best,
-            result,
-            Some(&mut attempts),
-            elapsed_ms,
-        );
-        if route_best_is_clean_via_free(&best) {
-            let result = best.expect("specialist candidate just populated best").0;
-            return RouteAutoRun {
-                result,
-                attempts,
-                global,
-            };
-        }
-    }
-
-    // The single grid pass is an order of magnitude cheaper than the
-    // sequential/mesh tiers and cleanly routes most mid-size boards; give it
-    // the first full-board shot so a solvable board ships in seconds instead
-    // of after minutes of higher-tier grinding. Imperfect results stay as the
-    // incumbent for the tiers below to beat.
-    {
-        let started = Instant::now();
-        let result = router::route_orthogonal_single_pass(problem);
-        let elapsed_ms = started.elapsed().as_millis();
-        let _ = consider_candidate_recording(
-            problem,
-            &mut best,
-            result,
-            Some(&mut attempts),
-            elapsed_ms,
-        );
-        if !route_best_is_clean(&best) {
-            try_adaptive_grid_rescue(problem, &mut best, &mut attempts);
-        }
-        if route_best_is_clean(&best) {
-            let result = best.expect("single-pass candidate just populated best").0;
-            return RouteAutoRun {
-                result,
-                attempts,
-                global,
-            };
-        }
-    }
-
-    if sequential.can_route(problem) {
-        let started = Instant::now();
-        let result = sequential.route(problem);
-        let elapsed_ms = started.elapsed().as_millis();
-        let _ = consider_candidate_recording(
-            problem,
-            &mut best,
-            result,
-            Some(&mut attempts),
-            elapsed_ms,
-        );
-        if route_best_is_clean(&best) {
-            let result = best.expect("sequential candidate just populated best").0;
-            return RouteAutoRun {
-                result,
-                attempts,
-                global,
-            };
-        }
-    }
-
-    if mesh.can_route(problem) && should_try_detailed_in_auto(problem) {
-        let started = Instant::now();
-        let (mut result, g) = route_detailed_with_global(problem);
-        reconcile_connectivity(problem, &mut result.solution, &mut result.failed);
-        let elapsed_ms = started.elapsed().as_millis();
-        global = Some(g);
-        let mut mesh_best = None;
-        let _ = consider_candidate_recording(
-            problem,
-            &mut mesh_best,
-            result,
-            Some(&mut attempts),
-            elapsed_ms,
-        );
-        try_adaptive_grid_rescue(problem, &mut mesh_best, &mut attempts);
-        let (mesh_result, _) = mesh_best.expect("mesh candidate just populated best");
-        if consider_candidate_recording(problem, &mut best, mesh_result, None, 0) {
-            let result = best.expect("mesh candidate just won best").0;
-            return RouteAutoRun {
-                result,
-                attempts,
-                global,
-            };
-        }
-    }
-
-    if grid.can_route(problem) {
-        let started = Instant::now();
-        let result = grid.route(problem);
-        let elapsed_ms = started.elapsed().as_millis();
-        let _ = consider_candidate_recording(
-            problem,
-            &mut best,
-            result,
-            Some(&mut attempts),
-            elapsed_ms,
-        );
-    }
-
-    try_adaptive_grid_rescue(problem, &mut best, &mut attempts);
-    let result = best.map(|(r, _)| r).unwrap_or_else(|| RouteResult {
-        solution: RouteSolution {
-            traces: vec![],
-            vias: vec![],
-        },
-        failed: vec![],
-        engine: "none".to_owned(),
-    });
-    RouteAutoRun {
-        result,
-        attempts,
-        global,
-    }
-}
-
-fn auto_route_requires_bounded_pass(problem: &RouteProblem) -> bool {
-    problem.connections.len() > AUTO_BOUNDED_MAX_CONNECTIONS
-        || problem
-            .connections
-            .iter()
-            .map(|connection| connection.points_to_connect.len())
-            .sum::<usize>()
-            > AUTO_BOUNDED_MAX_TERMINALS
-        || estimated_grid_cells(problem) > AUTO_BOUNDED_MAX_GRID_CELLS
-}
-
-fn estimated_grid_cells(problem: &RouteProblem) -> usize {
-    let pitch = pcb_route_grid::grid::grid_pitch(problem);
-    let cells = |span: f64| ((span.max(0.0) / pitch).ceil() as usize).max(1);
-    cells(problem.bounds.width())
-        .saturating_mul(cells(problem.bounds.height()))
-        .saturating_mul(problem.layer_count.max(1) as usize)
-}
-
-fn should_try_detailed_in_auto(problem: &RouteProblem) -> bool {
-    problem.layer_count <= 2
-        || problem.connections.len() <= AUTO_DETAILED_MAX_MULTILAYER_CONNECTIONS
-}
-
 fn try_adaptive_grid_rescue(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     best: &mut Option<(RouteResult, RouteQuality)>,
-    attempts: &mut Vec<RouteEngineAttempt>,
+    passes: &mut Vec<RoutePassReport>,
 ) {
     let Some((result, q)) = best.as_ref() else {
         return;
@@ -1041,14 +749,14 @@ fn try_adaptive_grid_rescue(
         return;
     };
     let elapsed_ms = started.elapsed().as_millis();
-    let _ = consider_candidate_recording(problem, best, candidate, Some(attempts), elapsed_ms);
+    let _ = consider_candidate_recording(problem, best, candidate, Some(passes), elapsed_ms);
 }
 
 /// Deterministic work budget for each adaptive-rescue phase. A fixed candidate
 /// count keeps equal inputs byte-reproducible across fast and slow machines.
 const ADAPTIVE_RESCUE_MAX_ORDERS: usize = 16;
 
-fn adaptive_grid_rescue(problem: &RouteProblem, selected: &RouteResult) -> Option<RouteResult> {
+fn adaptive_grid_rescue(problem: &RoutingView, selected: &RouteResult) -> Option<RouteResult> {
     let failed_names: BTreeSet<String> = selected
         .failed
         .iter()
@@ -1182,7 +890,7 @@ struct AdaptiveRescueBase {
 }
 
 fn adaptive_rescue_base(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     selected: &RouteResult,
     failed_names: &BTreeSet<String>,
 ) -> AdaptiveRescueBase {
@@ -1202,12 +910,11 @@ fn adaptive_rescue_base(
 }
 
 fn adaptive_grid_rescue_order(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     selected: &RouteResult,
     base: &AdaptiveRescueBase,
     order: &[usize],
 ) -> Option<RouteResult> {
-    let grid = GridAStarRouter;
     let mut solution = base.solution.clone();
     let mut failed = base.failed.clone();
     let mut rescued = BTreeSet::new();
@@ -1223,7 +930,7 @@ fn adaptive_grid_rescue_order(
 
         let subproblem =
             problem_with_single_connection_and_obstacles(problem, idx, &residual_obstacles);
-        let routed = grid.route(&subproblem);
+        let routed = route_grid(&subproblem);
         if !routed.failed.is_empty() {
             continue;
         }
@@ -1256,7 +963,7 @@ fn adaptive_grid_rescue_order(
 }
 
 fn adaptive_grid_ripup_rescue_order(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     selected: &RouteResult,
     failed_names: &BTreeSet<String>,
     order: &[usize],
@@ -1278,7 +985,6 @@ fn adaptive_grid_ripup_rescue_order(
         .retain(|via| !ripup_names.contains(&via.connection));
     let mut failed = selected.failed.clone();
     let mut residual_obstacles = copper_obstacles(problem, &solution);
-    let grid = GridAStarRouter;
     let mut routed_any = false;
 
     for &idx in order {
@@ -1291,7 +997,7 @@ fn adaptive_grid_ripup_rescue_order(
 
         let subproblem =
             problem_with_single_connection_and_obstacles(problem, idx, &residual_obstacles);
-        let routed = grid.route(&subproblem);
+        let routed = route_grid(&subproblem);
         if !routed.failed.is_empty() {
             if !failed.iter().any(|f| f.connection == conn.name) {
                 failed.push(FailedNet {
@@ -1337,7 +1043,7 @@ fn adaptive_grid_ripup_rescue_order(
 }
 
 fn adaptive_rescue_orders(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     failed_names: &BTreeSet<String>,
 ) -> Vec<Vec<usize>> {
     let metrics = adaptive_rescue_order_metrics(problem);
@@ -1436,7 +1142,7 @@ fn adaptive_rescue_orders(
 }
 
 fn adaptive_ripup_rescue_orders(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     selected: &RouteResult,
     failed_names: &BTreeSet<String>,
 ) -> Vec<Vec<usize>> {
@@ -1500,7 +1206,7 @@ fn adaptive_ripup_rescue_orders(
 }
 
 fn adaptive_ripup_blocker_scores(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     selected: &RouteResult,
     failed_names: &BTreeSet<String>,
 ) -> Vec<(String, u64)> {
@@ -1619,7 +1325,7 @@ fn adaptive_ripup_blocker_scores(
         .collect()
 }
 
-fn terminal_relief_radius(problem: &RouteProblem, clearance: f64) -> f64 {
+fn terminal_relief_radius(problem: &RoutingView, clearance: f64) -> f64 {
     clearance + problem.min_trace_width.max(problem.clearance) * 2.0
 }
 
@@ -1636,7 +1342,7 @@ struct FailedTerminalPoint {
 }
 
 fn failed_terminal_points(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     failed_names: &BTreeSet<String>,
 ) -> Vec<FailedTerminalPoint> {
     let mut out = Vec::new();
@@ -1657,7 +1363,7 @@ fn failed_terminal_points(
 }
 
 fn failed_reason_terminal_points(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     failed_names: &BTreeSet<String>,
     failures: &[FailedNet],
 ) -> Vec<FailedTerminalPoint> {
@@ -1708,7 +1414,7 @@ fn copper_layers(layer_count: u32) -> Vec<LayerRef> {
 }
 
 fn failed_corridor_segments(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     failed_names: &BTreeSet<String>,
 ) -> Vec<FailedCorridorSegment> {
     let mut out = Vec::new();
@@ -1824,18 +1530,18 @@ fn push_adaptive_rescue_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
 
 #[cfg(test)]
 fn problem_with_single_connection_and_copper(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     idx: usize,
     solution: &RouteSolution,
-) -> RouteProblem {
+) -> RoutingView {
     problem_with_single_connection_and_obstacles(problem, idx, &copper_obstacles(problem, solution))
 }
 
 fn problem_with_single_connection_and_obstacles(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     idx: usize,
     obstacles: &[Obstacle],
-) -> RouteProblem {
+) -> RoutingView {
     let mut out = problem.clone();
     out.connections = problem
         .connections
@@ -1848,9 +1554,9 @@ fn problem_with_single_connection_and_obstacles(
 }
 
 fn problem_with_solution_connections(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
-) -> RouteProblem {
+) -> RoutingView {
     let names: BTreeSet<&str> = solution
         .traces
         .iter()
@@ -1868,7 +1574,7 @@ fn problem_with_solution_connections(
 }
 
 #[cfg(test)]
-fn adaptive_rescue_order(problem: &RouteProblem, failed_names: &BTreeSet<String>) -> Vec<usize> {
+fn adaptive_rescue_order(problem: &RoutingView, failed_names: &BTreeSet<String>) -> Vec<usize> {
     let metrics = adaptive_rescue_order_metrics(problem);
     adaptive_rescue_order_with_metrics(problem, failed_names, &metrics)
 }
@@ -1882,7 +1588,7 @@ struct AdaptiveOrderMetric {
     span_um: u64,
 }
 
-fn adaptive_rescue_order_metrics(problem: &RouteProblem) -> Vec<AdaptiveOrderMetric> {
+fn adaptive_rescue_order_metrics(problem: &RoutingView) -> Vec<AdaptiveOrderMetric> {
     let crossing_pressures = connection_crossing_pressures(problem);
     problem
         .connections
@@ -1899,7 +1605,7 @@ fn adaptive_rescue_order_metrics(problem: &RouteProblem) -> Vec<AdaptiveOrderMet
 }
 
 fn adaptive_rescue_order_with_metrics(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     failed_names: &BTreeSet<String>,
     metrics: &[AdaptiveOrderMetric],
 ) -> Vec<usize> {
@@ -1937,7 +1643,7 @@ fn adaptive_rescue_order_with_metrics(
 /// Freerouter-style postroute cleanup for selected copper: drop redundant vias,
 /// merge degree-2 same-net trace fragments, then pull local trace corners tight
 /// when the exact DRC/connectivity oracle says the shortcut is equivalent.
-pub fn postroute_cleanup(problem: &RouteProblem, solution: &mut RouteSolution) {
+pub fn postroute_cleanup(problem: &RoutingView, solution: &mut RouteSolution) {
     drop_redundant_thruhole_vias(problem, solution);
     crate::via_cleanup::normalize_redundant_vias(problem, solution);
     drop_dangling_vias(problem, solution);
@@ -1961,7 +1667,7 @@ pub fn postroute_cleanup(problem: &RouteProblem, solution: &mut RouteSolution) {
 /// trace stays connected THROUGH the pad (both trace ends land inside it, and the
 /// pad bridges the layers). A pad is through-hole when its obstacle reaches both
 /// the top and bottom copper layers.
-fn drop_redundant_thruhole_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
+fn drop_redundant_thruhole_vias(problem: &RoutingView, solution: &mut RouteSolution) {
     let (top, bottom) = (LayerRef::top(), LayerRef::bottom());
     solution.vias.retain(|v| {
         !problem.obstacles.iter().any(|ob| {
@@ -1978,7 +1684,7 @@ fn drop_redundant_thruhole_vias(problem: &RouteProblem, solution: &mut RouteSolu
 /// Detailed stitching already suppresses these; this applies the same cleanup to
 /// fast-path and fallback router output. Every removal is lint-guarded so a via
 /// anchor that preserves connectivity or DRC is kept.
-fn drop_dangling_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
+fn drop_dangling_vias(problem: &RoutingView, solution: &mut RouteSolution) {
     let mut baseline = pcb_drc::lint::lint(problem, solution);
     let mut idx = 0usize;
     while idx < solution.vias.len() {
@@ -2011,7 +1717,7 @@ fn introduces_new_findings(
 }
 
 fn via_connected_layers(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     via: &Via,
 ) -> BTreeSet<String> {
@@ -2069,7 +1775,7 @@ fn trace_duplicate_key(trace: &Trace) -> (String, String, i64, Vec<(i64, i64)>) 
 /// Remove redundant vertices inside individual traces when the full DRC/connectivity
 /// lint report is unchanged. This catches equal-length collinear simplifications
 /// that the shortcut pass deliberately skips because they do not reduce wirelength.
-fn simplify_trace_paths(problem: &RouteProblem, solution: &mut RouteSolution) {
+fn simplify_trace_paths(problem: &RoutingView, solution: &mut RouteSolution) {
     let mut baseline = pcb_drc::lint::lint(problem, solution);
     for ti in 0..solution.traces.len() {
         let simplified = geom::Polyline::new(solution.traces[ti].path.clone())
@@ -2093,7 +1799,7 @@ fn simplify_trace_paths(problem: &RouteProblem, solution: &mut RouteSolution) {
 /// full lint report, so via anchors, terminal reachability, and DRC invariants
 /// remain protected; a loop may also be accepted when deleting it removes an
 /// existing detour-caused lint finding without adding any new one.
-fn drop_trace_spurs(problem: &RouteProblem, solution: &mut RouteSolution) {
+fn drop_trace_spurs(problem: &RoutingView, solution: &mut RouteSolution) {
     let mut baseline = pcb_drc::lint::lint(problem, solution);
     let mut lint_budget = 256usize;
 
@@ -2148,7 +1854,7 @@ fn drop_trace_spurs(problem: &RouteProblem, solution: &mut RouteSolution) {
 /// same-net, same-layer, same-width straight segment. This removes redundant
 /// overlapped copper left by pattern/grid retries while preserving every
 /// connectivity and DRC invariant through the lint oracle.
-fn drop_covered_collinear_traces(problem: &RouteProblem, solution: &mut RouteSolution) {
+fn drop_covered_collinear_traces(problem: &RoutingView, solution: &mut RouteSolution) {
     let mut baseline = pcb_drc::lint::lint(problem, solution);
     let mut idx = 0usize;
     while idx < solution.traces.len() {
@@ -2245,7 +1951,7 @@ fn point_on_segment(p: Point2, a: Point2, b: Point2) -> bool {
 /// endpoints. This is pure cleanup: every proposed rewrite is accepted only if
 /// the full lint report is unchanged, so T-junctions, via anchors, and clearance
 /// constraints remain under the same oracle as the selected route.
-fn merge_touching_traces(problem: &RouteProblem, solution: &mut RouteSolution) {
+fn merge_touching_traces(problem: &RoutingView, solution: &mut RouteSolution) {
     loop {
         let baseline = pcb_drc::lint::lint(problem, solution);
         let mut groups: BTreeMap<(String, String, i64), Vec<usize>> = BTreeMap::new();
@@ -2314,7 +2020,7 @@ fn merge_touching_traces(problem: &RouteProblem, solution: &mut RouteSolution) {
 /// the trace without introducing new lint findings, which protects via anchors,
 /// T-junctions, clearance, board-edge, and connectivity invariants while allowing
 /// cleanup to remove an existing detour-caused finding.
-fn shortcut_octilinear_traces(problem: &RouteProblem, solution: &mut RouteSolution) {
+fn shortcut_octilinear_traces(problem: &RoutingView, solution: &mut RouteSolution) {
     if !has_octilinear_shortcut_candidate_shape(solution) {
         return;
     }
@@ -2397,7 +2103,7 @@ fn has_octilinear_shortcut_candidate_shape(solution: &RouteSolution) -> bool {
 /// -> b` and `a -> (b.x,a.y) -> b`) and keep the first one that shortens copper
 /// without introducing new lint findings. This borrows freerouting-style
 /// post-optimization without changing the router's preferred orthogonal output.
-fn pull_orthogonal_trace_corners(problem: &RouteProblem, solution: &mut RouteSolution) {
+fn pull_orthogonal_trace_corners(problem: &RoutingView, solution: &mut RouteSolution) {
     if !has_orthogonal_pull_candidate_shape(solution) {
         return;
     }
@@ -2504,11 +2210,12 @@ const NAIVE_DETOUR_TOLERANCE: f64 = 1.15;
 /// / width / via / bounds) — the engine must never emit copper that fails DRC —
 /// then drop any net left unconnected or shorted (a cross-net merge). Every
 /// dropped net is reported failed. After this `failed` is faithful and the
-/// surviving copper is fully DRC-clean, so `route_auto`'s comparison ranks a
+/// surviving copper is fully DRC-clean, so `route_tuned`'s comparison ranks a
 /// silent violation or phantom-route below an engine that cleanly connected
 /// fewer nets, and the engine never ships copper that fails DRC.
+#[cfg(test)]
 fn reconcile_connectivity(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &mut RouteSolution,
     failed: &mut Vec<FailedNet>,
 ) {
@@ -2539,7 +2246,7 @@ fn reconcile_connectivity(
 /// every [`crate::detail::CellVia`] becomes a [`Via`], deduplicated by exact
 /// position. Net/layer/trace order is deterministic (BTreeMap key order).
 fn stitch(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     cell_routes: &[CellRoute],
     skip: &std::collections::BTreeSet<String>,
 ) -> RouteSolution {
@@ -2585,7 +2292,7 @@ fn stitch(
         // layer (a layer transition that simplified away), which KiCAD flags as
         // `via_dangling`. Dropping it cannot break connectivity: by definition the
         // net is already connected without it, and the connectivity oracle +
-        // naive fallback in `route_auto` catch any over-drop.
+        // naive fallback in `route_tuned` catch any over-drop.
         for at in nc.vias {
             if vias
                 .iter()
@@ -2828,12 +2535,8 @@ mod tests {
     use super::*;
     use pcb_drc::lint::lint;
     use std::path::Path;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
 
-    fn load(name: &str) -> RouteProblem {
+    fn load(name: &str) -> RoutingView {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures")
             .join(name);
@@ -2855,8 +2558,8 @@ mod tests {
         assert_eq!(failed[0].reason, "cell 1");
     }
 
-    fn simple_two_point_problem() -> RouteProblem {
-        RouteProblem {
+    fn simple_two_point_problem() -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],
@@ -2907,7 +2610,7 @@ mod tests {
             },
             pcb_model::Obstacle {
                 kind: "rect".to_owned(),
-                // `pcb-model::place::to_route_problem` represents a plated
+                // `pcb-model::place::routing_view` represents a plated
                 // through-hole pad by its two outer copper faces; the barrel's
                 // inner-layer span is implicit.
                 layers: vec![LayerRef::top(), LayerRef::bottom()],
@@ -3116,7 +2819,7 @@ mod tests {
         assert_eq!(transformed.obstacles, p.obstacles);
     }
 
-    fn top_blocked_two_point_problem() -> RouteProblem {
+    fn top_blocked_two_point_problem() -> RoutingView {
         let mut p = simple_two_point_problem();
         p.obstacles = vec![
             pcb_model::Obstacle {
@@ -3147,7 +2850,7 @@ mod tests {
         p
     }
 
-    fn layer_change_problem() -> RouteProblem {
+    fn layer_change_problem() -> RoutingView {
         let mut p = simple_two_point_problem();
         p.connections[0].points_to_connect[0] = pcb_model::RoutePoint {
             x: 1.0,
@@ -3162,7 +2865,7 @@ mod tests {
         p
     }
 
-    fn stacked_layer_change_problem() -> RouteProblem {
+    fn stacked_layer_change_problem() -> RoutingView {
         let mut p = simple_two_point_problem();
         p.obstacles = vec![
             pcb_model::Obstacle {
@@ -3208,8 +2911,8 @@ mod tests {
         }
     }
 
-    fn heterogeneous_pattern_problem() -> RouteProblem {
-        RouteProblem {
+    fn heterogeneous_pattern_problem() -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![
@@ -3291,8 +2994,8 @@ mod tests {
         }
     }
 
-    fn heterogeneous_multi_pin_channel_problem() -> RouteProblem {
-        RouteProblem {
+    fn heterogeneous_multi_pin_channel_problem() -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![
@@ -3445,187 +3148,34 @@ mod tests {
         // and grid fallback. Quad is no longer forced to pay the detailed mesh:
         // the sequential candidate can solve it cleanly and should short-circuit.
         let p = load("quad.json");
-        let r = route_auto(&p);
+        let r = route_tuned(&p);
         assert_eq!(r.engine, router::ENGINE);
         assert!(
             r.failed.is_empty(),
-            "route_auto routes quad cleanly: {:?}",
+            "route_tuned routes quad cleanly: {:?}",
             r.failed
         );
         let vs = lint(&p, &r.solution);
         assert!(
             vs.is_empty(),
-            "quad route_auto solution must lint CLEAN, got {vs:?}"
+            "quad route_tuned solution must lint CLEAN, got {vs:?}"
         );
     }
 
     #[test]
-    fn route_auto_diagnostics_skip_global_for_clean_direct_route() {
+    fn tuned_route_reports_one_clean_grid_pass_for_direct_net() {
         let p = simple_two_point_problem();
-        let r = route_auto_with_diagnostics(&p);
-        assert_eq!(r.result.engine, crate::direct::ENGINE);
+        let r = route_tuned_with_diagnostics(&p);
+        assert_eq!(r.result.engine, router::ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         assert!(
             r.global.is_none(),
-            "direct short-circuit should not pay negotiated global routing"
+            "the tuned grid algorithm does not run the diagnostic mesh"
         );
-        assert_eq!(r.attempts.len(), 1);
-        assert_eq!(r.attempts[0].engine, crate::direct::ENGINE);
-        assert_eq!(r.attempts[0].failed_nets, 0);
-        assert_eq!(r.attempts[0].geometry_violations, 0);
-    }
-
-    #[test]
-    fn bounded_auto_route_thresholds_are_strict() {
-        let mut p = simple_two_point_problem();
-        let connection = p.connections[0].clone();
-
-        p.connections = vec![connection.clone(); AUTO_BOUNDED_MAX_CONNECTIONS];
-        assert!(!auto_route_requires_bounded_pass(&p));
-        p.connections.push(connection.clone());
-        assert!(auto_route_requires_bounded_pass(&p));
-
-        p.connections = vec![connection];
-        let terminal = p.connections[0].points_to_connect[0].clone();
-        p.connections[0]
-            .points_to_connect
-            .resize(AUTO_BOUNDED_MAX_TERMINALS, terminal);
-        assert_eq!(
-            p.connections
-                .iter()
-                .map(|c| c.points_to_connect.len())
-                .sum::<usize>(),
-            AUTO_BOUNDED_MAX_TERMINALS
-        );
-        assert!(!auto_route_requires_bounded_pass(&p));
-        let extra_terminal = p.connections[0].points_to_connect[0].clone();
-        p.connections[0].points_to_connect.push(extra_terminal);
-        assert!(auto_route_requires_bounded_pass(&p));
-
-        let mut p = simple_two_point_problem();
-        p.bounds = pcb_model::Rect {
-            min_x: 0.0,
-            min_y: 0.0,
-            max_x: 120.0,
-            max_y: 80.0,
-        };
-        p.layer_count = 4;
-        assert!(
-            estimated_grid_cells(&p) > AUTO_BOUNDED_MAX_GRID_CELLS,
-            "fixture must represent the live large-grid failure"
-        );
-        assert!(auto_route_requires_bounded_pass(&p));
-
-        p.bounds.max_x = 117.0;
-        p.bounds.max_y = 60.0;
-        assert!(
-            estimated_grid_cells(&p) <= AUTO_BOUNDED_MAX_GRID_CELLS,
-            "known-good compact isolation boards retain the normal portfolio"
-        );
-        assert!(!auto_route_requires_bounded_pass(&p));
-    }
-
-    #[test]
-    fn large_auto_route_uses_only_the_bounded_cheap_portfolio() {
-        let mut p = simple_two_point_problem();
-        p.connections = (0..=AUTO_BOUNDED_MAX_CONNECTIONS)
-            .map(|index| {
-                let point = pcb_model::RoutePoint {
-                    x: 1.0 + (index % 7) as f64 * 2.0,
-                    y: 1.0 + (index / 7) as f64,
-                    layer: LayerRef::top(),
-                };
-                Connection {
-                    name: format!("N{index}"),
-                    points_to_connect: vec![point.clone(), point],
-                }
-            })
-            .collect();
-
-        let run = route_auto_with_diagnostics(&p);
-
-        assert!((1..=6).contains(&run.attempts.len()));
-        assert!(
-            run.attempts
-                .iter()
-                .all(|attempt| attempt.geometry_violations == 0)
-        );
-        assert!(
-            run.attempts
-                .iter()
-                .any(|attempt| attempt.engine == run.result.engine)
-        );
-        assert!(run.global.is_none());
-    }
-
-    #[test]
-    fn route_auto_direct_fast_path_returns_same_cleaned_result_as_selector() {
-        let p = simple_two_point_problem();
-        let direct = DirectLineRouter;
-
-        let auto = route_auto(&p);
-        let selected = select_best(&p, &[&direct]);
-
-        assert_eq!(auto.engine, crate::direct::ENGINE);
-        assert_eq!(auto.failed, selected.failed);
-        assert_eq!(
-            serde_json::to_string(&auto.solution).unwrap(),
-            serde_json::to_string(&selected.solution).unwrap(),
-            "route_auto early return should keep the already-cleaned selected candidate"
-        );
-        assert!(lint(&p, &auto.solution).is_empty());
-    }
-
-    #[test]
-    fn route_auto_stop_policy_keeps_clean_via_heavy_cheap_routes_competing() {
-        let result = RouteResult {
-            solution: RouteSolution {
-                traces: Vec::new(),
-                vias: Vec::new(),
-            },
-            failed: Vec::new(),
-            engine: "synthetic".to_owned(),
-        };
-        let clean_via_free = Some((
-            result.clone(),
-            RouteQuality {
-                fault_weight: 0,
-                geom: 0,
-                failed_nets: 0,
-                via_count: 0,
-                wirelength: 10.0,
-            },
-        ));
-        let clean_via_heavy = Some((
-            result.clone(),
-            RouteQuality {
-                fault_weight: 0,
-                geom: 0,
-                failed_nets: 0,
-                via_count: 2,
-                wirelength: 8.0,
-            },
-        ));
-        let faulty = Some((
-            result,
-            RouteQuality {
-                fault_weight: 1,
-                geom: 0,
-                failed_nets: 1,
-                via_count: 0,
-                wirelength: 0.0,
-            },
-        ));
-
-        assert!(route_best_is_clean(&clean_via_free));
-        assert!(route_best_is_clean_via_free(&clean_via_free));
-        assert!(route_best_is_clean(&clean_via_heavy));
-        assert!(
-            !route_best_is_clean_via_free(&clean_via_heavy),
-            "clean via-heavy cheap results should keep competing with later cheap routers"
-        );
-        assert!(!route_best_is_clean(&faulty));
-        assert!(!route_best_is_clean_via_free(&faulty));
+        assert_eq!(r.passes.len(), 1);
+        assert_eq!(r.passes[0].engine, router::ENGINE);
+        assert_eq!(r.passes[0].failed_nets, 0);
+        assert_eq!(r.passes[0].geometry_violations, 0);
     }
 
     #[test]
@@ -3756,9 +3306,10 @@ mod tests {
         let rescued = adaptive_grid_rescue(&p, &selected).expect("B should grid-rescue");
 
         assert!(rescued.failed.is_empty(), "{:?}", rescued.failed);
-        assert_eq!(
-            rescued.engine,
-            format!("synthetic+{ADAPTIVE_GRID_RESCUE_ENGINE}")
+        assert!(
+            rescued.engine.starts_with("synthetic+adaptive-grid"),
+            "unexpected rescue phase: {}",
+            rescued.engine
         );
         assert!(
             rescued
@@ -4943,285 +4494,35 @@ mod tests {
         );
     }
 
-    struct RedundantViaRouter;
-
-    impl Router for RedundantViaRouter {
-        fn name(&self) -> &'static str {
-            "redundant-via"
-        }
-
-        fn capabilities(&self) -> Capabilities {
-            Capabilities {
-                max_layers: u32::MAX,
-                honors_escape_layers: true,
-                honors_net_widths: true,
-                honors_outline: true,
-            }
-        }
-
-        fn route(&self, problem: &RouteProblem) -> RouteResult {
-            RouteResult {
-                solution: RouteSolution {
-                    traces: vec![Trace {
-                        connection: "N".to_owned(),
-                        layer: LayerRef::top(),
-                        width: problem.min_trace_width,
-                        path: vec![pt(2.0, 5.0), pt(18.0, 5.0)],
-                    }],
-                    vias: vec![Via {
-                        connection: "N".to_owned(),
-                        at: pt(2.0, 5.0),
-                        diameter: problem.via_diameter,
-                        drill: problem.via_drill,
-                        span: ViaSpan::Through,
-                    }],
-                },
-                failed: vec![],
-                engine: self.name().to_owned(),
-            }
-        }
-    }
-
-    struct CountingRouter {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl Router for CountingRouter {
-        fn name(&self) -> &'static str {
-            "counting"
-        }
-
-        fn capabilities(&self) -> Capabilities {
-            Capabilities {
-                max_layers: u32::MAX,
-                honors_escape_layers: true,
-                honors_net_widths: true,
-                honors_outline: true,
-            }
-        }
-
-        fn route(&self, _problem: &RouteProblem) -> RouteResult {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            RouteResult {
-                solution: RouteSolution {
-                    traces: vec![],
-                    vias: vec![],
-                },
-                failed: vec![],
-                engine: self.name().to_owned(),
-            }
-        }
-    }
-
-    struct CleanViaHeavyRouter;
-
-    impl Router for CleanViaHeavyRouter {
-        fn name(&self) -> &'static str {
-            "clean-via-heavy"
-        }
-
-        fn capabilities(&self) -> Capabilities {
-            Capabilities {
-                max_layers: u32::MAX,
-                honors_escape_layers: true,
-                honors_net_widths: true,
-                honors_outline: true,
-            }
-        }
-
-        fn route(&self, problem: &RouteProblem) -> RouteResult {
-            RouteResult {
-                solution: RouteSolution {
-                    traces: vec![
-                        Trace {
-                            connection: "N".to_owned(),
-                            layer: LayerRef::top(),
-                            width: problem.min_trace_width,
-                            path: vec![pt(2.0, 5.0), pt(18.0, 5.0)],
-                        },
-                        Trace {
-                            connection: "N".to_owned(),
-                            layer: LayerRef::bottom(),
-                            width: problem.min_trace_width,
-                            path: vec![pt(10.0, 5.0), pt(10.4, 5.0)],
-                        },
-                    ],
-                    vias: vec![Via {
-                        connection: "N".to_owned(),
-                        at: pt(10.0, 5.0),
-                        diameter: problem.via_diameter,
-                        drill: problem.via_drill,
-                        span: ViaSpan::Through,
-                    }],
-                },
-                failed: vec![],
-                engine: self.name().to_owned(),
-            }
-        }
-    }
-
-    struct CleanViaFreeRouter {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl Router for CleanViaFreeRouter {
-        fn name(&self) -> &'static str {
-            "clean-via-free"
-        }
-
-        fn capabilities(&self) -> Capabilities {
-            Capabilities {
-                max_layers: u32::MAX,
-                honors_escape_layers: true,
-                honors_net_widths: true,
-                honors_outline: true,
-            }
-        }
-
-        fn route(&self, problem: &RouteProblem) -> RouteResult {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            RouteResult {
-                solution: RouteSolution {
-                    traces: vec![Trace {
-                        connection: "N".to_owned(),
-                        layer: LayerRef::top(),
-                        width: problem.min_trace_width,
-                        path: vec![pt(2.0, 5.0), pt(18.0, 5.0)],
-                    }],
-                    vias: vec![],
-                },
-                failed: vec![],
-                engine: self.name().to_owned(),
-            }
-        }
-    }
-
     #[test]
-    fn select_best_cleans_candidate_before_short_circuit_return() {
-        let mut p = simple_two_point_problem();
-        p.obstacles = vec![
-            pcb_model::Obstacle {
-                kind: "rect".to_owned(),
-                layers: vec![LayerRef::top(), LayerRef::bottom()],
-                center: pt(2.0, 5.0),
-                width: 0.8,
-                height: 0.8,
-                connected_to: vec!["N".to_owned()],
-            },
-            pcb_model::Obstacle {
-                kind: "rect".to_owned(),
-                layers: vec![LayerRef::top(), LayerRef::bottom()],
-                center: pt(18.0, 5.0),
-                width: 0.8,
-                height: 0.8,
-                connected_to: vec!["N".to_owned()],
-            },
-        ];
-        let redundant = RedundantViaRouter;
-        let calls = Arc::new(AtomicUsize::new(0));
-        let counting = CountingRouter {
-            calls: calls.clone(),
-        };
-
-        let selected = select_best(&p, &[&redundant, &counting]);
-
-        assert_eq!(selected.engine, "redundant-via");
-        assert!(selected.failed.is_empty(), "{:?}", selected.failed);
-        assert!(selected.solution.vias.is_empty());
-        assert!(lint(&p, &selected.solution).is_empty());
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            0,
-            "clean-after-cleanup candidate should short-circuit before later routers"
-        );
-    }
-
-    #[test]
-    fn select_best_keeps_competing_after_clean_via_heavy_candidate() {
-        let p = simple_two_point_problem();
-        let via_heavy = CleanViaHeavyRouter;
-        let calls = Arc::new(AtomicUsize::new(0));
-        let via_free = CleanViaFreeRouter {
-            calls: calls.clone(),
-        };
-
-        let selected = select_best(&p, &[&via_heavy, &via_free]);
-
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "clean via-heavy incumbent should not short-circuit before a later injected router"
-        );
-        assert_eq!(selected.engine, "clean-via-free");
-        assert!(selected.failed.is_empty(), "{:?}", selected.failed);
-        assert!(selected.solution.vias.is_empty());
-        assert!(lint(&p, &selected.solution).is_empty());
-    }
-
-    #[test]
-    fn route_auto_diagnostics_skip_global_for_clean_layer_hop_route() {
+    fn tuned_route_handles_layer_change() {
         let p = layer_change_problem();
-        assert!(
-            !crate::direct::route_direct(&p).failed.is_empty(),
-            "direct fast-path must not solve a layer-changing net"
-        );
-        assert!(
-            !crate::via_escape::route_via_escape(&p).failed.is_empty(),
-            "via-escape must stay scoped to same-layer nets"
-        );
 
-        let r = route_auto_with_diagnostics(&p);
+        let r = route_tuned_with_diagnostics(&p);
 
-        assert_eq!(r.result.engine, crate::layer_hop::ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         assert_eq!(r.result.solution.vias.len(), 1);
         assert!(lint(&p, &r.result.solution).is_empty());
-        assert!(
-            r.global.is_none(),
-            "layer-hop short-circuit should not pay negotiated global routing"
-        );
-        let engines: Vec<&str> = r
-            .attempts
-            .iter()
-            .map(|attempt| attempt.engine.as_str())
-            .collect();
-        assert_eq!(
-            engines,
-            vec![
-                crate::direct::ENGINE,
-                crate::layer_hop::ENGINE,
-                crate::via_escape::ENGINE,
-                crate::pattern::ENGINE,
-                crate::channel::ENGINE,
-                router::ENGINE,
-            ],
-            "clean via-heavy cheap routes should keep competing with later cheap routers before skipping the mesh"
-        );
+        assert!(r.global.is_none());
     }
 
     #[test]
-    fn route_auto_diagnostics_skip_global_for_via_only_layer_hop_route() {
+    fn tuned_route_handles_stacked_layer_change() {
         let p = stacked_layer_change_problem();
-        assert!(
-            !crate::direct::route_direct(&p).failed.is_empty(),
-            "direct fast-path must not solve a stacked layer change"
-        );
 
-        let r = route_auto_with_diagnostics(&p);
+        let r = route_tuned_with_diagnostics(&p);
 
-        assert_eq!(r.result.engine, crate::layer_hop::ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
-        assert!(r.result.solution.traces.is_empty());
         assert_eq!(r.result.solution.vias.len(), 1);
         assert!(lint(&p, &r.result.solution).is_empty());
         assert!(
             r.global.is_none(),
-            "via-only layer-hop should not pay negotiated global routing"
+            "the tuned grid algorithm does not run the diagnostic mesh"
         );
     }
 
     #[test]
-    fn route_auto_diagnostics_skip_global_for_clean_layer_hop_star() {
+    fn tuned_route_handles_mixed_layer_star() {
         let mut p = layer_change_problem();
         p.connections[0]
             .points_to_connect
@@ -5230,92 +4531,71 @@ mod tests {
                 y: 4.0,
                 layer: LayerRef::bottom(),
             });
-        assert!(
-            !crate::direct::route_direct(&p).failed.is_empty(),
-            "direct fast-path must not solve a mixed-layer star"
-        );
-        assert!(
-            !crate::via_escape::route_via_escape(&p).failed.is_empty(),
-            "via-escape must stay scoped to same-layer nets"
-        );
+        let r = route_tuned_with_diagnostics(&p);
 
-        let r = route_auto_with_diagnostics(&p);
-
-        assert_eq!(r.result.engine, crate::layer_hop::ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
-        assert_eq!(r.result.solution.traces.len(), 1);
+        assert!(!r.result.solution.traces.is_empty());
         assert_eq!(r.result.solution.vias.len(), 1);
         assert!(lint(&p, &r.result.solution).is_empty());
         assert!(
             r.global.is_none(),
-            "layer-hop star short-circuit should not pay negotiated global routing"
+            "the tuned grid algorithm does not run the diagnostic mesh"
         );
     }
 
     #[test]
-    fn route_auto_diagnostics_skip_global_for_clean_via_escape_route() {
+    fn tuned_route_handles_blocked_top_layer() {
         let p = top_blocked_two_point_problem();
-        assert!(
-            !crate::direct::route_direct(&p).failed.is_empty(),
-            "direct fast-path must not solve a via-escape case"
-        );
 
-        let r = route_auto_with_diagnostics(&p);
+        let r = route_tuned_with_diagnostics(&p);
 
-        assert_eq!(r.result.engine, crate::via_escape::ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         assert_eq!(r.result.solution.vias.len(), 2);
         assert!(lint(&p, &r.result.solution).is_empty());
         assert!(
             r.global.is_none(),
-            "via-escape short-circuit should not pay negotiated global routing"
+            "the tuned grid algorithm does not run the diagnostic mesh"
         );
     }
 
     #[test]
-    fn route_auto_diagnostics_skip_global_for_composite_pattern_route() {
+    fn tuned_route_handles_heterogeneous_nets() {
         let p = heterogeneous_pattern_problem();
-        assert!(!crate::direct::route_direct(&p).failed.is_empty());
-        assert!(!crate::layer_hop::route_layer_hop(&p).failed.is_empty());
-        assert!(!crate::via_escape::route_via_escape(&p).failed.is_empty());
 
-        let r = route_auto_with_diagnostics(&p);
+        let r = route_tuned_with_diagnostics(&p);
 
-        assert_eq!(r.result.engine, crate::pattern::ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
-        assert_eq!(r.result.solution.traces.len(), 3);
+        assert!(r.result.solution.traces.len() >= 3);
         assert_eq!(r.result.solution.vias.len(), 3);
         assert!(lint(&p, &r.result.solution).is_empty());
         assert!(
             r.global.is_none(),
-            "pattern router should compose simple nets without negotiated global routing"
+            "the tuned grid algorithm does not run the diagnostic mesh"
         );
     }
 
     #[test]
-    fn route_auto_diagnostics_skip_global_for_multi_pin_channel_pattern_route() {
+    fn tuned_route_handles_multi_pin_channel() {
         let p = heterogeneous_multi_pin_channel_problem();
-        assert!(!crate::direct::route_direct(&p).failed.is_empty());
-        assert!(!crate::layer_hop::route_layer_hop(&p).failed.is_empty());
-        assert!(!crate::via_escape::route_via_escape(&p).failed.is_empty());
 
-        let r = route_auto_with_diagnostics(&p);
+        let r = route_tuned_with_diagnostics(&p);
 
-        assert_eq!(r.result.engine, crate::pattern::ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         assert!(
             r.result
                 .solution
                 .traces
                 .iter()
-                .any(|trace| trace.connection == "BUS" && trace.path.len() >= 5),
-            "BUS should be routed as a multi-leg preferred-direction path: {:?}",
+                .filter(|trace| trace.connection == "BUS")
+                .count()
+                >= 2,
+            "BUS should be routed as a connected multi-leg tree: {:?}",
             r.result.solution
         );
         assert!(lint(&p, &r.result.solution).is_empty());
         assert!(
             r.global.is_none(),
-            "pattern router should compose multi-pin channel nets without negotiated global routing"
+            "the tuned grid algorithm does not run the diagnostic mesh"
         );
     }
 
@@ -6073,38 +5353,20 @@ mod tests {
     }
 
     #[test]
-    fn route_auto_diagnostics_skip_global_for_clean_sequential_route() {
+    fn tuned_route_diagnostics_report_grid_pass() {
         let p = load("quad.json");
-        let r = route_auto_with_diagnostics(&p);
+        let r = route_tuned_with_diagnostics(&p);
         assert_eq!(r.result.engine, router::ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         let engines: Vec<&str> = r
-            .attempts
+            .passes
             .iter()
             .map(|attempt| attempt.engine.as_str())
             .collect();
-        assert_eq!(
-            engines,
-            vec![
-                crate::direct::ENGINE,
-                crate::layer_hop::ENGINE,
-                crate::via_escape::ENGINE,
-                crate::pattern::ENGINE,
-                crate::channel::ENGINE,
-                router::ENGINE,
-            ],
-            "route_auto diagnostics should preserve attempted engines until the clean winner"
-        );
-        assert!(
-            r.attempts
-                .iter()
-                .take(r.attempts.len() - 1)
-                .any(|attempt| attempt.failed_nets > 0),
-            "diagnostics should retain failed earlier attempts before the winner"
-        );
+        assert_eq!(engines, vec![router::ENGINE]);
         assert!(
             r.global.is_none(),
-            "clean sequential-grid route should not pay negotiated global routing"
+            "the tuned grid algorithm does not run the diagnostic mesh"
         );
     }
 
@@ -6114,8 +5376,8 @@ mod tests {
         let r = route_mesh_with_diagnostics(&p);
         assert_eq!(r.result.engine, ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
-        assert_eq!(r.attempts.len(), 1);
-        assert_eq!(r.attempts[0].engine, ENGINE);
+        assert_eq!(r.passes.len(), 1);
+        assert_eq!(r.passes[0].engine, ENGINE);
         assert!(
             r.global
                 .as_ref()
@@ -6124,39 +5386,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn route_auto_skips_detailed_for_large_multilayer_boards() {
-        let mut p = simple_two_point_problem();
-        p.layer_count = 4;
-        p.connections = (0..=AUTO_DETAILED_MAX_MULTILAYER_CONNECTIONS)
-            .map(|idx| pcb_model::Connection {
-                name: format!("N{idx}"),
-                points_to_connect: vec![
-                    pcb_model::RoutePoint {
-                        x: 1.0,
-                        y: 1.0 + idx as f64,
-                        layer: LayerRef::top(),
-                    },
-                    pcb_model::RoutePoint {
-                        x: 8.0,
-                        y: 1.0 + idx as f64,
-                        layer: LayerRef::top(),
-                    },
-                ],
-            })
-            .collect();
-
-        assert!(
-            !should_try_detailed_in_auto(&p),
-            "large multilayer boards should use bounded fallback routing unless mesh is explicitly requested"
-        );
-    }
-
     // ── congested: the per-net finisher repairs most of the wall, but the wall is
     //    EXACTLY saturated (8 top-layer crossings for 8 nets, the relief gap's fifth
     //    slot at its blocked margin) and a few nets stay honest failures — the
     //    rip-up case the slice plan put off the table. route_detailed reports them
-    //    with finisher provenance; route_auto then falls back to the grid baseline
+    //    with finisher provenance; route_tuned then falls back to the grid baseline
     //    if it has fewer failed nets. (See `tests/detailed_gate.rs` for the
     //    geometry note.)
 
@@ -6164,7 +5398,7 @@ mod tests {
     fn congested_auto_reports_honest_failures() {
         let p = load("congested.json");
         // route_detailed(congested) is the expensive path — call it ONCE and derive
-        // route_auto's outcome from it + naive (route_auto runs exactly this
+        // route_tuned's outcome from it + naive (route_tuned runs exactly this
         // route_detailed internally, then naive, and returns the fewer-failed result),
         // rather than paying for a second full detailed route.
         let detailed = route_detailed(&p);
@@ -6197,7 +5431,7 @@ mod tests {
             "congested detailed copper must be geometry-clean (only connectivity gaps \
              from dropped nets are allowed), got {geom_violations:?}"
         );
-        // route_auto keeps the negotiated primary on equal faults and falls back
+        // route_tuned keeps the negotiated primary on equal faults and falls back
         // only when grid has fewer failed nets; with both non-empty here the
         // report is honest either way.
         if naive.failed.len() < detailed.failed.len() {

@@ -10,8 +10,8 @@ import sys
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-API_CRATES = {"pcb-model", "pcb-place-api"}
-PCB_IMPLEMENTATIONS = {"pcb-place", "pcb-route-grid", "pcb-route-mesh", "pcb-drc"}
+API_CRATES = {"pcb-model"}
+PCB_IMPLEMENTATIONS = {"pcb-engine", "pcb-place", "pcb-route-grid", "pcb-route-mesh", "pcb-drc"}
 AGENT_CRATES = {"gordian", "gordian-core", "gordian-runtime", "gordian-tools-pcb"}
 
 

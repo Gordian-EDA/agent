@@ -1,6 +1,6 @@
 //! Routing grid: per-layer occupancy bitmaps with net-aware blocking.
 //!
-//! The naive grid router (slice 1) rasterizes the [`RouteProblem`] onto a
+//! The naive grid router (slice 1) rasterizes the [`RoutingView`] onto a
 //! uniform square grid, one occupancy plane per copper layer, and asks A* the
 //! single question "is this cell free for connection *c*?". A cell answers no
 //! when it is blocked by foreign copper, by a keepout (copper with no net), or
@@ -29,7 +29,7 @@
 //! single-owner pads, so this is exact for them; the DRC lint (a later task) is
 //! the precision authority regardless.
 
-use pcb_model::{Point2, Polygon, RouteProblem};
+use pcb_model::{Point2, Polygon, RoutingView};
 use std::collections::BTreeMap;
 
 /// Minimum grid pitch, mm. Keeps the grid from exploding on tiny design rules.
@@ -81,7 +81,7 @@ impl RouteGrid {
     /// centre kept one cell away clears the obstacle by the full rule) and
     /// rasterized into each layer it occupies. Cells whose inflated disc would
     /// leave `bounds` are blocked for everyone (board edge).
-    pub fn build(problem: &RouteProblem) -> RouteGrid {
+    pub fn build(problem: &RoutingView) -> RouteGrid {
         Self::build_with_pitch(problem, grid_pitch(problem))
     }
 
@@ -91,7 +91,7 @@ impl RouteGrid {
     /// shrinking the grid-snap distortion that the exact-geometry lint measures at
     /// dense crossings. Slice-1 calls [`Self::build`] (the design pitch) and is
     /// unaffected. Obstacle/board-edge semantics are identical to [`Self::build`].
-    pub fn build_with_pitch(problem: &RouteProblem, pitch: f64) -> RouteGrid {
+    pub fn build_with_pitch(problem: &RoutingView, pitch: f64) -> RouteGrid {
         let pitch = pitch.max(MIN_PITCH_MM);
         let inflation = obstacle_inflation(problem);
 
@@ -182,7 +182,7 @@ impl RouteGrid {
     /// each terminal endpoint to its exact mm position, not by aligning window
     /// lattices (floating-point floor mismatches make exact lattice alignment
     /// unreliable, and snapping is exact regardless).
-    pub fn build_window(problem: &RouteProblem, window: &pcb_model::Rect) -> RouteGrid {
+    pub fn build_window(problem: &RoutingView, window: &pcb_model::Rect) -> RouteGrid {
         Self::build_window_with_pitch(problem, window, grid_pitch(problem))
     }
 
@@ -190,7 +190,7 @@ impl RouteGrid {
     /// uses a finer pitch than slice-1 for better geometric fidelity (smaller
     /// grid-snap distortion). See [`Self::build_with_pitch`].
     pub fn build_window_with_pitch(
-        problem: &RouteProblem,
+        problem: &RoutingView,
         window: &pcb_model::Rect,
         pitch: f64,
     ) -> RouteGrid {
@@ -678,7 +678,7 @@ impl RouteGrid {
     /// REAL copper; anything tighter stays blocked.
     fn assert_fine_pitch_escape_lanes(
         &mut self,
-        problem: &RouteProblem,
+        problem: &RoutingView,
         obstacles: &[pcb_model::Obstacle],
     ) {
         const FINE_PITCH_MM: f64 = 0.66;
@@ -810,7 +810,7 @@ impl RouteGrid {
 }
 
 /// Grid pitch for `problem`: `max(MIN_PITCH_MM, (min_trace_width+clearance)/2)`.
-pub fn grid_pitch(problem: &RouteProblem) -> f64 {
+pub fn grid_pitch(problem: &RoutingView) -> f64 {
     ((problem.min_trace_width + problem.clearance) / 2.0).max(MIN_PITCH_MM)
 }
 
@@ -819,7 +819,7 @@ pub fn grid_pitch(problem: &RouteProblem) -> f64 {
 /// wider net adds its extra half-width `(w - min)/2` as a per-net A* scan
 /// (`AStarCosts.trace_clear_radius_cells`), so it clears exactly without over-spacing
 /// every other net (the old `max_route_width` approach did, costing routability).
-pub fn obstacle_inflation(problem: &RouteProblem) -> f64 {
+pub fn obstacle_inflation(problem: &RoutingView) -> f64 {
     problem.clearance + problem.min_trace_width / 2.0
 }
 
@@ -855,10 +855,10 @@ fn combine(existing: Cell, incoming: Cell) -> Cell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pcb_model::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem};
+    use pcb_model::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RoutingView};
 
-    fn problem(obstacles: Vec<Obstacle>) -> RouteProblem {
-        RouteProblem {
+    fn problem(obstacles: Vec<Obstacle>) -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles,

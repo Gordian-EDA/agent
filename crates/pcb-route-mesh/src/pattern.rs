@@ -21,8 +21,8 @@ use crate::quality::{
 };
 use crate::via_escape::ViaEscapeRouter;
 use pcb_model::{
-    Capabilities, FailedNet, Point2, RouteProblem, RouteQuality, RouteResult, RouteSolution,
-    Router, Trace, Via, ViaSpan,
+    FailedNet, Point2, RouteQuality, RouteResult, RouteSolution, RoutingCapabilities, RoutingView,
+    Trace, Via, ViaSpan,
 };
 use std::collections::BTreeSet;
 
@@ -39,17 +39,40 @@ type SolutionCandidateKey = (Vec<TraceCandidateKey>, Vec<ViaCandidateKey>);
 type PatternStateKey = (SolutionCandidateKey, Vec<usize>, Vec<String>);
 type CandidateDiversityKey = (Vec<String>, usize, usize);
 
+trait PatternStep {
+    fn can_route(&self, problem: &RoutingView) -> bool;
+    fn route(&self, problem: &RoutingView) -> RouteResult;
+}
+
+macro_rules! pattern_step {
+    ($ty:ty) => {
+        impl PatternStep for $ty {
+            fn can_route(&self, problem: &RoutingView) -> bool {
+                <$ty>::can_route(self, problem)
+            }
+            fn route(&self, problem: &RoutingView) -> RouteResult {
+                <$ty>::route(self, problem)
+            }
+        }
+    };
+}
+
+pattern_step!(DirectLineRouter);
+pattern_step!(LayerHopRouter);
+pattern_step!(ViaEscapeRouter);
+pattern_step!(ChannelRouter);
+
 /// A cheap portfolio router that composes the narrow pattern routers per net.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PatternRouter;
 
-impl Router for PatternRouter {
-    fn name(&self) -> &'static str {
+impl PatternRouter {
+    pub fn name(&self) -> &'static str {
         ENGINE
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
+    pub fn capabilities(&self) -> RoutingCapabilities {
+        RoutingCapabilities {
             max_layers: u32::MAX,
             honors_escape_layers: false,
             honors_net_widths: true,
@@ -57,24 +80,24 @@ impl Router for PatternRouter {
         }
     }
 
-    fn can_route(&self, problem: &RouteProblem) -> bool {
+    pub fn can_route(&self, problem: &RoutingView) -> bool {
         self.capabilities().can_route(problem)
             && (problem.layer_count <= 2
                 || problem.connections.len() <= PATTERN_MAX_MULTILAYER_CONNECTIONS)
     }
 
-    fn route(&self, problem: &RouteProblem) -> RouteResult {
+    pub fn route(&self, problem: &RoutingView) -> RouteResult {
         route_pattern(problem)
     }
 }
 
 /// Route each net with the best clean pattern candidate, accumulating copper.
-pub fn route_pattern(problem: &RouteProblem) -> RouteResult {
+pub fn route_pattern(problem: &RoutingView) -> RouteResult {
     let direct = DirectLineRouter;
     let layer_hop = LayerHopRouter;
     let via_escape = ViaEscapeRouter;
     let channel = ChannelRouter;
-    let routers: [&dyn Router; 4] = [&direct, &layer_hop, &via_escape, &channel];
+    let routers: [&dyn PatternStep; 4] = [&direct, &layer_hop, &via_escape, &channel];
     let candidates = isolated_candidates(problem, &routers);
 
     let mut best: Option<(RouteResult, RouteQuality)> = None;
@@ -96,7 +119,7 @@ pub fn route_pattern(problem: &RouteProblem) -> RouteResult {
 }
 
 fn route_pattern_order(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     candidates: &[Vec<RouteSolution>],
     order: &[usize],
 ) -> RouteResult {
@@ -129,7 +152,7 @@ fn route_pattern_order(
 }
 
 fn route_pattern_order_once(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     candidates: &[Vec<RouteSolution>],
     order: &[usize],
 ) -> RouteResult {
@@ -197,7 +220,7 @@ fn route_pattern_order_once(
 }
 
 fn failed_priority_order(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     candidates: &[Vec<RouteSolution>],
     order: &[usize],
     failed: &[FailedNet],
@@ -227,7 +250,7 @@ fn failed_priority_order(
 }
 
 fn failed_priority_cmp_with_metrics(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     metrics: &[PatternOrderMetric],
     a: usize,
     b: usize,
@@ -266,7 +289,7 @@ struct PatternState {
 }
 
 fn net_order_portfolio(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     candidates: &[Vec<RouteSolution>],
 ) -> Vec<Vec<usize>> {
     let base: Vec<usize> = (0..problem.connections.len()).collect();
@@ -383,7 +406,7 @@ struct PatternOrderMetric {
 }
 
 fn net_order_metrics(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     candidates: &[Vec<RouteSolution>],
 ) -> Vec<PatternOrderMetric> {
     let crossing_pressures = connection_crossing_pressures(problem);
@@ -411,7 +434,10 @@ fn isolated_success_count(candidates: &[Vec<RouteSolution>], idx: usize) -> usiz
     candidates.get(idx).map_or(0, Vec::len)
 }
 
-fn isolated_candidates(problem: &RouteProblem, routers: &[&dyn Router]) -> Vec<Vec<RouteSolution>> {
+fn isolated_candidates(
+    problem: &RoutingView,
+    routers: &[&dyn PatternStep],
+) -> Vec<Vec<RouteSolution>> {
     let mut all = Vec::with_capacity(problem.connections.len());
     for idx in 0..problem.connections.len() {
         let subproblem = problem_with_connections(problem, &[idx]);
@@ -448,8 +474,8 @@ fn isolated_candidates(problem: &RouteProblem, routers: &[&dyn Router]) -> Vec<V
 }
 
 fn add_synthetic_same_layer_candidates(
-    problem: &RouteProblem,
-    subproblem: &RouteProblem,
+    problem: &RoutingView,
+    subproblem: &RoutingView,
     idx: usize,
     seen: &mut BTreeSet<SolutionCandidateKey>,
     out: &mut Vec<RouteSolution>,
@@ -535,7 +561,7 @@ fn add_synthetic_same_layer_candidates(
     }
 }
 
-fn has_nearby_foreign_obstacle(problem: &RouteProblem, conn: &pcb_model::Connection) -> bool {
+fn has_nearby_foreign_obstacle(problem: &RoutingView, conn: &pcb_model::Connection) -> bool {
     let Some((mut min_x, mut max_x, mut min_y, mut max_y)) = connection_bbox(conn) else {
         return false;
     };
@@ -558,7 +584,7 @@ fn has_nearby_foreign_obstacle(problem: &RouteProblem, conn: &pcb_model::Connect
 }
 
 fn synthetic_detour_axes(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     conn: &pcb_model::Connection,
     a: Point2,
     b: Point2,
@@ -720,7 +746,7 @@ fn connection_bbox(conn: &pcb_model::Connection) -> Option<(f64, f64, f64, f64)>
 }
 
 fn route_one_net_candidates(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     routed: &[usize],
     idx: usize,
@@ -800,7 +826,7 @@ fn candidate_diversity_key(route: &RouteSolution) -> CandidateDiversityKey {
     (layers, route.vias.len(), bend_count)
 }
 
-fn prune_pattern_states(problem: &RouteProblem, states: &mut Vec<PatternState>) {
+fn prune_pattern_states(problem: &RoutingView, states: &mut Vec<PatternState>) {
     states.sort_by(|a, b| {
         let ar = RouteResult {
             solution: a.solution.clone(),
@@ -837,7 +863,7 @@ fn failed_names(failed: &[FailedNet]) -> Vec<&str> {
     failed.iter().map(|f| f.connection.as_str()).collect()
 }
 
-fn problem_with_connections(problem: &RouteProblem, indices: &[usize]) -> RouteProblem {
+fn problem_with_connections(problem: &RoutingView, indices: &[usize]) -> RoutingView {
     let mut out = problem.clone();
     out.connections = indices
         .iter()
@@ -847,10 +873,10 @@ fn problem_with_connections(problem: &RouteProblem, indices: &[usize]) -> RouteP
 }
 
 fn problem_with_connections_and_extra(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     indices: &[usize],
     extra: usize,
-) -> RouteProblem {
+) -> RoutingView {
     let mut all = indices.to_vec();
     all.push(extra);
     problem_with_connections(problem, &all)
@@ -912,8 +938,8 @@ mod tests {
         }
     }
 
-    fn base() -> RouteProblem {
-        RouteProblem {
+    fn base() -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: Vec::new(),
@@ -988,7 +1014,7 @@ mod tests {
         let layer_hop = LayerHopRouter;
         let via_escape = ViaEscapeRouter;
         let channel = ChannelRouter;
-        let routers: [&dyn Router; 4] = [&direct, &layer_hop, &via_escape, &channel];
+        let routers: [&dyn PatternStep; 4] = [&direct, &layer_hop, &via_escape, &channel];
         let candidates = isolated_candidates(&p, &routers);
         let counts: Vec<usize> = candidates.iter().map(Vec::len).collect();
 
@@ -1146,7 +1172,7 @@ mod tests {
         let layer_hop = LayerHopRouter;
         let via_escape = ViaEscapeRouter;
         let channel = ChannelRouter;
-        let routers: [&dyn Router; 4] = [&direct, &layer_hop, &via_escape, &channel];
+        let routers: [&dyn PatternStep; 4] = [&direct, &layer_hop, &via_escape, &channel];
 
         let candidates = isolated_candidates(&p, &routers);
         let counts: Vec<usize> = candidates.iter().map(Vec::len).collect();
@@ -1208,8 +1234,8 @@ mod tests {
         let layer_hop = LayerHopRouter;
         let via_escape = ViaEscapeRouter;
         let channel = ChannelRouter;
-        let without_channel: [&dyn Router; 3] = [&direct, &layer_hop, &via_escape];
-        let with_channel: [&dyn Router; 4] = [&direct, &layer_hop, &via_escape, &channel];
+        let without_channel: [&dyn PatternStep; 3] = [&direct, &layer_hop, &via_escape];
+        let with_channel: [&dyn PatternStep; 4] = [&direct, &layer_hop, &via_escape, &channel];
 
         let base_candidates = isolated_candidates(&p, &without_channel);
         let channel_candidates = isolated_candidates(&p, &with_channel);
@@ -1254,8 +1280,8 @@ mod tests {
         let layer_hop = LayerHopRouter;
         let via_escape = ViaEscapeRouter;
         let channel = ChannelRouter;
-        let without_channel: [&dyn Router; 3] = [&direct, &layer_hop, &via_escape];
-        let with_channel: [&dyn Router; 4] = [&direct, &layer_hop, &via_escape, &channel];
+        let without_channel: [&dyn PatternStep; 3] = [&direct, &layer_hop, &via_escape];
+        let with_channel: [&dyn PatternStep; 4] = [&direct, &layer_hop, &via_escape, &channel];
 
         let base_candidates = isolated_candidates(&p, &without_channel);
         let channel_candidates = isolated_candidates(&p, &with_channel);
@@ -1269,8 +1295,7 @@ mod tests {
         assert!(
             channel_candidates[0].iter().any(|solution| {
                 solution.traces.len() >= 2
-                    && pcb_drc::lint::lint(&problem_with_connections(&p, &[0]), solution)
-                        .is_empty()
+                    && pcb_drc::lint::lint(&problem_with_connections(&p, &[0]), solution).is_empty()
             }),
             "channel router should add a clean multi-pin preferred-direction tree: {:?}",
             channel_candidates[0]
@@ -1294,7 +1319,7 @@ mod tests {
         let layer_hop = LayerHopRouter;
         let via_escape = ViaEscapeRouter;
         let channel = ChannelRouter;
-        let routers: [&dyn Router; 4] = [&direct, &layer_hop, &via_escape, &channel];
+        let routers: [&dyn PatternStep; 4] = [&direct, &layer_hop, &via_escape, &channel];
 
         let candidates = isolated_candidates(&p, &routers);
         let r = route_pattern(&p);

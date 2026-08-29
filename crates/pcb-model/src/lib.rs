@@ -1,22 +1,26 @@
-//! Data model for PCB routing problems and solutions.
+//! Framework-level PCB problem, solution, and engine contract.
 //!
-//! `RouteProblem` is wire-compatible with tscircuit's `SimpleRouteJson`
+//! [`PcbEngine`] accepts one complete [`PcbProblem`] and returns one complete
+//! [`PcbSolution`]. `RoutingView` is an internal phase projection which remains
+//! wire-compatible with tscircuit's `SimpleRouteJson`
 //! (camelCase, same field names/shapes) so the archived benchmark dataset
 //! parses without transformation.  Extension fields (`clearance`,
 //! `via_diameter`, `via_drill`) are optional with sane defaults so upstream
 //! fixtures that omit them still parse.
 //!
-//! `RouteSolution` is our own format; unknown fields are rejected so any
+//! `RouteSolution` is the copper portion of a solution; unknown fields are rejected so any
 //! schema drift is caught immediately.
 
 use serde::{Deserialize, Serialize};
 
+mod engine;
 pub mod route;
+pub use engine::{
+    EdgeDatum, LockedAt, Part, PartPad, PcbEngine, PcbProblem, PcbSolution, Placement,
+};
 pub use geom::UnionFind;
 pub use geom::{Point2, Polygon, Rect, Segment};
-pub use route::{
-    Capabilities, RouteMetrics, RouteQuality, RouteResult, Router, failed_pad_weight, select,
-};
+pub use route::{RouteMetrics, RouteQuality, RouteResult, RoutingCapabilities, failed_pad_weight};
 
 // ── defaults for extension fields ────────────────────────────────────────────
 
@@ -119,7 +123,7 @@ impl LayerRef {
     }
 }
 
-// ── RouteProblem ─────────────────────────────────────────────────────────────
+// ── RoutingView ─────────────────────────────────────────────────────────────
 
 /// A PCB routing problem, wire-compatible with tscircuit `SimpleRouteJson`.
 ///
@@ -127,7 +131,7 @@ impl LayerRef {
 /// not model).  Extension fields default to sensible values when absent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RouteProblem {
+pub struct RoutingView {
     pub layer_count: u32,
     pub min_trace_width: f64,
     pub obstacles: Vec<Obstacle>,
@@ -170,7 +174,7 @@ pub struct RouteProblem {
     pub escape_layers: std::collections::BTreeMap<String, u32>,
 }
 
-impl RouteProblem {
+impl RoutingView {
     /// Trace width to emit for `net`: its per-net override, else the board minimum.
     pub fn net_width(&self, net: &str) -> f64 {
         self.net_widths
@@ -243,10 +247,7 @@ impl RoutePoint {
 
 /// A net a router could not fully connect, with a human-readable cause.
 ///
-/// The single failure-provenance type every [`Router`](crate::Router) reports in
-/// [`RouteResult::failed`](crate::RouteResult) — shared across the grid and
-/// pcb-route-mesh engines so failures have one shape. Serializable: a router's
-/// congestion report carries these as data.
+/// One connection the concrete routing phase could not complete.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FailedNet {
@@ -258,11 +259,12 @@ pub struct FailedNet {
 
 // ── RouteSolution ─────────────────────────────────────────────────────────────
 
-/// The result of routing a [`RouteProblem`]: copper traces and vias.
+/// The result of routing a [`RoutingView`]: copper traces and vias.
 ///
 /// Unknown JSON fields are rejected — any schema drift is caught immediately.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Default)]
 pub struct RouteSolution {
     pub traces: Vec<Trace>,
     pub vias: Vec<Via>,

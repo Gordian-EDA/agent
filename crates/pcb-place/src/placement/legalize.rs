@@ -1,6 +1,6 @@
 //! The legalizer (the spiral overlap-resolver + deterministic initial grid). The
 //! exact-geometry legality check ([`is_legal`]) lives in the kernel
-//! (`pcb-place-api`) so a third-party placer self-verifies with it; it is
+//! (`pcb-place`) so a third-party placer self-verifies with it; it is
 //! re-exported here.
 //!
 //! `legalize` snaps movable parts to the grid then resolves residual courtyard
@@ -11,10 +11,10 @@ use super::geometry::{
     PLACE_GRID, PLACEMENT_GRID, SPIRAL_MAX_RING, clamp_center_for_envelope,
     part_placement_bounds_envelope, placement_envelope_at,
 };
+use crate::PlacementView;
 use pcb_model::{Point2, Rect};
-use pcb_place_api::PlaceProblem;
 
-pub(crate) use pcb_place_api::is_legal;
+pub(crate) use crate::is_legal;
 
 /// Outcome counters from [`legalize`].
 pub(crate) struct LegalizeStats {
@@ -33,7 +33,7 @@ struct LegalizeGeometry<'a> {
 ///
 /// Records (and never trusts) — legality is re-checked by [`is_legal`] after.
 pub(crate) fn legalize(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     half: &[(f64, f64)],
     copper_bbox: &[Rect],
     margin: f64,
@@ -128,7 +128,7 @@ pub(crate) fn legalize(
 /// fixed (sorted) order for determinism. `None` if nothing is found within
 /// [`SPIRAL_MAX_RING`] rings.
 fn spiral_free_cell(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     geometry: &LegalizeGeometry<'_>,
     margin: f64,
     i: usize,
@@ -171,7 +171,7 @@ fn spiral_free_cell(
     None
 }
 
-fn collides_keepout(problem: &PlaceProblem, cand: &Point2, cand_half: (f64, f64)) -> bool {
+fn collides_keepout(problem: &PlacementView, cand: &Point2, cand_half: (f64, f64)) -> bool {
     let courtyard = Rect::from_center_half(*cand, cand_half);
     problem.keepouts.iter().any(|keepout| {
         let (ox, oy) = courtyard.axis_penetration(keepout);
@@ -200,7 +200,7 @@ pub(crate) fn collides(
 /// Deterministic initial layout: parts (sorted by reference) on a near-square
 /// grid sized to the largest courtyard, anchored at the board's top-left inset.
 /// No RNG — the grid is a pure function of the parts.
-pub(crate) fn initial_grid(problem: &PlaceProblem, half: &[(f64, f64)]) -> Vec<Point2> {
+pub(crate) fn initial_grid(problem: &PlacementView, half: &[(f64, f64)]) -> Vec<Point2> {
     let n = problem.parts.len();
     let mut pos = vec![Point2 { x: 0.0, y: 0.0 }; n];
     if n == 0 {

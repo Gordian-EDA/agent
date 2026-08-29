@@ -137,7 +137,7 @@ pub struct BoardVia {
 }
 
 pub(crate) type LayerRef = CopperLayer;
-pub(crate) type RouteProblem = BoardRouting;
+pub(crate) type RoutingView = BoardRouting;
 pub(crate) type Obstacle = BoardObstacle;
 pub(crate) type Connection = BoardConnection;
 pub(crate) type RoutePoint = BoardRoutePoint;
@@ -478,7 +478,7 @@ impl SnapshotBuilder {
         // Copper pours adapt around tracks, pads, and vias when KiCad refills
         // them. Treating their outline bbox as fixed copper makes the router see
         // a board-sized obstacle (and can invent cross-plane shorts). Plane
-        // connectivity is modeled separately by `RouteProblem::plane_nets`.
+        // connectivity is modeled separately by `RoutingView::plane_nets`.
         if !zone_is_routing_keepout(zone) {
             return;
         }
@@ -512,7 +512,7 @@ impl SnapshotBuilder {
             .collect();
 
         let plane_nets = observed_plane_nets(layer_count, &connections, &self.copper_zone_layers);
-        let problem = RouteProblem {
+        let problem = RoutingView {
             layer_count,
             min_trace_width: self.rules.min_trace_width,
             obstacles: self.obstacles,
@@ -1167,7 +1167,7 @@ fn zone_layers(zone: &Zone, layer_names: &[String]) -> Vec<LayerRef> {
 }
 
 fn zone_is_routing_keepout(zone: &Zone) -> bool {
-    // RouteProblem has one generic obstacle kind, so a via-only area is
+    // RoutingView has one generic obstacle kind, so a via-only area is
     // intentionally conservative: it blocks tracks too rather than allowing a
     // route that may later require an illegal via inside the area.
     matches!(

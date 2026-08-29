@@ -44,7 +44,7 @@ pub use connectivity::Violation;
 pub use ctx::{CopperGeom, CopperItem, DrcCtx, collect_copper};
 pub use lint::DrcViolation;
 
-use pcb_model::{Point2, RouteProblem, RouteSolution};
+use pcb_model::{Point2, RouteSolution, RoutingView};
 use serde::Serialize;
 
 /// A single design-rule violation in a [`RouteSolution`] relative to its problem.
@@ -198,7 +198,7 @@ impl DrcSuite {
 
     /// Run every rule against `solution`/`problem` and concatenate the findings
     /// in suite order.
-    pub fn run(&self, problem: &RouteProblem, solution: &RouteSolution) -> Vec<Finding> {
+    pub fn run(&self, problem: &RoutingView, solution: &RouteSolution) -> Vec<Finding> {
         let ctx = DrcCtx::build(problem, solution);
         let mut out = Vec::new();
         for rule in &self.0 {

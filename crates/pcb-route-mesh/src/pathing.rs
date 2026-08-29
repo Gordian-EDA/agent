@@ -11,7 +11,7 @@
 //! exists and reports congestion when it does not.
 //!
 //! This module is deliberately independent of [`pcb_route_grid::grid`] / [`pcb_route_grid::astar`]:
-//! it shares only the [`RouteProblem`] model, the [`CapacityMesh`], and
+//! it shares only the [`RoutingView`] model, the [`CapacityMesh`], and
 //! [`FailedNet`] (the cross-stage failure type). The always-correct slice-1
 //! fallback stays untouched.
 //!
@@ -50,7 +50,7 @@ use crate::heuristics::{
 };
 use crate::mesh::{CapacityMesh, LeafId};
 use geom::STRICT_EPS;
-use pcb_model::{FailedNet, Point2, Rect, RouteProblem};
+use pcb_model::{FailedNet, Point2, Rect, RoutingView};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -272,14 +272,14 @@ impl GlobalRouteResult {
 /// Globally route `problem`: build the capacity mesh, route every net's points
 /// over it with congestion-costed A\*, and negotiate rip-up until feasible or the
 /// iteration cap is hit. Never panics; never silently drops a net.
-pub fn global_route(problem: &RouteProblem) -> GlobalRouteResult {
+pub fn global_route(problem: &RoutingView) -> GlobalRouteResult {
     let mesh = CapacityMesh::build(problem);
     global_route_with_mesh(problem, &mesh)
 }
 
 /// As [`global_route`], but over a pre-built mesh (slice 4's SVG overlay builds
 /// the mesh once and shares it).
-pub fn global_route_with_mesh(problem: &RouteProblem, mesh: &CapacityMesh) -> GlobalRouteResult {
+pub fn global_route_with_mesh(problem: &RoutingView, mesh: &CapacityMesh) -> GlobalRouteResult {
     let orders = net_order_portfolio(problem);
     let mut best = Router::new(problem, mesh).run_order(&orders[0], VictimOrder::Baseline);
     if best.is_feasible() {
@@ -327,7 +327,7 @@ enum VictimOrder {
 
 /// Negotiated global router state over the mesh.
 struct Router<'a> {
-    problem: &'a RouteProblem,
+    problem: &'a RoutingView,
     mesh: &'a CapacityMesh,
     layer_count: usize,
     /// Adjacency: for each leaf, `(neighbor_leaf, edge_index)` pairs. Built once.
@@ -351,7 +351,7 @@ struct Router<'a> {
 }
 
 impl<'a> Router<'a> {
-    fn new(problem: &'a RouteProblem, mesh: &'a CapacityMesh) -> Self {
+    fn new(problem: &'a RoutingView, mesh: &'a CapacityMesh) -> Self {
         let layer_count = mesh.layer_count.max(1);
         let n_leaves = mesh.leaves.len();
         let n_edges = mesh.edges.len();
@@ -1183,7 +1183,7 @@ fn clear_unrouted_for(unrouted: &mut Vec<FailedNet>, connection: &str) {
 }
 
 fn build_via_allowed(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     mesh: &CapacityMesh,
     layer_count: usize,
 ) -> Vec<Vec<bool>> {
@@ -1205,7 +1205,7 @@ struct ViaClearanceObstacles {
 }
 
 impl ViaClearanceObstacles {
-    fn build(problem: &RouteProblem, layer_count: usize) -> Self {
+    fn build(problem: &RoutingView, layer_count: usize) -> Self {
         let name_index = connection_name_index(problem);
         let mut rects = vec![Vec::new(); layer_count];
         for ob in &problem.obstacles {
@@ -1290,7 +1290,7 @@ fn via_site_exists(
     false
 }
 
-fn connection_name_index(problem: &RouteProblem) -> BTreeMap<String, usize> {
+fn connection_name_index(problem: &RoutingView) -> BTreeMap<String, usize> {
     let mut map = BTreeMap::new();
     for (idx, conn) in problem.connections.iter().enumerate() {
         map.entry(conn.name.clone()).or_insert(idx);
@@ -1328,7 +1328,7 @@ fn victim_pressure(
 /// Connection indices in routing order: ascending bounding-box half-perimeter,
 /// ties by name. The slice-1 order ([`pcb_route_grid::router`]), reproduced so pathing
 /// does not depend on the router's internals.
-fn net_order(problem: &RouteProblem) -> Vec<usize> {
+fn net_order(problem: &RoutingView) -> Vec<usize> {
     let mut order: Vec<usize> = (0..problem.connections.len()).collect();
     order.sort_by(|&a, &b| {
         let ka = problem.connections[a].half_perimeter();
@@ -1345,7 +1345,7 @@ fn net_order(problem: &RouteProblem) -> Vec<usize> {
 /// Tiny deterministic fallback portfolio for negotiated routing. The first
 /// order is the baseline fast path; the rest are only tried when that route is not
 /// feasible.
-fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
+fn net_order_portfolio(problem: &RoutingView) -> Vec<Vec<usize>> {
     let metrics = net_order_metrics(problem);
     let mut orders = Vec::new();
     push_unique_order(&mut orders, net_order(problem));
@@ -1466,7 +1466,7 @@ struct NetOrderMetric {
     crossing_pressure: usize,
 }
 
-fn net_order_metrics(problem: &RouteProblem) -> Vec<NetOrderMetric> {
+fn net_order_metrics(problem: &RoutingView) -> Vec<NetOrderMetric> {
     let crossing_pressures = connection_crossing_pressures(problem);
     problem
         .connections
@@ -1494,8 +1494,8 @@ mod tests {
     use pcb_model::{Connection, LayerRef, Obstacle, Rect, RoutePoint};
     use std::path::Path;
 
-    fn base(bounds: Rect, obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RouteProblem {
-        RouteProblem {
+    fn base(bounds: Rect, obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles,
@@ -1548,7 +1548,7 @@ mod tests {
         }
     }
 
-    fn load(name: &str) -> RouteProblem {
+    fn load(name: &str) -> RoutingView {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures")
             .join(name);
@@ -1560,7 +1560,7 @@ mod tests {
     /// Validate a plan's structural invariants against the mesh: every step's
     /// exit references a real edge joining the step's leaf to the named
     /// neighbour, entry/exit chain is consistent, and the last step has no exit.
-    fn assert_plan_consistent(problem: &RouteProblem, result: &GlobalRouteResult) {
+    fn assert_plan_consistent(problem: &RoutingView, result: &GlobalRouteResult) {
         let mesh = CapacityMesh::build(problem);
         for net in &result.plan.nets {
             for path in &net.paths {

@@ -22,7 +22,6 @@ kicad-ipc = { path = "../kicad-ipc" }
 pcb-route-mesh = { path = "../pcb-route-mesh" }
 pcb-model = { path = "../pcb-model" }
 pcb-place = { path = "../pcb-place" }
-pcb-place-api = { path = "../pcb-place-api" }
 sch-io = { path = "../sch-io" }
 tempfile.workspace = true
 prost-types = "0.13"

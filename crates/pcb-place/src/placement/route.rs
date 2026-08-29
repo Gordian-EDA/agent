@@ -1,14 +1,4 @@
-//! The placement pipeline entry points + the built-in [`Placer`]s and the
-//! [`RouteRanker`] the routability oracle is wired from.
-//!
-//! [`to_route_problem`] (the bridge from a placement to the router) and the
-//! [`Placer`]/[`RouteRanker`]/[`RoutabilityOracle`] trait seam all live in the
-//! kernel (`pcb-place-api`); this module supplies the BUILT-IN implementations:
-//! [`LegalizingPlacer`] (force + legalize, the baseline + spring idioms),
-//! [`AnnealingPlacer`] (SA refine), and [`FanoutPlacer`] (the structured radial
-//! fast-path). The caller injects the [`RouteRanker`].
-
-use std::sync::Arc;
+//! The single tuned placement phase and its internal optimization passes.
 
 use super::anneal::anneal_placement;
 use super::cost::{compute_hpwl_with_rotations, place_cost};
@@ -17,149 +7,15 @@ use super::geometry::{
     PLACEMENT_GRID, clamp_center_for_envelope, courtyard_margin, datum_edge_target,
     part_edge_target, part_placement_bounds_envelope, rotated_copper_bbox, rotated_courtyard_half,
 };
-use super::hints::{apply_edge_lock, apply_grid_hints, unified_fanout_place};
+use super::hints::{apply_grid_hints, unified_fanout_place};
 use super::legalize::{initial_grid, is_legal, legalize};
-use pcb_model::{LayerRef, Point2, Rect};
-use pcb_place_api::decoupling_pairs;
-use pcb_place_api::{
-    Edge, Pin, PlaceProblem, PlaceReport, PlaceResult, Placement, PlacementHints, derive_nets,
+use crate::decoupling_pairs;
+use crate::{
+    Edge, Pin, PlaceReport, PlaceResult, Placement, PlacementHints, PlacementView, derive_nets,
 };
-use pcb_place_api::{PlacementRankKey, Placer, RoutabilityOracle, RouteRanker};
+use pcb_model::{LayerRef, Point2, Rect};
 
-#[cfg(test)]
-use pcb_model::Router;
-
-#[cfg(test)]
-pub(crate) struct GridAstarRanker;
-
-#[cfg(test)]
-impl RouteRanker for GridAstarRanker {
-    fn faults(&self, problem: &pcb_model::RouteProblem) -> usize {
-        self.rank_key(problem).0
-    }
-
-    fn rank_key(&self, problem: &pcb_model::RouteProblem) -> pcb_place_api::RouteRankKey {
-        if placement_ranker_uses_layout_only(problem) {
-            return (0, 0, 0, 0, 0);
-        }
-        if placement_ranker_uses_bounded_pass(problem) {
-            return route_rank_key(
-                problem,
-                &pcb_route_grid::router::route_orthogonal_single_pass(problem),
-            );
-        }
-        let strict = route_rank_key(problem, &pcb_route_grid::router::route_orthogonal(problem));
-        let lenient = route_rank_key(
-            problem,
-            &pcb_route_grid::router::route_orthogonal_lenient(problem),
-        );
-        let orthogonal = strict.min(lenient);
-        rank_key_with_full_grid_fallback(
-            orthogonal,
-            should_try_full_grid_ranker_fallback(problem, orthogonal),
-            || {
-                route_rank_key(
-                    problem,
-                    &pcb_route_grid::router::GridAStarRouter.route(problem),
-                )
-            },
-        )
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn placement_ranker_uses_bounded_pass(problem: &pcb_model::RouteProblem) -> bool {
-    let terminals = problem
-        .connections
-        .iter()
-        .map(|connection| connection.points_to_connect.len())
-        .sum::<usize>();
-    terminals > 40 && terminals <= 48
-}
-
-#[cfg(test)]
-pub(crate) fn placement_ranker_uses_layout_only(problem: &pcb_model::RouteProblem) -> bool {
-    problem
-        .connections
-        .iter()
-        .map(|connection| connection.points_to_connect.len())
-        .sum::<usize>()
-        > 48
-}
-
-#[cfg(test)]
-pub(crate) fn route_rank_key(
-    problem: &pcb_model::RouteProblem,
-    routed: &pcb_model::RouteResult,
-) -> pcb_place_api::RouteRankKey {
-    let geometry = pcb_drc::lint::lint(problem, &routed.solution)
-        .iter()
-        .filter(|finding| !matches!(finding, pcb_drc::DrcViolation::Connectivity { .. }))
-        .count();
-    let metrics = routed.solution.metrics();
-    (
-        pcb_model::failed_pad_weight(problem, &routed.failed) + geometry,
-        geometry,
-        routed.failed.len(),
-        metrics.via_count,
-        (metrics.wirelength * 1000.0).round() as u64,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn route_rank_key_better(
-    candidate: pcb_place_api::RouteRankKey,
-    incumbent: pcb_place_api::RouteRankKey,
-) -> bool {
-    candidate < incumbent
-}
-
-#[cfg(test)]
-pub(crate) fn route_rank_key_clean_via_free(key: pcb_place_api::RouteRankKey) -> bool {
-    key.0 == 0 && key.3 == 0
-}
-
-#[cfg(test)]
-pub(crate) fn fanout_fast_path_accepts(
-    problem: &pcb_model::RouteProblem,
-    key: pcb_place_api::RouteRankKey,
-) -> bool {
-    !placement_ranker_uses_layout_only(problem) && route_rank_key_clean_via_free(key)
-}
-
-#[cfg(test)]
-pub(crate) fn should_try_full_grid_ranker_fallback(
-    problem: &pcb_model::RouteProblem,
-    orthogonal: pcb_place_api::RouteRankKey,
-) -> bool {
-    let terminals = problem
-        .connections
-        .iter()
-        .map(|connection| connection.points_to_connect.len())
-        .sum::<usize>();
-    let (max_connections, max_terminals) = if orthogonal.0 > 0 { (6, 18) } else { (4, 12) };
-    !route_rank_key_clean_via_free(orthogonal)
-        && problem.connections.len() <= max_connections
-        && terminals <= max_terminals
-}
-
-#[cfg(test)]
-pub(crate) fn rank_key_with_full_grid_fallback<F>(
-    orthogonal: pcb_place_api::RouteRankKey,
-    try_fallback: bool,
-    full_grid: F,
-) -> pcb_place_api::RouteRankKey
-where
-    F: FnOnce() -> pcb_place_api::RouteRankKey,
-{
-    if try_fallback && !route_rank_key_clean_via_free(orthogonal) {
-        orthogonal.min(full_grid())
-    } else {
-        orthogonal
-    }
-}
-
-/// Per-variant placement toggles a [`LegalizingPlacer`]/[`AnnealingPlacer`] carries.
+/// Internal placement-phase tuning switches.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct PlaceOpts {
     /// Pull each decoupling cap to hug its IC ([`super::pairs::decoupling_pairs`]) via
@@ -178,296 +34,24 @@ pub(crate) struct PlaceOpts {
     pub(crate) anneal: bool,
 }
 
-/// The force-directed-seed + spiral-legalize [`Placer`] — the always-legal baseline.
-/// With `PlaceOpts::default` it is the pure seed ([`LegalizingPlacer::baseline`]); the
-/// `decouple`/`aspect_edge` opts turn on the spring idioms (cap co-placement,
-/// aspect-aware connector edges) as extra oracle candidates. Never anneals.
-pub struct LegalizingPlacer {
-    pub(crate) opts: PlaceOpts,
-}
-
-impl LegalizingPlacer {
-    /// The baseline placer (pure force seed + legalize, no idioms).
-    pub fn baseline() -> Self {
-        Self {
-            opts: PlaceOpts::default(),
-        }
+/// Gordian's single tuned placement algorithm.
+pub fn place_tuned(problem: &PlacementView, hints: &PlacementHints) -> PlaceResult {
+    let mut initialized = problem.clone();
+    let structured = unified_fanout_place(&mut initialized, hints);
+    if !structured {
+        apply_grid_hints(&mut initialized, hints);
     }
-}
-
-impl Placer for LegalizingPlacer {
-    fn name(&self) -> &'static str {
-        "legalizing"
-    }
-    fn place(&self, problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
-        place_variant(problem, hints, self.opts)
-    }
-}
-
-/// The simulated-annealing-refine [`Placer`]: the force seed then [`anneal_placement`]
-/// (escape the springs' local minima, optimize the explicit layout cost). The
-/// oracle's main alternative to the baseline.
-pub struct AnnealingPlacer {
-    pub(crate) opts: PlaceOpts,
-}
-
-impl AnnealingPlacer {
-    /// The SA-refine placer, seeded from the baseline force layout.
-    pub fn new() -> Self {
-        Self {
-            opts: PlaceOpts {
-                anneal: true,
-                aspect_edge: false,
-                decouple: false,
-            },
-        }
-    }
-}
-
-impl Default for AnnealingPlacer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Placer for AnnealingPlacer {
-    fn name(&self) -> &'static str {
-        "anneal"
-    }
-    fn place(&self, problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
-        place_variant(problem, hints, self.opts)
-    }
-}
-
-/// A deterministic edge-locked placer for explicit connector/header edge hints.
-/// It is offered as an oracle candidate, not a replacement for the soft edge
-/// spring: crowded boards often route better when connectors are pinned to the
-/// frame before relaxation, while quieter boards can still keep the baseline or
-/// annealed candidate if hard locking is worse.
-pub(crate) struct EdgeLockedPlacer;
-
-impl Placer for EdgeLockedPlacer {
-    fn name(&self) -> &'static str {
-        "edge-lock"
-    }
-
-    fn place(&self, problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
-        let mut edge_locked = problem.clone();
-        apply_edge_lock(&mut edge_locked, &hints.edge_seek);
-        place_variant(
-            &edge_locked,
-            hints,
-            PlaceOpts {
-                anneal: true,
-                aspect_edge: false,
-                decouple: false,
-            },
-        )
-    }
-}
-
-/// Build the routability oracle for THIS board: the baseline [`LegalizingPlacer`]
-/// (`placers[0]`, the exact-tie winner) plus the SA refine and, when they apply, the
-/// spring-idiom variants. The candidate set + order match the previous `place_best`
-/// portfolio exactly, so the oracle's selection is byte-identical.
-fn board_oracle(
-    problem: &PlaceProblem,
-    hints: &PlacementHints,
-    ranker: Arc<dyn RouteRanker + Send + Sync>,
-) -> RoutabilityOracle {
-    let has_decouple = !decoupling_pairs(problem).is_empty();
-    let has_edge = !hints.edge_seek.is_empty();
-
-    // The variants worth trying for THIS board (always include the baseline).
-    // The SA refinement subsumes the decouple/edge springs (its cost does
-    // cohesion + edge-seek directly), so the annealed variant is the main
-    // alternative; the spring variants stay as cheap extra candidates.
-    let mut placers: Vec<Box<dyn Placer + Send + Sync>> = vec![Box::new(LegalizingPlacer {
-        opts: PlaceOpts::default(),
-    })];
-    placers.push(Box::new(AnnealingPlacer {
-        opts: PlaceOpts {
-            anneal: true,
-            aspect_edge: has_edge,
-            decouple: false,
+    let mut result = place_variant(
+        &initialized,
+        hints,
+        PlaceOpts {
+            decouple: !structured,
+            aspect_edge: true,
+            anneal: !structured,
         },
-    }));
-    if has_decouple {
-        placers.push(Box::new(LegalizingPlacer {
-            opts: PlaceOpts {
-                decouple: true,
-                aspect_edge: false,
-                anneal: false,
-            },
-        }));
-    }
-    if hints.edge_seek.len() >= 2 {
-        placers.push(Box::new(EdgeLockedPlacer));
-    }
-    if has_edge {
-        placers.push(Box::new(LegalizingPlacer {
-            opts: PlaceOpts {
-                decouple: false,
-                aspect_edge: true,
-                anneal: false,
-            },
-        }));
-    }
-    RoutabilityOracle::new(placers, ranker)
-}
-
-/// Place `problem` and return the variant that ROUTES cleanest — the placement
-/// analog of `route_auto`. It runs the baseline placement plus idiom variants
-/// (decoupling co-placement, aspect-aware connector edges), routes each via the
-/// injected [`RouteRanker`], and keeps whichever yields fewer routing faults
-/// (unrouted nets + geometry DRC violations), breaking ties by lower layout cost
-/// then HPWL. The baseline is always a candidate, so an idiom variant that does not
-/// actually help (e.g. one that scatters a board's power net) is automatically
-/// discarded — the [`RoutabilityOracle`] decides per board, so aggressive idioms can
-/// never regress a board they do not improve. The decouple idiom is where the
-/// cap-ring snap ([`snap_caps_to_anchor_ring`]) lives: the baseline runs UNSNAPPED
-/// and the `decouple` variant runs snapped, so the oracle picks snapped-vs-unsnapped
-/// per board.
-pub fn place_best(
-    problem: &PlaceProblem,
-    hints: &PlacementHints,
-    ranker: Arc<dyn RouteRanker + Send + Sync>,
-) -> PlaceResult {
-    place_best_with_rank_key(problem, hints, ranker).0
-}
-
-fn place_best_with_rank_key(
-    problem: &PlaceProblem,
-    hints: &PlacementHints,
-    ranker: Arc<dyn RouteRanker + Send + Sync>,
-) -> (PlaceResult, PlacementRankKey) {
-    let (mut best, key) = board_oracle(problem, hints, ranker).place_with_rank_key(problem, hints);
-    // Post-pass: seat mounting holes (corner_seek) at the board corners on the
-    // WINNING placement. They carry no signal nets (GND-plane only), so moving
-    // them never changes routing — which is why this must run AFTER the faults-
-    // ranked variant selection rather than inside a routing-affecting variant.
-    seat_corner_seek_parts(problem, hints, &mut best);
-    (best, key)
-}
-
-/// The structured radial fan-out [`Placer`]: a board with a dominant fine-pitch IC
-/// gets the textbook layout (IC centred, decoupling caps + series resistors ringed
-/// in IC-pad order, connectors on the edges) via [`unified_fanout_place`],
-/// overlap-free by construction, then the oracle ([`place_best`]) seats the rest.
-/// When the fan-out doesn't apply (no dominant IC) or its result is illegal, it
-/// falls back to the oracle on the un-fanned board — so it is NEVER worse than the
-/// legalizing baseline. This is `place_board`'s built-in placer.
-pub struct FanoutPlacer {
-    ranker: Arc<dyn RouteRanker + Send + Sync>,
-}
-
-impl FanoutPlacer {
-    pub fn new(ranker: Arc<dyn RouteRanker + Send + Sync>) -> Self {
-        Self { ranker }
-    }
-}
-
-impl Placer for FanoutPlacer {
-    fn name(&self) -> &'static str {
-        "fanout"
-    }
-    fn place(&self, problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
-        // Stage 1 — structured fan-out fast-path.
-        let mut p = problem.clone();
-        let fanned = unified_fanout_place(&mut p, hints);
-        if !fanned {
-            apply_grid_hints(&mut p, hints);
-        }
-        if fanned {
-            let mut result = place(&p, hints);
-            seat_corner_seek_parts(problem, hints, &mut result);
-            if result.legal {
-                let mut base = problem.clone();
-                apply_grid_hints(&mut base, hints);
-                let (fallback, fallback_key) =
-                    place_best_with_rank_key(&base, hints, self.ranker.clone());
-                let result_key = place_rank_key(problem, &result, self.ranker.as_ref());
-                return better_place_result_with_keys(result, result_key, fallback, fallback_key);
-            }
-            let optimized = place_best(&p, hints, self.ranker.clone());
-            if optimized.legal {
-                return optimized;
-            }
-            let mut base = problem.clone();
-            apply_grid_hints(&mut base, hints);
-            return place_best(&base, hints, self.ranker.clone());
-        }
-        place_best(&p, hints, self.ranker.clone())
-    }
-}
-
-fn place_rank_key(
-    problem: &PlaceProblem,
-    result: &PlaceResult,
-    ranker: &dyn RouteRanker,
-) -> PlacementRankKey {
-    if !result.legal {
-        return (
-            (usize::MAX, usize::MAX, usize::MAX, usize::MAX, u64::MAX),
-            u64::MAX,
-            u64::MAX,
-            u64::MAX,
-        );
-    }
-    let rp = pcb_place_api::to_route_problem(problem, &result.placements);
-    (
-        ranker.rank_key(&rp),
-        0,
-        (result.report.layout_cost * 1000.0) as u64,
-        (result.report.hpwl * 1000.0) as u64,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn better_place_result(
-    problem: &PlaceProblem,
-    incumbent: PlaceResult,
-    challenger: PlaceResult,
-    ranker: &dyn RouteRanker,
-) -> PlaceResult {
-    let incumbent_key = place_rank_key(problem, &incumbent, ranker);
-    let challenger_key = place_rank_key(problem, &challenger, ranker);
-    better_place_result_with_keys(incumbent, incumbent_key, challenger, challenger_key)
-}
-
-fn better_place_result_with_keys(
-    incumbent: PlaceResult,
-    incumbent_key: PlacementRankKey,
-    challenger: PlaceResult,
-    challenger_key: PlacementRankKey,
-) -> PlaceResult {
-    if challenger_key < incumbent_key {
-        challenger
-    } else {
-        incumbent
-    }
-}
-
-/// THE PLACEMENT PIPELINE — the single visible entry the tool layer calls.
-///
-/// All of force / anneal / fan-out are placement; this runs the [`FanoutPlacer`]:
-///
-/// 1. **STRUCTURED fast-path** — [`unified_fanout_place`]: a board with a dominant
-///    fine-pitch IC gets the textbook radial layout (IC centred, decoupling caps +
-///    series resistors ringed in IC-pad order, connectors on the edges), overlap-free
-///    by construction.
-/// 2. **OPTIMIZE fallback** — [`place_best`]: when the fan-out doesn't apply (no
-///    dominant IC) or can't seat legally, run the cost-optimized search — a
-///    force-directed seed, optionally simulated-annealing-refined, plus idiom
-///    variants, each routed and the most routable kept.
-///
-/// A fan-out that cannot seat legally is discarded in favour of `place_best`.
-pub fn place_board(
-    problem: &PlaceProblem,
-    hints: &PlacementHints,
-    ranker: Arc<dyn RouteRanker + Send + Sync>,
-) -> PlaceResult {
-    FanoutPlacer::new(ranker).place(problem, hints)
+    );
+    seat_corner_seek_parts(problem, hints, &mut result);
+    result
 }
 
 /// Move up to four `corner_seek` parts to a maximum-cardinality set of distinct,
@@ -480,7 +64,7 @@ pub fn place_board(
 /// Safe on any placement: corner-seek parts (mounting holes) have no nets, so this
 /// cannot change connectivity or routing.
 pub(crate) fn seat_corner_seek_parts(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     hints: &PlacementHints,
     best: &mut PlaceResult,
 ) {
@@ -582,7 +166,7 @@ struct CornerAssignment {
 
 #[allow(clippy::too_many_arguments)]
 fn search_corner_assignments(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     half: &[(f64, f64)],
     copper_bbox: &[Rect],
     margin: f64,
@@ -687,13 +271,13 @@ fn search_corner_assignments(
 /// exact geometry. Never panics: an impossible board returns `legal: false`
 /// with a report rather than overlapping silently or aborting. This is the
 /// baseline (no idiom variants); [`place_best`] selects among variants.
-pub fn place(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
+pub fn place(problem: &PlacementView, hints: &PlacementHints) -> PlaceResult {
     place_variant(problem, hints, PlaceOpts::default())
 }
 
 /// [`place`] with a specific set of idiom variant toggles.
 pub(crate) fn place_variant(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     hints: &PlacementHints,
     opts: PlaceOpts,
 ) -> PlaceResult {
@@ -848,8 +432,8 @@ pub(crate) fn place_variant(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn polish_positions(
-    problem: &PlaceProblem,
-    nets: &[pcb_place_api::LogicalNet],
+    problem: &PlacementView,
+    nets: &[crate::LogicalNet],
     margin: f64,
     pairs: &[(usize, usize)],
     edge_idx: &[usize],
@@ -908,8 +492,8 @@ pub(crate) fn polish_positions(
 
 #[allow(clippy::too_many_arguments)]
 fn polish_positions_in_order(
-    problem: &PlaceProblem,
-    nets: &[pcb_place_api::LogicalNet],
+    problem: &PlacementView,
+    nets: &[crate::LogicalNet],
     margin: f64,
     pairs: &[(usize, usize)],
     edge_idx: &[usize],
@@ -998,8 +582,8 @@ fn polish_positions_in_order(
 }
 
 pub(crate) fn position_polish_part_order(
-    problem: &PlaceProblem,
-    nets: &[pcb_place_api::LogicalNet],
+    problem: &PlacementView,
+    nets: &[crate::LogicalNet],
     rotations: &[f64],
     half: &[(f64, f64)],
     margin: f64,
@@ -1086,7 +670,7 @@ struct PositionPolishMetric {
 }
 
 pub(crate) fn unique_position_candidates(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     part_idx: usize,
     rotation: f64,
     half: (f64, f64),
@@ -1157,7 +741,7 @@ pub(crate) fn unique_position_candidates(
 }
 
 pub(crate) fn edge_seek_position_candidates(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     half: &[(f64, f64)],
     rotation: f64,
     pos: &[Point2],
@@ -1195,8 +779,8 @@ pub(crate) fn edge_seek_position_candidates(
 }
 
 pub(crate) fn net_centroid_position_candidates(
-    problem: &PlaceProblem,
-    nets: &[pcb_place_api::LogicalNet],
+    problem: &PlacementView,
+    nets: &[crate::LogicalNet],
     rotations: &[f64],
     pos: &[Point2],
     part_idx: usize,
@@ -1347,8 +931,8 @@ fn median_coord(values: impl Iterator<Item = f64>) -> f64 {
 
 #[cfg(test)]
 pub(crate) fn ratline_crossing_position_candidates(
-    problem: &PlaceProblem,
-    nets: &[pcb_place_api::LogicalNet],
+    problem: &PlacementView,
+    nets: &[crate::LogicalNet],
     rotations: &[f64],
     pos: &[Point2],
     part_idx: usize,
@@ -1358,7 +942,7 @@ pub(crate) fn ratline_crossing_position_candidates(
 }
 
 pub(crate) fn ratline_crossing_position_candidates_from_edges(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     rotations: &[f64],
     part_idx: usize,
     edges: &[RatlineEdge<'_>],
@@ -1423,8 +1007,8 @@ pub(crate) fn ratline_crossing_position_candidates_from_edges(
 
 #[cfg(test)]
 pub(crate) fn ratline_obstruction_position_candidates(
-    problem: &PlaceProblem,
-    nets: &[pcb_place_api::LogicalNet],
+    problem: &PlacementView,
+    nets: &[crate::LogicalNet],
     rotations: &[f64],
     half: &[(f64, f64)],
     margin: f64,
@@ -1438,7 +1022,7 @@ pub(crate) fn ratline_obstruction_position_candidates(
 }
 
 pub(crate) fn ratline_obstruction_position_candidates_from_edges(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     rotations: &[f64],
     half: &[(f64, f64)],
     margin: f64,
@@ -1486,8 +1070,8 @@ pub(crate) fn ratline_obstruction_position_candidates_from_edges(
 
 #[cfg(test)]
 pub(crate) fn obstructing_part_position_candidates(
-    problem: &PlaceProblem,
-    nets: &[pcb_place_api::LogicalNet],
+    problem: &PlacementView,
+    nets: &[crate::LogicalNet],
     rotations: &[f64],
     half: &[(f64, f64)],
     margin: f64,
@@ -1499,7 +1083,7 @@ pub(crate) fn obstructing_part_position_candidates(
 }
 
 pub(crate) fn obstructing_part_position_candidates_from_edges(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     half: &[(f64, f64)],
     margin: f64,
     pos: &[Point2],
@@ -1535,7 +1119,7 @@ pub(crate) fn obstructing_part_position_candidates_from_edges(
 }
 
 fn move_center_away_from_segment(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     half: (f64, f64),
     margin: f64,
     center: Point2,
@@ -1566,7 +1150,7 @@ fn move_center_away_from_segment(
 }
 
 fn ratline_obstacles(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     half: &[(f64, f64)],
     margin: f64,
     pos: &[Point2],
@@ -1585,7 +1169,7 @@ fn ratline_obstacles(
 }
 
 fn obstruction_relief_pad_targets(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     obstacle: Rect,
     own_pad: Point2,
     partner_pad: Point2,
@@ -1660,8 +1244,8 @@ fn edge_for_part<'a>(
 }
 
 pub(crate) fn ratline_tree_edge_list<'a>(
-    problem: &PlaceProblem,
-    nets: &'a [pcb_place_api::LogicalNet],
+    problem: &PlacementView,
+    nets: &'a [crate::LogicalNet],
     rotations: &[f64],
     pos: &[Point2],
 ) -> Vec<RatlineEdge<'a>> {
@@ -1672,11 +1256,11 @@ pub(crate) fn ratline_tree_edge_list<'a>(
 }
 
 fn ratline_tree_edges<'a>(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     rotations: &[f64],
     pos: &[Point2],
     net_idx: usize,
-    net: &'a pcb_place_api::LogicalNet,
+    net: &'a crate::LogicalNet,
 ) -> Vec<RatlineEdge<'a>> {
     match net.pins.as_slice() {
         [] | [_] => Vec::new(),
@@ -1741,7 +1325,7 @@ fn ratline_tree_edges<'a>(
 }
 
 fn ratline_tree_edge_better(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     pins: &[Pin],
     pin_positions: &[Point2],
     a: usize,
@@ -1757,7 +1341,7 @@ fn ratline_tree_edge_better(
 }
 
 fn ratline_tree_edge_tiebreak(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     pins: &[Pin],
     a: usize,
     b: usize,
@@ -1773,7 +1357,7 @@ fn ratline_tree_edge_tiebreak(
     }
 }
 
-fn ratline_edge_layers(problem: &PlaceProblem, a: &Pin, b: &Pin) -> Vec<LayerRef> {
+fn ratline_edge_layers(problem: &PlacementView, a: &Pin, b: &Pin) -> Vec<LayerRef> {
     let mut layers = Vec::new();
     for pin in [a, b] {
         for layer in &problem.parts[pin.part].pads[pin.pad].layers {
@@ -1785,7 +1369,7 @@ fn ratline_edge_layers(problem: &PlaceProblem, a: &Pin, b: &Pin) -> Vec<LayerRef
     layers
 }
 
-fn ratline_edge_requires_layer_change(problem: &PlaceProblem, a: &Pin, b: &Pin) -> bool {
+fn ratline_edge_requires_layer_change(problem: &PlacementView, a: &Pin, b: &Pin) -> bool {
     let a_layers = &problem.parts[a.part].pads[a.pad].layers;
     let b_layers = &problem.parts[b.part].pads[b.pad].layers;
     !a_layers
@@ -1800,10 +1384,10 @@ fn ratline_edge_layers_overlap(a: &RatlineEdge<'_>, b: &RatlineEdge<'_>) -> bool
 }
 
 fn pin_world_pos(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     rotations: &[f64],
     pos: &[Point2],
-    pin: &pcb_place_api::Pin,
+    pin: &crate::Pin,
 ) -> Point2 {
     let off = problem.parts[pin.part].pads[pin.pad]
         .offset
@@ -1819,7 +1403,7 @@ fn move_point_just_past_line(
     same_side_as: Point2,
     line_a: Point2,
     line_b: Point2,
-    problem: &PlaceProblem,
+    problem: &PlacementView,
 ) -> Option<Point2> {
     let dx = line_b.x - line_a.x;
     let dy = line_b.y - line_a.y;
@@ -1845,8 +1429,8 @@ fn move_point_just_past_line(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn polish_swaps(
-    problem: &PlaceProblem,
-    nets: &[pcb_place_api::LogicalNet],
+    problem: &PlacementView,
+    nets: &[crate::LogicalNet],
     margin: f64,
     pairs: &[(usize, usize)],
     edge_idx: &[usize],
@@ -1880,8 +1464,8 @@ pub(crate) fn polish_swaps(
 }
 
 pub(crate) fn swap_pair_order(
-    problem: &PlaceProblem,
-    nets: &[pcb_place_api::LogicalNet],
+    problem: &PlacementView,
+    nets: &[crate::LogicalNet],
     rotations: &[f64],
     pos: &[Point2],
 ) -> Vec<(usize, usize)> {
@@ -1986,8 +1570,8 @@ fn push_pair(set: &mut std::collections::BTreeSet<(usize, usize)>, a: usize, b: 
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn polish_rotations(
-    problem: &PlaceProblem,
-    nets: &[pcb_place_api::LogicalNet],
+    problem: &PlacementView,
+    nets: &[crate::LogicalNet],
     margin: f64,
     pairs: &[(usize, usize)],
     edge_idx: &[usize],

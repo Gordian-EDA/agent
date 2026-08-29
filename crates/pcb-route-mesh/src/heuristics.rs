@@ -1,4 +1,4 @@
-use pcb_model::{Connection, LayerRef, Point2, RouteProblem};
+use pcb_model::{Connection, LayerRef, Point2, RoutingView};
 
 pub(crate) fn connection_span_um(conn: &Connection) -> u64 {
     let Some((min_x, max_x, min_y, max_y)) = connection_bbox(conn) else {
@@ -7,7 +7,7 @@ pub(crate) fn connection_span_um(conn: &Connection) -> u64 {
     (((max_x - min_x) + (max_y - min_y)) * 1000.0).round() as u64
 }
 
-pub(crate) fn connection_obstacle_pressure_um(problem: &RouteProblem, conn: &Connection) -> u64 {
+pub(crate) fn connection_obstacle_pressure_um(problem: &RoutingView, conn: &Connection) -> u64 {
     let Some((mut min_x, mut max_x, mut min_y, mut max_y)) = connection_bbox(conn) else {
         return 0;
     };
@@ -44,7 +44,7 @@ pub(crate) fn connection_obstacle_pressure_um(problem: &RouteProblem, conn: &Con
 }
 
 pub(crate) fn connection_segment_obstacle_pressure_um(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     conn: &Connection,
 ) -> u64 {
     let expand = problem.clearance + problem.net_width(&conn.name) / 2.0;
@@ -76,7 +76,7 @@ pub(crate) fn connection_segment_obstacle_pressure_um(
     pressure
 }
 
-pub(crate) fn connection_crossing_pressures(problem: &RouteProblem) -> Vec<usize> {
+pub(crate) fn connection_crossing_pressures(problem: &RoutingView) -> Vec<usize> {
     let segments: Vec<Vec<TreeSegment>> = problem
         .connections
         .iter()
@@ -103,13 +103,14 @@ pub(crate) fn connection_crossing_pressures(problem: &RouteProblem) -> Vec<usize
 }
 
 #[cfg(test)]
-pub(crate) fn connection_crossing_pressure(problem: &RouteProblem, idx: usize) -> usize {
+pub(crate) fn connection_crossing_pressure(problem: &RoutingView, idx: usize) -> usize {
     connection_crossing_pressures(problem)
         .get(idx)
         .copied()
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 pub(crate) fn connection_tree_segments(conn: &Connection) -> Vec<(Point2, Point2)> {
     connection_tree_segment_indices(conn)
         .into_iter()
@@ -267,8 +268,8 @@ mod tests {
         }
     }
 
-    fn problem(connections: Vec<Connection>, obstacles: Vec<Obstacle>) -> RouteProblem {
-        RouteProblem {
+    fn problem(connections: Vec<Connection>, obstacles: Vec<Obstacle>) -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles,

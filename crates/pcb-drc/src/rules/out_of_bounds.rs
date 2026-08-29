@@ -7,7 +7,7 @@
 use crate::ctx::{CopperGeom, CopperItem};
 use crate::rules::geom::EPS;
 use crate::{DrcCtx, Finding, Rule};
-use pcb_model::RouteProblem;
+use pcb_model::RoutingView;
 
 /// Flags any trace or via whose copper extent (segment fattened by its
 /// half-width, via by its radius) pokes past the board's `bounds`.
@@ -31,7 +31,7 @@ impl Rule for OutOfBoundsRule {
 
 /// How far the item's copper extent (segment fattened by half-width, via by its
 /// radius, rect as-is) leaves the board bounds, or `None` if it is inside.
-fn out_of_bounds(item: &CopperItem, problem: &RouteProblem) -> Option<Finding> {
+fn out_of_bounds(item: &CopperItem, problem: &RoutingView) -> Option<Finding> {
     let (overshoot, at, owner) = match &item.geom {
         CopperGeom::Segment {
             segment, half_w, ..

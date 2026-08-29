@@ -11,7 +11,7 @@
 
 use pcb_drc::{DrcCtx, DrcSuite, Finding, Rule};
 use pcb_model::{
-    Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem, RouteSolution, Trace,
+    Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteSolution, RoutingView, Trace,
 };
 
 fn bounds() -> Rect {
@@ -23,8 +23,8 @@ fn bounds() -> Rect {
     }
 }
 
-fn problem(connections: Vec<Connection>, obstacles: Vec<Obstacle>) -> RouteProblem {
-    RouteProblem {
+fn problem(connections: Vec<Connection>, obstacles: Vec<Obstacle>) -> RoutingView {
+    RoutingView {
         layer_count: 2,
         min_trace_width: 0.25,
         obstacles,
@@ -67,7 +67,7 @@ fn trace(connection: &str, layer: &str, width: f64, path: &[(f64, f64)]) -> Trac
 /// foreign traces too close (trace/trace clearance), and a stranded second
 /// connection (connectivity Unconnected). The exact, ordered finding set the
 /// suite must reproduce — geometry first, connectivity last.
-fn mixed_board() -> (RouteProblem, RouteSolution) {
+fn mixed_board() -> (RoutingView, RouteSolution) {
     let p = problem(
         vec![
             // Two close parallel foreign traces (centrelines 0.30 mm apart, each 0.25 wide).

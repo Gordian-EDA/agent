@@ -1,6 +1,6 @@
-use pcb_model::{LayerRef, Obstacle, Point2, RouteProblem, RouteSolution, Trace, Via, ViaSpan};
+use pcb_model::{LayerRef, Obstacle, Point2, RouteSolution, RoutingView, Trace, Via, ViaSpan};
 
-pub fn copper_obstacles(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Obstacle> {
+pub fn copper_obstacles(problem: &RoutingView, solution: &RouteSolution) -> Vec<Obstacle> {
     let mut obstacles = Vec::new();
     for trace in &solution.traces {
         obstacles.extend(trace_obstacles(problem, trace));
@@ -11,7 +11,7 @@ pub fn copper_obstacles(problem: &RouteProblem, solution: &RouteSolution) -> Vec
     obstacles
 }
 
-pub(crate) fn trace_obstacles(problem: &RouteProblem, trace: &Trace) -> Vec<Obstacle> {
+pub(crate) fn trace_obstacles(problem: &RoutingView, trace: &Trace) -> Vec<Obstacle> {
     let pitch = pcb_route_grid::grid::grid_pitch(problem);
     trace
         .path
@@ -44,7 +44,7 @@ pub(crate) fn trace_obstacles(problem: &RouteProblem, trace: &Trace) -> Vec<Obst
         .collect()
 }
 
-fn via_obstacle(problem: &RouteProblem, via: &Via) -> Obstacle {
+fn via_obstacle(problem: &RoutingView, via: &Via) -> Obstacle {
     Obstacle {
         kind: "route-via".to_owned(),
         layers: via_layers(problem, &via.span),
@@ -55,7 +55,7 @@ fn via_obstacle(problem: &RouteProblem, via: &Via) -> Obstacle {
     }
 }
 
-fn via_layers(problem: &RouteProblem, span: &ViaSpan) -> Vec<LayerRef> {
+fn via_layers(problem: &RoutingView, span: &ViaSpan) -> Vec<LayerRef> {
     match span {
         ViaSpan::Through => (0..problem.layer_count)
             .map(|idx| layer_ref_from_index(idx, problem.layer_count))

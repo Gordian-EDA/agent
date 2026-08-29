@@ -4,16 +4,16 @@ use std::path::PathBuf;
 
 use geom::{Point2, Rect};
 use pcb_model::{
-    Connection, LayerRef, Obstacle, RoutePoint, RouteProblem, RouteSolution, Trace, Via, ViaSpan,
+    Connection, LayerRef, Obstacle, RoutePoint, RouteSolution, RoutingView, Trace, Via, ViaSpan,
 };
-use pcb_place_api::Placement;
+use pcb_place::Placement;
 
 use gordian_runtime::AgentRuntime;
 
 /// Domain view consumed by placement and routing tools.
 #[derive(Debug, Clone)]
 pub struct IpcBoardSnapshot {
-    pub problem: RouteProblem,
+    pub problem: RoutingView,
     pub imported: ImportedBoard,
     pub copper: RouteSolution,
     pub layer_names: Vec<String>,
@@ -49,7 +49,7 @@ pub struct ImportedPad {
 pub(super) fn from_bridge(snapshot: kicad_ipc::snapshot::IpcBoardSnapshot) -> IpcBoardSnapshot {
     let problem = snapshot.problem;
     IpcBoardSnapshot {
-        problem: RouteProblem {
+        problem: RoutingView {
             layer_count: problem.layer_count,
             min_trace_width: problem.min_trace_width,
             obstacles: problem
@@ -147,7 +147,7 @@ pub(super) fn from_bridge(snapshot: kicad_ipc::snapshot::IpcBoardSnapshot) -> Ip
 }
 
 pub(super) fn bridge_route(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
 ) -> kicad_ipc::RouteWrite {
     let bridge_solution = kicad_ipc::snapshot::BoardCopper {
@@ -383,7 +383,7 @@ fn is_seed_placement(bounds: &pcb_model::Rect, placements: &[Placement]) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pcb_model::{LayerRef, Point2, Rect, RouteProblem, RouteSolution, Trace};
+    use pcb_model::{LayerRef, Point2, Rect, RouteSolution, RoutingView, Trace};
     use std::collections::BTreeMap;
 
     fn placement(reference: &str, x: f64, y: f64, rotation: f64) -> Placement {
@@ -432,7 +432,7 @@ mod tests {
         };
         let stale_inner = LayerRef("inner1".to_owned());
         let mut snapshot = IpcBoardSnapshot {
-            problem: RouteProblem {
+            problem: RoutingView {
                 layer_count: 32,
                 min_trace_width: 0.2,
                 obstacles: vec![pcb_model::Obstacle {

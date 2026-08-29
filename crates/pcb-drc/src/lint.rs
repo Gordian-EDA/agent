@@ -23,7 +23,7 @@
 //!   in last so `lint` is the single one-stop report.
 
 use crate::DrcSuite;
-use pcb_model::{RouteProblem, RouteSolution};
+use pcb_model::{RouteSolution, RoutingView};
 
 /// A design-rule violation. Alias retained for the established lint API.
 pub use crate::Finding as DrcViolation;
@@ -36,7 +36,7 @@ pub use crate::Finding as DrcViolation;
 /// deterministic order — geometry violations first (collection order — traces,
 /// then vias, then bounds), then the connectivity oracle's violations folded in
 /// last.
-pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolation> {
+pub fn lint(problem: &RoutingView, solution: &RouteSolution) -> Vec<DrcViolation> {
     DrcSuite::standard().run(problem, solution)
 }
 
@@ -50,10 +50,7 @@ pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolatio
 /// the reported result is faithful (an honest unrouted net, never silent copper
 /// that lies about connectivity). Dropping a net's copper only removes obstacles,
 /// so it can never break another net or introduce a geometry violation.
-pub fn drop_unconnected_copper(
-    problem: &RouteProblem,
-    solution: &mut RouteSolution,
-) -> Vec<String> {
+pub fn drop_unconnected_copper(problem: &RoutingView, solution: &mut RouteSolution) -> Vec<String> {
     use crate::connectivity::Violation as ConnViolation;
     let mut broken: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for v in lint(problem, solution) {
@@ -85,7 +82,7 @@ pub fn drop_unconnected_copper(
 /// is correct; a silent clearance violation that looks routed is not. Bounded by
 /// the net count so it always terminates. Connectivity is handled separately by
 /// [`drop_unconnected_copper`]; callers typically run both.
-pub fn drop_violating_copper(problem: &RouteProblem, solution: &mut RouteSolution) -> Vec<String> {
+pub fn drop_violating_copper(problem: &RoutingView, solution: &mut RouteSolution) -> Vec<String> {
     let mut dropped: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // One net can be dropped per pass; at most one pass per net plus a margin.
     let max_passes = problem.connections.len() + 1;
@@ -137,8 +134,8 @@ mod tests {
     use super::*;
     use crate::connectivity::Violation;
     use pcb_model::{
-        Connection, LayerRef, Obstacle, Point2, Polygon, Rect, RoutePoint, RouteProblem,
-        RouteSolution, Trace, Via, ViaSpan,
+        Connection, LayerRef, Obstacle, Point2, Polygon, Rect, RoutePoint, RouteSolution,
+        RoutingView, Trace, Via, ViaSpan,
     };
 
     fn bounds() -> Rect {
@@ -150,8 +147,8 @@ mod tests {
         }
     }
 
-    fn problem(connections: Vec<Connection>, obstacles: Vec<Obstacle>) -> RouteProblem {
-        RouteProblem {
+    fn problem(connections: Vec<Connection>, obstacles: Vec<Obstacle>) -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.25,
             obstacles,

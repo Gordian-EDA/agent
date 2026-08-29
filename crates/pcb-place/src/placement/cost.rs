@@ -2,15 +2,15 @@
 //! secondary selection key). The cost carries a SILK-GAP term so parts keep room
 //! for their reference designators (the recurring critic complaint). HPWL — the
 //! cheap quality number every engine reports — lives in the kernel
-//! ([`pcb_place_api::compute_hpwl`]) and is re-exported here.
+//! ([`crate::compute_hpwl`]) and is re-exported here.
 
 use super::geometry::{
     part_edge_distance, part_placement_bounds_envelope, placement_envelope_at, rotated_copper_bbox,
 };
+use crate::{LogicalNet, Pin, PlacementView};
 use pcb_model::{LayerRef, Point2, Rect};
-use pcb_place_api::{LogicalNet, Pin, PlaceProblem};
 
-pub(crate) use pcb_place_api::compute_hpwl_with_rotations;
+pub(crate) use crate::compute_hpwl_with_rotations;
 
 /// SA cost weights (mm units), scaled like the schematic floorplan cost.
 pub(crate) const SA_OVERLAP_W: f64 = 1000.0; // hard: courtyard collision
@@ -35,7 +35,7 @@ pub(crate) const SA_SILK_GAP: f64 = 1.0;
 /// Distance from a decoupling cap's origin to the NEAREST power pad of its anchor
 /// (the proximity a bypass cap should minimize). 0 if the anchor shares no pad net.
 fn cap_anchor_dist(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     pos: &[Point2],
     rotations: &[f64],
     cap: usize,
@@ -61,7 +61,7 @@ fn cap_anchor_dist(
 }
 
 /// Physical world position of one logical pin's pad under the current placement.
-fn pin_pos(problem: &PlaceProblem, pos: &[Point2], rotations: &[f64], pin: &Pin) -> Point2 {
+fn pin_pos(problem: &PlacementView, pos: &[Point2], rotations: &[f64], pin: &Pin) -> Point2 {
     let part = &problem.parts[pin.part];
     let pad = &part.pads[pin.pad];
     let off = pad.offset.rotate(rotations[pin.part]);
@@ -70,7 +70,7 @@ fn pin_pos(problem: &PlaceProblem, pos: &[Point2], rotations: &[f64], pin: &Pin)
         y: pos[pin.part].y + off.y,
     }
 }
-fn net_hpwl(problem: &PlaceProblem, rotations: &[f64], net: &LogicalNet, pos: &[Point2]) -> f64 {
+fn net_hpwl(problem: &PlacementView, rotations: &[f64], net: &LogicalNet, pos: &[Point2]) -> f64 {
     if net.pins.len() < 2 {
         return 0.0;
     }
@@ -98,7 +98,7 @@ fn net_hpwl(problem: &PlaceProblem, rotations: &[f64], net: &LogicalNet, pos: &[
 /// unrelated signals with no crossing penalty at all.
 #[cfg(test)]
 pub(crate) fn ratline_crossings(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     rotations: &[f64],
     nets: &[LogicalNet],
     pos: &[Point2],
@@ -140,7 +140,7 @@ fn ratline_crossings_from_segments(segs: &[RatlineSegment]) -> usize {
 /// route corridor is occupied by another part and the router must detour.
 #[cfg(test)]
 pub(crate) fn ratline_obstruction_pressure(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     rotations: &[f64],
     nets: &[LogicalNet],
     half: &[(f64, f64)],
@@ -155,7 +155,7 @@ pub(crate) fn ratline_obstruction_pressure(
 
 #[cfg(test)]
 pub(crate) fn ratline_layer_change_pressure(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     rotations: &[f64],
     nets: &[LogicalNet],
     pos: &[Point2],
@@ -171,7 +171,7 @@ fn ratline_layer_change_pressure_from_segments(segs: &[RatlineSegment]) -> usize
 }
 
 fn ratline_obstruction_pressure_from_segments(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     half: &[(f64, f64)],
     margin: f64,
     pos: &[Point2],
@@ -201,7 +201,7 @@ fn ratline_obstruction_pressure_from_segments(
 }
 
 fn ratline_pin_positions(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     rotations: &[f64],
     nets: &[LogicalNet],
     pos: &[Point2],
@@ -227,7 +227,7 @@ struct RatlineSegment {
 }
 
 fn ratline_tree_segments(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     nets: &[LogicalNet],
     pin_positions: &[Vec<Point2>],
 ) -> Vec<RatlineSegment> {
@@ -294,7 +294,7 @@ fn ratline_tree_segments(
 }
 
 fn ratline_tree_edge_better(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     pins: &[Pin],
     pin_positions: &[Point2],
     a: usize,
@@ -310,7 +310,7 @@ fn ratline_tree_edge_better(
 }
 
 fn ratline_tree_edge_tiebreak(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     pins: &[Pin],
     a: usize,
     b: usize,
@@ -329,7 +329,7 @@ fn ratline_tree_edge_tiebreak(
 
 fn push_ratline_segment(
     segs: &mut Vec<RatlineSegment>,
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     net_idx: usize,
     a: &Pin,
     b: &Pin,
@@ -349,7 +349,7 @@ fn push_ratline_segment(
     });
 }
 
-fn ratline_segment_layers(problem: &PlaceProblem, a: &Pin, b: &Pin) -> Vec<LayerRef> {
+fn ratline_segment_layers(problem: &PlacementView, a: &Pin, b: &Pin) -> Vec<LayerRef> {
     let mut layers = Vec::new();
     for pin in [a, b] {
         for layer in &problem.parts[pin.part].pads[pin.pad].layers {
@@ -361,7 +361,7 @@ fn ratline_segment_layers(problem: &PlaceProblem, a: &Pin, b: &Pin) -> Vec<Layer
     layers
 }
 
-fn ratline_segment_requires_layer_change(problem: &PlaceProblem, a: &Pin, b: &Pin) -> bool {
+fn ratline_segment_requires_layer_change(problem: &PlacementView, a: &Pin, b: &Pin) -> bool {
     let a_layers = &problem.parts[a.part].pads[a.pad].layers;
     let b_layers = &problem.parts[b.part].pads[b.pad].layers;
     !a_layers
@@ -380,7 +380,7 @@ fn ratline_layers_overlap(a: &RatlineSegment, b: &RatlineSegment) -> bool {
 /// Lower is better.
 #[allow(clippy::too_many_arguments)] // internal SA cost kernel; arg-struct adds indirection without value
 pub(crate) fn place_cost(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     nets: &[LogicalNet],
     half: &[(f64, f64)],
     margin: f64,
@@ -480,9 +480,9 @@ pub(crate) fn place_cost(
 mod tests {
     use super::*;
     use crate::placement::geometry::courtyard_margin;
+    use crate::{Part, PartPad};
     use geom::Rect;
     use pcb_model::LayerRef;
-    use pcb_place_api::{Part, PartPad};
 
     fn part(reference: &str, net: &str) -> Part {
         part_on(reference, net, vec![LayerRef::top()])
@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn shared_ratline_segments_match_public_pressure_proxies() {
-        let problem = PlaceProblem {
+        let problem = PlacementView {
             bounds: Rect {
                 min_x: 0.0,
                 max_x: 30.0,
@@ -528,7 +528,7 @@ mod tests {
             ],
             outline: None,
         };
-        let nets = pcb_place_api::derive_nets(&problem);
+        let nets = crate::derive_nets(&problem);
         let rotations = vec![0.0; problem.parts.len()];
         let half = vec![(0.5, 0.5); problem.parts.len()];
         let margin = courtyard_margin(problem.clearance);
@@ -554,7 +554,7 @@ mod tests {
 
     #[test]
     fn ratline_crossings_ignore_disjoint_pad_layers() {
-        let problem = PlaceProblem {
+        let problem = PlacementView {
             bounds: Rect {
                 min_x: 0.0,
                 max_x: 30.0,
@@ -575,7 +575,7 @@ mod tests {
             ],
             outline: None,
         };
-        let nets = pcb_place_api::derive_nets(&problem);
+        let nets = crate::derive_nets(&problem);
         let rotations = vec![0.0; problem.parts.len()];
         let pos = vec![
             Point2 { x: 5.0, y: 15.0 },
@@ -595,7 +595,7 @@ mod tests {
 
     #[test]
     fn ratline_layer_change_pressure_counts_disjoint_pad_layers() {
-        let problem = PlaceProblem {
+        let problem = PlacementView {
             bounds: Rect {
                 min_x: 0.0,
                 max_x: 30.0,
@@ -616,7 +616,7 @@ mod tests {
             ],
             outline: None,
         };
-        let nets = pcb_place_api::derive_nets(&problem);
+        let nets = crate::derive_nets(&problem);
         let rotations = vec![0.0; problem.parts.len()];
         let pos = vec![
             Point2 { x: 5.0, y: 5.0 },
@@ -636,7 +636,7 @@ mod tests {
 
     #[test]
     fn multi_pin_ratline_tree_prefers_same_layer_edge_on_distance_tie() {
-        let problem = PlaceProblem {
+        let problem = PlacementView {
             bounds: Rect {
                 min_x: 0.0,
                 max_x: 30.0,
@@ -654,7 +654,7 @@ mod tests {
             ],
             outline: None,
         };
-        let nets = pcb_place_api::derive_nets(&problem);
+        let nets = crate::derive_nets(&problem);
         let rotations = vec![0.0; problem.parts.len()];
         let pos = vec![
             Point2 { x: 5.0, y: 5.0 },
@@ -677,7 +677,7 @@ mod tests {
 
     #[test]
     fn place_cost_penalizes_layer_change_ratlines() {
-        let same_layer = PlaceProblem {
+        let same_layer = PlacementView {
             bounds: Rect {
                 min_x: 0.0,
                 max_x: 20.0,
@@ -701,8 +701,8 @@ mod tests {
         let half = vec![(0.5, 0.5), (0.5, 0.5)];
         let margin = courtyard_margin(same_layer.clearance);
         let pos = vec![Point2 { x: 5.0, y: 5.0 }, Point2 { x: 15.0, y: 5.0 }];
-        let same_nets = pcb_place_api::derive_nets(&same_layer);
-        let split_nets = pcb_place_api::derive_nets(&split_layer);
+        let same_nets = crate::derive_nets(&same_layer);
+        let split_nets = crate::derive_nets(&split_layer);
 
         let same_cost = place_cost(
             &same_layer,

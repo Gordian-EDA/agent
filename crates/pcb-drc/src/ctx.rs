@@ -6,7 +6,7 @@
 //! third-party — measures the same copper, and a custom rule can reuse the same
 //! collection instead of re-deriving it.
 
-use pcb_model::{LayerRef, RouteProblem, RouteSolution};
+use pcb_model::{LayerRef, RouteSolution, RoutingView};
 
 /// The context a [`Rule`](crate::Rule) reads: the routed board plus the shared
 /// copper collection.
@@ -15,7 +15,7 @@ use pcb_model::{LayerRef, RouteProblem, RouteSolution};
 /// duration of a [`DrcSuite::run`](crate::DrcSuite::run).
 pub struct DrcCtx<'a> {
     /// The routing problem (board bounds, obstacles, clearance, …).
-    pub problem: &'a RouteProblem,
+    pub problem: &'a RoutingView,
     /// The routed solution under test (traces, vias).
     pub solution: &'a RouteSolution,
     /// Every piece of copper, flattened in a stable order (obstacles, then trace
@@ -26,7 +26,7 @@ pub struct DrcCtx<'a> {
 
 impl<'a> DrcCtx<'a> {
     /// Build the context, running [`collect_copper`] once.
-    pub fn build(problem: &'a RouteProblem, solution: &'a RouteSolution) -> Self {
+    pub fn build(problem: &'a RoutingView, solution: &'a RouteSolution) -> Self {
         Self {
             problem,
             solution,
@@ -83,7 +83,7 @@ impl CopperItem {
 ///
 /// Public so rules and third parties reuse the same collection instead of
 /// re-deriving it from the raw `problem`/`solution`.
-pub fn collect_copper(problem: &RouteProblem, solution: &RouteSolution) -> Vec<CopperItem> {
+pub fn collect_copper(problem: &RoutingView, solution: &RouteSolution) -> Vec<CopperItem> {
     let mut items = Vec::new();
 
     // Obstacles: pads (owned) and unowned/foreign copper alike — both constrain

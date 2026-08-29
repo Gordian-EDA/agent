@@ -14,8 +14,8 @@ use crate::quality::{
     trace_route_cost_um,
 };
 use pcb_model::{
-    Capabilities, FailedNet, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult,
-    RouteSolution, Router, Trace, Via, ViaSpan,
+    FailedNet, LayerRef, Point2, RouteQuality, RouteResult, RouteSolution, RoutingCapabilities,
+    RoutingView, Trace, Via, ViaSpan,
 };
 use std::collections::BTreeSet;
 
@@ -31,13 +31,13 @@ type LayerHopLegCandidate = (Option<Trace>, LayerHopLegKey);
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LayerHopRouter;
 
-impl Router for LayerHopRouter {
-    fn name(&self) -> &'static str {
+impl LayerHopRouter {
+    pub fn name(&self) -> &'static str {
         ENGINE
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
+    pub fn capabilities(&self) -> RoutingCapabilities {
+        RoutingCapabilities {
             max_layers: u32::MAX,
             honors_escape_layers: false,
             honors_net_widths: true,
@@ -45,19 +45,19 @@ impl Router for LayerHopRouter {
         }
     }
 
-    fn can_route(&self, problem: &RouteProblem) -> bool {
+    pub fn can_route(&self, problem: &RoutingView) -> bool {
         self.capabilities().can_route(problem)
             && (problem.layer_count <= 2
                 || problem.connections.len() <= LAYER_HOP_MAX_MULTILAYER_CONNECTIONS)
     }
 
-    fn route(&self, problem: &RouteProblem) -> RouteResult {
+    pub fn route(&self, problem: &RoutingView) -> RouteResult {
         route_layer_hop(problem)
     }
 }
 
 /// Route eligible mixed-layer point/star nets with terminal vias only.
-pub fn route_layer_hop(problem: &RouteProblem) -> RouteResult {
+pub fn route_layer_hop(problem: &RoutingView) -> RouteResult {
     let mut best: Option<(RouteResult, RouteQuality)> = None;
     for order in net_order_portfolio(problem) {
         let result = route_layer_hop_order(problem, &order);
@@ -72,7 +72,7 @@ pub fn route_layer_hop(problem: &RouteProblem) -> RouteResult {
         .unwrap_or_else(|| route_layer_hop_order(problem, &[]))
 }
 
-fn route_layer_hop_order(problem: &RouteProblem, order: &[usize]) -> RouteResult {
+fn route_layer_hop_order(problem: &RoutingView, order: &[usize]) -> RouteResult {
     let mut best = route_layer_hop_order_once(problem, order);
     let mut current_order = order.to_vec();
     let mut tried = vec![current_order.clone()];
@@ -101,7 +101,7 @@ fn route_layer_hop_order(problem: &RouteProblem, order: &[usize]) -> RouteResult
     best
 }
 
-fn route_layer_hop_order_once(problem: &RouteProblem, order: &[usize]) -> RouteResult {
+fn route_layer_hop_order_once(problem: &RoutingView, order: &[usize]) -> RouteResult {
     let mut solution = RouteSolution {
         traces: Vec::new(),
         vias: Vec::new(),
@@ -144,7 +144,7 @@ fn route_layer_hop_order_once(problem: &RouteProblem, order: &[usize]) -> RouteR
 }
 
 fn failed_priority_order(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     order: &[usize],
     failed: &[FailedNet],
 ) -> Vec<usize> {
@@ -173,7 +173,7 @@ fn failed_priority_order(
 }
 
 fn failed_priority_cmp_with_metrics(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     metrics: &[LayerHopOrderMetric],
     a: usize,
     b: usize,
@@ -201,7 +201,7 @@ fn failed_priority_cmp_with_metrics(
 }
 
 fn route_mixed_layer_tree(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     conn: &pcb_model::Connection,
 ) -> Option<RouteSolution> {
@@ -243,7 +243,7 @@ fn route_mixed_layer_tree(
 }
 
 fn route_tree_on_layer(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     conn: &pcb_model::Connection,
     layer: &LayerRef,
@@ -267,7 +267,7 @@ fn route_tree_on_layer(
 }
 
 fn route_tree_on_layer_from_root(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     conn: &pcb_model::Connection,
     layer: &LayerRef,
@@ -317,7 +317,7 @@ fn route_tree_on_layer_from_root(
 
 #[allow(clippy::too_many_arguments)]
 fn route_leg_on_layer(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     conn: &pcb_model::Connection,
     layer: &LayerRef,
@@ -357,7 +357,7 @@ fn route_leg_on_layer(
 }
 
 fn solution_tree_key(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     before: &RouteSolution,
     after: &RouteSolution,
 ) -> (usize, u64, u64, u32, usize) {
@@ -374,7 +374,7 @@ fn solution_tree_key(
 }
 
 fn trace_tree_key(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     trace: &Trace,
     from: usize,
@@ -422,7 +422,7 @@ fn route_layer_via_count(terminal_layers: &[u32], route_layer: u32) -> usize {
 }
 
 fn push_via_if_layer_differs(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &mut RouteSolution,
     connection: &str,
     at: Point2,
@@ -446,7 +446,7 @@ fn push_via_if_layer_differs(
     });
 }
 
-fn candidate_layers(problem: &RouteProblem, terminal_layers: &[u32]) -> Vec<LayerRef> {
+fn candidate_layers(problem: &RoutingView, terminal_layers: &[u32]) -> Vec<LayerRef> {
     let layer_count = problem.layer_count.max(1);
     let plane_layers: BTreeSet<u32> = pcb_route_grid::router::plane_layers(layer_count as usize)
         .into_iter()
@@ -470,7 +470,7 @@ fn candidate_layers(problem: &RouteProblem, terminal_layers: &[u32]) -> Vec<Laye
         .collect()
 }
 
-fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
+fn net_order_portfolio(problem: &RoutingView) -> Vec<Vec<usize>> {
     let base: Vec<usize> = (0..problem.connections.len()).collect();
     let metrics = net_order_metrics(problem);
     let mut orders = Vec::new();
@@ -547,7 +547,7 @@ struct LayerHopOrderMetric {
     crossing_pressure: usize,
 }
 
-fn net_order_metrics(problem: &RouteProblem) -> Vec<LayerHopOrderMetric> {
+fn net_order_metrics(problem: &RoutingView) -> Vec<LayerHopOrderMetric> {
     let crossing_pressures = connection_crossing_pressures(problem);
     problem
         .connections
@@ -569,7 +569,7 @@ fn push_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
     }
 }
 
-fn estimated_required_vias(problem: &RouteProblem, conn: &pcb_model::Connection) -> usize {
+fn estimated_required_vias(problem: &RoutingView, conn: &pcb_model::Connection) -> usize {
     if !mixed_layers(&conn.points_to_connect) || conn.points_to_connect.len() < 2 {
         return usize::MAX;
     }
@@ -590,7 +590,7 @@ fn estimated_required_vias(problem: &RouteProblem, conn: &pcb_model::Connection)
 }
 
 fn candidate_paths(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     connection: &str,
     layer: &LayerRef,
@@ -700,7 +700,7 @@ fn simplify_candidate_paths(solution: &mut RouteSolution) {
 }
 
 fn candidate_is_geometry_clean(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     connection: &str,
 ) -> bool {
@@ -716,7 +716,7 @@ fn candidate_is_geometry_clean(
     true
 }
 
-fn reconcile(problem: &RouteProblem, solution: &mut RouteSolution, failed: &mut Vec<FailedNet>) {
+fn reconcile(problem: &RoutingView, solution: &mut RouteSolution, failed: &mut Vec<FailedNet>) {
     crate::via_cleanup::normalize_redundant_vias(problem, solution);
     let mut dropped = pcb_drc::lint::drop_violating_copper(problem, solution);
     dropped.extend(pcb_drc::lint::drop_unconnected_copper(problem, solution));
@@ -799,8 +799,8 @@ mod tests {
         }
     }
 
-    fn base(obstacles: Vec<Obstacle>) -> RouteProblem {
-        RouteProblem {
+    fn base(obstacles: Vec<Obstacle>) -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles,
@@ -1191,7 +1191,10 @@ mod tests {
             trace.path
         );
         solution.traces.push(trace);
-        assert_eq!(pcb_route_grid::router::geometry_violations(&p, &solution), 0);
+        assert_eq!(
+            pcb_route_grid::router::geometry_violations(&p, &solution),
+            0
+        );
     }
 
     #[test]

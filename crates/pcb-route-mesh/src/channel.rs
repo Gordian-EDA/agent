@@ -15,8 +15,8 @@ use crate::quality::{
     trace_route_cost_um,
 };
 use pcb_model::{
-    Capabilities, Connection, FailedNet, LayerRef, Point2, RoutePoint, RouteProblem, RouteQuality,
-    RouteResult, RouteSolution, Router, Trace, Via, ViaSpan,
+    Connection, FailedNet, LayerRef, Point2, RoutePoint, RouteQuality, RouteResult, RouteSolution,
+    RoutingCapabilities, RoutingView, Trace, Via, ViaSpan,
 };
 use std::collections::BTreeSet;
 
@@ -31,13 +31,13 @@ type ChannelBestLeg = (usize, RouteSolution, ChannelLegKey);
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ChannelRouter;
 
-impl Router for ChannelRouter {
-    fn name(&self) -> &'static str {
+impl ChannelRouter {
+    pub fn name(&self) -> &'static str {
         ENGINE
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
+    pub fn capabilities(&self) -> RoutingCapabilities {
+        RoutingCapabilities {
             max_layers: u32::MAX,
             honors_escape_layers: false,
             honors_net_widths: true,
@@ -45,20 +45,20 @@ impl Router for ChannelRouter {
         }
     }
 
-    fn can_route(&self, problem: &RouteProblem) -> bool {
+    pub fn can_route(&self, problem: &RoutingView) -> bool {
         self.capabilities().can_route(problem)
             && problem.connections.len() <= CHANNEL_MAX_CONNECTIONS
             && (problem.layer_count <= 2
                 || problem.connections.len() <= CHANNEL_MAX_MULTILAYER_CONNECTIONS)
     }
 
-    fn route(&self, problem: &RouteProblem) -> RouteResult {
+    pub fn route(&self, problem: &RoutingView) -> RouteResult {
         route_channel(problem)
     }
 }
 
 /// Route eligible two-pin nets with preferred horizontal/vertical signal layers.
-pub fn route_channel(problem: &RouteProblem) -> RouteResult {
+pub fn route_channel(problem: &RoutingView) -> RouteResult {
     let mut best: Option<(RouteResult, RouteQuality)> = None;
     for order in net_order_portfolio(problem) {
         let result = route_order(problem, &order);
@@ -73,7 +73,7 @@ pub fn route_channel(problem: &RouteProblem) -> RouteResult {
         .unwrap_or_else(|| route_order(problem, &[]))
 }
 
-fn route_order(problem: &RouteProblem, order: &[usize]) -> RouteResult {
+fn route_order(problem: &RoutingView, order: &[usize]) -> RouteResult {
     let mut best = route_order_once(problem, order);
     let mut current_order = order.to_vec();
     let mut tried = vec![current_order.clone()];
@@ -102,7 +102,7 @@ fn route_order(problem: &RouteProblem, order: &[usize]) -> RouteResult {
     best
 }
 
-fn route_order_once(problem: &RouteProblem, order: &[usize]) -> RouteResult {
+fn route_order_once(problem: &RoutingView, order: &[usize]) -> RouteResult {
     let mut solution = RouteSolution {
         traces: Vec::new(),
         vias: Vec::new(),
@@ -151,7 +151,7 @@ fn route_order_once(problem: &RouteProblem, order: &[usize]) -> RouteResult {
 }
 
 fn failed_priority_order(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     order: &[usize],
     failed: &[FailedNet],
 ) -> Vec<usize> {
@@ -180,7 +180,7 @@ fn failed_priority_order(
 }
 
 fn failed_priority_cmp_with_metrics(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     metrics: &[ChannelOrderMetric],
     a: usize,
     b: usize,
@@ -202,7 +202,7 @@ fn failed_priority_cmp_with_metrics(
 }
 
 fn route_two_pin(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     routed: &[usize],
     idx: usize,
@@ -223,7 +223,7 @@ fn route_two_pin(
 }
 
 fn route_multi_pin(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     routed: &[usize],
     idx: usize,
@@ -251,8 +251,8 @@ fn route_multi_pin(
 }
 
 fn route_multi_pin_from_root(
-    problem: &RouteProblem,
-    validation: &RouteProblem,
+    problem: &RoutingView,
+    validation: &RoutingView,
     solution: &RouteSolution,
     conn: &Connection,
     root: usize,
@@ -300,7 +300,7 @@ fn route_multi_pin_from_root(
 }
 
 fn two_pin_candidates(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     conn: &Connection,
 ) -> Vec<RouteSolution> {
@@ -314,7 +314,7 @@ fn two_pin_candidates(
 }
 
 fn point_pair_candidates(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     connection: &str,
     a: &RoutePoint,
@@ -403,7 +403,7 @@ fn point_pair_candidates(
 
 #[allow(clippy::too_many_arguments)]
 fn push_candidate(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     connection: &str,
     a: &RoutePoint,
@@ -423,7 +423,7 @@ fn push_candidate(
 }
 
 fn build_segment_candidate(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     connection: &str,
     a: &RoutePoint,
@@ -478,7 +478,7 @@ fn build_segment_candidate(
 }
 
 fn solution_tree_key(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     before: &RouteSolution,
     after: &RouteSolution,
 ) -> (usize, u64, u64, usize) {
@@ -496,7 +496,7 @@ fn solution_tree_key(
 }
 
 fn leg_key(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     before: &RouteSolution,
     after: &RouteSolution,
     from: usize,
@@ -518,7 +518,7 @@ fn trace_length_um(trace: &Trace) -> u64 {
     (trace.path.windows(2).map(|w| w[1].dist(w[0])).sum::<f64>() * 1000.0).round() as u64
 }
 
-fn geometry_clean(problem: &RouteProblem, solution: &RouteSolution) -> bool {
+fn geometry_clean(problem: &RoutingView, solution: &RouteSolution) -> bool {
     pcb_drc::lint::lint(problem, solution)
         .iter()
         .all(|v| matches!(v, pcb_drc::lint::DrcViolation::Connectivity { .. }))
@@ -532,7 +532,7 @@ fn segment_layer(a: Point2, b: Point2, horizontal: &LayerRef, vertical: &LayerRe
     }
 }
 
-fn preferred_layers(problem: &RouteProblem) -> Option<(LayerRef, LayerRef)> {
+fn preferred_layers(problem: &RoutingView) -> Option<(LayerRef, LayerRef)> {
     let signal = signal_layers(problem);
     let horizontal = signal
         .iter()
@@ -549,7 +549,7 @@ fn preferred_layers(problem: &RouteProblem) -> Option<(LayerRef, LayerRef)> {
     Some((horizontal, vertical))
 }
 
-fn signal_layers(problem: &RouteProblem) -> Vec<(u32, LayerRef)> {
+fn signal_layers(problem: &RoutingView) -> Vec<(u32, LayerRef)> {
     let planes: BTreeSet<u32> = pcb_route_grid::router::plane_layers(problem.layer_count as usize)
         .into_iter()
         .collect();
@@ -569,7 +569,7 @@ fn layer_ref_from_index(idx: u32, layer_count: u32) -> LayerRef {
     }
 }
 
-fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
+fn net_order_portfolio(problem: &RoutingView) -> Vec<Vec<usize>> {
     let base: Vec<usize> = (0..problem.connections.len()).collect();
     let metrics = net_order_metrics(problem);
     let mut orders = Vec::new();
@@ -638,7 +638,7 @@ struct ChannelOrderMetric {
     crossing_pressure: usize,
 }
 
-fn net_order_metrics(problem: &RouteProblem) -> Vec<ChannelOrderMetric> {
+fn net_order_metrics(problem: &RoutingView) -> Vec<ChannelOrderMetric> {
     let crossing_pressures = connection_crossing_pressures(problem);
     problem
         .connections
@@ -659,10 +659,10 @@ fn push_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
 }
 
 fn problem_with_connections_and_extra(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     indices: &[usize],
     extra: usize,
-) -> RouteProblem {
+) -> RoutingView {
     let mut all = indices.to_vec();
     all.push(extra);
     let mut out = problem.clone();
@@ -673,7 +673,7 @@ fn problem_with_connections_and_extra(
     out
 }
 
-fn reconcile(problem: &RouteProblem, solution: &mut RouteSolution, failed: &mut Vec<FailedNet>) {
+fn reconcile(problem: &RoutingView, solution: &mut RouteSolution, failed: &mut Vec<FailedNet>) {
     crate::via_cleanup::normalize_redundant_vias(problem, solution);
     let mut dropped = pcb_drc::lint::drop_violating_copper(problem, solution);
     dropped.extend(pcb_drc::lint::drop_unconnected_copper(problem, solution));
@@ -776,14 +776,14 @@ mod tests {
         }
     }
 
-    fn problem(connections: Vec<Connection>) -> RouteProblem {
+    fn problem(connections: Vec<Connection>) -> RoutingView {
         let mut obstacles = Vec::new();
         for conn in &connections {
             for pt in &conn.points_to_connect {
                 obstacles.push(pad(&conn.name, (pt.x, pt.y)));
             }
         }
-        RouteProblem {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles,

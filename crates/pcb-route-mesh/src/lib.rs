@@ -1,28 +1,35 @@
-//! `pcb-route-mesh` — the premium detailed PCB router.
+//! Routing implementation owned by Gordian's single PCB engine.
 //!
-//! A quadtree **capacity mesh** with **negotiated rip-up/reroute** global pathing
-//! (`mesh` + `pathing`), boundary `crossing` assignment, and per-cell `detail`
-//! routing, exposed as the premium [`pipeline::NegotiatedMeshRouter`] behind the
-//! `pcb-model` [`Router`](pcb_model::Router) trait. The generic
-//! [`pipeline::select_best`] selector ranks any injected `&[&dyn Router]` by
-//! routability then tidiness; [`pipeline::route_auto`] is the premium-portfolio
-//! convenience (direct line-of-sight + via-escape + channel + pcb-route-mesh +
-//! pcb-route-grid).
-//! Builds on `pcb-route-grid` (the fallback router + grid/astar primitives); DRC via
-//! `pcb-drc`; shared types from `pcb-model`.
+//! [`pipeline::route_tuned`] is the production entry point. It combines a
+//! deterministic grid pass with targeted rip-up/rescue phases. The capacity-mesh,
+//! crossing, and detailed-routing modules are lower-level implementation and
+//! diagnostic primitives, not selectable routing engines.
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) mod channel;
 pub mod copper;
 pub mod crossing;
 pub mod detail;
-pub mod direct;
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) mod direct;
 pub(crate) mod heuristics;
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) mod layer_hop;
 pub mod mesh;
 pub mod pathing;
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) mod pattern;
 pub mod pipeline;
+#[cfg(test)]
 pub(crate) mod quality;
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) mod sequential;
 pub(crate) mod via_cleanup;
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) mod via_escape;

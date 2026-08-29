@@ -1,0 +1,13 @@
+[package]
+name = "pcb-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The single Gordian PCB physical-design engine."
+
+[dependencies]
+pcb-drc = { path = "../pcb-drc" }
+pcb-model = { path = "../pcb-model" }
+pcb-place = { path = "../pcb-place" }
+pcb-route-mesh = { path = "../pcb-route-mesh" }

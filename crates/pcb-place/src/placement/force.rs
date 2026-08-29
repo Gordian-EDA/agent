@@ -10,9 +10,9 @@ use super::geometry::{
 };
 use super::legalize::collides;
 use super::route::PlaceOpts;
+use crate::decoupling_pairs;
+use crate::{LogicalNet, PlacementHints, PlacementView};
 use pcb_model::{Point2, Rect};
-use pcb_place_api::decoupling_pairs;
-use pcb_place_api::{LogicalNet, PlaceProblem, PlacementHints};
 
 /// Force-directed iteration count.
 const FORCE_ITERS: usize = 200;
@@ -51,7 +51,7 @@ const REPULSION_K: f64 = 0.5;
 /// still attract movable parts through shared nets/groups. Deterministic: fixed
 /// iteration count, no RNG, forces summed in a fixed order.
 pub(crate) fn force_layout(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     hints: &PlacementHints,
     nets: &[LogicalNet],
     half: &[(f64, f64)],
@@ -270,7 +270,7 @@ pub(crate) fn force_layout(
 /// essentially untouched; the win is on multi-IC boards where the seed splits a cap between
 /// its IC and a far power net.
 pub(crate) fn snap_caps_to_anchor_ring(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     hints: &PlacementHints,
     half: &[(f64, f64)],
     margin: f64,

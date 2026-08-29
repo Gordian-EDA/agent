@@ -818,11 +818,11 @@ fn reconstruct(came_from: &[usize], goal: State, plane: usize, nx: usize) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pcb_model::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem};
+    use pcb_model::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RoutingView};
 
     /// A wide-open board with two connections so cell tags exist for tests.
-    fn open_problem() -> RouteProblem {
-        RouteProblem {
+    fn open_problem() -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],

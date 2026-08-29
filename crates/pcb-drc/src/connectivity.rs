@@ -46,7 +46,7 @@
 //! between single-net copper are still reported.
 
 use geom::EPS;
-use pcb_model::{LayerRef, RouteProblem, RouteSolution};
+use pcb_model::{LayerRef, RouteSolution, RoutingView};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -96,7 +96,7 @@ impl fmt::Display for Violation {
 /// no two distinct connections. Returns violations in deterministic order
 /// (`Unconnected` first, by connection then point index; then `CrossNetMerge`
 /// by name pair).
-pub fn check(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Violation> {
+pub fn check(problem: &RoutingView, solution: &RouteSolution) -> Vec<Violation> {
     let elements = build_elements(problem, solution);
     let mut uf = UnionFind::new(elements.len());
 
@@ -188,7 +188,7 @@ enum Shape {
     Via { at: geom::Point2, radius: f64 },
 }
 
-fn build_elements(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Element> {
+fn build_elements(problem: &RoutingView, solution: &RouteSolution) -> Vec<Element> {
     let mut els = Vec::new();
 
     // (1) Pads: obstacles owned by ≥1 connection.
@@ -369,7 +369,7 @@ use pcb_model::UnionFind;
 /// For each connection, the elements representing its `points_to_connect` were
 /// appended in order; recover them and check they share point 0's root.
 fn unconnected_violations(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     elements: &[Element],
     uf: &mut UnionFind,
 ) -> Vec<Violation> {
@@ -518,7 +518,7 @@ impl NameGroups {
 mod tests {
     use super::*;
     use pcb_model::{
-        Connection, Obstacle, Point2, Rect, RoutePoint, RouteProblem, RouteSolution, Trace, Via,
+        Connection, Obstacle, Point2, Rect, RoutePoint, RouteSolution, RoutingView, Trace, Via,
         ViaSpan,
     };
 
@@ -531,8 +531,8 @@ mod tests {
         }
     }
 
-    fn problem(connections: Vec<Connection>, obstacles: Vec<Obstacle>) -> RouteProblem {
-        RouteProblem {
+    fn problem(connections: Vec<Connection>, obstacles: Vec<Obstacle>) -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles,

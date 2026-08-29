@@ -10,8 +10,8 @@
 use super::cost::place_cost;
 use super::geometry::{PLACEMENT_GRID, courtyard_margin, rotated_courtyard_half};
 use super::pairs::coplacement_pairs;
+use crate::{LogicalNet, Pin, PlacementHints, PlacementView};
 use pcb_model::{LayerRef, Point2, Rect};
-use pcb_place_api::{LogicalNet, Pin, PlaceProblem, PlacementHints};
 
 /// Fixed seed — placement is deterministic (same board → same layout).
 const SA_SEED: u64 = 0xB5AD_C0DE_1234_5678;
@@ -47,7 +47,7 @@ impl SaRng {
 /// deterministic swap polish accepts any pairwise swap that still lowers the same
 /// cost after the random search cools. Locked parts never move. Deterministic.
 pub(crate) fn anneal_placement(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     hints: &PlacementHints,
     nets: &[LogicalNet],
     half: &[(f64, f64)],
@@ -148,7 +148,7 @@ pub(crate) fn anneal_placement(
 /// and keep only strict cost improvements. Two passes are enough to cascade a
 /// local improvement without turning this into another O(n^3) search.
 pub(crate) fn greedy_swap_polish_with_order<F>(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     half: &[(f64, f64)],
     swap_order: &[(usize, usize)],
     pos: &mut [Point2],
@@ -181,7 +181,7 @@ pub(crate) fn greedy_swap_polish_with_order<F>(
 }
 
 pub(crate) fn routing_aware_swap_order(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     nets: &[LogicalNet],
     rotations: &[f64],
     pos: &[Point2],
@@ -289,7 +289,7 @@ struct RatlineEdge {
 }
 
 fn ratline_tree_edges<'a>(
-    problem: &'a PlaceProblem,
+    problem: &'a PlacementView,
     rotations: &'a [f64],
     pos: &'a [Point2],
     net_idx: usize,
@@ -350,7 +350,7 @@ fn ratline_tree_edges<'a>(
 }
 
 fn ratline_tree_edge_better(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     pins: &[Pin],
     pin_positions: &[Point2],
     a: usize,
@@ -366,7 +366,7 @@ fn ratline_tree_edge_better(
 }
 
 fn ratline_tree_edge_tiebreak(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     pins: &[Pin],
     a: usize,
     b: usize,
@@ -383,7 +383,7 @@ fn ratline_tree_edge_tiebreak(
 }
 
 fn ratline_edge(
-    problem: &PlaceProblem,
+    problem: &PlacementView,
     rotations: &[f64],
     pos: &[Point2],
     net_idx: usize,
@@ -403,7 +403,7 @@ fn ratline_edge(
     })
 }
 
-fn ratline_edge_requires_layer_change(problem: &PlaceProblem, a: &Pin, b: &Pin) -> bool {
+fn ratline_edge_requires_layer_change(problem: &PlacementView, a: &Pin, b: &Pin) -> bool {
     let a_layers = &problem.parts[a.part].pads[a.pad].layers;
     let b_layers = &problem.parts[b.part].pads[b.pad].layers;
     !a_layers
@@ -411,7 +411,7 @@ fn ratline_edge_requires_layer_change(problem: &PlaceProblem, a: &Pin, b: &Pin) 
         .any(|layer| b_layers.iter().any(|other| other == layer))
 }
 
-fn ratline_edge_layers(problem: &PlaceProblem, a: &Pin, b: &Pin) -> Vec<LayerRef> {
+fn ratline_edge_layers(problem: &PlacementView, a: &Pin, b: &Pin) -> Vec<LayerRef> {
     let mut layers = Vec::new();
     for pin in [a, b] {
         for layer in &problem.parts[pin.part].pads[pin.pad].layers {
@@ -429,7 +429,7 @@ fn ratline_edge_layers_overlap(a: &RatlineEdge, b: &RatlineEdge) -> bool {
         .any(|layer| b.layers.iter().any(|other| other == layer))
 }
 
-fn pin_world_pos(problem: &PlaceProblem, rotations: &[f64], pos: &[Point2], pin: &Pin) -> Point2 {
+fn pin_world_pos(problem: &PlacementView, rotations: &[f64], pos: &[Point2], pin: &Pin) -> Point2 {
     let off = problem.parts[pin.part].pads[pin.pad]
         .offset
         .rotate(rotations[pin.part]);

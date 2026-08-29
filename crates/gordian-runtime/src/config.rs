@@ -280,15 +280,12 @@ impl ToolConfig {
 pub struct EngineConfig {
     /// Schematic placement engine.
     pub schematic_placer: SchematicPlacementEngine,
-    /// PCB routing engine.
-    pub pcb_router: PcbRouterEngine,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             schematic_placer: SchematicPlacementEngine::Cluster,
-            pcb_router: PcbRouterEngine::Auto,
         }
     }
 }
@@ -311,25 +308,6 @@ pub enum SchematicPlacementEngine {
     Anneal,
     /// Deterministic grammar placement only.
     Spine,
-}
-
-/// PCB routing engine.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PcbRouterEngine {
-    /// Current production portfolio: cheap special-case routers, contextual
-    /// sequential grid, negotiated mesh with adaptive rescue, and the grid A*
-    /// fallback, selected by routability/tidiness.
-    #[default]
-    Auto,
-    /// Grid A* only.
-    #[serde(alias = "astar", alias = "a-star", alias = "AStar")]
-    Astar,
-    /// Negotiated capacity mesh with adaptive rescue only.
-    Mesh,
-    /// Contextual sequential grid router only.
-    #[serde(alias = "sequential-grid", alias = "seq")]
-    Sequential,
 }
 
 /// One config validation failure.
@@ -388,7 +366,6 @@ mod tests {
         assert_eq!(cfg.llm.reasoning_effort, None);
         assert!(!cfg.llm.capture_reasoning);
         assert_eq!(cfg.project.schematic_filename, DEFAULT_SCHEMATIC_FILENAME);
-        assert_eq!(cfg.engines.pcb_router, PcbRouterEngine::Auto);
     }
 
     #[test]
@@ -576,30 +553,6 @@ mod tests {
 
     #[test]
     fn engine_config_deserializes_aliases() {
-        let cfg: GordianConfig = toml::from_str(
-            r#"
-            [engines]
-            pcbRouter = "astar"
-            "#,
-        )
-        .unwrap();
-
-        assert_eq!(cfg.engines.pcb_router, PcbRouterEngine::Astar);
-        assert_eq!(
-            cfg.engines.schematic_placer,
-            SchematicPlacementEngine::Cluster
-        );
-
-        let cfg: GordianConfig = toml::from_str(
-            r#"
-            [engines]
-            pcbRouter = "seq"
-            "#,
-        )
-        .unwrap();
-
-        assert_eq!(cfg.engines.pcb_router, PcbRouterEngine::Sequential);
-
         let cfg: GordianConfig = toml::from_str(
             r#"
             [engines]

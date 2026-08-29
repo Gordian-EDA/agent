@@ -6,7 +6,7 @@
 use super::sexpr::{sexpr_end, sexpr_point};
 use anyhow::{Context, Result};
 use pcb_model::{Point2, Polygon, Rect, RouteSolution};
-use pcb_place_api::{Part, PlaceProblem};
+use pcb_place::{Part, PlacementView};
 use serde_json::{Value, json};
 
 use gordian_runtime::AgentRuntime;
@@ -145,7 +145,7 @@ fn parse_outline(v: Option<&Value>) -> std::result::Result<Polygon, String> {
 
 fn geometry_bounds(
     board: &crate::active::IpcBoardSnapshot,
-    placement: &PlaceProblem,
+    placement: &PlacementView,
 ) -> Option<Rect> {
     let mut bounds = routed_copper_bounds(&board.copper);
     for (imported, part) in board.imported.parts.iter().zip(&placement.parts) {
@@ -396,7 +396,7 @@ fn suffix(kind: &str) -> &'static str {
 mod tests {
     use super::*;
     use pcb_model::{LayerRef, Trace, Via, ViaSpan};
-    use pcb_place_api::PartPad;
+    use pcb_place::PartPad;
 
     #[test]
     fn fit_bounds_include_rotated_courtyard_and_off_center_pad_extents() {

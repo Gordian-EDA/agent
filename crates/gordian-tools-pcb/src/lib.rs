@@ -21,7 +21,7 @@
 //!   `get_footprint_info`, `assign_footprints`.
 //! - [`create`] — board construction + input parsing: `regenerate_board`,
 //!   rules and bounds parsing.
-//! - [`place`] — `get_board`, IPC snapshot→`PlaceProblem`, and `place_board`.
+//! - [`place`] — `get_board`, IPC snapshot→`PlacementView`, and `place_board`.
 //! - [`route`] — `route_board` IPC copper write-back + triage.
 //! - [`export`] — `check_board`.
 //! - [`fab`] — `export_fab`: bundle a routed board into Gerbers/drill/pos/BOM.
@@ -39,7 +39,6 @@ mod interactive;
 mod outline;
 mod patch;
 mod place;
-mod place_ranker;
 mod render;
 mod route;
 mod seed;
@@ -61,7 +60,6 @@ pub use interactive::{
 };
 pub use outline::update_board_outline;
 pub use place::{get_board, place_board};
-pub use place_ranker::GridRouteRanker;
 pub use render::render_board;
-pub use route::{apply_direct_rescue_fallback, route_board};
+pub use route::route_board;
 pub use seed::{BoardSeedRules, PourSpec};

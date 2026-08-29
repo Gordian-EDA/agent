@@ -12,13 +12,12 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
-use gordian_tools_pcb::apply_direct_rescue_fallback;
 use gordian_tools_pcb::corpus::{load_corpus_board, route_problem_for_placement, run_kicad_drc};
 use kicad::KicadInstallation;
 use kicad_footprint::FootprintCatalog;
 use pcb_drc::lint::lint;
-use pcb_model::{Point2, RouteProblem, RouteQuality, RouteResult, Router};
-use pcb_route_grid::router::{GridAStarRouter, geometry_violations};
+use pcb_model::{Point2, RouteResult, RoutingView};
+use pcb_route_grid::router::geometry_violations;
 use pcb_route_mesh::crossing::{
     AssignedCrossing, AssignmentFailure, CellJob, CrossingAssignment, TerminalKind,
     assign_crossings,
@@ -26,10 +25,7 @@ use pcb_route_mesh::crossing::{
 use pcb_route_mesh::detail::{self, DetailPassDiagnostic};
 use pcb_route_mesh::mesh::CapacityMesh;
 use pcb_route_mesh::pathing::global_route_with_mesh;
-use pcb_route_mesh::pipeline::{
-    RouteAutoRun, RouteEngineAttempt, route_auto_with_diagnostics, route_detailed_with_global,
-    route_mesh_with_diagnostics, route_sequential_with_diagnostics,
-};
+use pcb_route_mesh::pipeline::{TunedRouteRun, route_tuned_with_diagnostics};
 
 const DEFAULT_BOARDS: &[&str] = &[
     "rc-divider",
@@ -72,11 +68,7 @@ fn main() -> Result<()> {
             }
         };
 
-        let placed = pcb_place::placement::place_board(
-            &board.problem,
-            &board.hints,
-            std::sync::Arc::new(gordian_tools_pcb::GridRouteRanker),
-        );
+        let placed = pcb_place::placement::place_tuned(&board.problem, &board.hints);
         let place_ms = started.elapsed().as_millis();
         if !placed.legal {
             failures += 1;
@@ -245,14 +237,7 @@ fn main() -> Result<()> {
         }
 
         let route_started = Instant::now();
-        let mut routed = route_with_mode(&rp, args.router);
-        let direct_rescue_applied = args.router != RouterMode::MeshDetail
-            && apply_direct_rescue_fallback(&rp, &mut routed.result);
-        if direct_rescue_applied {
-            routed
-                .attempts
-                .push(attempt_summary(&rp, &routed.result, 0));
-        }
+        let routed = route_with_mode(&rp, args.router);
         let route_ms = route_started.elapsed().as_millis();
         let findings = lint(&rp, &routed.result.solution);
         let drc_started = Instant::now();
@@ -280,7 +265,7 @@ fn main() -> Result<()> {
         dump_route_inspection(name, &rp, Some(&routed.result), &inspect_nets);
         let failed = routed.result.failed.len();
         let (slowest_engine, slowest_ms) = routed
-            .attempts
+            .passes
             .iter()
             .max_by_key(|attempt| attempt.elapsed_ms)
             .map(|attempt| (attempt.engine.as_str(), attempt.elapsed_ms))
@@ -314,7 +299,7 @@ fn main() -> Result<()> {
             findings.len(),
             metrics.via_count,
             metrics.wirelength,
-            routed.attempts.len(),
+            routed.passes.len(),
             slowest_engine,
             slowest_ms,
             kicad_faults,
@@ -356,7 +341,7 @@ fn main() -> Result<()> {
                 }
                 Err(err) => eprintln!("  {name}: kicad-drc-error={err}"),
             }
-            for attempt in &routed.attempts {
+            for attempt in &routed.passes {
                 let failed_names = attempt
                     .failed
                     .iter()
@@ -497,7 +482,7 @@ fn assignment_failure_connection(failure: &AssignmentFailure) -> String {
 
 fn dump_detail_job_inspection_for_problem(
     board_name: &str,
-    problem: &RouteProblem,
+    problem: &RoutingView,
     net_names: &[String],
 ) {
     let started = Instant::now();
@@ -525,7 +510,7 @@ fn dump_detail_job_inspection_for_problem(
 
 fn dump_detail_job_inspection(
     board_name: &str,
-    problem: &RouteProblem,
+    problem: &RoutingView,
     mesh: &CapacityMesh,
     assignment: &CrossingAssignment,
     net_names: &[String],
@@ -598,7 +583,7 @@ fn dump_detail_pass_diagnostics(board_name: &str, diagnostics: &[DetailPassDiagn
 }
 
 fn selected_detail_job_nets(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     assignment: &CrossingAssignment,
     net_names: &[String],
 ) -> Vec<String> {
@@ -705,7 +690,7 @@ const INSPECT_LIMIT: usize = 12;
 
 fn dump_route_inspection(
     board_name: &str,
-    problem: &RouteProblem,
+    problem: &RoutingView,
     result: Option<&RouteResult>,
     net_names: &[String],
 ) {
@@ -728,11 +713,7 @@ fn dump_route_inspection(
     }
 }
 
-fn dump_connection_geometry(
-    board_name: &str,
-    problem: &RouteProblem,
-    conn: &pcb_model::Connection,
-) {
+fn dump_connection_geometry(board_name: &str, problem: &RoutingView, conn: &pcb_model::Connection) {
     let points = conn
         .points_to_connect
         .iter()
@@ -796,7 +777,7 @@ fn dump_connection_geometry(
 
 fn dump_connection_route_context(
     board_name: &str,
-    problem: &RouteProblem,
+    problem: &RoutingView,
     result: &RouteResult,
     conn: &pcb_model::Connection,
 ) {
@@ -1020,60 +1001,16 @@ impl RouterMode {
     }
 }
 
-fn route_with_mode(problem: &pcb_model::RouteProblem, mode: RouterMode) -> RouteAutoRun {
+fn route_with_mode(problem: &pcb_model::RoutingView, mode: RouterMode) -> TunedRouteRun {
     match mode {
-        RouterMode::Auto => route_auto_with_diagnostics(problem),
-        RouterMode::Mesh => route_mesh_with_diagnostics(problem),
-        RouterMode::MeshDetail => route_mesh_detail_with_diagnostics(problem),
+        RouterMode::Auto
+        | RouterMode::Mesh
+        | RouterMode::MeshDetail
+        | RouterMode::Sequential
+        | RouterMode::Grid => route_tuned_with_diagnostics(problem),
         RouterMode::MeshGlobal | RouterMode::MeshAssign => {
             unreachable!("mesh diagnostics are handled before copper routing")
         }
-        RouterMode::Sequential => route_sequential_with_diagnostics(problem),
-        RouterMode::Grid => route_grid_with_diagnostics(problem),
-    }
-}
-
-fn route_mesh_detail_with_diagnostics(problem: &pcb_model::RouteProblem) -> RouteAutoRun {
-    let started = Instant::now();
-    let (result, global) = route_detailed_with_global(problem);
-    let elapsed_ms = started.elapsed().as_millis();
-    let attempts = vec![attempt_summary(problem, &result, elapsed_ms)];
-    RouteAutoRun {
-        result,
-        attempts,
-        global: Some(global),
-    }
-}
-
-fn route_grid_with_diagnostics(problem: &pcb_model::RouteProblem) -> RouteAutoRun {
-    let grid = GridAStarRouter;
-    let started = Instant::now();
-    let result = grid.route(problem);
-    let elapsed_ms = started.elapsed().as_millis();
-    let attempts = vec![attempt_summary(problem, &result, elapsed_ms)];
-    RouteAutoRun {
-        result,
-        attempts,
-        global: None,
-    }
-}
-
-fn attempt_summary(
-    problem: &pcb_model::RouteProblem,
-    result: &RouteResult,
-    elapsed_ms: u128,
-) -> RouteEngineAttempt {
-    let geometry_violations = geometry_violations(problem, &result.solution);
-    let quality = RouteQuality::of(problem, result, geometry_violations);
-    RouteEngineAttempt {
-        engine: result.engine.clone(),
-        failed: result.failed.clone(),
-        elapsed_ms,
-        fault_weight: quality.fault_weight,
-        geometry_violations,
-        failed_nets: quality.failed_nets,
-        vias: quality.via_count,
-        wirelength: quality.wirelength,
     }
 }
 

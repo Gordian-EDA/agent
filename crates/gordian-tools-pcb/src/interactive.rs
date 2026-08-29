@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use kicad_ipc::units::mm_to_nm;
 use kicad_ipc::{CopperDeleteRequest, CopperHit, CopperKind, FootprintMove};
 use pcb_model::{
-    Connection, FailedNet, LayerRef, RoutePoint, RouteProblem, RouteResult, RouteSolution, Router,
-    Trace, Via, ViaSpan,
+    Connection, FailedNet, LayerRef, RoutePoint, RouteResult, RouteSolution, RoutingView, Trace,
+    Via, ViaSpan,
 };
 
 use gordian_runtime::AgentRuntime;
@@ -536,7 +536,7 @@ struct RouteViaAnchor {
 
 fn parse_route_track_request(
     input: &Value,
-    problem: &RouteProblem,
+    problem: &RoutingView,
 ) -> std::result::Result<RouteTrackRequest, String> {
     let ctx = "route_track";
     if input.get("start").is_some() || input.get("end").is_some() || input.get("layer").is_some() {
@@ -611,9 +611,9 @@ fn parse_route_track_request(
 }
 
 fn manual_route_solution(
-    base: &RouteProblem,
+    base: &RoutingView,
     request: &RouteTrackRequest,
-) -> std::result::Result<(RouteProblem, RouteSolution), String> {
+) -> std::result::Result<(RoutingView, RouteSolution), String> {
     let mut solution = RouteSolution {
         traces: Vec::new(),
         vias: Vec::new(),
@@ -666,7 +666,7 @@ fn manual_route_solution(
 }
 
 fn route_leg(
-    base: &RouteProblem,
+    base: &RoutingView,
     net: &str,
     width: f64,
     from: Point2,
@@ -714,8 +714,7 @@ fn route_leg(
     let grid_to = snapped_route_point(&exact_problem, to);
     let grid_problem =
         single_connection_problem(base, net, width, grid_from, from_layer, grid_to, to_layer);
-    let router = pcb_route_grid::router::GridAStarRouter;
-    let result = router.route(&grid_problem);
+    let result = pcb_route_grid::router::route_grid(&grid_problem);
     if !result.failed.is_empty() {
         let reasons = result
             .failed
@@ -731,7 +730,7 @@ fn route_leg(
     Ok(solution)
 }
 
-fn snapped_route_point(problem: &RouteProblem, point: Point2) -> Point2 {
+fn snapped_route_point(problem: &RoutingView, point: Point2) -> Point2 {
     let pitch = pcb_route_grid::grid::grid_pitch(problem);
     Point2::new(
         route_cell_center(problem.bounds.min_x, point.x, pitch),
@@ -740,14 +739,14 @@ fn snapped_route_point(problem: &RouteProblem, point: Point2) -> Point2 {
 }
 
 fn single_connection_problem(
-    base: &RouteProblem,
+    base: &RoutingView,
     net: &str,
     width: f64,
     from: Point2,
     from_layer: LayerRef,
     to: Point2,
     to_layer: LayerRef,
-) -> RouteProblem {
+) -> RoutingView {
     let mut problem = base.clone();
     problem.connections = vec![Connection {
         name: net.to_owned(),
@@ -769,7 +768,7 @@ fn single_connection_problem(
     problem
 }
 
-fn validation_problem(base: &RouteProblem, request: &RouteTrackRequest) -> RouteProblem {
+fn validation_problem(base: &RoutingView, request: &RouteTrackRequest) -> RoutingView {
     single_connection_problem(
         base,
         &request.net,
@@ -786,7 +785,7 @@ fn extend_solution(dst: &mut RouteSolution, src: RouteSolution) {
     dst.vias.extend(src.vias);
 }
 
-fn add_manual_terminal_stubs(problem: &RouteProblem, solution: &mut RouteSolution) {
+fn add_manual_terminal_stubs(problem: &RoutingView, solution: &mut RouteSolution) {
     let pitch = pcb_route_grid::grid::grid_pitch(problem);
     for conn in &problem.connections {
         let width = problem.net_width(&conn.name);
@@ -815,7 +814,7 @@ fn route_cell_center(min: f64, value: f64, pitch: f64) -> f64 {
 }
 
 fn validate_manual_solution(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
 ) -> std::result::Result<(), String> {
     let target_net = problem
@@ -901,7 +900,7 @@ fn via_span_between(
 }
 
 fn route_track_output(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     request: &RouteTrackRequest,
 ) -> Value {
@@ -1305,8 +1304,8 @@ mod tests {
         );
     }
 
-    fn route_problem(obstacles: Vec<pcb_model::Obstacle>) -> RouteProblem {
-        RouteProblem {
+    fn route_problem(obstacles: Vec<pcb_model::Obstacle>) -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles,

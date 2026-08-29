@@ -15,7 +15,7 @@
 //! points, via sites) with mm positions and layers — exactly what the per-cell
 //! router ([`crate::detail`], Task 2) iterates over. It is deliberately
 //! independent of [`pcb_route_grid::grid`] / [`pcb_route_grid::astar`]; it consumes the public
-//! [`CapacityMesh`] / [`GlobalPlan`] API and the [`RouteProblem`] obstacle model.
+//! [`CapacityMesh`] / [`GlobalPlan`] API and the [`RoutingView`] obstacle model.
 //!
 //! ## Algorithm
 //!
@@ -59,9 +59,9 @@
 use crate::mesh::{CapacityMesh, LeafId};
 use crate::pathing::GlobalPlan;
 use geom::{BoundaryAxis, STRICT_EPS, SharedBoundary};
-use pcb_route_grid::grid::grid_pitch;
 use pcb_model::Rect;
-use pcb_model::{LayerRef, Point2, RouteProblem};
+use pcb_model::{LayerRef, Point2, RoutingView};
+use pcb_route_grid::grid::grid_pitch;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -200,7 +200,7 @@ impl CrossingAssignment {
 /// failures (overflow, unplaceable via) are collected in
 /// [`CrossingAssignment::failures`].
 pub fn assign_crossings(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     mesh: &CapacityMesh,
     plan: &GlobalPlan,
 ) -> CrossingAssignment {
@@ -509,7 +509,7 @@ impl JobAcc {
 /// full span minus the obstacle-covered portions that straddle the boundary
 /// line. Mirrors `mesh::edge_capacity`'s coverage logic, but keeps the gaps.
 fn usable_intervals(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     mesh: &CapacityMesh,
     boundary: &SharedBoundary,
     layer: usize,
@@ -761,7 +761,7 @@ impl AssignedCrossingSites {
 }
 
 impl ForeignCopper {
-    fn build(problem: &RouteProblem, layer_count: usize) -> Self {
+    fn build(problem: &RoutingView, layer_count: usize) -> Self {
         let name_index = name_index(problem);
         let mut rects: Vec<Vec<(Rect, Vec<usize>)>> = vec![Vec::new(); layer_count];
         for ob in &problem.obstacles {
@@ -1052,7 +1052,7 @@ fn via_site_clear(
 
 /// Connection name → dense index (connections order, first-wins) — mirrors
 /// `mesh::name_index` / `grid`'s map so pad-leaf attribution matches the mesh.
-fn name_index(problem: &RouteProblem) -> BTreeMap<String, usize> {
+fn name_index(problem: &RoutingView) -> BTreeMap<String, usize> {
     let mut m = BTreeMap::new();
     for (i, c) in problem.connections.iter().enumerate() {
         m.entry(c.name.clone()).or_insert(i);
@@ -1080,7 +1080,7 @@ mod tests {
     use pcb_model::{Connection, Obstacle, Rect, RoutePoint};
     use std::path::Path;
 
-    fn load(name: &str) -> RouteProblem {
+    fn load(name: &str) -> RoutingView {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures")
             .join(name);
@@ -1117,8 +1117,8 @@ mod tests {
         }
     }
 
-    fn base(bounds: Rect, obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RouteProblem {
-        RouteProblem {
+    fn base(bounds: Rect, obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles,
@@ -1143,7 +1143,7 @@ mod tests {
         }
     }
 
-    fn via_crossing_spacing(problem: &RouteProblem) -> f64 {
+    fn via_crossing_spacing(problem: &RoutingView) -> f64 {
         let detailed_route_pitch = grid_pitch(problem) / 2.0;
         let snap_disp = detailed_route_pitch * std::f64::consts::SQRT_2 / 2.0;
         problem.via_diameter / 2.0 + problem.clearance + problem.min_trace_width / 2.0 + snap_disp
@@ -1152,7 +1152,7 @@ mod tests {
     /// Assert: every plan crossing got exactly one concrete point; spacing on
     /// every boundary/layer ≥ track pitch; points lie on the shared boundary; via
     /// sites clear foreign copper.
-    fn assert_assignment_sound(p: &RouteProblem) {
+    fn assert_assignment_sound(p: &RoutingView) {
         let mesh = CapacityMesh::build(p);
         let plan = global_route(p).plan;
         let a = assign_crossings(p, &mesh, &plan);

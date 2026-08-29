@@ -49,10 +49,10 @@ use crate::heuristics::{
     connection_segment_obstacle_pressure_um, connection_span_um,
 };
 use crate::mesh::{CapacityMesh, LeafId};
+use pcb_model::Rect;
+use pcb_model::{FailedNet, LayerRef, Point2, RouteSolution, RoutingView, Trace, Via, ViaSpan};
 use pcb_route_grid::astar::{self, AStarCosts, DIAG_COST, State};
 use pcb_route_grid::grid::{self, Cell, RouteGrid};
-use pcb_model::Rect;
-use pcb_model::{FailedNet, LayerRef, Point2, RouteProblem, RouteSolution, Trace, Via, ViaSpan};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -146,7 +146,7 @@ pub struct DetailPassDiagnostic {
 /// `plan` over `mesh`/`problem`. Never panics; per-net cell failures are
 /// collected in [`CellRouteResult::failed`].
 pub fn route_cells(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     mesh: &CapacityMesh,
     assignment: &CrossingAssignment,
 ) -> CellRouteResult {
@@ -155,7 +155,7 @@ pub fn route_cells(
 
 /// As [`route_cells`], plus pre-finisher retry candidate diagnostics for tooling.
 pub fn route_cells_with_diagnostics(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     mesh: &CapacityMesh,
     assignment: &CrossingAssignment,
 ) -> (CellRouteResult, Vec<DetailPassDiagnostic>) {
@@ -165,7 +165,7 @@ pub fn route_cells_with_diagnostics(
 }
 
 fn route_cells_impl(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     mesh: &CapacityMesh,
     assignment: &CrossingAssignment,
     mut diagnostics: Option<&mut Vec<DetailPassDiagnostic>>,
@@ -475,7 +475,7 @@ struct DetailBlockerEdge {
 }
 
 fn detail_retry_job_orders(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     assignment: &CrossingAssignment,
     net_rank: &BTreeMap<String, usize>,
 ) -> Vec<Vec<usize>> {
@@ -662,7 +662,7 @@ fn diagnostic_net_order(assignment: &CrossingAssignment, job_order: &[usize]) ->
 
 #[allow(clippy::too_many_arguments)]
 fn route_detail_pass(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     mesh: &CapacityMesh,
     assignment: &CrossingAssignment,
     job_order: &[usize],
@@ -740,7 +740,7 @@ fn route_detail_pass(
 
 #[allow(clippy::too_many_arguments)]
 fn route_detail_pass_with_net_rollback(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     mesh: &CapacityMesh,
     assignment: &CrossingAssignment,
     job_order: &[usize],
@@ -842,11 +842,11 @@ fn reserve_job_vias(grid: &mut RouteGrid, job: &CellJob, via_halo: f64) {
     }
 }
 
-fn should_try_finisher(problem: &RouteProblem) -> bool {
+fn should_try_finisher(problem: &RoutingView) -> bool {
     problem.layer_count <= 2 || problem.connections.len() <= FINISHER_MAX_MULTILAYER_CONNECTIONS
 }
 
-fn finisher_skip_reason(problem: &RouteProblem) -> String {
+fn finisher_skip_reason(problem: &RoutingView) -> String {
     format!(
         "finisher skipped for large multilayer board (layers={}, connections={} > cap={})",
         problem.layer_count,
@@ -865,7 +865,7 @@ fn keep_cell_route_candidate(
 }
 
 fn cell_route_candidate_key(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     routes: &[CellRoute],
     failures: &[FailedNet],
 ) -> DetailPassCandidateKey {
@@ -889,7 +889,7 @@ struct DetailPassCandidateKey {
 }
 
 fn cell_routes_to_solution(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     routes: &[CellRoute],
     failed_names: &BTreeSet<String>,
 ) -> RouteSolution {
@@ -946,7 +946,7 @@ fn finisher_order(
 /// hotspot cases: long/hard nets first, reverse corridor claiming, and pure name
 /// order to break rank ties differently while staying byte-stable.
 fn finisher_orders(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     names_set: &std::collections::BTreeSet<String>,
     net_rank: &BTreeMap<String, usize>,
 ) -> Vec<Vec<String>> {
@@ -1039,7 +1039,7 @@ struct FinisherOrderMetric {
 }
 
 fn finisher_order_metrics(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     names_set: &std::collections::BTreeSet<String>,
 ) -> BTreeMap<String, FinisherOrderMetric> {
     let crossing_pressures = connection_crossing_pressures(problem);
@@ -1078,7 +1078,7 @@ fn finisher_metric(
 /// fallback). The grid is mutated as nets are committed.
 #[allow(clippy::too_many_arguments)]
 fn run_finisher_pass(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     grid: &mut RouteGrid,
     order: &[String],
     lanes: &BTreeMap<String, Vec<Waypoint>>,
@@ -1217,7 +1217,7 @@ impl FinisherCandidateKey {
 }
 
 fn finisher_candidate_key(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     routes: &[CellRoute],
     failures: &[FailedNet],
 ) -> FinisherCandidateKey {
@@ -1610,7 +1610,7 @@ struct Waypoint {
 /// structured error (the caller adds the leaf id).
 #[allow(clippy::too_many_arguments)]
 fn route_one_job(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     job: &CellJob,
     wgrid: &mut RouteGrid,
     window: &Rect,
@@ -1806,7 +1806,7 @@ impl DetailRouteError {
 
 #[cfg(test)]
 fn terminal_blockage_summary(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     grid: &RouteGrid,
     conn_idx: usize,
     terminal: State,
@@ -1821,7 +1821,7 @@ struct TerminalBlockage {
 }
 
 fn terminal_blockage(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     grid: &RouteGrid,
     conn_idx: usize,
     terminal: State,
@@ -1892,7 +1892,7 @@ fn terminal_neighborhood_counts(
     counts
 }
 
-fn occupancy_label(problem: &RouteProblem, cell: Cell, conn_idx: usize) -> String {
+fn occupancy_label(problem: &RoutingView, cell: Cell, conn_idx: usize) -> String {
     match cell {
         Cell::Free => "free".to_owned(),
         Cell::Net(owner) if owner == conn_idx => "own".to_owned(),
@@ -1902,7 +1902,7 @@ fn occupancy_label(problem: &RouteProblem, cell: Cell, conn_idx: usize) -> Strin
     }
 }
 
-fn format_foreign_owners(problem: &RouteProblem, owners: &BTreeSet<usize>) -> String {
+fn format_foreign_owners(problem: &RoutingView, owners: &BTreeSet<usize>) -> String {
     if owners.is_empty() {
         return "-".to_owned();
     }
@@ -1913,7 +1913,7 @@ fn format_foreign_owners(problem: &RouteProblem, owners: &BTreeSet<usize>) -> St
         .join("|")
 }
 
-fn connection_owner_label(problem: &RouteProblem, owner: usize) -> String {
+fn connection_owner_label(problem: &RoutingView, owner: usize) -> String {
     problem
         .connections
         .get(owner)
@@ -2181,7 +2181,7 @@ fn route_point_cell(grid: &RouteGrid, pt: &pcb_model::RoutePoint, layer_count: u
 /// half-perimeter, ties by name). Lower rank routes first. Matches
 /// [`pcb_route_grid::router`]'s `net_order` so the per-cell order is consistent with the
 /// full-board router.
-fn net_rank(problem: &RouteProblem) -> BTreeMap<String, usize> {
+fn net_rank(problem: &RoutingView) -> BTreeMap<String, usize> {
     let mut order: Vec<usize> = (0..problem.connections.len()).collect();
     order.sort_by(|&a, &b| {
         let ka = problem.connections[a].half_perimeter();
@@ -2223,7 +2223,7 @@ mod tests {
     use pcb_model::{Connection, Obstacle, Rect, RoutePoint};
     use std::path::Path;
 
-    fn load(name: &str) -> RouteProblem {
+    fn load(name: &str) -> RoutingView {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures")
             .join(name);
@@ -2246,8 +2246,8 @@ mod tests {
         }
     }
 
-    fn base(bounds: Rect, obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RouteProblem {
-        RouteProblem {
+    fn base(bounds: Rect, obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles,
@@ -2286,7 +2286,7 @@ mod tests {
         }
     }
 
-    fn run(p: &RouteProblem) -> (CapacityMesh, CellRouteResult) {
+    fn run(p: &RoutingView) -> (CapacityMesh, CellRouteResult) {
         let mesh = CapacityMesh::build(p);
         let plan = global_route(p).plan;
         let a = assign_crossings(p, &mesh, &plan);
@@ -2536,7 +2536,7 @@ mod tests {
         );
     }
 
-    fn assignment_for_connections(problem: &RouteProblem) -> CrossingAssignment {
+    fn assignment_for_connections(problem: &RoutingView) -> CrossingAssignment {
         CrossingAssignment {
             jobs: problem
                 .connections

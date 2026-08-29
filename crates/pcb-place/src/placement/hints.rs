@@ -6,9 +6,9 @@ use super::geometry::{
     clamp_center_for_envelope, datum_rotation_for_edge, part_edge_target,
     part_placement_bounds_envelope, rotated_copper_bbox, rotated_courtyard_half,
 };
+use crate::{Edge, LockedAt, Part, PlacementHints, PlacementView};
+use crate::{decoupling_pairs, series_pairs};
 use pcb_model::Point2;
-use pcb_place_api::{Edge, LockedAt, Part, PlaceProblem, PlacementHints};
-use pcb_place_api::{decoupling_pairs, series_pairs};
 
 /// Lock each member of a `grid` group at a computed cell of a regular grid (row-major,
 /// member order), centred in the group's region. The column count is sized from the
@@ -27,7 +27,7 @@ use pcb_place_api::{decoupling_pairs, series_pairs};
 /// GROW the array to fill a large board — that needs a board bounds-fit pass (size the
 /// outline to the placed extent) which does not exist in `pcb-place`. The pitch math here
 /// is the correct primitive that pass would build on.
-pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
+pub fn apply_grid_hints(problem: &mut PlacementView, hints: &PlacementHints) {
     for g in &hints.groups {
         // `surround`: ring the members tightly around a locked target part's edges
         // (the decoupling pattern). Handled first; falls through to `grid` otherwise.
@@ -80,7 +80,7 @@ pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
 /// a short one — a tall IC no longer overflows (and overlaps) its short edges. The
 /// target must already be locked (the agent fixes the IC first) so its centre is known.
 /// A no-op otherwise.
-pub fn apply_surround(problem: &mut PlaceProblem, members: &[String], target: &str, gap: f64) {
+pub fn apply_surround(problem: &mut PlacementView, members: &[String], target: &str, gap: f64) {
     let Some(ti) = problem.parts.iter().position(|p| p.reference == target) else {
         return;
     };
@@ -141,7 +141,7 @@ pub fn apply_surround(problem: &mut PlaceProblem, members: &[String], target: &s
 /// connector or two inboard, which the critic flags). Already-locked parts are
 /// left alone. Pairs with [`apply_surround`]: IC + caps centred, connectors framed
 /// at the edges, the rest placed between, then the outline tightens to it.
-pub fn apply_edge_lock(problem: &mut PlaceProblem, refs: &[String]) {
+pub fn apply_edge_lock(problem: &mut PlacementView, refs: &[String]) {
     let b = problem.bounds;
     let idxs: Vec<usize> = refs
         .iter()
@@ -209,7 +209,7 @@ pub fn apply_edge_lock(problem: &mut PlaceProblem, refs: &[String]) {
 /// overlap + illegal beyond ~a dozen parts), this scales to a full pin field and
 /// stays legal. Each member is locked.
 pub fn fan_out_rings(
-    problem: &mut PlaceProblem,
+    problem: &mut PlacementView,
     ic: usize,
     ordered: &[String],
     start_gap: f64,
@@ -293,7 +293,7 @@ fn ring_pos(cx: f64, cy: f64, rw: f64, rh: f64, pos: f64) -> Point2 {
     }
 }
 
-fn fanout_order_by_ic_pad_angle(problem: &PlaceProblem, ic: usize, parts: &[usize]) -> Vec<usize> {
+fn fanout_order_by_ic_pad_angle(problem: &PlacementView, ic: usize, parts: &[usize]) -> Vec<usize> {
     let mut keyed: Vec<(f64, String, usize)> = parts
         .iter()
         .map(|&part| {
@@ -312,7 +312,7 @@ fn fanout_order_by_ic_pad_angle(problem: &PlaceProblem, ic: usize, parts: &[usiz
     keyed.into_iter().map(|(_, _, part)| part).collect()
 }
 
-fn part_angle_around_ic(problem: &PlaceProblem, ic: usize, part: usize) -> f64 {
+fn part_angle_around_ic(problem: &PlacementView, ic: usize, part: usize) -> f64 {
     let part_nets: std::collections::BTreeSet<&str> = problem.parts[part]
         .pads
         .iter()
@@ -351,7 +351,7 @@ fn mean_angle(angles: &[f64]) -> Option<f64> {
     Some(sin.atan2(cos))
 }
 
-fn resonator_parts(problem: &PlaceProblem, ic: usize) -> Vec<usize> {
+fn resonator_parts(problem: &PlacementView, ic: usize) -> Vec<usize> {
     let ic_nets: std::collections::BTreeSet<&str> = problem.parts[ic]
         .pads
         .iter()
@@ -382,7 +382,7 @@ fn resonator_parts(problem: &PlaceProblem, ic: usize) -> Vec<usize> {
         .collect()
 }
 
-fn bus_peripherals(problem: &PlaceProblem, ic: usize) -> Vec<usize> {
+fn bus_peripherals(problem: &PlacementView, ic: usize) -> Vec<usize> {
     let ic_nets: std::collections::BTreeSet<&str> = problem.parts[ic]
         .pads
         .iter()
@@ -404,7 +404,7 @@ fn bus_peripherals(problem: &PlaceProblem, ic: usize) -> Vec<usize> {
         .collect()
 }
 
-fn resonator_load_caps(problem: &PlaceProblem, resonator: usize) -> Vec<usize> {
+fn resonator_load_caps(problem: &PlacementView, resonator: usize) -> Vec<usize> {
     let resonator_nets: std::collections::BTreeSet<&str> = problem.parts[resonator]
         .pads
         .iter()
@@ -434,7 +434,7 @@ fn resonator_load_caps(problem: &PlaceProblem, resonator: usize) -> Vec<usize> {
 }
 
 fn place_resonator_clusters(
-    problem: &mut PlaceProblem,
+    problem: &mut PlacementView,
     ic: usize,
     resonators: &[usize],
     ic_hw: f64,
@@ -462,7 +462,7 @@ fn place_resonator_clusters(
 }
 
 fn place_bus_clusters(
-    problem: &mut PlaceProblem,
+    problem: &mut PlacementView,
     ic: usize,
     buses: &[usize],
     ic_hw: f64,
@@ -481,7 +481,7 @@ fn place_bus_clusters(
 }
 
 fn place_tangent_cluster(
-    problem: &mut PlaceProblem,
+    problem: &mut PlacementView,
     _ic: usize,
     members: &[usize],
     angle: f64,
@@ -540,7 +540,7 @@ fn place_tangent_cluster(
     }
 }
 
-fn locked_max_extent(problem: &PlaceProblem) -> f64 {
+fn locked_max_extent(problem: &PlacementView) -> f64 {
     problem
         .parts
         .iter()
@@ -551,7 +551,7 @@ fn locked_max_extent(problem: &PlaceProblem) -> f64 {
         .fold(0.0, f64::max)
 }
 
-fn resolve_locked_overlaps_radially(problem: &mut PlaceProblem, fixed: usize) {
+fn resolve_locked_overlaps_radially(problem: &mut PlacementView, fixed: usize) {
     for _ in 0..2000 {
         let mut hit = None;
         'pairs: for a in 0..problem.parts.len() {
@@ -581,7 +581,7 @@ fn resolve_locked_overlaps_radially(problem: &mut PlaceProblem, fixed: usize) {
     }
 }
 
-fn locked_overlap(problem: &PlaceProblem, a: usize, b: usize) -> bool {
+fn locked_overlap(problem: &PlacementView, a: usize, b: usize) -> bool {
     let (Some(la), Some(lb)) = (&problem.parts[a].locked, &problem.parts[b].locked) else {
         return false;
     };
@@ -590,7 +590,7 @@ fn locked_overlap(problem: &PlaceProblem, a: usize, b: usize) -> bool {
     (la.at.x - lb.at.x).abs() < ahw + bhw && (la.at.y - lb.at.y).abs() < ahh + bhh
 }
 
-fn locked_radius(problem: &PlaceProblem, idx: usize) -> f64 {
+fn locked_radius(problem: &PlacementView, idx: usize) -> f64 {
     problem.parts[idx]
         .locked
         .as_ref()
@@ -598,7 +598,7 @@ fn locked_radius(problem: &PlaceProblem, idx: usize) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn push_locked_outward(problem: &mut PlaceProblem, idx: usize, step: f64) {
+fn push_locked_outward(problem: &mut PlacementView, idx: usize, step: f64) {
     let Some(loc) = problem.parts[idx].locked.as_mut() else {
         return;
     };
@@ -637,7 +637,7 @@ fn is_powerish_net(net: &str) -> bool {
 /// placer the lock-then-legalize path couldn't be: escapes route radially (short,
 /// parallel, non-crossing) and the board is compact. Returns false (no-op) when
 /// there's no clear dominant fine-pitch IC or the agent already pinned parts.
-pub fn unified_fanout_place(problem: &mut PlaceProblem, hints: &PlacementHints) -> bool {
+pub fn unified_fanout_place(problem: &mut PlacementView, hints: &PlacementHints) -> bool {
     let n = problem.parts.len();
     if problem.parts.iter().any(|p| p.locked.is_some()) {
         return false; // respect any agent-pinned layout

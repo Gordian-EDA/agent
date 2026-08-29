@@ -13,8 +13,8 @@ use crate::heuristics::{
 };
 use crate::quality::{keep_route_candidate as keep_candidate, route_quality, trace_route_cost_um};
 use pcb_model::{
-    Capabilities, FailedNet, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult,
-    RouteSolution, Router, Trace,
+    FailedNet, LayerRef, Point2, RouteQuality, RouteResult, RouteSolution, RoutingCapabilities,
+    RoutingView, Trace,
 };
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -34,13 +34,13 @@ type VisibilityCache = BTreeMap<VisibilitySegmentKey, bool>;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DirectLineRouter;
 
-impl Router for DirectLineRouter {
-    fn name(&self) -> &'static str {
+impl DirectLineRouter {
+    pub fn name(&self) -> &'static str {
         ENGINE
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
+    pub fn capabilities(&self) -> RoutingCapabilities {
+        RoutingCapabilities {
             max_layers: u32::MAX,
             honors_escape_layers: false,
             honors_net_widths: true,
@@ -50,13 +50,13 @@ impl Router for DirectLineRouter {
         }
     }
 
-    fn can_route(&self, problem: &RouteProblem) -> bool {
+    pub fn can_route(&self, problem: &RoutingView) -> bool {
         self.capabilities().can_route(problem)
             && (problem.layer_count <= 2
                 || problem.connections.len() <= DIRECT_MAX_MULTILAYER_CONNECTIONS)
     }
 
-    fn route(&self, problem: &RouteProblem) -> RouteResult {
+    pub fn route(&self, problem: &RoutingView) -> RouteResult {
         route_direct(problem)
     }
 }
@@ -75,7 +75,7 @@ const DIRECT_GEOMETRY_CHECK_BUDGET: usize = 30_000;
 
 /// Route every eligible net as straight same-layer segments and reconcile the
 /// result through the same geometry/connectivity oracle used by the detailed router.
-pub fn route_direct(problem: &RouteProblem) -> RouteResult {
+pub fn route_direct(problem: &RoutingView) -> RouteResult {
     GEOMETRY_CHECKS_LEFT.with(|b| b.set(DIRECT_GEOMETRY_CHECK_BUDGET));
     let mut best: Option<(RouteResult, RouteQuality)> = None;
     for order in net_order_portfolio(problem) {
@@ -91,7 +91,7 @@ pub fn route_direct(problem: &RouteProblem) -> RouteResult {
         .unwrap_or_else(|| route_direct_order_once(problem, &[]))
 }
 
-fn route_direct_order(problem: &RouteProblem, order: &[usize]) -> RouteResult {
+fn route_direct_order(problem: &RoutingView, order: &[usize]) -> RouteResult {
     let mut best = route_direct_order_once(problem, order);
     let mut current_order = order.to_vec();
     let mut tried = vec![current_order.clone()];
@@ -120,7 +120,7 @@ fn route_direct_order(problem: &RouteProblem, order: &[usize]) -> RouteResult {
     best
 }
 
-fn route_direct_order_once(problem: &RouteProblem, order: &[usize]) -> RouteResult {
+fn route_direct_order_once(problem: &RoutingView, order: &[usize]) -> RouteResult {
     let mut solution = RouteSolution {
         traces: Vec::new(),
         vias: Vec::new(),
@@ -174,7 +174,7 @@ fn route_direct_order_once(problem: &RouteProblem, order: &[usize]) -> RouteResu
     }
 }
 
-fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
+fn net_order_portfolio(problem: &RoutingView) -> Vec<Vec<usize>> {
     let base: Vec<usize> = (0..problem.connections.len()).collect();
     let mut orders = Vec::new();
     push_order(&mut orders, base.clone());
@@ -282,7 +282,7 @@ struct DirectOrderMetric {
     crossing_pressure: usize,
 }
 
-fn net_order_metrics(problem: &RouteProblem) -> Vec<DirectOrderMetric> {
+fn net_order_metrics(problem: &RoutingView) -> Vec<DirectOrderMetric> {
     let crossing_pressures = connection_crossing_pressures(problem);
     problem
         .connections
@@ -305,7 +305,7 @@ fn push_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
 }
 
 fn failed_priority_order(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     order: &[usize],
     failed: &[FailedNet],
 ) -> Vec<usize> {
@@ -334,7 +334,7 @@ fn failed_priority_order(
 }
 
 fn failed_priority_cmp_with_metrics(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     metrics: &[DirectOrderMetric],
     a: usize,
     b: usize,
@@ -366,7 +366,7 @@ fn failed_priority_cmp_with_metrics(
 }
 
 fn route_same_layer_tree(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     conn: &pcb_model::Connection,
 ) -> Option<RouteSolution> {
@@ -388,7 +388,7 @@ fn route_same_layer_tree(
 }
 
 fn route_same_layer_tree_from_root(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     conn: &pcb_model::Connection,
     root: usize,
@@ -463,7 +463,7 @@ fn trace_bends(trace: &Trace) -> u32 {
 }
 
 fn route_leg(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     connection: &str,
     layer: pcb_model::LayerRef,
@@ -506,7 +506,7 @@ fn route_leg(
 }
 
 fn best_clean_trace_for_paths(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     connection: &str,
     layer: LayerRef,
@@ -538,7 +538,7 @@ fn best_clean_trace_for_paths(
 }
 
 fn trace_quality_key(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     trace: &Trace,
 ) -> (u64, u64, u64, u32, usize) {
@@ -553,7 +553,7 @@ fn trace_quality_key(
 }
 
 fn candidate_paths(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     connection: &str,
     layer: &LayerRef,
@@ -593,7 +593,7 @@ fn candidate_paths(
 }
 
 fn candidate_axes(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     connection: &str,
     layer: &LayerRef,
@@ -724,7 +724,7 @@ impl VisibilityDir {
 }
 
 fn visibility_path(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     connection: &str,
     layer: LayerRef,
@@ -855,7 +855,7 @@ fn visibility_neighbors(
 }
 
 fn visibility_segment_is_clean(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     connection: &str,
     layer: &LayerRef,
@@ -927,7 +927,7 @@ fn quantize_mm(v: f64) -> i64 {
 }
 
 fn direct_candidate_is_geometry_clean(
-    problem: &RouteProblem,
+    problem: &RoutingView,
     solution: &RouteSolution,
     connection: &str,
 ) -> bool {
@@ -957,7 +957,7 @@ fn same_layer(points: &[pcb_model::RoutePoint]) -> bool {
         .is_some_and(|first| points.iter().all(|pt| pt.layer == first.layer))
 }
 
-fn reconcile(problem: &RouteProblem, solution: &mut RouteSolution, failed: &mut Vec<FailedNet>) {
+fn reconcile(problem: &RoutingView, solution: &mut RouteSolution, failed: &mut Vec<FailedNet>) {
     crate::via_cleanup::normalize_redundant_vias(problem, solution);
     let mut dropped = pcb_drc::lint::drop_violating_copper(problem, solution);
     dropped.extend(pcb_drc::lint::drop_unconnected_copper(problem, solution));
@@ -1030,8 +1030,8 @@ mod tests {
         Point2 { x, y }
     }
 
-    fn base(connections: Vec<Connection>, obstacles: Vec<Obstacle>) -> RouteProblem {
-        RouteProblem {
+    fn base(connections: Vec<Connection>, obstacles: Vec<Obstacle>) -> RoutingView {
+        RoutingView {
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles,
@@ -1437,7 +1437,7 @@ mod tests {
 
     #[test]
     fn visibility_fallback_routes_alternating_same_layer_channel() {
-        let p = RouteProblem {
+        let p = RoutingView {
             bounds: Rect {
                 min_x: 0.0,
                 max_x: 30.0,

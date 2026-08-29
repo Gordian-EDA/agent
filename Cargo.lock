@@ -1040,7 +1040,6 @@ dependencies = [
  "pcb-drc",
  "pcb-model",
  "pcb-place",
- "pcb-place-api",
  "pcb-route-grid",
  "pcb-route-mesh",
  "prost",
@@ -1105,7 +1104,6 @@ dependencies = [
  "pcb-drc",
  "pcb-model",
  "pcb-place",
- "pcb-place-api",
  "pcb-route-grid",
  "pcb-route-mesh",
  "prost-types",
@@ -2100,6 +2098,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pcb-engine"
+version = "0.1.0"
+dependencies = [
+ "pcb-drc",
+ "pcb-model",
+ "pcb-place",
+ "pcb-route-mesh",
+]
+
+[[package]]
 name = "pcb-model"
 version = "0.1.0"
 dependencies = [
@@ -2118,20 +2126,7 @@ dependencies = [
  "geom",
  "pcb-drc",
  "pcb-model",
- "pcb-place-api",
  "pcb-route-grid",
- "rayon",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "pcb-place-api"
-version = "0.1.0"
-dependencies = [
- "geom",
- "pcb-model",
- "rayon",
  "serde",
  "serde_json",
 ]

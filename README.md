@@ -61,16 +61,13 @@ cargo run --release -p gordian -- agent --project ./my_board "a 3.3V buck conver
 cargo run --release -p gordian -- tui --project ./my_board
 ```
 
-The default PCB router is the production `auto` portfolio. To isolate a routing strategy, set:
+PCB physical design uses one tuned place-then-route engine. Schematic placement
+remains independently selectable:
 
 ```toml
 [engines]
 schematicPlacer = "cluster" # cluster | anneal | spine
-pcbRouter = "auto"        # auto | mesh | sequential | astar
 ```
-
-`mesh` runs the negotiated capacity-mesh router plus adaptive rescue. `sequential` runs the
-contextual sequential grid router directly. `astar` is the grid A* baseline.
 
 ## Architecture
 
@@ -83,11 +80,11 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | `circuit-lang` | Parser, linter, and canonical emitter for the circuit markup language |
 | `circuit-graph` | Attributed circuit graph + a declarative idiom matcher |
 | `sch-floorplan` / `sch-io` / `sch-place` | Deterministic schematic floorplan core (`Design` → `.kicad_sch` and back), over the anneal/constraint placement engines, with the shared model + I/O layers |
-| `pcb-model` | Shared PCB placement/routing geometry and problem/result types |
-| `pcb-place-api` | Stable PCB placement contracts, legality checks, and routability ranking |
-| `pcb-place` | Built-in force-directed, annealing, fan-out, and legalization placement engines |
-| `pcb-route-grid` | Sequential grid-A\* PCB router |
-| `pcb-route-mesh` | Capacity-mesh negotiated PCB router |
+| `pcb-model` | Unified `PcbProblem -> PcbSolution` framework contract |
+| `pcb-engine` | Gordian's single tuned place-then-route PCB engine |
+| `pcb-place` | Placement views and the engine's tuned placement phase |
+| `pcb-route-grid` | Grid/A\* primitives for the tuned routing phase |
+| `pcb-route-mesh` | Tuned routing pipeline and lower-level mesh diagnostics |
 | `pcb-drc` | Extensible PCB geometry and connectivity DRC |
 | `kicad` / `kicad-ipc` / `specctra` | KiCAD discovery and CLI driver, live IPC session, Specctra DSN/SES |
 

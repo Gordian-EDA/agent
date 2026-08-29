@@ -43,8 +43,8 @@ pub use gordian_runtime::AgentRuntime;
 pub use gordian_runtime::config::{
     AgentConfig, CONFIG_SCHEMA_VERSION, ConfigError, DEFAULT_MAX_TOKENS, DEFAULT_RENDER_MAX_PX,
     DEFAULT_SCHEMATIC_FILENAME, DEFAULT_SEARCH_LIMIT, EngineConfig, GordianConfig, KicadConfig,
-    LlmConfig, LlmReasoningEffort, PcbRouterEngine, ProjectConfig, ReviewConfig,
-    SchematicPlacementEngine, ToolConfig,
+    LlmConfig, LlmReasoningEffort, ProjectConfig, ReviewConfig, SchematicPlacementEngine,
+    ToolConfig,
 };
 pub use gordian_runtime::tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
 pub use review::{review, review_image};

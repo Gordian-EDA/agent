@@ -3,7 +3,7 @@ fn bridge_does_not_depend_on_engine_models() {
     let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .expect("read kicad-ipc Cargo.toml");
 
-    for forbidden in ["pcb-model", "pcb-place-api"] {
+    for forbidden in ["pcb-model", "pcb-place"] {
         assert!(
             !manifest.lines().any(|line| {
                 line.trim_start()

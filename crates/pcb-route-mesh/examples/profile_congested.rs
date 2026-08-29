@@ -5,12 +5,12 @@
 use std::path::Path;
 use std::time::Instant;
 
+use pcb_model::RoutingView;
 use pcb_route_mesh::crossing::assign_crossings;
 use pcb_route_mesh::detail::route_cells;
 use pcb_route_mesh::mesh::CapacityMesh;
 use pcb_route_mesh::pathing::global_route;
 use pcb_route_mesh::pipeline::route_detailed;
-use pcb_model::RouteProblem;
 
 fn main() {
     let name = std::env::args()
@@ -20,7 +20,7 @@ fn main() {
         .join("fixtures")
         .join(&name);
     let json = std::fs::read_to_string(&path).unwrap();
-    let problem: RouteProblem = serde_json::from_str(&json).unwrap();
+    let problem: RoutingView = serde_json::from_str(&json).unwrap();
     println!("fixture {name}: {} connections", problem.connections.len());
 
     let t = Instant::now();

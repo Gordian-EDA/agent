@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use geom::Rect;
 use kicad_footprint::{FootprintCatalog, FootprintId};
 use pcb_model::{Point2, Polygon};
-use pcb_place_api::LockedAt;
+use pcb_place::LockedAt;
 
 use gordian_runtime::AgentRuntime;
 use gordian_runtime::tool::footprint_suggestion_clause;

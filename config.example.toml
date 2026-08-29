@@ -42,5 +42,3 @@ renderMaxPx = 1600
 [engines]
 # Schematic placement implementation: cluster | anneal | spine
 schematicPlacer = "cluster"
-# pcbRouter: "auto" (A* + mesh selector), "astar", or "mesh"
-pcbRouter = "auto"
