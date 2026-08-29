@@ -32,9 +32,7 @@
 //! [`RoutabilityOracle`] selector — lives in the KERNEL (`pcb-place-api`) so a
 //! third party implements it against `pcb-model` ALONE. This crate supplies the
 //! BUILT-IN implementations: [`LegalizingPlacer`], [`AnnealingPlacer`],
-//! [`FanoutPlacer`], and the pcb-route-grid-backed [`GridAstarRanker`]. The model types
-//! are re-exported VERBATIM so every external `pcb_place::placement::…` path resolves
-//! unchanged.
+//! [`FanoutPlacer`]. Routing quality is caller-injected through [`RouteRanker`].
 //!
 //! ## Module layout
 //!
@@ -50,10 +48,9 @@
 //! - [`anneal`]  — the SA driver + its deterministic `SaRng`.
 //! - [`legalize`] — the legalizer driver; re-exports the kernel legality check.
 //! - [`route`]   — the pipeline entries ([`place`], [`place_best`], [`place_board`])
-//!   + the built-in [`Placer`]s and the [`GridAstarRanker`].
+//!   + the built-in [`Placer`]s.
 //!
-//! Routing for the ranking comes from `pcb-route-grid`; DRC from `pcb-drc`; the engine
-//! kernel from `pcb-place-api`; shared geometry from `geom`.
+//! The engine kernel comes from `pcb-place-api`; shared geometry comes from `geom`.
 
 mod anneal;
 mod cost;
@@ -69,7 +66,7 @@ mod route;
 pub use hints::{
     apply_edge_lock, apply_grid_hints, apply_surround, fan_out_rings, unified_fanout_place,
 };
-pub use route::{AnnealingPlacer, FanoutPlacer, GridAstarRanker, LegalizingPlacer};
+pub use route::{AnnealingPlacer, FanoutPlacer, LegalizingPlacer};
 pub use route::{place, place_best, place_board};
 
 #[cfg(test)]

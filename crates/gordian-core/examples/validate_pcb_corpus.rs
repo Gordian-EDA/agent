@@ -12,12 +12,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
-use pcb_drc::lint::lint;
 use gordian_tools_pcb::apply_direct_rescue_fallback;
 use gordian_tools_pcb::corpus::{load_corpus_board, route_problem_for_placement, run_kicad_drc};
-use pcb_route_grid::router::{GridAStarRouter, geometry_violations};
 use kicad::KicadInstallation;
 use kicad_footprint::FootprintCatalog;
+use pcb_drc::lint::lint;
+use pcb_model::{Point2, RouteProblem, RouteQuality, RouteResult, Router};
+use pcb_route_grid::router::{GridAStarRouter, geometry_violations};
 use pcb_route_mesh::crossing::{
     AssignedCrossing, AssignmentFailure, CellJob, CrossingAssignment, TerminalKind,
     assign_crossings,
@@ -29,7 +30,6 @@ use pcb_route_mesh::pipeline::{
     RouteAutoRun, RouteEngineAttempt, route_auto_with_diagnostics, route_detailed_with_global,
     route_mesh_with_diagnostics, route_sequential_with_diagnostics,
 };
-use pcb_model::{Point2, RouteProblem, RouteQuality, RouteResult, Router};
 
 const DEFAULT_BOARDS: &[&str] = &[
     "rc-divider",
@@ -72,7 +72,11 @@ fn main() -> Result<()> {
             }
         };
 
-        let placed = pcb_place::placement::place_board(&board.problem, &board.hints);
+        let placed = pcb_place::placement::place_board(
+            &board.problem,
+            &board.hints,
+            std::sync::Arc::new(gordian_tools_pcb::GridRouteRanker),
+        );
         let place_ms = started.elapsed().as_millis();
         if !placed.legal {
             failures += 1;

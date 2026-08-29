@@ -5,9 +5,10 @@
 //! [`Placer`]/[`RouteRanker`]/[`RoutabilityOracle`] trait seam all live in the
 //! kernel (`pcb-place-api`); this module supplies the BUILT-IN implementations:
 //! [`LegalizingPlacer`] (force + legalize, the baseline + spring idioms),
-//! [`AnnealingPlacer`] (SA refine), [`FanoutPlacer`] (the structured radial
-//! fast-path), and [`GridAstarRanker`] (a pcb-route-grid-backed default [`RouteRanker`]
-//! so the router stays injectable, not hardwired).
+//! [`AnnealingPlacer`] (SA refine), and [`FanoutPlacer`] (the structured radial
+//! fast-path). The caller injects the [`RouteRanker`].
+
+use std::sync::Arc;
 
 use super::anneal::anneal_placement;
 use super::cost::{compute_hpwl_with_rotations, place_cost};
@@ -18,12 +19,145 @@ use super::geometry::{
 };
 use super::hints::{apply_edge_lock, apply_grid_hints, unified_fanout_place};
 use super::legalize::{initial_grid, is_legal, legalize};
-use pcb_model::{LayerRef, Point2, Rect, RouteProblem, Router, failed_pad_weight};
+use pcb_model::{LayerRef, Point2, Rect};
 use pcb_place_api::decoupling_pairs;
 use pcb_place_api::{
     Edge, Pin, PlaceProblem, PlaceReport, PlaceResult, Placement, PlacementHints, derive_nets,
 };
 use pcb_place_api::{PlacementRankKey, Placer, RoutabilityOracle, RouteRanker};
+
+#[cfg(test)]
+use pcb_model::Router;
+
+#[cfg(test)]
+pub(crate) struct GridAstarRanker;
+
+#[cfg(test)]
+impl RouteRanker for GridAstarRanker {
+    fn faults(&self, problem: &pcb_model::RouteProblem) -> usize {
+        self.rank_key(problem).0
+    }
+
+    fn rank_key(&self, problem: &pcb_model::RouteProblem) -> pcb_place_api::RouteRankKey {
+        if placement_ranker_uses_layout_only(problem) {
+            return (0, 0, 0, 0, 0);
+        }
+        if placement_ranker_uses_bounded_pass(problem) {
+            return route_rank_key(
+                problem,
+                &pcb_route_grid::router::route_orthogonal_single_pass(problem),
+            );
+        }
+        let strict = route_rank_key(problem, &pcb_route_grid::router::route_orthogonal(problem));
+        let lenient = route_rank_key(
+            problem,
+            &pcb_route_grid::router::route_orthogonal_lenient(problem),
+        );
+        let orthogonal = strict.min(lenient);
+        rank_key_with_full_grid_fallback(
+            orthogonal,
+            should_try_full_grid_ranker_fallback(problem, orthogonal),
+            || {
+                route_rank_key(
+                    problem,
+                    &pcb_route_grid::router::GridAStarRouter.route(problem),
+                )
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn placement_ranker_uses_bounded_pass(problem: &pcb_model::RouteProblem) -> bool {
+    let terminals = problem
+        .connections
+        .iter()
+        .map(|connection| connection.points_to_connect.len())
+        .sum::<usize>();
+    terminals > 40 && terminals <= 48
+}
+
+#[cfg(test)]
+pub(crate) fn placement_ranker_uses_layout_only(problem: &pcb_model::RouteProblem) -> bool {
+    problem
+        .connections
+        .iter()
+        .map(|connection| connection.points_to_connect.len())
+        .sum::<usize>()
+        > 48
+}
+
+#[cfg(test)]
+pub(crate) fn route_rank_key(
+    problem: &pcb_model::RouteProblem,
+    routed: &pcb_model::RouteResult,
+) -> pcb_place_api::RouteRankKey {
+    let geometry = pcb_drc::lint::lint(problem, &routed.solution)
+        .iter()
+        .filter(|finding| !matches!(finding, pcb_drc::DrcViolation::Connectivity { .. }))
+        .count();
+    let metrics = routed.solution.metrics();
+    (
+        pcb_model::failed_pad_weight(problem, &routed.failed) + geometry,
+        geometry,
+        routed.failed.len(),
+        metrics.via_count,
+        (metrics.wirelength * 1000.0).round() as u64,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn route_rank_key_better(
+    candidate: pcb_place_api::RouteRankKey,
+    incumbent: pcb_place_api::RouteRankKey,
+) -> bool {
+    candidate < incumbent
+}
+
+#[cfg(test)]
+pub(crate) fn route_rank_key_clean_via_free(key: pcb_place_api::RouteRankKey) -> bool {
+    key.0 == 0 && key.3 == 0
+}
+
+#[cfg(test)]
+pub(crate) fn fanout_fast_path_accepts(
+    problem: &pcb_model::RouteProblem,
+    key: pcb_place_api::RouteRankKey,
+) -> bool {
+    !placement_ranker_uses_layout_only(problem) && route_rank_key_clean_via_free(key)
+}
+
+#[cfg(test)]
+pub(crate) fn should_try_full_grid_ranker_fallback(
+    problem: &pcb_model::RouteProblem,
+    orthogonal: pcb_place_api::RouteRankKey,
+) -> bool {
+    let terminals = problem
+        .connections
+        .iter()
+        .map(|connection| connection.points_to_connect.len())
+        .sum::<usize>();
+    let (max_connections, max_terminals) = if orthogonal.0 > 0 { (6, 18) } else { (4, 12) };
+    !route_rank_key_clean_via_free(orthogonal)
+        && problem.connections.len() <= max_connections
+        && terminals <= max_terminals
+}
+
+#[cfg(test)]
+pub(crate) fn rank_key_with_full_grid_fallback<F>(
+    orthogonal: pcb_place_api::RouteRankKey,
+    try_fallback: bool,
+    full_grid: F,
+) -> pcb_place_api::RouteRankKey
+where
+    F: FnOnce() -> pcb_place_api::RouteRankKey,
+{
+    if try_fallback && !route_rank_key_clean_via_free(orthogonal) {
+        orthogonal.min(full_grid())
+    } else {
+        orthogonal
+    }
+}
 
 /// Per-variant placement toggles a [`LegalizingPlacer`]/[`AnnealingPlacer`] carries.
 #[derive(Debug, Clone, Copy, Default)]
@@ -132,181 +266,15 @@ impl Placer for EdgeLockedPlacer {
     }
 }
 
-/// A [`RouteRanker`] backed by the FAST pcb-route-grid router + the shared DRC lint —
-/// the built-in routability scorer the oracle uses by default. Lives here (not in
-/// the kernel) so the router stays INJECTABLE: a third party supplies its own
-/// `RouteRanker` to rank with its own router instead.
-pub struct GridAstarRanker;
-
-const FULL_GRID_RANKER_FALLBACK_MAX_CONNECTIONS: usize = 4;
-const FULL_GRID_RANKER_FALLBACK_MAX_TERMINALS: usize = 12;
-const FAULTY_FULL_GRID_RANKER_FALLBACK_MAX_CONNECTIONS: usize = 6;
-const FAULTY_FULL_GRID_RANKER_FALLBACK_MAX_TERMINALS: usize = 18;
-/// Above this size, each placement candidate gets exactly one strict routing
-/// pass. The full order/strictness portfolio belongs on the winning board, not
-/// multiplied across every placement candidate.
-const PLACEMENT_RANKER_PORTFOLIO_MAX_TERMINALS: usize = 40;
-/// Even one A* pass can become pathological once a candidate contains several
-/// large multi-pad buses. Above this ceiling placement selection stays purely
-/// geometric; `route_board` still runs the full router once on the winner.
-const PLACEMENT_RANKER_SINGLE_PASS_MAX_TERMINALS: usize = 48;
-
-impl RouteRanker for GridAstarRanker {
-    /// Route with the fast naive router, count failed-pad weight + geometry DRC
-    /// violations (Connectivity excluded — it is the router's own unrouted
-    /// signal, already counted in `failed`). Weighting by pins mirrors the PCB
-    /// router selector: failing one high-pin-count bus/power net is worse than
-    /// failing a tiny two-pin signal. Only relative routability matters for
-    /// variant selection, so the slow capacity-mesh router on every candidate of
-    /// a 70-part board is needlessly expensive (export re-routes with route_auto).
-    ///
-    /// Uses the ORTHOGONAL route as the first-pass stable proxy: it keeps the common
-    /// clean-board placement choice invariant to the router's 8-way diagonal default.
-    /// Within that orthogonal family it mirrors the grid router's strict/lenient
-    /// fallback. If the orthogonal proxy still leaves faults, or routes a small
-    /// local problem cleanly only by spending vias, the ranker pays for the full
-    /// grid portfolio and keeps it when it proves strictly better; full-board
-    /// placement-oracle candidates stay on the fast proxy. High-terminal candidates
-    /// have an explicit work ceiling: first a single strict pass, then geometry-only
-    /// ranking once even that pass is no longer predictably interactive. The winning
-    /// board is still fully routed by `route_board`.
-    fn faults(&self, rp: &RouteProblem) -> usize {
-        self.rank_key(rp).0
-    }
-
-    fn rank_key(&self, rp: &RouteProblem) -> (usize, usize, usize, usize, u64) {
-        if placement_ranker_uses_layout_only(rp) {
-            // Equal route keys deliberately fall through to the oracle's existing
-            // hint-penalty, layout-cost, and HPWL tie-breaks.
-            return (0, 0, 0, 0, 0);
-        }
-        if placement_ranker_uses_bounded_pass(rp) {
-            return route_rank_key(rp, &pcb_route_grid::router::route_orthogonal_single_pass(rp));
-        }
-        let routed = pcb_route_grid::router::route_orthogonal(rp);
-        let strict_key = route_rank_key(rp, &routed);
-        if route_rank_key_clean_via_free(strict_key) {
-            return strict_key;
-        }
-
-        let lenient = pcb_route_grid::router::route_orthogonal_lenient(rp);
-        let lenient_key = route_rank_key(rp, &lenient);
-        let orthogonal_key = if route_rank_key_better(lenient_key, strict_key) {
-            lenient_key
-        } else {
-            strict_key
-        };
-        if route_rank_key_clean_via_free(orthogonal_key) {
-            return orthogonal_key;
-        }
-
-        rank_key_with_full_grid_fallback(
-            orthogonal_key,
-            should_try_full_grid_ranker_fallback(rp, orthogonal_key),
-            || route_rank_key(rp, &pcb_route_grid::router::GridAStarRouter.route(rp)),
-        )
-    }
-}
-
-pub(crate) fn placement_ranker_uses_bounded_pass(problem: &RouteProblem) -> bool {
-    let terminals = problem
-        .connections
-        .iter()
-        .map(|connection| connection.points_to_connect.len())
-        .sum::<usize>();
-    terminals > PLACEMENT_RANKER_PORTFOLIO_MAX_TERMINALS
-        && terminals <= PLACEMENT_RANKER_SINGLE_PASS_MAX_TERMINALS
-}
-
-pub(crate) fn placement_ranker_uses_layout_only(problem: &RouteProblem) -> bool {
-    problem
-        .connections
-        .iter()
-        .map(|connection| connection.points_to_connect.len())
-        .sum::<usize>()
-        > PLACEMENT_RANKER_SINGLE_PASS_MAX_TERMINALS
-}
-
-pub(crate) fn route_rank_key(
-    rp: &RouteProblem,
-    routed: &pcb_model::RouteResult,
-) -> (usize, usize, usize, usize, u64) {
-    let geom = pcb_drc::lint::lint(rp, &routed.solution)
-        .iter()
-        .filter(|v| !matches!(v, pcb_drc::lint::DrcViolation::Connectivity { .. }))
-        .count();
-    let metrics = routed.solution.metrics();
-    (
-        failed_pad_weight(rp, &routed.failed) + geom,
-        geom,
-        routed.failed.len(),
-        metrics.via_count,
-        (metrics.wirelength * 1000.0).round() as u64,
-    )
-}
-
-pub(crate) fn route_rank_key_better(
-    candidate: (usize, usize, usize, usize, u64),
-    incumbent: (usize, usize, usize, usize, u64),
-) -> bool {
-    candidate < incumbent
-}
-
-pub(crate) fn route_rank_key_clean_via_free(key: (usize, usize, usize, usize, u64)) -> bool {
-    key.0 == 0 && key.3 == 0
-}
-
-pub(crate) fn rank_key_with_full_grid_fallback<F>(
-    orthogonal_key: (usize, usize, usize, usize, u64),
-    should_try_full_grid: bool,
-    full_grid_key: F,
-) -> (usize, usize, usize, usize, u64)
-where
-    F: FnOnce() -> (usize, usize, usize, usize, u64),
-{
-    if !should_try_full_grid || route_rank_key_clean_via_free(orthogonal_key) {
-        return orthogonal_key;
-    }
-    let full_grid_key = full_grid_key();
-    if route_rank_key_better(full_grid_key, orthogonal_key) {
-        full_grid_key
-    } else {
-        orthogonal_key
-    }
-}
-
-pub(crate) fn should_try_full_grid_ranker_fallback(
-    rp: &RouteProblem,
-    orthogonal_key: (usize, usize, usize, usize, u64),
-) -> bool {
-    if route_rank_key_clean_via_free(orthogonal_key) {
-        return false;
-    }
-    let connection_count = rp.connections.len();
-    let terminal_count = rp
-        .connections
-        .iter()
-        .map(|conn| conn.points_to_connect.len())
-        .sum::<usize>();
-    let (max_connections, max_terminals) = if orthogonal_key.0 > 0 {
-        (
-            FAULTY_FULL_GRID_RANKER_FALLBACK_MAX_CONNECTIONS,
-            FAULTY_FULL_GRID_RANKER_FALLBACK_MAX_TERMINALS,
-        )
-    } else {
-        (
-            FULL_GRID_RANKER_FALLBACK_MAX_CONNECTIONS,
-            FULL_GRID_RANKER_FALLBACK_MAX_TERMINALS,
-        )
-    };
-    connection_count <= max_connections && terminal_count <= max_terminals
-}
-
 /// Build the routability oracle for THIS board: the baseline [`LegalizingPlacer`]
 /// (`placers[0]`, the exact-tie winner) plus the SA refine and, when they apply, the
 /// spring-idiom variants. The candidate set + order match the previous `place_best`
 /// portfolio exactly, so the oracle's selection is byte-identical.
-fn board_oracle(problem: &PlaceProblem, hints: &PlacementHints) -> RoutabilityOracle {
+fn board_oracle(
+    problem: &PlaceProblem,
+    hints: &PlacementHints,
+    ranker: Arc<dyn RouteRanker + Send + Sync>,
+) -> RoutabilityOracle {
     let has_decouple = !decoupling_pairs(problem).is_empty();
     let has_edge = !hints.edge_seek.is_empty();
 
@@ -345,13 +313,13 @@ fn board_oracle(problem: &PlaceProblem, hints: &PlacementHints) -> RoutabilityOr
             },
         }));
     }
-    RoutabilityOracle::new(placers, Box::new(GridAstarRanker))
+    RoutabilityOracle::new(placers, ranker)
 }
 
 /// Place `problem` and return the variant that ROUTES cleanest — the placement
 /// analog of `route_auto`. It runs the baseline placement plus idiom variants
 /// (decoupling co-placement, aspect-aware connector edges), routes each via the
-/// injected [`GridAstarRanker`], and keeps whichever yields fewer routing faults
+/// injected [`RouteRanker`], and keeps whichever yields fewer routing faults
 /// (unrouted nets + geometry DRC violations), breaking ties by lower layout cost
 /// then HPWL. The baseline is always a candidate, so an idiom variant that does not
 /// actually help (e.g. one that scatters a board's power net) is automatically
@@ -360,15 +328,20 @@ fn board_oracle(problem: &PlaceProblem, hints: &PlacementHints) -> RoutabilityOr
 /// cap-ring snap ([`snap_caps_to_anchor_ring`]) lives: the baseline runs UNSNAPPED
 /// and the `decouple` variant runs snapped, so the oracle picks snapped-vs-unsnapped
 /// per board.
-pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
-    place_best_with_rank_key(problem, hints).0
+pub fn place_best(
+    problem: &PlaceProblem,
+    hints: &PlacementHints,
+    ranker: Arc<dyn RouteRanker + Send + Sync>,
+) -> PlaceResult {
+    place_best_with_rank_key(problem, hints, ranker).0
 }
 
 fn place_best_with_rank_key(
     problem: &PlaceProblem,
     hints: &PlacementHints,
+    ranker: Arc<dyn RouteRanker + Send + Sync>,
 ) -> (PlaceResult, PlacementRankKey) {
-    let (mut best, key) = board_oracle(problem, hints).place_with_rank_key(problem, hints);
+    let (mut best, key) = board_oracle(problem, hints, ranker).place_with_rank_key(problem, hints);
     // Post-pass: seat mounting holes (corner_seek) at the board corners on the
     // WINNING placement. They carry no signal nets (GND-plane only), so moving
     // them never changes routing — which is why this must run AFTER the faults-
@@ -384,7 +357,15 @@ fn place_best_with_rank_key(
 /// When the fan-out doesn't apply (no dominant IC) or its result is illegal, it
 /// falls back to the oracle on the un-fanned board — so it is NEVER worse than the
 /// legalizing baseline. This is `place_board`'s built-in placer.
-pub struct FanoutPlacer;
+pub struct FanoutPlacer {
+    ranker: Arc<dyn RouteRanker + Send + Sync>,
+}
+
+impl FanoutPlacer {
+    pub fn new(ranker: Arc<dyn RouteRanker + Send + Sync>) -> Self {
+        Self { ranker }
+    }
+}
 
 impl Placer for FanoutPlacer {
     fn name(&self) -> &'static str {
@@ -403,82 +384,28 @@ impl Placer for FanoutPlacer {
             if result.legal {
                 let mut base = problem.clone();
                 apply_grid_hints(&mut base, hints);
-                // A legal fanout that a single strict orthogonal pass routes cleanly
-                // without vias is already a strong result. Return it directly instead
-                // of multiplying routing work across the full 2-5 candidate placement
-                // portfolio. The gate is deliberately unavailable above the ranker's
-                // bounded terminal ceiling: those boards use layout-only ranking, which
-                // must never be mistaken for evidence of a clean route. Explicit grid
-                // hints also keep the portfolio comparison because `base` then encodes
-                // authored placement intent that fanout may not preserve.
-                let result_rank = (base == *problem)
-                    .then(|| bounded_fanout_rank(problem, &result))
-                    .flatten();
-                if result_rank.as_ref().is_some_and(|(_, strong)| *strong) {
-                    return result;
-                }
-
-                let (fallback, fallback_key) = place_best_with_rank_key(&base, hints);
-                let winner = if base == *problem {
-                    let result_key = result_rank
-                        .map(|(key, _)| key)
-                        .unwrap_or_else(|| place_rank_key(problem, &result));
-                    better_place_result_with_keys(result, result_key, fallback, fallback_key)
-                } else {
-                    better_place_result(problem, result, fallback)
-                };
-                return winner;
+                let (fallback, fallback_key) =
+                    place_best_with_rank_key(&base, hints, self.ranker.clone());
+                let result_key = place_rank_key(problem, &result, self.ranker.as_ref());
+                return better_place_result_with_keys(result, result_key, fallback, fallback_key);
             }
-            let optimized = place_best(&p, hints);
+            let optimized = place_best(&p, hints, self.ranker.clone());
             if optimized.legal {
                 return optimized;
             }
             let mut base = problem.clone();
             apply_grid_hints(&mut base, hints);
-            return place_best(&base, hints);
+            return place_best(&base, hints, self.ranker.clone());
         }
-        place_best(&p, hints)
+        place_best(&p, hints, self.ranker.clone())
     }
 }
 
-/// Rank one legal fanout with exactly one strict orthogonal routing pass.
-///
-/// `None` means the problem exceeds the placement ranker's bounded-routing ceiling;
-/// its normal rank would be layout-only and therefore cannot prove route quality.
-fn bounded_fanout_rank(
+fn place_rank_key(
     problem: &PlaceProblem,
     result: &PlaceResult,
-) -> Option<(PlacementRankKey, bool)> {
-    if !result.legal {
-        return None;
-    }
-    let rp = pcb_place_api::to_route_problem(problem, &result.placements);
-    if placement_ranker_uses_layout_only(&rp) {
-        return None;
-    }
-    let route_key = route_rank_key(&rp, &pcb_route_grid::router::route_orthogonal_single_pass(&rp));
-    let strong = fanout_fast_path_accepts(&rp, route_key);
-    Some((
-        (
-            route_key,
-            0,
-            (result.report.layout_cost * 1000.0) as u64,
-            (result.report.hpwl * 1000.0) as u64,
-        ),
-        strong,
-    ))
-}
-
-/// A fanout is strong enough to bypass the fallback portfolio only when the
-/// bounded pass is real (not layout-only), clean, and via-free.
-pub(crate) fn fanout_fast_path_accepts(
-    problem: &RouteProblem,
-    route_key: (usize, usize, usize, usize, u64),
-) -> bool {
-    !placement_ranker_uses_layout_only(problem) && route_rank_key_clean_via_free(route_key)
-}
-
-fn place_rank_key(problem: &PlaceProblem, result: &PlaceResult) -> PlacementRankKey {
+    ranker: &dyn RouteRanker,
+) -> PlacementRankKey {
     if !result.legal {
         return (
             (usize::MAX, usize::MAX, usize::MAX, usize::MAX, u64::MAX),
@@ -489,20 +416,22 @@ fn place_rank_key(problem: &PlaceProblem, result: &PlaceResult) -> PlacementRank
     }
     let rp = pcb_place_api::to_route_problem(problem, &result.placements);
     (
-        GridAstarRanker.rank_key(&rp),
+        ranker.rank_key(&rp),
         0,
         (result.report.layout_cost * 1000.0) as u64,
         (result.report.hpwl * 1000.0) as u64,
     )
 }
 
+#[cfg(test)]
 pub(crate) fn better_place_result(
     problem: &PlaceProblem,
     incumbent: PlaceResult,
     challenger: PlaceResult,
+    ranker: &dyn RouteRanker,
 ) -> PlaceResult {
-    let incumbent_key = place_rank_key(problem, &incumbent);
-    let challenger_key = place_rank_key(problem, &challenger);
+    let incumbent_key = place_rank_key(problem, &incumbent, ranker);
+    let challenger_key = place_rank_key(problem, &challenger, ranker);
     better_place_result_with_keys(incumbent, incumbent_key, challenger, challenger_key)
 }
 
@@ -533,8 +462,12 @@ fn better_place_result_with_keys(
 ///    variants, each routed and the most routable kept.
 ///
 /// A fan-out that cannot seat legally is discarded in favour of `place_best`.
-pub fn place_board(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
-    FanoutPlacer.place(problem, hints)
+pub fn place_board(
+    problem: &PlaceProblem,
+    hints: &PlacementHints,
+    ranker: Arc<dyn RouteRanker + Send + Sync>,
+) -> PlaceResult {
+    FanoutPlacer::new(ranker).place(problem, hints)
 }
 
 /// Move up to four `corner_seek` parts to a maximum-cardinality set of distinct,

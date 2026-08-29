@@ -11,8 +11,10 @@ circuit-graph = { path = "../circuit-graph" }
 geom = { path = "../geom" }
 pcb-model = { path = "../pcb-model" }
 pcb-place-api = { path = "../pcb-place-api" }
-pcb-drc = { path = "../pcb-drc" }
-pcb-route-grid = { path = "../pcb-route-grid" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 rayon.workspace = true
+
+[dev-dependencies]
+pcb-drc = { path = "../pcb-drc" }
+pcb-route-grid = { path = "../pcb-route-grid" }

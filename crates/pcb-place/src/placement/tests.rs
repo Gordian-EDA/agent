@@ -21,14 +21,15 @@ use super::route::{
     seat_corner_seek_parts, should_try_full_grid_ranker_fallback, swap_pair_order,
     unique_position_candidates,
 };
-use pcb_drc::connectivity;
 use geom::Rect;
+use pcb_drc::connectivity;
 use pcb_model::{Connection, LayerRef, Obstacle, Point2, Polygon, RoutePoint, RouteProblem};
 use pcb_place_api::{
     Edge, GroupHint, LockedAt, Part, PartPad, PlaceProblem, PlacementHints, derive_nets,
     series_pairs, to_route_problem,
 };
 use pcb_place_api::{Placer, RouteRanker, compute_hpwl, compute_hpwl_with_rotations};
+use std::sync::Arc;
 
 fn board(w: f64, h: f64) -> Rect {
     Rect {
@@ -37,6 +38,10 @@ fn board(w: f64, h: f64) -> Rect {
         min_y: 0.0,
         max_y: h,
     }
+}
+
+fn test_ranker() -> Arc<dyn RouteRanker + Send + Sync> {
+    Arc::new(GridAstarRanker)
 }
 
 fn top() -> Vec<LayerRef> {
@@ -2782,7 +2787,7 @@ fn fanout_keeps_crystal_cluster_near_dense_ic() {
         outline: None,
     };
 
-    let res = place_board(&problem, &PlacementHints::default());
+    let res = place_board(&problem, &PlacementHints::default(), test_ranker());
     assert!(res.legal, "fanout crystal placement must be legal: {res:?}");
     let at = |r: &str| res.placements.iter().find(|p| p.reference == r).unwrap().at;
     let u1 = at("U1");
@@ -3717,7 +3722,7 @@ fn place_result_selector_keeps_routable_layout_over_lower_cost_unroutable_one() 
     let routable = result(2.0, 5.0, 2.0, 15.0, 1000.0);
     let unroutable = result(2.0, 10.0, 18.0, 10.0, 1.0);
 
-    let winner = better_place_result(&problem, routable, unroutable);
+    let winner = better_place_result(&problem, routable, unroutable, test_ranker().as_ref());
 
     assert_eq!(winner.placements[1].at.x, 2.0);
     assert_eq!(
@@ -3812,7 +3817,12 @@ fn place_result_selector_prefers_lower_via_route_before_layout_cost() {
         "same-side route should need fewer vias: {no_via_key:?} vs {via_key:?}"
     );
 
-    let winner = better_place_result(&problem, same_side_no_via, cross_wall_with_vias);
+    let winner = better_place_result(
+        &problem,
+        same_side_no_via,
+        cross_wall_with_vias,
+        test_ranker().as_ref(),
+    );
 
     assert_eq!(
         winner.report.layout_cost, 1000.0,
@@ -3846,7 +3856,7 @@ fn place_result_selector_keeps_incumbent_on_exact_rank_tie() {
         },
     };
 
-    let winner = better_place_result(&problem, mk(3.0), mk(15.0));
+    let winner = better_place_result(&problem, mk(3.0), mk(15.0), test_ranker().as_ref());
 
     assert_eq!(winner.placements[0].at.x, 3.0);
 }
@@ -4088,7 +4098,7 @@ fn oracle_placement_is_byte_identical_to_pinned_snapshot() {
         corner_seek: vec![],
     };
 
-    let res = place_board(&problem, &hints);
+    let res = place_board(&problem, &hints, test_ranker());
     let got = serde_json::to_string(&res).unwrap();
     const PINNED: &str = r#"{"placements":[{"reference":"U1","at":{"x":9.0,"y":11.5},"rotation":270.0},{"reference":"U2","at":{"x":15.0,"y":10.0},"rotation":0.0},{"reference":"Ca0","at":{"x":4.5,"y":5.0},"rotation":90.0},{"reference":"Ca1","at":{"x":5.5,"y":12.0},"rotation":90.0},{"reference":"Ca2","at":{"x":9.0,"y":8.0},"rotation":0.0},{"reference":"Cb0","at":{"x":14.5,"y":7.5},"rotation":0.0},{"reference":"Cb1","at":{"x":9.5,"y":5.5},"rotation":180.0},{"reference":"Cb2","at":{"x":14.5,"y":5.5},"rotation":0.0},{"reference":"J1","at":{"x":2.0,"y":7.5},"rotation":180.0},{"reference":"R1","at":{"x":20.5,"y":12.5},"rotation":90.0},{"reference":"R2","at":{"x":14.5,"y":14.5},"rotation":0.0}],"legal":true,"report":{"overlapsResolved":7,"outOfBoundsClamps":0,"hpwl":95.63499999999999,"layoutCost":326.90557330030066}}"#;
     assert_eq!(

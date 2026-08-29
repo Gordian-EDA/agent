@@ -18,6 +18,7 @@ use geom::{Point2, Polygon, Rect};
 use pcb_model::{Connection, LayerRef, Obstacle, RoutePoint, RouteProblem};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 // ── problem ──────────────────────────────────────────────────────────────────
 
@@ -822,8 +823,8 @@ pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> Rou
 /// A PCB placement ENGINE: given a [`PlaceProblem`] and [`PlacementHints`], produce
 /// a [`PlaceResult`] (per-part placements + an honest legality verdict + a report).
 /// The only contract is "produce a placement"; *how* (force/anneal/fan-out, learned,
-/// constraint, template, portfolio) is the engine's own business. Lives in the kernel
-/// (`pcb-model`) so a third party can implement it against `pcb-model` ALONE.
+/// constraint, template, portfolio) is the engine's own business. Lives in this
+/// API crate so a third party can implement it against `pcb-place-api` alone.
 ///
 /// ## Contract
 /// - **Deterministic given the [`PlaceProblem`] + [`PlacementHints`].** No clock, no
@@ -898,14 +899,14 @@ pub struct RoutabilityOracle {
     /// so the oracle can evaluate candidates in parallel.
     pub placers: Vec<Box<dyn Placer + Send + Sync>>,
     /// The router the oracle ranks routability with — injected, not hardwired.
-    pub ranker: Box<dyn RouteRanker + Send + Sync>,
+    pub ranker: Arc<dyn RouteRanker + Send + Sync>,
 }
 
 impl RoutabilityOracle {
     /// Build an oracle from a placer portfolio and a route ranker.
     pub fn new(
         placers: Vec<Box<dyn Placer + Send + Sync>>,
-        ranker: Box<dyn RouteRanker + Send + Sync>,
+        ranker: Arc<dyn RouteRanker + Send + Sync>,
     ) -> Self {
         Self { placers, ranker }
     }
@@ -1214,7 +1215,7 @@ mod tests {
                     layout_cost: 100.0,
                 }),
             ],
-            Box::new(RichRanker),
+            Arc::new(RichRanker),
         );
 
         let result = oracle.place(&problem, &PlacementHints::default());
@@ -1310,7 +1311,7 @@ mod tests {
                     layout_cost: 100.0,
                 }),
             ],
-            Box::new(EqualRanker),
+            Arc::new(EqualRanker),
         );
 
         let result = oracle.place(
@@ -1370,7 +1371,7 @@ mod tests {
                     layout_cost: 100.0,
                 }),
             ],
-            Box::new(EqualRanker),
+            Arc::new(EqualRanker),
         );
 
         let result = oracle.place(
@@ -1419,7 +1420,7 @@ mod tests {
                     layout_cost: 100.0,
                 }),
             ],
-            Box::new(EqualRanker),
+            Arc::new(EqualRanker),
         );
         let hints = PlacementHints {
             groups: vec![GroupHint {
@@ -1500,7 +1501,7 @@ mod tests {
                     layout_cost: 5.0,
                 }),
             ],
-            Box::new(CountingRanker {
+            Arc::new(CountingRanker {
                 calls: calls.clone(),
             }),
         );

@@ -39,6 +39,7 @@ mod interactive;
 mod outline;
 mod patch;
 mod place;
+mod place_ranker;
 mod render;
 mod route;
 mod seed;
@@ -60,6 +61,7 @@ pub use interactive::{
 };
 pub use outline::update_board_outline;
 pub use place::{get_board, place_board};
+pub use place_ranker::GridRouteRanker;
 pub use render::render_board;
 pub use route::{apply_direct_rescue_fallback, route_board};
 pub use seed::{BoardSeedRules, PourSpec};

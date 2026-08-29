@@ -2,6 +2,7 @@
 
 use circuit_graph::netclass::is_ground;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -18,6 +19,10 @@ use pcb_place_api::{
 use gordian_runtime::AgentRuntime;
 
 use crate::active::{ImportedPad, ImportedPart, IpcBoardSnapshot};
+
+fn placement_ranker() -> Arc<dyn pcb_place_api::RouteRanker + Send + Sync> {
+    Arc::new(crate::GridRouteRanker)
+}
 
 pub(super) fn part_from_footprint_layers(
     footprint: &Footprint,
@@ -1738,17 +1743,21 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         if prescribed.parts.iter().all(|part| part.locked.is_some()) {
             pcb_place::placement::place(&prescribed, &PlacementHints::default())
         } else {
-            pcb_place::placement::place_board(&problem, &hints)
+            pcb_place::placement::place_board(&problem, &hints, placement_ranker())
         }
     } else {
-        pcb_place::placement::place_board(&problem, &hints)
+        pcb_place::placement::place_board(&problem, &hints, placement_ranker())
     };
     // The 817 grammar prescribes strips sized for its canonical channel shape;
     // a richer channel (series R + TVS + status LED per input) can overflow
     // them with sub-millimetre collisions no canvas growth fixes. An illegal
     // prescribed result falls back to the generic placer instead of failing.
     if !result.legal && opto817_requirements.is_some() {
-        let generic = pcb_place::placement::place_board(&problem, &PlacementHints::default());
+        let generic = pcb_place::placement::place_board(
+            &problem,
+            &PlacementHints::default(),
+            placement_ranker(),
+        );
         if generic.legal {
             result = generic;
         }
@@ -3208,7 +3217,11 @@ mod tests {
             json!({"w": 120.0, "h": 60.0})
         );
         problem.bounds = Rect::new(0.0, 0.0, estimate.width.ceil(), estimate.height.ceil());
-        let second_call = pcb_place::placement::place_board(&problem, &PlacementHints::default());
+        let second_call = pcb_place::placement::place_board(
+            &problem,
+            &PlacementHints::default(),
+            placement_ranker(),
+        );
         assert!(second_call.legal);
     }
 
@@ -3336,7 +3349,7 @@ mod tests {
             edge_seek: refs.to_vec(),
             ..PlacementHints::default()
         };
-        let result = pcb_place::placement::place_board(&problem, &hints);
+        let result = pcb_place::placement::place_board(&problem, &hints, placement_ranker());
         assert!(result.legal, "real Palconn auto-placement must be legal");
         let auto_positions: Vec<Point2> = result.placements.iter().map(|p| p.at).collect();
         let auto_half: Vec<_> = problem
