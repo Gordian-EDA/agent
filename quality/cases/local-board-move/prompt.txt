@@ -1,0 +1,1 @@
+On the existing routed PCB, move R1 closer to R2 while preserving the board outline, schematic, values, and R2 position. Re-route only the affected copper, then run checks and render the result. Do not regenerate the whole board.

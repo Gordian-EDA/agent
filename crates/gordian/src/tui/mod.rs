@@ -320,6 +320,9 @@ impl Shell {
                         StopReason::NoProgress { completions } => {
                             TurnEndReason::NoProgress { completions }
                         }
+                        StopReason::QualityGateFailed { failures } => {
+                            TurnEndReason::QualityGateFailed { failures }
+                        }
                     },
                     Err(e) => TurnEndReason::Error(format!("{e:#}")),
                 }

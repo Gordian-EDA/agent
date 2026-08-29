@@ -2145,6 +2145,43 @@ blocks:
 }
 
 #[test]
+fn assign_footprints_ignores_virtual_power_symbols() {
+    let (ctx, _guard) = fixture_ctx();
+    let yaml = "\
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: R, between: [NET_A, GND]}
+      GND1: {part: power:GND, pins: {1: GND}}
+";
+    run_tool(
+        "create_design",
+        serde_json::json!({ "yaml": yaml, "overwrite": true }),
+        &ctx,
+    )
+    .unwrap();
+
+    let assigned = run_tool(
+        "assign_footprints",
+        serde_json::json!({
+            "assignments": [
+                { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric" },
+                { "reference": "GND1", "footprint": "Fixtures:R_0603_1608Metric" }
+            ],
+        }),
+        &ctx,
+    )
+    .unwrap();
+
+    assert_eq!(assigned["ok"], serde_json::json!(true), "{assigned}");
+    assert_eq!(assigned["count"], serde_json::json!(1));
+    assert_eq!(assigned["ignored"][0]["reference"], "GND1");
+    let draft = ctx.workspace().read_draft().unwrap().unwrap();
+    assert_eq!(draft.matches("Fixtures:R_0603_1608Metric").count(), 1);
+}
+
+#[test]
 fn regenerate_board_rejects_unapplied_draft_footprints() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");

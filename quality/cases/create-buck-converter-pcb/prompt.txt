@@ -1,0 +1,1 @@
+Create a routed 12 V to 5 V, 1 A buck-converter PCB using a real integrated regulator and its required inductor, diode if needed, feedback, input/output capacitors, protection, and connectors. Use sensible power trace widths, apply, place, route, check, render, and export fabrication files.

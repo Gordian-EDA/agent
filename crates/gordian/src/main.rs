@@ -19,7 +19,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use gordian_core::AgentRuntime;
 use gordian_core::prompts::system_prompt;
-use gordian_core::{Agent, AgentEvent, AutoApprove};
+use gordian_core::{Agent, AgentEvent, AutoApprove, StopReason};
 
 /// Default project directory when `--project` is omitted.
 const DEFAULT_PROJECT_DIR: &str = "gordian-project";
@@ -445,6 +445,12 @@ fn run_agent_command(args: &[String]) -> Result<()> {
         bail!(
             "ERC reported {} error(s) on the generated schematic",
             report.error_count()
+        );
+    }
+    if outcome.stop_reason != StopReason::Completed {
+        bail!(
+            "agent turn ended without completing its quality contract: {:?}",
+            outcome.stop_reason
         );
     }
     Ok(())

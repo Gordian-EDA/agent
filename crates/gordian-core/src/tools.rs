@@ -1811,37 +1811,7 @@ fn add_footprint_alias_normalizations(report: &mut Value, normalizations: Vec<Va
 /// less universal choices (ICs, polarized capacitors, switches, and terminal
 /// blocks) deliberately remain explicit author decisions.
 fn common_default_footprint(part: &str) -> Option<String> {
-    let fixed = match part {
-        "Device:R" => "Resistor_SMD:R_0603_1608Metric",
-        "Device:C" => "Capacitor_SMD:C_0603_1608Metric",
-        "Device:D" => "Diode_SMD:D_SOD-123",
-        "Device:LED" => "LED_SMD:LED_0603_1608Metric",
-        "Mechanical:MountingHole" => "MountingHole:MountingHole_3.2mm_M3",
-        _ => {
-            let (columns, pins) = if let Some(pins) =
-                part.strip_prefix("Connector_Generic:Conn_01x").or_else(|| {
-                    part.strip_prefix("Connector:Conn_01x")
-                        .and_then(|pins| pins.strip_suffix("_Pin"))
-                }) {
-                (1, pins)
-            } else if let Some(pins) = part
-                .strip_prefix("Connector_Generic:Conn_02x")
-                .and_then(|pins| pins.strip_suffix("_Odd_Even"))
-            {
-                (2, pins)
-            } else {
-                return None;
-            };
-            let rows = pins.parse::<usize>().ok()?;
-            if rows == 0 || rows > 40 {
-                return None;
-            }
-            return Some(format!(
-                "Connector_PinHeader_2.54mm:PinHeader_{columns}x{rows:02}_P2.54mm_Vertical"
-            ));
-        }
-    };
-    Some(fixed.to_owned())
+    gordian_tools_pcb::common_default_footprint(part)
 }
 
 /// Fill conventional footprints only when a draft is large enough that it is

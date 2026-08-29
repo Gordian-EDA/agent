@@ -1,0 +1,1 @@
+Create a compact routed 3.3 V CAN interface PCB. Use a real CAN transceiver, MCU TX/RX header, edge-mounted CANH/CANL/GND connector, switchable 120 Ω termination, bus TVS protection, and local decoupling. Apply, place, route, check, render, and export fabrication files.

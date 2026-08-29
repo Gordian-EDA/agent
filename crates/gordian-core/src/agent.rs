@@ -72,6 +72,11 @@ const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 /// explicit component floor in the request raises it via [`TurnBudgets`].
 const MAX_PROVIDER_REQUESTS_PER_TURN: usize = 32;
 
+/// A provider request has no project-side effects, so transient transport
+/// failures are safe to retry. Keep this small so bad credentials and other
+/// persistent configuration errors still fail promptly.
+const MAX_PROVIDER_ERROR_RETRIES: usize = 2;
+
 /// Reserve enough of a complex turn for the deterministic PCB pipeline instead
 /// of allowing schematic repair chatter to consume the whole global ceiling.
 const MAX_PCB_STAGE_REQUESTS: usize = 12;
@@ -226,6 +231,10 @@ const MAX_REVIEW_REAPPLY_NUDGES: usize = 1;
 /// tool call. The retry is explicitly compact; a second truncation stops
 /// honestly instead of being misreported as a blank successful completion.
 const MAX_OUTPUT_TRUNCATION_NUDGES: usize = 1;
+
+/// One chance for a model that has not touched the requested PCB workflow to
+/// start it before final prose is rejected by the end-to-end quality gate.
+const MAX_PCB_COMPLETION_NUDGES: usize = 1;
 
 /// The human mutation gate. The loop calls [`Approvals::approve`] with either a
 /// dry-run preview or a structured immediate-operation proposal; returning
@@ -455,6 +464,7 @@ fn constrain_schematic_tools_for_draft_state(
     draft_known_invalid: bool,
     review_has_defects: bool,
     review_needs_full_edit: bool,
+    pcb_footprints_missing: bool,
 ) {
     if !draft_exists && !schematic_exists {
         defs.retain(|tool| {
@@ -488,7 +498,14 @@ fn constrain_schematic_tools_for_draft_state(
                 )
         });
     } else if draft_exists && draft_dirty && draft_known_clean {
-        defs.retain(|tool| tool.name.as_str() == "apply_design");
+        defs.retain(|tool| {
+            tool.name.as_str() == "apply_design"
+                || (pcb_footprints_missing
+                    && matches!(
+                        tool.name.as_str(),
+                        "search_footprints" | "get_footprint_info" | "assign_footprints"
+                    ))
+        });
     }
 }
 
@@ -684,6 +701,11 @@ pub enum StopReason {
     NoProgress {
         /// Consecutive non-discovery completions that made no progress.
         completions: usize,
+    },
+    /// The model stopped, but required end-to-end artifact checks did not pass.
+    QualityGateFailed {
+        /// Number of unresolved gate failures or review findings.
+        failures: usize,
     },
 }
 
@@ -902,6 +924,7 @@ impl<P: Provider> Agent<P> {
         let mut tool_calls_made = 0usize;
         let precommit_review_required = request_requires_precommit_review(authoritative_intent);
         let pcb_work_requested = request_requires_pcb_work(authoritative_intent);
+        let pcb_tools_authorized = request_authorizes_pcb_tools(authoritative_intent);
         let budgets = TurnBudgets::for_intent(authoritative_intent);
         // `applied` deliberately means "committed in this turn", but bounded
         // stop messages must also recognize a draft that was already synced to
@@ -934,6 +957,12 @@ impl<P: Provider> Agent<P> {
         let mut tool_state_revision = 0u64;
         let mut provider_requests = 0usize;
         let mut stage_provider_requests = 0usize;
+        // Some OpenAI-compatible gateways advertise streaming but close the
+        // response without the terminal event that carries assembled tool
+        // calls. Recover once with a complete request, then avoid paying for a
+        // known-broken stream on every later reasoning cycle in this subturn.
+        let mut stream_transport_available = true;
+        let mut provider_error_retries_left = MAX_PROVIDER_ERROR_RETRIES;
         let mut discovery_rounds_used: HashMap<String, usize> = HashMap::new();
         // Last project-state revision at which each repeat-prone read ran.
         // Advancing `tool_state_revision` automatically makes every read
@@ -956,8 +985,13 @@ impl<P: Provider> Agent<P> {
         // Enter the bounded PCB stage immediately instead of requiring another
         // no-op apply in this turn before regeneration may trigger the fixed
         // place/route/DRC/render/fab pipeline.
-        let mut pcb_only_stage =
-            starts_in_pcb_stage(pcb_work_requested, draft_committed_at_turn_start);
+        let mut pcb_only_stage = starts_in_pcb_stage(
+            pcb_work_requested,
+            draft_committed_at_turn_start,
+            instruction,
+        );
+        let mut pcb_quality = PcbQualityState::default();
+        let mut pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
         let mut reserved_clean_apply_used = false;
         let mut reserved_review_repair_requests = RESERVED_REVIEW_REPAIR_REQUESTS;
 
@@ -1055,12 +1089,25 @@ impl<P: Provider> Agent<P> {
                 .as_ref()
                 .and_then(|state| state.errors)
                 .is_some_and(|errors| errors > 0);
+            let draft_component_repairable = draft_supports_component_repair(&self.runtime);
+            let pcb_missing_footprints = if pcb_work_requested {
+                draft_missing_footprints(&self.runtime)
+            } else {
+                Vec::new()
+            };
             offer_component_repair(
                 &mut defs,
-                draft_known_invalid || (review_has_defects && !review_needs_full_edit),
+                (draft_known_invalid && draft_component_repairable)
+                    || (review_has_defects && !review_needs_full_edit),
             );
             if pcb_only_stage {
                 defs.retain(|def| is_pcb_stage_tool(def.name.as_str()));
+            } else if !pcb_tools_authorized {
+                // A populated project can make the runtime enter BoardSeed or
+                // BoardActive even when this turn only asks for schematic work.
+                // Do not invite an otherwise-correct model to expand scope into
+                // destructive board regeneration or unsolicited routing.
+                defs.retain(|def| !is_pcb_stage_tool(def.name.as_str()));
             }
             if schematic_review_current.is_some() {
                 defs.retain(|def| def.name.as_str() != "review_design");
@@ -1077,84 +1124,115 @@ impl<P: Provider> Agent<P> {
                 draft_known_invalid,
                 review_has_defects,
                 review_needs_full_edit,
+                !pcb_missing_footprints.is_empty(),
             );
             if let Some(focus) = &component_shortfall_focus {
                 defs.retain(|tool| focus.permits(tool.name.as_str()));
             }
 
-            // Drive the provider's stream so assistant prose renders token-by-token
-            // (each chunk forwarded as `AssistantDelta`), while the terminal End
-            // event carries the assembled tool calls + usage. A non-streaming
-            // backend's default `stream` yields one chunk then the End, so the loop
-            // is unchanged for it.
-            let stream = match self.client.stream(&self.system, &self.history, &defs).await {
-                Ok(stream) => stream,
-                Err(error) => {
-                    self.emit_pending_usage(events);
-                    return Err(error);
-                }
-            };
-            let streamed = match stream_completion(stream, events).await {
-                Ok(streamed) => streamed,
-                Err(error) => {
-                    self.emit_pending_usage(events);
-                    return Err(error);
-                }
-            };
-            let (text, end) = match streamed {
-                StreamCompletion::End { text, end } => (text, end),
-                StreamCompletion::MissingEnd { text } => {
-                    // The recovery completion is a second provider invocation,
-                    // so it consumes the same hard request budget as the stream.
-                    // If the stream itself used the last slot, preserve any
-                    // partial prose and stop without issuing request N+1.
-                    if request_budget_exhausted(
-                        budgets,
-                        provider_requests,
-                        stage_provider_requests,
-                        pcb_work_requested,
-                        pcb_only_stage,
-                    ) {
-                        if !text.is_empty() {
-                            emit(events, AgentEvent::AssistantText(text.clone()));
-                            self.history.push(ChatMessage::assistant(text.clone()));
+            // Drive a healthy provider stream token-by-token. If this backend
+            // omits the terminal End event, recover once and use one-shot
+            // completions for the rest of the subturn.
+            let (text, end) = if stream_transport_available {
+                let stream = match self.client.stream(&self.system, &self.history, &defs).await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        self.emit_pending_usage(events);
+                        if provider_error_retries_left > 0 {
+                            provider_error_retries_left -= 1;
+                            continue;
                         }
-                        let current_applied = applied && !draft_dirty;
-                        let final_text = provider_limit_final_text(
-                            (!text.trim().is_empty()).then_some(text.as_str()),
-                            !draft_dirty && (applied || draft_committed_at_turn_start),
-                            tool_calls_made,
-                            last_tool_status.as_deref(),
-                        );
-                        emit(events, AgentEvent::AssistantText(final_text.clone()));
-                        return Ok(TurnOutcome {
-                            applied: current_applied,
-                            final_text,
-                            tool_calls_made,
-                            stop_reason: StopReason::ProviderRequestLimit {
-                                requests: provider_requests,
-                            },
-                        });
+                        return Err(error);
                     }
-                    provider_requests += 1;
-                    stage_provider_requests += 1;
-                    let end = match self
-                        .client
-                        .complete(&self.system, &self.history, &defs)
-                        .await
-                    {
-                        Ok(end) => end,
-                        Err(error) => {
-                            self.emit_pending_usage(events);
-                            return Err(error);
+                };
+                let streamed = match stream_completion(stream, events).await {
+                    Ok(streamed) => streamed,
+                    Err(error) => {
+                        self.emit_pending_usage(events);
+                        if provider_error_retries_left > 0 {
+                            provider_error_retries_left -= 1;
+                            continue;
                         }
-                    };
-                    let final_text = match completed_text(&end) {
-                        t if !t.is_empty() => t,
-                        _ => text,
-                    };
-                    (final_text, end)
+                        return Err(error);
+                    }
+                };
+                match streamed {
+                    StreamCompletion::End { text, end } => (text, end),
+                    StreamCompletion::MissingEnd { text } => {
+                        stream_transport_available = false;
+                        // The recovery completion is a second provider invocation,
+                        // so it consumes the same hard request budget as the stream.
+                        // If the stream itself used the last slot, preserve any
+                        // partial prose and stop without issuing request N+1.
+                        if request_budget_exhausted(
+                            budgets,
+                            provider_requests,
+                            stage_provider_requests,
+                            pcb_work_requested,
+                            pcb_only_stage,
+                        ) {
+                            if !text.is_empty() {
+                                emit(events, AgentEvent::AssistantText(text.clone()));
+                                self.history.push(ChatMessage::assistant(text.clone()));
+                            }
+                            let current_applied = applied && !draft_dirty;
+                            let final_text = provider_limit_final_text(
+                                (!text.trim().is_empty()).then_some(text.as_str()),
+                                !draft_dirty && (applied || draft_committed_at_turn_start),
+                                tool_calls_made,
+                                last_tool_status.as_deref(),
+                            );
+                            emit(events, AgentEvent::AssistantText(final_text.clone()));
+                            return Ok(TurnOutcome {
+                                applied: current_applied,
+                                final_text,
+                                tool_calls_made,
+                                stop_reason: StopReason::ProviderRequestLimit {
+                                    requests: provider_requests,
+                                },
+                            });
+                        }
+                        provider_requests += 1;
+                        stage_provider_requests += 1;
+                        let end = match self
+                            .client
+                            .complete(&self.system, &self.history, &defs)
+                            .await
+                        {
+                            Ok(end) => end,
+                            Err(error) => {
+                                self.emit_pending_usage(events);
+                                if provider_error_retries_left > 0 {
+                                    provider_error_retries_left -= 1;
+                                    continue;
+                                }
+                                return Err(error);
+                            }
+                        };
+                        let final_text = match completed_text(&end) {
+                            t if !t.is_empty() => t,
+                            _ => text,
+                        };
+                        (final_text, end)
+                    }
                 }
+            } else {
+                let end = match self
+                    .client
+                    .complete(&self.system, &self.history, &defs)
+                    .await
+                {
+                    Ok(end) => end,
+                    Err(error) => {
+                        self.emit_pending_usage(events);
+                        if provider_error_retries_left > 0 {
+                            provider_error_retries_left -= 1;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                };
+                (completed_text(&end), end)
             };
             let output_truncated = end
                 .captured_stop_reason
@@ -1247,6 +1325,32 @@ impl<P: Provider> Agent<P> {
                     nudges_left -= 1;
                     self.history.push(ChatMessage::user(COMMIT_NUDGE));
                     continue;
+                }
+
+                if pcb_work_requested
+                    && !pcb_quality.accepted(request_requires_fabrication(authoritative_intent))
+                {
+                    let missing =
+                        pcb_quality.missing(request_requires_fabrication(authoritative_intent));
+                    if !pcb_quality.attempted
+                        && discovery_rounds_used.is_empty()
+                        && pcb_completion_nudges_left > 0
+                    {
+                        pcb_completion_nudges_left -= 1;
+                        self.history
+                            .push(ChatMessage::user(pcb_completion_nudge(&missing)));
+                        continue;
+                    }
+                    let final_text = pcb_quality_failure_final_text(&missing, &text);
+                    emit(events, AgentEvent::AssistantText(final_text.clone()));
+                    return Ok(TurnOutcome {
+                        applied: applied && !draft_dirty,
+                        final_text,
+                        tool_calls_made,
+                        stop_reason: StopReason::QualityGateFailed {
+                            failures: missing.len(),
+                        },
+                    });
                 }
 
                 return Ok(TurnOutcome {
@@ -1376,10 +1480,15 @@ impl<P: Provider> Agent<P> {
                 let component_shortfall_tool_blocked = component_shortfall_focus
                     .as_ref()
                     .is_some_and(|focus| !focus.permits(&call.fn_name));
+                let unsolicited_pcb_tool_blocked =
+                    !pcb_tools_authorized && is_pcb_stage_tool(&call.fn_name);
                 let full_design_repair_blocked = call.fn_name == "repair_components"
                     && schematic_review_current
                         .as_ref()
                         .is_some_and(review_requires_full_design_edit);
+                let malformed_draft_repair_blocked = call.fn_name == "repair_components"
+                    && draft_known_invalid
+                    && !draft_component_repairable;
                 let schematic_review_clean = schematic_review_current
                     .as_ref()
                     .is_some_and(review_result_is_clean);
@@ -1403,6 +1512,13 @@ impl<P: Provider> Agent<P> {
                 let unchanged_apply_blocked = call.fn_name == "apply_design"
                     && !draft_dirty
                     && (commit_attempted_for_current_draft || draft_committed_at_turn_start);
+                let missing_footprints_for_apply =
+                    if call.fn_name == "apply_design" && pcb_work_requested {
+                        draft_missing_footprints(&self.runtime)
+                    } else {
+                        Vec::new()
+                    };
+                let incomplete_pcb_apply_blocked = !missing_footprints_for_apply.is_empty();
                 let dispatched = !route_retry_blocked
                     && !exact_id_discovery_blocked
                     && !timeout_retry_blocked
@@ -1415,12 +1531,15 @@ impl<P: Provider> Agent<P> {
                     && !cached_precommit_defects
                     && !cached_review_call
                     && !known_invalid_apply
+                    && !incomplete_pcb_apply_blocked
                     && !unchanged_apply_blocked
                     && !post_apply_authoring_blocked
                     && !authoring_batch_dependency_blocked
                     && !create_on_existing_draft_blocked
                     && !full_design_repair_blocked
+                    && !malformed_draft_repair_blocked
                     && !component_shortfall_tool_blocked
+                    && !unsolicited_pcb_tool_blocked
                     && minimum_component_guard.is_none();
                 let (mut content, images, image_path) = if exact_id_discovery_blocked {
                     (
@@ -1431,6 +1550,19 @@ impl<P: Provider> Agent<P> {
                             "tool": call.fn_name,
                             "next_tool": "create_design",
                             "note": "Author the complete requested design directly with the supplied IDs.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if unsolicited_pcb_tool_blocked {
+                    (
+                        json!({
+                            "ok": false,
+                            "error": "PCB operation blocked because the user did not request board work",
+                            "code": "pcb_scope_not_requested",
+                            "tool": call.fn_name,
+                            "note": "Finish the requested schematic work without creating or modifying a PCB.",
                         })
                         .to_string(),
                         Vec::new(),
@@ -1480,6 +1612,20 @@ impl<P: Provider> Agent<P> {
                         Vec::new(),
                         None,
                     )
+                } else if incomplete_pcb_apply_blocked {
+                    (
+                        json!({
+                            "ok": false,
+                            "error": "apply_design deferred because PCB components still lack footprints",
+                            "code": "missing_pcb_footprints",
+                            "missing_footprints": missing_footprints_for_apply,
+                            "next_tool": "assign_footprints",
+                            "note": "Assign real Lib:Name footprints for every listed reference, then apply the updated draft before regenerating the board.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
                 } else if cached_review_call {
                     let mut cached = schematic_review_current.clone().unwrap_or_default();
                     if let Some(object) = cached.as_object_mut() {
@@ -1511,6 +1657,19 @@ impl<P: Provider> Agent<P> {
                             "defects": schematic_review_current.as_ref().and_then(|review| review.get("defects")).cloned().unwrap_or_else(|| json!([])),
                             "next_tool": "edit_design",
                             "note": "Send one COMPLETE corrected top-level YAML document with edit_design. Preserve valid existing work, but implement the missing circuit/topology in that single full replacement.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if malformed_draft_repair_blocked {
+                    (
+                        json!({
+                            "ok": false,
+                            "error": "repair_components cannot repair a structurally invalid circuit document",
+                            "code": "full_design_edit_required",
+                            "next_tool": "edit_design",
+                            "note": "Send one COMPLETE corrected top-level YAML document with edit_design. Fix document/block syntax and component pin errors together.",
                         })
                         .to_string(),
                         Vec::new(),
@@ -1784,6 +1943,15 @@ impl<P: Provider> Agent<P> {
                     &call.fn_name,
                     &parsed,
                 );
+                if dispatched
+                    && tool_state_revision != prior_tool_state_revision
+                    && pcb_quality_invalidated_by(&call.fn_name)
+                {
+                    pcb_quality.invalidate();
+                }
+                if dispatched {
+                    pcb_quality.observe(&call.fn_name, &parsed);
+                }
                 if tool_state_revision != prior_tool_state_revision
                     && !is_authoring_for_commit(&call.fn_name)
                     && call.fn_name != "apply_design"
@@ -1850,11 +2018,28 @@ impl<P: Provider> Agent<P> {
                     },
                 );
                 if dispatched
-                    && pcb_only_stage
-                    && request_requires_fabrication(authoritative_intent)
-                    && call.fn_name == "regenerate_board"
-                    && regenerate_board_succeeded(&parsed)
+                    && call.fn_name == "render_board"
+                    && pcb_quality.checked
+                    && pcb_finish_stage_succeeded("render_board", &parsed)
                 {
+                    let render = PcbFinishStage {
+                        name: "render_board",
+                        content: content.clone(),
+                        images: images.clone(),
+                    };
+                    let review = self
+                        .run_pcb_visual_review_stage(authoritative_intent, &render, events)
+                        .await;
+                    tool_calls_made += 1;
+                    let review_result = parse_or_null(&review.content);
+                    pcb_quality.observe(review.name, &review_result);
+                    let mut render_result = parse_or_null(&content);
+                    if let Some(object) = render_result.as_object_mut() {
+                        object.insert("automatic_quality_review".into(), review_result);
+                        content = render_result.to_string();
+                    }
+                }
+                if dispatched && should_auto_finish_pcb(pcb_only_stage, &call.fn_name, &parsed) {
                     let pipeline = self
                         .run_pcb_finish_pipeline(
                             authoritative_intent,
@@ -1884,6 +2069,12 @@ impl<P: Provider> Agent<P> {
                         if tool_state_revision != prior_revision {
                             non_authoring_state_changed_this_completion = true;
                         }
+                        if tool_state_revision != prior_revision
+                            && pcb_quality_invalidated_by(stage.name)
+                        {
+                            pcb_quality.invalidate();
+                        }
+                        pcb_quality.observe(stage.name, &stage_result);
                         let stage_summary = tool_summary(stage.name, &json!({}), &stage_result);
                         last_tool_status = Some(format!("{}: {stage_summary}", stage.name));
                     }
@@ -1935,11 +2126,11 @@ impl<P: Provider> Agent<P> {
             // replace that protocol-heavy history with a deterministic,
             // authoritative PCB-stage handoff. Project files are the source of
             // truth; no lossy LLM summary call is needed.
-            if pcb_work_requested
-                && schematic_stage_ready_this_completion
-                && !pcb_only_stage
-                && !self.runtime.pcb_path().exists()
-            {
+            if should_enter_pcb_stage(
+                pcb_work_requested,
+                schematic_stage_ready_this_completion,
+                pcb_only_stage,
+            ) {
                 let before = self.history.len();
                 self.history.truncate(current_turn_start);
                 self.history.extend(pcb_stage_history(authoritative_intent));
@@ -2117,7 +2308,20 @@ impl<P: Provider> Agent<P> {
                     defects: review.defects.clone(),
                 },
             );
-            if review.defects.is_empty() || round == max_fix {
+            if review.defects.is_empty() {
+                break;
+            }
+            if round == max_fix {
+                let final_text = format!(
+                    "Quality review still has {} unresolved high-confidence defect(s):\n{}",
+                    review.defects.len(),
+                    review.defects.join("\n")
+                );
+                emit(events, AgentEvent::AssistantText(final_text.clone()));
+                outcome.final_text = final_text;
+                outcome.stop_reason = StopReason::QualityGateFailed {
+                    failures: review.defects.len(),
+                };
                 break;
             }
             let fix = fix_prompt(&review.defects);
@@ -2584,6 +2788,18 @@ fn regenerate_board_succeeded(value: &Value) -> bool {
         && value.get("executed").and_then(Value::as_bool) != Some(false)
 }
 
+fn should_auto_finish_pcb(pcb_only_stage: bool, name: &str, value: &Value) -> bool {
+    pcb_only_stage && name == "regenerate_board" && regenerate_board_succeeded(value)
+}
+
+fn should_enter_pcb_stage(
+    pcb_work_requested: bool,
+    schematic_stage_ready: bool,
+    already_in_pcb_stage: bool,
+) -> bool {
+    pcb_work_requested && schematic_stage_ready && !already_in_pcb_stage
+}
+
 fn placement_resize_bounds(value: &Value) -> Option<Value> {
     if value.get("legal").and_then(Value::as_bool) == Some(true) {
         return None;
@@ -2656,6 +2872,86 @@ fn route_result_is_retry_failure(value: &Value) -> bool {
         .get("failed")
         .and_then(Value::as_array)
         .is_some_and(|failed| !failed.is_empty())
+}
+
+#[derive(Default)]
+struct PcbQualityState {
+    attempted: bool,
+    checked: bool,
+    rendered: bool,
+    reviewed: bool,
+    exported: bool,
+}
+
+impl PcbQualityState {
+    fn invalidate(&mut self) {
+        self.attempted = true;
+        self.checked = false;
+        self.rendered = false;
+        self.reviewed = false;
+        self.exported = false;
+    }
+
+    fn observe(&mut self, name: &str, value: &Value) {
+        if is_pcb_stage_tool(name) || name == "review_board" {
+            self.attempted = true;
+        }
+        match name {
+            "check_board" => {
+                self.checked = check_board_is_clean(value);
+                self.rendered = false;
+                self.reviewed = false;
+                self.exported = false;
+            }
+            "render_board" if self.checked => {
+                self.rendered = pcb_finish_stage_succeeded(name, value);
+                self.reviewed = false;
+            }
+            "review_board" if self.checked && self.rendered => {
+                self.reviewed = pcb_finish_stage_succeeded(name, value);
+            }
+            "export_fab" if self.checked => {
+                self.exported = pcb_finish_stage_succeeded(name, value);
+            }
+            _ => {}
+        }
+    }
+
+    fn accepted(&self, fabrication_required: bool) -> bool {
+        self.checked && self.rendered && self.reviewed && (!fabrication_required || self.exported)
+    }
+
+    fn missing(&self, fabrication_required: bool) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.checked {
+            missing.push("clean check_board");
+        }
+        if !self.rendered {
+            missing.push("current render_board");
+        }
+        if !self.reviewed {
+            missing.push("clean visual board review");
+        }
+        if fabrication_required && !self.exported {
+            missing.push("successful export_fab");
+        }
+        missing
+    }
+}
+
+fn pcb_quality_invalidated_by(name: &str) -> bool {
+    matches!(
+        name,
+        "apply_design"
+            | "regenerate_board"
+            | "place_board"
+            | "route_board"
+            | "move_parts"
+            | "route_track"
+            | "delete_copper"
+            | "set_net_width"
+            | "update_board_outline"
+    )
 }
 
 #[derive(Default)]
@@ -2736,13 +3032,7 @@ impl PcbRecoveryState {
 }
 
 fn check_board_requires_route_recovery(pcb_awaiting_clean_drc: bool, value: &Value) -> bool {
-    pcb_awaiting_clean_drc
-        && value.get("error").is_none()
-        && (value
-            .get("blocking_findings")
-            .and_then(Value::as_u64)
-            .is_some_and(|count| count > 0)
-            || value.get("ok").and_then(Value::as_bool) == Some(false))
+    pcb_awaiting_clean_drc && value.get("error").is_none() && !check_board_is_clean(value)
 }
 
 fn check_board_is_clean(value: &Value) -> bool {
@@ -2750,8 +3040,11 @@ fn check_board_is_clean(value: &Value) -> bool {
         && value
             .get("blocking_findings")
             .and_then(Value::as_u64)
-            .unwrap_or(0)
-            == 0
+            .is_some_and(|count| count == 0)
+        && value
+            .get("silk_warnings")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count == 0)
 }
 
 fn schematic_review_required_before_pcb(
@@ -2784,6 +3077,14 @@ fn request_requires_pcb_work(user_msg: &str) -> bool {
                 .any(|term| request.contains(term)))
 }
 
+fn request_authorizes_pcb_tools(user_msg: &str) -> bool {
+    let request = user_msg.to_ascii_lowercase();
+    request_requires_pcb_work(user_msg)
+        || ["board", "outline", "copper", "trace", " via", "drc"]
+            .iter()
+            .any(|term| request.contains(term))
+}
+
 fn request_requires_fabrication(user_msg: &str) -> bool {
     let request = user_msg.to_ascii_lowercase();
     request.contains("fabrication")
@@ -2793,8 +3094,46 @@ fn request_requires_fabrication(user_msg: &str) -> bool {
         || request.contains("board house")
 }
 
-fn starts_in_pcb_stage(pcb_work_requested: bool, draft_committed: bool) -> bool {
-    pcb_work_requested && draft_committed
+fn starts_in_pcb_stage(pcb_work_requested: bool, draft_committed: bool, instruction: &str) -> bool {
+    pcb_work_requested && draft_committed && request_is_explicit_pcb_only(instruction)
+}
+
+fn request_is_explicit_pcb_only(instruction: &str) -> bool {
+    let request = instruction.to_ascii_lowercase();
+    let physical_work = [
+        "route",
+        "routing",
+        "place",
+        "placement",
+        "layout",
+        "copper",
+        "outline",
+        "drc",
+        "fabrication",
+        "gerber",
+        "render",
+        "finish the board",
+        "finish the pcb",
+    ]
+    .iter()
+    .any(|term| request.contains(term));
+    let schematic_work = [
+        "schematic",
+        "circuit",
+        "component",
+        "resistor",
+        "capacitor",
+        "diode",
+        "transistor",
+        "sensor",
+        "controller",
+        "regulator",
+        "replace",
+        "re-commit",
+    ]
+    .iter()
+    .any(|term| request.contains(term));
+    physical_work && !schematic_work
 }
 
 fn request_budget_exhausted(
@@ -3045,6 +3384,35 @@ fn semantic_draft_hash(runtime: &AgentRuntime) -> Option<u64> {
         .map(|design| circuit_lang::canon::to_canonical_yaml(&design).into_bytes())
         .unwrap_or_else(|| text.into_bytes());
     Some(geom::fnv1a(&bytes))
+}
+
+fn draft_supports_component_repair(runtime: &AgentRuntime) -> bool {
+    let Ok(Some(text)) = runtime.workspace().read_draft() else {
+        return false;
+    };
+    circuit_lang::compile(&text, runtime.provider())
+        .design
+        .is_some()
+}
+
+fn draft_missing_footprints(runtime: &AgentRuntime) -> Vec<String> {
+    let Ok(Some(text)) = runtime.workspace().read_draft() else {
+        return Vec::new();
+    };
+    let Some(design) = circuit_lang::compile(&text, runtime.provider()).design else {
+        return Vec::new();
+    };
+    design
+        .blocks
+        .values()
+        .flat_map(|block| &block.components)
+        .filter(|(_, component)| {
+            !component.dnp
+                && !component.part.starts_with("power:")
+                && component.footprint.as_deref().is_none_or(str::is_empty)
+        })
+        .map(|(reference, _)| reference.clone())
+        .collect()
 }
 
 fn file_content_hash(path: &std::path::Path) -> Option<u64> {
@@ -3928,10 +4296,30 @@ const ERC_CLEANUP_NUDGE: &str = "The design was written, but the latest `apply_d
 
 const OUTPUT_TRUNCATION_NUDGE: &str = "Your previous response hit the output-token limit before completing a usable tool call. Retry now with exactly one tool call and no prose or private reasoning. Use compact YAML flow syntax, `between`, `positive`/`negative`, and short block/net names; omit optional fields and comments. The YAML must still be one complete functional design meeting the requested physical-component minimum.";
 
+fn pcb_completion_nudge(missing: &[&str]) -> String {
+    format!(
+        "The requested PCB workflow is not complete. Missing authoritative quality gates: {}. Continue with the actual board tools now; final prose cannot substitute for these artifacts.",
+        missing.join(", ")
+    )
+}
+
+fn pcb_quality_failure_final_text(missing: &[&str], model_text: &str) -> String {
+    let attempted = model_text.trim();
+    let suffix = if attempted.is_empty() {
+        String::new()
+    } else {
+        format!(" Last model response: {attempted}")
+    };
+    format!(
+        "PCB quality gate failed; the workflow is incomplete. Missing: {}.{suffix}",
+        missing.join(", ")
+    )
+}
+
 /// The text fed back as a fix turn when the post-turn review finds defects.
 fn fix_prompt(defects: &[String]) -> String {
     format!(
-        "An INDEPENDENT review of the work you just committed found these \
+        "An INDEPENDENT schematic review of the work you just committed found these \
          high-confidence defects:\n{}\n\nFix each one and re-commit.",
         defects.join("\n")
     )
@@ -4614,8 +5002,18 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 .and_then(Value::as_u64)
                 .or_else(|| result.get("violations").and_then(Value::as_u64))
                 .unwrap_or(0);
-            if result.get("ok").and_then(Value::as_bool) == Some(true) {
-                format!("DRC clean: 0 blocking findings ({reported} total reported)")
+            let silk = result
+                .get("silk_warnings")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if check_board_is_clean(result) {
+                format!(
+                    "PCB quality clean: 0 blocking findings, 0 silkscreen warnings ({reported} total reported)"
+                )
+            } else if result.get("ok").and_then(Value::as_bool) == Some(true) {
+                format!(
+                    "DRC copper clean, but {silk} silkscreen warning(s) block quality acceptance"
+                )
             } else {
                 format!("DRC failed: {blocking} blocking findings")
             }
@@ -5053,9 +5451,9 @@ mod tests {
         ]
     }
 
-    /// First stream completes with a tool call; every later stream closes
-    /// without End, forcing the agent's one-shot fallback. Both entry points
-    /// increment the same counter so the test observes real provider invocations.
+    /// First stream completes with a tool call; the next stream closes without
+    /// End. The agent should recover once, then use complete directly rather
+    /// than retrying the known-broken streaming transport every cycle.
     struct MissingEndProvider {
         requests: Arc<AtomicUsize>,
         fallback_requests: Arc<AtomicUsize>,
@@ -5094,7 +5492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_end_fallback_never_exceeds_the_provider_request_limit() {
+    async fn missing_end_fallback_disables_streaming_for_the_rest_of_the_subturn() {
         let requests = Arc::new(AtomicUsize::new(0));
         let fallback_requests = Arc::new(AtomicUsize::new(0));
         let client = MissingEndProvider {
@@ -5120,11 +5518,70 @@ mod tests {
             MAX_PROVIDER_REQUESTS_PER_TURN,
             "the missing-End fallback must not become request N+1"
         );
-        assert_eq!(fallback_requests.load(Ordering::SeqCst), 15);
+        assert_eq!(fallback_requests.load(Ordering::SeqCst), 30);
+        assert_eq!(
+            requests.load(Ordering::SeqCst) - fallback_requests.load(Ordering::SeqCst),
+            2,
+            "only the healthy stream and first missing-End stream should run"
+        );
         assert_eq!(
             outcome.tool_calls_made, 1,
             "discovery calls dispatch for their one-round budget"
         );
+    }
+
+    struct RetryOnceProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for RetryOnceProvider {
+        async fn complete(
+            &self,
+            _system: &str,
+            _messages: &[ChatMessage],
+            _tools: &[crate::Tool],
+        ) -> Result<StreamEnd> {
+            Ok(final_text("done"))
+        }
+
+        async fn stream<'a>(
+            &'a self,
+            _system: &'a str,
+            _messages: &'a [ChatMessage],
+            _tools: &'a [crate::Tool],
+        ) -> Result<EventStream<'a>> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
+            if request == 1 {
+                return Err(anyhow::anyhow!("transient provider failure"));
+            }
+            Ok(stream::iter(vec![
+                Ok(ChatStreamEvent::Chunk(gordian_llm::StreamChunk {
+                    content: "done".into(),
+                })),
+                Ok(ChatStreamEvent::End(final_text("done"))),
+            ])
+            .boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_provider_failure_is_retried_without_losing_the_turn() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let client = RetryOnceProvider {
+            requests: Arc::clone(&requests),
+        };
+        let mut agent = Agent::new(client, test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn("inspect", &mut approvals, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.final_text, "done");
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -5159,6 +5616,40 @@ mod tests {
         assert_eq!(rejected["executed"], false);
         assert_eq!(rejected["written"], false);
         assert_eq!(rejected["operation"], "update_board_outline");
+    }
+
+    #[tokio::test]
+    async fn schematic_only_turn_blocks_unsolicited_pcb_work() {
+        let runtime = test_runtime();
+        let pcb_path = runtime.pcb_path();
+        let (client, seen) = ScriptedClient::recording(vec![
+            tool_call("unexpected-board", "regenerate_board", json!({})),
+            final_text("done"),
+        ]);
+        let mut agent = Agent::new(client, runtime, "system");
+        let mut approvals = AutoApprove::yes();
+
+        let outcome = agent
+            .run_turn("apply and render the schematic", &mut approvals, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.tool_calls_made, 0);
+        assert!(!pcb_path.exists());
+        let requests = seen.lock().unwrap();
+        let blocked = requests[1]
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .find_map(|part| match part {
+                ContentPart::ToolResponse(response) => {
+                    serde_json::from_str::<Value>(&response.content).ok()
+                }
+                _ => None,
+            })
+            .expect("the unsolicited PCB call is returned as structured JSON");
+        assert_eq!(blocked["code"], "pcb_scope_not_requested");
+        assert_eq!(blocked["tool"], "regenerate_board");
     }
 
     #[tokio::test]
@@ -5339,9 +5830,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::QualityGateFailed { failures: 3 }
+        );
         assert_eq!(outcome.tool_calls_made, 1);
-        assert_eq!(outcome.final_text, "unable to author");
+        assert!(outcome.final_text.contains("PCB quality gate failed"));
     }
 
     #[tokio::test]
@@ -5631,7 +6125,11 @@ mod tests {
         let mut approvals = AutoApprove::yes();
 
         let outcome = agent
-            .run_turn("inspect, mutate, then inspect again", &mut approvals, None)
+            .run_turn(
+                "inspect the board, mutate its outline, then inspect again",
+                &mut approvals,
+                None,
+            )
             .await
             .unwrap();
 
@@ -5670,7 +6168,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::QualityGateFailed { failures: 3 }
+        );
         assert_eq!(
             outcome.tool_calls_made, 2,
             "the failed route and unrelated inspection dispatch; blind regeneration does not"
@@ -5909,12 +6410,43 @@ mod tests {
             "finish the requested board: 4-layer, placement/routing, DRC, export fab"
         ));
         assert!(request_requires_fabrication("DRC then export fab"));
-        assert!(starts_in_pcb_stage(true, true));
-        assert!(!starts_in_pcb_stage(true, false));
-        assert!(!starts_in_pcb_stage(false, true));
+        assert!(starts_in_pcb_stage(true, true, "finish the board routing"));
+        assert!(!starts_in_pcb_stage(
+            true,
+            true,
+            "replace the R1 component on the PCB and schematic"
+        ));
+        assert!(!starts_in_pcb_stage(
+            true,
+            false,
+            "finish the board routing"
+        ));
+        assert!(!starts_in_pcb_stage(
+            false,
+            true,
+            "finish the board routing"
+        ));
         assert!(!request_requires_pcb_work(
             "review this production schematic only"
         ));
+        assert!(request_is_explicit_pcb_only(
+            "finish the PCB routing and DRC"
+        ));
+        assert!(!request_is_explicit_pcb_only(
+            "replace the R1 component in the schematic and PCB"
+        ));
+        assert!(should_auto_finish_pcb(
+            true,
+            "regenerate_board",
+            &json!({"ok": true})
+        ));
+        assert!(!should_auto_finish_pcb(
+            false,
+            "regenerate_board",
+            &json!({"ok": true})
+        ));
+        assert!(should_enter_pcb_stage(true, true, false));
+        assert!(!should_enter_pcb_stage(true, true, true));
 
         let base = TurnBudgets::for_intent("finish the board");
         assert!(!request_budget_exhausted(base, 19, 19, true, false));
@@ -5930,6 +6462,39 @@ mod tests {
         assert!(request_budget_exhausted(floored, 52, 12, true, true));
         assert!(!request_budget_exhausted(floored, 52, 52, false, false));
         assert!(request_budget_exhausted(floored, 53, 53, false, false));
+    }
+
+    #[test]
+    fn pcb_quality_state_is_ordered_and_invalidated_by_real_edits() {
+        let mut quality = PcbQualityState::default();
+        quality.observe(
+            "check_board",
+            &json!({"ok": true, "blocking_findings": 0, "silk_warnings": 0}),
+        );
+        assert!(!quality.accepted(false));
+        quality.observe("render_board", &json!({"ok": true}));
+        quality.observe(
+            "review_board",
+            &json!({"ok": true, "defects": [], "score": 9}),
+        );
+        assert!(quality.accepted(false));
+        assert!(!quality.accepted(true));
+        quality.observe("export_fab", &json!({"ok": true, "file_count": 12}));
+        assert!(quality.accepted(true));
+
+        assert!(pcb_quality_invalidated_by("apply_design"));
+        assert!(pcb_quality_invalidated_by("move_parts"));
+        quality.invalidate();
+        assert!(!quality.accepted(false));
+        assert_eq!(
+            quality.missing(true),
+            [
+                "clean check_board",
+                "current render_board",
+                "clean visual board review",
+                "successful export_fab"
+            ]
+        );
     }
 
     #[test]
@@ -6062,7 +6627,7 @@ mod tests {
         let results = vec![
             json!({"ok": true, "legal": true}),
             json!({"ok": true, "failed": []}),
-            json!({"ok": true, "blocking_findings": 0}),
+            json!({"ok": true, "blocking_findings": 0, "silk_warnings": 0}),
             json!({"ok": true, "png_path": "/tmp/board.png"}),
             json!({"ok": true, "score": 9.0, "defects": []}),
             json!({"ok": true, "file_count": 16}),
@@ -6089,7 +6654,7 @@ mod tests {
         let dirty_route = vec![
             json!({"ok": true, "legal": true}),
             json!({"ok": true, "failed": [{"net": "SDA"}]}),
-            json!({"ok": true, "blocking_findings": 0}),
+            json!({"ok": true, "blocking_findings": 0, "silk_warnings": 0}),
         ];
         assert_eq!(
             scripted_pcb_finish_order(&dirty_route),
@@ -6110,7 +6675,7 @@ mod tests {
         let rejected_visual_review = vec![
             json!({"ok": true, "legal": true}),
             json!({"ok": true, "failed": []}),
-            json!({"ok": true, "blocking_findings": 0}),
+            json!({"ok": true, "blocking_findings": 0, "silk_warnings": 0}),
             json!({"ok": true}),
             json!({"ok": false, "defects": ["poor connector placement"]}),
             json!({"ok": true}),
@@ -6339,6 +6904,38 @@ mod tests {
             cosmetic.draft_hash, changed.draft_hash,
             "comments and mapping order are not electrical progress"
         );
+    }
+
+    #[test]
+    fn component_repair_is_only_offered_for_a_parseable_draft() {
+        let runtime = test_runtime();
+        runtime
+            .workspace()
+            .write_draft(
+                "version: 1\nblocks:\n  BAD NAME:\n    components: {}\n",
+                None,
+            )
+            .unwrap();
+        assert!(!draft_supports_component_repair(&runtime));
+
+        runtime
+            .workspace()
+            .write_draft(
+                "version: 1\nblocks:\n  main:\n    components:\n      R1: {part: Device:R, between: [A, GND]}\n",
+                None,
+            )
+            .unwrap();
+        assert!(draft_supports_component_repair(&runtime));
+
+        assert_eq!(draft_missing_footprints(&runtime), vec!["R1"]);
+        runtime
+            .workspace()
+            .write_draft(
+                "version: 1\nblocks:\n  main:\n    components:\n      R1: {part: Device:R, footprint: Resistor_SMD:R_0603_1608Metric, between: [A, GND]}\n      GND1: {part: power:GND, pins: {1: GND}}\n",
+                None,
+            )
+            .unwrap();
+        assert!(draft_missing_footprints(&runtime).is_empty());
     }
 
     #[test]
@@ -7104,9 +7701,12 @@ blocks:
         let s = tool_summary(
             "check_board",
             &json!({}),
-            &json!({ "ok": true, "blocking_findings": 0, "reported_findings": 2 }),
+            &json!({ "ok": true, "blocking_findings": 0, "silk_warnings": 0, "reported_findings": 2 }),
         );
-        assert_eq!(s, "DRC clean: 0 blocking findings (2 total reported)");
+        assert_eq!(
+            s,
+            "PCB quality clean: 0 blocking findings, 0 silkscreen warnings (2 total reported)"
+        );
         let s = tool_summary(
             "place_board",
             &json!({}),
@@ -7504,6 +8104,7 @@ blocks:
                     invalid,
                     defects,
                     full_edit,
+                    false,
                 );
                 defs.into_iter()
                     .map(|tool| tool.name.as_str().to_owned())
@@ -7536,6 +8137,33 @@ blocks:
         let clean = names_after(true, false, true, true, false, false, false);
         assert_eq!(clean.len(), 1);
         assert!(clean.contains("apply_design"));
+
+        let mut pcb_defs = tool_defs_for_phase(
+            ToolPhase::Schematic,
+            &HashMap::new(),
+            MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
+            true,
+            &HashSet::new(),
+            false,
+        );
+        constrain_schematic_tools_for_draft_state(
+            &mut pcb_defs,
+            true,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            true,
+        );
+        let pcb_names = pcb_defs
+            .into_iter()
+            .map(|tool| tool.name.as_str().to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(pcb_names.contains("assign_footprints"));
+        assert!(pcb_names.contains("search_footprints"));
+        assert!(pcb_names.contains("apply_design"));
 
         let defects = names_after(true, false, true, true, false, true, false);
         assert!(defects.contains("repair_components"));
@@ -7743,7 +8371,8 @@ blocks:
             true,
             &json!({
                 "ok": true,
-                "blocking_findings": 0
+                "blocking_findings": 0,
+                "silk_warnings": 0
             })
         ));
         assert!(!check_board_requires_route_recovery(
@@ -7775,7 +8404,13 @@ blocks:
         assert!(route_retry_blocked(failed_route_attempts, "route_board"));
         assert!(check_board_is_clean(&json!({
             "ok": true,
-            "blocking_findings": 0
+            "blocking_findings": 0,
+            "silk_warnings": 0
+        })));
+        assert!(!check_board_is_clean(&json!({
+            "ok": true,
+            "blocking_findings": 0,
+            "silk_warnings": 1
         })));
         assert!(!check_board_is_clean(&json!({
             "ok": false,
@@ -7786,7 +8421,7 @@ blocks:
     #[test]
     fn recovery_state_keeps_failed_drc_sticky_through_real_edits_only() {
         let failed_drc = json!({"ok": false, "blocking_findings": 12});
-        let clean_drc = json!({"ok": true, "blocking_findings": 0});
+        let clean_drc = json!({"ok": true, "blocking_findings": 0, "silk_warnings": 0});
         let real_move = json!({"ok": true, "moved": 1, "changed": 1});
         let noop_move = json!({"ok": true, "moved": 1, "changed": 0});
 

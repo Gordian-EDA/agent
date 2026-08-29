@@ -1,0 +1,1 @@
+Add a two-pin output connector exposing SENSE and GND to the existing divider. Preserve R1 and R2 and do not alter their nets or values. Use a real 2.54 mm pin-header footprint, then apply and render.

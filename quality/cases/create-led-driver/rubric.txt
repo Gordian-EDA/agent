@@ -1,0 +1,1 @@
+The transistor must switch the LED current on the low side, the base must have both series drive and pulldown resistors, and the connectors must expose only power and CTRL. Values, polarity, references, and signal flow should be readable.

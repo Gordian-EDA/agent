@@ -1,0 +1,1 @@
+The active filter and biasing must be electrically plausible and the unused op-amp must be safe. The PCB must be fully routed and DRC-clean, with the signal path ordered from input through filter to output and decoupling close to the op-amp.

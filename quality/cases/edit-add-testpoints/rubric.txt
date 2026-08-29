@@ -1,0 +1,1 @@
+Exactly three test points should be added, one on each requested net, with real test-point footprints. The existing divider references, values, and connectivity must remain unchanged.

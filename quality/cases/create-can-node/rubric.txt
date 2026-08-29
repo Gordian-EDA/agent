@@ -1,0 +1,1 @@
+Logic TX/RX and bus CANH/CANL must connect to the correct transceiver pins. Termination must bridge CANH to CANL and be genuinely switchable, TVS protection must be at the external bus side, and power/decoupling must match the chosen part.

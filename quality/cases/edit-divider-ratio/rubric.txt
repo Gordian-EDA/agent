@@ -1,0 +1,1 @@
+R1 and R2 must remain a two-resistor VIN-to-GND divider with SENSE at their junction. Their values should produce approximately 3.0 V from 12 V, references and footprints must be preserved, and no unrelated circuitry should appear.

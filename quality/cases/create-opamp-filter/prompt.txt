@@ -1,0 +1,1 @@
+Create and apply a single-supply second-order active low-pass filter schematic using one half of a dual op-amp. Run from 3.3 V, include a mid-rail bias divider with decoupling, input and output connectors, supply decoupling, and explicitly handle the unused op-amp unit. Target roughly 1 kHz and render it.

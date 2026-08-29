@@ -1,0 +1,1 @@
+The original divider schematic, values, and board outline must be preserved. The resulting board must have complete routing, zero DRC errors or unconnected items, useful renders, and a complete fabrication bundle.

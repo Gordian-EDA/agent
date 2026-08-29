@@ -1,0 +1,1 @@
+The connector must expose exactly SENSE and GND and use a real two-pin 2.54 mm header footprint. The divider itself must remain unchanged and the schematic should stay compact.

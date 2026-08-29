@@ -1,0 +1,1 @@
+Create and apply a complete 12 V to 5 V, 1 A buck-converter schematic using a real integrated regulator. Include input protection, input/output capacitors, inductor, feedback network, catch diode if required by the regulator, enable handling, and input/output connectors. Render it.

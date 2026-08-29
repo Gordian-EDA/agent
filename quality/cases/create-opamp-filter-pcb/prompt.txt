@@ -1,0 +1,1 @@
+Create a routed 3.3 V active low-pass filter PCB using one half of a real dual op-amp, targeting about 1 kHz. Include input/output headers, mid-rail bias, decoupling, and safe handling of the unused amplifier. Use compact SMD footprints, then apply, place, route, check, and render.

@@ -1,0 +1,1 @@
+Finish and quality-check the existing PCB without changing the schematic. Keep the current outline and component values, ensure the board is fully routed, run DRC, render both sides, and export fabrication files.

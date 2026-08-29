@@ -1,0 +1,1 @@
+Add a resettable fuse before the existing divider input. Rename the external side RAW_VIN and keep VIN as the protected side feeding R1. Preserve R1, R2, SENSE, and their values; apply and render.

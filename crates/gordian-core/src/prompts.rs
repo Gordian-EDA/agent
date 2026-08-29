@@ -40,7 +40,7 @@ Treat validation warnings as work, not success. A single-pin GPIO/control net us
 
 Schematic flow:
 1. Supplied `Lib:Name` IDs are authoritative: use directly, never search. Otherwise batch once; never empty queries. Built-ins: `Device:R`, `Device:C`, `Device:LED`, `power:GND`, `power:+3V3`, `Connector:Conn_01x02_Pin`.
-2. For a PCB, choose real footprints now with `search_footprints` / `get_footprint_info`; put `footprint:` in YAML before apply.
+2. PCB: search footprints; every fitted non-power part needs one before apply. Never footprint power/labels or use generic `Device:Q_*`; set values.
 3. Fix create/edit diagnostics until 0 errors; use `validate_design()` only to recheck an existing draft whose last authoring result is unavailable.
 4. `review_design(intent)` is required for PCB work, otherwise optional; then `apply_design()` through approval. Apply runs ERC.
 5. Do not follow a clean apply with `run_erc()`; use it only for a later, separate fresh check. Fix ERC errors and re-apply before PCB work.

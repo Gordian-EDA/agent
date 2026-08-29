@@ -89,6 +89,8 @@ pub enum TurnEndReason {
     MutationTimedOut,
     /// Repeated model completions made no durable project progress.
     NoProgress { completions: usize },
+    /// Required artifact checks or independent review still have findings.
+    QualityGateFailed { failures: usize },
     /// The user pressed Esc to abort the turn.
     Interrupted,
     /// The turn failed (provider/network/tool error); carries the message.

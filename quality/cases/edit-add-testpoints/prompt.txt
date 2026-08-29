@@ -1,0 +1,1 @@
+Add one real test-point symbol and footprint on each of VIN, SENSE, and GND in the existing divider. Preserve R1 and R2 without changing their values or nets. Apply and render the schematic.

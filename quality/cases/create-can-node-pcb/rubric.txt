@@ -1,0 +1,1 @@
+The transceiver pins, termination, and protection must be electrically correct. The bus connector and TVS should be together at an edge, logic header on the opposite side, decoupling near the IC, routing complete and DRC-clean, with a fabrication bundle produced.

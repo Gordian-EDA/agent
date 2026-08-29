@@ -1,0 +1,1 @@
+The fuse must sit in series from RAW_VIN to VIN, with R1 still fed by VIN. R1/R2 values, references, SENSE, and the divider topology must remain intact; no bypass around the fuse is acceptable.

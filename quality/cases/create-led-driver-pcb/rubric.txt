@@ -1,0 +1,1 @@
+The schematic must implement a correct low-side transistor LED driver with appropriate resistor values. The routed PCB must be DRC-clean with no unconnected items, group the transistor and resistors tightly, and place both headers accessibly at edges.

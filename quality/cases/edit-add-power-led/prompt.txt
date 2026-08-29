@@ -1,0 +1,1 @@
+Add a green power-present LED and its current-limiting resistor from VIN to GND to the existing divider. Assume VIN is 5 V. Preserve R1, R2, and the SENSE divider exactly; apply and render the change.

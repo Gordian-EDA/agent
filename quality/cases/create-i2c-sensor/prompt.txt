@@ -1,0 +1,1 @@
+Create and apply a 3.3 V I²C temperature-sensor module schematic using a real KiCad sensor symbol. Include a four-pin VCC/GND/SDA/SCL connector, local decoupling, pull-ups on SDA and SCL, and a selectable address strap when the chosen sensor supports one. Render the result.

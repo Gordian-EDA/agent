@@ -260,6 +260,12 @@ impl App {
                     "Worked for {elapsed} — stopped after {completions} model completions made no durable progress"
                 ),
             )),
+            TurnEndReason::QualityGateFailed { failures } => Some(Entry::notice(
+                NoticeLevel::Error,
+                format!(
+                    "Worked for {elapsed} — quality gate failed with {failures} unresolved item(s)"
+                ),
+            )),
             TurnEndReason::Interrupted => Some(Entry::notice(
                 NoticeLevel::Plain,
                 format!("Worked for {elapsed}"),

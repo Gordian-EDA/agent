@@ -1,0 +1,1 @@
+Edit the existing divider so 12 V at VIN produces approximately 3.0 V at SENSE. Preserve R1 and R2 references, keep both 0603 footprints, apply the change, and render the schematic. Do not add unrelated parts.

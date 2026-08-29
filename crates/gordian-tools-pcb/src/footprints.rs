@@ -158,7 +158,34 @@ fn bbox_json(b: &geom::Rect) -> Value {
 /// performs the draft edit directly and returns a compact edit result, adding
 /// compile diagnostics only when the edited draft has errors or warnings.
 pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Value> {
-    let assignments = footprint_assignments(&input)?;
+    let mut assignments = footprint_assignments(&input)?;
+    let Some(draft) = ctx.workspace().read_draft()? else {
+        return Ok(json!({
+            "error": "no draft exists — call read_schematic({source:\"draft\"}) (seeds a draft from the current schematic) or create_design first",
+        }));
+    };
+    let compiled = circuit_lang::compile(&draft, ctx.provider()).design;
+    let mut ignored = Vec::new();
+    if let Some(design) = &compiled {
+        assignments.retain(|assignment| {
+            let component = design
+                .blocks
+                .values()
+                .find_map(|block| block.components.get(&assignment.reference));
+            let virtual_component = component.is_some_and(|component| {
+                component.dnp
+                    || component.part.starts_with("power:")
+                    || component.part.starts_with("label:")
+            });
+            if virtual_component {
+                ignored.push(json!({
+                    "reference": assignment.reference,
+                    "reason": "virtual or DNP component has no PCB footprint",
+                }));
+            }
+            !virtual_component
+        });
+    }
     let catalog = ctx.footprint_catalog()?;
     for assignment in &assignments {
         let id = match FootprintId::parse(&assignment.footprint) {
@@ -192,11 +219,6 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Val
         }
     }
 
-    let Some(draft) = ctx.workspace().read_draft()? else {
-        return Ok(json!({
-            "error": "no draft exists — call read_schematic({source:\"draft\"}) (seeds a draft from the current schematic) or create_design first",
-        }));
-    };
     let mut edited = draft;
     let mut applied = Vec::new();
     for assignment in &assignments {
@@ -212,6 +234,44 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Val
             "edit": edit_kind,
         }));
     }
+
+    // Once the user/model explicitly enters footprint assignment, fill only
+    // universally conventional package choices that are present in the local
+    // catalog. Active parts and polarized/specialized passives remain explicit
+    // author decisions.
+    if let Some(design) = circuit_lang::compile(&edited, ctx.provider()).design {
+        for block in design.blocks.values() {
+            for (reference, component) in &block.components {
+                if component.dnp
+                    || component.footprint.is_some()
+                    || component.part.starts_with("power:")
+                    || component.part.starts_with("label:")
+                {
+                    continue;
+                }
+                let Some(footprint) = common_default_footprint(&component.part) else {
+                    continue;
+                };
+                let Ok(id) = FootprintId::parse(&footprint) else {
+                    continue;
+                };
+                if catalog.footprint(&id).is_err() {
+                    continue;
+                }
+                let (next, edit_kind) = match patch_footprint(&edited, reference, &footprint) {
+                    Ok(patched) => patched,
+                    Err(_) => continue,
+                };
+                edited = next;
+                applied.push(json!({
+                    "reference": reference,
+                    "footprint": footprint,
+                    "edit": edit_kind,
+                    "defaulted": true,
+                }));
+            }
+        }
+    }
     ctx.workspace()
         .write_draft(&edited, current_sch_text(ctx).as_deref())?;
 
@@ -221,15 +281,53 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Val
     let mut out = json!({
         "ok": errors == 0,
         "assigned": applied,
-        "count": assignments.len(),
+        "count": applied.len(),
         "next": "apply_design(), then regenerate_board",
     });
+    if !ignored.is_empty() {
+        out["ignored"] = json!(ignored);
+    }
     if errors > 0 || warnings > 0 {
         out["errors"] = json!(errors);
         out["warnings"] = json!(warnings);
         out["diagnostics"] = report["diagnostics"].clone();
     }
     Ok(out)
+}
+
+/// Conservative conventional footprints whose symbol/pad mapping is stable.
+pub fn common_default_footprint(part: &str) -> Option<String> {
+    let fixed = match part {
+        "Device:R" => "Resistor_SMD:R_0603_1608Metric",
+        "Device:C" => "Capacitor_SMD:C_0603_1608Metric",
+        "Device:D" => "Diode_SMD:D_SOD-123",
+        "Device:LED" => "LED_SMD:LED_0603_1608Metric",
+        "Mechanical:MountingHole" => "MountingHole:MountingHole_3.2mm_M3",
+        _ => {
+            let (columns, pins) = if let Some(pins) =
+                part.strip_prefix("Connector_Generic:Conn_01x").or_else(|| {
+                    part.strip_prefix("Connector:Conn_01x")
+                        .and_then(|pins| pins.strip_suffix("_Pin"))
+                }) {
+                (1, pins)
+            } else if let Some(pins) = part
+                .strip_prefix("Connector_Generic:Conn_02x")
+                .and_then(|pins| pins.strip_suffix("_Odd_Even"))
+            {
+                (2, pins)
+            } else {
+                return None;
+            };
+            let rows = pins.parse::<usize>().ok()?;
+            if rows == 0 || rows > 40 {
+                return None;
+            }
+            return Some(format!(
+                "Connector_PinHeader_2.54mm:PinHeader_{columns}x{rows:02}_P2.54mm_Vertical"
+            ));
+        }
+    };
+    Some(fixed.to_owned())
 }
 
 struct FootprintAssignment {

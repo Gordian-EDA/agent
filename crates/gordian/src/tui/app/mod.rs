@@ -940,6 +940,18 @@ mod tests {
         assert!(last.text.contains("safety limit"), "{}", last.text);
         assert_eq!(last.level, NoticeLevel::Error);
 
+        // Artifact/review quality failure → red and explicit, never "completed".
+        let mut a = app();
+        type_str(&mut a, "go");
+        a.update(Msg::Submit);
+        a.update(Msg::TurnEnded(TurnEndReason::QualityGateFailed {
+            failures: 2,
+        }));
+        let last = a.transcript.last().unwrap();
+        assert!(last.text.contains("quality gate failed"), "{}", last.text);
+        assert!(last.text.contains("2 unresolved"), "{}", last.text);
+        assert_eq!(last.level, NoticeLevel::Error);
+
         // Repeated unchanged-state tool cycles → red, with the bounded count.
         let mut a = app();
         type_str(&mut a, "go");
