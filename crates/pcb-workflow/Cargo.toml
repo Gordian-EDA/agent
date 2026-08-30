@@ -1,10 +1,10 @@
 [package]
-name = "gordian-tools-pcb"
+name = "pcb-workflow"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The agent's PCB tool family over the live KiCAD board: regenerate, place, route, check, silkscreen, render, and fab export."
+description = "Application workflows for creating, placing, routing, validating, rendering, and exporting KiCad PCBs."
 
 [dependencies]
 anyhow.workspace = true
@@ -15,6 +15,8 @@ circuit-lang = { path = "../circuit-lang" }
 pcb-drc = { path = "../pcb-drc" }
 geom = { path = "../geom" }
 gordian-runtime = { path = "../gordian-runtime" }
+pcb-engine = { path = "../pcb-engine" }
+kicad-board = { path = "../kicad-board" }
 pcb-route-grid = { path = "../pcb-route-grid" }
 kicad = { path = "../kicad" }
 kicad-footprint = { path = "../kicad-footprint" }

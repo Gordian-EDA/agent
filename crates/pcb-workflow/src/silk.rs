@@ -6,7 +6,7 @@ use std::path::Path;
 use kicad::{DrcReport, KicadInstallation, Violation};
 
 use super::export::gate_drc;
-use super::patch::{
+use kicad_board::{
     FieldPosition, board_outline_bbox, field_position, footprint_placement, patch_field_hidden,
     patch_field_position, patch_field_text_size, silk_field_owners,
 };

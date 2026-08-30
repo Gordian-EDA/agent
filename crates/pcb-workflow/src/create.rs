@@ -2335,13 +2335,13 @@ mod tests {
         };
 
         write_seed_board(&spec(20.0, 10.0), &ctx).unwrap();
-        let first = super::super::active::board_problem(&ctx).unwrap();
+        let first = crate::active_board(&ctx).unwrap();
         assert_eq!(first.imported.bounds, Rect::new(0.0, 0.0, 20.0, 10.0));
 
         // `first` opened and cached a pcbnew session. Replacing the same path
         // must force the next snapshot to open the new document, not reuse it.
         write_seed_board(&spec(40.0, 30.0), &ctx).unwrap();
-        let second = super::super::active::board_problem(&ctx).unwrap();
+        let second = crate::active_board(&ctx).unwrap();
         assert_eq!(second.imported.bounds, Rect::new(0.0, 0.0, 40.0, 30.0));
         ctx.close_kicad_session();
     }

@@ -3,8 +3,8 @@
 //! This is the non-destructive PCB geometry path: it edits the current
 //! `.kicad_pcb` Edge.Cuts instead of regenerating the board from a schematic.
 
-use super::sexpr::{sexpr_end, sexpr_point};
 use anyhow::{Context, Result};
+use kicad_board::{sexpr_end, sexpr_point};
 use pcb_model::{Point2, Polygon, Rect, RouteSolution};
 use pcb_place::{Part, PlacementView};
 use serde_json::{Value, json};
@@ -28,7 +28,7 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let margin = input.get("margin").and_then(Value::as_f64).unwrap_or(2.0);
 
     let outline = if fit {
-        let board = match super::active::board_problem(ctx) {
+        let board = match crate::active_board(ctx) {
             Ok(board) => board,
             Err(err) => return Ok(json!({ "error": err })),
         };
@@ -144,7 +144,7 @@ fn parse_outline(v: Option<&Value>) -> std::result::Result<Polygon, String> {
 }
 
 fn geometry_bounds(
-    board: &crate::active::IpcBoardSnapshot,
+    board: &kicad_board::IpcBoardSnapshot,
     placement: &PlacementView,
 ) -> Option<Rect> {
     let mut bounds = routed_copper_bounds(&board.copper);

@@ -9,7 +9,7 @@
 //! it: footprint blocks with a block-level `(at …)`, top-level
 //! `(segment …)`/`(via …)` copper, and `(net N "NAME")` declarations.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, io::Write, path::Path};
 
 use kicad_ipc::FootprintMove;
 use pcb_model::{LayerRef, RouteSolution, ViaSpan};
@@ -80,7 +80,7 @@ fn root_body(text: &str) -> Result<(usize, usize), String> {
 /// Copper layers enabled by the board file's authoritative `(layers ...)`
 /// table, in stack order. Unlike the live IPC stackup count, this cannot refer
 /// to a board that was open immediately before the current project.
-pub(super) fn board_copper_layer_names(text: &str) -> Result<Vec<String>, String> {
+pub fn board_copper_layer_names(text: &str) -> Result<Vec<String>, String> {
     let (body_start, body_end) = root_body(text)?;
     let layers = child_nodes(text, body_start, body_end)
         .into_iter()
@@ -133,7 +133,7 @@ pub(super) fn board_copper_layer_names(text: &str) -> Result<Vec<String>, String
 /// Full-board rectangular copper zones, as authoritative plane-net assignments.
 /// Gordian's seed writer emits its planes in exactly this form; requiring the
 /// zone rectangle to cover the Edge.Cuts rectangle avoids promoting local pours.
-pub(super) fn board_file_plane_nets(text: &str) -> Result<BTreeMap<String, u32>, String> {
+pub fn board_file_plane_nets(text: &str) -> Result<BTreeMap<String, u32>, String> {
     let layers = board_copper_layer_names(text)?;
     let (body_start, body_end) = root_body(text)?;
     let top = child_nodes(text, body_start, body_end);
@@ -215,7 +215,7 @@ fn footprint_reference(text: &str, fp: &Node) -> Option<String> {
 
 /// Local position of a visible footprint text field.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct FieldPosition {
+pub struct FieldPosition {
     pub x: f64,
     pub y: f64,
 }
@@ -224,7 +224,7 @@ fn field_prefix(field: &str) -> String {
     format!("(property \"{field}\"")
 }
 
-pub(super) fn field_position(text: &str, reference: &str, field: &str) -> Option<FieldPosition> {
+pub fn field_position(text: &str, reference: &str, field: &str) -> Option<FieldPosition> {
     let prefix = field_prefix(field);
     let (body_start, body_end) = root_body(text).ok()?;
     for fp in child_nodes(text, body_start, body_end) {
@@ -250,7 +250,7 @@ pub(super) fn field_position(text: &str, reference: &str, field: &str) -> Option
 }
 
 /// Rewrite a visible text field's font size and stroke thickness.
-pub(super) fn patch_field_text_size(
+pub fn patch_field_text_size(
     text: &str,
     reference: &str,
     field: &str,
@@ -306,11 +306,7 @@ pub(super) fn patch_field_text_size(
 }
 
 /// Hide a footprint text field entirely.
-pub(super) fn patch_field_hidden(
-    text: &str,
-    reference: &str,
-    field: &str,
-) -> Result<String, String> {
+pub fn patch_field_hidden(text: &str, reference: &str, field: &str) -> Result<String, String> {
     let prefix = field_prefix(field);
     let (body_start, body_end) = root_body(text)?;
     for fp in child_nodes(text, body_start, body_end) {
@@ -348,7 +344,7 @@ pub(super) fn patch_field_hidden(
 /// KiCad 9 DRC reports omit `PCB_FIELD` items other than Reference/Value, so
 /// violations caused by generated fields arrive without attribution; this scan
 /// recovers the candidate owners directly from the board text.
-pub(super) fn silk_field_owners(text: &str, field: &str) -> Vec<String> {
+pub fn silk_field_owners(text: &str, field: &str) -> Vec<String> {
     let prefix = field_prefix(field);
     let Ok((body_start, body_end)) = root_body(text) else {
         return Vec::new();
@@ -376,7 +372,7 @@ pub(super) fn silk_field_owners(text: &str, field: &str) -> Vec<String> {
 }
 
 /// A footprint's board placement: position and rotation in degrees.
-pub(super) fn footprint_placement(text: &str, reference: &str) -> Option<(f64, f64, f64)> {
+pub fn footprint_placement(text: &str, reference: &str) -> Option<(f64, f64, f64)> {
     let (body_start, body_end) = root_body(text).ok()?;
     for fp in child_nodes(text, body_start, body_end) {
         if node_head(text, &fp) != "footprint"
@@ -395,7 +391,7 @@ pub(super) fn footprint_placement(text: &str, reference: &str) -> Option<(f64, f
 
 /// Bounding box of the board outline: every `(start/end/mid/center …)` point of
 /// top-level Edge.Cuts graphics.
-pub(super) fn board_outline_bbox(text: &str) -> Option<(f64, f64, f64, f64)> {
+pub fn board_outline_bbox(text: &str) -> Option<(f64, f64, f64, f64)> {
     let (body_start, body_end) = root_body(text).ok()?;
     let mut bbox: Option<(f64, f64, f64, f64)> = None;
     for node in child_nodes(text, body_start, body_end) {
@@ -428,7 +424,7 @@ pub(super) fn board_outline_bbox(text: &str) -> Option<(f64, f64, f64, f64)> {
 
 /// Relocate one visible text field in footprint-local coordinates and
 /// counter-rotate it so the rendered board text remains upright.
-pub(super) fn patch_field_position(
+pub fn patch_field_position(
     text: &str,
     reference: &str,
     field: &str,
@@ -764,9 +760,23 @@ pub fn append_copper_file(
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("could not read board {}: {err}", path.display()))?;
     let updated = append_copper(&text, solution, layer_count, layer_names)?;
-    gordian_runtime::workspace::atomic_write(path, updated.as_bytes())
+    atomic_write(path, updated.as_bytes())
         .map_err(|err| format!("could not replace board {}: {err}", path.display()))?;
     Ok(())
+}
+
+fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("board path has no parent: {}", path.display()),
+        )
+    })?;
+    let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
+    replacement.write_all(contents)?;
+    replacement.as_file().sync_all()?;
+    replacement.persist(path).map_err(|error| error.error)?;
+    std::fs::File::open(parent)?.sync_all()
 }
 
 fn validate_route_layers(

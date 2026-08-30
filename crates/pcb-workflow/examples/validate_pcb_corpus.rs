@@ -1,7 +1,7 @@
 //! Validate representative PCB seed boards through placement + routing.
 //!
 //! Default run:
-//! `cargo run -p gordian-core --example validate_pcb_corpus --quiet`
+//! `cargo run -p pcb-workflow --example validate_pcb_corpus --quiet`
 //!
 //! Use `--required` for the bounded acceptance set, `--all` to run every
 //! `examples/pcb_circuits/*.json`, pass board names such as `power-buck
@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
-use gordian_tools_pcb::corpus::{load_corpus_board, route_problem_for_placement, run_kicad_drc};
 use kicad::KicadInstallation;
 use kicad_footprint::FootprintCatalog;
 use pcb_drc::lint::lint;
@@ -26,6 +25,7 @@ use pcb_route_mesh::detail::{self, DetailPassDiagnostic};
 use pcb_route_mesh::mesh::CapacityMesh;
 use pcb_route_mesh::pathing::global_route_with_mesh;
 use pcb_route_mesh::pipeline::{TunedRouteRun, route_tuned_with_diagnostics};
+use pcb_workflow::corpus::{load_corpus_board, route_problem_for_placement, run_kicad_drc};
 
 const DEFAULT_BOARDS: &[&str] = &[
     "rc-divider",
@@ -68,7 +68,7 @@ fn main() -> Result<()> {
             }
         };
 
-        let placed = pcb_place::placement::place_tuned(&board.problem, &board.hints);
+        let placed = pcb_engine::place_tuned(&board.problem, &board.hints);
         let place_ms = started.elapsed().as_millis();
         if !placed.legal {
             failures += 1;

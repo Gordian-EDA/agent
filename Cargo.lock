@@ -1031,17 +1031,11 @@ dependencies = [
  "geom",
  "gordian-llm",
  "gordian-runtime",
- "gordian-tools-pcb",
  "indexmap 2.14.0",
  "kicad",
  "kicad-footprint",
- "kicad-ipc",
  "kicad-symbol",
- "pcb-drc",
- "pcb-model",
- "pcb-place",
- "pcb-route-grid",
- "pcb-route-mesh",
+ "pcb-workflow",
  "prost",
  "prost-types",
  "rayon",
@@ -1087,30 +1081,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
-]
-
-[[package]]
-name = "gordian-tools-pcb"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "circuit-graph",
- "circuit-lang",
- "geom",
- "gordian-runtime",
- "kicad",
- "kicad-footprint",
- "kicad-ipc",
- "pcb-drc",
- "pcb-model",
- "pcb-place",
- "pcb-route-grid",
- "pcb-route-mesh",
- "prost-types",
- "sch-io",
- "serde",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -1645,6 +1615,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kicad-board"
+version = "0.1.0"
+dependencies = [
+ "geom",
+ "kicad-ipc",
+ "pcb-model",
+ "pcb-place",
+ "tempfile",
+]
+
+[[package]]
 name = "kicad-footprint"
 version = "0.1.0"
 dependencies = [
@@ -2153,6 +2134,32 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "pcb-workflow"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "circuit-graph",
+ "circuit-lang",
+ "geom",
+ "gordian-runtime",
+ "kicad",
+ "kicad-board",
+ "kicad-footprint",
+ "kicad-ipc",
+ "pcb-drc",
+ "pcb-engine",
+ "pcb-model",
+ "pcb-place",
+ "pcb-route-grid",
+ "pcb-route-mesh",
+ "prost-types",
+ "sch-io",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

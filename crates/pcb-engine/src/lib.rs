@@ -1,10 +1,25 @@
-//! The single Gordian PCB engine.
+//! Gordian's production PCB physical-design boundary.
 //!
-//! The framework sees only [`PcbEngine::solve`]. Placement and routing are
-//! concrete private phases owned by this implementation.
+//! Application workflows call this crate for placement and routing policy;
+//! concrete placer/router crates remain implementation details of this facade.
 
 use pcb_model::{Obstacle, PcbEngine, PcbProblem, PcbSolution, RoutingView};
 use pcb_place::{PlacementHints, PlacementView};
+
+/// Run the production placement policy for an already-imported board.
+pub fn place_tuned(problem: &PlacementView, hints: &PlacementHints) -> pcb_place::PlaceResult {
+    pcb_place::place_tuned(problem, hints)
+}
+
+/// Apply a fully prescribed placement without the tuned search portfolio.
+pub fn place_prescribed(problem: &PlacementView, hints: &PlacementHints) -> pcb_place::PlaceResult {
+    pcb_place::placement::place(problem, hints)
+}
+
+/// Run the production routing portfolio and retain its per-pass diagnostics.
+pub fn route_tuned(problem: &RoutingView) -> pcb_route_mesh::pipeline::TunedRouteRun {
+    pcb_route_mesh::pipeline::route_tuned_with_diagnostics(problem)
+}
 
 /// Gordian's tuned deterministic place-then-route implementation.
 #[derive(Debug, Clone, Default)]
@@ -21,7 +36,7 @@ impl GordianPcbEngine {
 impl PcbEngine for GordianPcbEngine {
     fn solve(&self, problem: &PcbProblem) -> PcbSolution {
         let placement_problem = placement_view(problem);
-        let placed = pcb_place::place_tuned(&placement_problem, &self.placement_hints);
+        let placed = place_tuned(&placement_problem, &self.placement_hints);
         if !placed.legal {
             return PcbSolution {
                 placements: placed.placements,
@@ -40,7 +55,7 @@ impl PcbEngine for GordianPcbEngine {
                 &validation_problem,
                 &problem.fixed_copper,
             ));
-        let routed = pcb_route_mesh::pipeline::route_tuned(&routing_problem);
+        let routed = route_tuned(&routing_problem).result;
         let mut copper = problem.fixed_copper.clone();
         copper.traces.extend(routed.solution.traces);
         copper.vias.extend(routed.solution.vias);

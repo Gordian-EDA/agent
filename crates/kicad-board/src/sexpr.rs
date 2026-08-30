@@ -5,7 +5,7 @@ use geom::Point2;
 
 /// End index (exclusive) of the balanced node beginning at `start`, which must
 /// sit on its `(`. String literals and their escapes are skipped.
-pub(crate) fn sexpr_end(text: &str, start: usize) -> Option<usize> {
+pub fn sexpr_end(text: &str, start: usize) -> Option<usize> {
     let bytes = text.as_bytes();
     if bytes.get(start) != Some(&b'(') {
         return None;
@@ -40,7 +40,7 @@ pub(crate) fn sexpr_end(text: &str, start: usize) -> Option<usize> {
 }
 
 /// First `(key x y …)` point inside `block`.
-pub(crate) fn sexpr_point(block: &str, key: &str) -> Option<Point2> {
+pub fn sexpr_point(block: &str, key: &str) -> Option<Point2> {
     let marker = format!("({key} ");
     let rest = block.split_once(&marker)?.1;
     let mut values = rest

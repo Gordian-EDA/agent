@@ -135,7 +135,7 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "no board exists yet — run regenerate_board first" }));
     }
     let mut note_prefix = if ctx.kicad().is_open() {
-        match super::active::save_live_board(ctx) {
+        match crate::save_active_board(ctx) {
             Ok(_) => "Saved the live KiCAD board, then ran DRC. ",
             Err(_) => {
                 // A wedged live session must not block DRC: the offline write

@@ -12,16 +12,10 @@ circuit-lang = { path = "../circuit-lang" }
 kicad = { path = "../kicad" }
 kicad-footprint = { path = "../kicad-footprint" }
 kicad-symbol = { path = "../kicad-symbol" }
-kicad-ipc = { path = "../kicad-ipc" }
-pcb-drc = { path = "../pcb-drc" }
-pcb-route-grid = { path = "../pcb-route-grid" }
-pcb-route-mesh = { path = "../pcb-route-mesh" }
 gordian-llm = { path = "../gordian-llm" }
 gordian-runtime = { path = "../gordian-runtime" }
-gordian-tools-pcb = { path = "../gordian-tools-pcb" }
+pcb-workflow = { path = "../pcb-workflow" }
 geom = { path = "../geom" }
-pcb-model = { path = "../pcb-model" }
-pcb-place = { path = "../pcb-place" }
 sch-floorplan = { path = "../sch-floorplan" }
 sch-io = { path = "../sch-io" }
 sch-place = { path = "../sch-place" }

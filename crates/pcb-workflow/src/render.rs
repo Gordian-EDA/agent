@@ -48,7 +48,7 @@ pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let source = match board_render_source(&pcb_path) {
         Ok(source) => source,
-        Err(file_err) => match super::active::board_problem(ctx) {
+        Err(file_err) => match crate::active_board(ctx) {
             Ok(board) => BoardRenderSource {
                 bounds: board.imported.bounds,
                 outline: board.problem.outline,
@@ -192,9 +192,9 @@ fn parse_board_render_source(text: &str) -> std::result::Result<BoardRenderSourc
         let block = &text[node.start..node.end];
         match board_node_head(text, &node) {
             "gr_rect" => {
-                let start = super::sexpr::sexpr_point(block, "start")
+                let start = kicad_board::sexpr_point(block, "start")
                     .ok_or("Edge.Cuts rectangle has no start")?;
-                let end = super::sexpr::sexpr_point(block, "end")
+                let end = kicad_board::sexpr_point(block, "end")
                     .ok_or("Edge.Cuts rectangle has no end")?;
                 let bounds = Rect::new(
                     start.x.min(end.x),
@@ -237,8 +237,8 @@ fn parse_board_render_source(text: &str) -> std::result::Result<BoardRenderSourc
             );
         }
         let start =
-            super::sexpr::sexpr_point(block, "start").ok_or("Edge.Cuts line has no start")?;
-        let end = super::sexpr::sexpr_point(block, "end").ok_or("Edge.Cuts line has no end")?;
+            kicad_board::sexpr_point(block, "start").ok_or("Edge.Cuts line has no start")?;
+        let end = kicad_board::sexpr_point(block, "end").ok_or("Edge.Cuts line has no end")?;
         segments.push((start, end));
     }
     let outline = Polygon::new(stitch_board_outline(segments)?)
@@ -252,7 +252,7 @@ fn parse_board_render_source(text: &str) -> std::result::Result<BoardRenderSourc
 }
 
 fn balanced_node(text: &str, start: usize) -> Option<BoardNode> {
-    super::sexpr::sexpr_end(text, start).map(|end| BoardNode { start, end })
+    kicad_board::sexpr_end(text, start).map(|end| BoardNode { start, end })
 }
 
 fn child_board_nodes(text: &str, start: usize, end: usize) -> Vec<BoardNode> {

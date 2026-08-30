@@ -17,7 +17,7 @@ use pcb_place::{
 
 use gordian_runtime::AgentRuntime;
 
-use crate::active::{ImportedPad, ImportedPart, IpcBoardSnapshot};
+use kicad_board::{ImportedPad, ImportedPart, IpcBoardSnapshot};
 
 pub(super) fn part_from_footprint_layers(
     footprint: &Footprint,
@@ -141,7 +141,7 @@ fn pad_aabb(pad: &FootprintPad) -> Rect {
 // ── get_board ────────────────────────────────────────────────────────────────
 
 pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let board = match super::active::board_problem(ctx) {
+    let board = match crate::active_board(ctx) {
         Ok(board) => board,
         Err(err) => return Ok(json!({ "error": err })),
     };
@@ -152,7 +152,7 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .map(|(name, &pins)| json!({ "name": name, "pins": pins }))
         .collect();
 
-    let placed = !super::active::is_seed_imported_board(&board.imported);
+    let placed = !kicad_board::is_seed_imported_board(&board.imported);
     let routed = !board.copper.traces.is_empty() || !board.copper.vias.is_empty();
     let parts: Vec<Value> = board
         .imported
@@ -1635,7 +1635,7 @@ fn placement_existing_copper_error(tracks: usize, vias: usize) -> Option<Value> 
 }
 
 pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let board = match super::active::board_problem(ctx) {
+    let board = match crate::active_board(ctx) {
         Ok(board) => board,
         Err(live_err) => return Ok(json!({ "error": live_err })),
     };
@@ -1736,19 +1736,19 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         mirror_right_817_bank(&mut prescribed, &hints);
         align_817_field_connector_datums(&mut prescribed, &hints);
         if prescribed.parts.iter().all(|part| part.locked.is_some()) {
-            pcb_place::placement::place(&prescribed, &PlacementHints::default())
+            pcb_engine::place_prescribed(&prescribed, &PlacementHints::default())
         } else {
-            pcb_place::placement::place_tuned(&problem, &hints)
+            pcb_engine::place_tuned(&problem, &hints)
         }
     } else {
-        pcb_place::placement::place_tuned(&problem, &hints)
+        pcb_engine::place_tuned(&problem, &hints)
     };
     // The 817 grammar prescribes strips sized for its canonical channel shape;
     // a richer channel (series R + TVS + status LED per input) can overflow
     // them with sub-millimetre collisions no canvas growth fixes. An illegal
     // prescribed result falls back to the generic placer instead of failing.
     if !result.legal && opto817_requirements.is_some() {
-        let generic = pcb_place::placement::place_tuned(&problem, &PlacementHints::default());
+        let generic = pcb_engine::place_tuned(&problem, &PlacementHints::default());
         if generic.legal {
             result = generic;
         }
@@ -1939,7 +1939,7 @@ fn write_placement(ctx: &AgentRuntime, moves: &[FootprintMove]) -> std::result::
     // so the next read reopens from disk.
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("{live_err}; offline fallback could not read the board: {e}"))?;
-    let patched = super::patch::patch_placements(&text, moves)
+    let patched = kicad_board::patch_placements(&text, moves)
         .map_err(|e| format!("{live_err}; offline fallback failed: {e}"))?;
     std::fs::write(&path, patched)
         .map_err(|e| format!("{live_err}; offline fallback could not write the board: {e}"))?;
@@ -1950,9 +1950,9 @@ fn write_placement(ctx: &AgentRuntime, moves: &[FootprintMove]) -> std::result::
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::active::{ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot};
     use geom::Point2;
     use kicad::KicadInstallation;
+    use kicad_board::{ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot};
     use kicad_footprint::{FootprintCatalog, PadTechnology};
     use pcb_model::{RouteSolution, RoutingView, Trace, Via};
 
@@ -3208,7 +3208,7 @@ mod tests {
             json!({"w": 120.0, "h": 60.0})
         );
         problem.bounds = Rect::new(0.0, 0.0, estimate.width.ceil(), estimate.height.ceil());
-        let second_call = pcb_place::placement::place_tuned(&problem, &PlacementHints::default());
+        let second_call = pcb_engine::place_tuned(&problem, &PlacementHints::default());
         assert!(second_call.legal);
     }
 
@@ -3336,7 +3336,7 @@ mod tests {
             edge_seek: refs.to_vec(),
             ..PlacementHints::default()
         };
-        let result = pcb_place::placement::place_tuned(&problem, &hints);
+        let result = pcb_engine::place_tuned(&problem, &hints);
         assert!(result.legal, "real Palconn auto-placement must be legal");
         let auto_positions: Vec<Point2> = result.placements.iter().map(|p| p.at).collect();
         let auto_half: Vec<_> = problem

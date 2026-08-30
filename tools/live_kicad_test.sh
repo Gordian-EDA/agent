@@ -43,5 +43,5 @@ else
 fi
 
 echo "Running live KiCad IPC tests against KiCad $actual_version"
-cargo test -p gordian-tools-pcb --lib -- --ignored --test-threads=1
+cargo test -p pcb-workflow --lib -- --ignored --test-threads=1
 cargo test -p gordian-core --test tools -- --ignored --test-threads=1

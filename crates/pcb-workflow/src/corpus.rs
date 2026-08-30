@@ -203,9 +203,9 @@ pub fn routed_board_text(
             rotation_deg: Some(placement.rotation),
         })
         .collect::<Vec<_>>();
-    let placed = super::patch::patch_placements(&seed, &moves)?;
+    let placed = kicad_board::patch_placements(&seed, &moves)?;
     let layer_names = copper_layer_names(board.rules.layer_count);
-    super::patch::append_copper(&placed, solution, board.rules.layer_count, &layer_names)
+    kicad_board::append_copper(&placed, solution, board.rules.layer_count, &layer_names)
 }
 
 /// Synthesize a temporary routed board and check it with KiCad's DRC using the

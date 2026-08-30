@@ -2,7 +2,7 @@
 //!
 //! This crate IS the agent: the [`Agent`] turn loop with a human apply-gate, the
 //! conversation history (unwind / clear / [`Agent::compact`]), the schematic/PCB
-//! tool registry ([`tools`] + [`tools_pcb`]), the composed-sheet emit
+//! tool registry ([`tools`]), the composed-sheet emit
 //! ([`multisheet`]), the SVG→PNG [`render`], the netlist + vision [`review`]
 //! mechanics, and the [`prompts`] system prompt.
 //!

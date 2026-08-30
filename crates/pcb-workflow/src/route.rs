@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use crate::active::ImportedPart;
+use kicad_board::ImportedPart;
 use pcb_drc::connectivity::Violation as ConnViolation;
 use pcb_drc::lint::{DrcViolation, lint};
 use pcb_model::{
@@ -176,7 +176,7 @@ pub fn route_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
 }
 
 fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
-    let board = super::active::board_problem(ctx)?;
+    let board = crate::active_board(ctx)?;
     if is_seed_placement(&board.imported.bounds, &board.imported.parts) {
         return Err("board has only the initial seed-row footprint positions — run place_board before route_board".to_owned());
     }
@@ -310,7 +310,7 @@ fn replace_route_atomically(
     let original = std::fs::read(&path).map_err(|error| {
         format!("could not snapshot existing board before replacement: {error}")
     })?;
-    let ipc_route = super::active::bridge_route(rp, solution);
+    let ipc_route = kicad_board::bridge_route(rp, solution);
     let live = ctx.kicad().with_session(&path, |session| {
         session
             .kicad()
@@ -343,9 +343,8 @@ fn replace_route_offline(
     let path = ctx.pcb_path();
     let text = std::fs::read_to_string(&path)
         .map_err(|error| format!("could not read the board: {error}"))?;
-    let (stripped, _, _) = super::patch::strip_copper(&text)?;
-    let replacement =
-        super::patch::append_copper(&stripped, solution, rp.layer_count, layer_names)?;
+    let (stripped, _, _) = kicad_board::strip_copper(&text)?;
+    let replacement = kicad_board::append_copper(&stripped, solution, rp.layer_count, layer_names)?;
     write_board_atomically(&path, replacement.as_bytes())
         .map_err(|error| format!("could not write the board: {error}"))
 }
@@ -647,7 +646,7 @@ struct RouteRun {
 }
 
 fn route_with_engine(rp: &RoutingView) -> RouteRun {
-    let run = pcb_route_mesh::pipeline::route_tuned_with_diagnostics(rp);
+    let run = pcb_engine::route_tuned(rp);
     RouteRun {
         result: run.result,
         attempts: run.passes,
@@ -1814,7 +1813,7 @@ fn write_route(
     solution: &RouteSolution,
     layer_names: &[String],
 ) -> std::result::Result<(), String> {
-    let ipc_route = super::active::bridge_route(rp, solution);
+    let ipc_route = kicad_board::bridge_route(rp, solution);
     let path = ctx.pcb_path();
     let live = ctx.kicad().with_session(&path, |session| {
         session
@@ -1836,7 +1835,7 @@ pub(super) fn write_route_offline(
     layer_names: &[String],
 ) -> std::result::Result<(), String> {
     ctx.close_kicad_session();
-    super::patch::append_copper_file(&ctx.pcb_path(), solution, rp.layer_count, layer_names)
+    kicad_board::append_copper_file(&ctx.pcb_path(), solution, rp.layer_count, layer_names)
 }
 
 fn is_seed_placement(bounds: &pcb_model::Rect, parts: &[ImportedPart]) -> bool {
@@ -1864,7 +1863,7 @@ fn is_seed_placement(bounds: &pcb_model::Rect, parts: &[ImportedPart]) -> bool {
 #[cfg(test)]
 mod escape_bottleneck_tests {
     use super::*;
-    use crate::active::ImportedPad;
+    use kicad_board::ImportedPad;
 
     fn part(reference: &str, footprint: &str, nets: &[(&str, &str)]) -> ImportedPart {
         ImportedPart {

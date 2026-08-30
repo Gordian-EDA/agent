@@ -11,8 +11,15 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 API_CRATES = {"pcb-model"}
-PCB_IMPLEMENTATIONS = {"pcb-engine", "pcb-place", "pcb-route-grid", "pcb-route-mesh", "pcb-drc"}
-AGENT_CRATES = {"gordian", "gordian-core", "gordian-runtime", "gordian-tools-pcb"}
+PCB_IMPLEMENTATIONS = {
+    "kicad-board",
+    "pcb-engine",
+    "pcb-place",
+    "pcb-route-grid",
+    "pcb-route-mesh",
+    "pcb-drc",
+}
+AGENT_CRATES = {"gordian", "gordian-core", "gordian-runtime", "pcb-workflow"}
 
 
 def workspace_graph() -> dict[str, set[str]]:
@@ -73,6 +80,17 @@ def main() -> int:
         forbidden = graph.get(crate, set()) & AGENT_CRATES
         for dependency in sorted(forbidden):
             errors.append(f"PCB crate {crate} depends on agent crate {dependency}")
+
+    core_forbidden = graph.get("gordian-core", set()) & PCB_IMPLEMENTATIONS
+    for dependency in sorted(core_forbidden):
+        errors.append(
+            f"gordian-core bypasses pcb-workflow and depends on PCB implementation {dependency}"
+        )
+
+    workflow_dependencies = graph.get("pcb-workflow", set())
+    for required in ("kicad-board", "pcb-engine"):
+        if required not in workflow_dependencies:
+            errors.append(f"pcb-workflow must depend on boundary crate {required}")
 
     if errors:
         print("crate architecture check failed:", file=sys.stderr)

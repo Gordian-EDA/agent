@@ -1,14 +1,12 @@
 //! Live KiCAD-board views and the explicit bridge-to-domain conversion seam.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use geom::{Point2, Rect};
 use pcb_model::{
     Connection, LayerRef, Obstacle, RoutePoint, RouteSolution, RoutingView, Trace, Via, ViaSpan,
 };
 use pcb_place::Placement;
-
-use gordian_runtime::AgentRuntime;
 
 /// Domain view consumed by placement and routing tools.
 #[derive(Debug, Clone)]
@@ -46,7 +44,7 @@ pub struct ImportedPad {
     pub layers: Vec<LayerRef>,
 }
 
-pub(super) fn from_bridge(snapshot: kicad_ipc::snapshot::IpcBoardSnapshot) -> IpcBoardSnapshot {
+pub fn from_bridge(snapshot: kicad_ipc::snapshot::IpcBoardSnapshot) -> IpcBoardSnapshot {
     let problem = snapshot.problem;
     IpcBoardSnapshot {
         problem: RoutingView {
@@ -146,10 +144,7 @@ pub(super) fn from_bridge(snapshot: kicad_ipc::snapshot::IpcBoardSnapshot) -> Ip
     }
 }
 
-pub(super) fn bridge_route(
-    problem: &RoutingView,
-    solution: &RouteSolution,
-) -> kicad_ipc::RouteWrite {
+pub fn bridge_route(problem: &RoutingView, solution: &RouteSolution) -> kicad_ipc::RouteWrite {
     let bridge_solution = kicad_ipc::snapshot::BoardCopper {
         traces: solution
             .traces
@@ -206,43 +201,46 @@ fn bridge_via_span(span: &ViaSpan) -> kicad_ipc::snapshot::BoardViaSpan {
 }
 
 /// Save the active KiCAD board and return its project PCB path.
-pub fn save_live_board(ctx: &AgentRuntime) -> std::result::Result<PathBuf, String> {
-    let path = ctx.pcb_path();
+pub fn save_live_board(
+    path: &Path,
+    sessions: &kicad_ipc::SessionManager,
+) -> std::result::Result<PathBuf, String> {
     if !path.exists() {
         return Err("no board exists yet — run regenerate_board first".to_owned());
     }
     // A wedged live session must not block file-based consumers: the offline
     // write paths keep the on-disk board current, so drop the session and hand
     // back the file.
-    if ctx
-        .kicad()
-        .with_session(&path, |session| session.kicad().save())
+    if sessions
+        .with_session(path, |session| session.kicad().save())
         .is_err()
     {
-        ctx.close_kicad_session();
+        sessions.close();
     }
-    Ok(path)
+    Ok(path.to_path_buf())
 }
 
 /// Read the active board as a routing problem.
-pub fn board_problem(ctx: &AgentRuntime) -> std::result::Result<IpcBoardSnapshot, String> {
-    read_snapshot(ctx)
+pub fn board_problem(
+    path: &Path,
+    sessions: &kicad_ipc::SessionManager,
+) -> std::result::Result<IpcBoardSnapshot, String> {
+    read_snapshot(path, sessions)
 }
 
-fn read_snapshot(ctx: &AgentRuntime) -> std::result::Result<IpcBoardSnapshot, String> {
-    let path = ctx.pcb_path();
+fn read_snapshot(
+    path: &Path,
+    sessions: &kicad_ipc::SessionManager,
+) -> std::result::Result<IpcBoardSnapshot, String> {
     if !path.exists() {
         return Err("no board exists yet — run regenerate_board first".to_owned());
     }
     let mut last_ready_err = None;
     for _ in 0..6 {
-        match ctx
-            .kicad()
-            .with_session(&path, |session| session.kicad().board_snapshot())
-        {
+        match sessions.with_session(path, |session| session.kicad().board_snapshot()) {
             Ok(snapshot) => {
                 let mut snapshot = from_bridge(snapshot);
-                reconcile_file_stackup(&path, &mut snapshot)?;
+                reconcile_file_stackup(path, &mut snapshot)?;
                 return Ok(snapshot);
             }
             Err(err) if err.is_transient_api_ready_error() => {
@@ -251,17 +249,16 @@ fn read_snapshot(ctx: &AgentRuntime) -> std::result::Result<IpcBoardSnapshot, St
             }
             Err(err) if err.is_transport_timeout() || err.is_type_mismatch() => {
                 let initial = err.to_string();
-                ctx.close_kicad_session();
-                let snapshot = ctx
-                    .kicad()
-                    .with_session(&path, |session| session.kicad().board_snapshot())
+                sessions.close();
+                let snapshot = sessions
+                    .with_session(path, |session| session.kicad().board_snapshot())
                     .map_err(|retry| {
                         format!(
                             "could not read live KiCAD board over IPC after reconnect; initial error: {initial}; retry error: {retry}"
                         )
                     })?;
                 let mut snapshot = from_bridge(snapshot);
-                reconcile_file_stackup(&path, &mut snapshot)?;
+                reconcile_file_stackup(path, &mut snapshot)?;
                 return Ok(snapshot);
             }
             Err(err) => return Err(format!("could not read live KiCAD board over IPC: {err}")),
@@ -270,12 +267,11 @@ fn read_snapshot(ctx: &AgentRuntime) -> std::result::Result<IpcBoardSnapshot, St
     if let Some(err) = last_ready_err {
         Err(format!("could not read live KiCAD board over IPC: {err}"))
     } else {
-        let snapshot = ctx
-            .kicad()
-            .with_session(&path, |session| session.kicad().board_snapshot())
+        let snapshot = sessions
+            .with_session(path, |session| session.kicad().board_snapshot())
             .map_err(|err| format!("could not read live KiCAD board over IPC: {err}"))?;
         let mut snapshot = from_bridge(snapshot);
-        reconcile_file_stackup(&path, &mut snapshot)?;
+        reconcile_file_stackup(path, &mut snapshot)?;
         Ok(snapshot)
     }
 }
@@ -286,7 +282,7 @@ fn reconcile_file_stackup(
 ) -> std::result::Result<(), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("could not read board layer table: {err}"))?;
-    let layer_names = super::patch::board_copper_layer_names(&text)?;
+    let layer_names = crate::patch::board_copper_layer_names(&text)?;
     let ipc_layer_names = snapshot.layer_names.clone();
     let layer_count = layer_names.len() as u32;
     if ipc_layer_names != layer_names {
@@ -301,7 +297,7 @@ fn reconcile_file_stackup(
             true
         });
     }
-    for (net, layer) in super::patch::board_file_plane_nets(&text)? {
+    for (net, layer) in crate::patch::board_file_plane_nets(&text)? {
         snapshot.problem.plane_nets.insert(net, layer);
     }
     snapshot.problem.escape_layers.retain(|_, layer| {
@@ -342,7 +338,7 @@ fn reconcile_file_stackup(
     Ok(())
 }
 
-pub(super) fn imported_placements(board: &ImportedBoard) -> Vec<Placement> {
+fn imported_placements(board: &ImportedBoard) -> Vec<Placement> {
     board
         .parts
         .iter()
@@ -354,7 +350,7 @@ pub(super) fn imported_placements(board: &ImportedBoard) -> Vec<Placement> {
         .collect()
 }
 
-pub(super) fn is_seed_imported_board(board: &ImportedBoard) -> bool {
+pub fn is_seed_imported_board(board: &ImportedBoard) -> bool {
     is_seed_placement(&board.bounds, &imported_placements(board))
 }
 

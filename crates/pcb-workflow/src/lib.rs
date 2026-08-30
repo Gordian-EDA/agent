@@ -1,21 +1,21 @@
-//! PCB-side tools over the active KiCAD board.
+//! PCB application workflows over the active KiCad board.
 //!
-//! `tools.rs` stays the schematic file; the PCB tools live here and are merged
-//! into [`crate::tools::tool_defs`]/[`run`](crate::tools::run_tool). Recoverable
-//! tool failures are returned as JSON error payloads rather than `Err`.
+//! This crate coordinates board creation, physical design, validation, rendering,
+//! and fabrication export. KiCad persistence lives in `kicad-board`; placement
+//! and routing implementation selection lives in `pcb-engine`. Recoverable
+//! workflow failures are returned as JSON error payloads rather than `Err`.
 //!
 //! ## Active board
 //!
-//! The live KiCAD IPC session is the source of truth for PCB state. Tools ask the
-//! global session manager for the project board, save it for CLI checks/exports,
-//! and write geometry back through IPC.
+//! The saved `.kicad_pcb` is the durable board state. When pcbnew is open, tools
+//! snapshot and save it through IPC; headless operations use `kicad-board`'s
+//! atomic file-edit fallback and invalidate any stale live session.
 //!
 //! `regenerate_board` synthesizes the initial `.kicad_pcb` file. Active
 //! placement, routing, rendering, and `get_board` read the live IPC board.
 //!
 //! ## Tool families (one module each)
 //!
-//! - [`active`] — live-session snapshot/save helpers.
 //! - [`seed`] — board-construction rule/extra input types.
 //! - [`footprints`] — footprint discovery + assignment: `search_footprints`,
 //!   `get_footprint_info`, `assign_footprints`.
@@ -29,7 +29,6 @@
 //! - [`interactive`] — live IPC board editing (`open_board`, `move_parts`,
 //!   `route_track`, `delete_copper`, `set_net_width`).
 
-mod active;
 pub mod corpus;
 mod create;
 mod export;
@@ -37,12 +36,10 @@ mod fab;
 mod footprints;
 mod interactive;
 mod outline;
-mod patch;
 mod place;
 mod render;
 mod route;
 mod seed;
-mod sexpr;
 mod silk;
 
 pub(crate) fn fmt_num(v: f64) -> String {
@@ -65,3 +62,13 @@ pub use place::{get_board, place_board};
 pub use render::render_board;
 pub use route::route_board;
 pub use seed::{BoardSeedRules, PourSpec};
+
+fn active_board(
+    ctx: &gordian_runtime::AgentRuntime,
+) -> Result<kicad_board::IpcBoardSnapshot, String> {
+    kicad_board::board_problem(&ctx.pcb_path(), ctx.kicad())
+}
+
+fn save_active_board(ctx: &gordian_runtime::AgentRuntime) -> Result<std::path::PathBuf, String> {
+    kicad_board::save_live_board(&ctx.pcb_path(), ctx.kicad())
+}

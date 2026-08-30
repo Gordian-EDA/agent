@@ -21,7 +21,7 @@ use pcb_model::{
 use gordian_runtime::AgentRuntime;
 use gordian_runtime::tool::require_str;
 
-use crate::active::IpcBoardSnapshot;
+use kicad_board::IpcBoardSnapshot;
 
 fn ipc_err(e: kicad_ipc::Error) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
@@ -41,7 +41,7 @@ pub fn open_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
 pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
     match ctx.kicad().with_session(&path, |session| {
-        let snapshot = crate::active::from_bridge(session.kicad().board_snapshot()?);
+        let snapshot = kicad_board::from_bridge(session.kicad().board_snapshot()?);
         let mut board = MoveBoard::from_snapshot(&snapshot);
         let plan = match resolve_move_parts(&input, &mut board) {
             Ok(plan) => plan,
@@ -426,7 +426,7 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // commit, leaving route_track unable to tell whether retrying would
     // duplicate copper. Use the resilient, read-only snapshot path (including
     // its timeout reconnect) and then commit offline.
-    let prepared = super::active::board_problem(ctx).and_then(|snapshot| {
+    let prepared = crate::active_board(ctx).and_then(|snapshot| {
         let request = parse_route_track_request(&input, &snapshot.problem)?;
         let (problem, solution) = manual_route_solution(&snapshot.problem, &request)?;
         Ok((problem, solution, request, snapshot.layer_names))

@@ -14,7 +14,7 @@
 //! The schematic side covers `search_symbols` / `get_symbol_info`
 //! / `validate_design` / `apply_design` / `review_design` / `run_erc` /
 //! `project_info` / `read_schematic` / `render_schematic` / `create_design` /
-//! `edit_design`; the PCB side (in [`crate::tools_pcb`]) covers the footprint
+//! `edit_design`; `pcb-workflow` covers the footprint
 //! search/info, `regenerate_board`, and the place/route/export/interactive flow.
 //!
 //! ## `apply_design`: preview vs approved write
@@ -639,22 +639,22 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "create_design" => create_design(input, ctx),
         "edit_design" => edit_design(input, ctx),
         "repair_components" => repair_components(input, ctx),
-        "search_footprints" => gordian_tools_pcb::search_footprints(input, ctx),
-        "get_footprint_info" => gordian_tools_pcb::get_footprint_info(input, ctx),
-        "regenerate_board" => gordian_tools_pcb::regenerate_board(input, ctx),
-        "assign_footprints" => gordian_tools_pcb::assign_footprints(input, ctx),
-        "get_board" => gordian_tools_pcb::get_board(input, ctx),
-        "place_board" => gordian_tools_pcb::place_board(input, ctx),
-        "route_board" => gordian_tools_pcb::route_board(input, ctx),
-        "check_board" => gordian_tools_pcb::check_board(input, ctx),
-        "export_fab" => gordian_tools_pcb::export_fab(input, ctx),
-        "open_board" => gordian_tools_pcb::open_board(input, ctx),
-        "move_parts" => gordian_tools_pcb::move_parts(input, ctx),
-        "route_track" => gordian_tools_pcb::route_track(input, ctx),
-        "delete_copper" => gordian_tools_pcb::delete_copper(input, ctx),
-        "set_net_width" => gordian_tools_pcb::set_net_width(input, ctx),
-        "update_board_outline" => gordian_tools_pcb::update_board_outline(input, ctx),
-        "render_board" => gordian_tools_pcb::render_board(input, ctx),
+        "search_footprints" => pcb_workflow::search_footprints(input, ctx),
+        "get_footprint_info" => pcb_workflow::get_footprint_info(input, ctx),
+        "regenerate_board" => pcb_workflow::regenerate_board(input, ctx),
+        "assign_footprints" => pcb_workflow::assign_footprints(input, ctx),
+        "get_board" => pcb_workflow::get_board(input, ctx),
+        "place_board" => pcb_workflow::place_board(input, ctx),
+        "route_board" => pcb_workflow::route_board(input, ctx),
+        "check_board" => pcb_workflow::check_board(input, ctx),
+        "export_fab" => pcb_workflow::export_fab(input, ctx),
+        "open_board" => pcb_workflow::open_board(input, ctx),
+        "move_parts" => pcb_workflow::move_parts(input, ctx),
+        "route_track" => pcb_workflow::route_track(input, ctx),
+        "delete_copper" => pcb_workflow::delete_copper(input, ctx),
+        "set_net_width" => pcb_workflow::set_net_width(input, ctx),
+        "update_board_outline" => pcb_workflow::update_board_outline(input, ctx),
+        "render_board" => pcb_workflow::render_board(input, ctx),
         other => bail!("unknown tool: {other}"),
     }
 }
@@ -1665,13 +1665,9 @@ fn normalize_misplaced_footprint_parts(
     let mut normalized = yaml.to_owned();
     let mut report = Vec::new();
     for (reference, footprint, symbol) in replacements {
-        normalized = gordian_tools_pcb::patch_part_and_footprint(
-            &normalized,
-            &reference,
-            &symbol,
-            &footprint,
-        )
-        .map_err(anyhow::Error::msg)?;
+        normalized =
+            pcb_workflow::patch_part_and_footprint(&normalized, &reference, &symbol, &footprint)
+                .map_err(anyhow::Error::msg)?;
         report.push(json!({
             "reference": reference,
             "original_part": footprint,
@@ -1752,7 +1748,7 @@ fn normalize_common_footprint_aliases(
     let mut normalized = yaml.to_owned();
     let mut report = Vec::new();
     for (reference, original, canonical) in replacements {
-        normalized = gordian_tools_pcb::patch_footprint(&normalized, &reference, canonical)
+        normalized = pcb_workflow::patch_footprint(&normalized, &reference, canonical)
             .map_err(anyhow::Error::msg)?
             .0;
         report.push(json!({
@@ -1811,7 +1807,7 @@ fn add_footprint_alias_normalizations(report: &mut Value, normalizations: Vec<Va
 /// less universal choices (ICs, polarized capacitors, switches, and terminal
 /// blocks) deliberately remain explicit author decisions.
 fn common_default_footprint(part: &str) -> Option<String> {
-    gordian_tools_pcb::common_default_footprint(part)
+    pcb_workflow::common_default_footprint(part)
 }
 
 /// Fill conventional footprints only when a draft is large enough that it is
@@ -1867,7 +1863,7 @@ fn normalize_dense_default_footprints(
     let mut normalized = yaml.to_owned();
     let mut report = Vec::new();
     for (reference, part, footprint) in assignments {
-        normalized = gordian_tools_pcb::patch_footprint(&normalized, &reference, &footprint)
+        normalized = pcb_workflow::patch_footprint(&normalized, &reference, &footprint)
             .map_err(anyhow::Error::msg)?
             .0;
         report.push(json!({

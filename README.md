@@ -77,6 +77,8 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 |-------|------|
 | `gordian` | CLI + ratatui copilot TUI — the entry point |
 | `gordian-core` | The KiCAD agent: the turn loop + apply-gate, the schematic/PCB tools, prompts, review, and render — over the `Provider` seam with one provider-agnostic, genai-backed `GenaiProvider` (BYOK any provider) |
+| `pcb-workflow` | Application workflows that coordinate PCB creation, placement, routing, validation, rendering, and fabrication export |
+| `kicad-board` | KiCad PCB persistence boundary: live IPC snapshots, domain conversion, and atomic offline board edits |
 | `circuit-lang` | Parser, linter, and canonical emitter for the circuit markup language |
 | `circuit-graph` | Attributed circuit graph + a declarative idiom matcher |
 | `sch-floorplan` / `sch-io` / `sch-place` | Deterministic schematic floorplan core (`Design` → `.kicad_sch` and back), over the anneal/constraint placement engines, with the shared model + I/O layers |
@@ -86,7 +88,7 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | `pcb-route-grid` | Grid/A\* primitives for the tuned routing phase |
 | `pcb-route-mesh` | Tuned routing pipeline and lower-level mesh diagnostics |
 | `pcb-drc` | Extensible PCB geometry and connectivity DRC |
-| `kicad` / `kicad-ipc` / `specctra` | KiCAD discovery and CLI driver, live IPC session, Specctra DSN/SES |
+| `kicad` / `kicad-ipc` | KiCAD discovery and CLI driver, plus the live pcbnew IPC session |
 
 ## Testing
 
@@ -95,29 +97,29 @@ cargo test --workspace --quiet  # unit + integration tests
 tools/live_kicad_test.sh 9      # live pcbnew IPC suite; also accepts 10
 cargo clippy --workspace --all-targets -- -D warnings
                                # lints for libs, bins, examples, tests, and doctests
-cargo run -p gordian-core --example validate_pcb_corpus --quiet
+cargo run -p pcb-workflow --example validate_pcb_corpus --quiet
                                # PCB smoke: real KiCAD footprints, place + route + DRC lint
-cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --required
+cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --required
                                # Required PCB gate: smoke boards plus power, LED, and dense BGA
-cargo run -p gordian-core --example validate_pcb_corpus --quiet -- power-buck led-array
+cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- power-buck led-array
                                # Named ad-hoc real-board checks
-cargo run -p gordian-core --example validate_pcb_corpus --quiet -- bga25-route
+cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- bga25-route
                                # Dense BGA auto-router qualification check
-cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router sequential -v bga25-route
+cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router sequential -v bga25-route
                                # Explicit non-A* sequential-grid diagnostic route
-cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router astar -v bga25-route
+cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router astar -v bga25-route
                                # Explicit grid A* baseline diagnostic route
-cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router mesh-global -v bga25-route
+cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router mesh-global -v bga25-route
                                # Capacity-mesh global-routing isolation for heavy failures
-cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router mesh-assign -v bga25-route
+cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router mesh-assign -v bga25-route
                                # Capacity-mesh crossing/via assignment isolation
-cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router mesh-detail -v bga25-route
+cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router mesh-detail -v bga25-route
                                # Raw detailed cell-routing isolation; production rescue is intentionally disabled
-cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router mesh --inspect-net S1,S2 -v bga25-route
+cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router mesh --inspect-net S1,S2 -v bga25-route
                                # Bounded endpoint/copper inspection for failed or recently repaired nets
-cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router mesh-detail --inspect-failed-nets -v bga25-route
+cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router mesh-detail --inspect-failed-nets -v bga25-route
                                # Automatically inspect every failed raw-detail net
-cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router mesh-assign --inspect-detail-jobs --inspect-net S4,VCC bga25-route
+cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router mesh-assign --inspect-detail-jobs --inspect-net S4,VCC bga25-route
                                # Detailed crossing/cell-job inspection for dense-placement routing pressure
 ```
 
