@@ -4,7 +4,6 @@
 //! and the [`UnwindPicker`] it drives).
 
 use gordian_core::AgentEvent;
-use serde_json::Value;
 
 use super::{App, ImageCell};
 
@@ -30,8 +29,6 @@ pub enum NoticeLevel {
     /// The default dim/gray note (paths, undo confirmations, hints).
     #[default]
     Plain,
-    /// A clean success (green) — a turn that finished.
-    Success,
     /// A failure (red) — a turn that errored out.
     Error,
 }
@@ -80,29 +77,6 @@ impl Entry {
             speaker: Speaker::System,
             text: text.into(),
             level,
-        }
-    }
-}
-
-/// A proposed mutation awaiting the user's decision. Schematic applies carry a
-/// real dry-run diff; immediate PCB/project operations carry their exact name
-/// and model-supplied arguments because they cannot be previewed safely.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingApproval {
-    pub operation: String,
-    pub arguments: Value,
-}
-
-impl PendingApproval {
-    /// Parse a per-mutator operation proposal.
-    pub fn from_payload(v: &Value) -> Self {
-        Self {
-            operation: v
-                .get("operation")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown operation")
-                .to_string(),
-            arguments: v.get("arguments").cloned().unwrap_or(Value::Null),
         }
     }
 }
@@ -235,13 +209,6 @@ impl App {
                 if let Some(path) = image_path {
                     self.push_image(path, name);
                 }
-            }
-            AgentEvent::Applied { summary } => {
-                self.status.applied_count += 1;
-                self.transcript.push(Entry::notice(
-                    NoticeLevel::Success,
-                    format!("applied — {summary}"),
-                ));
             }
             AgentEvent::Usage {
                 provider_requests,

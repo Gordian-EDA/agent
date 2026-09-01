@@ -1,15 +1,14 @@
 //! The input composer and the panes that cluster around it: the flat input row
-//! ([`draw_input`]), the approval card just above it ([`draw_approval`]), and the
-//! two popups that float over it — the `/command` completion list
+//! ([`draw_input`]) and the two popups that float over it — the `/command` completion list
 //! ([`draw_completions`]) and the double-Esc unwind picker ([`draw_unwind`]).
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph};
 
-use super::super::app::{App, PendingApproval};
+use super::super::app::App;
 use super::super::theme;
 use super::{MARGIN, body};
 
@@ -87,77 +86,6 @@ fn draw_menu(f: &mut Frame, input_area: Rect, rows: Vec<Line<'static>>) {
     f.render_widget(Paragraph::new(rows).style(theme::MENU), popup);
 }
 
-/// Rows the approval pane needs at this terminal width: action row, summary row,
-/// and a wrapped diff/argument preview, capped so a large proposal cannot squeeze
-/// out the transcript.
-pub(super) fn approval_height(pending: &PendingApproval, width: u16) -> u16 {
-    let inner_w = width.saturating_sub(2 * MARGIN).max(1) as usize;
-    let preview_rows = approval_preview_text(pending)
-        .chars()
-        .count()
-        .div_ceil(inner_w) as u16;
-    (2 + preview_rows).clamp(3, 5)
-}
-
-pub(super) fn draw_approval(f: &mut Frame, area: Rect, app: &App) {
-    let Some(pending) = app.pending.as_ref() else {
-        return;
-    };
-
-    // The key letters are sourced from the keybinding definitions, not hardcoded,
-    // so the labels can never drift from what `event::map_key` actually accepts.
-    let accent = Style::default().fg(theme::ACC).add_modifier(Modifier::BOLD);
-    let dim = theme::META;
-    let action = Line::from(vec![
-        Span::styled("operation pending", accent),
-        Span::styled("   ", dim),
-        Span::styled(
-            format!("[{}] approve", super::super::event::APPROVE_KEY),
-            theme::SUCCESS.add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("   ", dim),
-        Span::styled(
-            format!("[{}] reject", super::super::event::REJECT_KEY),
-            theme::DANGER.add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("   Esc cancel", dim),
-    ]);
-    let summary = Line::from(vec![
-        Span::styled("run  ", dim),
-        Span::styled(
-            pending.operation.clone(),
-            theme::WARNING.add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  (mutates project)", dim),
-    ]);
-    let preview = Line::from(vec![
-        Span::styled("args  ", dim),
-        Span::styled(operation_args_text(&pending.arguments), theme::SUBTLE),
-    ]);
-
-    let para = Paragraph::new(vec![action, summary, preview]).wrap(Wrap { trim: true });
-    f.render_widget(para, body(area));
-}
-
-fn approval_preview_text(pending: &PendingApproval) -> String {
-    format!(
-        "run {}  args {}",
-        pending.operation,
-        operation_args_text(&pending.arguments)
-    )
-}
-
-fn operation_args_text(arguments: &serde_json::Value) -> String {
-    const MAX_CHARS: usize = 240;
-    let raw = serde_json::to_string(arguments).unwrap_or_else(|_| "{}".into());
-    if raw.chars().count() <= MAX_CHARS {
-        return raw;
-    }
-    let mut shortened: String = raw.chars().take(MAX_CHARS - 1).collect();
-    shortened.push('…');
-    shortened
-}
-
 /// Rows the composer needs: top/bottom separators plus one row per draft line
 /// (split on `\n`), capped so a giant paste can't swallow the transcript.
 pub(super) fn composer_height(app: &App, screen_h: u16, screen_w: u16) -> u16 {
@@ -177,7 +105,7 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     // Claude Code style: full-width border lines with footer-aligned input text.
     // No box; the border touches the terminal edge while typing follows the
     // chrome margin.
-    let focused = app.input_active() && app.pending.is_none();
+    let focused = app.input_active();
     let rule = if focused {
         theme::RULE_FOCUS
     } else {
@@ -216,16 +144,6 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     let caret = || Span::styled("❯", Style::default().fg(theme::ACC));
     f.render_widget(Paragraph::new(Line::from(caret())), marker);
 
-    if app.pending.is_some() {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "approve or reject the change above",
-                theme::META,
-            ))),
-            inner,
-        );
-        return;
-    }
     if app.esc_armed {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -359,43 +277,4 @@ pub(super) fn draw_unwind(f: &mut Frame, input_area: Rect, app: &App) {
         })
         .collect();
     draw_menu(f, input_area, rows);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn large_arguments_get_a_taller_pane_capped() {
-        let small = PendingApproval {
-            operation: "set_fields".into(),
-            arguments: serde_json::json!({"ref": "U1"}),
-        };
-        assert_eq!(approval_height(&small, 80), 3);
-        let big = PendingApproval {
-            operation: "place_parts".into(),
-            arguments: serde_json::json!({"parts": (0..60).map(|i| format!("LONG_REF_{i}")).collect::<Vec<_>>() }),
-        };
-        assert_eq!(
-            approval_height(&big, 24),
-            5,
-            "capped so it can't eat the transcript"
-        );
-    }
-
-    #[test]
-    fn operation_approval_names_the_tool_and_arguments() {
-        let pending = PendingApproval {
-            operation: "move_parts".into(),
-            arguments: serde_json::json!({
-                "moves": [{"reference": "U1", "by": [1, 2]}]
-            }),
-        };
-
-        let preview = approval_preview_text(&pending);
-
-        assert!(preview.contains("move_parts"), "{preview}");
-        assert!(preview.contains("U1"), "{preview}");
-        assert!(!preview.contains("no component changes"), "{preview}");
-    }
 }

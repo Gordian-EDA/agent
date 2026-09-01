@@ -1,7 +1,7 @@
 //! Gordian's KiCAD schematic + PCB design agent.
 //!
-//! This crate IS the agent: the [`Agent`] turn loop with human approval for each mutation, the
-//! conversation history (unwind / clear / [`Agent::compact`]), the schematic/PCB
+//! This crate IS the agent: the [`Agent`] turn loop, the conversation history
+//! (unwind / clear / [`Agent::compact`]), the schematic/PCB
 //! tool registry ([`tools`]), the composed-sheet emit
 //! the SVG→PNG [`render`], the schematic checks, and the PCB workflow
 //! mechanics, and the [`prompts`] system prompt.
@@ -37,7 +37,7 @@ pub mod session;
 pub mod testing;
 pub mod tools;
 
-pub use agent::{Agent, AgentEvent, Approvals, AutoApprove, ContextStats, StopReason, TurnOutcome};
+pub use agent::{Agent, AgentEvent, ContextStats, StopReason, TurnOutcome};
 pub use gordian_runtime::AgentRuntime;
 pub use gordian_runtime::config::{
     AgentConfig, CONFIG_SCHEMA_VERSION, ConfigError, DEFAULT_MAX_TOKENS, DEFAULT_RENDER_MAX_PX,

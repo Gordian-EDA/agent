@@ -2,7 +2,7 @@
 //!
 //! Kept separate from the shell so the mapping is a pure function and easy to
 //! reason about: the gate keys (`a`/`r`) are only special while a diff is
-//! pending; otherwise everything routes to the input line. Up/Down always
+//! active; otherwise everything routes to the input line. Up/Down always
 //! recall prompt history while editing — never the transcript, which is what
 //! makes the split with the mouse wheel legible; the transcript scrolls via
 //! Shift/Ctrl/Alt-Up/Down, PageUp/PageDown, and the (now captured, see
@@ -12,15 +12,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::app::{App, Msg};
 
-/// The mutation-approval keys, defined once here — the single source of truth shared by
-/// the key mapping below and the gate card's hint text ([`super::ui`]), so a key
-/// and its on-screen label can never drift apart.
-pub const APPROVE_KEY: char = 'a';
-pub const REJECT_KEY: char = 'r';
-
 /// Map a key press to a [`Msg`], given the current [`App`] state (which decides
-/// whether the gate keys are decisions or plain text). Returns `None` for keys we
-/// ignore.
+/// how navigation keys behave). Returns `None` for keys we ignore.
 pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
     // Only react to presses (Windows also emits Release/Repeat).
     if key.kind == KeyEventKind::Release {
@@ -68,8 +61,6 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
         };
     }
 
-    let gate_open = app.pending.is_some();
-
     match key.code {
         KeyCode::Enter => Some(Msg::Submit),
         KeyCode::Tab => Some(Msg::Complete),
@@ -89,15 +80,10 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
         // Up/Down edit history while the input line is live — always, so the
         // split with the mouse wheel (which now arrives as a real `Event::
         // Mouse`, distinct from a key press) stays simple to reason about.
-        // Outside an editable input (e.g. mutation approval holds focus) they
-        // still scroll, since there's no history to recall into.
         KeyCode::Up if app.input_active() => Some(Msg::HistoryPrev),
         KeyCode::Down if app.input_active() => Some(Msg::HistoryNext),
         KeyCode::Up => Some(Msg::ScrollUp),
         KeyCode::Down => Some(Msg::ScrollDown),
-        // While mutation approval is open, the gate keys are decisions, not text.
-        KeyCode::Char(APPROVE_KEY) if gate_open => Some(Msg::Approve),
-        KeyCode::Char(REJECT_KEY) if gate_open => Some(Msg::Reject),
         KeyCode::Char(c) => Some(Msg::Char(c)),
         _ => None,
     }
@@ -106,8 +92,7 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::app::{Action, Status};
-    use serde_json::json;
+    use crate::tui::app::Status;
 
     fn app() -> App {
         App::new(Status::new("bedrock", "m", "/tmp/p.kicad_sch", true))
@@ -281,17 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn up_scrolls_when_the_gate_is_open() {
-        let mut a = app();
-        a.update(Msg::PendingApproval(json!({
-            "approval_kind": "operation",
-            "operation": "place_parts",
-            "arguments": {"parts": [{"ref": "U1"}]}
-        })));
-        assert!(matches!(map_key(&a, key(KeyCode::Up)), Some(Msg::ScrollUp)));
-    }
-
-    #[test]
     fn page_keys_jump_by_a_viewport() {
         let mut a = app();
         a.viewport_h = 17;
@@ -320,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn char_routes_to_input_when_no_gate() {
+    fn char_routes_to_input() {
         let a = app();
         assert!(matches!(
             map_key(&a, key(KeyCode::Char('x'))),
@@ -329,21 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn a_key_resolves_gate_when_pending() {
-        let mut a = app();
-        a.update(Msg::PendingApproval(json!({
-            "approval_kind": "operation",
-            "operation": "place_parts",
-            "arguments": {"parts": [{"ref": "U1"}]}
-        })));
-        // With the gate open, 'a' maps to Approve and resolves it.
-        let msg = map_key(&a, key(KeyCode::Char('a'))).unwrap();
-        assert!(matches!(msg, Msg::Approve));
-        assert_eq!(a.update(msg), Action::ResolveApproval(true));
-    }
-
-    #[test]
-    fn a_key_is_plain_text_when_no_gate() {
+    fn a_key_is_plain_text() {
         let a = app();
         assert!(matches!(
             map_key(&a, key(KeyCode::Char('a'))),

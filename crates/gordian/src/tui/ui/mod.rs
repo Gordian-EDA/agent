@@ -7,8 +7,6 @@
 //! ```text
 //! │ chat transcript (scrollable; tool cards collapsed)           │
 //! ├──────────────────────────────────────────────────────────────┤
-//! │ ◆ PROPOSED CHANGES  +U1 +R7  ~C2   nets 3→12   [a]pprove [r]…  │  (only when a diff is pending)
-//! ├──────────────────────────────────────────────────────────────┤
 //! │ > input…                                                      │
 //! ├──────────────────────────────────────────────────────────────┤
 //! │ bedrock · opus · turns 2 · ctx 23.4k (12%) ····· /help /clear │
@@ -17,7 +15,7 @@
 //!
 //! Split by pane: [`transcript`] draws the scrollable chat (and owns the styled
 //! word-wrap that keeps the scroll math exact); [`composer`] draws the input box
-//! plus the floating popups and the mutation-approval card that sit just above it;
+//! plus the floating popups that sit just above it;
 //! [`chrome`] draws the frame furniture (status footer, running indicator,
 //! scrollback badge, help overlay). The transcript is wrapped by
 //! [`transcript::wrap_segments`] (not `Paragraph::wrap`) so the scroll arithmetic
@@ -74,12 +72,6 @@ pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
     // surface ramp reads as designed instead of inheriting the terminal profile.
     f.render_widget(Block::default().style(theme::PAGE), area);
 
-    // Size the diff pane to its content (0 when nothing is pending).
-    let diff_h = app
-        .pending
-        .as_ref()
-        .map(|d| composer::approval_height(d, area.width))
-        .unwrap_or(0);
     // The running indicator takes a row while a turn is in flight, plus a second
     // detail row when a named unit of work is currently executing, plus one row
     // per queued prompt (capped).
@@ -96,7 +88,6 @@ pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),            // transcript
-            Constraint::Length(diff_h),    // proposed-changes pane
             Constraint::Length(running_h), // running indicator
             Constraint::Length(input_h),   // input composer
             Constraint::Length(1),         // status bar
@@ -105,16 +96,13 @@ pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
 
     transcript::draw_transcript(f, chunks[0], app, ctx);
     chrome::draw_scrollbar(f, chunks[0], app);
-    if app.pending.is_some() {
-        composer::draw_approval(f, chunks[1], app);
-    }
     if app.running {
-        chrome::draw_running(f, chunks[2], app);
+        chrome::draw_running(f, chunks[1], app);
     }
-    composer::draw_input(f, chunks[3], app);
-    chrome::draw_status(f, chunks[4], app);
-    composer::draw_completions(f, chunks[3], app);
-    composer::draw_unwind(f, chunks[3], app);
+    composer::draw_input(f, chunks[2], app);
+    chrome::draw_status(f, chunks[3], app);
+    composer::draw_completions(f, chunks[2], app);
+    composer::draw_unwind(f, chunks[2], app);
 
     if app.help {
         chrome::draw_help(f, area);
@@ -149,7 +137,6 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Modifier;
-    use serde_json::json;
 
     /// Render an app to a TestBackend and return the buffer's text as one string.
     fn render_to_string(app: &mut App, w: u16, h: u16) -> String {
@@ -463,48 +450,6 @@ mod tests {
         assert!(
             !text.contains("esc to interrupt"),
             "no running line idle:\n{text}"
-        );
-    }
-
-    #[test]
-    fn pending_mutation_shows_approve_and_reject() {
-        let mut a = app();
-        a.update(Msg::PendingApproval(json!({
-            "approval_kind": "operation",
-            "operation": "place_parts",
-            "arguments": {"parts": [{"ref": "U1"}]}
-        })));
-        let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("operation pending"), "gate header:\n{text}");
-        assert!(text.contains("place_parts"), "operation name:\n{text}");
-        assert!(text.contains("U1"), "operation arguments:\n{text}");
-        assert!(text.contains("approve"), "approve hint:\n{text}");
-        assert!(text.contains("reject"), "reject hint:\n{text}");
-    }
-
-    #[test]
-    fn pending_operation_shows_name_and_arguments_not_an_empty_diff() {
-        let mut a = app();
-        a.update(Msg::PendingApproval(json!({
-            "approval_kind": "operation",
-            "operation": "update_board_outline",
-            "arguments": {"bounds": {"min_x": 2, "max_x": 18, "min_y": 3, "max_y": 15}}
-        })));
-
-        let text = render_to_string(&mut a, 96, 24);
-
-        assert!(
-            text.contains("operation pending"),
-            "operation header:\n{text}"
-        );
-        assert!(
-            text.contains("update_board_outline"),
-            "operation name:\n{text}"
-        );
-        assert!(text.contains("min_x"), "operation arguments:\n{text}");
-        assert!(
-            !text.contains("no component changes"),
-            "not a fake diff:\n{text}"
         );
     }
 
@@ -846,18 +791,6 @@ mod tests {
         assert!(
             !running.contains("Ctrl-C Ctrl-C quit"),
             "running footer hides double-quit hint:\n{running}"
-        );
-
-        a.update(Msg::PendingApproval(json!({
-            "approval_kind": "operation",
-            "operation": "place_parts",
-            "arguments": {"parts": [{"ref": "U1"}]}
-        })));
-        let gated = render_to_string(&mut a, 80, 24);
-        // The gate's actions live on the card, not duplicated in the footer.
-        assert!(
-            gated.contains("approve"),
-            "gate shows approve action:\n{gated}"
         );
     }
 

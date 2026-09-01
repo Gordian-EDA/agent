@@ -33,7 +33,6 @@ pub const FAINT: Color = Color::Rgb(0x6b, 0x62, 0x59);
 
 /// The brand accent. Rare by design.
 pub const ACC: Color = Color::Rgb(0xd9, 0x8b, 0x4a);
-pub const OK: Color = Color::Rgb(0x8f, 0xbf, 0x5f);
 pub const WARN: Color = Color::Rgb(0xe3, 0xbb, 0x52);
 pub const ERR: Color = Color::Rgb(0xe0, 0x65, 0x5a);
 /// The structural accent: frequent, calmer than [`ACC`].
@@ -93,7 +92,6 @@ pub const MENU_DETAIL: Style = Style::new().bg(SEL).fg(DIM);
 pub const MENU_SEL: Style = Style::new().bg(ACC).fg(BG0);
 pub const MENU_SEL_LABEL: Style = bold(Style::new().bg(ACC).fg(BG0));
 
-pub const SUCCESS: Style = fg(OK);
 pub const DANGER: Style = fg(ERR);
 pub const WARNING: Style = fg(WARN);
 

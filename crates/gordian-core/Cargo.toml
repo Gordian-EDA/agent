@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The Gordian KiCAD agent: the turn loop, per-mutation approval, schematic/PCB tools, prompts, review, and render over a provider-agnostic LLM client."
+description = "The Gordian KiCAD agent: the turn loop, schematic/PCB tools, prompts, review, and render over a provider-agnostic LLM client."
 
 [dependencies]
 sch-check = { path = "../sch-check" }

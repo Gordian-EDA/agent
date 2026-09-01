@@ -2,12 +2,12 @@
 //!
 //! - `gordian` (no args) prints the version.
 //! - `gordian agent [--project <dir>] "<prompt>"` runs ONE headless agent turn
-//!   against real Bedrock + real KiCAD, auto-approving the write, and prints the
+//!   against real Bedrock + real KiCAD and prints the
 //!   live transcript, turn outcome, token totals, and final ERC result. This is
 //!   the CLI form of the interactive copilot.
 //! - `gordian tui [--project <dir>]` launches the ratatui copilot cockpit
-//!   (spec §11): a chat transcript, a per-mutation approval gate, and an input
-//!   line, driving the same agent interactively.
+//!   (spec §11): a chat transcript and input line, driving the same agent
+//!   interactively.
 
 mod config;
 mod tui;
@@ -19,7 +19,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use gordian_core::AgentRuntime;
 use gordian_core::prompts::system_prompt;
-use gordian_core::{Agent, AgentEvent, AutoApprove, StopReason};
+use gordian_core::{Agent, AgentEvent, StopReason};
 use gordian_runtime::logging;
 
 /// Default project directory when `--project` is omitted.
@@ -272,7 +272,6 @@ impl AgentDebugLog {
                     .unwrap_or_default();
                 Some(format!("tool <- {name}: {summary}{image}"))
             }
-            AgentEvent::Applied { summary } => Some(format!("applied: {summary}")),
             AgentEvent::Usage {
                 provider_requests,
                 input_tokens,
@@ -373,7 +372,7 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     tracing::info!("project: {}", project_dir.display());
     tracing::info!("prompt:  {prompt}");
 
-    // 4. Run ONE agent turn, auto-approving the apply. By default it routes
+    // 4. Run ONE agent turn. By default it routes
     //    through `run_turn_reviewed`: after a turn that COMMITS a design change,
     //    an independent reviewer pass scores the netlist and feeds high-confidence
     //    defects into a bounded follow-up fix turn. `--no-review` runs the plain
@@ -382,7 +381,6 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("starting the Tokio runtime")?;
     let system = system_prompt();
     let mut agent = Agent::new(client, ctx, system);
-    let mut approvals = AutoApprove::yes();
 
     tracing::info!(target: logging::EVENTS_TARGET, "--- agent events ---");
     let run = runtime.block_on(async {
@@ -403,15 +401,12 @@ fn run_agent_command(args: &[String]) -> Result<()> {
                 .run_turn_reviewed(
                     &prompt,
                     &prompt,
-                    &mut approvals,
                     Some(&events_tx),
                     config.agent.review_fix_rounds as usize,
                 )
                 .await
         } else {
-            agent
-                .run_turn(&prompt, &mut approvals, Some(&events_tx))
-                .await
+            agent.run_turn(&prompt, Some(&events_tx)).await
         };
         drop(events_tx);
         let usage = printer.await.unwrap_or_default();
@@ -591,12 +586,6 @@ mod tests {
             Some(
                 "tool <- regenerate_board: written (image: .gordian/renders/render-001.png)".into()
             )
-        );
-        assert_eq!(
-            log.observe(&AgentEvent::Applied {
-                summary: "ERC 0 errors, 0 warnings".into()
-            }),
-            Some("applied: ERC 0 errors, 0 warnings".into())
         );
         assert_eq!(
             log.observe(&AgentEvent::Reviewed {

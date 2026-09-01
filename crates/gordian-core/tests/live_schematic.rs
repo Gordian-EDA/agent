@@ -4,10 +4,10 @@
 //! Skips when no KiCAD is installed: the mutators embed library definitions and
 //! `check_schematic` shells out to `kicad-cli`.
 
+use gordian_core::Agent;
 use gordian_core::AgentRuntime;
 use gordian_core::prompts::system_prompt;
 use gordian_core::testing::{ScriptedClient, final_text, tool_call};
-use gordian_core::{Agent, AutoApprove};
 use serde_json::json;
 
 #[tokio::test]
@@ -38,11 +38,7 @@ async fn the_loop_reads_swaps_and_checks_a_live_schematic() {
     ];
     let mut agent = Agent::new(ScriptedClient::new(script), ctx, system_prompt());
     let outcome = agent
-        .run_turn(
-            "wire two resistors, then swap R1",
-            &mut AutoApprove::yes(),
-            None,
-        )
+        .run_turn("wire two resistors, then swap R1", None)
         .await
         .unwrap();
     assert_eq!(outcome.tool_calls_made, 4, "{outcome:?}");
@@ -86,10 +82,7 @@ async fn moving_a_symbol_preserves_connectivity() {
         final_text("done"),
     ];
     let mut agent = Agent::new(ScriptedClient::new(script), ctx, system_prompt());
-    agent
-        .run_turn("move R2 away", &mut AutoApprove::yes(), None)
-        .await
-        .unwrap();
+    agent.run_turn("move R2 away", None).await.unwrap();
 
     let text = std::fs::read_to_string(&sch_path).unwrap();
     assert!(text.contains("\"R1\""), "the other part must survive");

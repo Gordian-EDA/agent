@@ -19,7 +19,7 @@ use ratatui::style::{Color, Modifier};
 
 use gordian_core::AgentEvent;
 
-use super::app::{App, Entry, Msg, NoticeLevel, PendingApproval, Speaker, Status};
+use super::app::{App, Entry, Msg, NoticeLevel, Speaker, Status};
 use super::theme;
 use super::ui;
 
@@ -297,16 +297,7 @@ fn tui_screenshots() {
     app.cursor = app.input.chars().count();
     shoot("01_chat", 96, 32, &mut app);
 
-    // 2. The mutation gate: a change awaiting approval.
-    let mut app = App::new(status());
-    seed_conversation(&mut app);
-    app.pending = Some(PendingApproval {
-        operation: "place_parts".into(),
-        arguments: serde_json::json!({"parts": ["C7", "R5"]}),
-    });
-    shoot("02_mutation_gate", 96, 32, &mut app);
-
-    // 3. A turn in flight (running indicator + spinner) with the live tool-detail
+    // 2. A turn in flight (running indicator + spinner) with the live tool-detail
     //    row naming the call now executing.
     let mut app = App::new(status());
     seed_conversation(&mut app);
@@ -314,7 +305,7 @@ fn tui_screenshots() {
     app.spinner = 3;
     app.turn_tool_calls = 4;
     app.active_work = Some("route_board".into());
-    shoot("03_running", 96, 32, &mut app);
+    shoot("02_running", 96, 32, &mut app);
 
     // 3b. A turn in flight with prompts queued behind it (via Enter) — each one
     //     listed, oldest first, so the queue is never just a count.
@@ -395,8 +386,8 @@ fn tui_screenshots() {
     push(
         &mut app,
         Speaker::System,
-        "applied — ERC 0 errors, 1 warning",
-        NoticeLevel::Success,
+        "checks passed — ERC 0 errors, 1 warning",
+        NoticeLevel::Plain,
     );
     push(
         &mut app,
@@ -468,7 +459,7 @@ fn tui_screenshots() {
             &mut app,
             Speaker::System,
             &format!("checkpoint {i}"),
-            NoticeLevel::Success,
+            NoticeLevel::Plain,
         );
     }
     app.scroll = 40;

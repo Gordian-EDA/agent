@@ -2,7 +2,7 @@
 
 use gordian_core::prompts::system_prompt;
 use gordian_core::testing::{ScriptedClient, final_text, tool_call};
-use gordian_core::{Agent, AgentRuntime, AutoApprove, StopReason};
+use gordian_core::{Agent, AgentRuntime, StopReason};
 use serde_json::json;
 
 fn place_two_resistors() -> gordian_core::StreamEnd {
@@ -32,11 +32,7 @@ async fn clean_check_followed_by_final_text_completes_without_a_quality_nudge() 
     let mut agent = Agent::new(client, ctx, system_prompt());
 
     let outcome = agent
-        .run_turn(
-            "create a two-resistor divider",
-            &mut AutoApprove::yes(),
-            None,
-        )
+        .run_turn("create a two-resistor divider", None)
         .await
         .unwrap();
 
@@ -62,7 +58,6 @@ async fn reviewed_turn_uses_check_schematic_without_a_reviewer_model_call() {
         .run_turn_reviewed(
             "create a two-resistor divider",
             "create a two-resistor divider",
-            &mut AutoApprove::yes(),
             None,
             1,
         )

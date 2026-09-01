@@ -2,7 +2,7 @@
 //!
 //! [`ScriptedClient`] is a [`Provider`] that replays a fixed `Vec<StreamEnd>`,
 //! one per call, in order — so the loop's control flow (tool dispatch → result
-//! feedback → mutation approval → final text) is exercised deterministically. It also
+//! feedback → mutation → final text) is exercised deterministically. It also
 //! records every `messages` slice it was given, so a test can assert on exactly
 //! what the model would see across turns. Build the scripted ends with the
 //! [`tool_call`] / [`final_text`] helpers.
