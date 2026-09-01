@@ -441,6 +441,49 @@ fn align_onto_pin(doc: &mut SchDoc, refdes: &str, at: Point2, out: Point2) {
     );
 }
 
+/// Every wire belonging to a run that no longer reaches a pin, a label or a
+/// no-connect marker.
+///
+/// Cutting a net at one pin leaves the rest of that pin's route behind: an
+/// L-bend whose far half still sits on the sheet, joined to nothing. KiCAD
+/// calls that a dangling-wire *error*, and it carries no connection, so it
+/// goes with the cut.
+pub(crate) fn floating_wires(doc: &SchDoc) -> Vec<String> {
+    let runs: Vec<(String, Segment)> = doc
+        .wires()
+        .filter_map(|wire| Some((wire.uuid.clone(), refs::ends(wire)?)))
+        .map(|(uuid, (a, b))| (uuid, Segment::new(a, b)))
+        .collect();
+    let mut groups = geom::UnionFind::new(runs.len());
+    for (i, (_, one)) in runs.iter().enumerate() {
+        for (j, (_, other)) in runs.iter().enumerate().skip(i + 1) {
+            let meets = [one.a, one.b].iter().any(|p| other.contains_point(*p))
+                || [other.a, other.b].iter().any(|p| one.contains_point(*p));
+            if meets {
+                groups.union(i, j);
+            }
+        }
+    }
+    let mut anchors: Vec<Point2> = sch_doc::placed_pins(doc).iter().map(|p| p.at).collect();
+    anchors.extend(doc.labels().map(|l| l.at.point()));
+    anchors.extend(doc.items().iter().filter_map(|item| match item {
+        sch_doc::Item::NoConnect(marker) => Some(marker.at),
+        _ => None,
+    }));
+    let roots: Vec<usize> = (0..runs.len()).map(|i| groups.find(i)).collect();
+    let held: Vec<usize> = runs
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, run))| anchors.iter().any(|p| run.contains_point(*p)))
+        .map(|(i, _)| roots[i])
+        .collect();
+    runs.iter()
+        .zip(&roots)
+        .filter(|(_, root)| !held.contains(root))
+        .map(|((uuid, _), _)| uuid.clone())
+        .collect()
+}
+
 /// Remove drawn wires by pin, by net, by the parts they touch, or by UUID.
 pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut edit = Edit::open(ctx)?;
@@ -526,7 +569,8 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if doomed.is_empty() {
         return Ok(json!({ "changed": "no wire matched", "net_delta": "connectivity unchanged" }));
     }
-    let removed = edit.doc.remove_drawing(&doomed);
+    let mut removed = edit.doc.remove_drawing(&doomed);
+    removed += edit.doc.remove_drawing(&floating_wires(&edit.doc));
     // Deleting copper loosens the pins that shared it, which is the point of
     // the call: every net the request named, and every pin on one, is fair game.
     let mut named: Vec<String> = wanted_refs.clone();
@@ -565,7 +609,7 @@ pub(crate) fn spot_beside(
     w: f64,
     h: f64,
     skip: &[String],
-) -> Option<Point2> {
+) -> Option<(Point2, bool)> {
     let symbol = doc.symbol_by_ref(anchor)?;
     let body = crate::place::extent(doc, symbol)?;
     Occupancy::skipping(doc, skip).beside(body, side, w, h)

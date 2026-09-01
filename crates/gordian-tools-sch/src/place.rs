@@ -255,8 +255,9 @@ impl Occupancy {
         None
     }
 
-    /// The first free centre for a `w`×`h` body on one side of `anchor`.
-    pub fn beside(&self, anchor: Rect, side: Side, w: f64, h: f64) -> Option<Point2> {
+    /// The first free centre for a `w`×`h` body on one side of `anchor`, and
+    /// whether it really landed on that side.
+    pub fn beside(&self, anchor: Rect, side: Side, w: f64, h: f64) -> Option<(Point2, bool)> {
         let centre = anchor.center();
         let (half_w, half_h) = (w / 2.0, h / 2.0);
         let start = match side {
@@ -265,14 +266,18 @@ impl Occupancy {
             Side::Above => Point2::new(centre.x, anchor.min_y - CLEARANCE - half_h),
             Side::Below => Point2::new(centre.x, anchor.max_y + CLEARANCE + half_h),
         };
+        // Slide along the side only as far as still reads as "beside": past
+        // that, a spot in some other direction but *close* is the better
+        // answer than one on the right side of the sheet and 60 mm away.
         let step = side.step();
         let mut at = snap_point(start);
-        for _ in 0..120 {
+        for _ in 0..12 {
             if at.x >= GRID && at.y >= GRID && self.free(at, w, h) {
-                return Some(at);
+                return Some((at, true));
             }
             at = Point2::new(at.x + step.x, at.y + step.y);
         }
         self.nearest_free(snap_point(start), w, h)
+            .map(|at| (at, false))
     }
 }

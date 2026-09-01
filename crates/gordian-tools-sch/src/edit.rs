@@ -61,7 +61,7 @@ fn destination(
     w: f64,
     h: f64,
     skip: &[String],
-) -> Result<Destination, String> {
+) -> Result<(Destination, Option<String>), String> {
     if let Some(at) = input
         .get("at")
         .or_else(|| input.get("to"))
@@ -71,7 +71,10 @@ fn destination(
         if n.len() != 2 {
             return Err("`at`/`to` must be [x, y] in mm".to_string());
         }
-        return Ok(Destination::Origin(snap_point(Point2::new(n[0], n[1]))));
+        return Ok((
+            Destination::Origin(snap_point(Point2::new(n[0], n[1]))),
+            None,
+        ));
     }
     if let Some(anchor) = input.get("near").and_then(Value::as_str) {
         if doc.symbol_by_ref(anchor).is_none() {
@@ -82,9 +85,11 @@ fn destination(
             .and_then(Value::as_str)
             .and_then(Side::parse)
             .unwrap_or(Side::Right);
-        return spot_beside(doc, anchor, side, w, h, skip)
-            .map(Destination::Centre)
-            .ok_or_else(|| format!("no room {side:?} of {anchor}"));
+        let (at, on_side) =
+            spot_beside(doc, anchor, side, w, h, skip).ok_or("no free space on the sheet")?;
+        let note = (!on_side)
+            .then(|| format!("nothing fits {side:?} {anchor}; used the nearest free spot"));
+        return Ok((Destination::Centre(at), note));
     }
     let content = Occupancy::skipping(doc, skip).content();
     spot_near(
@@ -94,7 +99,7 @@ fn destination(
         h,
         skip,
     )
-    .map(Destination::Centre)
+    .map(|at| (Destination::Centre(at), None))
     .ok_or_else(|| "no free space on the sheet".to_string())
 }
 
@@ -166,7 +171,7 @@ fn place_one(
         .and_then(|s| crate::place::extent(&edit.doc, s));
     let (w, h) = body.map_or((10.0, 10.0), |r| (r.width(), r.height()));
     let skip = vec![refdes.clone()];
-    let want = destination(&edit.doc, spec, w, h, &skip)?;
+    let (want, note) = destination(&edit.doc, spec, w, h, &skip)?;
     let centre = body.map_or(park.point(), |r| r.center());
     let at = want.origin_for(park.point(), centre);
     edit.doc
@@ -178,12 +183,16 @@ fn place_one(
         .symbol_by_ref(&refdes)
         .map(|s| (s.at.x, s.at.y))
         .unwrap_or_default();
-    Ok(json!({
+    let mut report = json!({
         "ref": refdes,
         "lib_id": lib_id,
         "at": [placed.0, placed.1],
         "rot": rot,
-    }))
+    });
+    if let Some(note) = note {
+        report["note"] = json!(note);
+    }
+    Ok(report)
 }
 
 /// Place one new part.
@@ -258,7 +267,9 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     for refdes in &targets {
         edit.doc.remove_symbol(refdes)?;
     }
-    let retracted = retract_stubs(&mut edit.doc, &orphaned);
+    let mut retracted = retract_stubs(&mut edit.doc, &orphaned);
+    let floating = crate::wiring::floating_wires(&edit.doc);
+    retracted += edit.doc.remove_drawing(&floating);
     let loose = refs::newly_loose(edit.before(), &sch_doc::connect::extract(&edit.doc));
     edit.commit(
         json!({
@@ -448,7 +459,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             Destination::Centre(Point2::new(centre.x + n[0], centre.y + n[1]))
         } else {
             match destination(&edit.doc, step, w, h, &pending) {
-                Ok(want) => want,
+                Ok((want, _)) => want,
                 Err(error) => return Ok(json!({ "error": error })),
             }
         };
