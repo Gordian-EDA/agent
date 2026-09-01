@@ -76,7 +76,10 @@ fn half_extent(items: &[Item], refdes: &str, axis_ix: usize) -> f64 {
 /// Bounding box of every item placing one of `members`.
 fn members_bbox(items: &[Item], members: &BTreeSet<&str>) -> Option<Rect> {
     let mut corners = Vec::new();
-    for it in items.iter().filter(|it| members.contains(it.refdes.as_str())) {
+    for it in items
+        .iter()
+        .filter(|it| members.contains(it.refdes.as_str()))
+    {
         let r = item_rect(it, it.at);
         corners.push(Point2::new(r.min_x, r.min_y));
         corners.push(Point2::new(r.max_x, r.max_y));
@@ -129,9 +132,7 @@ pub fn relation_viol(items: &[Item], ir: &LayoutIr) -> usize {
                     viol += 1;
                 }
             }
-            Relation::Group {
-                members, side, ..
-            } => {
+            Relation::Group { members, side, .. } => {
                 let set: BTreeSet<&str> = members.iter().map(String::as_str).collect();
                 if let Some(bbox) = members_bbox(items, &set) {
                     viol += items
@@ -184,7 +185,10 @@ pub fn relation_group_spread(items: &[Item], ir: &LayoutIr) -> f64 {
 
 /// Translate every non-frozen item of `refdes` by `d` along `axis_ix`, snapped to grid.
 fn shift(items: &mut [Item], refdes: &str, axis_ix: usize, d: f64) {
-    for it in items.iter_mut().filter(|it| it.refdes == refdes && !it.frozen) {
+    for it in items
+        .iter_mut()
+        .filter(|it| it.refdes == refdes && !it.frozen)
+    {
         let mut at: [f64; 2] = it.at.into();
         at[axis_ix] = geom::GRID_50_MIL.snap(at[axis_ix] + d);
         it.at = at.into();
@@ -304,14 +308,24 @@ fn repair_axis(items: &mut [Item], ir: &LayoutIr, axis_ix: usize) {
         let mut moved = false;
         for n in order.iter().copied().filter(|n| movable.contains(n)) {
             let mut want = coord[n];
-            for p in preds.get(n).into_iter().flatten().filter(|p| nodes.contains(*p)) {
+            for p in preds
+                .get(n)
+                .into_iter()
+                .flatten()
+                .filter(|p| nodes.contains(*p))
+            {
                 want = want.max(coord[p] + separation(items, p, n, axis_ix));
             }
             moved |= set_coord(&mut coord, n, want);
         }
         for n in order.iter().rev().copied().filter(|n| movable.contains(n)) {
             let mut want = coord[n];
-            for q in succs.get(n).into_iter().flatten().filter(|q| nodes.contains(*q)) {
+            for q in succs
+                .get(n)
+                .into_iter()
+                .flatten()
+                .filter(|q| nodes.contains(*q))
+            {
                 want = want.min(coord[q] - separation(items, n, q, axis_ix));
             }
             moved |= set_coord(&mut coord, n, want);

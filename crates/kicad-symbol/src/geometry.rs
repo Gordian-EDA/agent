@@ -147,6 +147,36 @@ impl SymbolGeometry {
         })
     }
 
+    /// Read geometry straight out of a `(symbol "Lib:Name" …)` block that a
+    /// schematic embeds, rather than from an installed library.
+    ///
+    /// A saved schematic carries the definition of every symbol it places, which is
+    /// the only copy when the part came from a project-local library. Editing such a
+    /// sheet has to work off what the file itself says.
+    pub fn from_definition(lib_id: &str, definition: &str) -> io::Result<SymbolGeometry> {
+        let wrapped = format!(
+            "(kicad_symbol_lib (version 20241209) (generator \"embedded\")\n{definition}\n)"
+        );
+        let file = tempfile::Builder::new().suffix(".kicad_sym").tempfile()?;
+        std::fs::write(file.path(), &wrapped)?;
+        let doc = SymbolLibFile::read(file.path()).map_err(map_kiutils_err)?;
+        let symbols = doc.ast().symbols.clone();
+        let name = lib_id.rsplit(':').next().unwrap_or(lib_id);
+        let sym = find_symbol(&symbols, lib_id)
+            .or_else(|| find_symbol(&symbols, name))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("embedded definition does not declare {lib_id:?}"),
+                )
+            })?;
+        Ok(SymbolGeometry {
+            lib_id: lib_id.to_string(),
+            pins: collect_pins(resolve_body(&symbols, sym)),
+            raw_definition: definition.to_string(),
+        })
+    }
+
     /// The balanced `(symbol "Lib:Name" …)` block for `(lib_symbols)`.
     pub fn definition_sexpr(&self) -> &str {
         &self.raw_definition

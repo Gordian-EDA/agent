@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use geom::{Point2, Rect};
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
+use kicad_symbol::geometry::SymbolGeometry;
 use sch_check::model::{Block, Component, Design, PinTarget};
 use sch_check::{Diagnostics, PlacePartsInput};
 use sch_doc::{Netlist, SchDoc, connect};
@@ -134,6 +135,13 @@ impl Selection {
     }
 }
 
+/// An empty sheet, ready to be filled — what [`place_parts`] starts from when there is
+/// no file yet. It is the realiser's own empty output, so a sheet created here and a
+/// sheet KiCAD saved are the same kind of document.
+pub fn blank_sheet() -> Result<SchDoc> {
+    Ok(crate::realize::to_doc(crate::write::SchematicWriter::new())?)
+}
+
 /// Add `input`'s parts to `doc`, wired as it says and placed by `engine`.
 ///
 /// An empty sheet is laid out whole; a sheet with content keeps every symbol it has and
@@ -165,14 +173,10 @@ pub fn place_parts(
     let fresh = doc.symbols().next().is_none();
 
     let mut design = added;
-    let seated = lift_sheet(doc, &before);
-    if !fresh {
-        merge_sheet_block(&mut design, seated);
-        // A net the sheet already carries is joined by NAME: the new block hangs a label
-        // on it rather than trying to reach across to a pin it cannot see.
-        for net in shared_nets(&design, &before, &new_refs) {
-            design.nets.entry(net).or_default().port = true;
-        }
+    // A net the sheet already carries is joined by NAME: the new block hangs a label on
+    // it rather than reaching across to a pin the region placement cannot draw to.
+    for net in shared_nets(&design, &before) {
+        design.nets.entry(net).or_default().port = true;
     }
     sch_check::nets::derive_attrs(&mut design);
 
@@ -181,14 +185,11 @@ pub fn place_parts(
         apply_intent(&mut ir, intent.into_layout_ir());
     }
 
-    let problem = SchematicPlaceProblem::from_design(env, &design)?;
-    let (movable, held): (Vec<Item>, Vec<Item>) = problem
-        .items
-        .into_iter()
-        .partition(|it| new_refs.contains(&it.refdes));
+    let movable = SchematicPlaceProblem::from_design(env, &design)?.items;
     if movable.is_empty() {
         return Err(Error::Nothing);
     }
+    let held = seated_items(doc, &before);
 
     let out = region_arrange(RegionProblem::new(
         env,
@@ -259,16 +260,19 @@ fn rearrange(
     let chosen = selection.resolve(doc);
     let before = connect::extract(doc);
     let mut design = Design::default();
-    merge_sheet_block(&mut design, lift_sheet(doc, &before));
+    design
+        .blocks
+        .insert(SHEET_BLOCK.to_string(), lift_sheet(doc, &before));
     sch_check::nets::derive_attrs(&mut design);
 
-    let problem = SchematicPlaceProblem::from_design(env, &design)?;
-    let (movable, held): (Vec<Item>, Vec<Item>) = problem
-        .items
+    let (mut movable, held): (Vec<Item>, Vec<Item>) = seated_items(doc, &before)
         .into_iter()
         .partition(|it| chosen.contains(&it.refdes));
     if movable.is_empty() {
         return Err(Error::EmptySelection);
+    }
+    for it in &mut movable {
+        it.frozen = false;
     }
 
     let ir = crate::floorplan::infer_ir(env, &design);
@@ -426,26 +430,72 @@ fn lift_sheet(doc: &SchDoc, netlist: &Netlist) -> Block {
     block
 }
 
-fn merge_sheet_block(design: &mut Design, seated: Block) {
-    if !seated.components.is_empty() {
-        design.blocks.insert(SHEET_BLOCK.to_string(), seated);
-    }
-}
-
 /// Nets the new parts share with something already on the sheet.
-fn shared_nets(design: &Design, before: &Netlist, new_refs: &BTreeSet<String>) -> Vec<String> {
+fn shared_nets(design: &Design, before: &Netlist) -> Vec<String> {
     let live: BTreeSet<&str> = before.nets.iter().map(|n| n.name.as_str()).collect();
     design
         .blocks
         .values()
-        .flat_map(|b| b.components.iter())
-        .filter(|(refdes, _)| new_refs.contains(*refdes))
-        .flat_map(|(_, comp)| comp.pins.values())
+        .flat_map(|b| b.components.values())
+        .flat_map(|comp| comp.pins.values())
         .filter_map(|target| match target {
             PinTarget::Net(net) if live.contains(net.as_str()) => Some(net.clone()),
             _ => None,
         })
         .collect()
+}
+
+/// The parts already on the sheet as frozen placement items, at their live poses.
+///
+/// Geometry comes from the definition the FILE embeds, so a sheet drawn with a
+/// project-local library — which nothing outside that project can resolve — is still
+/// something the placement can see and stay clear of.
+fn seated_items(doc: &SchDoc, netlist: &Netlist) -> Vec<Item> {
+    let mut net_of: HashMap<(&str, &str), &str> = HashMap::new();
+    for net in &netlist.nets {
+        for pin in &net.pins {
+            net_of.insert((&pin.refdes, &pin.pin), &net.name);
+        }
+    }
+    doc.symbols()
+        .filter(|s| !placement_ignores(s))
+        .filter_map(|symbol| {
+            let definition = doc.lib_symbols()?.definition_text(&symbol.lib_id)?;
+            let geom = SymbolGeometry::from_definition(&symbol.lib_id, &definition).ok()?;
+            let unit = symbol.unit.clamp(1, u8::MAX as u32) as u8;
+            let pins = geom
+                .pins
+                .iter()
+                .filter(|p| p.unit == unit)
+                .map(|p| {
+                    let net = net_of
+                        .get(&(symbol.refdes(), p.number.as_str()))
+                        .map(|n| (*n).to_string());
+                    (p.number.clone(), p.name.clone(), net)
+                })
+                .collect();
+            Some(Item {
+                refdes: symbol.refdes().to_string(),
+                part: symbol.lib_id.clone(),
+                value: symbol.value().to_string(),
+                footprint: None,
+                geom,
+                pins,
+                at: symbol.at.point(),
+                angle: symbol.at.rot,
+                unit,
+                mirror: symbol.mirror == sch_doc::Mirror::Y,
+                frozen: true,
+            })
+        })
+        .collect()
+}
+
+/// Whether a placed symbol is furniture rather than a part: a power-rail terminal or
+/// any other hidden-reference symbol the realiser draws for itself.
+fn placement_ignores(symbol: &sch_doc::SymbolInst) -> bool {
+    let refdes = symbol.refdes();
+    refdes.is_empty() || refdes.starts_with('#') || symbol.lib_id.starts_with("power:")
 }
 
 /// What a placement must not land on: the wires, labels and power symbols that belong

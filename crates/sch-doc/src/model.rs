@@ -520,6 +520,13 @@ impl LibSymbols {
         self.defs.get(lib_id).map(|r| &r.node)
     }
 
+    /// The embedded definition for `lib_id` as S-expression text — what a reader
+    /// that wants the symbol's own geometry needs when the library it came from is
+    /// not installed.
+    pub fn definition_text(&self, lib_id: &str) -> Option<String> {
+        self.defs.get(lib_id).map(|def| sexpr::flat(&def.node))
+    }
+
     /// Embedded `Lib:Name` keys in document order.
     pub fn lib_ids(&self) -> impl Iterator<Item = &str> {
         self.defs.keys().map(String::as_str)

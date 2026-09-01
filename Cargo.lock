@@ -2973,6 +2973,7 @@ dependencies = [
  "anyhow",
  "circuit-graph",
  "circuit-lang",
+ "cluster-place",
  "geom",
  "indexmap 2.14.0",
  "kicad",

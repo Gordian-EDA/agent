@@ -106,10 +106,9 @@ fn clear_of(r: &Rect, obstacles: &[Rect], others: &[Rect]) -> bool {
 
 /// Offsets on the ring `max(|dx|, |dy|) == ring`, nearest-first and deterministic.
 fn ring_offsets(ring: i32) -> Vec<(i32, i32)> {
-    let mut out: Vec<(i32, i32)> = (-ring..=ring)
-        .flat_map(|dx| (-ring..=ring).map(move |dy| (dx, dy)))
-        .filter(|(dx, dy)| dx.abs().max(dy.abs()) == ring)
-        .collect();
+    let edges = (-ring..=ring).flat_map(move |d| [(d, -ring), (d, ring)]);
+    let sides = (-ring + 1..ring).flat_map(move |d| [(-ring, d), (ring, d)]);
+    let mut out: Vec<(i32, i32)> = edges.chain(sides).collect();
     out.sort_by_key(|(dx, dy)| (dx.abs() + dy.abs(), *dx, *dy));
     out
 }

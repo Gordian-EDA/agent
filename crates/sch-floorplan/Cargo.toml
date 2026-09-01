@@ -29,4 +29,6 @@ rayon.workspace = true
 [dev-dependencies]
 anneal-place = { path = "../anneal-place" }
 spine-place = { path = "../spine-place" }
+cluster-place = { path = "../cluster-place" }
+circuit-lang = { path = "../circuit-lang" }
 tempfile.workspace = true
