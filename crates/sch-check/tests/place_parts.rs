@@ -1,7 +1,9 @@
 //! The bulk-create input: JSON round trip, pin resolution, decouple expansion.
 
 use sch_check::model::{Origin, PinTarget};
-use sch_check::place_parts::{BLOCK, PlacePartsInput, into_design, place_parts_input_schema};
+use sch_check::place_parts::{
+    DEFAULT_BLOCK, PlacePartsInput, into_design, place_parts_input_schema,
+};
 use sch_check::{PinType, SymbolTable};
 
 fn provider() -> SymbolTable {
@@ -84,7 +86,7 @@ fn unknown_keys_are_rejected() {
 fn pins_lower_to_physical_numbers() {
     let (design, diags) = into_design(&parse(), &provider());
     assert!(!diags.has_errors(), "{:?}", diags.0);
-    let comps = &design.blocks[BLOCK].components;
+    let comps = &design.blocks[DEFAULT_BLOCK].components;
     let mcu = &comps["U2"];
     // The name `VDD` covers both physical VDD pins.
     assert_eq!(mcu.pins["1"], PinTarget::Net("+3V3".into()));
@@ -98,7 +100,7 @@ fn pins_lower_to_physical_numbers() {
 #[test]
 fn decouple_expands_into_synthesized_caps() {
     let (design, _) = into_design(&parse(), &provider());
-    let comps = &design.blocks[BLOCK].components;
+    let comps = &design.blocks[DEFAULT_BLOCK].components;
     let synth: Vec<(&String, &sch_check::model::Component)> = comps
         .iter()
         .filter(|(_, c)| matches!(c.origin, Origin::Synthesized { .. }))
@@ -150,7 +152,7 @@ fn ambiguous_decouple_rails_are_reported() {
     .unwrap();
     let (design, diags) = into_design(&input, &provider());
     assert!(diags.0.iter().any(|d| d.code == "decouple-ambiguous"));
-    assert_eq!(design.blocks[BLOCK].components.len(), 1);
+    assert_eq!(design.blocks[DEFAULT_BLOCK].components.len(), 1);
 }
 
 #[test]
@@ -178,4 +180,79 @@ fn schema_describes_the_accepted_shape() {
             assert!(item["properties"][key].is_object(), "undocumented {key}");
         }
     }
+}
+
+#[test]
+fn unmentioned_signal_pins_become_no_connects() {
+    let (design, _) = into_design(&parse(), &provider());
+    // PA10 is wired; the MCU has no other free signal pin in this fixture, so
+    // check the regulator-free connector instead: every pin is used there too.
+    // The LED is the case that matters: Device:LED has exactly A and K wired.
+    let mcu = &design.blocks[DEFAULT_BLOCK].components["U2"];
+    assert!(
+        mcu.pins.values().all(|t| matches!(t, PinTarget::Net(_))),
+        "every listed MCU pin is wired"
+    );
+
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "U2", "part": "MCU:STM32F103C8T",
+             "pins": {"VDD": "+3V3", "VSS": "GND", "PA9": "TX"}}]}"#,
+    )
+    .unwrap();
+    let (design, _) = into_design(&input, &provider());
+    let mcu = &design.blocks[DEFAULT_BLOCK].components["U2"];
+    // NRST (4) and PA10 (6) were left out: explicit no-connects, not silence.
+    assert_eq!(mcu.pins["4"], PinTarget::NoConnect);
+    assert_eq!(mcu.pins["6"], PinTarget::NoConnect);
+}
+
+#[test]
+fn a_duplicate_refdes_is_an_error() {
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "R1", "part": "Device:R"}, {"ref": "R1", "part": "Device:C"}]}"#,
+    )
+    .unwrap();
+    let (_, diags) = into_design(&input, &provider());
+    assert!(diags.0.iter().any(|d| d.code == "duplicate-ref"));
+}
+
+#[test]
+fn two_keys_on_one_physical_pin_conflict() {
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "U2", "part": "MCU:STM32F103C8T",
+             "pins": {"3": "GND", "VSS": "AGND"}}]}"#,
+    )
+    .unwrap();
+    let (_, diags) = into_design(&input, &provider());
+    assert!(
+        diags.0.iter().any(|d| d.code == "pin-conflict"),
+        "{:?}",
+        diags.0
+    );
+}
+
+#[test]
+fn parts_land_on_the_named_sheet() {
+    let input: PlacePartsInput =
+        serde_json::from_str(r#"{"block": "power", "parts": [{"ref": "R1", "part": "Device:R"}]}"#)
+            .unwrap();
+    let (design, _) = into_design(&input, &provider());
+    assert!(design.blocks.contains_key("power"));
+}
+
+#[test]
+fn intent_becomes_a_layout_ir() {
+    let ir = parse().intent.expect("intent").into_layout_ir();
+    assert_eq!(ir.rails.len(), 2);
+    assert_eq!(ir.ports.len(), 2);
+    // The engine's own derived fields are not input.
+    assert!(ir.idioms.is_empty() && ir.frozen.is_empty() && ir.zone.is_empty());
+}
+
+#[test]
+fn engine_internal_intent_fields_are_rejected() {
+    let err =
+        serde_json::from_str::<PlacePartsInput>(r#"{"parts": [], "intent": {"frozen": ["U1"]}}"#)
+            .unwrap_err();
+    assert!(err.to_string().contains("frozen"), "{err}");
 }

@@ -4613,7 +4613,7 @@ fn deterministic_netlist_defects(
     intent: &str,
     design: &sch_check::Design,
 ) -> Vec<String> {
-    let mut defects = sch_check::erc::erc_checks(design);
+    let mut defects = sch_check::erc::erc_checks(design, ctx.provider());
     defects.extend(crate::review_kicad::symbol_pin_rail_checks(
         design,
         ctx.provider(),

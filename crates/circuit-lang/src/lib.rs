@@ -2,7 +2,6 @@
 //! markup language. The model it produces and the checks that judge it live in
 //! [`sch_check`]. Pure — no I/O.
 
-pub mod authored;
 pub mod canon;
 pub mod desugar;
 pub mod parse;
@@ -23,7 +22,7 @@ pub fn compile(src: &str, provider: &SymbolTable) -> CompileResult {
     let design = surface.map(|s| {
         let (d, ds) = desugar::desugar(&s, provider);
         diagnostics.extend(ds);
-        diagnostics.extend(authored::lint(&d, provider));
+        diagnostics.extend(sch_check::authored::lint(&d, provider));
         diagnostics.extend(sch_check::lint::lint(&d, provider));
         d
     });

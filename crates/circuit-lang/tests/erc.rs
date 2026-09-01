@@ -3,8 +3,13 @@
 use circuit_lang::desugar::desugar;
 use circuit_lang::parse::parse_str;
 use sch_check::SymbolTable;
-use sch_check::erc::*;
+use sch_check::erc::{parse_value, rail_voltage};
 use sch_check::model::Design;
+
+/// The fixtures name pins the way an author does, against the basics table.
+fn erc_checks(d: &Design) -> Vec<String> {
+    sch_check::erc::erc_checks(d, &SymbolTable::with_basics())
+}
 
 fn design(src: &str) -> Design {
     let p = SymbolTable::with_basics();

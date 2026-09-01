@@ -1,8 +1,10 @@
-//! The checkers over a [`Design`] built directly — no parse, no text. This is
-//! the shape a `.kicad_sch` extractor hands them.
+//! The checkers over a [`Design`] built directly — no parse, no text.
+//!
+//! An extracted or tool-built design keys its pins by NUMBER, an authored one by
+//! NAME, so the rules that read pin names are exercised both ways here.
 
 use sch_check::model::*;
-use sch_check::{Diagnostics, PinType, SymbolTable, erc, lint, nets};
+use sch_check::{Diagnostics, PinType, SymbolTable, erc, lint, nets, pins};
 
 fn provider() -> SymbolTable {
     use PinType::*;
@@ -15,6 +17,19 @@ fn provider() -> SymbolTable {
             ("3", "VSS", PowerInput, 1),
             ("4", "PB6", Other, 1),
             ("5", "NRST", Other, 1),
+        ],
+    );
+    p.mock_add(
+        "M:BIG",
+        vec![
+            ("1", "VDD", PowerInput, 1),
+            ("2", "VSS", PowerInput, 1),
+            ("3", "EN", Other, 1),
+            ("4", "SDA", Other, 1),
+            ("5", "SCL", Other, 1),
+            ("6", "OUT", Other, 1),
+            ("7", "IN", Other, 1),
+            ("8", "GPIO", Other, 1),
         ],
     );
     p.mock_add(
@@ -54,6 +69,7 @@ fn design(parts: &[(&str, Component)]) -> Design {
             }
         }
     }
+    pins::mark_unused_no_connect(&mut d, &provider());
     nets::derive_attrs(&mut d);
     d
 }
@@ -124,7 +140,7 @@ fn erc_sees_a_dangling_part() {
         ("U1", part("M:REG", &[("IN", "VIN"), ("OUT", "+3V3")])),
         ("R9", part("Device:R", &[("1", "ORPHAN"), ("2", "ORPHAN")])),
     ]);
-    let defects = erc::erc_checks(&d);
+    let defects = erc::erc_checks(&d, &provider());
     assert!(
         defects
             .iter()
@@ -143,9 +159,58 @@ fn erc_reads_a_feedback_divider_from_the_model() {
     bottom.value = Some("10k".into());
     let d = design(&[("U1", reg), ("R1", top), ("R2", bottom)]);
     // A 1:1 divider off a 0.8 V reference cannot make 5 V.
-    let defects = erc::erc_checks(&d);
+    let defects = erc::erc_checks(&d, &provider());
     assert!(
         defects.iter().any(|s| s.contains("feedback-divider")),
         "expected a divider defect, got {defects:?}"
+    );
+}
+
+/// A number-keyed part: the shape an extractor or `place_parts` produces.
+fn by_number(lib_id: &str, pins: &[(&str, &str)]) -> Component {
+    part(lib_id, pins)
+}
+
+#[test]
+fn name_reading_rules_survive_number_keyed_pins() {
+    // EN (pin 3) is on a net nothing else touches — a floating enable.
+    let d = design(&[(
+        "U5",
+        by_number(
+            "M:BIG",
+            &[
+                ("1", "+3V3"),
+                ("2", "GND"),
+                ("3", "EN_FLOAT"),
+                ("6", "SIG"),
+                ("7", "SIG"),
+            ],
+        ),
+    )]);
+    let defects = erc::erc_checks(&d, &provider());
+    assert!(
+        defects.iter().any(|s| s.contains("floating")),
+        "the floating-enable rule must read pin 3 as EN: {defects:?}"
+    );
+}
+
+#[test]
+fn a_global_label_marks_its_net_as_a_port() {
+    let mut label = Component {
+        part: "label:global".into(),
+        ..Default::default()
+    };
+    label.pins.insert("1".into(), PinTarget::Net("TX".into()));
+    let d = design(&[("U1", part("M:CPU", &[("PB6", "TX")])), ("#LBL01", label)]);
+    assert!(d.nets["TX"].port);
+    // A port legitimately has one pin — no typo warning.
+    let diags = lint::lint(&d, &provider());
+    assert!(
+        !diags
+            .0
+            .iter()
+            .any(|x| x.code == "single-pin-net" && x.message.contains("TX")),
+        "{:?}",
+        diags.0
     );
 }

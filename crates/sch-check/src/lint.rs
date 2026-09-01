@@ -115,10 +115,8 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
                 if is_osc {
                     osc_nets.insert(n.clone());
                 }
-                let pin_name = meta
-                    .pins
-                    .iter()
-                    .find(|p| p.number == *key || p.name == *key)
+                let pin_name = crate::pins::resolve(&meta, key)
+                    .first()
                     .map(|p| p.name.as_str())
                     .unwrap_or(key.as_str());
                 let u = pin_name.to_ascii_uppercase();

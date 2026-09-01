@@ -20,6 +20,7 @@
 //! rustdoc states the heuristic and its known limits.
 
 use crate::model::*;
+use crate::{SymbolMeta, SymbolTable};
 use std::collections::HashMap;
 
 /// Common regulator/converter feedback reference voltages, for divider-ratio checks.
@@ -119,6 +120,24 @@ struct Item<'a> {
     refdes: &'a str,
     comp: &'a Component,
     nets: Vec<&'a str>,
+    /// Connected pins with their keys resolved against the symbol.
+    pins: Vec<Pin<'a>>,
+}
+
+/// One connected pin, seen both ways: as the model wrote it (`key` — a number on
+/// an extracted design, a name on an authored one) and as the symbol names it.
+/// The name-based rules below match either, so they read the same circuit the
+/// same way whichever front end built it.
+struct Pin<'a> {
+    key: &'a str,
+    name: &'a str,
+    net: &'a str,
+}
+
+impl Pin<'_> {
+    fn is(&self, pred: impl Fn(&str) -> bool) -> bool {
+        pred(self.key) || pred(self.name)
+    }
 }
 
 fn nets_of(c: &Component) -> Vec<&str> {
@@ -181,10 +200,9 @@ fn pin_count(c: &Component) -> usize {
     c.pins.len() + c.units.values().map(|u| u.len()).sum::<usize>()
 }
 
-/// Every (pin-key, net) pair on a component, across the flat map and all units.
-/// The key is the author-written pin reference (a number OR a symbol pin name), so
-/// name-based heuristics must tolerate both. `NoConnect` pins are dropped.
-fn pin_nets(c: &Component) -> impl Iterator<Item = (&str, &str)> {
+/// The connected pins of a component, each key resolved against `meta` when the
+/// symbol is known. `NoConnect` pins are dropped.
+fn pins_of<'a>(c: &'a Component, meta: Option<&'a SymbolMeta>) -> Vec<Pin<'a>> {
     c.pins
         .iter()
         .chain(c.units.values().flatten())
@@ -192,12 +210,24 @@ fn pin_nets(c: &Component) -> impl Iterator<Item = (&str, &str)> {
             PinTarget::Net(n) => Some((k.as_str(), n.as_str())),
             PinTarget::NoConnect => None,
         })
+        .map(|(key, net)| {
+            let name = meta
+                .and_then(|m| {
+                    crate::pins::resolve(m, key)
+                        .first()
+                        .map(|p| p.name.as_str())
+                })
+                .unwrap_or(key);
+            Pin { key, name, net }
+        })
+        .collect()
 }
 
-fn pin_net_alias<'a>(comp: &'a Component, aliases: &[&str]) -> Option<&'a str> {
-    pin_nets(comp)
-        .find(|(key, _)| aliases.iter().any(|alias| key.eq_ignore_ascii_case(alias)))
-        .map(|(_, net)| net)
+fn pin_net_alias<'a>(it: &Item<'a>, aliases: &[&str]) -> Option<&'a str> {
+    it.pins
+        .iter()
+        .find(|p| p.is(|s| aliases.iter().any(|a| s.eq_ignore_ascii_case(a))))
+        .map(|p| p.net)
 }
 
 /// A 2-pin decoupling/bypass cap bridging `rail` and a ground net — the unit the
@@ -218,7 +248,16 @@ fn has_pullup_to_rail(net: &str, items: &[Item], net_items: &HashMap<&str, Vec<u
 
 /// Run all deterministic quantitative checks, returning defect lines (same `- REFDES: ...` shape the
 /// LLM review emits, so the agent's run_turn_reviewed can union them).
-pub fn erc_checks(d: &Design) -> Vec<String> {
+pub fn erc_checks(d: &Design, provider: &SymbolTable) -> Vec<String> {
+    let parts: Vec<&Component> = d
+        .blocks
+        .values()
+        .flat_map(|b| b.components.values())
+        .collect();
+    let symbols: HashMap<&str, SymbolMeta> = parts
+        .iter()
+        .filter_map(|c| provider.symbol(&c.part).map(|m| (c.part.as_str(), m)))
+        .collect();
     let items: Vec<Item> = d
         .blocks
         .values()
@@ -228,6 +267,7 @@ pub fn erc_checks(d: &Design) -> Vec<String> {
             refdes: rd.as_str(),
             comp: c,
             nets: nets_of(c),
+            pins: pins_of(c, symbols.get(c.part.as_str())),
         })
         .collect();
     // net -> indices into items
@@ -268,8 +308,8 @@ fn check_phototransistor_optocoupler_polarity(items: &[Item], out: &mut Vec<Stri
         if !(part.contains("PC817") || part.contains("LTV-817") || part.contains("LTV817")) {
             continue;
         }
-        let emitter = pin_net_alias(it.comp, &["3", "E", "EMITTER"]);
-        let collector = pin_net_alias(it.comp, &["4", "C", "COLLECTOR"]);
+        let emitter = pin_net_alias(it, &["3", "E", "EMITTER"]);
+        let collector = pin_net_alias(it, &["4", "C", "COLLECTOR"]);
         if let (Some(emitter), Some(collector)) = (emitter, collector)
             && rail_voltage(collector) == Some(0.0)
             && rail_voltage(emitter) != Some(0.0)
@@ -299,9 +339,9 @@ fn check_555_timing_topology(
             continue;
         }
         let (Some(trigger), Some(threshold), Some(discharge)) = (
-            pin_net_alias(timer.comp, &["2", "TR", "TRIG", "TRIGGER"]),
-            pin_net_alias(timer.comp, &["6", "THR", "THRESH", "THRESHOLD"]),
-            pin_net_alias(timer.comp, &["7", "DIS", "DISCH", "DISCHARGE"]),
+            pin_net_alias(timer, &["2", "TR", "TRIG", "TRIGGER"]),
+            pin_net_alias(timer, &["6", "THR", "THRESH", "THRESHOLD"]),
+            pin_net_alias(timer, &["7", "DIS", "DISCH", "DISCHARGE"]),
         ) else {
             continue;
         };
@@ -343,15 +383,10 @@ const DECOUPLE_MIN_PINS: usize = 16;
 /// FP-averse: each branch needs an unambiguous rail on the relevant pin.
 fn check_polarity(items: &[Item], net_items: &HashMap<&str, Vec<usize>>, out: &mut Vec<String>) {
     let pin_net = |it: &Item, pred: &dyn Fn(&str) -> bool| -> Option<String> {
-        it.comp.pins.iter().find_map(|(k, t)| {
-            if pred(&k.to_uppercase())
-                && let PinTarget::Net(n) = t
-            {
-                Some(n.clone())
-            } else {
-                None
-            }
-        })
+        it.pins
+            .iter()
+            .find(|p| p.is(|s| pred(&s.to_uppercase())))
+            .map(|p| p.net.to_string())
     };
     for it in items {
         if !is_diode(it.comp) {
@@ -667,7 +702,7 @@ fn check_missing_pullup(
 ///
 /// FP-averse — this is the easiest check to make noisy, so it is deliberately narrow:
 /// * Net degree must be exactly 1. Explicit `NoConnect` pins are already dropped by
-///   [`pin_nets`]/`nets_of`, so an intentional NC never reaches here.
+///   [`pins_of`]/`nets_of`, so an intentional NC never reaches here.
 /// * The owner must be a real IC (≥8 pins, not connector/passive/power) — a dangling
 ///   2-pin passive is the `check_dangling` case, and a single-pin header/port pin is an
 ///   intentional board I/O, not a floating input.
@@ -703,8 +738,9 @@ fn check_floating_input(
         if pin_count(c) < 8 || is_connector(c) || is_passive(c) || is_power_symbol(c) {
             continue;
         }
-        for (key, net) in pin_nets(c) {
-            if rail_voltage(net).is_some() || !looks_input(key) {
+        for pin in &ic.pins {
+            let (key, net) = (pin.key, pin.net);
+            if rail_voltage(net).is_some() || !pin.is(looks_input) {
                 continue;
             }
             if net_items.get(net).map_or(0, |v| v.len()) == 1 {
@@ -825,7 +861,7 @@ fn check_output_short(
         let mut drivers: Vec<&str> = net_items[net]
             .iter()
             .map(|&i| &items[i])
-            .filter(|it| pin_nets(it.comp).any(|(k, n)| n == net && is_output_name(k)))
+            .filter(|it| it.pins.iter().any(|p| p.net == net && p.is(is_output_name)))
             .map(|it| it.refdes)
             .collect();
         drivers.sort();

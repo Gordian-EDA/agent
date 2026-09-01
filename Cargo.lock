@@ -354,6 +354,7 @@ dependencies = [
  "saphyr",
  "saphyr-parser",
  "sch-check",
+ "serde_json",
  "strsim",
 ]
 

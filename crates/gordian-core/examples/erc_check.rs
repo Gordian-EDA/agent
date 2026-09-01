@@ -17,7 +17,7 @@ fn main() -> anyhow::Result<()> {
     let design = circuit_lang::compile(&src, &provider)
         .design
         .ok_or_else(|| anyhow::anyhow!("compile produced no design"))?;
-    let defects = sch_check::erc::erc_checks(&design);
+    let defects = sch_check::erc::erc_checks(&design, &provider);
     if defects.is_empty() {
         println!("erc: clean (no deterministic quantitative defect)");
     }

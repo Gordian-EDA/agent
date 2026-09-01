@@ -132,7 +132,7 @@ pub fn desugar(s: &SurfaceDesign, provider: &SymbolTable) -> (Design, Diagnostic
     resolve_pins(&mut d, raw_pins, &mut diags);
     synth_decouple(&mut d, s, provider, &mut diags);
     sch_check::decouple::renumber(&mut d);
-    materialize_auto_nc(&mut d, provider); // Task R6
+    sch_check::pins::mark_unused_no_connect(&mut d, provider);
     sch_check::nets::derive_attrs(&mut d);
 
     (d, diags)
@@ -165,55 +165,6 @@ fn lower_block_layout(sb: &SurfaceBlock, diags: &mut Diagnostics) -> LayoutGrid 
                 .collect()
         })
         .collect()
-}
-
-/// Final desugar pass: for every component whose symbol is known, any physical
-/// pin not covered by an author key and whose `etype` is not `PowerInput`
-/// becomes an explicit `nc`. A net-mapped pin, an explicit `nc`,
-/// or a stacked name covering the pin all count as coverage; power-input pins
-/// are skipped (lint.rs already errors when they are left unconnected).
-/// Markers are keyed by pin number and inserted in symbol pin order, so the
-/// pass is deterministic and idempotent across a canonical round-trip.
-fn materialize_auto_nc(d: &mut Design, provider: &SymbolTable) {
-    for block in d.blocks.values_mut() {
-        for comp in block.components.values_mut() {
-            let Some(meta) = provider.symbol(&comp.part) else {
-                continue; // unknown symbol — leave pins as authored
-            };
-            // Physical pin numbers already covered by an author key (number
-            // first, then name; a stacked name covers all its physical pins).
-            let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
-            let keys: Vec<&String> = comp
-                .pins
-                .keys()
-                .chain(comp.units.values().flatten().map(|(k, _)| k))
-                .collect();
-            for key in keys {
-                let by_number = meta.pins.iter().filter(|p| p.number == *key);
-                let mut matched = false;
-                for p in by_number {
-                    covered.insert(p.number.as_str());
-                    matched = true;
-                }
-                if !matched {
-                    for p in meta.pins.iter().filter(|p| p.name == *key) {
-                        covered.insert(p.number.as_str());
-                    }
-                }
-            }
-            // Insert in symbol pin order for determinism.
-            let to_nc: Vec<String> = meta
-                .pins
-                .iter()
-                .filter(|p| p.etype != sch_check::PinType::PowerInput)
-                .filter(|p| !covered.contains(p.number.as_str()))
-                .map(|p| p.number.clone())
-                .collect();
-            for number in to_nc {
-                comp.pins.insert(number, PinTarget::NoConnect);
-            }
-        }
-    }
 }
 
 struct RawPin {

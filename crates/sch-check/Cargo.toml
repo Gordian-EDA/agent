@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Kernel circuit model, symbol-aware lints, and deterministic ERC over a design — independent of how the design was authored."
+description = "Kernel circuit model, symbol-aware lints, deterministic ERC, and the connectivity-only bulk-create input — independent of how a design was authored."
 
 [dependencies]
 circuit-graph = { path = "../circuit-graph" }

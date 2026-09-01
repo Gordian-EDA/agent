@@ -1,7 +1,6 @@
-//! The authored-text checks of `circuit_lang::authored`: an unknown lib_id, an
-//! unknown pin key, and two keys claiming the same physical pin.
+//! The authored-input checks of `sch_check::authored`, through the YAML front
+//! end: an unknown lib_id, an unknown pin key, and two keys claiming one pin.
 
-use circuit_lang::authored;
 use circuit_lang::desugar::desugar;
 use circuit_lang::parse::parse_str;
 use sch_check::{Diagnostics, PinType, SymbolTable};
@@ -20,30 +19,6 @@ fn provider() -> SymbolTable {
             ("6", "NRST", Other, 1),
         ],
     );
-    p.mock_add(
-        "Device:Crystal",
-        vec![("1", "1", Other, 1), ("2", "2", Other, 1)],
-    );
-    p.mock_add(
-        "Switch:SW_Push",
-        vec![("1", "1", Passive, 1), ("2", "2", Passive, 1)],
-    );
-    p.mock_add(
-        "M:REG",
-        vec![
-            ("1", "IN", PowerInput, 1),
-            ("2", "OUT", PowerOutput, 1),
-            ("3", "GND", PowerInput, 1),
-        ],
-    );
-    p.mock_add(
-        "Connector:Conn_01x02_Pin",
-        vec![("1", "Pin_1", Passive, 1), ("2", "Pin_2", Passive, 1)],
-    );
-    p.mock_add(
-        "Device:Polyfuse",
-        vec![("1", "~", Passive, 1), ("2", "~", Passive, 1)],
-    );
     p
 }
 
@@ -52,7 +27,7 @@ fn run(src: &str) -> Diagnostics {
     let (s, mut diags) = parse_str(src);
     let (d, ds) = desugar(&s.unwrap(), &p);
     diags.extend(ds);
-    diags.extend(authored::lint(&d, &p));
+    diags.extend(sch_check::authored::lint(&d, &p));
     diags
 }
 

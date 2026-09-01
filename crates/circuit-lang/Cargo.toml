@@ -16,3 +16,4 @@ strsim.workspace = true
 
 [dev-dependencies]
 kicad = { path = "../kicad" }
+serde_json.workspace = true
