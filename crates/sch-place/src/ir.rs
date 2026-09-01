@@ -203,6 +203,18 @@ pub struct LayoutIr {
     /// RELATIONAL layout intent: the author's statements about parts relative to each
     /// other ([`Relation`]). `#[serde(default)]` so every existing sidecar `layout.json`
     /// deserializes to an empty list ⇒ no constraint ⇒ tuned references unaffected.
+    ///
+    /// ## What each engine guarantees
+    ///
+    /// | engine | ordering (`LeftOf`/`RightOf`/`Above`/`Below`) | `Group` side | `Group` cohesion | `Align` |
+    /// |---|---|---|---|---|
+    /// | `anneal-place` | HARD — seeded by projection, moves that break it are rejected, plus a heavy cost term | HARD, same route | soft cost (group bbox) | HARD, same route |
+    /// | `cluster-place` | inherits anneal, and its pose/de-sprawl/rail steps self-reject on any regression | as anneal | as anneal | as anneal |
+    /// | `spine-place` | projection at the end of typesetting, kept only if its A/B gate agrees; violations rank above aesthetics in every pass | same | not modelled — the grammar owns cohesion | same |
+    ///
+    /// "HARD" means the shipped placement satisfies the relation whenever a feasible
+    /// placement exists; contradictory intent (a cycle) is left alone rather than
+    /// resolved arbitrarily, and a relation whose parts are all frozen cannot be met.
     #[serde(default)]
     pub relations: Vec<Relation>,
 }

@@ -7,7 +7,13 @@
 //! geometry/idiom primitives from `sch-floorplan`'s contract.
 //!
 //! The amplified objective + the SA + the greedy-descent SEED candidate all live here. The
-//! greedy refine/polish below is a COPY of the free engine's descent (the SA uses a
+//! The author's [`sch_place::ir::Relation`] intent is HARD here: the cell seed is projected
+//! onto the constraints before the search, every SA move that would break more of them is
+//! rejected outright, a heavy `RELATION_W` term keeps the routed objective honest, and the
+//! finalize re-projects after the relation-blind align passes. `Group` cohesion is the one
+//! SOFT part — a bbox pull, not a constraint.
+//!
+//! The greedy refine/polish below is a COPY of the free engine's descent (the SA uses a
 //! greedy hill-climb as one multi-start candidate) — duplicated, not shared, so the two
 //! engines evolve independently. The weights/constants likewise are anneal's own copies.
 

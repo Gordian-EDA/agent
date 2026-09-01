@@ -21,6 +21,10 @@
 //! sharing the dominant rail in one row so a shared trunk replaces their distributed power
 //! glyphs. Full-dataset validation: 13/40 liftable boards de-sprawl, 0 regressions.
 //!
+//! Relational intent ([`sch_place::ir::Relation`]) arrives already satisfied from the anneal
+//! baseline; pose, de-sprawl, and the rail relayout are relation-blind rigid moves, so each
+//! gate below refuses a result that breaks one.
+//!
 //! It owns its objective and search; it measures candidates through `sch-floorplan`'s
 //! [`RoutedEvaluator`] and implements the published [`PlacementEngine`] trait.
 
