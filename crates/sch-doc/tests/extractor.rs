@@ -225,3 +225,62 @@ fn bussed_sheets_are_reported_not_guessed() {
     }
     assert!(bussed > 0, "corpus has no bussed sheet to check");
 }
+
+/// What the extractor may never do, on *any* sheet: connect two pins KiCAD
+/// keeps apart.
+///
+/// Buses, hierarchy and missing definitions all make the extractor see *less*
+/// connectivity than KiCAD, never more, so on every sheet — including the ones
+/// the exact gate has to skip — each of its nets must fit inside one of
+/// KiCAD's. Only a re-instantiated sheet is exempt, because there the two sides
+/// do not even agree on reference designators.
+#[test]
+fn no_sheet_is_ever_over_connected() {
+    let Some(kicad) = corpus::kicad10() else {
+        eprintln!("SKIP: no KiCAD 10 installation detected");
+        return;
+    };
+    let mut checked = 0;
+    let mut ambiguous = 0;
+    let mut unreadable = 0;
+    let mut failures = Vec::new();
+    for path in corpus::files() {
+        let doc = SchDoc::read(&path).expect("parse");
+        let netlist = connect::extract(&doc);
+        if netlist
+            .warnings
+            .iter()
+            .any(|w| w.contains("instantiated more than once") || w.contains("not unique"))
+        {
+            ambiguous += 1;
+            continue;
+        }
+        let Ok(oracle) = kicad.netlist(&path) else {
+            unreadable += 1;
+            continue;
+        };
+        checked += 1;
+        let theirs = theirs(&oracle);
+        for ours in ours(&netlist) {
+            if !theirs.iter().any(|net| ours.iter().all(|p| net.contains(p))) {
+                failures.push(format!(
+                    "{}: {:?} is not inside any kicad net",
+                    corpus::label(&path),
+                    &ours[..ours.len().min(6)]
+                ));
+                break;
+            }
+        }
+    }
+    eprintln!(
+        "over-connection: {checked} sheets checked, {ambiguous} with ambiguous \
+         references, {unreadable} kicad-cli could not netlist"
+    );
+    assert!(checked > 90, "only {checked} sheets were checked");
+    assert!(
+        failures.is_empty(),
+        "{} sheets over-connected:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}

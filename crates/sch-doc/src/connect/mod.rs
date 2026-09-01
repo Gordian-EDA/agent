@@ -371,11 +371,13 @@ fn survey(doc: &SchDoc) -> Vec<String> {
             "no embedded lib_symbols definition for {lib_id}: its pins are not placed"
         ));
     }
-    let mut seen: HashSet<&str> = HashSet::new();
+    // The units of one multi-unit part share a reference on purpose; only a
+    // repeated (reference, unit) makes a pin impossible to name.
+    let mut seen: HashSet<(&str, u32)> = HashSet::new();
     let mut duplicated: Vec<&str> = doc
         .symbols()
+        .filter(|s| !seen.insert((s.refdes(), s.unit)))
         .map(SymbolInst::refdes)
-        .filter(|refdes| !seen.insert(refdes))
         .collect();
     duplicated.sort_unstable();
     duplicated.dedup();

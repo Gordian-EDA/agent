@@ -276,6 +276,10 @@ fn only_the_placed_unit_and_the_shared_pins_appear() {
             place("Dual:OP", "U1", "op", 50.0, 0.0, 0.0, "(unit 2)"),
         ),
     );
+    assert!(
+        connect::extract(&doc).warnings.is_empty(),
+        "the units of one part share a reference on purpose"
+    );
     let mut placed: Vec<(u32, String)> = sch_doc::placed_pins(&doc)
         .into_iter()
         .map(|p| (p.unit, p.number))
