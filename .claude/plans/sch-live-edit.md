@@ -36,25 +36,30 @@ are never drawn by coordinate.
 - Extractor must equal kicad-cli netlist partition on every corpus file; kicad-cli stays the oracle in tests and at save.
 - Any placement change passes the truthfulness gate before it is called a win.
 
-## Queued after wave 2 (user, 2026-09-01)
-**Tracing migration** (Sonnet lane): add `tracing` + `tracing-subscriber` as workspace
-deps; replace every non-TUI `println!`/`eprintln!` in library and binary code (~74 sites:
-gordian 27, spine-place 15, sch-floorplan 9, sch-io 6, cluster-place 5, anneal-place 5,
-pcb-workflow 3, gordian-core 3, kicad-ipc 1) with `tracing::{info,debug,warn,error}` and
-spans; the CLI/TUI install a subscriber writing to `<project>/.gordian/logs/` (rolling,
-one file per session, thread id in the filename) plus stderr at `info` for headless
-runs; `RUST_LOG` honoured. Tests/examples may keep `println!`. Stdout must stay clean
-for `tool_once`-style JSON binaries.
+## Done
+- **Tracing migration** — library and binary code logs through `tracing`; the CLI installs
+  the subscriber (`.gordian/logs/`, stderr at `info`, `RUST_LOG` honoured). Only test
+  `SKIP:` lines and the CLI's own version/usage output still print.
+- **Spine channel-order regression** — fixed on main (`c01da81`): `preseeded`, not
+  `frozen`, is what skips idiom seeding.
+- **The `.kicad_sch` as sole source of truth** — the YAML front end, the draft workspace
+  and the apply gate are gone; `place_parts`/`arrange`/`rewire` are the bulk tools, and
+  fixtures are `PlacePartsInput` JSON that reproduces the pre-conversion placements
+  byte-for-byte (a part names its own `block`; a payload carries `layout` per region).
+- **One board-readiness policy** — `check_schematic` is the gate: ERC errors, an
+  unbuildable net (one pin, no power symbol), a proved electrical defect, and a
+  symbol/footprint pad mismatch are errors; heuristics stay warnings. `regenerate_board`
+  refuses nothing the schematic gate passed.
 
 ## Open engine bug (found by W2b's `live::verify`, 2026-09-01)
 `stm32f4-buck` and `openmyo-emg` are untruthful on BOTH the old and live paths: 2-pin
 parts come back with pins swapped (`R5.1`↔`R5.2`, `C11.1`↔`C11.2`, `C17`/`U2` on
 `N_U2_BS`) — `between: [A, B]` pin order is not honoured somewhere in the engine/realiser.
 Neither fixture is in `floorplan_netlist`'s lists, so nothing checked them. Add both to
-the netlist gate and fix the ordering (engine-owned; after the truthfulness-fix lane merges).
+the netlist gate and fix the ordering.
 
-## Open: spine channel-order regression (bisected 2026-09-01)
-`spine-place/tests/frozen_idioms.rs::spine_preserves_inferred_pc817_channel_cells` fails
-(`U1.at.y < U2.at.y` violated) from the L2 merge (`07bbb94`, relational intent) onward;
-passes at `100b3bc`. Likely the relation projection / `apply_cells` frozen-seed change in
-spine's pass ordering. Engine-owned — assign to the truthfulness-fix lane after its gate.
+## Open: created designs under-deliver their own brief
+`sch-create-medium` still lands ~13 parts against a rubric of 18, and `sch-create-large`
+ships wiring the judge faults (VSS on the rail, a half-built feedback divider). Nothing
+in the tool contract blocks the model — the completeness is a prompt/design-review lever,
+not a gate. The deterministic checks that *can* prove a defect already block the turn.
