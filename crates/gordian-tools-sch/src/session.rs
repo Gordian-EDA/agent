@@ -250,3 +250,94 @@ pub(crate) fn delta_json(delta: &NetDelta) -> Value {
     }
     Value::Object(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sch_doc::PinRef;
+
+    fn pin(refdes: &str, number: &str) -> PinRef {
+        PinRef {
+            refdes: refdes.to_string(),
+            unit: 1,
+            pin: number.to_string(),
+            dnp: false,
+        }
+    }
+
+    /// A move or a field edit claims to be inert, so any net change refuses.
+    #[test]
+    fn an_inert_call_refuses_every_net_change() {
+        let delta = NetDelta {
+            merged: vec![(vec!["VCC".into(), "GND".into()], "GND".into())],
+            ..NetDelta::default()
+        };
+        let offenders = Allow::nothing().violation(&delta).unwrap();
+        assert!(offenders.contains("VCC"), "{offenders}");
+        assert!(offenders.contains("GND"), "{offenders}");
+    }
+
+    /// A call that named both nets it merged is doing exactly what it said.
+    #[test]
+    fn a_named_merge_is_permitted() {
+        let delta = NetDelta {
+            merged: vec![(vec!["VCC".into(), "N1".into()], "VCC".into())],
+            pins_now_connected: vec![pin("R5", "2")],
+            ..NetDelta::default()
+        };
+        assert!(
+            Allow::nothing()
+                .nets(["VCC".to_string(), "N1".to_string()])
+                .part("R5")
+                .violation(&delta)
+                .is_none()
+        );
+    }
+
+    /// KiCAD names an unnamed net after its strongest pin, so joining a pin to
+    /// one re-derives that name. The partition did not change.
+    #[test]
+    fn a_generated_name_re_deriving_itself_is_not_a_rewiring() {
+        let delta = NetDelta {
+            renamed: vec![("Net-(P4-Pad1)".into(), "Net-(D1-A)".into())],
+            pins_now_connected: vec![pin("D1", "2")],
+            ..NetDelta::default()
+        };
+        assert!(Allow::nothing().part("D1").violation(&delta).is_none());
+        // An authored name is a different matter entirely.
+        let authored = NetDelta {
+            renamed: vec![("VCC".into(), "Net-(D1-A)".into())],
+            ..NetDelta::default()
+        };
+        assert!(Allow::nothing().part("D1").violation(&authored).is_some());
+    }
+
+    /// A pin belonging to a part the call never mentioned must never move nets.
+    #[test]
+    fn an_unnamed_part_losing_its_net_refuses() {
+        let delta = NetDelta {
+            pins_now_unconnected: vec![pin("U1", "7")],
+            ..NetDelta::default()
+        };
+        let offenders = Allow::nothing().part("R5").violation(&delta).unwrap();
+        assert_eq!(offenders, "U1.7");
+    }
+
+    /// `creating` covers the net a new connection brings into existence, never
+    /// the disappearance of one that was already there.
+    #[test]
+    fn creating_permits_new_nets_but_not_lost_ones() {
+        let created = NetDelta {
+            created: vec!["Net-(R5-Pad1)".into()],
+            ..NetDelta::default()
+        };
+        assert!(Allow::nothing().creating().violation(&created).is_none());
+        assert!(Allow::nothing().violation(&created).is_some());
+
+        let removed = NetDelta {
+            removed: vec!["VCC".into()],
+            ..NetDelta::default()
+        };
+        assert!(Allow::nothing().creating().violation(&removed).is_some());
+    }
+}

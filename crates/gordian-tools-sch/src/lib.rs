@@ -32,7 +32,8 @@ use serde_json::{Value, json};
 
 /// The tools that write the schematic. The turn loop approves these before
 /// they run — they mutate the project and have no dry-run.
-pub const MUTATORS: [&str; 11] = [
+pub const MUTATORS: [&str; 12] = [
+    "undo",
     "add_symbol",
     "remove_symbols",
     "move_symbols",
@@ -58,7 +59,6 @@ fn tool_names() -> Vec<&'static str> {
         "get_net",
         "free_space",
         "check_schematic",
-        "undo",
     ];
     names.extend(MUTATORS);
     names

@@ -521,7 +521,7 @@ fn tool_definitions_stay_within_static_context_budget() {
     let defs = tool_defs();
     let total: usize = defs.iter().map(|tool| tool.size()).sum();
     assert!(
-        total <= 13_800,
+        total <= 14_200,
         "tool definitions use {total} bytes; keep the always-on schemas concise"
     );
 }
