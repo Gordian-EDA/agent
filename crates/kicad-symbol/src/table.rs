@@ -58,7 +58,7 @@ impl SymbolTable {
                 dir: match etype {
                     PinType::PowerInput | PinType::PowerOutput => PinDir::Power,
                     PinType::Passive => PinDir::Passive,
-                    PinType::Other => PinDir::Unknown,
+                    PinType::NoConnect | PinType::Other => PinDir::Unknown,
                 },
                 unit,
             })

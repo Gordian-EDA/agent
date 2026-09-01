@@ -66,6 +66,17 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
                 for p in crate::pins::resolve(&meta, key) {
                     covered.insert(&p.number, key);
                     if let Some(PinTarget::Net(n)) = pin_target_for(comp, key) {
+                        if p.etype == PinType::NoConnect {
+                            diags.push(Diagnostic::error(
+                                "library-no-connect-wired",
+                                format!(
+                                    "{refdes}: pin {} ({}) is a library no-connect pin but is \
+                                     connected to `{n}`; disconnect it and use a functional pin \
+                                     or swap to a compatible symbol",
+                                    p.number, p.name
+                                ),
+                            ));
+                        }
                         match p.etype {
                             PinType::PowerInput => {
                                 net_power_inputs

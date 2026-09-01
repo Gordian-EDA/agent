@@ -36,6 +36,28 @@ fn stm32h743vitx_has_100_pins_with_correct_types() {
 }
 
 #[test]
+fn library_no_connect_pin_type_is_preserved() {
+    let lib_text = r#"(kicad_symbol_lib
+	(version 20231120)
+	(generator "test")
+	(symbol "MCU"
+		(symbol "MCU_1_1"
+			(pin no_connect line (at 0 0 0) (length 2.54)
+				(name "NC/PA9" (effects (font (size 1.27 1.27))))
+				(number "19" (effects (font (size 1.27 1.27)))))
+		)
+	)
+)
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Test.kicad_sym"), lib_text).unwrap();
+    let table = SymbolTable::from_symbol_dir(dir.path().to_path_buf());
+    let symbol = table.symbol("Test:MCU").unwrap();
+
+    assert_eq!(symbol.pins[0].etype, PinType::NoConnect);
+}
+
+#[test]
 fn extends_chain_resolves() {
     let Some(t) = installed() else {
         eprintln!("SKIP");
