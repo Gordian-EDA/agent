@@ -12,7 +12,7 @@ use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::SymbolGeometry;
 use sch_check::model::{Component, Design, PinTarget};
-use sch_check::{PinType, find_pin};
+use sch_check::{PinType, SymbolMeta, find_pin};
 
 use crate::write::SchematicWriter;
 use geom::Dir;
@@ -106,17 +106,18 @@ pub const ROW_GAP: f64 = 5.08; // 4 grid — vertical stack; tighter lets the ro
 // unconventional), so keep the conventional spacing here.
 pub(crate) const MARGIN: f64 = 12.7;
 
-/// Resolve a component's pins to (number, name, net) using geometry + the
-/// authored pin map (number first, then name — matching the emitter).
+/// Resolve a component's pins to (number, name, net) using the canonical
+/// symbol-wide number-first resolver.
 pub(crate) fn resolve_pins(
     comp: &Component,
     geom: &SymbolGeometry,
+    meta: &SymbolMeta,
 ) -> Vec<(String, String, Option<String>)> {
+    let targets = resolve_pin_targets(comp, meta);
     geom.pins
         .iter()
         .map(|pg| {
-            let target = resolve_pin_target(comp, pg);
-            let net = match target {
+            let net = match targets.get(&pg.number) {
                 Some(PinTarget::Net(n)) => Some(n.clone()),
                 _ => None,
             };
@@ -125,20 +126,30 @@ pub(crate) fn resolve_pins(
         .collect()
 }
 
-fn resolve_pin_target<'a>(
+fn resolve_pin_targets<'a>(
     comp: &'a Component,
-    pin: &kicad_symbol::geometry::PinGeom,
-) -> Option<&'a PinTarget> {
-    comp.pins
-        .get(&pin.number)
-        .or_else(|| comp.pins.get(&pin.name))
-        .or_else(|| {
-            comp.units.iter().find_map(|(unit, pins)| {
-                (authored_unit_number(unit) == Some(pin.unit))
-                    .then(|| pins.get(&pin.number).or_else(|| pins.get(&pin.name)))
-                    .flatten()
-            })
-        })
+    meta: &SymbolMeta,
+) -> BTreeMap<String, &'a PinTarget> {
+    let mut targets = BTreeMap::new();
+    for (key, target) in &comp.pins {
+        for pin in sch_check::pins::resolve(meta, key) {
+            targets.insert(pin.number.clone(), target);
+        }
+    }
+    for (unit, pins) in &comp.units {
+        let Some(unit) = authored_unit_number(unit) else {
+            continue;
+        };
+        for (key, target) in pins {
+            for pin in sch_check::pins::resolve(meta, key)
+                .into_iter()
+                .filter(|pin| pin.unit == unit)
+            {
+                targets.entry(pin.number.clone()).or_insert(target);
+            }
+        }
+    }
+    targets
 }
 
 /// Circuit YAML names symbol units `A`, `B`, ... while KiCad geometry numbers
@@ -157,11 +168,12 @@ fn authored_unit_number(name: &str) -> Option<u8> {
     }
 }
 
-fn used_symbol_units(comp: &Component, geom: &SymbolGeometry) -> Vec<u8> {
+fn used_symbol_units(comp: &Component, geom: &SymbolGeometry, meta: &SymbolMeta) -> Vec<u8> {
+    let targets = resolve_pin_targets(comp, meta);
     let mut units: Vec<u8> = geom
         .pins
         .iter()
-        .filter(|pin| resolve_pin_target(comp, pin).is_some())
+        .filter(|pin| targets.contains_key(&pin.number))
         .map(|pin| pin.unit.max(1))
         .collect();
     units.sort_unstable();
@@ -218,9 +230,20 @@ mod resolve_pin_tests {
             ],
             raw_definition: String::new(),
         };
+        let mut provider = SymbolTable::mock();
+        provider.mock_add(
+            &comp.part,
+            vec![
+                ("1", "OUT", PinType::Other, 1),
+                ("5", "OUT", PinType::Other, 2),
+                ("7", "-", PinType::Other, 2),
+                ("4", "V+", PinType::Other, 5),
+            ],
+        );
+        let meta = provider.symbol(&comp.part).unwrap();
 
         assert_eq!(
-            resolve_pins(&comp, &geom),
+            resolve_pins(&comp, &geom, &meta),
             vec![
                 ("1".to_owned(), "OUT".to_owned(), Some("OUT_A".to_owned())),
                 ("5".to_owned(), "OUT".to_owned(), Some("OUT_B".to_owned())),
@@ -229,7 +252,7 @@ mod resolve_pin_tests {
             ]
         );
         assert_eq!(
-            used_symbol_units(&comp, &geom),
+            used_symbol_units(&comp, &geom, &meta),
             [1, 2, 5],
             "an explicitly no-connected unit must still be placed"
         );
@@ -427,6 +450,7 @@ pub(crate) fn compute_needs_flag(
 
 pub(crate) fn gather(env: &KicadInstallation, design: &Design) -> io::Result<Vec<Item>> {
     let mut items = Vec::new();
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     for block in design.blocks.values() {
         for (refdes, comp) in &block.components {
             if comp.dnp {
@@ -442,7 +466,13 @@ pub(crate) fn gather(env: &KicadInstallation, design: &Design) -> io::Result<Vec
                 continue;
             }
             let geom = SymbolGeometry::load(env.symbol_dir(), &comp.part)?;
-            let pins = resolve_pins(comp, &geom); // same order/len as geom.pins
+            let meta = provider.symbol(&comp.part).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("symbol metadata unavailable for {}", comp.part),
+                )
+            })?;
+            let pins = resolve_pins(comp, &geom, &meta); // same order/len as geom.pins
             // An IC/connector (>=3 pins) with no authored value shows its part
             // name (the MPN) so the part is identifiable on the sheet — the
             // reference's "MCP1703A-3302" etc. Passives keep their authored value.
@@ -464,7 +494,7 @@ pub(crate) fn gather(env: &KicadInstallation, design: &Design) -> io::Result<Vec
             // to the old behaviour. Without this, only unit 1's pins ever reach the
             // netlist (the power pins and unit B silently vanish).
             let pin_unit: Vec<u8> = geom.pins.iter().map(|p| p.unit.max(1)).collect();
-            let units = used_symbol_units(comp, &geom);
+            let units = used_symbol_units(comp, &geom, &meta);
             for (k, &u) in units.iter().enumerate() {
                 let unit_pins: Vec<(String, String, Option<String>)> = pins
                     .iter()
