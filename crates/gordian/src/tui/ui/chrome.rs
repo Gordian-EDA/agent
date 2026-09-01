@@ -4,11 +4,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 
 use super::super::app::App;
+use super::super::theme;
 use super::{MARGIN, body, fmt_tokens};
 
 /// The running-indicator spinner. Quadrant blocks (U+2596…U+259F) are far more
@@ -35,10 +36,7 @@ pub(super) fn draw_scroll_indicator(f: &mut Frame, area: Rect, app: &App) {
         height: 1,
     };
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            ind,
-            Style::default().fg(Color::DarkGray),
-        ))),
+        Paragraph::new(Line::from(Span::styled(ind, theme::META))),
         ind_area,
     );
 }
@@ -50,7 +48,7 @@ pub(super) fn draw_scroll_indicator(f: &mut Frame, area: Rect, app: &App) {
 pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
     let frame = SPINNER[app.spinner % SPINNER.len()];
     let secs = app.turn_elapsed_secs().unwrap_or(0);
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = theme::META;
     // While an approval gate holds the turn the verb says so, and the elapsed
     // clock is already frozen (see `App::turn_elapsed_secs`); else it's "working".
     let gated = app.pending.is_some();
@@ -60,13 +58,8 @@ pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
         "working"
     };
     let mut spans = vec![
-        Span::styled(
-            format!("{frame} "),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(verb, Style::default().fg(Color::Yellow)),
+        Span::styled(format!("{frame} "), theme::SPINNER),
+        Span::styled(verb, Style::default().fg(theme::ACC)),
         Span::styled(format!(" · {secs}s"), dim),
     ];
     if !gated {
@@ -81,9 +74,7 @@ pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("  ↳ ", dim),
             Span::styled(
                 format!("{work}…"),
-                Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::ITALIC),
+                theme::SUBTLE.add_modifier(Modifier::ITALIC),
             ),
         ]));
     }
@@ -92,10 +83,8 @@ pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
 
 pub(super) fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let area = body(area);
-    let dim = Style::default().fg(Color::DarkGray);
-    let armed_quit = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
+    let dim = theme::META;
+    let armed_quit = theme::WARNING.add_modifier(Modifier::BOLD);
     // The right side only carries a hint that isn't already on screen. A pending
     // change shows its actions on the card, so the footer stays quiet there.
     let right = if app.ctrl_c_armed {
@@ -192,15 +181,13 @@ fn status_left(app: &App, avail: usize) -> String {
 }
 
 pub(super) fn draw_help(f: &mut Frame, area: Rect) {
-    let accent = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(Color::DarkGray);
+    let accent = theme::POPUP_TITLE;
+    let dim = theme::META;
     // A key/description row: the key in accent, the description in soft gray.
     let kv = |k: &str, d: &str| {
         Line::from(vec![
-            Span::styled(format!("{k:<15} "), Style::default().fg(Color::Cyan)),
-            Span::styled(d.to_string(), Style::default().fg(Color::Gray)),
+            Span::styled(format!("{k:<15} "), Style::default().fg(theme::INFO)),
+            Span::styled(d.to_string(), theme::SUBTLE),
         ])
     };
     let section = |t: &str| {
@@ -251,7 +238,8 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(dim)
+                    .style(theme::BAND)
+                    .border_style(theme::POPUP_BORDER)
                     .padding(Padding::horizontal(2))
                     .title(Span::styled(" help · keys & commands ", accent)),
             )

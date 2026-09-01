@@ -29,9 +29,11 @@ mod transcript;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::widgets::Block;
 use ratatui_image::picker::Picker;
 
 use super::app::App;
+use super::theme;
 
 /// Symmetric horizontal margin (in columns) applied to every pane via [`body`],
 /// so the header, transcript, composer, diff card, and footer all share one left
@@ -68,6 +70,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 /// [`Picker`] when one is present.
 pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
     let area = f.area();
+    // The app owns its rectangle: lay the page wash down first so the warm
+    // surface ramp reads as designed instead of inheriting the terminal profile.
+    f.render_widget(Block::default().style(theme::PAGE), area);
 
     // Size the diff pane to its content (0 when nothing is pending).
     let diff_h = app
@@ -142,7 +147,7 @@ mod tests {
     use gordian_core::AgentEvent;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::style::{Color, Modifier};
+    use ratatui::style::Modifier;
     use serde_json::json;
 
     /// Render an app to a TestBackend and return the buffer's text as one string.
@@ -693,14 +698,14 @@ mod tests {
         assert!(text.contains(":++;++:"), "logo art appears:\n{text}");
         assert!(text.contains("Gordian"), "brand text appears:\n{text}");
 
-        let logo_color = Some(Color::Rgb(181, 113, 58));
+        let logo_color = Some(theme::ACC);
         let colored_logo_cells = buf
             .content()
             .iter()
             .filter(|cell| cell.symbol() != " " && cell.style().fg == logo_color);
         assert!(
             colored_logo_cells.count() > 20,
-            "logo cells carry the bronze foreground color"
+            "logo cells carry the brand accent"
         );
     }
 
@@ -728,7 +733,7 @@ mod tests {
             .find(|x| buf[(*x, y)].symbol() == "C")
             .expect("hint starts with C");
         let style = buf[(first_hint_cell, y)].style();
-        assert_eq!(style.fg, Some(Color::Yellow));
+        assert_eq!(style.fg, Some(theme::WARN));
         assert!(style.add_modifier.contains(Modifier::BOLD));
         assert!(!style.add_modifier.contains(Modifier::REVERSED));
     }

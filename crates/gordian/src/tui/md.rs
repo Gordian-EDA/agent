@@ -8,7 +8,9 @@
 //! needs to know the terminal width.
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
+
+use crate::tui::theme;
 
 /// How the renderer may wrap a logical line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,8 +53,15 @@ pub fn render_markdown(text: &str, base: Style) -> Vec<MdLine> {
     r.finish()
 }
 
-fn code_style(base: Style) -> Style {
-    base.fg(Color::Cyan)
+/// Inline `code` takes the structural accent so it reads as a token in prose.
+fn inline_code_style(base: Style) -> Style {
+    base.patch(theme::INLINE_CODE)
+}
+
+/// Fenced-block code is plain text on a raised surface — the block's background
+/// already marks it as code, so recolouring every line would be noise.
+fn block_code_style(base: Style) -> Style {
+    base.patch(theme::CODE)
 }
 
 /// Walks the pulldown-cmark event stream, accumulating styled segments into
@@ -109,7 +118,7 @@ impl Renderer {
             Event::Text(t) => self.push_text(&t),
             Event::Code(t) => {
                 self.ensure_line();
-                self.current.push((t.to_string(), code_style(self.base)));
+                self.current.push((t.to_string(), inline_code_style(self.base)));
             }
             Event::SoftBreak | Event::HardBreak => {
                 self.flush_line();
@@ -124,7 +133,7 @@ impl Renderer {
                 self.block_start();
                 self.ensure_line();
                 self.current
-                    .push(("─".repeat(24), Style::default().fg(Color::DarkGray)));
+                    .push(("─".repeat(24), theme::RULE));
                 self.flush_line();
                 self.mark_sep();
             }
@@ -229,13 +238,13 @@ impl Renderer {
     /// The style inline text takes right now.
     fn style(&self) -> Style {
         let mut s = self.base;
-        if self.bold > 0 || self.heading {
+        if self.bold > 0 {
             s = s.add_modifier(Modifier::BOLD);
         }
-        // Headings carry an accent so they read as structure, not just bold
-        // prose; inline **strong** stays plain bold (no recolour).
+        // Headings carry the structural accent so they read as structure, not
+        // just bold prose; inline **strong** stays plain bold (no recolour).
         if self.heading {
-            s = s.fg(Color::Cyan);
+            s = s.patch(theme::HEADING);
         }
         if self.italic > 0 || self.quote_depth > 0 {
             s = s.add_modifier(Modifier::ITALIC);
@@ -267,7 +276,7 @@ impl Renderer {
             if !piece.is_empty() {
                 self.line_open = true;
                 self.current
-                    .push((piece.to_string(), code_style(self.base)));
+                    .push((piece.to_string(), block_code_style(self.base)));
             }
         }
     }
@@ -289,10 +298,8 @@ impl Renderer {
     fn begin_line(&mut self) {
         self.line_open = true;
         if self.quote_depth > 0 {
-            self.current.push((
-                "▌ ".repeat(self.quote_depth),
-                Style::default().fg(Color::DarkGray),
-            ));
+            self.current
+                .push(("▌ ".repeat(self.quote_depth), theme::QUOTE_GUTTER));
         }
     }
 
@@ -382,7 +389,7 @@ mod tests {
         let bold = l.segments.iter().find(|(t, _)| t == "R1").unwrap();
         assert!(bold.1.add_modifier.contains(Modifier::BOLD));
         let code = l.segments.iter().find(|(t, _)| t == "10k").unwrap();
-        assert_eq!(code.1.fg, Some(Color::Cyan));
+        assert_eq!(code.1.fg, Some(theme::INFO), "inline code takes the structural accent");
     }
 
     #[test]
@@ -423,7 +430,7 @@ mod tests {
         assert_eq!(text_of(&lines[0]), "Power section");
         let h = lines[0].segments[0].1;
         assert!(h.add_modifier.contains(Modifier::BOLD), "heading is bold");
-        assert_eq!(h.fg, Some(Color::Cyan), "heading carries the accent");
+        assert_eq!(h.fg, Some(theme::INFO), "heading carries the accent");
 
         // Inline **strong** is plain bold — no recolour — so the two are distinct.
         let strong = render_markdown("a **bold** word", base());
@@ -435,7 +442,7 @@ mod tests {
         assert!(seg.1.add_modifier.contains(Modifier::BOLD));
         assert_ne!(
             seg.1.fg,
-            Some(Color::Cyan),
+            Some(theme::INFO),
             "strong stays plain, not accented"
         );
     }
@@ -474,7 +481,11 @@ mod tests {
             WrapMode::Preserve,
             "code is preserve-wrapped"
         );
-        assert_eq!(lines[3].segments[0].1.fg, Some(Color::Cyan));
+        assert_eq!(
+            lines[3].segments[0].1.fg,
+            Some(theme::FG),
+            "fenced code is plain text on the raised surface"
+        );
         // The fence language rides the opening code row only.
         assert_eq!(
             lines[2].kind,

@@ -29,6 +29,7 @@ pub mod app;
 pub mod event;
 pub mod md;
 pub mod pricing;
+pub mod theme;
 pub mod ui;
 
 #[cfg(test)]

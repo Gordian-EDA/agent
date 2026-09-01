@@ -16,6 +16,7 @@ use ratatui_image::{Resize, ResizeEncodeRender};
 
 use super::super::app::{App, Entry, ImageState, NoticeLevel, Speaker};
 use super::super::md::{self, LineKind, MdLine, WrapMode};
+use super::super::theme;
 use super::{RenderCtx, body};
 
 /// The most rows an inline image preview may occupy, so a render can never eat the
@@ -245,7 +246,7 @@ fn draw_image(
     // Text-only mode (screenshot harness / dumb terminal): just the stable label.
     let Some(picker) = ctx.picker else {
         let label = app.images[idx].label();
-        f.render_widget(text_label(&label, Color::DarkGray), rect);
+        f.render_widget(text_label(&label, theme::FAINT), rect);
         return;
     };
 
@@ -275,7 +276,7 @@ fn draw_image(
 
     if matches!(app.images[idx].state, ImageState::Failed) {
         let label = app.images[idx].label();
-        f.render_widget(text_label(&label, Color::DarkGray), rect);
+        f.render_widget(text_label(&label, theme::FAINT), rect);
         return;
     }
 
@@ -295,7 +296,7 @@ fn draw_image(
         app.images[idx].caption
     );
     let (cap_rect, img_rect) = split_caption(full_rect);
-    text_label(&caption, Color::Cyan).render(cap_rect, &mut scratch);
+    text_label(&caption, theme::INFO).render(cap_rect, &mut scratch);
     if img_rect.height > 0
         && let ImageState::Ready { proto, .. } = &mut app.images[idx].state
     {
@@ -371,18 +372,14 @@ fn decode(
 /// the brand, a tagline, a few example prompts, and the key hints — vertically
 /// centred so an empty cockpit feels intentional rather than blank.
 fn draw_welcome(f: &mut Frame, area: Rect) {
-    let logo = Style::default()
-        .fg(Color::Rgb(181, 113, 58))
-        .add_modifier(Modifier::BOLD);
-    let accent = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(Color::DarkGray);
-    let caret = Style::default().fg(Color::Cyan);
+    let logo = theme::LOGO;
+    let wordmark = theme::LOGO;
+    let dim = theme::META;
+    let caret = Style::default().fg(theme::ACC);
     let example = |s: &'static str| {
         Line::from(vec![
             Span::styled("    › ", caret),
-            Span::styled(s, Style::default()),
+            Span::styled(s, theme::PROSE),
         ])
     };
 
@@ -403,8 +400,8 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
     .collect();
     lines.extend([
         Line::from(""),
-        Line::from(Span::styled("Gordian", accent)),
-        Line::from(Span::styled("the schematic & PCB design copilot", dim)),
+        Line::from(Span::styled("Gordian", wordmark)),
+        Line::from(Span::styled("the schematic & PCB design copilot", theme::SUBTLE)),
         Line::from(""),
         Line::from(Span::styled("  Try:", dim)),
         example("design a 3.3V LDO regulator with input and output caps"),
@@ -468,41 +465,25 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
     let (first, cont, marker_style, body_style, markdown) = match e.speaker {
         // The user's turn: a cyan caret and bold text — the one thing the eye
         // should land on when scanning back through the transcript.
-        Speaker::User => (
-            "› ",
-            "  ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-            Style::default().add_modifier(Modifier::BOLD),
-            false,
-        ),
+        Speaker::User => ("› ", "  ", theme::USER_CARET, theme::USER, false),
         // Assistant prose: plain markdown at a blank 2-col gutter, aligned under
         // the user's text. No bullet — the user's caret alone marks the turns, so
         // the transcript stays lean (the Codex idiom).
-        Speaker::Assistant => ("  ", "  ", Style::default(), Style::default(), true),
+        Speaker::Assistant => ("  ", "  ", theme::PROSE, theme::PROSE, true),
         // Tool calls are grouped by `render_tool_group`; this fallback is only for
         // direct unit use of `render_entry`.
-        Speaker::Tool => (
-            "  ",
-            "  ",
-            Style::default().fg(Color::DarkGray),
-            Style::default().fg(Color::DarkGray),
-            false,
-        ),
+        Speaker::Tool => ("  ", "  ", theme::META, theme::META, false),
         Speaker::System => {
             // A notice reads as a callout: a level glyph leads it, the text takes
             // the level colour, and a warn/error gets a colored left rule on every
             // row so failures stand out from the recessed metadata around them.
             let (glyph, color) = match e.level {
-                NoticeLevel::Plain => ("• ", Color::DarkGray),
-                NoticeLevel::Success => ("✓ ", Color::Green),
-                NoticeLevel::Error => ("✗ ", Color::Red),
+                NoticeLevel::Plain => ("• ", theme::FAINT),
+                NoticeLevel::Success => ("✓ ", theme::OK),
+                NoticeLevel::Error => ("✗ ", theme::ERR),
             };
             let body = match e.level {
-                NoticeLevel::Plain | NoticeLevel::Success => {
-                    Style::default().fg(color).add_modifier(Modifier::DIM)
-                }
+                NoticeLevel::Plain | NoticeLevel::Success => Style::default().fg(color),
                 _ => Style::default().fg(color),
             };
             // Continuation rows of a loud notice keep a colored rule; quiet ones
@@ -529,7 +510,7 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
     // Error notices get a one-cell background tint so the whole line reads
     // as a callout band, not just a colored glyph.
     let notice_tint = match (e.speaker, e.level) {
-        (Speaker::System, NoticeLevel::Error) => Some(Color::Rgb(58, 30, 36)),
+        (Speaker::System, NoticeLevel::Error) => Some(theme::ERR_BG),
         _ => None,
     };
 
@@ -572,40 +553,34 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
 }
 
 fn render_worked_divider(text: &str, width: usize, level: NoticeLevel) -> Line<'static> {
-    let color = match level {
-        NoticeLevel::Error => Color::Red,
-        NoticeLevel::Plain | NoticeLevel::Success => Color::DarkGray,
+    let (rule, label_style) = match level {
+        NoticeLevel::Error => (theme::DANGER, theme::DANGER),
+        NoticeLevel::Plain | NoticeLevel::Success => (theme::RULE, theme::META),
     };
-    let style = Style::default().fg(color).add_modifier(Modifier::DIM);
     let label = format!(" {text} ");
     let label_w = label.chars().count();
     if width <= 1 {
-        return Line::from(Span::styled("─", style));
+        return Line::from(Span::styled("─", rule));
     }
     if width <= label_w + 1 {
         return Line::from(Span::styled(
             label.chars().take(width).collect::<String>(),
-            style,
+            label_style,
         ));
     }
     let right = width.saturating_sub(1 + label_w);
     Line::from(vec![
-        Span::styled("─", style),
-        Span::styled(label, style),
-        Span::styled("─".repeat(right), style),
+        Span::styled("─", rule),
+        Span::styled(label, label_style),
+        Span::styled("─".repeat(right), rule),
     ])
 }
 
 fn render_tool_group(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
     let title = tool_group_title(entries);
     let mut lines = vec![Line::from(vec![
-        Span::styled("• ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            title,
-            Style::default()
-                .fg(Color::Gray)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("• ", theme::TOOL_GUTTER),
+        Span::styled(title, theme::TOOL_GROUP),
     ])];
 
     for (idx, e) in entries.iter().enumerate() {
@@ -653,14 +628,9 @@ fn render_tool_row(e: &Entry, last: bool, width: usize) -> Vec<Line<'static>> {
     let cont_prefix = if last { "    " } else { "  │ " };
     let (name, detail) = split_tool_text(&e.text);
     let action = human_tool_name(name);
-    let mut segments = vec![(
-        action,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )];
+    let mut segments = vec![(action, theme::TOOL_NAME)];
     if !detail.is_empty() {
-        segments.push((format!(" {detail}"), Style::default().fg(Color::Gray)));
+        segments.push((format!(" {detail}"), theme::SUBTLE));
     }
 
     let body_w = width.saturating_sub(first_prefix.chars().count()).max(1);
@@ -669,7 +639,7 @@ fn render_tool_row(e: &Entry, last: bool, width: usize) -> Vec<Line<'static>> {
         .enumerate()
         .map(|(row, spans)| {
             let prefix = if row == 0 { first_prefix } else { cont_prefix };
-            let mut out = vec![Span::styled(prefix, Style::default().fg(Color::DarkGray))];
+            let mut out = vec![Span::styled(prefix, theme::TOOL_GUTTER)];
             out.extend(spans);
             Line::from(out)
         })
@@ -710,19 +680,13 @@ fn human_tool_name(name: &str) -> String {
 /// opening row — a dim language label so the block reads as code without a
 /// boxed container.
 fn code_row_spans(ml: &MdLine, row: Vec<Span<'static>>, opening: bool) -> Vec<Span<'static>> {
-    const SLATE: Color = Color::Rgb(33, 36, 51);
-    let bg = |st: Style| st.bg(SLATE);
-    let mut spans = vec![Span::styled("▎ ", bg(Style::default().fg(Color::DarkGray)))];
+    let bg = |st: Style| st.bg(theme::BG2);
+    let mut spans = vec![Span::styled("▎ ", theme::CODE_GUTTER)];
     for s in row {
         spans.push(Span::styled(s.content, bg(s.style)));
     }
     if opening && let LineKind::Code { lang: Some(lang) } = &ml.kind {
-        spans.push(Span::styled(
-            format!("  {lang}"),
-            bg(Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM)),
-        ));
+        spans.push(Span::styled(format!("  {lang}"), theme::CODE_LANG));
     }
     spans
 }

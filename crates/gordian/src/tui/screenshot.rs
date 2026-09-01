@@ -20,6 +20,7 @@ use ratatui::style::{Color, Modifier};
 use gordian_core::AgentEvent;
 
 use super::app::{App, Entry, Msg, NoticeLevel, PendingApproval, Speaker, Status};
+use super::theme;
 use super::ui;
 
 /// Where the SVGs are written; `tools/tui_shot.sh` reads from here.
@@ -33,60 +34,23 @@ const CW: f64 = 9.0;
 const CH: f64 = 24.0;
 const FS: f64 = 15.0;
 
-// Default terminal fg/bg used for `Color::Reset`.
-const BG: &str = "#1a1b26";
-const FG: &str = "#c0caf5";
-
-/// Map a ratatui [`Color`] to a CSS hex string. Named ANSI colours use a
-/// Tokyo-Night-ish palette; `Reset` as a background returns `None` (the terminal
-/// background shows through). RGB/indexed are mapped faithfully.
+/// A `Color` as a CSS hex string. The whole TUI paints from [`theme`], which is
+/// truecolour end to end, so this only has to handle `Rgb` — plus `Reset`, which
+/// means "the terminal's own fg/bg" and resolves to the theme's page colours.
 fn hex(c: Color, is_fg: bool) -> Option<String> {
-    let named = match c {
-        Color::Reset => return if is_fg { Some(FG.into()) } else { None },
-        Color::Black => "#15161e",
-        Color::Red => "#f7768e",
-        Color::Green => "#9ece6a",
-        Color::Yellow => "#e0af68",
-        Color::Blue => "#7aa2f7",
-        Color::Magenta => "#bb9af7",
-        Color::Cyan => "#7dcfff",
-        Color::Gray => "#a9b1d6",
-        Color::DarkGray => "#565f89",
-        Color::LightRed => "#ff7a93",
-        Color::LightGreen => "#b9f27c",
-        Color::LightYellow => "#ff9e64",
-        Color::LightBlue => "#7da6ff",
-        Color::LightMagenta => "#c8a2ff",
-        Color::LightCyan => "#b4f9f8",
-        Color::White => "#c0caf5",
-        Color::Rgb(r, g, b) => return Some(format!("#{r:02x}{g:02x}{b:02x}")),
-        Color::Indexed(i) => return Some(indexed(i)),
-    };
-    Some(named.into())
-}
-
-/// The standard xterm 256-colour palette (16 ANSI + 6×6×6 cube + grayscale ramp).
-fn indexed(i: u8) -> String {
-    const ANSI: [&str; 16] = [
-        "#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
-        "#565f89", "#ff7a93", "#b9f27c", "#ff9e64", "#7da6ff", "#c8a2ff", "#b4f9f8", "#c0caf5",
-    ];
-    match i {
-        0..=15 => ANSI[i as usize].into(),
-        16..=231 => {
-            let i = i - 16;
-            let r = i / 36;
-            let g = (i % 36) / 6;
-            let b = i % 6;
-            let lvl = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
-            format!("#{:02x}{:02x}{:02x}", lvl(r), lvl(g), lvl(b))
-        }
-        _ => {
-            let v = 8 + (i - 232) * 10;
-            format!("#{v:02x}{v:02x}{v:02x}")
-        }
+    match c {
+        Color::Reset if is_fg => hex(theme::FG, true),
+        Color::Reset => None,
+        Color::Rgb(r, g, b) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+        other => unreachable!("the TUI paints only theme truecolours, got {other:?}"),
     }
 }
+
+/// A theme colour as hex, for the SVG furniture that sits outside the cell grid.
+fn swatch(c: Color) -> String {
+    hex(c, false).expect("theme colours are truecolour")
+}
+
 
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -149,13 +113,17 @@ fn buffer_to_svg(buf: &Buffer) -> String {
     // the PNG reads like a windowed capture rather than edge-to-edge text.
     const PAD: f64 = 20.0;
     let (pw, ph) = (cwpx + 2.0 * PAD, chpx + 2.0 * PAD);
+    // The panel is the page colour; the backdrop is one step darker still, so the
+    // capture reads as a window rather than edge-to-edge text.
+    let panel = swatch(theme::BG0);
+    let backdrop = swatch(Color::Rgb(0x08, 0x07, 0x06));
     let mut s = String::new();
     let _ = writeln!(
         s,
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{pw:.0}\" height=\"{ph:.0}\" \
          viewBox=\"0 0 {pw:.0} {ph:.0}\">\n\
-         <rect width=\"{pw:.0}\" height=\"{ph:.0}\" fill=\"#12131c\"/>\n\
-         <rect x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"{:.0}\" rx=\"10\" fill=\"{BG}\"/>\n\
+         <rect width=\"{pw:.0}\" height=\"{ph:.0}\" fill=\"{backdrop}\"/>\n\
+         <rect x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"{:.0}\" rx=\"10\" fill=\"{panel}\"/>\n\
          <g transform=\"translate({PAD:.0} {PAD:.0})\">",
         PAD - 8.0,
         PAD - 8.0,
@@ -190,7 +158,7 @@ fn buffer_to_svg(buf: &Buffer) -> String {
             if sym == " " || sym.is_empty() {
                 continue;
             }
-            let fg = hex(cell.fg, true).unwrap_or_else(|| FG.into());
+            let fg = hex(cell.fg, true).unwrap_or_else(|| swatch(theme::FG));
             let m = cell.modifier;
             // Box-drawing glyphs render as stroked paths spanning the full cell, so
             // adjacent border cells join into smooth continuous lines with rounded

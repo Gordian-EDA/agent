@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **TUI colour scheme**: every styled span now names a semantic role from a single
+  `tui::theme` module instead of a hardcoded ANSI colour. The palette is a warm dark
+  ramp with two accent tiers — copper (`#d98b4a`) for the rare, high-salience surfaces
+  (brand, user caret, composer focus, selection) and teal (`#5fb3b8`) for the frequent
+  structural ones (tool names, headings, inline code) — replacing the single overloaded
+  cyan. The screenshot harness renders from the same constants, so previews can no
+  longer drift from what ships.
+
 ### Added
 - Initial open-source release scaffolding: Apache-2.0 `LICENSE`, `README`, `CONTRIBUTING`,
   `.env.example`, and per-crate package metadata.
