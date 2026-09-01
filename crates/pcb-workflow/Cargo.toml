@@ -12,6 +12,7 @@ serde.workspace = true
 serde_json.workspace = true
 circuit-graph = { path = "../circuit-graph" }
 circuit-lang = { path = "../circuit-lang" }
+sch-check = { path = "../sch-check" }
 pcb-drc = { path = "../pcb-drc" }
 geom = { path = "../geom" }
 gordian-runtime = { path = "../gordian-runtime" }

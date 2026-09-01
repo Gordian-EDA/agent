@@ -8,11 +8,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use circuit_lang::model::Design;
-use circuit_lang::{PinType, find_pin};
 use geom::{EPS, Point2, Segment};
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
+use sch_check::model::Design;
+use sch_check::{PinType, find_pin};
 
 use crate::wire::DrawnSegment;
 use crate::write::SchematicWriter;
@@ -21,7 +21,7 @@ use circuit_graph::netclass::is_ground;
 use sch_place::item::{Incidence, Item};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `geom::union_find`, shared with circuit-lang's pin reconciler.
+// `geom::union_find`, shared with the desugar pin reconciler.
 use sch_place::ir::LayoutIr;
 
 /// An item's body rect at position `at`. Uses the FULL `approx_size` (which

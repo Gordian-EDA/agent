@@ -12,7 +12,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tempfile.workspace = true
 resvg = { workspace = true }
-circuit-lang = { path = "../circuit-lang" }
+sch-check = { path = "../sch-check" }
 gordian-llm = { path = "../gordian-llm" }
 kicad = { path = "../kicad" }
 kicad-ipc = { path = "../kicad-ipc" }

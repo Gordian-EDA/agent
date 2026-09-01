@@ -13,7 +13,7 @@ fn validation_corpus_available() -> bool {
         .is_dir()
 }
 
-fn compile_fixture(provider: &SymbolTable, name: &str) -> circuit_lang::Design {
+fn compile_fixture(provider: &SymbolTable, name: &str) -> sch_check::Design {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(format!("tests/fixtures/validation/{name}.circuit.yaml"));
     let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
@@ -26,7 +26,7 @@ fn compile_fixture(provider: &SymbolTable, name: &str) -> circuit_lang::Design {
     result.design.expect("design")
 }
 
-fn compile_source(provider: &SymbolTable, name: &str, src: &str) -> circuit_lang::Design {
+fn compile_source(provider: &SymbolTable, name: &str, src: &str) -> sch_check::Design {
     let result = circuit_lang::compile(src, provider);
     assert!(
         !result.diagnostics.has_errors(),

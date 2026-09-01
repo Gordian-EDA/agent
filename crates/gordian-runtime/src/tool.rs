@@ -125,8 +125,8 @@ pub fn require_search_query(input: &Value) -> Result<String> {
 }
 
 /// Build the `{ok, diagnostics, errors, warnings}` report a compile yields.
-pub fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
-    use circuit_lang::Severity;
+pub fn compile_report(diags: &sch_check::Diagnostics) -> Value {
+    use sch_check::Severity;
     use std::collections::{BTreeMap, HashMap, HashSet};
 
     const MAX_DIAGNOSTICS: usize = 40;

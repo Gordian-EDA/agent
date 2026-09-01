@@ -4,15 +4,27 @@ pub type RefDes = String;
 pub type NetName = String;
 pub type BlockName = String;
 
-/// Kernel design — post-desugar. This is the ONLY thing the
-/// validator, reconciler, and lift operate on.
+/// Natural refdes sort key: alpha prefix + numeric suffix, so `J2` < `J10`.
+/// Malformed suffixes sort last within their prefix.
+pub fn refdes_key(r: &str) -> (&str, u64) {
+    let split = r.find(|c: char| c.is_ascii_digit()).unwrap_or(r.len());
+    let (alpha, num) = r.split_at(split);
+    (alpha, num.parse().unwrap_or(u64::MAX))
+}
+
+/// The kernel design: parts, their pin→net map, and net attributes.
+///
+/// The one thing the checkers, the placement engines, and the writer operate
+/// on — whatever built it (a live `.kicad_sch`, a tool call, or the YAML front
+/// end). It holds connectivity and intent, never geometry.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Design {
     pub name: Option<String>,
     pub description: Option<String>,
     pub blocks: IndexMap<BlockName, Block>,
     pub nets: IndexMap<NetName, NetAttrs>,
-    /// Lint codes suppressed via the top-level `lint: {allow: [...]}` section.
+    /// Lint codes this design suppresses — a deliberate exception the author
+    /// recorded (the YAML front end reads them from `lint: {allow: [...]}`).
     pub lint_allow: std::collections::BTreeSet<String>,
 }
 
@@ -70,9 +82,9 @@ pub enum PinTarget {
     NoConnect,
 }
 
-/// Identity for reconciliation: authored components match by
-/// refdes; sugar-synthesized ones by (parent, role, index) — carried
-/// into the sch file as ap_parent/ap_role/ap_index properties.
+/// Identity for reconciliation: authored components match by refdes;
+/// sugar-synthesized ones by (parent, role, index) — carried into the sch file
+/// as ap_parent/ap_role/ap_index properties.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Origin {
     Authored,

@@ -1,6 +1,6 @@
-use circuit_lang::model::Design;
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
+use sch_check::model::Design;
 use sch_floorplan::contract::{PlacementEngine, SchematicPlaceProblem};
 use spine_place::SpinePlace;
 

@@ -2,10 +2,10 @@
 //! independently, then the blocks are tiled onto ONE `.kicad_sch` as labeled
 //! bounding-box regions. Cross-block nets connect via global labels only.
 
-use circuit_lang::model::{Block, Design, PinTarget};
 use gordian_runtime::config::SchematicPlacementEngine;
 use indexmap::IndexMap;
 use kicad::KicadInstallation;
+use sch_check::model::{Block, Design, PinTarget};
 use sch_place::result::EmitOutput;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -183,7 +183,7 @@ pub fn emit_and_check(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use circuit_lang::model::{Component, PinTarget};
+    use sch_check::model::{Component, PinTarget};
 
     #[test]
     fn authored_groups_one_per_block() {

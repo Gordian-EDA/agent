@@ -5,11 +5,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use circuit_lang::model::Design;
 use geom::Point2;
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::{PinDir as SymPinDir, SymbolMeta, find_pin};
+use sch_check::model::Design;
 
 use sch_floorplan::contract::{
     PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,

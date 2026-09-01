@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
             .diagnostics
             .0
             .iter()
-            .filter(|d| matches!(d.severity, circuit_lang::diag::Severity::Error))
+            .filter(|d| matches!(d.severity, sch_check::diag::Severity::Error))
             .map(|d| d.message.clone())
             .collect();
         if result.design.is_some() && errs.is_empty() {
