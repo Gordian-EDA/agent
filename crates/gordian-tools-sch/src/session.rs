@@ -101,7 +101,11 @@ impl Allow {
         for (pin, net) in moved {
             let named = self.refs.contains(&pin.refdes)
                 || net.as_ref().is_some_and(|net| self.nets.contains(net))
-                || (self.creating && net.as_ref().is_none_or(|net| is_auto(net)));
+                || (self.creating
+                    && (generated_support_ref(&pin.refdes)
+                        || net
+                            .as_ref()
+                            .is_none_or(|net| is_auto(net) || delta.created.contains(net))));
             if !named {
                 offenders.insert(format!("{}.{}", pin.refdes, pin.pin));
             }
@@ -114,6 +118,10 @@ impl Allow {
 /// Whether a net name was generated rather than authored.
 fn is_auto(name: &str) -> bool {
     name.starts_with("Net-(")
+}
+
+fn generated_support_ref(refdes: &str) -> bool {
+    refdes.starts_with("#PWR_") || refdes.starts_with("#FLG_")
 }
 
 /// Every pin that gained or lost a connection, with the net it changed against:

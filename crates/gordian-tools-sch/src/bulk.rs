@@ -55,7 +55,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let payload: sch_check::PlacePartsInput =
         serde_json::from_value(input).context("invalid place_parts input")?;
     let mut edit = if ctx.sch_path().is_file() {
-        Edit::open(ctx)?
+        Edit::open(ctx).context("opening the existing schematic")?
     } else {
         Edit::create(ctx, sch_floorplan::live::blank_sheet()?)
     };
@@ -73,8 +73,13 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !report.committed {
         return Ok(refused_place(report));
     }
-    let value = edit.commit(json!(report), Allow::nothing().parts(refs).creating())?;
-    with_check(value, ctx)
+    let value = edit
+        .commit(json!(report), Allow::nothing().parts(refs).creating())
+        .context("committing placed parts")?;
+    if value.get("error").is_some() {
+        return Ok(value);
+    }
+    with_check(value, ctx).context("checking placed parts")
 }
 
 pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -114,6 +119,9 @@ fn finish_arrangement(edit: Edit, report: ArrangeReport, ctx: &AgentRuntime) -> 
         }));
     }
     let value = edit.commit(json!(report), Allow::nothing())?;
+    if value.get("error").is_some() {
+        return Ok(value);
+    }
     with_check(value, ctx)
 }
 
