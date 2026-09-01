@@ -526,7 +526,6 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Default project PCB." },
                     "out_dir": { "type": "string", "description": "Default fab/." }
                 }
             }),

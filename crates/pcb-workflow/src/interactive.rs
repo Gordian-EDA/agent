@@ -39,22 +39,140 @@ pub fn open_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
 /// Move one or more live-board parts in a single KiCAD IPC commit.
 pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let path = ctx.pcb_path();
-    match ctx.kicad().with_session(&path, |session| {
-        let snapshot = kicad_board::from_bridge(session.kicad().board_snapshot()?);
-        let mut board = MoveBoard::from_snapshot(&snapshot);
-        let plan = match resolve_move_parts(&input, &mut board) {
-            Ok(plan) => plan,
-            Err(err) => return Ok(Err(err)),
-        };
-        session.kicad().move_footprints(&plan.ipc_moves)?;
-        session.kicad().save()?;
-        Ok(Ok(plan.output()))
-    }) {
-        Ok(Ok(out)) => Ok(out),
-        Ok(Err(err)) => Ok(json!({ "error": err })),
-        Err(e) => Ok(json!({ "error": e.to_string() })),
+    let snapshot = match crate::active_board(ctx) {
+        Ok(snapshot) => snapshot,
+        Err(err) => return Ok(json!({ "error": err })),
+    };
+    let mut board = MoveBoard::from_snapshot(&snapshot);
+    let plan = match resolve_move_parts(&input, &mut board) {
+        Ok(plan) => plan,
+        Err(err) => return Ok(json!({ "error": err })),
+    };
+    if let Some(err) = overlap_error(&board, &plan, snapshot.problem.clearance) {
+        return Ok(json!({ "error": err }));
     }
+    let retract = retracted_copper(&snapshot, &plan);
+    if let Err(err) = crate::place::write_placement(ctx, &plan.ipc_moves) {
+        return Ok(json!({ "error": format!("move_parts could not write the board: {err}") }));
+    }
+    if let Err(err) = write_retained_copper(ctx, &snapshot, &retract) {
+        return Ok(json!({
+            "error": format!("move_parts moved the parts but could not retract their copper: {err}"),
+        }));
+    }
+    Ok(plan.output(&retract))
+}
+
+/// Copper the move invalidates: every trace with an end on a pad that moved.
+#[derive(Debug, Default, Clone)]
+struct RetractedCopper {
+    retained: RouteSolution,
+    nets: BTreeSet<String>,
+    count: usize,
+}
+
+fn retracted_copper(snapshot: &IpcBoardSnapshot, plan: &MovePlan) -> RetractedCopper {
+    let moved: BTreeSet<&str> = plan
+        .positions
+        .iter()
+        .map(|position| position.reference.as_str())
+        .collect();
+    let pads: Vec<Rect> = snapshot
+        .problem
+        .obstacles
+        .iter()
+        .filter(|obstacle| {
+            obstacle
+                .kind
+                .strip_prefix("pad:")
+                .is_some_and(|reference| moved.contains(reference))
+        })
+        .map(|obstacle| {
+            Rect::new(
+                obstacle.center.x - obstacle.width / 2.0,
+                obstacle.center.y - obstacle.height / 2.0,
+                obstacle.center.x + obstacle.width / 2.0,
+                obstacle.center.y + obstacle.height / 2.0,
+            )
+        })
+        .collect();
+    let touches_moved_pad = |trace: &Trace| {
+        trace
+            .path
+            .iter()
+            .any(|point| pads.iter().any(|pad| pad.contains(*point)))
+    };
+    let mut retract = RetractedCopper::default();
+    for trace in &snapshot.copper.traces {
+        if touches_moved_pad(trace) {
+            retract.nets.insert(trace.connection.clone());
+            retract.count += 1;
+        } else {
+            retract.retained.traces.push(trace.clone());
+        }
+    }
+    retract.retained.vias = snapshot.copper.vias.clone();
+    retract
+}
+
+fn write_retained_copper(
+    ctx: &AgentRuntime,
+    snapshot: &IpcBoardSnapshot,
+    retract: &RetractedCopper,
+) -> std::result::Result<(), String> {
+    if retract.count == 0 {
+        return Ok(());
+    }
+    ctx.close_kicad_session();
+    let path = ctx.pcb_path();
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| format!("could not read the board: {err}"))?;
+    let (stripped, _, _) = kicad_board::strip_copper(&text)?;
+    let replacement = kicad_board::append_copper(
+        &stripped,
+        &retract.retained,
+        snapshot.problem.layer_count,
+        &snapshot.layer_names,
+    )?;
+    std::fs::write(&path, replacement)
+        .map_err(|err| format!("could not write the board: {err}"))
+}
+
+/// Reject a move that would land a part on top of another one: the pad extents
+/// plus the board clearance must not overlap.
+fn overlap_error(board: &MoveBoard, plan: &MovePlan, clearance: f64) -> Option<String> {
+    let extent = |reference: &str| {
+        board.parts.get(reference).map(|part| {
+            Rect::new(
+                part.at.x - part.width / 2.0 - clearance / 2.0,
+                part.at.y - part.height / 2.0 - clearance / 2.0,
+                part.at.x + part.width / 2.0 + clearance / 2.0,
+                part.at.y + part.height / 2.0 + clearance / 2.0,
+            )
+        })
+    };
+    for position in &plan.positions {
+        let moved = extent(&position.reference)?;
+        for (reference, _) in board.parts.iter() {
+            if reference == &position.reference {
+                continue;
+            }
+            let other = extent(reference)?;
+            if !moved.overlaps(&other) {
+                continue;
+            }
+            return Some(format!(
+                "move_parts refused: {} at [{:.3}, {:.3}] would overlap {} — leave at least \
+                 {:.3} mm between their pad extents",
+                position.reference,
+                position.at.x,
+                position.at.y,
+                reference,
+                clearance
+            ));
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +265,7 @@ impl MoveBoard {
 }
 
 impl MovePlan {
-    fn output(&self) -> Value {
+    fn output(&self, retract: &RetractedCopper) -> Value {
         let positions: Vec<Value> = self
             .positions
             .iter()
@@ -165,6 +283,8 @@ impl MovePlan {
             "moved": self.positions.len(),
             "changed": self.changed,
             "positions": positions,
+            "retracted_tracks": retract.count,
+            "nets_to_reroute": retract.nets.iter().collect::<Vec<_>>(),
         })
     }
 }
@@ -1178,7 +1298,7 @@ mod tests {
 
         assert_eq!(plan.positions.len(), 1);
         assert_eq!(plan.changed, 0);
-        assert_eq!(plan.output()["changed"], json!(0));
+        assert_eq!(plan.output(&RetractedCopper::default())["changed"], json!(0));
     }
 
     #[test]

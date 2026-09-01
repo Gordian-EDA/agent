@@ -2410,18 +2410,17 @@ impl<P: Provider> Agent<P> {
             stage.name == "render_board"
                 && pcb_finish_stage_succeeded(stage.name, &parse_or_null(&stage.content))
         }) {
+            // The visual review is advice, not an oracle: DRC already decided the
+            // board is manufacturable, so its defects ride along in the report for
+            // the model to act on instead of withholding the deliverable.
             let review = self
                 .run_pcb_visual_review_stage(intent, stages.last().expect("render stage"), events)
                 .await;
-            let succeeded =
-                pcb_finish_stage_succeeded(review.name, &parse_or_null(&review.content));
             stages.push(review);
-            if succeeded {
-                let export = self
-                    .run_pcb_finish_stage("export_fab", json!({}), pcb_recovery, events)
-                    .await;
-                stages.push(export);
-            }
+            let export = self
+                .run_pcb_finish_stage("export_fab", json!({}), pcb_recovery, events)
+                .await;
+            stages.push(export);
         }
         let completed = stages.last().is_some_and(|stage| {
             stage.name == "export_fab"
@@ -4820,6 +4819,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
     if let Some(err) = result.get("error").and_then(Value::as_str) {
         let diagnostic = result
             .get("diagnostics")
+            .or_else(|| result.get("defects"))
             .and_then(Value::as_array)
             .and_then(|items| items.iter().find_map(Value::as_str));
         return diagnostic.map_or_else(

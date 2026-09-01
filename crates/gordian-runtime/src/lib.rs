@@ -4,6 +4,7 @@
 
 pub mod config;
 pub mod footprint_compat;
+pub mod platform;
 pub mod render;
 pub mod runtime;
 pub mod tool;
