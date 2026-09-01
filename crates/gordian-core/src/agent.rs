@@ -546,7 +546,10 @@ fn is_discovery_tool(name: &str) -> bool {
 /// anything is the stuck pattern the no-progress watchdog exists to catch.
 fn is_inspection_tool(name: &str) -> bool {
     is_discovery_tool(name)
-        || matches!(name, "read_schematic" | "get_symbol" | "get_net" | "free_space")
+        || matches!(
+            name,
+            "read_schematic" | "get_symbol" | "get_net" | "free_space"
+        )
 }
 
 fn request_supplies_multiple_library_ids(intent: &str) -> bool {
@@ -623,10 +626,7 @@ fn coalesced_discovery_call(call: &ToolCall, calls: &[ToolCall]) -> Option<ToolC
 }
 
 fn is_revision_scoped_read(name: &str) -> bool {
-    matches!(
-        name,
-        "project_info" | "run_erc" | "render_schematic"
-    )
+    matches!(name, "project_info" | "run_erc" | "render_schematic")
 }
 
 /// Best-effort emit: a closed receiver (UI gone) is ignored.
@@ -1439,14 +1439,13 @@ impl<P: Provider> Agent<P> {
                     call.fn_name == "create_design" && draft_existed_before_completion;
                 let current_draft = self.runtime.workspace().read_draft().ok().flatten();
                 let minimum_component_guard =
-                    undersized_full_draft_result(authoritative_intent, call)
-                        .or_else(|| {
-                            undersized_existing_draft_result(
-                                authoritative_intent,
-                                call,
-                                current_draft.as_deref(),
-                            )
-                        });
+                    undersized_full_draft_result(authoritative_intent, call).or_else(|| {
+                        undersized_existing_draft_result(
+                            authoritative_intent,
+                            call,
+                            current_draft.as_deref(),
+                        )
+                    });
                 let component_shortfall_tool_blocked = component_shortfall_focus
                     .as_ref()
                     .is_some_and(|focus| !focus.permits(&call.fn_name));
@@ -2108,7 +2107,9 @@ impl<P: Provider> Agent<P> {
             // watchdog; the turn's request budget bounds them instead. Every
             // other tool completion must change durable authoring
             // state/diagnostics (or a PCB mutation revision).
-            let inspection_only = tool_calls.iter().all(|call| is_inspection_tool(&call.fn_name));
+            let inspection_only = tool_calls
+                .iter()
+                .all(|call| is_inspection_tool(&call.fn_name));
             if !inspection_only {
                 let durable_state =
                     durable_authoring_state(&self.runtime, latest_authoring_diagnostics.clone());
@@ -3230,21 +3231,15 @@ fn next_tool_state_revision(
 fn authoring_diagnostics_state(name: &str, value: &Value) -> Option<AuthoringDiagnosticsState> {
     if !matches!(
         name,
-        "create_design"
-
-            | "assign_footprints"
-            | "run_erc"
-            | "apply_design"
+        "create_design" | "assign_footprints" | "run_erc" | "apply_design"
     ) {
         return None;
     }
     // Rejected authoring candidates report diagnostics for the candidate, not
     // for the preserved working draft. Never let those errors poison the
     // apply guard for a draft that the tool explicitly left unchanged.
-    if matches!(
-        name,
-        "create_design" | "assign_footprints"
-    ) && value.get("draft_written").and_then(Value::as_bool) == Some(false)
+    if matches!(name, "create_design" | "assign_footprints")
+        && value.get("draft_written").and_then(Value::as_bool) == Some(false)
     {
         return None;
     }
@@ -3602,10 +3597,7 @@ fn prune_stale_tool_results(history: &mut [ChatMessage]) {
 }
 
 fn tool_args_can_be_pruned(name: &str) -> bool {
-    matches!(
-        name,
-        "create_design" | "apply_design"
-    )
+    matches!(name, "create_design" | "apply_design")
 }
 
 fn prune_large_json_strings(value: &mut Value) {
@@ -3653,9 +3645,7 @@ fn tool_effect(name: &str) -> ToolEffect {
         "apply_design" => ToolEffect::Gated,
         // Project-local draft mutations are intentionally ungated: only
         // apply_design can commit them to the schematic.
-        "create_design" | "assign_footprints" => {
-            ToolEffect::Authoring
-        }
+        "create_design" | "assign_footprints" => ToolEffect::Authoring,
         // Immediate project/PCB mutations lack a safe dry-run, so approve the
         // operation and arguments before their first execution.
         "regenerate_board"
@@ -3685,10 +3675,7 @@ fn wants_apply(call: &ToolCall) -> bool {
 /// can ask the agent to find or inspect parts without being forced through two
 /// irrelevant "commit now" model rounds.
 fn is_authoring_for_commit(name: &str) -> bool {
-    matches!(
-        name,
-        "create_design" | "assign_footprints"
-    )
+    matches!(name, "create_design" | "assign_footprints")
 }
 
 fn post_apply_authoring_batch_blocked(name: &str, apply_already_dispatched: bool) -> bool {
@@ -4669,7 +4656,10 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
         }
         "read_schematic" => "read the schematic".to_string(),
         "export_fab" => {
-            let files = result.get("file_count").and_then(Value::as_u64).unwrap_or(0);
+            let files = result
+                .get("file_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             let dir = result.get("fab_dir").and_then(Value::as_str).unwrap_or("");
             format!("{files} file(s) in {dir}")
         }
@@ -4690,7 +4680,10 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 .get("diagnostics_omitted")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            let mode = result.get("mode").and_then(Value::as_str).unwrap_or("created");
+            let mode = result
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("created");
             if omitted > 0 {
                 format!("{mode}: {errors} errors, {warnings} warnings ({omitted} omitted)")
             } else {
@@ -7899,9 +7892,9 @@ blocks:
     #[test]
     fn used_revision_reads_and_precommit_erc_are_not_advertised() {
         let used = ["project_info", "run_erc", "render_schematic"]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<HashSet<_>>();
+            .into_iter()
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
         let exhausted = tool_defs_for_phase(
             ToolPhase::BoardActive,
             &HashMap::new(),
