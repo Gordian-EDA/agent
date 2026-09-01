@@ -745,6 +745,28 @@ mod tests {
     }
 
     #[test]
+    fn the_model_label_only_drops_the_vendor_namespace() {
+        // A regression guard: this used to cut every model id down to its first
+        // three dash-separated words, which mangled short ids like "gpt-6-luna"
+        // into just "6-luna" once the namespace was stripped.
+        let mut a = App::new(Status::new(
+            "openai",
+            "gpt-6-luna",
+            "/tmp/proj/design.kicad_sch",
+            true,
+        ));
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(text.contains("gpt-6-luna"), "full model id shown:\n{text}");
+
+        let mut a = app(); // "us.anthropic.claude-opus-4-5-20251101-v1:0"
+        let text = render_to_string(&mut a, 120, 24);
+        assert!(
+            text.contains("claude-opus-4-5-20251101-v1:0"),
+            "the namespace is stripped, not the model name:\n{text}"
+        );
+    }
+
+    #[test]
     fn empty_landing_page_shows_colored_logo_art() {
         let mut a = app();
         let backend = TestBackend::new(96, 32);
