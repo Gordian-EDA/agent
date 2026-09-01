@@ -94,9 +94,50 @@ fn agrees_with_kicad(doc: &SchDoc) {
     assert_eq!(
         oracle_view(&oracle),
         our_view(&netlist),
-        "kicad disagrees about this fixture:\n{}",
+        "kicad disagrees about this fixture's nets:\n{}",
         doc.to_text()
     );
+    // Loose ends are half the answer: a rule about severing or settling a pin
+    // says nothing at all in the net list.
+    assert_eq!(
+        oracle_loose_ends(&oracle),
+        our_loose_ends(&netlist),
+        "kicad disagrees about this fixture's loose ends:\n{}",
+        doc.to_text()
+    );
+}
+
+/// Pins `kicad-cli` left on a net of their own, which it names `unconnected-`.
+fn oracle_loose_ends(netlist: &kicad::Netlist) -> Vec<String> {
+    let mut pins: Vec<String> = netlist
+        .nets
+        .iter()
+        .filter(|net| net.name.starts_with("unconnected-"))
+        .flat_map(|net| net.nodes.iter())
+        .filter(|(refdes, _)| !is_virtual(refdes))
+        .map(|(refdes, pin)| format!("{refdes}.{pin}"))
+        .collect();
+    pins.sort();
+    pins
+}
+
+/// The same, as this crate reports it: settled or not, a lone pin is a loose end.
+fn our_loose_ends(netlist: &connect::Netlist) -> Vec<String> {
+    let mut pins: Vec<String> = netlist
+        .unconnected
+        .iter()
+        .chain(&netlist.no_connect)
+        .filter(|p| !is_virtual(&p.refdes))
+        .map(|p| format!("{}.{}", p.refdes, p.pin))
+        .collect();
+    pins.sort();
+    pins
+}
+
+/// A symbol KiCAD keeps out of the netlist: a power flag and friends (`#`), or
+/// a part nobody has annotated yet (`?`).
+fn is_virtual(refdes: &str) -> bool {
+    refdes.starts_with('#') || refdes.contains('?')
 }
 
 /// Nets as `name -> pins`, in the shape both sides can be compared in: KiCAD
@@ -109,7 +150,7 @@ fn our_view(netlist: &connect::Netlist) -> BTreeMap<String, Vec<String>> {
             let mut pins: Vec<String> = net
                 .pins
                 .iter()
-                .filter(|p| !p.refdes.starts_with('#'))
+                .filter(|p| !is_virtual(&p.refdes))
                 .map(|p| format!("{}.{}", p.refdes, p.pin))
                 .collect();
             pins.sort();
@@ -128,7 +169,7 @@ fn oracle_view(netlist: &kicad::Netlist) -> BTreeMap<String, Vec<String>> {
             let mut pins: Vec<String> = net
                 .nodes
                 .iter()
-                .filter(|(refdes, _)| !refdes.starts_with('#'))
+                .filter(|(refdes, _)| !is_virtual(refdes))
                 .map(|(refdes, pin)| format!("{refdes}.{pin}"))
                 .collect();
             pins.sort();
@@ -141,11 +182,16 @@ fn oracle_view(netlist: &kicad::Netlist) -> BTreeMap<String, Vec<String>> {
 /// A placed symbol. `extra` carries whatever the case needs — `(mirror y)`,
 /// `(dnp yes)`, `(unit 2)`.
 fn place(lib_id: &str, refdes: &str, value: &str, x: f64, y: f64, rot: f64, extra: &str) -> String {
+    let unit = extra
+        .split_once("(unit ")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .and_then(|(digits, _)| digits.trim().parse::<u32>().ok())
+        .unwrap_or(1);
     format!(
         "(symbol (lib_id \"{lib_id}\") (at {x} {y} {rot}) {extra} (uuid \"{refdes}-uuid\")\n\
          (property \"Reference\" \"{refdes}\" (at {x} {y} 0))\n\
          (property \"Value\" \"{value}\" (at {x} {y} 0))\n\
-         (instances (project \"t\" (path \"/{ROOT}\" (reference \"{refdes}\") (unit 1)))))"
+         (instances (project \"t\" (path \"/{ROOT}\" (reference \"{refdes}\") (unit {unit})))))"
     )
 }
 
@@ -847,6 +893,123 @@ fn the_delta_sees_a_pin_joining_an_existing_net() {
     let back = connect::Netlist::diff(&connect::extract(&after), &connect::extract(&before));
     assert_eq!(back.pins_now_unconnected.len(), 1);
     assert!(back.pins_now_connected.is_empty(), "{back:?}");
+}
+
+/// A label on a pin tip binds to the pin, not to the wire running past it. The
+/// wire is a different net, however much it looks like one drawing.
+#[test]
+fn a_label_on_a_pin_tip_leaves_the_passing_wire_alone() {
+    let parts = format!(
+        "{}\n{}\n{}\n{}\n{}\n(label \"SIG\" (at 140 96.19 0) (uuid \"l1\"))\n\
+         (label \"SIG\" (at 180 96.19 0) (uuid \"l2\"))",
+        place("Device:R", "R1", "1k", 100.0, 100.0, 0.0, "(unit 1)"),
+        place("Device:R", "R4", "1k", 140.0, 100.0, 0.0, "(unit 1)"),
+        place("Device:R", "R2", "1k", 160.0, 100.0, 0.0, "(unit 1)"),
+        wire(100.0, 96.19, 150.0, 96.19),
+        wire(160.0, 96.19, 200.0, 96.19),
+    );
+    let doc = sheet(&[RESISTOR], &parts);
+    let netlist = connect::extract(&doc);
+    assert_eq!(
+        net_named(&netlist, "SIG")
+            .pins
+            .iter()
+            .map(|p| p.refdes.as_str())
+            .collect::<Vec<_>>(),
+        ["R2", "R4"],
+        "the wire past R4's pin was pulled onto SIG"
+    );
+
+    // A junction at the same point is not suppressed by the pin.
+    let dotted = sheet(
+        &[RESISTOR],
+        &format!("{parts}\n(junction (at 140 96.19) (uuid \"j\"))"),
+    );
+    let joined = connect::extract(&dotted);
+    assert_eq!(net_named(&joined, "SIG").pins.len(), 3);
+}
+
+/// A no-connect marker severs its point: it does not merely excuse a pin, it
+/// stops anything connecting through it.
+#[test]
+fn a_no_connect_severs_its_point() {
+    let parts = format!(
+        "{}\n{}\n{}",
+        place("Device:R", "R1", "1k", 100.0, 100.0, 0.0, "(unit 1)"),
+        place("Device:R", "R2", "1k", 150.0, 100.0, 0.0, "(unit 1)"),
+        wire(100.0, 96.19, 150.0, 96.19),
+    );
+    let wired = sheet(&[RESISTOR], &parts);
+    assert_eq!(
+        nets(&wired),
+        vec![vec!["R1.1".to_string(), "R2.1".to_string()]]
+    );
+
+    let cut = sheet(
+        &[RESISTOR],
+        &format!("{parts}\n(no_connect (at 100 96.19) (uuid \"nc\"))"),
+    );
+    let netlist = connect::extract(&cut);
+    assert!(netlist.nets.is_empty(), "{:?}", netlist.nets);
+    assert_eq!(
+        netlist
+            .no_connect
+            .iter()
+            .map(|p| p.refdes.as_str())
+            .collect::<Vec<_>>(),
+        ["R1"]
+    );
+
+    // It stops a junction joining two crossing wires, too.
+    let crossing = format!(
+        "{}\n{}\n{}\n{}",
+        place("Device:R", "R1", "1k", 0.0, 13.81, 0.0, "(unit 1)"),
+        place("Device:R", "R2", "1k", 10.0, 23.81, 0.0, "(unit 1)"),
+        wire(0.0, 10.0, 20.0, 10.0),
+        wire(10.0, 0.0, 10.0, 20.0),
+    );
+    let dotted = sheet(
+        &[RESISTOR],
+        &format!("{crossing}\n(junction (at 10 10) (uuid \"j\"))"),
+    );
+    assert_eq!(nets(&dotted).len(), 1);
+    let severed = sheet(
+        &[RESISTOR],
+        &format!(
+            "{crossing}\n(junction (at 10 10) (uuid \"j\"))\n\
+             (no_connect (at 10 10) (uuid \"nc\"))"
+        ),
+    );
+    assert!(
+        nets(&severed).is_empty(),
+        "{:?}",
+        connect::extract(&severed).nets
+    );
+}
+
+/// A drawing unit the definition does not have draws the first one, as KiCAD
+/// does — rather than leaving the symbol with no pins and saying nothing.
+#[test]
+fn an_out_of_range_unit_falls_back_to_the_first() {
+    for unit in ["(unit 0)", "(unit 2)", "(unit 5)"] {
+        // Only the symbol's own unit is out of range; its `(instances)` entry
+        // stays at 1, which is the shape a drifted writer produces.
+        let drifted = place("Device:R", "R1", "1k", 100.0, 100.0, 0.0, "(unit 1)")
+            .replacen("(unit 1)", unit, 1);
+        let doc = sheet(
+            &[RESISTOR],
+            &format!(
+                "{drifted}\n{}\n{}",
+                place("Device:R", "R2", "1k", 120.0, 100.0, 0.0, "(unit 1)"),
+                wire(100.0, 96.19, 120.0, 96.19),
+            ),
+        );
+        assert_eq!(
+            nets(&doc),
+            vec![vec!["R1.1".to_string(), "R2.1".to_string()]],
+            "{unit} lost its pins"
+        );
+    }
 }
 
 #[test]
