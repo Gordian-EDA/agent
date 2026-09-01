@@ -21,6 +21,9 @@ use crate::{Diagnostic, Diagnostics, SymbolTable, authored, decouple, nets, pins
 #[serde(deny_unknown_fields)]
 pub struct PlacePartsInput {
     pub parts: Vec<PartSpec>,
+    /// Sheet title, drawn in the frame's title block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Sheet these parts belong to. One tool call fills one sheet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block: Option<BlockName>,
@@ -120,7 +123,10 @@ pub fn into_design(input: &PlacePartsInput, provider: &SymbolTable) -> (Design, 
             ));
         }
     }
-    let mut design = Design::default();
+    let mut design = Design {
+        name: input.name.clone(),
+        ..Design::default()
+    };
     design.blocks.insert(name.to_string(), block);
     expand_decouple(input, name, &mut design, provider, &mut diags);
     decouple::renumber(&mut design);
@@ -247,6 +253,10 @@ pub fn place_parts_input_schema() -> Value {
                         }
                     }
                 }
+            },
+            "name": {
+                "type": "string",
+                "description": "Sheet title, drawn in the frame's title block."
             },
             "block": {
                 "type": "string",

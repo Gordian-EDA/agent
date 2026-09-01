@@ -834,6 +834,12 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if units.is_empty() {
         return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
     }
+    // Every pin the part has today, so a pin the new definition adds is recognisable.
+    let had: Vec<String> = placed_pins(&edit.doc)
+        .into_iter()
+        .filter(|p| p.refdes == refdes)
+        .map(|p| p.number)
+        .collect();
     // Where each connected pin sat, so whatever met it can follow it across.
     let before: Vec<(String, String, String, Point2)> = placed_pins(&edit.doc)
         .into_iter()
@@ -875,6 +881,28 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "{lib_id} has no unit {}; {refdes} is a {}-unit part and every unit must swap \
                  together — pick a symbol with at least {} units",
                 missing.join(", "), units.len(), units.len()
+            ),
+        }));
+    }
+    // A definition that brings supply pins the old part did not have is not the
+    // pin-compatible replacement a swap claims to be: nothing on the sheet drives them
+    // and KiCAD calls every one of them an error.
+    let added_supplies: Vec<String> = now
+        .iter()
+        .filter(|p| p.refdes == refdes && p.etype == "power_in" && !had.contains(&p.number))
+        .map(|p| match p.name.as_str() {
+            "" | "~" => p.number.clone(),
+            name => format!("{} ({name})", p.number),
+        })
+        .collect();
+    if !added_supplies.is_empty() {
+        return Ok(json!({
+            "error": format!(
+                "{lib_id} adds supply pin(s) {} that {refdes} does not have, so nothing on the \
+                 sheet drives them; it is not a pin-compatible replacement. Use \
+                 `set_fields({{ref, fields:{{Value:…}}}})` if the part is electrically the same, \
+                 or pick a symbol with the same supply pins.",
+                added_supplies.join(", ")
             ),
         }));
     }

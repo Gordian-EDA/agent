@@ -96,49 +96,14 @@ fn resolve_pour_layer(layer: &str, layer_count: u32) -> Option<(u32, String)> {
     }
 }
 
-/// A dangling wire shorter than 0.1mm is emitter rounding residue, not a
-/// broken connection: its endpoints sit inside any pin snap tolerance.
-fn degenerate_wire_endpoint(v: &kicad::Violation) -> bool {
-    v.kind == "unconnected_wire_endpoint"
-        && v.items.iter().all(|item| {
-            item.description
-                .split("length ")
-                .nth(1)
-                .and_then(|rest| rest.split_whitespace().next())
-                .and_then(|len| len.parse::<f64>().ok())
-                .is_some_and(|len| len < 0.1)
-        })
-}
-
-fn blocking_erc_warnings(report: &kicad::ErcReport) -> Vec<Value> {
-    report
-        .violations
-        .iter()
-        .filter(|v| {
-            v.severity == "warning"
-                && !v.kind.starts_with("lib_symbol")
-                && v.kind != "global_label_dangling"
-                && !degenerate_wire_endpoint(v)
-        })
-        .map(|v| {
-            let items: Vec<_> = v
-                .items
-                .iter()
-                .map(|item| item.description.clone())
-                .collect();
-            json!({
-                "type": v.kind,
-                "description": v.description,
-                "items": items,
-            })
-        })
-        .collect()
-}
-
 /// `regenerate_board` — seed the PCB from KiCAD's own schematic netlist export.
 ///
 /// Footprints must already be assigned in the live schematic. Missing footprints are
 /// a hard error: the agent assigns them before regenerating the board again.
+///
+/// The schematic gate is exactly `check_schematic`'s: ERC errors block, ERC warnings do
+/// not. One policy, so a schematic the agent was told is finished is one the board can
+/// be seeded from.
 pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !ctx.sch_path().exists() {
         return Ok(json!({
@@ -182,22 +147,6 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "warnings": erc.warning_count(),
                 "violations": violations,
             },
-        }));
-    }
-    let blocking_warnings = blocking_erc_warnings(&erc);
-    if !blocking_warnings.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "error": format!(
-                "schematic ERC has {} actionable warning(s); fix the live schematic before regenerate_board",
-                blocking_warnings.len()
-            ),
-            "erc": {
-                "errors": erc.error_count(),
-                "warnings": erc.warning_count(),
-                "blocking_warnings": blocking_warnings,
-            },
-            "note": "Library symbol warnings and composed-sheet dangling global-label artifacts are allowed; same local/global labels and other connectivity warnings must be fixed before PCB work.",
         }));
     }
     let mut pad_nets_by_ref: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();

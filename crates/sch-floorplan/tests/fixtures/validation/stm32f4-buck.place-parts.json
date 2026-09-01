@@ -1,4 +1,5 @@
 {
+  "name": "stm32f4_buck_testboard",
   "parts": [
     {
       "ref": "PWR100",

@@ -1,4 +1,5 @@
 {
+  "name": "mcp1703-power-entry",
   "parts": [
     {
       "ref": "PWR1",

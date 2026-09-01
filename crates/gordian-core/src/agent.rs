@@ -2434,11 +2434,21 @@ fn into_outcome(result: Result<Value>) -> ToolOutcome {
             }
         }
         Err(e) => ToolOutcome {
-            value: json!({ "error": e.to_string() }),
+            value: json!({ "error": error_chain(&e) }),
             images: Vec::new(),
             image_path: None,
         },
     }
+}
+
+/// An error as one line per cause. `to_string` shows only the outermost context, which
+/// is where a tool says *that* it refused; the causes under it say *why*, and a model
+/// that cannot see them can only guess at the fix.
+fn error_chain(e: &anyhow::Error) -> String {
+    e.chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 /// Pull a `_image_path` out of a tool result: load + base64 the PNG for the model,

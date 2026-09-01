@@ -10,6 +10,17 @@ use serde_json::{Value, json};
 
 use crate::session::{Allow, Edit};
 
+/// Deserialize a tool's arguments, naming the field that was wrong.
+///
+/// Serde's own message says what is malformed but not where; without the path a caller
+/// can only resubmit the whole payload and hope.
+fn typed<T: serde::de::DeserializeOwned>(input: Value, tool: &str) -> Result<T> {
+    serde_path_to_error::deserialize(input).map_err(|e| {
+        let path = e.path().to_string();
+        anyhow!("invalid {tool} input at `{path}`: {}", e.into_inner())
+    })
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SelectionInput {
@@ -52,8 +63,7 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
 }
 
 pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let payload: sch_check::PlacePartsInput =
-        serde_json::from_value(input).context("invalid place_parts input")?;
+    let payload: sch_check::PlacePartsInput = typed(input, "place_parts")?;
     let mut edit = if ctx.sch_path().is_file() {
         Edit::open(ctx).context("opening the existing schematic")?
     } else {
@@ -83,7 +93,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 }
 
 pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let input: SelectionInput = serde_json::from_value(input).context("invalid arrange input")?;
+    let input: SelectionInput = typed(input, "arrange")?;
     let selection = selection(&input)?;
     let mut edit = Edit::open(ctx)?;
     let report = sch_floorplan::live::arrange(
@@ -101,7 +111,7 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 }
 
 pub(crate) fn rewire(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let input: SelectionInput = serde_json::from_value(input).context("invalid rewire input")?;
+    let input: SelectionInput = typed(input, "rewire")?;
     if input.engine.is_some() {
         return Err(anyhow!("rewire does not accept an engine"));
     }

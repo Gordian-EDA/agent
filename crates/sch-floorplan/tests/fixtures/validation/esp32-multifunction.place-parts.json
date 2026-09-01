@@ -1,4 +1,5 @@
 {
+  "name": "esp32_multifunction",
   "parts": [
     {
       "ref": "PWR1",

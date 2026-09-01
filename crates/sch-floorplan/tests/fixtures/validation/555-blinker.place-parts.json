@@ -1,4 +1,5 @@
 {
+  "name": "555-blinker",
   "parts": [
     {
       "ref": "PWR1",

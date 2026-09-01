@@ -1,4 +1,5 @@
 {
+  "name": "rf_lna_frontend",
   "parts": [
     {
       "ref": "PWR1",

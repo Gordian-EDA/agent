@@ -1,4 +1,5 @@
 {
+  "name": "mixed_signal_adc_frontend",
   "parts": [
     {
       "ref": "PWR1",

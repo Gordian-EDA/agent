@@ -1,4 +1,5 @@
 {
+  "name": "openmyo_emg",
   "parts": [
     {
       "ref": "PWR1",

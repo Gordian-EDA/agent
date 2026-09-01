@@ -14,6 +14,19 @@ use crate::model::{
 };
 use crate::sexpr::{list, num, quoted, sym, tagged};
 
+/// Landscape dimensions of the ISO page sizes KiCAD names, in millimetres.
+fn iso_page(name: &str) -> Option<[f64; 2]> {
+    Some(match name {
+        "A5" => [210.0, 148.0],
+        "A4" => [297.0, 210.0],
+        "A3" => [420.0, 297.0],
+        "A2" => [594.0, 420.0],
+        "A1" => [841.0, 594.0],
+        "A0" => [1189.0, 841.0],
+        _ => return None,
+    })
+}
+
 /// Whether an item is part of the DRAWING rather than the design: wires,
 /// junctions, no-connect markers, labels, free text, and the generated symbols
 /// a drawing is made of — power-rail terminals and PWR_FLAGs, which carry a
@@ -573,6 +586,53 @@ impl SchDoc {
     /// netlist. Returns the UUIDs of the symbols adopted, in source order.
     pub fn adopt(&mut self, source: &SchDoc) -> Result<Vec<String>> {
         self.merge(source, true)
+    }
+
+    /// The page size in millimetres, landscape as KiCAD lays a schematic out.
+    ///
+    /// A named size resolves to its landscape dimensions; a `User` page reads its own.
+    pub fn page(&self) -> Option<[f64; 2]> {
+        let node = self.items().iter().find_map(|item| match item {
+            Item::Other(raw) if crate::sexpr::head(&raw.node) == Some("paper") => Some(&raw.node),
+            _ => None,
+        })?;
+        let args = crate::sexpr::items(node);
+        let name = crate::sexpr::text(args.get(1)?)?;
+        if name == "User" {
+            let w = crate::sexpr::number(args.get(2)?)?;
+            let h = crate::sexpr::number(args.get(3)?)?;
+            return Some([w, h]);
+        }
+        iso_page(&name)
+    }
+
+    /// Grow the page so `size` fits, leaving it alone when it already does.
+    ///
+    /// Content drawn beyond the page is invisible in every renderer, so a placement
+    /// that outgrew the sheet takes the sheet with it. Growing only: a hand-chosen
+    /// page is never shrunk under its author.
+    pub fn grow_page(&mut self, size: [f64; 2]) -> bool {
+        let now = self.page().unwrap_or([0.0, 0.0]);
+        let want = [now[0].max(size[0]), now[1].max(size[1])];
+        if want == now {
+            return false;
+        }
+        let paper = tagged(
+            "paper",
+            vec![quoted("User"), num(want[0]), num(want[1])],
+        );
+        let replaced = self.items_mut().iter_mut().any(|item| match item {
+            Item::Other(raw) if crate::sexpr::head(&raw.node) == Some("paper") => {
+                raw.node = paper.clone();
+                raw.touch();
+                true
+            }
+            _ => false,
+        });
+        if !replaced {
+            self.insert_item(Item::Other(Box::new(Retained::owned(paper))));
+        }
+        true
     }
 
     /// Merge only `source`'s DRAWING — see [`is_drawing`]. What a re-wire of parts

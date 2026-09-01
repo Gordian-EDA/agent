@@ -1,4 +1,5 @@
 {
+  "name": "stm32h7_bluepill",
   "parts": [
     {
       "ref": "PWR1",

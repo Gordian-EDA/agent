@@ -1,4 +1,5 @@
 {
+  "name": "ice40hx8k_bga_core",
   "parts": [
     {
       "ref": "PWR1",

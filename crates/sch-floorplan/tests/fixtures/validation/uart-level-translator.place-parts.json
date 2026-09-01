@@ -1,4 +1,5 @@
 {
+  "name": "uart-level-translator",
   "parts": [
     {
       "ref": "PWR1",
