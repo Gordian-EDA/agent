@@ -7,6 +7,16 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **Queued prompts could interleave out of order.** `AgentEvent`s (a turn's
+  final reply, `TurnDone`) and its completion signal (which drains the queue
+  and spawns the next turn) travel on two separate channels; a bare
+  `tokio::select!` doesn't preserve ordering across channels, so an unlucky
+  poll could process the completion signal — and start the next queued turn —
+  before the previous turn's own reply had been added to the transcript.
+  Queuing several prompts back to back made this easy to hit. The event loop
+  now polls `biased`, which (given the task already guarantees it sends all
+  its events before signaling completion) deterministically drains a turn's
+  events before ever touching its completion signal.
 - **A completed turn could show nothing for a real reply.** Paragraph-gated
   streaming (see below) buffers assistant text until a blank line closes a
   paragraph or the turn finalizes it. `TurnDone` used to just drop that buffer
