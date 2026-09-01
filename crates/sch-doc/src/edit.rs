@@ -51,6 +51,31 @@ fn generated(symbol: &SymbolInst) -> bool {
     symbol.refdes().starts_with('#')
 }
 
+/// `refdes` itself when free, else the first `<refdes>_<n>` that is.
+fn free_reference(refdes: &str, taken: &std::collections::HashSet<String>) -> String {
+    if !taken.contains(refdes) {
+        return refdes.to_string();
+    }
+    (2..)
+        .map(|n| format!("{refdes}_{n}"))
+        .find(|candidate| !taken.contains(candidate))
+        .expect("an unbounded sequence has a free name")
+}
+
+fn rename_generated(symbol: &mut SymbolInst, sheet_path: &str, refdes: &str) {
+    let origin = symbol.at;
+    match symbol.fields.get_mut("Reference") {
+        Some(field) => field.value = refdes.to_string(),
+        None => {
+            symbol.fields.insert(
+                "Reference".to_string(),
+                new_field("Reference", refdes, Pose::new(origin.x, origin.y, 0.0), true),
+            );
+        }
+    }
+    set_instance_reference(&mut symbol.raw.node, sheet_path, refdes);
+}
+
 impl SchDoc {
     /// A UUID derived from the root UUID, a kind and a content key, made unique
     /// against the UUIDs already in the document.
@@ -653,10 +678,23 @@ impl SchDoc {
         }
         self.union_lib_symbols(source);
         let sheet_path = self.sheet_path();
+        // The realiser names its power symbols and flags after the nets they sit
+        // on, so a second graft onto the same sheet brings the same `#PWR_GND_0`
+        // again — two symbols answering to one reference, and a netlist that
+        // cannot tell their pins apart.
+        let mut taken: std::collections::HashSet<String> =
+            self.symbols().map(|s| s.refdes().to_string()).collect();
         let mut adopted = Vec::new();
         for item in source.items().to_vec() {
             match item {
-                Item::Symbol(symbol) if symbols || generated(&symbol) => {
+                Item::Symbol(mut symbol) if symbols || generated(&symbol) => {
+                    if generated(&symbol) {
+                        let free = free_reference(symbol.refdes(), &taken);
+                        taken.insert(free.clone());
+                        if free != symbol.refdes() {
+                            rename_generated(&mut symbol, &sheet_path, &free);
+                        }
+                    }
                     let symbol = self.regraft_symbol(symbol, &sheet_path);
                     adopted.push(symbol.uuid.clone());
                     self.insert_item(Item::Symbol(symbol));
