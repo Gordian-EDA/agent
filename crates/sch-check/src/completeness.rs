@@ -78,6 +78,7 @@ pub fn audit(design: &Design, symbols: &SymbolTable) -> Vec<Gap> {
     }
     audit_buses(design, &matched, &mut gaps);
     audit_bus_power_support(design, symbols, &matched, &mut gaps);
+    audit_discrete_power_support(design, &mut gaps);
     audit_connector_protection(design, symbols, &mut gaps);
 
     gaps.sort_by(|a, b| {
@@ -408,6 +409,47 @@ fn audit_bus_power_support(
             refdes: None,
             net: None,
             suggestion: "add a power/status LED with its own current-limiting resistor".into(),
+        });
+    }
+}
+
+fn audit_discrete_power_support(design: &Design, gaps: &mut Vec<Gap>) {
+    let components: Vec<&Component> = design
+        .blocks
+        .values()
+        .flat_map(|block| block.components.values())
+        .filter(|component| !component.dnp)
+        .collect();
+    let has_discrete_active = design.blocks.values().any(|block| {
+        block.components.iter().any(|(refdes, component)| {
+            !component.dnp
+                && (refdes.starts_with('Q')
+                    || component.part.to_ascii_uppercase().contains("TRANSISTOR"))
+        })
+    });
+    if !has_discrete_active {
+        return;
+    }
+    let rails: BTreeSet<String> = components
+        .iter()
+        .copied()
+        .filter(|component| is_connector_like(&component.part))
+        .flat_map(component_nets)
+        .filter(|net| is_power_net(net) && !is_ground(net))
+        .collect();
+    for rail in rails {
+        if components
+            .iter()
+            .copied()
+            .any(|component| is_bypass_cap(component, &rail))
+        {
+            continue;
+        }
+        gaps.push(Gap {
+            kind: "supply_bypass".into(),
+            refdes: None,
+            net: Some(rail.clone()),
+            suggestion: format!("add 100nF between {rail} and GND near the transistor stage"),
         });
     }
 }
