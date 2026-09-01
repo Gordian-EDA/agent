@@ -184,10 +184,18 @@ pub fn get_net(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let Some(net) = netlist.nets.iter().find(|n| n.name == name) else {
         let mut known: Vec<&str> = netlist.nets.iter().map(|n| n.name.as_str()).collect();
         known.sort_unstable();
-        return Ok(json!({
-            "error": format!("no net `{name}`"),
-            "nets": known,
-        }));
+        let closest = known
+            .iter()
+            .max_by(|a, b| {
+                strsim::jaro_winkler(a, name)
+                    .total_cmp(&strsim::jaro_winkler(b, name))
+            })
+            .filter(|candidate| strsim::jaro_winkler(candidate, name) > 0.8);
+        let error = match closest {
+            Some(candidate) => format!("no net `{name}` — did you mean `{candidate}`?"),
+            None => format!("no net `{name}`"),
+        };
+        return Ok(json!({ "error": error, "nets": known }));
     };
     let labels: Vec<Value> = doc
         .labels()

@@ -21,6 +21,7 @@ Then make ONE change per call:
 - connections → `connect({from:"R5.2", to:"U1.VDD"})`. NEVER emit wire coordinates; there is no tool that takes them. `connect` routes around what is already drawn and adds junctions. If it reports no clear path it names both ends instead — that is a real connection, not a failure.
 - rails → `add_power({net:"GND", pin:"U1.8"})`. Naming a net at one pin → `label({pin, net})`. Deliberately unused pin → `no_connect({pin})`.
 - removal → `remove_symbols({refs})`, which also retracts the stubs that only served them; `delete_wires` for copper alone.
+- IN SERIES on an existing net → `delete_wires({net})` to break it, then `add_symbol`, then `connect` each side to its own half. Skipping the break leaves the part shunted across the net, not in series.
 
 Every mutator re-derives the netlist and REFUSES the write if it would change a net you did not name, returning the delta. Read that refusal: it means the edit was wrong, not the tool. Each success returns a `snapshot` id for `undo({snapshot})`.
 

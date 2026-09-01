@@ -187,7 +187,8 @@ fn retract_stubs(doc: &mut SchDoc, orphaned: &[Point2]) -> usize {
         let live: Vec<Point2> = placed_pins(doc).into_iter().map(|p| p.at).collect();
         let ends: Vec<Point2> = doc
             .wires()
-            .flat_map(|w| [w.points[0], w.points[w.points.len() - 1]])
+            .filter_map(refs::ends)
+            .flat_map(|(a, b)| [a, b])
             .collect();
         let anchored = |p: Point2| {
             live.iter().any(|q| q.near_eq(p, EPS))
@@ -197,7 +198,9 @@ fn retract_stubs(doc: &mut SchDoc, orphaned: &[Point2]) -> usize {
         let doomed: Vec<String> = doc
             .wires()
             .filter(|wire| {
-                let (a, b) = (wire.points[0], wire.points[wire.points.len() - 1]);
+                let Some((a, b)) = refs::ends(wire) else {
+                    return false;
+                };
                 let touches = |p: Point2| orphaned.iter().any(|q| q.near_eq(p, EPS));
                 (touches(a) && !anchored(b)) || (touches(b) && !anchored(a))
             })

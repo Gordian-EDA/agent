@@ -540,6 +540,15 @@ fn is_discovery_tool(name: &str) -> bool {
     )
 }
 
+/// Tools that only look: catalog discovery and reading the live schematic.
+///
+/// `check_schematic` is deliberately excluded — re-checking without changing
+/// anything is the stuck pattern the no-progress watchdog exists to catch.
+fn is_inspection_tool(name: &str) -> bool {
+    is_discovery_tool(name)
+        || matches!(name, "read_schematic" | "get_symbol" | "get_net" | "free_space")
+}
+
 fn request_supplies_multiple_library_ids(intent: &str) -> bool {
     let ids = intent
         .split_whitespace()
@@ -2092,14 +2101,14 @@ impl<P: Provider> Agent<P> {
                 });
             }
 
-            // Discovery is bounded separately and legitimately needs a couple
-            // of unchanged-state rounds. It neither accrues nor clears this
-            // watchdog. Every other tool completion must change durable
-            // authoring state/diagnostics (or a PCB mutation revision).
-            let discovery_only = tool_calls
-                .iter()
-                .all(|call| is_discovery_tool(&call.fn_name));
-            if !discovery_only {
+            // Catalog discovery and reading the existing schematic legitimately
+            // need a few unchanged-state rounds — editing someone else's board
+            // starts by understanding it. Neither accrues nor clears this
+            // watchdog; the turn's request budget bounds them instead. Every
+            // other tool completion must change durable authoring
+            // state/diagnostics (or a PCB mutation revision).
+            let inspection_only = tool_calls.iter().all(|call| is_inspection_tool(&call.fn_name));
+            if !inspection_only {
                 let durable_state =
                     durable_authoring_state(&self.runtime, latest_authoring_diagnostics.clone());
                 if non_authoring_state_changed_this_completion
@@ -6036,6 +6045,25 @@ mod tests {
         }
         for name in ["project_info", "read_schematic", "create_design"] {
             assert!(!is_discovery_tool(name), "{name}");
+        }
+    }
+
+    /// Understanding an existing board takes a few rounds of pure reading, and
+    /// the no-progress watchdog must not mistake that for being stuck.
+    #[test]
+    fn inspection_tools_do_not_feed_the_no_progress_watchdog() {
+        for name in [
+            "read_schematic",
+            "get_symbol",
+            "get_net",
+            "free_space",
+            "search_symbols",
+        ] {
+            assert!(is_inspection_tool(name), "{name}");
+        }
+        // Re-checking without changing anything IS being stuck.
+        for name in ["check_schematic", "set_fields", "connect", "apply_design"] {
+            assert!(!is_inspection_tool(name), "{name}");
         }
     }
 

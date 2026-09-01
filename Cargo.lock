@@ -1102,6 +1102,7 @@ dependencies = [
  "sch-doc",
  "sch-io",
  "serde_json",
+ "strsim",
 ]
 
 [[package]]

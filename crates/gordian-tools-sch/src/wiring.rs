@@ -59,6 +59,9 @@ fn scene(doc: &SchDoc, a: Point2, b: Point2, net: &str) -> RouteScene {
 
 /// Draw a wire path, adding a junction wherever it lands on existing copper.
 fn draw(doc: &mut SchDoc, path: &[Point2]) -> Vec<String> {
+    let (Some(&head), Some(&tail)) = (path.first(), path.last()) else {
+        return Vec::new();
+    };
     let existing: Vec<(Point2, Point2)> = doc
         .wires()
         .flat_map(|w| {
@@ -72,7 +75,7 @@ fn draw(doc: &mut SchDoc, path: &[Point2]) -> Vec<String> {
     for pair in path.windows(2) {
         uuids.push(doc.add_wire(pair[0], pair[1]));
     }
-    for vertex in [path[0], path[path.len() - 1]] {
+    for vertex in [head, tail] {
         let interior = existing.iter().any(|(from, to)| {
             Segment::new(*from, *to).contains_point(vertex)
                 && !vertex.near_eq(*from, EPS)
@@ -384,7 +387,9 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .doc
         .wires()
         .filter(|wire| {
-            let (a, b) = (wire.points[0], wire.points[wire.points.len() - 1]);
+            let Some((a, b)) = refs::ends(wire) else {
+                return false;
+            };
             wanted_uuids.contains(&wire.uuid)
                 || touches_ref(a, b)
                 || wanted_net.is_some_and(|net| net_of_segment(a, b).as_deref() == Some(net))
