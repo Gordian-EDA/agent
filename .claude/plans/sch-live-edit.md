@@ -58,3 +58,11 @@ the netlist gate and fix the ordering (engine-owned; after the truthfulness-fix 
 (`U1.at.y < U2.at.y` violated) from the L2 merge (`07bbb94`, relational intent) onward;
 passes at `100b3bc`. Likely the relation projection / `apply_cells` frozen-seed change in
 spine's pass ordering. Engine-owned — assign to the truthfulness-fix lane after its gate.
+
+## Queued (user, 2026-09-01): remove the approval gate entirely
+Delete `ToolEffect::ApprovalRequired` (mutators run directly — per-call snapshot +
+connectivity guard + `undo` make it safe), the `Approvals`/`AutoApprove` seam and
+`AgentEvent::Applied` plumbing in `gordian-core/src/agent.rs`, `AutoApprove::yes()` in the
+CLI, and the TUI's approve/reject cockpit (`crates/gordian/src/tui`). PCB mutators
+(`move_parts`, `route_track`, `delete_copper`, `regenerate_board`, `export_fab`) run
+directly too. Start after the wave-3 close-out lane merges (it edits agent.rs + TUI).
