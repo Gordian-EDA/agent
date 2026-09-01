@@ -106,18 +106,24 @@ pub(crate) fn extent(doc: &SchDoc, inst: &SymbolInst) -> Option<Rect> {
     Rect::bounding(&corners)
 }
 
-/// The rotation that best points a part's first pin back at its anchor.
+/// The rotation that points a two-pin part's entry pin back at its anchor.
 ///
-/// A two-pin part dropped beside something should lie along the line to it,
-/// entering at pin 1 — a series resistor left of a connector is horizontal
-/// with pin 1 facing the connector, not vertical beside it. Parts with more
-/// pins have no such axis, so they keep the orientation the library drew.
+/// A part dropped beside something should lie along the line to it and be
+/// entered from that side — a series resistor left of a connector is
+/// horizontal with pin 1 facing the connector, not vertical beside it, and a
+/// diode below its supply points its anode up so current runs on through it.
+/// Parts with more pins have no such axis, so they keep the library's drawing.
 pub(crate) fn facing_rotation(doc: &mut SchDoc, refdes: &str, side: Side) -> f64 {
+    // Anode first for a polarised part, pin 1 otherwise: current enters there.
+    let entry = |pin: &sch_doc::PlacedPin| matches!(pin.name.as_str(), "A" | "+");
     let pin_span = |doc: &SchDoc| {
-        let pins: Vec<sch_doc::PlacedPin> = placed_pins(doc)
+        let mut pins: Vec<sch_doc::PlacedPin> = placed_pins(doc)
             .into_iter()
             .filter(|p| p.refdes == refdes)
             .collect();
+        if pins.iter().any(entry) {
+            pins.sort_by_key(|p| !entry(p));
+        }
         match pins.as_slice() {
             [a, b] => Some((a.at, b.at)),
             _ => None,

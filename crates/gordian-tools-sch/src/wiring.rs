@@ -37,7 +37,11 @@ const ROUTING_NET: &str = "#routing";
 /// router must be free to touch what it is about to join, and would otherwise
 /// refuse to leave its own start point. Everything else keeps its own name and
 /// stays untouchable.
-fn scene(doc: &SchDoc, a: Point2, b: Point2) -> RouteScene {
+///
+/// The two symbols being joined are also lifted out of the solids: a pin tip
+/// often falls inside its own body's bounding box — an LED's does — and a
+/// router that treats that box as a wall can never reach the pin at all.
+fn scene(doc: &SchDoc, a: Point2, b: Point2, own: &[String]) -> RouteScene {
     let live = connect::scene(doc);
     let joined: Vec<String> = live
         .points
@@ -61,7 +65,11 @@ fn scene(doc: &SchDoc, a: Point2, b: Point2) -> RouteScene {
         })
         .collect();
     RouteScene {
-        solids: body_rects(doc).into_iter().map(|(_, r)| r).collect(),
+        solids: body_rects(doc)
+            .into_iter()
+            .filter(|(refdes, _)| !own.contains(refdes))
+            .map(|(_, r)| r)
+            .collect(),
         points: live
             .points
             .iter()
@@ -162,7 +170,12 @@ pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .parts(to.owner().map(str::to_string))
         .creating();
 
-    let scene = scene(&edit.doc, a, b);
+    let own: Vec<String> = [from.owner(), to.owner()]
+        .into_iter()
+        .flatten()
+        .map(str::to_string)
+        .collect();
+    let scene = scene(&edit.doc, a, b, &own);
     let drawn = route_edge(a, dir_a, b, ROUTING_NET, &scene)
         .map(|path| draw(&mut edit.doc, &path))
         // Drawing a path is not the same as making a connection: if the two
