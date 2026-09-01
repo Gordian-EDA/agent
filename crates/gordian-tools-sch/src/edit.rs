@@ -547,10 +547,13 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .filter(|p| p.owner == uuid)
             .map(|p| p.at)
             .collect();
+        let mut landed = Vec::new();
         for (from, to) in was.into_iter().zip(now) {
             edit.doc.move_attached(from, to);
             carry_glued_symbols(&mut edit.doc, &uuid, from, to)?;
+            landed.push(to);
         }
+        let straightened = crate::wiring::straighten(&mut edit.doc, &landed);
         pending.retain(|r| *r != refdes);
         let mut report = json!({ "ref": refdes, "at": [at.x, at.y] });
         if let Some(to) = nudge {
@@ -558,6 +561,9 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         if let Some(rot) = turned {
             report["rot"] = json!(rot);
+        }
+        if straightened > 0 {
+            report["rerouted_wires"] = json!(straightened);
         }
         placed.push(report);
     }

@@ -465,6 +465,52 @@ fn align_onto_pin(doc: &mut SchDoc, refdes: &str, at: Point2, out: Point2) {
     );
 }
 
+/// Redraw the wires a move left slanting.
+///
+/// Dragging a symbol carries its wires' endpoints with it, which turns a
+/// right-angled route into a diagonal one — the thing that makes a moved part
+/// look wrong and sends the model off deleting and re-wiring by hand. Each
+/// slanted wire is re-routed; one the router cannot redraw goes back exactly
+/// as it was, because a slanted wire still connects.
+pub(crate) fn straighten(doc: &mut SchDoc, moved: &[Point2]) -> usize {
+    let touches = |p: Point2| moved.iter().any(|q| q.near_eq(p, EPS));
+    let slanted: Vec<(String, Point2, Point2)> = doc
+        .wires()
+        .filter_map(|wire| Some((wire.uuid.clone(), refs::ends(wire)?)))
+        .filter(|(_, (a, b))| (a.x - b.x).abs() > EPS && (a.y - b.y).abs() > EPS)
+        .filter(|(_, (a, b))| touches(*a) || touches(*b))
+        .map(|(uuid, (a, b))| (uuid, a, b))
+        .collect();
+    let mut redrawn = 0;
+    for (uuid, a, b) in slanted {
+        let (a, b) = if touches(a) { (a, b) } else { (b, a) };
+        let pin = sch_doc::placed_pins(doc).into_iter().find(|p| p.at == a);
+        let dir = pin
+            .as_ref()
+            .map_or_else(|| dir_of(Point2::new(b.x - a.x, b.y - a.y)), |p| dir_of(p.out));
+        let own: Vec<String> = pin.iter().map(|p| p.refdes.clone()).collect();
+        doc.remove_drawing(&[uuid]);
+        let scene = scene(doc, a, b, &own);
+        match route_edge(a, dir, b, ROUTING_NET, &scene) {
+            Some(path) if joined_after(doc, &path, a, b) => redrawn += 1,
+            _ => {
+                doc.add_wire(a, b);
+            }
+        }
+    }
+    redrawn
+}
+
+/// Draw `path` and keep it only if it really joined `a` to `b`.
+fn joined_after(doc: &mut SchDoc, path: &[Point2], a: Point2, b: Point2) -> bool {
+    let uuids = draw(doc, path);
+    if joined(doc, a, b) {
+        return true;
+    }
+    doc.remove_drawing(&uuids);
+    false
+}
+
 /// Every wire belonging to a run that no longer reaches a pin, a label or a
 /// no-connect marker.
 ///
