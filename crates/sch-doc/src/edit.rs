@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::libsyms::SymbolSource;
 use crate::model::{
     Item, Junction, Label, LabelKind, Mirror, NoConnect, Pose, Retained, SymbolInst, Wire,
-    new_field, property_node, set_instance_reference, yes_no,
+    instance_path, instance_paths, new_field, property_node, set_instance_reference, yes_no,
 };
 use crate::sexpr::{list, num, quoted, sym, tagged};
 
@@ -44,7 +44,8 @@ impl SchDoc {
             Item::Label(l) => l.uuid == uuid,
             Item::Text(t) => t.uuid == uuid,
             Item::Sheet(s) => s.uuid == uuid || s.pins.iter().any(|p| p.uuid == uuid),
-            _ => false,
+            Item::LibSymbols(_) => false,
+            Item::Other(raw) => crate::sexpr::child_text(&raw.node, "uuid") == Some(uuid),
         })
     }
 
@@ -105,6 +106,9 @@ impl SchDoc {
     pub fn set_field(&mut self, id: &str, name: &str, value: &str) -> Result<()> {
         let uuid = self.uuid_of(id)?;
         let sheet_path = self.sheet_path();
+        if name == "Reference" && !self.owns_annotation(&uuid) {
+            return Err(Error::ForeignInstances(id.to_string()));
+        }
         let mut symbol = self.symbol_mut(&uuid)?;
         let origin = symbol.at;
         match symbol.fields.get_mut(name) {
@@ -114,19 +118,18 @@ impl SchDoc {
                 symbol.fields.insert(name.to_string(), field);
             }
         }
-        if name == "Reference"
-            && has_instances(&symbol.raw.node)
-            && !set_instance_reference(&mut symbol.raw.node, &sheet_path, value)
-        {
-            return Err(Error::ForeignInstances(id.to_string()));
+        if name == "Reference" {
+            set_instance_reference(&mut symbol.raw.node, &sheet_path, value);
         }
         drop(symbol);
         self.mark_edited();
         Ok(())
     }
 
-    /// Place a new symbol, embedding its library definition first.
+    /// Place a new symbol at unit 1, embedding its library definition first.
     ///
+    /// Refused on a sheet the hierarchy places more than once: each placement
+    /// needs its own reference, and one call cannot say what the others are.
     /// Returns the new symbol's UUID.
     pub fn add_symbol(
         &mut self,
@@ -136,6 +139,12 @@ impl SchDoc {
         at: Pose,
         source: &SymbolSource,
     ) -> Result<String> {
+        if self
+            .symbols()
+            .any(|s| instance_paths(s.retained().node()) > 1)
+        {
+            return Err(Error::ReInstantiatedSheet);
+        }
         self.ensure_lib_symbol(lib_id, source)?;
         let uuid = self.derive_uuid("symbol", &format!("{lib_id}|{refdes}"));
         // One `(pin …)` uuid per pin of the unit being placed, as KiCAD writes.
@@ -284,6 +293,17 @@ impl SchDoc {
         uuid
     }
 
+    /// Whether this sheet, rather than a parent hierarchy, decides what this
+    /// symbol is called. A symbol with no `(instances)` at all is this sheet's.
+    fn owns_annotation(&self, uuid: &str) -> bool {
+        let sheet_path = self.sheet_path();
+        self.symbol(uuid).is_some_and(|symbol| {
+            let node = symbol.retained().node();
+            crate::sexpr::child(node, "instances").is_none()
+                || instance_path(node, &sheet_path).is_some()
+        })
+    }
+
     /// Resolve a symbol identifier — a UUID, or a reference designator.
     ///
     /// The units of a multi-unit part share a reference, so a reference alone
@@ -304,8 +324,9 @@ impl SchDoc {
         }
     }
 
-    /// Clone the project/path shape an existing symbol uses, so a new symbol
+    /// Clone the project and path an existing symbol uses, so a new symbol
     /// lands in the same hierarchy; fall back to this sheet's own root path.
+    /// Only reached once the sheet is known to have a single placement.
     fn instances_node(&self, refdes: &str) -> Node {
         let project = self
             .symbols()
@@ -347,9 +368,4 @@ impl SchDoc {
             ])],
         )
     }
-}
-
-/// Whether a symbol carries an `(instances …)` table at all.
-fn has_instances(node: &Node) -> bool {
-    crate::sexpr::child(node, "instances").is_some()
 }

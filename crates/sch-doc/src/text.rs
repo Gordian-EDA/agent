@@ -51,17 +51,19 @@ pub fn unescape(text: &str) -> String {
     out
 }
 
-/// Encode the characters KiCAD cannot store literally.
+/// Encode the two characters that would otherwise change what a label says:
+/// `/`, which separates sheet from net in a net name, and `{`, which would
+/// start an escape of its own.
+///
+/// The decode table above is larger because KiCAD accepts all of it; in a label
+/// KiCAD itself writes nothing else, and neither does this.
 pub fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
-        match ESCAPES.iter().find(|(_, escaped)| *escaped == ch) {
-            Some((token, _)) => {
-                out.push('{');
-                out.push_str(token);
-                out.push('}');
-            }
-            None => out.push(ch),
+        match ch {
+            '/' => out.push_str("{slash}"),
+            '{' => out.push_str("{brace}"),
+            _ => out.push(ch),
         }
     }
     out
@@ -79,11 +81,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round_trips_every_escaped_character() {
-        for (_, ch) in ESCAPES {
-            let plain = format!("A{ch}B");
-            assert_eq!(unescape(&escape(&plain)), plain);
+    fn round_trips_what_it_encodes() {
+        for plain in ["A/B", "A{B", "{slash}", "plain"] {
+            assert_eq!(unescape(&escape(plain)), plain);
         }
+    }
+
+    /// Everything KiCAD leaves alone in a label, this leaves alone too.
+    #[test]
+    fn encodes_only_what_would_change_the_meaning() {
+        assert_eq!(escape("MY SIG,A"), "MY SIG,A");
+        assert_eq!(escape("D<0>"), "D<0>");
+        assert_eq!(escape("A/B"), "A{slash}B");
     }
 
     #[test]

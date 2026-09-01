@@ -525,9 +525,29 @@ impl LibSymbols {
         self.defs.keys().map(String::as_str)
     }
 
+    /// Re-emit the block with the current definitions in place of the old ones,
+    /// keeping any child the typed model does not decode.
     pub(crate) fn encode(&self) -> Node {
-        let mut children = vec![sym("lib_symbols")];
-        children.extend(self.defs.values().map(|r| r.node.clone()));
+        let Some(raw) = self.raw.as_ref() else {
+            let mut children = vec![sym("lib_symbols")];
+            children.extend(self.defs.values().map(|r| r.node.clone()));
+            return list(children);
+        };
+        let mut children = Vec::with_capacity(self.defs.len() + 1);
+        let mut written = false;
+        for child in items(&raw.node) {
+            if sexpr::head(child) != Some("symbol") {
+                children.push(child.clone());
+                continue;
+            }
+            if !written {
+                written = true;
+                children.extend(self.defs.values().map(|r| r.node.clone()));
+            }
+        }
+        if !written {
+            children.extend(self.defs.values().map(|r| r.node.clone()));
+        }
         list(children)
     }
 }
@@ -737,29 +757,53 @@ fn sync_properties(node: &mut Node, fields: &IndexMap<String, Field>) {
 /// A sheet placed several times in a hierarchy carries one path per placement,
 /// each with its own reference; only the entry whose path is this sheet's own
 /// may be touched, and a re-instantiated sheet has none.
-pub(crate) fn set_instance_reference(node: &mut Node, sheet_path: &str, refdes: &str) -> bool {
+pub(crate) fn set_instance_reference(node: &mut Node, sheet_path: &str, refdes: &str) {
     let Some(instances) = sexpr::child_mut(node, "instances") else {
-        return false;
+        return;
     };
     let Some(projects) = sexpr::items_mut(instances) else {
-        return false;
+        return;
     };
-    let mut touched = false;
     for project in projects.iter_mut() {
         let Some(paths) = sexpr::items_mut(project) else {
             continue;
         };
         for path in paths.iter_mut() {
-            if sexpr::head(path) != Some("path")
-                || items(path).get(1).and_then(sexpr::text) != Some(sheet_path)
+            if sexpr::head(path) == Some("path")
+                && items(path).get(1).and_then(sexpr::text) == Some(sheet_path)
             {
-                continue;
+                sexpr::set_child(path, tagged("reference", vec![quoted(refdes)]));
             }
-            sexpr::set_child(path, tagged("reference", vec![quoted(refdes)]));
-            touched = true;
         }
     }
-    touched
+}
+
+/// How many `(instances … (path …))` entries a symbol carries — one per
+/// placement of the sheet it lives on.
+pub(crate) fn instance_paths(node: &Node) -> usize {
+    let Some(instances) = sexpr::child(node, "instances") else {
+        return 0;
+    };
+    items(instances)
+        .iter()
+        .map(|project| {
+            items(project)
+                .iter()
+                .filter(|c| sexpr::head(c) == Some("path"))
+                .count()
+        })
+        .sum()
+}
+
+/// The `(path …)` entry for `sheet_path`, if the symbol has one.
+pub(crate) fn instance_path<'a>(node: &'a Node, sheet_path: &str) -> Option<&'a Node> {
+    let instances = sexpr::child(node, "instances")?;
+    items(instances).iter().find_map(|project| {
+        items(project).iter().find(|path| {
+            sexpr::head(path) == Some("path")
+                && items(path).get(1).and_then(sexpr::text) == Some(sheet_path)
+        })
+    })
 }
 
 /// Build a fresh symbol field in the shape KiCAD writes.

@@ -15,6 +15,11 @@ pub enum Error {
     UnknownReference(String),
     #[error("{0} names several units of one symbol; address a unit by its uuid")]
     AmbiguousReference(String),
+    #[error(
+        "this sheet is placed more than once in the hierarchy; \
+         each placement needs its own reference"
+    )]
+    ReInstantiatedSheet,
     #[error("no snapshot {0}")]
     UnknownSnapshot(usize),
     #[error(

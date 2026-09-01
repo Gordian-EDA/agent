@@ -42,8 +42,10 @@ const HEADER: [&str; 7] = [
     "lib_symbols",
 ];
 
-/// The sections KiCAD writes after it; new content goes before them.
-const TRAILER: [&str; 2] = ["sheet_instances", "embedded_fonts"];
+/// Sections KiCAD writes after the sheet content. New content goes before the
+/// first of them that the file actually has; a file with none takes it at the
+/// end, so the list does not have to be exhaustive.
+const TRAILER: [&str; 3] = ["sheet_instances", "embedded_fonts", "embedded_files"];
 
 /// Whether a top-level head belongs to the file's trailing sections.
 pub(crate) fn is_trailer(head: &str) -> bool {
@@ -95,7 +97,10 @@ impl SchDoc {
         SchDoc::parse(&std::fs::read_to_string(path)?)
     }
 
-    /// Render the document back to schematic text.
+    /// Render the document back to schematic text, as it stands.
+    ///
+    /// [`Self::write`] collects orphaned `(lib_symbols)` entries first, so on an
+    /// edited document its output can be a little smaller than this one's.
     pub fn to_text(&self) -> String {
         let mut out = String::with_capacity(self.source.len() + 1024);
         out.push_str("(kicad_sch\n");

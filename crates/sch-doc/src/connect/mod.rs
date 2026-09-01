@@ -2,12 +2,18 @@
 //!
 //! Every connection point in the sheet — pin tips, wire ends, label anchors,
 //! junctions, no-connects, sheet pins — becomes a node keyed by its position
-//! quantised to 1 µm. Wires join their own ends; a node lying *inside* a wire
-//! joins that wire, which is what makes a pin-on-wire or a wire-end-on-wire
-//! connect with no dot while two wires merely crossing stay apart. A junction is
-//! just another node, so it connects the crossing wires it sits on without a
-//! special case. Names then merge partitions: same-named labels within the
-//! sheet, and power symbols and hidden power pins by the name they carry.
+//! quantised to 1 µm, and things at the same point are connected.
+//!
+//! A wire joins its own two ends, and *only* its ends. Touching a wire partway
+//! along is not a connection: KiCAD leaves a pin sitting in the middle of a
+//! wire unconnected, and leaves a wire that ends on another wire's middle
+//! unconnected too. Three things do attach anywhere along a wire — a junction,
+//! a label, and a sheet pin — and a junction is how two crossing wires are
+//! joined. Every one of these rules is checked against `kicad-cli` by the
+//! fixtures in `tests/pitfalls.rs`.
+//!
+//! Names then merge partitions: same-named labels within the sheet, and power
+//! symbols and hidden power pins by the name they carry.
 //!
 //! A partition holding one pin and no name is not a net — a dangling wire off a
 //! pin does not make one — which is the same line `kicad-cli` draws when it
@@ -19,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use geom::{Point2, UnionFind};
 
 use crate::doc::SchDoc;
-use crate::model::{Item, LabelKind, SymbolInst};
+use crate::model::{Item, LabelKind, SymbolInst, instance_paths};
 use crate::pins::{PlacedPin, pins_of};
 
 mod diff;
@@ -180,13 +186,13 @@ struct Segment {
 pub fn extract(doc: &SchDoc) -> Netlist {
     let warnings = survey(doc);
     let placed: Vec<PlacedPin> = doc.symbols().flat_map(|s| pins_of(doc, s)).collect();
-    let (nodes, segments) = intern(doc, &placed);
+    let (nodes, segments, attachments) = intern(doc, &placed);
 
     let mut sets = UnionFind::new(nodes.points.len());
     for seg in &segments {
         sets.union(seg.a, seg.b);
     }
-    join_interiors(&nodes, &segments, &mut sets);
+    attach(&nodes, &segments, &attachments, &mut sets);
 
     let named = names(doc, &nodes, &placed);
     for (_, members) in named.values() {
@@ -206,8 +212,9 @@ pub fn extract(doc: &SchDoc) -> Netlist {
     }
 }
 
-/// Intern every connection point on the sheet and the wire segments over them.
-fn intern(doc: &SchDoc, placed: &[PlacedPin]) -> (Nodes, Vec<Segment>) {
+/// Intern every connection point on the sheet, the wire segments over them, and
+/// the nodes that attach to a wire anywhere along its length.
+fn intern(doc: &SchDoc, placed: &[PlacedPin]) -> (Nodes, Vec<Segment>, Vec<usize>) {
     let mut nodes = Nodes::default();
     let mut segments = Vec::new();
     for wire in doc.wires() {
@@ -224,27 +231,24 @@ fn intern(doc: &SchDoc, placed: &[PlacedPin]) -> (Nodes, Vec<Segment>) {
     for pin in placed {
         nodes.intern(pin.at);
     }
+    let mut attachments = Vec::new();
     for item in doc.items() {
         match item {
-            Item::Junction(junction) => {
-                nodes.intern(junction.at);
+            Item::Junction(junction) => attachments.push(nodes.intern(junction.at)),
+            Item::Label(label) => attachments.push(nodes.intern(label.at.point())),
+            Item::Sheet(sheet) => {
+                // A sheet pin's `at` is already in sheet coordinates.
+                for pin in &sheet.pins {
+                    attachments.push(nodes.intern(pin.at.point()));
+                }
             }
             Item::NoConnect(no_connect) => {
                 nodes.intern(no_connect.at);
             }
-            Item::Label(label) => {
-                nodes.intern(label.at.point());
-            }
-            Item::Sheet(sheet) => {
-                // A sheet pin's `at` is already in sheet coordinates.
-                for pin in &sheet.pins {
-                    nodes.intern(pin.at.point());
-                }
-            }
             _ => {}
         }
     }
-    (nodes, segments)
+    (nodes, segments, attachments)
 }
 
 /// Every name claimed on the sheet, with the strongest source that claimed it
@@ -270,19 +274,6 @@ fn names(
                 LabelKind::Hier => NetSource::Hier,
             };
             note(crate::text::unescape(&label.text), source, node);
-        }
-    }
-    for sheet in doc.items().iter().filter_map(|item| match item {
-        Item::Sheet(sheet) => Some(sheet),
-        _ => None,
-    }) {
-        // The child sheet names this net; from here the best that can be said
-        // is which sheet pin it arrives on.
-        for pin in &sheet.pins {
-            if let Some(node) = nodes.get(pin.at.point()) {
-                let name = crate::text::unescape(&format!("{}/{}", sheet.name, pin.name));
-                note(name, NetSource::SheetPin, node);
-            }
         }
     }
     for pin in placed {
@@ -338,6 +329,23 @@ impl Anchors {
                     });
             if better {
                 name.insert(root, candidate);
+            }
+        }
+        // A sheet pin names its net only when nothing stronger does, and it
+        // never merges: two sheets can each have a pin called `IN`.
+        for sheet in doc.items().iter().filter_map(|item| match item {
+            Item::Sheet(sheet) => Some(sheet),
+            _ => None,
+        }) {
+            for pin in &sheet.pins {
+                let Some(node) = nodes.get(pin.at.point()) else {
+                    continue;
+                };
+                let candidate = (NetSource::SheetPin, crate::text::unescape(&pin.name));
+                let root = roots[node];
+                if name.get(&root).is_none_or(|held| *held < candidate) {
+                    name.insert(root, candidate);
+                }
             }
         }
         let settled = doc
@@ -430,7 +438,10 @@ fn survey(doc: &SchDoc) -> Vec<String> {
             duplicated.join(", ")
         ));
     }
-    if doc.symbols().any(|s| instance_paths(s) > 1) {
+    if doc
+        .symbols()
+        .any(|s| instance_paths(s.retained().node()) > 1)
+    {
         warnings.push(
             "sheet is instantiated more than once; reference designators are ambiguous \
              outside the hierarchy"
@@ -438,22 +449,6 @@ fn survey(doc: &SchDoc) -> Vec<String> {
         );
     }
     warnings
-}
-
-/// How many `(instances … (path …))` entries a symbol carries.
-fn instance_paths(symbol: &SymbolInst) -> usize {
-    let Some(instances) = crate::sexpr::child(symbol.retained().node(), "instances") else {
-        return 0;
-    };
-    crate::sexpr::items(instances)
-        .iter()
-        .map(|project| {
-            crate::sexpr::items(project)
-                .iter()
-                .filter(|c| crate::sexpr::head(c) == Some("path"))
-                .count()
-        })
-        .sum()
 }
 
 /// Power symbols name their net with their `Value` field, not their pin name.
@@ -474,13 +469,12 @@ fn definition<'a>(doc: &'a SchDoc, lib_id: &str) -> Option<&'a kiutils_sexpr::No
 
 /// KiCAD's fallback name for an unnamed net: `Net-(<lead pin>)`.
 ///
-/// The lead is the net's strongest pin driver. Symbols whose reference starts
-/// with `#` — power flags and the like — are not real components and never
-/// lead; a pin with a name of its own outranks an unnamed (`~`) one; ties go to
-/// whichever label sorts first.
+/// The lead is the net's strongest pin driver: a pin with a name of its own
+/// outranks an unnamed (`~`) one, a real component outranks a `#`-prefixed
+/// symbol such as a power flag, and ties go to whichever label sorts first.
 fn auto_name(pins: &[&PlacedPin]) -> String {
-    let pool = narrow(pins.to_vec(), |p| !p.refdes.starts_with('#'));
-    let pool = narrow(pool, has_pin_name);
+    let pool = narrow(pins.to_vec(), has_pin_name);
+    let pool = narrow(pool, |p| !p.refdes.starts_with('#'));
     let lead = pool
         .iter()
         .map(|p| driver_label(p))
@@ -531,16 +525,22 @@ fn unit_letter(pin: &PlacedPin) -> String {
     }
 }
 
-/// Join every node that lies strictly inside a wire to that wire.
+/// Join each attaching node to every wire whose length passes through it.
 ///
-/// Axis-aligned wires — everything KiCAD normally draws — are answered from a
-/// row/column index so this stays near-linear on boards with tens of thousands
-/// of wires; the rare diagonal wire falls back to a scan.
-fn join_interiors(nodes: &Nodes, segments: &[Segment], sets: &mut UnionFind) {
+/// Only junctions, labels and sheet pins attach this way; a pin or a wire end
+/// that merely touches a wire partway along is not connected to it, which is
+/// what makes a junction meaningful. Axis-aligned wires — everything KiCAD
+/// normally draws — are answered from a row/column index over the attachment
+/// points, so this stays near-linear on boards with tens of thousands of wires;
+/// the rare diagonal wire falls back to a scan.
+fn attach(nodes: &Nodes, segments: &[Segment], attachments: &[usize], sets: &mut UnionFind) {
+    if attachments.is_empty() {
+        return;
+    }
     let mut rows: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
     let mut cols: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
-    for (idx, p) in nodes.points.iter().enumerate() {
-        let (x, y) = key(*p);
+    for &idx in attachments {
+        let (x, y) = key(nodes.points[idx]);
         rows.entry(y).or_default().push((x, idx));
         cols.entry(x).or_default().push((y, idx));
     }
@@ -555,8 +555,8 @@ fn join_interiors(nodes: &Nodes, segments: &[Segment], sets: &mut UnionFind) {
         } else if from.0 == to.0 {
             cols.get(&from.0).map(|b| (b, from.1, to.1))
         } else {
-            for (idx, p) in nodes.points.iter().enumerate() {
-                if inside(*p, seg.from, seg.to) {
+            for &idx in attachments {
+                if inside(nodes.points[idx], seg.from, seg.to) {
                     sets.union(idx, seg.a);
                 }
             }

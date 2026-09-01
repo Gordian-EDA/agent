@@ -402,6 +402,111 @@ fn write_keeps_the_parent_a_derived_symbol_extends() {
     assert_eq!(sch_doc::placed_pins(&written).len(), before);
 }
 
+/// A refused rename must leave nothing behind: the drawn reference and the
+/// instance table disagreeing is exactly the corruption the refusal is for.
+#[test]
+fn a_refused_rename_changes_nothing() {
+    let Some(path) = corpus::files()
+        .into_iter()
+        .find(|p| p.ends_with("multichannel/channel_strip.kicad_sch"))
+    else {
+        eprintln!("SKIP: corpus not found");
+        return;
+    };
+    let source = std::fs::read_to_string(&path).expect("read");
+    let mut doc = SchDoc::parse(&source).expect("parse");
+    let refdes = doc.symbols().next().expect("a symbol").refdes().to_string();
+
+    let refused = doc.set_field(&refdes, "Reference", "R999");
+    assert!(
+        matches!(refused, Err(sch_doc::Error::ForeignInstances(_))),
+        "{refused:?}"
+    );
+    assert!(!doc.is_edited(), "a refused edit marked the document dirty");
+    assert_eq!(doc.to_text(), source, "a refused edit changed the file");
+    assert!(doc.symbol_by_ref("R999").is_none());
+    assert!(doc.symbol_by_ref(&refdes).is_some());
+}
+
+/// The same sheet cannot take a new symbol either: one call cannot say what
+/// each placement should call it.
+#[test]
+fn adding_to_a_re_instantiated_sheet_is_refused() {
+    let (Some(path), Some(source_lib)) = (
+        corpus::files()
+            .into_iter()
+            .find(|p| p.ends_with("multichannel/channel_strip.kicad_sch")),
+        symbol_source(),
+    ) else {
+        eprintln!("SKIP: corpus or KiCAD not found");
+        return;
+    };
+    let text = std::fs::read_to_string(&path).expect("read");
+    let mut doc = SchDoc::parse(&text).expect("parse");
+    let added = doc.add_symbol("Device:R", "RX99", "1k", Pose::default(), &source_lib);
+    assert!(
+        matches!(added, Err(sch_doc::Error::ReInstantiatedSheet)),
+        "{added:?}"
+    );
+    assert_eq!(doc.to_text(), text, "the refused add changed the file");
+}
+
+/// Library text carries escapes as much as document text does.
+#[test]
+fn a_spliced_definition_keeps_its_escaped_newlines() {
+    let Some(source_lib) = symbol_source() else {
+        eprintln!("SKIP: no KiCAD 10 installation detected");
+        return;
+    };
+    let (_, source) = fixture();
+    let mut doc = SchDoc::parse(&source).expect("parse");
+    // This symbol's graphic text holds a newline, written `\n`.
+    if doc
+        .add_symbol(
+            "Analog_ADC:AD574A",
+            "U9",
+            "AD574A",
+            Pose::new(40.0, 40.0, 0.0),
+            &source_lib,
+        )
+        .is_err()
+    {
+        eprintln!("SKIP: Analog_ADC:AD574A not in this library");
+        return;
+    }
+    let text = doc.to_text();
+    assert!(
+        text.contains("I_{DAC}\\nI_{DAC}"),
+        "the escape was eaten on the way in"
+    );
+    assert!(SchDoc::parse(&text).is_ok());
+}
+
+/// `(lib_symbols)` is retained like everything else: a child the typed model
+/// does not decode survives an edit that rewrites the block.
+#[test]
+fn lib_symbols_keeps_children_it_does_not_decode() {
+    let (_, source) = fixture();
+    let marked = source.replacen(
+        "\t(lib_symbols\n",
+        "\t(lib_symbols\n\t\t(something_new \"keepme\")\n",
+        1,
+    );
+    assert_ne!(marked, source, "fixture layout changed");
+    let mut doc = SchDoc::parse(&marked).expect("parse");
+    doc.remove_symbol("C3").expect("remove");
+    doc.gc_lib_symbols();
+    let text = doc.to_text();
+    assert!(
+        text.contains("(something_new \"keepme\")"),
+        "unknown child dropped"
+    );
+    assert!(
+        !text.contains("(symbol \"Device:C\""),
+        "orphan not collected"
+    );
+}
+
 #[test]
 fn snapshots_restore_the_document_exactly() {
     let (_, source) = fixture();

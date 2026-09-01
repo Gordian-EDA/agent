@@ -33,11 +33,16 @@ impl SymbolSource {
     fn definition(&self, lib_id: &str) -> Result<kiutils_sexpr::Node> {
         let geometry = SymbolGeometry::load(&self.symbol_dir, lib_id)
             .map_err(|e| Error::Library(format!("{lib_id}: {e}")))?;
-        let cst = parse_one(geometry.definition_sexpr())?;
-        cst.nodes
+        let source = geometry.definition_sexpr();
+        let cst = parse_one(source)?;
+        let mut node = cst
+            .nodes
             .into_iter()
             .next()
-            .ok_or_else(|| Error::Library(format!("{lib_id}: empty definition")))
+            .ok_or_else(|| Error::Library(format!("{lib_id}: empty definition")))?;
+        // Library text carries escapes too; a symbol's graphic text often does.
+        crate::sexpr::repair_quotes(&mut node, source);
+        Ok(node)
     }
 }
 

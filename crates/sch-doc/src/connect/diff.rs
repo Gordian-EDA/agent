@@ -19,6 +19,10 @@ pub struct NetDelta {
     pub renamed: Vec<(String, String)>,
     /// Pins that were on a net and now are on none.
     pub pins_now_unconnected: Vec<PinRef>,
+    /// Pins that were on no net and now are on one. A wire that pulls a
+    /// dangling pin onto a live net changes nothing else, so without this the
+    /// delta would call that edit harmless.
+    pub pins_now_connected: Vec<PinRef>,
 }
 
 impl NetDelta {
@@ -30,10 +34,15 @@ impl NetDelta {
             && self.split.is_empty()
             && self.renamed.is_empty()
             && self.pins_now_unconnected.is_empty()
+            && self.pins_now_connected.is_empty()
     }
 }
 
 type PinKey = (String, u32, String);
+
+fn key(pin: &PinRef) -> PinKey {
+    (pin.refdes.clone(), pin.unit, pin.pin.clone())
+}
 
 fn pin_to_net(netlist: &Netlist) -> HashMap<PinKey, &str> {
     netlist
@@ -56,7 +65,7 @@ fn images<'a>(
     for net in &netlist.nets {
         let entry = out.entry(net.name.as_str()).or_default();
         for pin in &net.pins {
-            if let Some(name) = other.get(&(pin.refdes.clone(), pin.unit, pin.pin.clone()))
+            if let Some(name) = other.get(&key(pin))
                 && !entry.iter().any(|n| n == name)
             {
                 entry.push((*name).to_string());
@@ -98,8 +107,15 @@ impl Netlist {
         }
         for net in &before.nets {
             for pin in &net.pins {
-                if !after_of.contains_key(&(pin.refdes.clone(), pin.unit, pin.pin.clone())) {
+                if !after_of.contains_key(&key(pin)) {
                     delta.pins_now_unconnected.push(pin.clone());
+                }
+            }
+        }
+        for net in &after.nets {
+            for pin in &net.pins {
+                if !before_of.contains_key(&key(pin)) {
+                    delta.pins_now_connected.push(pin.clone());
                 }
             }
         }
@@ -109,6 +125,7 @@ impl Netlist {
         delta.split.sort();
         delta.renamed.sort();
         delta.pins_now_unconnected.sort();
+        delta.pins_now_connected.sort();
         delta
     }
 }
