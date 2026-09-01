@@ -1176,7 +1176,7 @@
 		(uuid "bb0b63d7-d962-5da4-8ae4-c4dc40216f6e")
 	)
 	(label "N_Q"
-		(at 27.94 78.74 270)
+		(at 27.94 74.93 270)
 		(effects (font (size 1.27 1.27)) (justify right bottom))
 		(uuid "50850403-6972-57e3-becf-db40b7742753")
 	)
@@ -1238,13 +1238,6 @@
 		)
 		(stroke (width 0) (type default))
 		(uuid "349249a0-c7a1-5d74-a3f1-f9afb1d01739")
-	)
-	(wire
-		(pts
-			(xy 27.94 74.93) (xy 27.94 78.74)
-		)
-		(stroke (width 0) (type default))
-		(uuid "a066c564-4853-54d3-8efa-52523a364daf")
 	)
 	(wire
 		(pts
