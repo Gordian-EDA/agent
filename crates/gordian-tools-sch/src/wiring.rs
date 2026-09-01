@@ -131,19 +131,22 @@ pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return connect_one(input, ctx);
     };
     // Each pair is its own transaction: a route that cannot be drawn falls
-    // back to a label rather than failing, so there is nothing to roll back,
-    // and the caller sees which end did what.
+    // back to a label rather than failing, so there is nothing to roll back.
+    // Every pair is tried — one bad reference must not silently drop the rest
+    // of a block's wiring — and each result says which ends it was about.
     let mut done = Vec::new();
+    let mut failures = 0;
     for pair in pairs {
-        let result = connect_one(pair.clone(), ctx)?;
-        let failed = result.get("error").is_some();
+        let mut result = connect_one(pair.clone(), ctx)?;
+        failures += usize::from(result.get("error").is_some());
+        result["from"] = pair.get("from").cloned().unwrap_or(Value::Null);
+        result["to"] = pair.get("to").cloned().unwrap_or(Value::Null);
         done.push(result);
-        if failed {
-            return Ok(json!({ "error": "a connection failed; the rest were skipped",
-                              "connected": done }));
-        }
     }
-    Ok(json!({ "connected": done }))
+    if failures == done.len() {
+        return Ok(json!({ "error": "every connection failed", "connected": done }));
+    }
+    Ok(json!({ "connected": done, "failed": failures }))
 }
 
 /// Route a connection between two ends of the sheet.
