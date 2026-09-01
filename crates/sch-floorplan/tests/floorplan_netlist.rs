@@ -50,6 +50,8 @@ const CHALLENGE_FIXTURES: &[&str] = &[
     "bga-fpga-ice40",              // ICE40HX8K-BG121 121-ball BGA, dual-rail (BGA)
     "grid-demo",                   // authored `layout:` 2D grid (NE555 blinker)
     "idiom-stm32",                 // distributed local grounds (≥2 GND symbols) + idioms
+    "stm32f4-buck",                // 75 parts: buck regulator + STM32, dense 2-pin passives
+    "openmyo-emg",                 // analog EMG front-end, dense 2-pin passives
 ];
 
 fn doc(name: &str, ext: &str) -> std::path::PathBuf {

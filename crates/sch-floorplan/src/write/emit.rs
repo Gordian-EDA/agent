@@ -360,8 +360,8 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     s.push_str("\t(symbol\n");
     let _ = writeln!(s, "\t\t(lib_id \"{lib_id}\")");
     let _ = writeln!(s, "\t\t(at {x} {y} {angle})");
-    // A left-right flip negates local x — that is `(mirror y)` in KiCAD — matching
-    // `Point2::transform_offset`.
+    // A left-right flip on the sheet is `(mirror y)` in KiCAD — what
+    // `Point2::transform_offset` applies after the rotation.
     if inst.mirror {
         s.push_str("\t\t(mirror y)\n");
     }

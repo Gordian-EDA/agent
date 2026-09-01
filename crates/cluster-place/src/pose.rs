@@ -8,8 +8,9 @@
 //! the routed cost without breaking connectivity.
 //!
 //! The rigid transform is exact: a symbol's `(angle, mirror)` maps a local pin offset
-//! to the sheet via [`geom::Point2::transform_offset`] (`x→−x` if mirror, then rotate
-//! with the symbol-Y-into-sheet flip). Those 8 maps are orthogonal matrices with
+//! to the sheet via [`geom::Point2::transform_offset`] (rotate with the
+//! symbol-Y-into-sheet flip, then `(mirror y)` reflecting the sheet x). Those 8 maps
+//! are orthogonal matrices with
 //! entries in {−1,0,1} closed under composition, so the cluster's base→target transform
 //! `Δ = M(target)·M(base)⁻¹` is itself one of the 8 — we apply Δ to every member's
 //! position and compose it into each member's own pose, then decode back to KiCAD's
@@ -33,8 +34,9 @@ type Mat = [[f64; 2]; 2];
 fn pose_mat(angle_deg: f64, mirror: bool) -> Mat {
     let (s, c) = angle_deg.to_radians().sin_cos();
     let mx = if mirror { -1.0 } else { 1.0 };
-    // e1=(1,0) -> (mx*c, -mx*s); e2=(0,1) -> (-s, -c).
-    [[mx * c, -s], [-mx * s, -c]]
+    // e1=(1,0) -> (mx*c, -s); e2=(0,1) -> (-mx*s, -c). The mirror negates the
+    // sheet-space x, so it scales the whole first ROW.
+    [[mx * c, -mx * s], [-s, -c]]
 }
 
 fn matmul(a: Mat, b: Mat) -> Mat {
