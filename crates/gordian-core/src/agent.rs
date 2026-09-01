@@ -6344,7 +6344,7 @@ mod tests {
         ] {
             assert!(is_pcb_stage_tool(tool), "{tool}");
         }
-        for tool in ["read_schematic", "edit_design", "apply_design", "run_erc"] {
+        for tool in ["read_schematic", "set_fields", "apply_design", "run_erc"] {
             assert!(!is_pcb_stage_tool(tool), "{tool}");
         }
     }
@@ -6514,7 +6514,7 @@ mod tests {
         ));
         assert!(!timed_out_retry_blocked(
             &timed_out,
-            &call("validate_design", json!({"yaml": "components: []"})),
+            &call("check_schematic", json!({})),
             3,
         ));
         assert!(timed_out_retry_blocked(
@@ -6583,7 +6583,7 @@ mod tests {
                 revision,
                 true,
                 ToolEffect::Authoring,
-                "edit_design",
+                "create_design",
                 &json!({"ok": true, "draft_written": true}),
             ),
             revision + 1
@@ -7020,7 +7020,7 @@ blocks:
             "code": "minimum_component_padding_suspected",
             "required_minimum": 45,
             "candidate_physical_components": 46,
-            "next_tool": "edit_design",
+            "next_tool": "create_design",
         }))
         .expect("padding rejection should retain the one-tool authoring focus");
         assert_eq!(padding.shortfall, 0);
@@ -7082,7 +7082,7 @@ blocks:
     fn rejected_candidate_diagnostics_do_not_replace_preserved_draft_state() {
         assert_eq!(
             authoring_diagnostics_state(
-                "edit_design",
+                "create_design",
                 &json!({
                     "code": "invalid_replacement_preserved_draft",
                     "draft_written": false,
@@ -7193,7 +7193,7 @@ blocks:
         assert_eq!(effective.call_id, call.call_id);
 
         let non_review = ToolCall {
-            fn_name: "validate_design".into(),
+            fn_name: "check_schematic".into(),
             ..call
         };
         assert!(authoritative_review_call(&non_review, "goal").is_none());
@@ -7462,8 +7462,8 @@ blocks:
             ChatMessage::assistant(MessageContent::from_parts(vec![ContentPart::ToolCall(
                 ToolCall {
                     call_id: "patch".into(),
-                    fn_name: "edit_design".into(),
-                    fn_arguments: json!({"old_string": "10k", "new_string": "12k"}),
+                    fn_name: "set_fields".into(),
+                    fn_arguments: json!({"ref": "R1", "fields": {"Value": "12k"}}),
                     thought_signatures: None,
                 },
             )])),
@@ -8125,7 +8125,7 @@ blocks:
             &json!({"legal": true})
         ));
         assert!(!route_retry_budget_reset_by_fix(
-            "edit_design",
+            "create_design",
             &json!({"ok": true})
         ));
         assert!(!route_retry_budget_reset_by_fix(
@@ -8189,7 +8189,7 @@ blocks:
             &json!({"error": "placement failed"})
         ));
         assert!(!route_retry_budget_reset_by_fix(
-            "edit_design",
+            "create_design",
             &json!({"error": "bad yaml"})
         ));
         assert!(!route_retry_budget_reset_by_fix(
@@ -8197,7 +8197,7 @@ blocks:
             &json!({"ok": true, "rejected": true})
         ));
         assert!(!route_retry_budget_reset_by_fix(
-            "edit_design",
+            "create_design",
             &json!({"ok": false, "errors": 1})
         ));
         assert!(!route_retry_budget_reset_by_fix(
