@@ -971,7 +971,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                       discard those edits",
             "code": "stale_draft",
             "note": "The schematic is the design. Edit it in place with the schematic tools \
-                     (read_schematic, set_fields, add_symbol, connect, …) instead of re-applying.",
+                     (read_schematic, set_fields, add_symbols, connect, …) instead of re-applying.",
         }));
     }
 
@@ -1685,8 +1685,8 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({
             "error": format!(
                 "{} already holds a schematic — create_design is for empty projects only. \
-                 Edit it in place: read_schematic, then add_symbol/add_symbols, connect, \
-                 set_fields, swap_symbol.",
+                 Edit it in place: read_schematic, then add_symbols, connect, set_fields, \
+                 swap_symbol.",
                 ctx.sch_path().display()
             ),
             "draft_changed": false,

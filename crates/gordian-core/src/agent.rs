@@ -7724,14 +7724,14 @@ blocks:
         let seed_names = names(&seed);
         let active_names = names(&active);
 
-        assert_eq!(schematic.len(), 28);
+        assert_eq!(schematic.len(), 27);
         assert!(schematic_names.contains("create_design"));
         assert!(schematic_names.contains("search_footprints"));
         assert!(schematic_names.contains("assign_footprints"));
         assert!(!schematic_names.contains("regenerate_board"));
         assert!(!schematic_names.contains("route_board"));
 
-        assert_eq!(seed.len(), 29);
+        assert_eq!(seed.len(), 28);
         assert!(schematic_names.is_subset(&seed_names));
         assert!(seed_names.contains("regenerate_board"));
         assert!(!seed_names.contains("route_board"));

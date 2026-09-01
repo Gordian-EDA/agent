@@ -32,9 +32,8 @@ use serde_json::{Value, json};
 
 /// The tools that write the schematic. The turn loop approves these before
 /// they run — they mutate the project and have no dry-run.
-pub const MUTATORS: [&str; 13] = [
+pub const MUTATORS: [&str; 12] = [
     "undo",
-    "add_symbol",
     "add_symbols",
     "remove_symbols",
     "move_symbols",
@@ -119,21 +118,11 @@ pub fn tool_defs() -> Vec<Tool> {
             json!({ "type": "object", "properties": {}, "additionalProperties": false }),
         ),
         (
-            "add_symbol",
-            "Place one part and report where it went. `near`+`side` finds a clear, grid-aligned \
-             spot beside that part and turns a two-pin body to face it, so no follow-up move is \
-             needed; `at` and `rot` override. `ref` is auto-assigned. Wire it with `connect`.",
-            json!({
-                "type": "object",
-                "properties": part.clone(),
-                "required": ["lib_id"],
-                "additionalProperties": false
-            }),
-        ),
-        (
             "add_symbols",
-            "Place a whole block — an LED and its resistor, a clamp pair — in one call, each part \
-             clear of the ones before it, footprints and all. Nothing is written if any fails.",
+            "Place parts — one, or a whole block in a single call — and report where each went. \
+             `near`+`side` finds a clear, grid-aligned spot beside that part and turns a two-pin \
+             body to face it, so no follow-up move is needed; `at` and `rot` override. `ref` is \
+             auto-assigned. Nothing is written if any part fails. Wire them with `connect`.",
             json!({
                 "type": "object",
                 "properties": {
@@ -164,8 +153,10 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "move_symbols",
-            "Move parts. A spot already taken is slid to the nearest free one and reported as \
-             `nudged_to`; the move is refused only if nothing near it fits, or if it changed a net.",
+            "Move or turn parts, wires and rails following along. `rot`/`mirror` alone turns a \
+             part in place — that is how a diode is reversed. A spot already taken is slid to the \
+             nearest free one and reported as `nudged_to`; refused only if nothing near it fits, \
+             or if the move changed a net.",
             json!({
                 "type": "object",
                 "properties": {
@@ -176,6 +167,8 @@ pub fn tool_defs() -> Vec<Tool> {
                             "properties": {
                                 "ref": { "type": "string" },
                                 "unit": { "type": "integer", "minimum": 1 },
+                                "rot": { "type": "number", "enum": [0, 90, 180, 270] },
+                                "mirror": { "type": "string", "enum": ["none", "x", "y"] },
                                 "to": point.clone(),
                                 "by": point.clone(),
                                 "near": { "type": "string" },
@@ -360,7 +353,6 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "get_symbol" => query::get_symbol(input, ctx),
         "get_net" => query::get_net(input, ctx),
         "check_schematic" => check::check_schematic(input, ctx),
-        "add_symbol" => edit::add_symbol(input, ctx),
         "add_symbols" => edit::add_symbols(input, ctx),
         "remove_symbols" => edit::remove_symbols(input, ctx),
         "move_symbols" => edit::move_symbols(input, ctx),

@@ -415,9 +415,8 @@ fn defs_lists_all_tools() {
         "read_schematic",
         "get_symbol",
         "get_net",
-        "add_symbols",
         "check_schematic",
-        "add_symbol",
+        "add_symbols",
         "remove_symbols",
         "move_symbols",
         "set_fields",
@@ -521,7 +520,7 @@ fn tool_definitions_stay_within_static_context_budget() {
     let defs = tool_defs();
     let total: usize = defs.iter().map(|tool| tool.size()).sum();
     assert!(
-        total <= 15_400,
+        total <= 14_900,
         "tool definitions use {total} bytes; keep the always-on schemas concise"
     );
 }

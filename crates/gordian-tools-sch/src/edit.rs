@@ -210,11 +210,6 @@ fn place_one(
     Ok(report)
 }
 
-/// Place one new part.
-pub fn add_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    add_symbols(json!({ "parts": [input] }), ctx)
-}
-
 /// Place a block of new parts in one transaction, each clear of the last.
 pub fn add_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let specs: Vec<Value> = input
@@ -391,6 +386,31 @@ fn carry_glued_symbols(
     Ok(())
 }
 
+/// Apply a `rot`/`mirror` to a symbol, returning the rotation it now carries.
+///
+/// Rotating in place is how a diode is reversed or a part turned to meet a
+/// wire; without it the only way to change an orientation is to delete the
+/// part and place it again, losing its connections.
+fn orient(doc: &mut SchDoc, uuid: &str, step: &Value) -> Result<Option<f64>> {
+    let rot = step.get("rot").and_then(Value::as_f64);
+    let mirror = step.get("mirror").and_then(Value::as_str);
+    if rot.is_none() && mirror.is_none() {
+        return Ok(None);
+    }
+    let current = doc.symbol(uuid).map_or((0.0, sch_doc::Mirror::None), |s| {
+        (s.at.rot, s.mirror)
+    });
+    let mirror = match mirror {
+        Some("x") => sch_doc::Mirror::X,
+        Some("y") => sch_doc::Mirror::Y,
+        Some(_) => sch_doc::Mirror::None,
+        None => current.1,
+    };
+    let rot = rot.map_or(current.0, geom::snap_quadrant);
+    doc.set_symbol_orientation(uuid, rot, mirror)?;
+    Ok(Some(rot))
+}
+
 /// `1, 2` — the unit numbers of a multi-unit part, for an error message.
 fn list(units: &[(u32, String)]) -> String {
     units
@@ -424,12 +444,12 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut pending = all.clone();
     for step in &moves {
         let refdes = step["ref"].as_str().unwrap_or_default().to_string();
-        if ["to", "at", "by", "near"]
+        if ["to", "at", "by", "near", "rot", "mirror"]
             .iter()
             .all(|key| step.get(key).is_none())
         {
             return Ok(json!({
-                "error": format!("the move of {refdes} says nowhere to put it — give `to`, `by`, or `near`+`side`"),
+                "error": format!("the move of {refdes} does nothing — give `to`, `by`, `near`+`side`, `rot` or `mirror`"),
             }));
         }
         // The units of one part sit in different places, so a move — unlike a
@@ -459,14 +479,33 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 }));
             }
         };
-        let Some(symbol) = edit.doc.symbol(&uuid) else {
+        if edit.doc.symbol(&uuid).is_none() {
             return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
+        }
+        // Where the pins are *now*, before any turn: their wires follow them
+        // through both the rotation and the move.
+        let was: Vec<Point2> = placed_pins(&edit.doc)
+            .into_iter()
+            .filter(|p| p.owner == uuid)
+            .map(|p| p.at)
+            .collect();
+        // Turning a part is how a diode is reversed, and it changes the shape
+        // that has to fit, so it happens before the destination is chosen.
+        let turned = orient(&mut edit.doc, &uuid, step)?;
+        let symbol = match edit.doc.symbol(&uuid) {
+            Some(symbol) => symbol,
+            None => return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") })),
         };
         let origin = symbol.at.point();
         let body = crate::place::extent(&edit.doc, symbol);
         let (w, h) = body.map_or((10.0, 10.0), |r| (r.width(), r.height()));
         let centre = body.map_or(origin, |r| r.center());
-        let want = if let Some(by) = step.get("by").and_then(Value::as_array) {
+        let staying = ["to", "at", "by", "near"]
+            .iter()
+            .all(|key| step.get(key).is_none());
+        let want = if staying {
+            Destination::Origin(origin)
+        } else if let Some(by) = step.get("by").and_then(Value::as_array) {
             let n: Vec<f64> = by.iter().filter_map(Value::as_f64).collect();
             if n.len() != 2 {
                 return Ok(json!({ "error": "`by` must be [dx, dy] in mm" }));
@@ -502,11 +541,6 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         // Whatever met this part's pins comes with it, the way KiCAD drags a
         // symbol: leaving the wires behind would silently unwire the board.
-        let was: Vec<Point2> = placed_pins(&edit.doc)
-            .into_iter()
-            .filter(|p| p.owner == uuid)
-            .map(|p| p.at)
-            .collect();
         edit.doc.move_symbol(&uuid, at.x, at.y)?;
         let now: Vec<Point2> = placed_pins(&edit.doc)
             .into_iter()
@@ -521,6 +555,9 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let mut report = json!({ "ref": refdes, "at": [at.x, at.y] });
         if let Some(to) = nudge {
             report["nudged_to"] = json!(to);
+        }
+        if let Some(rot) = turned {
+            report["rot"] = json!(rot);
         }
         placed.push(report);
     }

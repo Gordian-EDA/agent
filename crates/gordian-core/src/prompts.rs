@@ -17,12 +17,12 @@ ALWAYS `read_schematic()` first. It lists every symbol as `R1 Device:R "10k" @(6
 Then make ONE change per call:
 - value / footprint / any property → `set_fields({ref, fields})`. This is the whole job for "make R3 4.7k 0805"; it moves nothing.
 - different part → `swap_symbol({ref, lib_id, pin_map?})`, which carries each pin's net across.
-- new part → `add_symbol({lib_id, near, side, value, footprint})`; several → `add_symbols({parts:[…]})`. Both pick the spot and orientation: never `free_space`+`move_symbols` to hand-place.
+- new parts → `add_symbols({parts:[{lib_id, near, side, value, footprint}, …]})`, one or many. It picks the spot and orientation; never hand-place with coordinates.
 - one refdes = one part: `set_fields`/`set_flags`/`swap_symbol` hit every unit of a dual/quad; only `move_symbols` takes `unit`.
 - connections → `connect({from:"R5.2", to:"U1.VDD"})`, or `connect({pairs:[…]})` for a block. NEVER emit wire coordinates; there is no tool that takes them. `connect` routes around the drawing and adds junctions; if it reports no clear path it names both ends instead — a real connection, not a failure.
 - rails → `add_power({net:"GND", pin:"U1.8"})`. Naming a net at one pin → `label({pin, net})`. Deliberately unused pin → `no_connect({pin})`.
 - removal → `remove_symbols({refs})`, which also retracts the stubs that only served them.
-- IN SERIES on an existing net → `delete_wires({pins:["P1.2"]})` to free ONE pin, then `add_symbol`, then `connect` the part between that pin and the node it used to reach. Skipping the cut shunts the part across the net; cutting by `net` loosens every pin on it.
+- IN SERIES on an existing net → `delete_wires({pins:["P1.2"]})` to free ONE pin, then `add_symbols`, then `connect` the part between that pin and the node it used to reach. Skipping the cut shunts the part across the net; cutting by `net` loosens every pin on it.
 
 Every mutator re-derives the netlist and REFUSES the write if it would change a net you did not name, returning the delta. Read that refusal: it means the edit was wrong, not the tool. Each success returns a `snapshot` id for `undo`.
 
@@ -87,7 +87,7 @@ mod tests {
             "get_net",
             "set_fields",
             "swap_symbol",
-            "add_symbol",
+            "add_symbols",
             "connect",
             "add_power",
             "label",
