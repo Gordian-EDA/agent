@@ -2342,11 +2342,13 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 ))
             })
             .or_else(|| {
-                result
-                    .get("unknown_pins")
-                    .and_then(Value::as_array)
-                    .and_then(|items| items.iter().find_map(Value::as_str))
-                    .map(str::to_string)
+                ["unknown_pins", "nets"].iter().find_map(|key| {
+                    result
+                        .get(key)
+                        .and_then(Value::as_array)
+                        .and_then(|items| items.iter().find_map(Value::as_str))
+                        .map(str::to_string)
+                })
             });
         return detail.map_or_else(
             || format!("refused: {code}"),

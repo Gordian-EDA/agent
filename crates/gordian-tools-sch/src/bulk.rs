@@ -79,6 +79,17 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .map(|part| part.refdes.clone())
         .collect::<Vec<_>>();
+    let derived: Vec<String> = payload
+        .parts
+        .iter()
+        .flat_map(|part| part.pins.values())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|net| crate::refs::derived_name_refusal(edit.before(), net))
+        .collect();
+    if !derived.is_empty() {
+        return Ok(json!({ "ok": false, "code": "derived_net_name", "nets": derived }));
+    }
     let report = match sch_floorplan::live::place_parts(
         ctx.env(),
         &mut edit.doc,

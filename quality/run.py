@@ -121,7 +121,10 @@ def sch_facts(*args):
 
 def kicad_partition(schematic, out_path):
     """KiCAD's own net partition: sorted `REF.PIN` groups, power symbols and
-    single-pin nets dropped so it is comparable to the extractor's."""
+    single-pin nets dropped so it is comparable to the extractor's, plus the
+    named nets exactly as KiCAD sees them. The named form is what settles a
+    connectivity question for the judge, which otherwise has only a render —
+    where a wire passing behind a symbol reads as a short that is not there."""
     result = command(
         [
             "kicad-cli", "sch", "export", "netlist",
@@ -130,16 +133,18 @@ def kicad_partition(schematic, out_path):
         check=False,
     )
     if not out_path.exists():
-        return None, (result.stderr or result.stdout).strip()
+        return None, None, (result.stderr or result.stdout).strip()
     try:
         nets = ET.parse(out_path).getroot().find("nets")
     except ET.ParseError as error:
-        return None, f"malformed netlist export: {error}"
-    groups = [
-        [f"{n.get('ref')}.{n.get('pin')}" for n in net.findall("node")]
+        return None, None, f"malformed netlist export: {error}"
+    named = {
+        net.get("name"): sorted(
+            f"{n.get('ref')}.{n.get('pin')}" for n in net.findall("node")
+        )
         for net in (nets if nets is not None else [])
-    ]
-    return normalize_partition(groups), None
+    }
+    return normalize_partition(named.values()), named, None
 
 
 def normalize_partition(groups):
@@ -215,10 +220,11 @@ def schematic_facts(project, before_project, artifacts):
     if "error" in after:
         return facts, detail
 
-    kicad, kicad_error = kicad_partition(schematic, artifacts / "netlist.xml")
+    kicad, kicad_nets, kicad_error = kicad_partition(schematic, artifacts / "netlist.xml")
     extracted = normalize_partition(after["partition"])
     facts.update(
         {
+            "kicad_nets": kicad_nets,
             "sch_errors": after["errors"],
             "symbol_count": after["symbol_count"],
             "part_count": after["part_count"],
@@ -440,6 +446,13 @@ MACHINE CHECKS ALREADY EVALUATED:
 position or rotation changed; on an edit case that is a regression even when the
 result looks fine. `fields_lost` lists properties dropped from a surviving part.
 `net_delta_*` is the change to the net partition.
+
+`kicad_nets` is KiCAD's own netlist of the delivered schematic: every net and
+every pin on it. It, not the render, decides what is connected to what. Never
+claim a short, a missing connection, an isolated node or a wrong topology that
+`kicad_nets` contradicts — two wires crossing, a label sitting over a symbol, or
+a part drawn far from its net all look wrong and are not. Judge the render for
+what only it can show: readability, overlap, clipping, layout and orientation.
 
 The images are labeled by filename as before/after schematic or PCB renders.
 Return only JSON with this exact shape:
