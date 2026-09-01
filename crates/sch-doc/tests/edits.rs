@@ -255,6 +255,61 @@ fn snapshots_restore_the_document_exactly() {
     assert_eq!(doc.symbol_by_ref("R8").expect("R8").value(), "0R");
 }
 
+/// The whole add path through the oracle: a spliced `lib_symbols` entry, the
+/// pin UUIDs, the cloned `(instances)` and a wire onto an existing net.
+#[test]
+fn kicad_sees_an_added_symbol_on_the_net_it_was_wired_to() {
+    let (Some(kicad), Some(source_lib)) = (corpus::kicad10(), symbol_source()) else {
+        eprintln!("SKIP: no KiCAD 10 installation detected");
+        return;
+    };
+    let (_, source) = fixture();
+    let mut doc = SchDoc::parse(&source).expect("parse");
+    doc.add_symbol("Device:L", "L9", "10uH", Pose::new(60.0, 40.0, 0.0), &source_lib)
+        .expect("add_symbol");
+    let anchor = sch_doc::placed_pins(&doc)
+        .into_iter()
+        .find(|p| p.refdes == "R8" && p.number == "2")
+        .expect("R8.2");
+    let new_pin = sch_doc::placed_pins(&doc)
+        .into_iter()
+        .find(|p| p.refdes == "L9" && p.number == "1")
+        .expect("L9.1");
+    let corner = Point2::new(new_pin.at.x, anchor.at.y);
+    doc.add_wire(new_pin.at, corner);
+    doc.add_wire(corner, anchor.at);
+
+    let ours = connect::extract(&doc);
+    let net = ours
+        .nets
+        .iter()
+        .find(|n| n.pins.iter().any(|p| p.refdes == "L9"))
+        .expect("L9 landed on no net");
+    assert!(net.pins.iter().any(|p| p.refdes == "R8"), "{net:?}");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("edited.kicad_sch");
+    doc.write(&out).expect("write");
+    let oracle = kicad.netlist(&out).expect("netlist");
+    let theirs = oracle
+        .nets
+        .iter()
+        .find(|n| n.nodes.iter().any(|(refdes, _)| refdes == "L9"))
+        .expect("kicad did not see L9");
+    assert!(
+        theirs.nodes.iter().any(|(refdes, _)| refdes == "R8"),
+        "kicad put L9 on {theirs:?}"
+    );
+    assert_eq!(
+        oracle
+            .components
+            .iter()
+            .find(|c| c.reference == "L9")
+            .map(|c| c.lib_id.as_str()),
+        Some("Device:L")
+    );
+}
+
 #[test]
 fn kicad_agrees_with_the_edited_file() {
     let Some(kicad) = corpus::kicad10() else {
