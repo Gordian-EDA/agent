@@ -78,7 +78,7 @@ def prepare_project(case, project):
     if not seed.exists():
         return
     state = project / ".gordian"
-    state.mkdir()
+    state.mkdir(exist_ok=True)
     shutil.copy2(seed, state / "draft.circuit.yaml")
     (state / "draft.meta.json").write_text(
         '{"seeded_from_sch_hash":null}', encoding="utf-8"
@@ -99,13 +99,11 @@ def sch_facts_binary():
     configured = os.environ.get("SCH_FACTS_BIN")
     if configured:
         return [configured]
-    built = ROOT / "target" / "release" / "examples" / "sch_facts"
-    if not built.is_file():
-        command(
-            ["cargo", "build", "--release", "-p", "sch-doc", "--example", "sch_facts"],
-            timeout=1800,
-        )
-    return [str(built)]
+    command(
+        ["cargo", "build", "--release", "-p", "sch-doc", "--example", "sch_facts"],
+        timeout=1800,
+    )
+    return [str(ROOT / "target" / "release" / "examples" / "sch_facts")]
 
 
 def sch_facts(*args):
@@ -127,7 +125,10 @@ def kicad_partition(schematic, out_path):
     )
     if not out_path.exists():
         return None, (result.stderr or result.stdout).strip()
-    nets = ET.parse(out_path).getroot().find("nets")
+    try:
+        nets = ET.parse(out_path).getroot().find("nets")
+    except ET.ParseError as error:
+        return None, f"malformed netlist export: {error}"
     groups = [
         [f"{n.get('ref')}.{n.get('pin')}" for n in net.findall("node")]
         for net in (nets if nets is not None else [])
@@ -141,7 +142,10 @@ def normalize_partition(groups):
 
 
 def symbol_table(facts):
-    return {symbol["key"]: symbol for symbol in facts.get("symbols", [])}
+    table = {}
+    for symbol in facts.get("symbols", []):
+        table.setdefault(symbol["key"], symbol)
+    return table
 
 
 def pose(symbol):
@@ -149,16 +153,26 @@ def pose(symbol):
 
 
 def compare_symbols(before, after):
-    """What the edit did to the symbols that were already there."""
+    """What the edit did to the symbols that were already there.
+
+    A part the case asked to swap is expected to change, so
+    `unchanged_symbols_moved` and `fields_lost` look only at the parts whose
+    `lib_id` stayed put: replacing one component never reads as trampling the
+    rest, and trampling the rest is still caught.
+    """
     old, new = symbol_table(before), symbol_table(after)
     shared = sorted(set(old) & set(new))
+    swapped = set(k for k in shared if old[k]["lib_id"] != new[k]["lib_id"])
+    kept = [k for k in shared if k not in swapped]
     return {
         "symbols_added": sorted(set(new) - set(old)),
         "symbols_removed": sorted(set(old) - set(new)),
-        "unchanged_symbols_moved": [k for k in shared if pose(old[k]) != pose(new[k])],
+        "unchanged_symbols_moved": [k for k in kept if pose(old[k]) != pose(new[k])],
+        "symbols_reidentified": [k for k in shared if old[k]["uuid"] != new[k]["uuid"]],
+        "duplicate_symbol_keys": len(after.get("symbols", [])) - len(new),
         "fields_lost": [
             [k, name]
-            for k in shared
+            for k in kept
             for name in old[k]["fields"]
             if name not in new[k]["fields"]
         ],
@@ -168,11 +182,7 @@ def compare_symbols(before, after):
             for name, value in old[k]["fields"].items()
             if name in new[k]["fields"] and new[k]["fields"][name] != value
         ],
-        "lib_ids_changed": [
-            [k, old[k]["lib_id"], new[k]["lib_id"]]
-            for k in shared
-            if old[k]["lib_id"] != new[k]["lib_id"]
-        ],
+        "lib_ids_changed": [[k, old[k]["lib_id"], new[k]["lib_id"]] for k in sorted(swapped)],
     }
 
 
@@ -181,31 +191,56 @@ def flat_net_delta(delta):
 
 
 def schematic_facts(project, before_project, artifacts):
-    """Everything measurable about the schematic, before against after."""
-    schematic = next(project.glob("*.kicad_sch"), None)
+    """Everything measurable about the schematic, before against after.
+
+    A fact is recorded only when it was actually measured. Where the extractor
+    or `kicad-cli` failed, the facts they would have produced stay *absent*
+    rather than defaulting to zero, so a rubric line about them fails instead of
+    passing on a broken run.
+    """
+    schematic = first_schematic(project)
     if schematic is None:
         return {"schematic_created": False}, {}
 
     after = sch_facts(project)
-    before = sch_facts(before_project) if before_project.is_dir() else {}
-    kicad, kicad_error = kicad_partition(schematic, artifacts / "netlist.xml")
-    extracted = normalize_partition(after.get("partition", []))
-
-    facts = {
-        "schematic_created": True,
-        "symbol_count": after.get("symbol_count", 0),
-        "part_count": after.get("part_count", 0),
-        "extractor_warnings": after.get("extractor_warnings", []),
-        "partition_matches_kicad": kicad is not None and kicad == extracted,
-        "kicad_netlist_error": kicad_error,
-        "net_count": len(extracted),
-    }
+    before = sch_facts(before_project)
+    facts = {"schematic_created": True, "sch_facts_error": after.get("error")}
     detail = {"sch_after": after}
-    if before.get("symbols") is not None:
+    if "error" in after:
+        return facts, detail
+
+    kicad, kicad_error = kicad_partition(schematic, artifacts / "netlist.xml")
+    extracted = normalize_partition(after["partition"])
+    facts.update(
+        {
+            "sch_errors": after["errors"],
+            "symbol_count": after["symbol_count"],
+            "part_count": after["part_count"],
+            "extractor_warnings": after["extractor_warnings"],
+            "unconnected_pins": after["unconnected_pins"],
+            # An empty partition matches an empty partition; that is agreement
+            # about nothing, not evidence the extractor tracks KiCAD.
+            "partition_matches_kicad": bool(kicad) and kicad == extracted,
+            "kicad_netlist_error": kicad_error,
+            "net_count": len(extracted),
+            "kicad_net_count": len(kicad) if kicad is not None else None,
+        }
+    )
+    if "error" not in before and before["symbols"]:
         facts.update(compare_symbols(before, after))
+        facts["unconnected_pins_added"] = sorted(
+            set(after["unconnected_pins"]) - set(before["unconnected_pins"])
+        )
         facts.update(flat_net_delta(sch_facts("--diff", before_project, project)))
         detail["sch_before"] = before
     return facts, detail
+
+
+def first_schematic(project):
+    """The project's schematic, chosen deterministically so the ERC and the
+    netlist export can never end up measuring different sheets."""
+    found = sorted(project.glob("*.kicad_sch"))
+    return found[0] if found else None
 
 
 def run_check(kind, design, report_path):
@@ -233,13 +268,26 @@ def violations(report):
     return found
 
 
+def severity_counts(report, prefix):
+    """Error and warning counts, but only when there was a report to count.
+    A design that was never checked leaves the counts out, so
+    `expect: erc_errors == 0` cannot pass on a run that never got that far."""
+    if not isinstance(report, dict) or "error" in report:
+        reason = report.get("error") if isinstance(report, dict) else None
+        return {f"{prefix}_check_error": reason or "not run"}
+    findings = violations(report)
+    return {
+        f"{prefix}_errors": sum(v.get("severity") == "error" for v in findings),
+        f"{prefix}_warnings": sum(v.get("severity") == "warning" for v in findings),
+        f"{prefix}_check_error": None,
+    }
+
+
 def deterministic_facts(project, before_project, artifacts, agent_result):
-    schematic = next(project.glob("*.kicad_sch"), None)
-    board = next(project.glob("*.kicad_pcb"), None)
+    schematic = first_schematic(project)
+    board = next(iter(sorted(project.glob("*.kicad_pcb"))), None)
     erc = run_check("sch", schematic, artifacts / "erc.json")
     drc = run_check("pcb", board, artifacts / "drc.json")
-    erc_findings = violations(erc)
-    drc_findings = violations(drc)
     unconnected = drc.get("unconnected_items", []) if isinstance(drc, dict) else []
     fab = (
         sorted(path.name for path in (project / "fab").glob("*"))
@@ -250,10 +298,8 @@ def deterministic_facts(project, before_project, artifacts, agent_result):
     facts = {
         "agent_exit": agent_result.returncode,
         "pcb_created": board is not None,
-        "erc_errors": sum(v.get("severity") == "error" for v in erc_findings),
-        "erc_warnings": sum(v.get("severity") == "warning" for v in erc_findings),
-        "drc_errors": sum(v.get("severity") == "error" for v in drc_findings),
-        "drc_warnings": sum(v.get("severity") == "warning" for v in drc_findings),
+        **severity_counts(erc, "erc"),
+        **severity_counts(drc, "drc"),
         "unconnected_items": len(unconnected),
         "fab_files": fab,
         **sch,
@@ -264,8 +310,9 @@ def deterministic_facts(project, before_project, artifacts, agent_result):
 # --- rubric checks ----------------------------------------------------------
 
 
+IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 CHECK = re.compile(
-    r"^(?P<len>len\()?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\)?"
+    rf"^(?:len\((?P<counted>{IDENT})\)|(?P<name>{IDENT}))"
     r"\s*(?P<op>==|!=|<=|>=|<|>)\s*(?P<value>.+)$"
 )
 OPS = {
@@ -295,12 +342,13 @@ def evaluate_check(expression, facts):
     match = CHECK.match(expression)
     if not match:
         return False, "unparseable check"
-    name = match.group("name")
+    counted = match.group("counted")
+    name = counted or match.group("name")
     if name not in facts:
-        return False, f"no such fact: {name}"
+        return False, f"not measured: {name}"
     actual = facts[name]
-    if match.group("len"):
-        if not isinstance(actual, (list, str, dict)):
+    if counted:
+        if not isinstance(actual, (list, dict)):
             return False, f"len() needs a collection, {name} is {actual!r}"
         actual = len(actual)
     try:
@@ -343,9 +391,10 @@ def extract_object(text):
                 objects.append(value)
         except json.JSONDecodeError:
             pass
-    if not objects:
-        raise ValueError(f"judge returned no JSON object: {text}")
-    return objects[-1]
+    verdicts = [value for value in objects if "score" in value]
+    if not verdicts:
+        raise ValueError(f"judge returned no verdict object: {text!r}")
+    return verdicts[-1]
 
 
 def llm_config():
@@ -410,19 +459,25 @@ An empty issues array means no actionable issue was found."""
             },
             {"role": "user", "content": content},
         ],
-        "max_tokens": 1200,
+        "max_tokens": 4000,
     }
     request = urllib.request.Request(
         f"{base}/chat/completions",
         data=json.dumps(body).encode(),
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=240) as response:
-            payload = json.loads(response.read())
-    except urllib.error.HTTPError as error:
-        raise RuntimeError(error.read().decode(errors="replace")) from error
-    verdict = extract_object(payload["choices"][0]["message"]["content"])
+    # A reasoning model occasionally spends the whole budget thinking and
+    # answers with nothing; one retry costs less than losing a 15-minute run.
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(request, timeout=240) as response:
+                payload = json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            raise RuntimeError(error.read().decode(errors="replace")) from error
+        answer = payload["choices"][0]["message"].get("content") or ""
+        if answer.strip():
+            break
+    verdict = extract_object(answer)
     score = verdict.get("score")
     issues = verdict.get("issues")
     if not isinstance(score, int) or not 0 <= score <= 10:
@@ -440,7 +495,7 @@ def capture_render(project, tool_name, destination):
         value = tool(project, tool_name)
     except Exception as error:
         return {"error": str(error)}
-    path = value.get("__image_path") or value.get("png_path")
+    path = value.get("_image_path") or value.get("png_path")
     if not path or not Path(path).is_file():
         return {"error": f"{tool_name} returned no image"}
     shutil.copy2(path, destination)
@@ -501,23 +556,27 @@ def run_case(case, output_root):
     renders["after"] = render_project(project, artifacts, "after")
     facts, detail = deterministic_facts(project, before_project, artifacts, result)
     outcome = evaluate_checks(checks, facts)
-    verdict = judge(prompt, rubric, facts, outcome, renders)
-    score = min(verdict["score"], CAPPED_SCORE) if outcome["fail"] else verdict["score"]
-
     report = {
         "case": case.name,
-        "score": score,
-        "judge_score": verdict["score"],
         "checks": outcome,
         "agent_seconds": agent_seconds,
         "elapsed_seconds": round(time.time() - started, 1),
         **facts,
-        "judge": verdict,
         **detail,
     }
-    (run_dir / "result.json").write_text(
-        json.dumps(report, indent=2) + "\n", encoding="utf-8"
+    # The measured half is written before the judge is asked, so a gateway
+    # failure costs the verdict and not the whole run.
+    result_path = run_dir / "result.json"
+    result_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+    verdict = judge(prompt, rubric, facts, outcome, renders)
+    report["judge"] = verdict
+    report["judge_score"] = verdict["score"]
+    report["score"] = (
+        min(verdict["score"], CAPPED_SCORE) if outcome["fail"] else verdict["score"]
     )
+    report["elapsed_seconds"] = round(time.time() - started, 1)
+    result_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return report
 
 
@@ -527,19 +586,23 @@ def run_case(case, output_root):
 COLUMNS = ["case", "score", "checks", "erc e/w", "moved", "lost", "added", "elapsed"]
 
 
+def count(report, name):
+    return str(len(report[name])) if name in report else "-"
+
+
 def row(report):
     if "error" in report:
-        return [report["case"], "-", "-", "-", "-", "-", "-", report["error"][:40]]
+        return [report["case"], "-", "-", "-", "-", "-", "-", report["error"][:60]]
     checks = report["checks"]
     total = len(checks["pass"]) + len(checks["fail"])
     return [
         report["case"],
-        str(report["score"]),
+        str(report.get("score", "-")),
         f"{len(checks['pass'])}/{total}" if total else "-",
-        f"{report.get('erc_errors', '-')}/{report.get('erc_warnings', '-')}",
-        str(len(report.get("unchanged_symbols_moved", []))) if "unchanged_symbols_moved" in report else "-",
-        str(len(report.get("fields_lost", []))) if "fields_lost" in report else "-",
-        str(len(report.get("symbols_added", []))) if "symbols_added" in report else "-",
+        f"{report.get('erc_errors', '?')}/{report.get('erc_warnings', '?')}",
+        count(report, "unchanged_symbols_moved"),
+        count(report, "fields_lost"),
+        count(report, "symbols_added"),
         f"{report['elapsed_seconds']:.0f}s",
     ]
 
@@ -596,13 +659,18 @@ def main():
             report = {"case": name, "error": str(error)}
             print(f"{name}: {error}", file=sys.stderr)
         reports.append(report)
-        print(json.dumps(report, indent=2)[:4000], flush=True)
+        print(" | ".join(row(report)), flush=True)
+        for failure in report.get("checks", {}).get("fail", []):
+            print(f"    failed check: {failure}", flush=True)
 
     table = scoreboard(reports)
     print("\n" + table)
     if args.scoreboard:
         args.scoreboard.write_text(table + "\n", encoding="utf-8")
-    raise SystemExit(1 if any("error" in r for r in reports) else 0)
+    broken = any(
+        "error" in report or report.get("checks", {}).get("fail") for report in reports
+    )
+    raise SystemExit(1 if broken else 0)
 
 
 if __name__ == "__main__":

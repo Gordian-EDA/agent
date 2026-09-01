@@ -9,7 +9,6 @@
 //! is flat and stable rather than general: everything a check or a judge needs
 //! about one schematic, and nothing else.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use sch_doc::{Netlist, SchDoc, SymbolInst, connect};
@@ -63,7 +62,9 @@ fn load(root: &Path) -> (Vec<Sheet>, Vec<String>) {
     for path in sheet_paths(root) {
         let name = path
             .strip_prefix(root)
-            .unwrap_or(&path)
+            .ok()
+            .filter(|rest| !rest.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new(path.file_name().unwrap_or_default()))
             .to_string_lossy()
             .into_owned();
         match SchDoc::read(&path) {
@@ -77,26 +78,8 @@ fn load(root: &Path) -> (Vec<Sheet>, Vec<String>) {
     (sheets, errors)
 }
 
-/// `REF` for a single-unit part, `REF/unit` when the reference carries several
-/// units, so multi-unit parts stay distinguishable in the symbol table.
-fn symbol_key(refdes: &str, unit: u32, multi: bool) -> String {
-    if multi {
-        format!("{refdes}/{unit}")
-    } else {
-        refdes.to_string()
-    }
-}
-
 fn facts(root: &Path) -> String {
     let (sheets, errors) = load(root);
-
-    let mut units: BTreeMap<String, usize> = BTreeMap::new();
-    for sheet in &sheets {
-        for symbol in sheet.doc.symbols() {
-            *units.entry(field(symbol, "Reference")).or_default() += 1;
-        }
-    }
-
     let mut symbols = Vec::new();
     let mut warnings = Vec::new();
     let mut partition: Vec<Vec<String>> = Vec::new();
@@ -106,10 +89,13 @@ fn facts(root: &Path) -> String {
     for sheet in &sheets {
         for symbol in sheet.doc.symbols() {
             let refdes = field(symbol, "Reference");
-            let multi = units.get(&refdes).copied().unwrap_or(1) > 1;
             symbols.push(Symbol {
-                key: symbol_key(&refdes, symbol.unit, multi),
+                // Always unit-qualified: a multi-unit part must stay
+                // distinguishable, and a part that gains or loses units must
+                // not silently re-key the ones it kept.
+                key: format!("{refdes}/{}", symbol.unit),
                 refdes,
+                uuid: symbol.uuid.clone(),
                 sheet: sheet.name.clone(),
                 lib_id: symbol.lib_id.clone(),
                 unit: symbol.unit,
@@ -219,6 +205,7 @@ fn merge(sheets: &[Sheet]) -> Netlist {
 struct Symbol {
     key: String,
     refdes: String,
+    uuid: String,
     sheet: String,
     lib_id: String,
     unit: u32,
@@ -241,6 +228,7 @@ impl Symbol {
         let mut out = Object::new();
         out.add("key", quote(&self.key));
         out.add("ref", quote(&self.refdes));
+        out.add("uuid", quote(&self.uuid));
         out.add("sheet", quote(&self.sheet));
         out.add("lib_id", quote(&self.lib_id));
         out.add("unit", self.unit.to_string());
@@ -262,8 +250,14 @@ fn pin_name(pin: &sch_doc::PinRef) -> String {
     format!("{}.{}", pin.refdes, pin.pin)
 }
 
+/// A coordinate as JSON. A non-finite float has no JSON spelling, and
+/// `{:.4}` would emit a bare `NaN` that breaks the whole document.
 fn round(value: f64) -> String {
-    format!("{value:.4}")
+    if value.is_finite() {
+        format!("{value:.4}")
+    } else {
+        "null".to_string()
+    }
 }
 
 /// A comma-joined JSON object built key by key.

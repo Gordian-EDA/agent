@@ -1,5 +1,7 @@
 The transistor must switch the LED low-side with the base network and series resistor sized for 5 V, and both connectors must be wired.
+expect: agent_exit == 0
 expect: schematic_created == true
+expect: sch_errors == []
 expect: erc_errors == 0
 expect: partition_matches_kicad == true
 expect: part_count >= 8
