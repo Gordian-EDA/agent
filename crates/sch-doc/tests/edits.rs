@@ -90,6 +90,22 @@ fn setting_a_field_touches_one_block_and_no_net() {
 }
 
 #[test]
+fn renaming_to_an_existing_reference_is_refused_without_editing() {
+    let (_, source) = fixture();
+    let mut doc = SchDoc::parse(&source).expect("parse");
+    let before = doc.to_text();
+
+    let refused = doc.set_field("R7", "Reference", "C3");
+
+    assert!(
+        matches!(refused, Err(sch_doc::Error::ReferenceInUse(ref name)) if name == "C3"),
+        "{refused:?}"
+    );
+    assert!(!doc.is_edited());
+    assert_eq!(doc.to_text(), before);
+}
+
+#[test]
 fn moving_a_symbol_carries_its_fields_and_drops_only_its_own_pins() {
     let (source, text, delta) = edited(|doc| {
         let r7 = doc.symbol_by_ref("R7").expect("R7");

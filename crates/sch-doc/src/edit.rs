@@ -120,9 +120,8 @@ impl SchDoc {
     /// rather than flattening the table.
     pub fn set_field(&mut self, id: &str, name: &str, value: &str) -> Result<()> {
         let uuid = self.uuid_of(id)?;
-        let sheet_path = self.sheet_path();
-        if name == "Reference" && !self.owns_annotation(&uuid) {
-            return Err(Error::ForeignInstances(id.to_string()));
+        if name == "Reference" {
+            return self.set_reference(&[uuid], value);
         }
         let mut symbol = self.symbol_mut(&uuid)?;
         let origin = symbol.at;
@@ -133,10 +132,44 @@ impl SchDoc {
                 symbol.fields.insert(name.to_string(), field);
             }
         }
-        if name == "Reference" {
+        drop(symbol);
+        self.mark_edited();
+        Ok(())
+    }
+
+    /// Rename one symbol or every unit of a part without allowing a duplicate
+    /// reference designator on the sheet.
+    pub fn set_reference(&mut self, ids: &[String], value: &str) -> Result<()> {
+        let uuids: Vec<String> = ids
+            .iter()
+            .map(|id| self.uuid_of(id))
+            .collect::<Result<_>>()?;
+        if self
+            .symbols()
+            .any(|symbol| symbol.refdes() == value && !uuids.contains(&symbol.uuid))
+        {
+            return Err(Error::ReferenceInUse(value.to_string()));
+        }
+        for uuid in &uuids {
+            if !self.owns_annotation(uuid) {
+                return Err(Error::ForeignInstances(uuid.clone()));
+            }
+        }
+
+        let sheet_path = self.sheet_path();
+        for uuid in uuids {
+            let mut symbol = self.symbol_mut(&uuid)?;
+            let origin = symbol.at;
+            match symbol.fields.get_mut("Reference") {
+                Some(field) => field.value = value.to_string(),
+                None => {
+                    let field =
+                        new_field("Reference", value, Pose::new(origin.x, origin.y, 0.0), true);
+                    symbol.fields.insert("Reference".to_string(), field);
+                }
+            }
             set_instance_reference(&mut symbol.raw.node, &sheet_path, value);
         }
-        drop(symbol);
         self.mark_edited();
         Ok(())
     }
@@ -534,7 +567,7 @@ impl SchDoc {
                 list(vec![
                     sym("path"),
                     quoted(path),
-                    tagged("reference", vec![quoted(refdes)]),
+                    tagged("reference", vec![sym(refdes)]),
                     tagged("unit", vec![num(1.0)]),
                 ]),
             ])],

@@ -586,6 +586,24 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if units.is_empty() {
         return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
     }
+    let renamed_to = fields.get("Reference").and_then(Value::as_str);
+    if let Some(new_refdes) = renamed_to
+        && new_refdes != refdes
+    {
+        let clashes = refs::units(&edit.doc, new_refdes);
+        if !clashes.is_empty() {
+            let units = clashes
+                .iter()
+                .map(|(unit, _)| unit.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Ok(json!({
+                "error": format!(
+                    "reference clash: cannot rename {refdes} to {new_refdes}; {new_refdes} is already used by unit(s) {units}; nothing was written"
+                ),
+            }));
+        }
+    }
     let was = refs::nets_touching(edit.before(), &[refdes.to_string()]);
     let mut allow = Allow::nothing().nets(was).part(refdes);
     if let Some(new) = fields.get("Reference").and_then(Value::as_str) {
@@ -597,8 +615,13 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             Value::Null => "",
             other => other.as_str().unwrap_or_default(),
         };
-        for (_, uuid) in &units {
-            edit.doc.set_field(uuid, name, text)?;
+        if name == "Reference" {
+            let uuids: Vec<String> = units.iter().map(|(_, uuid)| uuid.clone()).collect();
+            edit.doc.set_reference(&uuids, text)?;
+        } else {
+            for (_, uuid) in &units {
+                edit.doc.set_field(uuid, name, text)?;
+            }
         }
         applied.insert(name.clone(), json!(text));
     }
