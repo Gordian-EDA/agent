@@ -2939,6 +2939,7 @@ name = "sch-check"
 version = "0.1.0"
 dependencies = [
  "circuit-graph",
+ "fuzzy-matcher",
  "indexmap 2.14.0",
  "kicad-symbol",
  "sch-place",

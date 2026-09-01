@@ -2,7 +2,7 @@
 
 use sch_check::model::{Origin, PinTarget};
 use sch_check::place_parts::{
-    DEFAULT_BLOCK, PlacePartsInput, into_design, place_parts_input_schema,
+    DEFAULT_BLOCK, ExistingNetPins, PlacePartsInput, into_design, place_parts_input_schema,
 };
 use sch_check::{PinType, SymbolTable};
 
@@ -84,7 +84,7 @@ fn unknown_keys_are_rejected() {
 
 #[test]
 fn pins_lower_to_physical_numbers() {
-    let (design, diags) = into_design(&parse(), &provider());
+    let (design, diags, _) = into_design(&parse(), &provider(), &Default::default());
     assert!(!diags.has_errors(), "{:?}", diags.0);
     let comps = &design.blocks[DEFAULT_BLOCK].components;
     let mcu = &comps["U2"];
@@ -99,7 +99,7 @@ fn pins_lower_to_physical_numbers() {
 
 #[test]
 fn decouple_expands_into_synthesized_caps() {
-    let (design, _) = into_design(&parse(), &provider());
+    let (design, _, _) = into_design(&parse(), &provider(), &Default::default());
     let comps = &design.blocks[DEFAULT_BLOCK].components;
     let synth: Vec<(&String, &sch_check::model::Component)> = comps
         .iter()
@@ -126,7 +126,7 @@ fn decouple_expands_into_synthesized_caps() {
 
 #[test]
 fn only_attributed_nets_get_an_entry() {
-    let (design, _) = into_design(&parse(), &provider());
+    let (design, _, _) = into_design(&parse(), &provider(), &Default::default());
     // No power symbol in the fixture, so no net earns an attribute — the same
     // design the kernel produces for the same circuit.
     assert!(design.nets.is_empty(), "{:?}", design.nets);
@@ -136,7 +136,7 @@ fn only_attributed_nets_get_an_entry() {
              {"ref": "R1", "part": "Device:R", "pins": {"1": "+3V3", "2": "SIG"}}]}"#,
     )
     .unwrap();
-    let (design, _) = into_design(&input, &provider());
+    let (design, _, _) = into_design(&input, &provider(), &Default::default());
     assert!(design.nets["+3V3"].power);
     assert!(!design.nets.contains_key("SIG"));
 }
@@ -147,9 +147,82 @@ fn an_unknown_pin_is_reported_with_a_suggestion() {
         r#"{"parts": [{"ref": "U2", "part": "MCU:STM32F103C8T", "pins": {"PA99": "SIG"}}]}"#,
     )
     .unwrap();
-    let (_, diags) = into_design(&input, &provider());
+    let (_, diags, _) = into_design(&input, &provider(), &Default::default());
     let d = diags.0.iter().find(|d| d.code == "unknown-pin").unwrap();
     assert_eq!(d.suggestion.as_deref(), Some("PA9"));
+}
+
+fn live_power_nets() -> ExistingNetPins {
+    [("+3V3".to_string(), 1), ("GND".to_string(), 1)]
+        .into_iter()
+        .collect()
+}
+
+#[test]
+fn a_dangling_led_cathode_is_refused_with_the_pin() {
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "D1", "part": "Device:LED",
+             "pins": {"A": "+3V3", "K": "LED_K"}}]}"#,
+    )
+    .unwrap();
+    let (_, _, audit) = into_design(&input, &provider(), &live_power_nets());
+
+    assert!(!audit.is_valid());
+    assert_eq!(audit.dangling.len(), 1);
+    assert_eq!(audit.dangling[0].refdes, "D1");
+    assert_eq!(audit.dangling[0].pin, "K");
+    assert_eq!(audit.dangling[0].net, "LED_K");
+}
+
+#[test]
+fn an_led_cathode_on_existing_ground_is_accepted() {
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "D1", "part": "Device:LED",
+             "pins": {"A": "+3V3", "K": "GND"}}]}"#,
+    )
+    .unwrap();
+    let (_, _, audit) = into_design(&input, &provider(), &live_power_nets());
+
+    assert!(audit.is_valid(), "{audit:?}");
+}
+
+#[test]
+fn a_single_pin_gnd_typo_suggests_the_existing_ground_net() {
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "D1", "part": "Device:LED",
+             "pins": {"A": "+3V3", "K": "GNDD"}}]}"#,
+    )
+    .unwrap();
+    let (_, _, audit) = into_design(&input, &provider(), &live_power_nets());
+
+    assert_eq!(audit.did_you_mean["GNDD"], "GND");
+}
+
+#[test]
+fn a_library_no_connect_pin_is_invalid_before_placement() {
+    let mut symbols = provider();
+    symbols.mock_add(
+        "MCU:WithNC",
+        vec![
+            ("1", "NC", PinType::NoConnect, 1),
+            ("2", "IO", PinType::Other, 1),
+        ],
+    );
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "U3", "part": "MCU:WithNC",
+             "pins": {"NC": "GND", "IO": "+3V3"}}]}"#,
+    )
+    .unwrap();
+    let (_, _, audit) = into_design(&input, &symbols, &live_power_nets());
+
+    assert!(!audit.is_valid());
+    assert!(
+        audit
+            .unknown_pins
+            .iter()
+            .any(|finding| finding.contains("library-no-connect-wired")),
+        "{audit:?}"
+    );
 }
 
 #[test]
@@ -160,7 +233,7 @@ fn ambiguous_decouple_rails_are_reported() {
              "decouple": {"100nF": 1}}]}"#,
     )
     .unwrap();
-    let (design, diags) = into_design(&input, &provider());
+    let (design, diags, _) = into_design(&input, &provider(), &Default::default());
     assert!(diags.0.iter().any(|d| d.code == "decouple-ambiguous"));
     assert_eq!(design.blocks[DEFAULT_BLOCK].components.len(), 1);
 }
@@ -199,7 +272,7 @@ fn unmentioned_signal_pins_become_no_connects() {
              "pins": {"VDD": "+3V3", "VSS": "GND", "PA9": "TX"}}]}"#,
     )
     .unwrap();
-    let (design, _) = into_design(&input, &provider());
+    let (design, _, _) = into_design(&input, &provider(), &Default::default());
     let mcu = &design.blocks[DEFAULT_BLOCK].components["U2"];
     // NRST (4) and PA10 (6) were left out: explicit no-connects, not silence.
     assert_eq!(mcu.pins["4"], PinTarget::NoConnect);
@@ -214,7 +287,7 @@ fn a_duplicate_refdes_is_an_error() {
         r#"{"parts": [{"ref": "R1", "part": "Device:R"}, {"ref": "R1", "part": "Device:C"}]}"#,
     )
     .unwrap();
-    let (design, diags) = into_design(&input, &provider());
+    let (design, diags, _) = into_design(&input, &provider(), &Default::default());
     assert!(diags.0.iter().any(|d| d.code == "duplicate-ref"));
     // The last declaration wins; the diagnostic says the other one is lost.
     assert_eq!(
@@ -230,7 +303,7 @@ fn two_keys_on_one_physical_pin_conflict() {
              "pins": {"3": "GND", "VSS": "AGND"}}]}"#,
     )
     .unwrap();
-    let (_, diags) = into_design(&input, &provider());
+    let (_, diags, _) = into_design(&input, &provider(), &Default::default());
     assert!(
         diags.0.iter().any(|d| d.code == "pin-conflict"),
         "{:?}",
@@ -243,7 +316,7 @@ fn parts_land_on_the_named_sheet() {
     let input: PlacePartsInput =
         serde_json::from_str(r#"{"block": "power", "parts": [{"ref": "R1", "part": "Device:R"}]}"#)
             .unwrap();
-    let (design, _) = into_design(&input, &provider());
+    let (design, _, _) = into_design(&input, &provider(), &Default::default());
     assert!(design.blocks.contains_key("power"));
 }
 

@@ -380,10 +380,12 @@ fn audit_bus_power_support(
                 suggestion: format!("add 4.7uF between {rail} and GND near the powered block"),
             });
         }
-        let has_entry = components.iter().copied().any(|component| {
-            is_connector_like(&component.part) && component_nets(component).contains(&rail)
+        let entry_path = supply_entry_path(&rail, &components);
+        let protected = entry_path.as_ref().is_some_and(|path| {
+            path.iter()
+                .any(|net| has_protection(net, &components, symbols))
         });
-        if has_entry && !has_protection(&rail, &components, symbols) {
+        if entry_path.is_some() && !protected {
             gaps.push(Gap {
                 kind: "power_entry_protection".into(),
                 refdes: None,
@@ -392,7 +394,7 @@ fn audit_bus_power_support(
                     "add a bidirectional supply TVS from {rail} to GND at its connector"
                 ),
             });
-        } else if !has_entry && !has_power_output(&rail, &components, symbols) {
+        } else if entry_path.is_none() && !has_power_output(&rail, &components, symbols) {
             gaps.push(Gap {
                 kind: "power_entry".into(),
                 refdes: None,
@@ -631,6 +633,47 @@ fn has_power_output(rail: &str, components: &[&Component], symbols: &SymbolTable
                     .any(|pin| pin.etype == PinType::PowerOutput && pin.net == rail)
             })
         })
+}
+
+fn supply_entry_path(rail: &str, components: &[&Component]) -> Option<BTreeSet<String>> {
+    let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for component in components
+        .iter()
+        .copied()
+        .filter(|component| is_supply_entry_series(component))
+    {
+        let nets: Vec<String> = component_nets(component).into_iter().collect();
+        if let [a, b] = nets.as_slice() {
+            edges.entry(a.clone()).or_default().push(b.clone());
+            edges.entry(b.clone()).or_default().push(a.clone());
+        }
+    }
+    let mut reachable = BTreeSet::new();
+    let mut queue = VecDeque::from([rail.to_string()]);
+    while let Some(net) = queue.pop_front() {
+        if !reachable.insert(net.clone()) {
+            continue;
+        }
+        queue.extend(edges.get(&net).into_iter().flatten().cloned());
+    }
+    components
+        .iter()
+        .copied()
+        .filter(|component| is_connector_like(&component.part))
+        .any(|component| {
+            component_nets(component)
+                .iter()
+                .any(|net| reachable.contains(net) && !is_ground(net))
+        })
+        .then_some(reachable)
+}
+
+fn is_supply_entry_series(component: &Component) -> bool {
+    let part = component.part.to_ascii_uppercase();
+    part.contains("FUSE")
+        || part == "DEVICE:D"
+        || part.contains(":D_SCHOTTKY")
+        || part.contains(":D_IDEAL")
 }
 
 fn has_resistive_path(from: &str, to: &str, components: &[&Component]) -> bool {
@@ -879,5 +922,51 @@ mod tests {
             .find(|gap| gap.kind == "can_termination")
             .expect("CAN termination gap");
         assert_eq!(termination.net.as_deref(), Some("CAN_H/CAN_L"));
+    }
+
+    #[test]
+    fn protected_series_power_entry_reaches_the_rail() {
+        let design = design(&[
+            (
+                "J1",
+                component(
+                    "Connector_Generic:Conn_01x02",
+                    &[("1", "VIN_RAW"), ("2", "GND")],
+                ),
+            ),
+            (
+                "F1",
+                component(
+                    "Device:Polyfuse",
+                    &[("1", "VIN_RAW"), ("2", "VIN_PROT")],
+                ),
+            ),
+            (
+                "D1",
+                component("Device:D", &[("1", "VIN_PROT"), ("2", "+3V3")]),
+            ),
+            (
+                "D2",
+                component("Device:D_TVS", &[("1", "VIN_PROT"), ("2", "GND")]),
+            ),
+        ]);
+        let components = design.blocks["main"]
+            .components
+            .values()
+            .collect::<Vec<_>>();
+
+        let path = supply_entry_path("+3V3", &components).expect("connector reaches rail");
+
+        assert_eq!(
+            path,
+            ["+3V3", "VIN_PROT", "VIN_RAW"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+        assert!(
+            path.iter()
+                .any(|net| has_protection(net, &components, &symbols()))
+        );
     }
 }

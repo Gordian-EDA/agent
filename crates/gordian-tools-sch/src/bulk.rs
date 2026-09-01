@@ -79,12 +79,24 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .map(|part| part.refdes.clone())
         .collect::<Vec<_>>();
-    let report = sch_floorplan::live::place_parts(
+    let report = match sch_floorplan::live::place_parts(
         ctx.env(),
         &mut edit.doc,
         &payload,
         placement_engine(ctx.config().engines.schematic_placer).as_ref(),
-    )?;
+    ) {
+        Ok(report) => report,
+        Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
+            return Ok(json!({
+                "ok": false,
+                "code": "invalid_payload",
+                "dangling": audit.dangling,
+                "did_you_mean": audit.did_you_mean,
+                "unknown_pins": audit.unknown_pins,
+            }));
+        }
+        Err(error) => return Err(error.into()),
+    };
     if !report.committed {
         return Ok(refused_place(report));
     }

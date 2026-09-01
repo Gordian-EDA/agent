@@ -225,7 +225,8 @@ fn bulk_create_matches_the_whole_sheet_pipeline() {
     for name in fixture_names() {
         let source = std::fs::read_to_string(fixture(&name)).unwrap();
         let input: PlacePartsInput = serde_json::from_str(&source).unwrap();
-        let (design, diagnostics) = sch_check::into_design(&input, &provider);
+        let (design, diagnostics, _) =
+            sch_check::into_design(&input, &provider, &Default::default());
         assert!(!diagnostics.has_errors(), "{name}: {diagnostics:#?}");
 
         let old = whole_sheet(&env, &design, dir.path(), &name);

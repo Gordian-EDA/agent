@@ -2295,6 +2295,35 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             },
         );
     }
+    if result.get("ok").and_then(Value::as_bool) == Some(false) {
+        let code = result
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("refused");
+        let detail = result
+            .get("dangling")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(|item| {
+                Some(format!(
+                    "{}.{} on {} is dangling",
+                    item.get("ref")?.as_str()?,
+                    item.get("pin")?.as_str()?,
+                    item.get("net")?.as_str()?
+                ))
+            })
+            .or_else(|| {
+                result
+                    .get("unknown_pins")
+                    .and_then(Value::as_array)
+                    .and_then(|items| items.iter().find_map(Value::as_str))
+                    .map(str::to_string)
+            });
+        return detail.map_or_else(
+            || format!("refused: {code}"),
+            |detail| format!("refused: {code} — {}", compact_summary_text(&detail, 160)),
+        );
+    }
     match name {
         "search_symbols" | "search_footprints" => search_summary(input, result),
         "get_symbol_info" => {
@@ -2341,7 +2370,10 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             )
         }
         "place_parts" => {
-            let gaps = result.get("gaps").and_then(Value::as_array).map_or(0, Vec::len);
+            let gaps = result
+                .get("gaps")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
             format!("placed block; {gaps} completeness gaps remain")
         }
         "project_info" => result
@@ -2618,4 +2650,25 @@ fn pop_n(history: &mut Vec<ChatMessage>, turn_starts: &mut Vec<usize>, k: usize)
         }
     }
     popped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_payload_summary_is_not_reported_as_placed() {
+        let result = json!({
+            "ok": false,
+            "code": "invalid_payload",
+            "dangling": [{"ref": "D1", "pin": "K", "net": "LED_K"}],
+            "did_you_mean": {},
+            "unknown_pins": []
+        });
+
+        assert_eq!(
+            tool_summary("place_parts", &json!({}), &result),
+            "refused: invalid_payload — D1.K on LED_K is dangling"
+        );
+    }
 }

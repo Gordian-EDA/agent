@@ -107,7 +107,8 @@ fn placing_a_two_pin_part_honours_every_authored_orientation() {
                 }
             }))
             .unwrap();
-            let (design, diagnostics) = sch_check::into_design(&input, &provider);
+            let (design, diagnostics, _) =
+                sch_check::into_design(&input, &provider, &Default::default());
             assert!(!diagnostics.has_errors(), "{diagnostics:#?}");
 
             let mut doc = live::blank_sheet().unwrap();
