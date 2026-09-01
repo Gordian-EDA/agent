@@ -71,9 +71,11 @@ pub struct App {
     pub input: String,
     /// Cursor position in the input line, in **chars** (0 ..= char count).
     pub cursor: usize,
-    /// A prompt queued (via Tab) while a turn was running, auto-submitted when the
-    /// turn ends so the next instruction isn't dropped. `None` when nothing waits.
-    pub queued: Option<String>,
+    /// Prompts queued (via Enter) while a turn was running, oldest first. Drained
+    /// one at a time as each turn ends, so the next instruction isn't dropped —
+    /// and, since a fresh turn's own `TurnEnded` drains the next one, further
+    /// queued prompts chain through in order. Empty when nothing waits.
+    pub queued: Vec<String>,
     /// Large pasted blocks hidden behind compact, unique composer tokens. A
     /// vector preserves multiple pastes in one prompt without overwriting the
     /// first payload.
@@ -154,7 +156,7 @@ impl App {
             live_assistant: None,
             input: String::new(),
             cursor: 0,
-            queued: None,
+            queued: Vec::new(),
             pastes: Vec::new(),
             history: Vec::new(),
             history_pos: None,

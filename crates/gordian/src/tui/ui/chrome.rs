@@ -98,6 +98,24 @@ fn draw_jump_hint(f: &mut Frame, inner: Rect) {
 /// animated frame, elapsed seconds, and the interrupt hint, plus a second detail
 /// row naming the active tool or review phase. Drawn only while a turn is in
 /// flight.
+/// Queued prompts shown under the running indicator, capped so a long queue
+/// can't swallow the transcript.
+const MAX_QUEUED_ROWS: usize = 3;
+
+/// Rows [`draw_running`] needs at the current queue depth — shared with the
+/// layout in `ui::mod` so the reserved space and what actually renders can
+/// never drift apart (the [`super::composer::approval_height`] pattern).
+pub(super) fn running_rows(app: &App) -> u16 {
+    let queued = if app.queued.is_empty() {
+        0
+    } else {
+        let shown = app.queued.len().min(MAX_QUEUED_ROWS);
+        let overflow = usize::from(app.queued.len() > MAX_QUEUED_ROWS);
+        (shown + overflow) as u16
+    };
+    1 + u16::from(app.active_work.is_some()) + queued
+}
+
 pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
     let frame = SPINNER[app.spinner % SPINNER.len()];
     let secs = app.turn_elapsed_secs().unwrap_or(0);
@@ -130,6 +148,27 @@ pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
                 theme::SUBTLE.add_modifier(Modifier::ITALIC),
             ),
         ]));
+    }
+    // Every Enter pressed mid-turn queues rather than vanishing — list what's
+    // waiting, oldest (next to run) first, so a queue is never invisible.
+    if !app.queued.is_empty() {
+        let inner_w = body(area).width as usize;
+        let shown = app.queued.len().min(MAX_QUEUED_ROWS);
+        for (i, prompt) in app.queued.iter().take(shown).enumerate() {
+            let prefix = format!("  {} ", i + 1);
+            let room = inner_w.saturating_sub(prefix.chars().count());
+            let text: String = prompt.chars().take(room).collect();
+            lines.push(Line::from(vec![
+                Span::styled(prefix, dim),
+                Span::styled(text, theme::SUBTLE),
+            ]));
+        }
+        if app.queued.len() > MAX_QUEUED_ROWS {
+            lines.push(Line::from(Span::styled(
+                format!("  +{} more queued", app.queued.len() - MAX_QUEUED_ROWS),
+                dim,
+            )));
+        }
     }
     f.render_widget(Paragraph::new(lines), body(area));
 }

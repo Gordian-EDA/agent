@@ -499,7 +499,7 @@ impl Shell {
     }
 
     /// Finish only the current task and execute any follow-up action returned by
-    /// the reducer (notably the next prompt queued with Tab).
+    /// the reducer (notably the next queued prompt).
     fn finish_task(&mut self, app: &mut App, task_id: TaskId, reason: TurnEndReason) {
         if self.active_task_id != Some(task_id) {
             return;
@@ -814,7 +814,7 @@ mod shell_tests {
     }
 
     #[test]
-    fn completion_dispatches_the_prompt_queued_during_the_turn() {
+    fn turn_completion_dispatches_the_prompt_queued_during_the_turn() {
         let mut shell = shell();
         let mut app = app();
         app.update(Msg::Char('x'));
@@ -822,12 +822,12 @@ mod shell_tests {
         for c in "next".chars() {
             app.update(Msg::Char(c));
         }
-        app.update(Msg::Complete);
+        app.update(Msg::Submit);
         shell.active_task_id = Some(1);
 
         shell.finish_task(&mut app, 1, TurnEndReason::Completed);
 
-        assert!(app.queued.is_none());
+        assert!(app.queued.is_empty());
         assert!(
             app.transcript
                 .iter()

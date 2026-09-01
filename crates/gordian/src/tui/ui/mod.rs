@@ -81,9 +81,10 @@ pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
         .map(|d| composer::approval_height(d, area.width))
         .unwrap_or(0);
     // The running indicator takes a row while a turn is in flight, plus a second
-    // detail row when a named unit of work is currently executing.
+    // detail row when a named unit of work is currently executing, plus one row
+    // per queued prompt (capped).
     let running_h = if app.running {
-        1 + u16::from(app.active_work.is_some())
+        chrome::running_rows(app)
     } else {
         0
     };

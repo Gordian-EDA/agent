@@ -320,6 +320,33 @@ fn tui_screenshots() {
     app.active_work = Some("route_board".into());
     shoot("03_running", 96, 32, &mut app);
 
+    // 3b. A turn in flight with prompts queued behind it (via Enter) — each one
+    //     listed, oldest first, so the queue is never just a count.
+    let mut app = App::new(status());
+    seed_conversation(&mut app);
+    app.running = true;
+    app.spinner = 1;
+    app.active_work = Some("route_board".into());
+    app.queued = vec![
+        "then run DRC and fix any clearance violations".into(),
+        "add a 3.3V rail with its own LDO".into(),
+    ];
+    shoot("03b_queued", 96, 32, &mut app);
+
+    // 3c. More queued prompts than the cap — the overflow collapses to a count.
+    let mut app = App::new(status());
+    seed_conversation(&mut app);
+    app.running = true;
+    app.spinner = 1;
+    app.queued = vec![
+        "one".into(),
+        "two".into(),
+        "three".into(),
+        "four".into(),
+        "five".into(),
+    ];
+    shoot("03c_queued_overflow", 96, 32, &mut app);
+
     // 4. Empty / first-launch state.
     let mut app = App::new(status());
     shoot("04_empty", 96, 32, &mut app);
