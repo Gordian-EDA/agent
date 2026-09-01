@@ -31,6 +31,7 @@ struct ResolvedPin {
 struct MatchedIdioms {
     decoupling_caps: BTreeSet<String>,
     i2c_pullup_nets: BTreeSet<String>,
+    led_indicator: bool,
 }
 
 /// Audit support circuitry whose absence is unambiguous from connectivity and symbol metadata.
@@ -58,6 +59,8 @@ pub fn audit(design: &Design, symbols: &SymbolTable) -> Vec<Gap> {
                 }
             }
         }
+        matched.led_indicator |=
+            !circuit_graph::find(&graph, &circuit_graph::library::LED_INDICATOR).is_empty();
     }
 
     for block in design.blocks.values() {
@@ -65,6 +68,7 @@ pub fn audit(design: &Design, symbols: &SymbolTable) -> Vec<Gap> {
         audit_control_straps(block, symbols, &mut gaps);
     }
     audit_buses(design, &matched, &mut gaps);
+    audit_bus_power_support(design, symbols, &matched, &mut gaps);
     audit_connector_protection(design, symbols, &mut gaps);
 
     gaps.sort_by(|a, b| {
@@ -290,24 +294,100 @@ fn audit_connector_protection(design: &Design, symbols: &SymbolTable, gaps: &mut
                 continue;
             };
             for pin in resolved_pins(component, &meta) {
+                let protected = has_protection(&pin.net, &components, symbols);
+                let filtered = has_signal_shunt_cap(&pin.net, &components);
                 if matches!(pin.etype, PinType::PowerInput | PinType::PowerOutput)
                     || is_power_net(&pin.net)
-                    || has_protection(&pin.net, &components)
+                    || protected && (!is_uart_signal(&pin.net) || filtered)
                 {
                     continue;
                 }
+                let support = match (protected, is_uart_signal(&pin.net), filtered) {
+                    (false, true, false) => "bidirectional TVS/ESD protection and a 100pF shunt capacitor",
+                    (false, _, _) => "bidirectional TVS/ESD protection",
+                    (true, true, false) => "a 100pF shunt capacitor",
+                    (true, _, _) => continue,
+                };
                 gaps.push(Gap {
                     kind: "connector_protection".into(),
                     refdes: Some(refdes.clone()),
                     net: Some(pin.net.clone()),
                     suggestion: format!(
-                        "add bidirectional TVS/ESD protection from {refdes}.{} ({}) to GND at the connector",
+                        "add {support} from {refdes}.{} ({}) to GND at the connector",
                         display_pin(&pin),
                         pin.net
                     ),
                 });
             }
         }
+    }
+}
+
+fn audit_bus_power_support(
+    design: &Design,
+    symbols: &SymbolTable,
+    matched: &MatchedIdioms,
+    gaps: &mut Vec<Gap>,
+) {
+    if !all_nets(design).iter().any(|net| is_bus_net(net)) {
+        return;
+    }
+    let components: Vec<&Component> = design
+        .blocks
+        .values()
+        .flat_map(|block| block.components.values())
+        .filter(|component| !component.dnp)
+        .collect();
+    let mut rails = BTreeSet::new();
+    for component in components.iter().copied().filter(|component| is_ic(component)) {
+        let Some(meta) = symbols.symbol(&component.part) else {
+            continue;
+        };
+        rails.extend(
+            resolved_pins(component, &meta)
+                .into_iter()
+                .filter(|pin| {
+                    pin.etype == PinType::PowerInput
+                        && !is_ground(&pin.net)
+                        && is_supply_input(pin)
+                })
+                .map(|pin| pin.net),
+        );
+    }
+    for rail in rails {
+        if !components
+            .iter()
+            .copied()
+            .any(|component| is_bulk_cap(component, &rail))
+        {
+            gaps.push(Gap {
+                kind: "bulk_capacitor".into(),
+                refdes: None,
+                net: Some(rail.clone()),
+                suggestion: format!("add 4.7uF between {rail} and GND near the powered block"),
+            });
+        }
+        let has_entry = components.iter().copied().any(|component| {
+            is_connector_like(&component.part) && component_nets(component).contains(&rail)
+        });
+        if !has_entry && !has_power_output(&rail, &components, symbols) {
+            gaps.push(Gap {
+                kind: "power_entry".into(),
+                refdes: None,
+                net: Some(rail.clone()),
+                suggestion: format!(
+                    "add a 2-pin power connector feeding {rail} through a resettable fuse and reverse-polarity diode, with a TVS from the protected rail to GND"
+                ),
+            });
+        }
+    }
+    if !matched.led_indicator {
+        gaps.push(Gap {
+            kind: "bus_indicator".into(),
+            refdes: None,
+            net: None,
+            suggestion: "add a power/status LED with its own current-limiting resistor".into(),
+        });
     }
 }
 
@@ -427,15 +507,67 @@ fn has_series_resistor(net: &str, components: &[&Component]) -> bool {
         .any(|resistor| far_net(resistor, net).is_some_and(|far| !is_power_net(&far) && far != net))
 }
 
-fn has_protection(net: &str, components: &[&Component]) -> bool {
+fn has_protection(net: &str, components: &[&Component], symbols: &SymbolTable) -> bool {
     components.iter().copied().any(|component| {
         let part = component.part.to_ascii_uppercase();
+        let metadata = symbols.symbol(&component.part);
+        let description = metadata
+            .as_ref()
+            .and_then(|meta| meta.description.as_deref())
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        let keywords = metadata
+            .as_ref()
+            .and_then(|meta| meta.keywords.as_deref())
+            .unwrap_or_default()
+            .to_ascii_uppercase();
         (part.contains("TVS")
             || part.contains("ESD")
             || part.contains("TRANSIL")
-            || part.contains("VARISTOR"))
+            || part.contains("VARISTOR")
+            || description.contains("TVS")
+            || description.contains("TRANSIENT VOLTAGE")
+            || keywords.contains("TRANSIL")
+            || keywords.contains("TRANSIENT VOLTAGE"))
             && component_nets(component).contains(net)
     })
+}
+
+fn has_signal_shunt_cap(net: &str, components: &[&Component]) -> bool {
+    components.iter().copied().any(|component| {
+        is_capacitor(component)
+            && component_nets(component).contains(net)
+            && component_nets(component).iter().any(|other| is_ground(other))
+            && component
+                .value
+                .as_deref()
+                .and_then(crate::erc::parse_value)
+                .is_some_and(|value| value <= 10e-9)
+    })
+}
+
+fn is_bulk_cap(component: &Component, rail: &str) -> bool {
+    is_bypass_cap(component, rail)
+        && component
+            .value
+            .as_deref()
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(crate::erc::parse_value)
+            .is_some_and(|value| value >= 1e-6)
+}
+
+fn has_power_output(rail: &str, components: &[&Component], symbols: &SymbolTable) -> bool {
+    components
+        .iter()
+        .copied()
+        .filter(|component| is_ic(component))
+        .any(|component| {
+            symbols.symbol(&component.part).is_some_and(|meta| {
+                resolved_pins(component, &meta)
+                    .iter()
+                    .any(|pin| pin.etype == PinType::PowerOutput && pin.net == rail)
+            })
+        })
 }
 
 fn has_resistive_path(from: &str, to: &str, components: &[&Component]) -> bool {
@@ -521,12 +653,45 @@ fn is_spi_cs(net: &str) -> bool {
     name.starts_with("SPI") && (name.ends_with("CS") || name.ends_with("NSS"))
 }
 
+fn is_uart_signal(net: &str) -> bool {
+    matches!(normalized(net).as_str(), "TX" | "TXD" | "RX" | "RXD")
+}
+
+fn is_bus_net(net: &str) -> bool {
+    can_kind(net).is_some()
+        || i2c_kind(net).is_some()
+        || is_usb_data(net)
+        || is_spi_cs(net)
+        || is_uart_signal(net)
+}
+
 fn is_control_pin(name: &str) -> bool {
     let name = normalized(name);
     matches!(
         name.as_str(),
         "EN" | "ENABLE" | "NRST" | "NRESET" | "RESET" | "RESETN" | "RST" | "RSTN"
     ) || name.starts_with("BOOT")
+}
+
+fn is_supply_input(pin: &ResolvedPin) -> bool {
+    let name = normalized(&pin.name);
+    is_power_net(&pin.net)
+        || matches!(
+            name.as_str(),
+            "VIN"
+                | "VCC"
+                | "VDD"
+                | "VDDA"
+                | "VDDD"
+                | "AVCC"
+                | "AVDD"
+                | "VBAT"
+                | "VBUS"
+                | "VS"
+                | "VMOT"
+        )
+        || name.starts_with("VCC")
+        || name.starts_with("VDD")
 }
 
 #[cfg(test)]
@@ -639,8 +804,10 @@ mod tests {
 
         let gaps = audit(&design, &symbols());
 
-        assert_eq!(gaps.len(), 1);
-        assert_eq!(gaps[0].kind, "can_termination");
-        assert_eq!(gaps[0].net.as_deref(), Some("CAN_H/CAN_L"));
+        let termination = gaps
+            .iter()
+            .find(|gap| gap.kind == "can_termination")
+            .expect("CAN termination gap");
+        assert_eq!(termination.net.as_deref(), Some("CAN_H/CAN_L"));
     }
 }

@@ -700,6 +700,7 @@ impl<P: Provider> Agent<P> {
         let mut applied = false;
         let mut schematic_mutated = false;
         let mut schematic_check_complete = false;
+        let mut successful_place_parts = 0usize;
         let mut check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
         let mut provider_requests = 0usize;
@@ -965,7 +966,13 @@ impl<P: Provider> Agent<P> {
                 if dispatched && schematic_mutation_succeeded(&call.fn_name, &parsed) {
                     applied = true;
                     schematic_mutated = true;
-                    schematic_check_complete = false;
+                    if call.fn_name == "place_parts" {
+                        successful_place_parts += 1;
+                    }
+                    schematic_check_complete = successful_place_parts > 1
+                        && parsed
+                            .get("check_schematic")
+                            .is_some_and(check_schematic_is_complete);
                 }
                 if dispatched && call.fn_name == "check_schematic" {
                     let complete = check_schematic_is_complete(&parsed);
@@ -2305,7 +2312,17 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 .and_then(|erc| erc.get("errors"))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            format!("{errors} errors, {warnings} warnings, {erc} ERC errors")
+            let completeness = result
+                .pointer("/completeness/warnings")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            format!(
+                "{errors} errors, {warnings} warnings, {erc} ERC errors, {completeness} completeness gaps"
+            )
+        }
+        "place_parts" => {
+            let gaps = result.get("gaps").and_then(Value::as_array).map_or(0, Vec::len);
+            format!("placed block; {gaps} completeness gaps remain")
         }
         "project_info" => result
             .get("sch_path")
