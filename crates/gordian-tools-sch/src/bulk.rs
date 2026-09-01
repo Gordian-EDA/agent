@@ -153,8 +153,23 @@ fn finish_arrangement(edit: Edit, report: ArrangeReport, ctx: &AgentRuntime) -> 
 }
 
 fn refused_place(report: PlaceReport) -> Value {
+    let m = &report.mismatch;
+    let mut why = Vec::new();
+    if !m.shorted.is_empty() {
+        let pairs: Vec<String> = m.shorted.iter().map(|(a, b)| format!("{a}+{b}")).collect();
+        why.push(format!("shorted {}", pairs.join(", ")));
+    }
+    if !m.scattered.is_empty() {
+        why.push(format!("scattered {}", m.scattered.join(", ")));
+    }
+    if !m.disturbed.is_empty() {
+        why.push(format!("disturbed existing {}", m.disturbed.join(", ")));
+    }
     json!({
-        "error": "refused: the placed result does not match the requested connectivity; nothing was written",
+        "error": format!(
+            "refused: the placed result does not match the requested connectivity ({}); nothing was written. This is a placement-engine failure, not a payload error — retrying the same payload will not help; report it and try `engine: \"anneal\"` or a smaller block",
+            why.join("; ")
+        ),
         "report": report,
     })
 }
