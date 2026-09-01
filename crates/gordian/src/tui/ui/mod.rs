@@ -511,7 +511,7 @@ mod tests {
     fn placeholder_shows_when_input_is_empty() {
         let mut a = app();
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("type a prompt"), "placeholder:\n{text}");
+        assert!(text.contains("Ask Gordian"), "placeholder:\n{text}");
     }
 
     #[test]
@@ -524,7 +524,7 @@ mod tests {
         let bottom_rule = rows[rows.len() - 2];
         let status_row = rows[rows.len() - 1];
         assert_eq!(
-            col_of(prompt_row, "type a prompt"),
+            col_of(prompt_row, "Ask Gordian"),
             col_of(status_row, "bedrock"),
             "input text and footer should share a left edge:\n{text}"
         );

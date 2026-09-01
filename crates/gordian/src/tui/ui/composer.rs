@@ -337,7 +337,7 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         } else if app.running {
             "agent is working… · Tab queues your next message"
         } else {
-            "type a prompt — /help for commands, ⏎ sends · ⇧⏎ newline"
+            "Ask Gordian anything..."
         };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
