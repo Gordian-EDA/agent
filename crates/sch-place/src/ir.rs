@@ -72,6 +72,74 @@ pub struct Cell {
     pub orient: Orient,
 }
 
+
+/// The axis a set of parts is aligned ALONG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Axis {
+    /// Members sit on one horizontal line — a shared row (equal `y`).
+    Horizontal,
+    /// Members sit on one vertical line — a shared column (equal `x`).
+    Vertical,
+}
+
+/// One piece of RELATIONAL layout intent the LLM authors: a statement about parts
+/// relative to each other, never a coordinate.
+///
+/// Orthogonal to the other [`LayoutIr`] keys by design:
+/// - [`LayoutIr::grid`] is the DENSE form (a full authored 2D arrangement, already
+///   enforced by `grid_order_viol`); relations are the SPARSE pairwise form an LLM can
+///   state about two parts without laying out the whole sheet. They share the same
+///   comparison convention (part origins, `x` grows right, `y` grows down).
+/// - [`LayoutIr::zone`] is an ABSOLUTE coarse bias (a fraction of the board bbox);
+///   relations say nothing about where on the sheet the parts land.
+/// - [`LayoutIr::frozen`] pins recognized idiom clusters at engine-chosen poses;
+///   [`Relation::Group`] asks the engine to FIND a cohesive arrangement.
+///
+/// A refdes naming a multi-unit part refers to the centroid of its units.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Relation {
+    /// `a` sits strictly left of `b`.
+    LeftOf { a: String, b: String },
+    /// `a` sits strictly right of `b`.
+    RightOf { a: String, b: String },
+    /// `a` sits strictly above `b` (smaller `y`).
+    Above { a: String, b: String },
+    /// `a` sits strictly below `b`.
+    Below { a: String, b: String },
+    /// `members` are placed as one cohesive cluster — packed together with nothing
+    /// foreign between them — optionally on `side` of the `anchor` refdes.
+    Group {
+        name: String,
+        members: Vec<String>,
+        #[serde(default)]
+        side: Option<(Side, String)>,
+    },
+    /// `members` share one row (`Horizontal`) or column (`Vertical`).
+    Align { members: Vec<String>, axis: Axis },
+}
+
+impl Relation {
+    /// Every refdes this relation constrains.
+    pub fn refdes(&self) -> Vec<&str> {
+        match self {
+            Relation::LeftOf { a, b }
+            | Relation::RightOf { a, b }
+            | Relation::Above { a, b }
+            | Relation::Below { a, b } => vec![a.as_str(), b.as_str()],
+            Relation::Group {
+                members, side, ..
+            } => members
+                .iter()
+                .map(String::as_str)
+                .chain(side.iter().map(|(_, anchor)| anchor.as_str()))
+                .collect(),
+            Relation::Align { members, .. } => members.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
 /// The geometry-free floorplan. Four keys; everything else is inferred from
 /// connectivity by the compiler's fixed rule set.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -132,6 +200,23 @@ pub struct LayoutIr {
     /// nudged toward the LLM's zones. Empty on every existing path ⇒ no bias ⇒ unchanged.
     #[serde(default)]
     pub zone: BTreeMap<String, [f64; 2]>,
+    /// RELATIONAL layout intent: the author's statements about parts relative to each
+    /// other ([`Relation`]). `#[serde(default)]` so every existing sidecar `layout.json`
+    /// deserializes to an empty list ⇒ no constraint ⇒ tuned references unaffected.
+    ///
+    /// ## What each engine guarantees
+    ///
+    /// | engine | ordering (`LeftOf`/`RightOf`/`Above`/`Below`) | `Group` side | `Group` cohesion | `Align` |
+    /// |---|---|---|---|---|
+    /// | `anneal-place` | HARD — seeded by projection, moves that break it are rejected, plus a heavy cost term | HARD, same route | soft cost (group bbox) | HARD, same route |
+    /// | `cluster-place` | inherits anneal, and its pose/de-sprawl/rail steps self-reject on any regression | as anneal | as anneal | as anneal |
+    /// | `spine-place` | projection at the end of typesetting, kept only if its A/B gate agrees; violations rank above aesthetics in every pass | same | not modelled — the grammar owns cohesion | same |
+    ///
+    /// "HARD" means the shipped placement satisfies the relation whenever a feasible
+    /// placement exists; contradictory intent (a cycle) is left alone rather than
+    /// resolved arbitrarily, and a relation whose parts are all frozen cannot be met.
+    #[serde(default)]
+    pub relations: Vec<Relation>,
 }
 
 impl LayoutIr {

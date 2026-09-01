@@ -6,6 +6,11 @@
 //! Correctness of the hard challenge fixtures is covered by the geometry-invariant
 //! truthfulness oracle (`floorplan_netlist.rs`); this gate guards the *aesthetic*
 //! placement the oracle can't see.
+//!
+//! ⚠️ This gate SKIPped from 2026-07-07 to 2026-08-31 — `validation_corpus_available` probed a
+//! `docs/validation` directory that had already been deleted. All six snapshots are stale by
+//! that much engine drift. Re-baselining them needs the visual review the failure message
+//! asks for; it is not a rubber stamp.
 
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
@@ -34,7 +39,7 @@ fn snap_path(name: &str) -> PathBuf {
 
 fn validation_corpus_available() -> bool {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/validation")
+        .join("tests/fixtures/validation")
         .is_dir()
 }
 

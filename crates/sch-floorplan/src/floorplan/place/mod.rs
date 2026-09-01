@@ -4,13 +4,15 @@
 //!
 //! - [`emit`] — gather + grid seed + engine orchestration + `SchematicWriter` assembly.
 //! - [`idioms`] — idiom align passes and anchor-block helpers.
+//! - [`relation`] — the author's RELATIONAL intent: violation counts + the projection
+//!   that seeds a search inside the constraint set.
 //! - [`refine`] — the overlap relaxers (`decongest`/`normalize`/keepout passes) the emit
 //!   finalize and the engines drive.
 //! - [`score`] — the routed `count_*` crossing/merge/short terms + the geometry primitives
 //!   the [`measure`] library reads off a built sheet.
 //! - [`problem`] — the neutral [`SchematicPlaceProblem`]: gathered items, connectivity,
 //!   route/build/measure helpers.
-//! - [`measure`] — [`RawMetrics`] (the weight-free 16 terms) + the [`PlacementEngine`]
+//! - [`measure`] — [`RawMetrics`] (the weight-free 18 terms) + the [`PlacementEngine`]
 //!   trait an engine implements. A measurement-based engine CALLS this because IT chose
 //!   measurement; the OBJECTIVE (the weights) and the SEARCH live in the engine crates,
 //!   not here.
@@ -24,6 +26,7 @@ mod idioms;
 mod measure;
 mod problem;
 mod refine;
+mod relation;
 mod route;
 mod score;
 
@@ -32,6 +35,7 @@ pub use idioms::*;
 pub use measure::*;
 pub use problem::SchematicPlaceProblem;
 pub use refine::*;
+pub use relation::*;
 pub use score::*;
 // `route` is the orthogonal router — every item is crate-internal (none was `pub`
 // pre-split), so re-export it crate-visibly, not publicly.

@@ -1,5 +1,5 @@
 //! `anneal-place` — the amplified simulated-annealing schematic placement engine. It OWNS
-//! its objective (the amplified energy: the 16 terms under the straightness-amplified
+//! its objective (the amplified energy: the 18 terms under the straightness-amplified
 //! weights + the compaction/orientation boosts + the real-warning gate) and its
 //! search (the SA move-set + proxy costs + multi-start + route-aware refinement). It is a
 //! MEASUREMENT-based engine: it builds + routes candidates to score them, so it searches
@@ -7,7 +7,13 @@
 //! geometry/idiom primitives from `sch-floorplan`'s contract.
 //!
 //! The amplified objective + the SA + the greedy-descent SEED candidate all live here. The
-//! greedy refine/polish below is a COPY of the free engine's descent (the SA uses a
+//! The author's [`sch_place::ir::Relation`] intent is HARD here: the cell seed is projected
+//! onto the constraints before the search, every SA move that would break more of them is
+//! rejected outright, a heavy `RELATION_W` term keeps the routed objective honest, and the
+//! finalize re-projects after the relation-blind align passes. `Group` cohesion is the one
+//! SOFT part — a bbox pull, not a constraint.
+//!
+//! The greedy refine/polish below is a COPY of the free engine's descent (the SA uses a
 //! greedy hill-climb as one multi-start candidate) — duplicated, not shared, so the two
 //! engines evolve independently. The weights/constants likewise are anneal's own copies.
 
@@ -29,7 +35,8 @@ use sch_floorplan::engine_support::{
     COL_GAP, FAST_PINS, GRID_KEY, ROW_GAP, align_idiom_clusters, align_led_chains,
     align_rail_cap_rows, apply_cells, assign_cells, body_overlap_count, build_anchor_blocks,
     cluster_group, cohesion_targets, decongest, grid_order_viol, item_rect, multi_unit_siblings,
-    normalize, orient_angle, overlaps_any, pin_endpoint, signal_anchor_centroid, supply_pin_target,
+    normalize, orient_angle, overlaps_any, pin_endpoint, relation_group_spread, relation_viol,
+    repair_relations, signal_anchor_centroid, supply_pin_target,
 };
 
 /// Simulated annealing: a seeded refine→anneal AND a broad anneal from the
@@ -53,15 +60,30 @@ impl PlacementEngine for Anneal {
         });
         for it in &mut problem.items {
             it.mirror = ir.mirror.contains(&it.refdes);
-            it.frozen = ir.frozen.contains(&it.refdes);
         }
         let cells = assign_cells(&problem.items, &ir);
+        // Seed FIRST: an item already frozen on arrival keeps its live pose (the region
+        // adapter's fixed neighbours), while the IR's idiom clusters are seeded here and
+        // only then pinned.
         apply_cells(&mut problem.items, &cells);
+        for it in &mut problem.items {
+            it.frozen |= ir.frozen.contains(&it.refdes);
+        }
+        // Project the cell seed onto the author's relations BEFORE the search, so the SA
+        // starts inside the constraint set and its hard rejection rule can keep it there.
+        if repair_relations(&mut problem.items, &ir) {
+            decongest(&mut problem.items);
+        }
         normalize(&mut problem.items);
 
         let _ = anneal_place(env, problem, &ir, self.name());
 
         decongest(&mut problem.items);
+        // The finalize align passes below are relation-blind, as is `decongest`; re-project
+        // and re-relax so what SHIPS satisfies the relations the search held.
+        if repair_relations(&mut problem.items, &ir) {
+            decongest(&mut problem.items);
+        }
         if align_idiom_clusters(&mut problem.items, &ir) {
             decongest(&mut problem.items);
         }
@@ -69,6 +91,9 @@ impl PlacementEngine for Anneal {
             decongest(&mut problem.items);
         }
         if align_rail_cap_rows(&mut problem.items, &ir) {
+            decongest(&mut problem.items);
+        }
+        if repair_relations(&mut problem.items, &ir) {
             decongest(&mut problem.items);
         }
 
@@ -82,7 +107,7 @@ impl PlacementEngine for Anneal {
 }
 
 // ---------------------------------------------------------------------------
-// The amplified OBJECTIVE — anneal's own energy: the 16 raw terms (from the shared
+// The amplified OBJECTIVE — anneal's own energy: the 18 raw terms (from the shared
 // measurement library) under the amplified weights. The base-tier energy (`base_cost`)
 // is the SA's free-base path; it coincides with the free engine's objective today but
 // is duplicated, not shared.
@@ -102,8 +127,14 @@ const COMPACT_BOOST: f64 = 2.0;
 const PROXY_SPREAD_W: f64 = 0.45;
 /// Weight on the LLM zone bias in `proxy_cost`.
 const ZBIAS_W: f64 = 0.8;
+/// Weight on an unsatisfied [`sch_place::ir::Relation`]. Above the authored-grid weight:
+/// a relation is an EXPLICIT statement, the grid an authored convenience.
+const RELATION_W: f64 = 1500.0;
+/// Pull on a `Relation::Group`'s bounding box — the same weight the whole-board `spread`
+/// carries, since it is the same quantity restricted to the group.
+const GROUP_COHESION: f64 = 0.45;
 
-/// The base routed energy of the 16 raw terms — anneal's own copy of the
+/// The base routed energy of the 18 raw terms — anneal's own copy of the
 /// non-amplified weighted combo. Used by the SA's `amplified=false` path. Build failure
 /// (saturated length) ⇒ ∞.
 fn base_cost(m: &RawMetrics) -> f64 {
@@ -111,6 +142,7 @@ fn base_cost(m: &RawMetrics) -> f64 {
         return f64::INFINITY;
     }
     let correctness = 2000.0 * m.merges as f64
+        + RELATION_W * m.relation as f64
         + 1500.0 * m.overlaps as f64
         + 1000.0 * m.fallbacks as f64
         + 1200.0 * m.grid_order as f64
@@ -125,10 +157,10 @@ fn base_cost(m: &RawMetrics) -> f64 {
         + 0.15 * m.length
         + 0.45 * m.spread;
     let multiunit = SIB_COHESION * m.sib_spread;
-    base + multiunit
+    base + multiunit + GROUP_COHESION * m.group_spread
 }
 
-/// The AMPLIFIED straightness energy of the 16 raw terms. The `neat` multiplier is 3.0
+/// The AMPLIFIED straightness energy of the 18 raw terms. The `neat` multiplier is 3.0
 /// (straighter wires), and a matching compaction boost + an orientation boost are ADDED
 /// outside the base sum. Build failure ⇒ ∞.
 fn amplified_energy(m: &RawMetrics) -> f64 {
@@ -136,6 +168,7 @@ fn amplified_energy(m: &RawMetrics) -> f64 {
         return f64::INFINITY;
     }
     let correctness = 2000.0 * m.merges as f64
+        + RELATION_W * m.relation as f64
         + 1500.0 * m.overlaps as f64
         + 1000.0 * m.fallbacks as f64
         + 1200.0 * m.grid_order as f64
@@ -151,6 +184,7 @@ fn amplified_energy(m: &RawMetrics) -> f64 {
         + 0.45 * m.spread;
     let multiunit = SIB_COHESION * m.sib_spread;
     base + multiunit
+        + GROUP_COHESION * m.group_spread
         + COMPACT_BOOST * (0.15 * m.length + 0.45 * m.spread)
         + ORIENT_BOOST * m.leg_viol as f64
 }
@@ -199,6 +233,15 @@ fn amplified_score_with_w(
 // multi-start candidate of the SA (`small_path_search`'s "greedy" path + the
 // per-candidate `polish`). It lives inside anneal now; there is no separate greedy engine.
 // ---------------------------------------------------------------------------
+
+
+/// HARD relational feasibility: a move that would break MORE of the author's
+/// [`sch_place::ir::Relation`] statements than the incumbent is rejected outright, so a
+/// search seeded inside the constraint set never leaves it. The heavy `RELATION_W` cost
+/// term still applies, and repairs any infeasibility the seed could not project away.
+fn relation_regressed(items: &[Item], ir: &LayoutIr, incumbent: usize) -> bool {
+    !ir.relations.is_empty() && relation_viol(items, ir) > incumbent
+}
 
 /// Score `items` under the base energy by measuring the routed sheet (the greedy
 /// descent's objective).
@@ -1064,6 +1107,7 @@ fn anneal_items(
     let mut rng = Rng(seed);
 
     let mut cur = objective(items);
+    let mut cur_rv = relation_viol(items, ir);
     let mut best_items: Vec<Item> = items.to_vec();
     let mut best = cur;
 
@@ -1162,10 +1206,18 @@ fn anneal_items(
             continue;
         }
 
+        if relation_regressed(items, ir, cur_rv) {
+            for (i, at, angle) in undo {
+                items[i].at = at.into();
+                items[i].angle = angle;
+            }
+            continue;
+        }
         let c = objective(items);
         let d = c - cur;
         if d < 0.0 || rng.unit() < (-d / t).exp() {
             cur = c;
+            cur_rv = relation_viol(items, ir);
             if c < best {
                 best = c;
                 best_items.clone_from_slice(items);
@@ -1244,6 +1296,8 @@ fn proxy_cost(
         }
     }
     1500.0 * overlaps as f64
+        + RELATION_W * relation_viol(items, ir) as f64
+        + GROUP_COHESION * relation_group_spread(items, ir)
         + 1200.0 * grid_order as f64
         + 0.15 * hpwl
         + PROXY_SPREAD_W * spread
@@ -1319,6 +1373,7 @@ fn anneal_locality(
     let mut last_verify = 0usize;
 
     let mut cur = proxy_cost(items, inc, ir, &cohesion);
+    let mut cur_rv = relation_viol(items, ir);
     let mut proxy_best = cur;
     let mut proxy_best_items: Vec<Item> = items.to_vec();
     let mut best_true = amplified_score(problem, eval, items);
@@ -1370,10 +1425,18 @@ fn anneal_locality(
             continue;
         }
 
+        if relation_regressed(items, ir, cur_rv) {
+            for (i, at, angle) in undo {
+                items[i].at = at.into();
+                items[i].angle = angle;
+            }
+            continue;
+        }
         let c = proxy_cost(items, inc, ir, &cohesion);
         let d = c - cur;
         if d < 0.0 || rng.unit() < (-d / t).exp() {
             cur = c;
+            cur_rv = relation_viol(items, ir);
             if c < proxy_best {
                 proxy_best = c;
                 proxy_best_items.clone_from_slice(items);

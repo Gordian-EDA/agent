@@ -781,7 +781,11 @@ pub(crate) fn incidence(items: &[Item]) -> Incidence {
 
 /// The coarse cell each item occupies. `assign_cells` reads the IR (unplaced
 /// parts flow into spare columns on the right); the refinement loop perturbs
-/// these; then `apply_cells` turns them into mm.
+/// these; then [`apply_cells`] turns them into mm.
+///
+/// An [`Item`] that arrives with `frozen` already set carries a LIVE pose the caller
+/// owns and [`apply_cells`] leaves it alone. `gather` never sets it, so the whole-sheet
+/// paths are unaffected; the engines set their own idiom `frozen` flags AFTER seeding.
 pub fn assign_cells(items: &[Item], ir: &LayoutIr) -> Vec<Cell> {
     let max_col = ir.place.values().map(|c| c.col).max().unwrap_or(-1);
     let mut spare = max_col + 1;
@@ -859,6 +863,11 @@ pub fn apply_cells(items: &mut [Item], cells: &[Cell]) {
     let row_y = track_centres(&row_h, ROW_GAP);
 
     for ((it, c), &angle) in items.iter_mut().zip(cells).zip(&angles) {
+        // An item that arrives ALREADY frozen holds a live pose the caller owns (the
+        // region adapter's fixed neighbours). Seeding is for parts the engine is placing.
+        if it.frozen {
+            continue;
+        }
         it.at = [
             geom::GRID_50_MIL.snap(col_x[&c.col]),
             geom::GRID_50_MIL.snap(row_y[&c.row]),

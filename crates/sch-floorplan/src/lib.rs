@@ -15,6 +15,8 @@
 //! - [`contract`] — the small stable engine API.
 //! - [`engine_support`] — lower-level geometry and realization helpers for engine
 //!   implementations; public because engines live in separate crates.
+//! - [`region`] — place a SUBSET of a sheet among fixed neighbours and obstacles, for
+//!   live editing (`arrange(selection)`) and bulk part creation.
 //!
 //! The shared placement vocabulary lives in `sch-place`; pure geometry and grid
 //! snapping live in `geom`; schematic I/O lives in `sch-io`.
@@ -22,5 +24,6 @@
 pub mod contract;
 pub mod engine_support;
 pub mod floorplan;
+pub mod region;
 
 pub use sch_io::{label, read, wire, write};

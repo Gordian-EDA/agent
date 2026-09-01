@@ -62,7 +62,7 @@ fn doc(name: &str, ext: &str) -> std::path::PathBuf {
 
 fn validation_corpus_available() -> bool {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/validation")
+        .join("tests/fixtures/validation")
         .is_dir()
 }
 
@@ -148,9 +148,20 @@ fn run_challenge_fixtures() {
 
 /// Challenge fixtures whose emitted netlist is NOT yet truthful because of a REAL,
 /// tracked engine bug. Tolerated so the suite stays green for the rest of the
-/// coverage; each must have a documented root cause. **Empty = the goal, and we
-/// are there:** all six challenge fixtures now emit truthful netlists. The bugs
-/// the expanded coverage surfaced, and how each was closed:
+/// coverage; each must have a documented root cause. Empty is the goal.
+///
+/// ⚠️ THIS GATE RAN FOR THE FIRST TIME IN 8 WEEKS on 2026-08-31. `validation_corpus_available`
+/// was born pointing at a `docs/validation` directory that had already been deleted, so from
+/// 2026-07-07 both tests here — and the placement snapshots — unconditionally SKIPped. The
+/// list below stays empty deliberately: `rf-lna-frontend` currently SHORTS `RF_IN` onto `GND`
+/// and that must be seen, not tolerated. C3's ground riser is drawn straight down the column
+/// it shares with J1 and terminates on J1's `In` pin at (30.48, 45.72), which
+/// `split_wires_at_nodes` then welds. `plan_riser_offsets` only fans riser-vs-riser (rails
+/// with ≥3 endpoints), and `riser_hits_body` bails on J1's DIAGONAL pin pair — neither guard
+/// looks for a riser landing on a foreign PIN. The fix belongs in `place::route`'s finalize
+/// jog, beside the existing body avoidance.
+///
+/// The bugs the expanded coverage surfaced earlier, and how each was closed:
 ///
 ///   - `mixed-signal-adc-frontend` and `bga-fpga-ice40` — **multi-unit symbols
 ///     were electrically broken**: the engine emitted only UNIT 1's pins, dropping
