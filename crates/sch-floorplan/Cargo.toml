@@ -25,6 +25,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true
 rayon.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 anneal-place = { path = "../anneal-place" }

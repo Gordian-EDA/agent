@@ -36,6 +36,9 @@ fastrand = "2"
 directories = "6"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures = "0.3"

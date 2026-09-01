@@ -99,14 +99,14 @@ pub fn compose_design_with_engine(
         let mut sub = design.clone();
         sub.blocks = std::iter::once((gname.clone(), block)).collect();
         mark_cross_sheet_ports(&mut sub, &cross_sheet);
-        eprintln!("  [emit] group '{gname}' with {}", placer.name());
+        tracing::info!(group = %gname, engine = placer.name(), "emitting schematic group");
         let (w, out) = sch_floorplan::floorplan::emit_group(
             env,
             &sub,
             crate::tools::schematic_placement_engine(selected),
         )
         .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
-        eprintln!("  [emit] group '{gname}' done");
+        tracing::info!(group = %gname, "schematic group emitted");
         layout_warnings.extend(out.layout_warnings);
         crossings.body += out.crossings.body;
         crossings.ic += out.crossings.ic;

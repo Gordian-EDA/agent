@@ -14,3 +14,4 @@ kicad = { path = "../kicad" }
 sch-place = { path = "../sch-place" }
 sch-floorplan = { path = "../sch-floorplan" }
 rayon.workspace = true
+tracing.workspace = true

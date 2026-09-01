@@ -46,8 +46,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream,
-    KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    EventStream, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
@@ -141,6 +140,11 @@ pub async fn run(project_dir: PathBuf, config: GordianConfig, config_path: PathB
     // 2. Build the agent if we have both KiCAD and LLM config; otherwise launch
     //    a "degraded" UI that explains what's missing (so `tui` never panics).
     let client_result = gordian_core::GenaiProvider::from_config(&config.llm);
+    let log_thread_id = client_result
+        .as_ref()
+        .map(|client| client.thread_identifier())
+        .unwrap_or("tui-unconfigured");
+    let _log_guard = gordian_runtime::logging::init_file_only(&project_dir, log_thread_id);
     let llm_error = client_result.as_ref().err().map(|e| format!("{e:#}"));
     let (provider, model) = match &client_result {
         Ok(client) => client.status(),
@@ -206,6 +210,9 @@ pub async fn run(project_dir: PathBuf, config: GordianConfig, config_path: PathB
     )
     .await;
     restore_terminal(&mut terminal, keyboard_enhancement).ok();
+    if let Err(error) = &result {
+        tracing::error!(error = %error, "TUI event loop failed");
+    }
     result
 }
 

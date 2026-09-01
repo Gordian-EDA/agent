@@ -27,4 +27,5 @@ pcb-model = { path = "../pcb-model" }
 pcb-place = { path = "../pcb-place" }
 sch-io = { path = "../sch-io" }
 tempfile.workspace = true
+tracing.workspace = true
 prost-types = "0.13"

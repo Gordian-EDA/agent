@@ -168,6 +168,7 @@ fn escape_bottleneck(
     (total >= 3 && c * 100 >= total * 60).then_some((r, fp, c, total))
 }
 
+#[tracing::instrument(skip_all, fields(project = %ctx.project_dir().display()))]
 pub fn route_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     match route_live_board(ctx) {
         Ok(out) => Ok(out),

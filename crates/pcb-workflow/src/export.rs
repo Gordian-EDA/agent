@@ -129,6 +129,7 @@ pub(super) fn materialize_zones_for_drc(
 }
 
 /// Save the active board and run KiCAD's PCB DRC against it.
+#[tracing::instrument(skip_all, fields(project = %ctx.project_dir().display()))]
 pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
     if !path.exists() {

@@ -33,6 +33,7 @@ serde_json.workspace = true
 indexmap.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 futures.workspace = true
 directories.workspace = true
 resvg = { workspace = true }

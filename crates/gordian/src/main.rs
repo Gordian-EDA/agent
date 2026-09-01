@@ -20,6 +20,7 @@ use anyhow::{Context, Result, bail};
 use gordian_core::AgentRuntime;
 use gordian_core::prompts::system_prompt;
 use gordian_core::{Agent, AgentEvent, AutoApprove, StopReason};
+use gordian_runtime::logging;
 
 /// Default project directory when `--project` is omitted.
 const DEFAULT_PROJECT_DIR: &str = "gordian-project";
@@ -47,6 +48,7 @@ fn main() -> ExitCode {
 
     match args.first().map(String::as_str) {
         None => {
+            logging::init_stderr_only();
             print_version();
             ExitCode::SUCCESS
         }
@@ -55,11 +57,13 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("--version" | "-V" | "version") => {
+            logging::init_stderr_only();
             print_version();
             ExitCode::SUCCESS
         }
         Some("agent") if is_help_request(&args[1..]) => {
-            println!(
+            logging::init_stderr_only();
+            tracing::info!(
                 "usage: gordian agent [--project <dir>] [--no-review] \"<prompt>\"\n\nRun one headless agent turn."
             );
             ExitCode::SUCCESS
@@ -67,12 +71,14 @@ fn main() -> ExitCode {
         Some("agent") => match run_agent_command(&args[1..]) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("error: {e:#}");
+                logging::init_stderr_only();
+                tracing::error!("error: {e:#}");
                 ExitCode::FAILURE
             }
         },
         Some("tui") if is_help_request(&args[1..]) => {
-            println!(
+            logging::init_stderr_only();
+            tracing::info!(
                 "usage: gordian tui [--project <dir>]\n\nLaunch the interactive copilot cockpit."
             );
             ExitCode::SUCCESS
@@ -80,12 +86,14 @@ fn main() -> ExitCode {
         Some("tui") => match run_tui_command(&args[1..]) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("error: {e:#}");
+                logging::init_stderr_only();
+                tracing::error!("error: {e:#}");
                 ExitCode::FAILURE
             }
         },
         Some(other) => {
-            eprintln!("error: unknown command `{other}`");
+            logging::init_stderr_only();
+            tracing::error!("unknown command `{other}`");
             eprintln!("{USAGE}");
             ExitCode::FAILURE
         }
@@ -334,15 +342,6 @@ fn run_agent_command(args: &[String]) -> Result<()> {
          kicad.footprintDir / kicad.cliPath in config.toml so the agent can resolve \
          symbols and run ERC",
     )?;
-    eprintln!(
-        "kicad: {} (cli: {}, pcbnew: {}, symbols: {})",
-        env.version(),
-        env.cli_path().display(),
-        env.pcbnew_path().display(),
-        env.symbol_dir().display()
-    );
-    eprintln!("config: {}", loaded.path.display());
-
     // 2. Build the LLM client from TOML config.
     let mut client = gordian_core::GenaiProvider::from_config(&config.llm).with_context(|| {
         format!(
@@ -353,7 +352,16 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     if let Ok(thread) = std::env::var("GORDIAN_THREAD_ID") {
         client = client.with_thread_identifier(thread);
     }
-    eprintln!("thread:  {}", client.thread_identifier());
+    let _log_guard = logging::init(&project_dir, client.thread_identifier());
+    tracing::info!(
+        "kicad: {} (cli: {}, pcbnew: {}, symbols: {})",
+        env.version(),
+        env.cli_path().display(),
+        env.pcbnew_path().display(),
+        env.symbol_dir().display()
+    );
+    tracing::info!("config: {}", loaded.path.display());
+    tracing::info!("thread:  {}", client.thread_identifier());
 
     // 3. Tool context over the real project directory. `apply_design` derives
     //    its human-style floorplan from the netlist (`infer_ir`), so no separate
@@ -362,8 +370,8 @@ fn run_agent_command(args: &[String]) -> Result<()> {
         AgentRuntime::for_project_with_config(env.clone(), project_dir.clone(), config.clone())
             .context("building the tool context for the project")?;
     let sch_path = ctx.sch_path().to_path_buf();
-    eprintln!("project: {}", project_dir.display());
-    eprintln!("prompt:  {prompt}\n");
+    tracing::info!("project: {}", project_dir.display());
+    tracing::info!("prompt:  {prompt}");
 
     // 4. Run ONE agent turn, auto-approving the apply. By default it routes
     //    through `run_turn_reviewed`: after a turn that COMMITS a design change,
@@ -376,14 +384,14 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     let mut agent = Agent::new(client, ctx, system);
     let mut approvals = AutoApprove::yes();
 
-    eprintln!("--- agent events ---");
+    tracing::info!(target: logging::EVENTS_TARGET, "--- agent events ---");
     let run = runtime.block_on(async {
         let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
         let printer = tokio::spawn(async move {
             let mut log = AgentDebugLog::default();
             while let Some(ev) = events_rx.recv().await {
                 if let Some(line) = log.observe(&ev) {
-                    eprintln!("{line}");
+                    tracing::info!(target: logging::EVENTS_TARGET, "{line}");
                 }
             }
             log.usage
@@ -416,32 +424,35 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     let (outcome, usage) = run.context("running the agent turn")?;
 
     // 5. Report the outcome.
-    println!("--- agent turn ---");
-    println!("tool calls made: {}", outcome.tool_calls_made);
-    println!("applied (wrote schematic): {}", outcome.applied);
-    println!("stop reason: {:?}", outcome.stop_reason);
-    println!(
+    tracing::info!("--- agent turn ---");
+    tracing::info!("tool calls made: {}", outcome.tool_calls_made);
+    tracing::info!("applied (wrote schematic): {}", outcome.applied);
+    tracing::info!("stop reason: {:?}", outcome.stop_reason);
+    tracing::info!(
         "provider requests: {} (all model invocations; separate from the agent main-request safety budget)",
         usage.provider_requests
     );
-    println!(
+    tracing::info!(
         "tokens: input {} output {} cache_write {} cache_read {}",
-        usage.input_tokens, usage.output_tokens, usage.cache_write_tokens, usage.cache_read_tokens
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_write_tokens,
+        usage.cache_read_tokens
     );
-    println!("\nfinal reply:\n{}", outcome.final_text.trim());
+    tracing::info!("final reply:\n{}", outcome.final_text.trim());
 
     // 6. Final ERC: re-run on whatever the agent produced (the source of truth).
-    println!("\n--- ERC ---");
+    tracing::info!("--- ERC ---");
     if !sch_path.exists() {
-        println!("no schematic was written at {}", sch_path.display());
+        tracing::warn!("no schematic was written at {}", sch_path.display());
         bail!("the agent did not produce a schematic");
     }
     let report = env
         .erc(&sch_path)
         .with_context(|| format!("running ERC on {}", sch_path.display()))?;
-    println!("errors:   {}", report.error_count());
-    println!("warnings: {}", report.warning_count());
-    println!("schematic: {}", sch_path.display());
+    tracing::info!("errors:   {}", report.error_count());
+    tracing::info!("warnings: {}", report.warning_count());
+    tracing::info!("schematic: {}", sch_path.display());
 
     if report.error_count() > 0 {
         // A nonzero ERC error count is real signal, not a tool failure — surface

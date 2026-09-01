@@ -234,7 +234,6 @@ fn amplified_score_with_w(
 // per-candidate `polish`). It lives inside anneal now; there is no separate greedy engine.
 // ---------------------------------------------------------------------------
 
-
 /// HARD relational feasibility: a move that would break MORE of the author's
 /// [`sch_place::ir::Relation`] statements than the incumbent is rejected outright, so a
 /// search seeded inside the constraint set never leaves it. The heavy `RELATION_W` cost
@@ -673,7 +672,7 @@ pub fn anneal_place(
             })
             .collect();
         if timed_top {
-            eprintln!(
+            tracing::debug!(
                 "  [SA-fast] {n_starts} proxy starts: {:.2}s",
                 t_search.elapsed().as_secs_f64()
             );
@@ -713,7 +712,7 @@ pub fn anneal_place(
             })
             .collect();
         if timed_top {
-            eprintln!(
+            tracing::debug!(
                 "  [SA-fast] score {} candidates: {:.2}s",
                 candidates.len(),
                 t_score.elapsed().as_secs_f64()
@@ -732,7 +731,7 @@ pub fn anneal_place(
             }
         }
         if timed_top {
-            eprintln!("  [SA-fast] pick cand#{best} scored={scored:?}");
+            tracing::debug!("  [SA-fast] pick cand#{best} scored={scored:?}");
         }
         // ROUTE-AWARE REFINEMENT (large boards). The proxy is crossing-BLIND, so the
         // fast-lane winner is sprawl-optimal but not crossing-optimal. Refine it with a
@@ -817,7 +816,7 @@ pub fn anneal_place(
         let refined_wins = (rb, rw, rx).cmp(&(bb, bw, bx)) == std::cmp::Ordering::Less
             || (rb == bb && rw == bw && rx == bx && rc + 0.5 < bc);
         if timed_top {
-            eprintln!(
+            tracing::debug!(
                 "  [SA-fast] route-refine {:.2}s cap={ref_cap}: ({bb},{bw},{bx},{bc:.0})->({rb},{rw},{rx},{rc:.0}) win={refined_wins}",
                 t_ref.elapsed().as_secs_f64()
             );
@@ -936,7 +935,7 @@ fn small_path_search(
         let t0 = std::time::Instant::now();
         f();
         if timed {
-            eprintln!("  [SA] {label}: {:.2}s", t0.elapsed().as_secs_f64());
+            tracing::debug!("  [SA] {label}: {:.2}s", t0.elapsed().as_secs_f64());
         }
     };
     let mut state_a: Vec<Item> = Vec::new();

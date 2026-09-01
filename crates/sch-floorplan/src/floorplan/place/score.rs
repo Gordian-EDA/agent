@@ -587,7 +587,7 @@ pub fn count_crossings(wires: &[DrawnSegment]) -> usize {
     n
 }
 
-/// DIAGNOSTIC (env-gated): print every short — a pin landing on a foreign net's
+/// DIAGNOSTIC (env-gated): log every short — a pin landing on a foreign net's
 /// wire (endpoint or interior) and every collinear/junction merge — naming the
 /// pin (refdes.num@net) and the offending wire (net + endpoints), so the exact
 /// rail/trunk wire that merges two nets is pinpointable without kicad.
@@ -600,7 +600,7 @@ pub(crate) fn diagnose_shorts(
 ) {
     let wires = w.wires_with_nets();
     let junctions = w.junction_positions();
-    eprintln!(
+    tracing::debug!(
         "[SHORT-DIAG] {} ({} wires, {} junctions)",
         design.name.as_deref().unwrap_or("<unnamed>"),
         wires.len(),
@@ -626,7 +626,7 @@ pub(crate) fn diagnose_shorts(
                     } else {
                         continue;
                     };
-                    eprintln!(
+                    tracing::debug!(
                         "[SHORT-DIAG]  PIN {}.{}@{net} at [{:.2},{:.2}] lands {how} of net {:?} wire \
                          [{:.2},{:.2}]->[{:.2},{:.2}]",
                         items[*i].refdes,
@@ -652,7 +652,7 @@ pub(crate) fn diagnose_shorts(
                 continue;
             }
             if a.segment.axis_aligned_collinear_overlap(b.segment) {
-                eprintln!(
+                tracing::debug!(
                     "[SHORT-DIAG]  COLLINEAR net {:?} [{:.2},{:.2}]->[{:.2},{:.2}] overlaps net {:?} \
                      [{:.2},{:.2}]->[{:.2},{:.2}]",
                     &a.net,
@@ -680,9 +680,11 @@ pub(crate) fn diagnose_shorts(
             }
         }
         if nets.len() > 1 {
-            eprintln!(
+            tracing::debug!(
                 "[SHORT-DIAG]  JUNCTION at [{:.2},{:.2}] fuses nets {:?}",
-                jp[0], jp[1], nets
+                jp[0],
+                jp[1],
+                nets
             );
         }
     }

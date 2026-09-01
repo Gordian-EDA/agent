@@ -16,3 +16,4 @@ sch-floorplan = { path = "../sch-floorplan" }
 anneal-place = { path = "../anneal-place" }
 spine-place = { path = "../spine-place" }
 rayon.workspace = true
+tracing.workspace = true

@@ -761,7 +761,7 @@ pub(crate) fn compact_clusters(
                 && spr + 1e-3 < baseline_rendered
         });
         if debug {
-            eprintln!(
+            tracing::debug!(
                 "[channels] rendered={rendered:?} routed={:?} ok={ok}",
                 (s.0, s.1, s.2)
             );
@@ -815,7 +815,7 @@ pub(crate) fn compact_clusters(
             && w <= sa_warnings
             && spr + 1e-3 < baseline_rendered;
         if debug {
-            eprintln!(
+            tracing::debug!(
                 "[holistic] gut={gut:.1} rendered={spr:.1} w={w} routed={:?} ok={ok}",
                 (s.0, s.1, s.2)
             );
