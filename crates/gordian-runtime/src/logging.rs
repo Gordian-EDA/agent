@@ -41,6 +41,15 @@ pub fn init_file_only(project_dir: &Path, thread_id: &str) -> LogGuard {
     init_with_stderr(project_dir, thread_id, false)
 }
 
+/// Installs compact stderr logging when a command has no project log context.
+pub fn init_stderr_only() {
+    let _ = tracing_subscriber::fmt()
+        .compact()
+        .with_writer(std::io::stderr)
+        .with_env_filter(env_filter("info"))
+        .try_init();
+}
+
 fn init_with_stderr(project_dir: &Path, thread_id: &str, stderr_enabled: bool) -> LogGuard {
     let logs_dir = project_dir.join(".gordian/logs");
     std::fs::create_dir_all(&logs_dir).expect("create Gordian log directory");

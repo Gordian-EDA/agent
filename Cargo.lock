@@ -1012,6 +1012,7 @@ dependencies = [
  "directories",
  "futures",
  "gordian-core",
+ "gordian-runtime",
  "image",
  "kicad",
  "libc",
@@ -1023,6 +1024,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
 ]
 
 [[package]]
