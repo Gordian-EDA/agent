@@ -354,7 +354,7 @@ pub fn arrange(
             .collect();
         if free.len() >= 3 {
             free.sort_by_key(|&v| {
-                circuit_lang::parse::refdes_key(&items[scene.nodes[v].anchor.unwrap_or(0)].refdes)
+                sch_check::model::refdes_key(&items[scene.nodes[v].anchor.unwrap_or(0)].refdes)
             });
             let base_layer = layer
                 .iter()
@@ -516,7 +516,7 @@ pub fn arrange(
                 .all(|&v| v < n_scene && scene.nodes[v].anchor.is_some() && is_strapish(scene, v));
         if is_strap_col && cols[strap_l].len() >= 2 {
             cols[strap_l].sort_by_key(|&v| {
-                circuit_lang::parse::refdes_key(&items[scene.nodes[v].anchor.unwrap_or(0)].refdes)
+                sch_check::model::refdes_key(&items[scene.nodes[v].anchor.unwrap_or(0)].refdes)
             });
         }
     }

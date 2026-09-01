@@ -1,7 +1,7 @@
 //! The schematic + PCB tool registry the agent drives.
 //!
 //! Each tool is a thin, deterministic wrapper over logic that already lives in
-//! `circuit-lang`, `kicad-footprint`/`kicad`, and `sch-floorplan`/`sch-io`. The registry
+//! `circuit-lang`/`sch-check`, `kicad-footprint`/`kicad`, and `sch-floorplan`/`sch-io`. The registry
 //! exposes two free functions, both driven directly by the [`crate::Agent`] loop:
 //!
 //! - [`tool_defs`] — the JSON-Schema genai [`Tool`]s handed to the LLM.
@@ -46,9 +46,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use circuit_lang::compile;
-use circuit_lang::model::{Block, Component, Design, Origin, PinTarget};
 use kicad::ErcReport;
 use kicad_footprint::FootprintId;
+use sch_check::model::{Block, Component, Design, Origin, PinTarget};
 use sch_io::read::lift;
 
 use crate::{AgentRuntime, Tool};
@@ -522,14 +522,8 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "export_fab".into(),
-            description: "Export fabrication files after clean check_board.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Default project PCB." },
-                    "out_dir": { "type": "string", "description": "Default fab/." }
-                }
-            }),
+            description: "Export fabrication files to <project>/fab after clean check_board.".into(),
+            input_schema: json!({ "type": "object", "properties": {} }),
         },
     ];
     defs.into_iter()
@@ -825,9 +819,9 @@ fn get_symbol_info(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 }
 
-/// Render a [`circuit_lang::PinType`] as a stable lowercase string for the LLM.
-fn pin_type_str(t: circuit_lang::PinType) -> &'static str {
-    use circuit_lang::PinType::*;
+/// Render a [`sch_check::PinType`] as a stable lowercase string for the LLM.
+fn pin_type_str(t: sch_check::PinType) -> &'static str {
+    use sch_check::PinType::*;
     match t {
         PowerInput => "power_input",
         PowerOutput => "power_output",
@@ -1022,16 +1016,16 @@ fn design_component_count(design: &Design) -> usize {
 }
 
 fn invalid_compile_quality_regressed(
-    prior: &circuit_lang::Diagnostics,
-    candidate: &circuit_lang::Diagnostics,
+    prior: &sch_check::Diagnostics,
+    candidate: &sch_check::Diagnostics,
 ) -> bool {
     let prior = compile_diagnostic_quality(prior);
     let candidate = compile_diagnostic_quality(candidate);
     prior.0 > 0 && candidate > prior
 }
 
-fn compile_diagnostic_quality(diagnostics: &circuit_lang::Diagnostics) -> (usize, usize) {
-    use circuit_lang::Severity;
+fn compile_diagnostic_quality(diagnostics: &sch_check::Diagnostics) -> (usize, usize) {
+    use sch_check::Severity;
 
     let errors = diagnostics
         .0
@@ -2896,7 +2890,7 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 fn electrical_yaml_changed(
     prior: Option<&str>,
     candidate: &str,
-    provider: &circuit_lang::SymbolTable,
+    provider: &sch_check::SymbolTable,
 ) -> bool {
     let Some(prior) = prior else {
         return true;
@@ -3606,7 +3600,7 @@ blocks:
 
     #[test]
     fn invalid_compile_quality_uses_warnings_only_as_an_error_tiebreak() {
-        use circuit_lang::{Diagnostic, Diagnostics};
+        use sch_check::{Diagnostic, Diagnostics};
 
         let diagnostics = |errors, warnings| {
             let mut diagnostics = Diagnostics::default();
@@ -3634,7 +3628,7 @@ blocks:
 
     #[test]
     fn compile_report_preserves_error_classes_under_repetitive_diagnostics() {
-        use circuit_lang::{Diagnostic, Diagnostics};
+        use sch_check::{Diagnostic, Diagnostics};
 
         let mut diagnostics = Diagnostics::default();
         for index in 0..55 {

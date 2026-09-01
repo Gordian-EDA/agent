@@ -1,20 +1,14 @@
-//! circuit-lang: parse, desugar, lint, and canonically emit the
-//! gordian circuit markup language. Pure — no I/O.
+//! circuit-lang: parse, desugar, and canonically emit the gordian circuit
+//! markup language. The model it produces and the checks that judge it live in
+//! [`sch_check`]. Pure — no I/O.
 
 pub mod canon;
 pub mod desugar;
-pub mod diag;
-pub mod erc;
-pub mod lint;
-pub mod model;
 pub mod parse;
-pub mod provider;
 pub mod surface;
 mod yaml;
 
-pub use diag::{Diagnostic, Diagnostics, Severity, Span};
-pub use model::Design;
-pub use provider::{PinDir, PinMeta, PinType, SymbolMeta, SymbolTable, find_pin};
+use sch_check::{Design, Diagnostics, SymbolTable};
 
 pub struct CompileResult {
     /// Some only when there are no errors (warnings allowed).
@@ -28,7 +22,8 @@ pub fn compile(src: &str, provider: &SymbolTable) -> CompileResult {
     let design = surface.map(|s| {
         let (d, ds) = desugar::desugar(&s, provider);
         diagnostics.extend(ds);
-        diagnostics.extend(lint::lint(&d, provider));
+        diagnostics.extend(sch_check::authored::lint(&d, provider));
+        diagnostics.extend(sch_check::lint::lint(&d, provider));
         d
     });
     CompileResult {

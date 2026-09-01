@@ -79,7 +79,8 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | `gordian-core` | The KiCAD agent: the turn loop + apply-gate, the schematic/PCB tools, prompts, review, and render — over the `Provider` seam with one provider-agnostic, genai-backed `GenaiProvider` (BYOK any provider) |
 | `pcb-workflow` | Application workflows that coordinate PCB creation, placement, routing, validation, rendering, and fabrication export |
 | `kicad-board` | KiCad PCB persistence boundary: live IPC snapshots, domain conversion, and atomic offline board edits |
-| `circuit-lang` | Parser, linter, and canonical emitter for the circuit markup language |
+| `sch-check` | The kernel circuit model (`Design`), its semantic lints and deterministic ERC, and the `place_parts` tool input |
+| `circuit-lang` | Parser and canonical emitter for the circuit markup language |
 | `circuit-graph` | Attributed circuit graph + a declarative idiom matcher |
 | `sch-floorplan` / `sch-io` / `sch-place` | Deterministic schematic floorplan core (`Design` → `.kicad_sch` and back), over the anneal/constraint placement engines, with the shared model + I/O layers |
 | `pcb-model` | Unified `PcbProblem -> PcbSolution` framework contract |

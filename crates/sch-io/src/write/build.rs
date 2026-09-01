@@ -140,7 +140,7 @@ impl SchematicWriter {
     /// symbols are an optional later enhancement.
     ///
     /// `pin` is resolved against the symbol geometry **by number first, then by
-    /// name** (matching `circuit-lang`'s pin resolution). A pin *name* may match
+    /// name** (matching `sch_check::pins`). A pin *name* may match
     /// several physical pins; in that case a label is emitted at **every**
     /// matching pin so they all join the net.
     ///

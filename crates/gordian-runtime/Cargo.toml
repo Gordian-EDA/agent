@@ -8,11 +8,13 @@ description = "Shared agent plumbing: GordianConfig, the AgentRuntime project co
 
 [dependencies]
 anyhow.workspace = true
+directories.workspace = true
+toml.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tempfile.workspace = true
 resvg = { workspace = true }
-circuit-lang = { path = "../circuit-lang" }
+sch-check = { path = "../sch-check" }
 gordian-llm = { path = "../gordian-llm" }
 kicad = { path = "../kicad" }
 kicad-ipc = { path = "../kicad-ipc" }
@@ -22,4 +24,3 @@ sch-io = { path = "../sch-io" }
 
 [dev-dependencies]
 serde_json.workspace = true
-toml.workspace = true

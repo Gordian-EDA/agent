@@ -74,7 +74,7 @@ impl SymbolTable {
     }
 
     /// An in-memory table preloaded with Device:R/C/L/D/LED and the common power
-    /// rails -- enough for most `circuit-lang` tests.
+    /// rails -- enough for most schematic tests.
     pub fn with_basics() -> Self {
         use PinType::*;
         let mut t = Self::mock();

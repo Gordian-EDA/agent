@@ -120,7 +120,7 @@ pub async fn review_netlist(
 /// a small semantic reviewer can otherwise overlook. These do not guess part
 /// suitability; they only reject objectively absent structures or malformed
 /// library identifiers named by the request.
-pub(crate) fn intent_contract_checks(intent: &str, design: &circuit_lang::Design) -> Vec<String> {
+pub(crate) fn intent_contract_checks(intent: &str, design: &sch_check::Design) -> Vec<String> {
     let request = intent.to_ascii_lowercase();
     let all_components = design
         .blocks
@@ -130,7 +130,7 @@ pub(crate) fn intent_contract_checks(intent: &str, design: &circuit_lang::Design
     let components = all_components
         .iter()
         .copied()
-        .filter(|(_, component)| matches!(component.origin, circuit_lang::model::Origin::Authored))
+        .filter(|(_, component)| matches!(component.origin, sch_check::model::Origin::Authored))
         .collect::<Vec<_>>();
     let mut defects = Vec::new();
 
@@ -380,7 +380,7 @@ fn requires_status_signal(request: &str) -> bool {
         })
 }
 
-fn component_text(component: &circuit_lang::model::Component) -> String {
+fn component_text(component: &sch_check::model::Component) -> String {
     format!(
         "{} {}",
         component.part,
@@ -390,7 +390,7 @@ fn component_text(component: &circuit_lang::model::Component) -> String {
     .replace(['-', ' '], "")
 }
 
-fn is_tvs_component(component: &circuit_lang::model::Component) -> bool {
+fn is_tvs_component(component: &sch_check::model::Component) -> bool {
     let text = component_text(component);
     [
         "tvs", "smaj", "smbj", "smcj", "p4sma", "p6smb", "p6ke", "1.5ke", "esd",
@@ -399,19 +399,19 @@ fn is_tvs_component(component: &circuit_lang::model::Component) -> bool {
     .any(|family| text.contains(family))
 }
 
-fn component_nets(component: &circuit_lang::model::Component) -> Vec<&str> {
+fn component_nets(component: &sch_check::model::Component) -> Vec<&str> {
     component
         .pins
         .values()
         .filter_map(|target| match target {
-            circuit_lang::model::PinTarget::Net(net) => Some(net.as_str()),
-            circuit_lang::model::PinTarget::NoConnect => None,
+            sch_check::model::PinTarget::Net(net) => Some(net.as_str()),
+            sch_check::model::PinTarget::NoConnect => None,
         })
         .collect()
 }
 
 fn pc817_inputs_bypassing_series_resistors(
-    components: &[(&String, &circuit_lang::model::Component)],
+    components: &[(&String, &sch_check::model::Component)],
 ) -> Vec<String> {
     let connectors = components
         .iter()
@@ -425,7 +425,7 @@ fn pc817_inputs_bypassing_series_resistors(
         if !part.contains("PC817") && !part.contains("LTV817") {
             continue;
         }
-        let Some(circuit_lang::model::PinTarget::Net(anode_net)) = opto.pins.get("1") else {
+        let Some(sch_check::model::PinTarget::Net(anode_net)) = opto.pins.get("1") else {
             continue;
         };
         if !connectors.contains(anode_net.as_str()) {
@@ -450,7 +450,7 @@ fn pc817_inputs_bypassing_series_resistors(
 }
 
 fn is_positive_rail_net(net: &str) -> bool {
-    if circuit_lang::erc::rail_voltage(net).is_some_and(|volts| volts > 0.0) {
+    if sch_check::erc::rail_voltage(net).is_some_and(|volts| volts > 0.0) {
         return true;
     }
     let normalized = net.trim().trim_start_matches('+').to_ascii_uppercase();
@@ -464,7 +464,7 @@ fn is_positive_rail_net(net: &str) -> bool {
     )
 }
 
-fn has_i2c_pullups(components: &[(&String, &circuit_lang::model::Component)]) -> bool {
+fn has_i2c_pullups(components: &[(&String, &sch_check::model::Component)]) -> bool {
     ["sda", "scl"].iter().all(|signal| {
         components.iter().any(|(_, component)| {
             if !component.part.ends_with(":R") {
@@ -478,7 +478,7 @@ fn has_i2c_pullups(components: &[(&String, &circuit_lang::model::Component)]) ->
     })
 }
 
-fn has_selectable_address_strap(components: &[(&String, &circuit_lang::model::Component)]) -> bool {
+fn has_selectable_address_strap(components: &[(&String, &sch_check::model::Component)]) -> bool {
     components.iter().any(|(refdes, component)| {
         let text = component_text(component);
         let selectable = refdes.to_ascii_uppercase().starts_with("JP")
@@ -554,7 +554,7 @@ fn requested_test_point_nets(request: &str) -> Vec<&'static str> {
         .collect()
 }
 
-fn test_point_nets(components: &[(&String, &circuit_lang::model::Component)]) -> Vec<String> {
+fn test_point_nets(components: &[(&String, &sch_check::model::Component)]) -> Vec<String> {
     components
         .iter()
         .filter(|(refdes, component)| {
@@ -580,7 +580,7 @@ fn canonical_net_matches(net: &str, canonical: &str) -> bool {
     }
 }
 
-fn has_decoupling(components: &[(&String, &circuit_lang::model::Component)]) -> bool {
+fn has_decoupling(components: &[(&String, &sch_check::model::Component)]) -> bool {
     components.iter().any(|(_, component)| {
         if !component.part.ends_with(":C") {
             return false;
@@ -590,7 +590,7 @@ fn has_decoupling(components: &[(&String, &circuit_lang::model::Component)]) -> 
     })
 }
 
-fn has_power_led(components: &[(&String, &circuit_lang::model::Component)]) -> bool {
+fn has_power_led(components: &[(&String, &sch_check::model::Component)]) -> bool {
     components.iter().any(|(_, led)| {
         if !component_text(led).contains("led") {
             return false;
@@ -616,7 +616,7 @@ fn has_power_led(components: &[(&String, &circuit_lang::model::Component)]) -> b
     })
 }
 
-fn has_reverse_protection(components: &[(&String, &circuit_lang::model::Component)]) -> bool {
+fn has_reverse_protection(components: &[(&String, &sch_check::model::Component)]) -> bool {
     components.iter().any(|(_, component)| {
         let text = component_text(component);
         let candidate = (component.part.ends_with(":D")
@@ -635,7 +635,7 @@ fn has_reverse_protection(components: &[(&String, &circuit_lang::model::Componen
     })
 }
 
-fn has_split_termination(components: &[(&String, &circuit_lang::model::Component)]) -> bool {
+fn has_split_termination(components: &[(&String, &sch_check::model::Component)]) -> bool {
     let legs = components
         .iter()
         .filter(|(_, component)| component.part.ends_with(":R"))
@@ -643,7 +643,7 @@ fn has_split_termination(components: &[(&String, &circuit_lang::model::Component
             component
                 .value
                 .as_deref()
-                .and_then(circuit_lang::erc::parse_value)
+                .and_then(sch_check::erc::parse_value)
                 .is_some_and(|ohms| (55.0..=65.0).contains(&ohms))
         })
         .map(|(_, component)| component_nets(component))
@@ -679,8 +679,8 @@ fn has_split_termination(components: &[(&String, &circuit_lang::model::Component
 /// data for active parts, package power pins, and synthesized support parts.
 pub(crate) fn annotate_netlist_for_review(
     netlist: &str,
-    design: &circuit_lang::Design,
-    provider: &circuit_lang::SymbolTable,
+    design: &sch_check::Design,
+    provider: &sch_check::SymbolTable,
 ) -> String {
     let decoupling = decoupling_by_parent(design);
     let mut lines = vec![
@@ -690,7 +690,7 @@ pub(crate) fn annotate_netlist_for_review(
 
     for block in design.blocks.values() {
         for (refdes, comp) in &block.components {
-            if matches!(comp.origin, circuit_lang::model::Origin::Synthesized { .. }) {
+            if matches!(comp.origin, sch_check::model::Origin::Synthesized { .. }) {
                 continue;
             }
             let power = power_pin_facts(comp, provider);
@@ -737,8 +737,8 @@ pub(crate) fn annotate_netlist_for_review(
 /// Keep this deliberately narrow: only exact, conventional supply/ground
 /// function names and unambiguous voltage/ground net names participate.
 pub(crate) fn symbol_pin_rail_checks(
-    design: &circuit_lang::Design,
-    provider: &circuit_lang::SymbolTable,
+    design: &sch_check::Design,
+    provider: &sch_check::SymbolTable,
 ) -> Vec<String> {
     let mut findings = Vec::new();
     for block in design.blocks.values() {
@@ -749,7 +749,7 @@ pub(crate) fn symbol_pin_rail_checks(
             let protection_part = is_protection_part(&comp.part, &meta);
             let mut flow_pins: BTreeMap<String, FlowChannelPins<'_>> = BTreeMap::new();
             for (key, target) in comp.pins.iter().chain(comp.units.values().flatten()) {
-                let circuit_lang::model::PinTarget::Net(net) = target else {
+                let sch_check::model::PinTarget::Net(net) = target else {
                     continue;
                 };
                 let by_number: Vec<_> = meta.pins.iter().filter(|pin| pin.number == *key).collect();
@@ -759,7 +759,7 @@ pub(crate) fn symbol_pin_rail_checks(
                     by_number
                 };
                 for pin in hits {
-                    let voltage = circuit_lang::erc::rail_voltage(net);
+                    let voltage = sch_check::erc::rail_voltage(net);
                     if is_positive_supply_function(&pin.name) && voltage == Some(0.0) {
                         findings.push(format!(
                             "- {refdes}: symbol pin {}/{} is tied to ground net {net} — a positive supply pin cannot be grounded",
@@ -802,7 +802,7 @@ pub(crate) fn symbol_pin_rail_checks(
     findings
 }
 
-fn is_protection_part(part: &str, meta: &circuit_lang::SymbolMeta) -> bool {
+fn is_protection_part(part: &str, meta: &sch_check::SymbolMeta) -> bool {
     let mut text = part.to_ascii_lowercase();
     if let Some(description) = &meta.description {
         text.push(' ');
@@ -855,11 +855,11 @@ fn is_positive_supply_function(name: &str) -> bool {
     )
 }
 
-fn decoupling_by_parent(design: &circuit_lang::Design) -> BTreeMap<&str, BTreeMap<&str, usize>> {
+fn decoupling_by_parent(design: &sch_check::Design) -> BTreeMap<&str, BTreeMap<&str, usize>> {
     let mut out: BTreeMap<&str, BTreeMap<&str, usize>> = BTreeMap::new();
     for block in design.blocks.values() {
         for comp in block.components.values() {
-            if let circuit_lang::model::Origin::Synthesized { parent, role, .. } = &comp.origin
+            if let sch_check::model::Origin::Synthesized { parent, role, .. } = &comp.origin
                 && role == "decouple"
             {
                 let value = comp.value.as_deref().unwrap_or("?");
@@ -874,13 +874,13 @@ fn decoupling_by_parent(design: &circuit_lang::Design) -> BTreeMap<&str, BTreeMa
 }
 
 fn power_pin_facts(
-    comp: &circuit_lang::model::Component,
-    provider: &circuit_lang::SymbolTable,
+    comp: &sch_check::model::Component,
+    provider: &sch_check::SymbolTable,
 ) -> Vec<String> {
     let Some(meta) = provider.symbol(&comp.part) else {
         return Vec::new();
     };
-    let mut covered: BTreeMap<&str, (&str, &circuit_lang::model::PinTarget)> = BTreeMap::new();
+    let mut covered: BTreeMap<&str, (&str, &sch_check::model::PinTarget)> = BTreeMap::new();
     let all_pins = comp.pins.iter().chain(comp.units.values().flatten());
     for (key, target) in all_pins {
         let by_number: Vec<_> = meta.pins.iter().filter(|p| p.number == *key).collect();
@@ -896,7 +896,7 @@ fn power_pin_facts(
 
     meta.pins
         .iter()
-        .filter(|pin| pin.etype == circuit_lang::PinType::PowerInput)
+        .filter(|pin| pin.etype == sch_check::PinType::PowerInput)
         .map(|pin| {
             let target = covered
                 .get(pin.number.as_str())
@@ -917,10 +917,10 @@ fn power_pin_facts(
 /// needed to prevent unsafe polarity guesses. Power-input facts already ride in
 /// [`power_pin_facts`] (including required pins absent from the YAML).
 fn explicit_pin_facts(
-    comp: &circuit_lang::model::Component,
-    provider: &circuit_lang::SymbolTable,
+    comp: &sch_check::model::Component,
+    provider: &sch_check::SymbolTable,
 ) -> Vec<String> {
-    use circuit_lang::{PinDir, PinType};
+    use sch_check::{PinDir, PinType};
 
     let Some(meta) = provider.symbol(&comp.part) else {
         return Vec::new();
@@ -977,10 +977,10 @@ fn explicit_pin_facts(
     facts
 }
 
-fn pin_target_text(target: &circuit_lang::model::PinTarget) -> String {
+fn pin_target_text(target: &sch_check::model::PinTarget) -> String {
     match target {
-        circuit_lang::model::PinTarget::Net(net) => net.clone(),
-        circuit_lang::model::PinTarget::NoConnect => "nc".to_string(),
+        sch_check::model::PinTarget::Net(net) => net.clone(),
+        sch_check::model::PinTarget::NoConnect => "nc".to_string(),
     }
 }
 
@@ -1104,16 +1104,16 @@ mod tests {
 
     #[test]
     fn review_subject_includes_symbol_ground_truth_and_decoupling() {
-        let mut provider = circuit_lang::SymbolTable::with_basics();
+        let mut provider = sch_check::SymbolTable::with_basics();
         provider.mock_add(
             "M:STM32",
             vec![
-                ("1", "VDD", circuit_lang::PinType::PowerInput, 1),
-                ("9", "VDD", circuit_lang::PinType::PowerInput, 1),
-                ("24", "VDD", circuit_lang::PinType::PowerInput, 1),
-                ("7", "NRST", circuit_lang::PinType::Other, 1),
-                ("8", "VSS", circuit_lang::PinType::PowerInput, 1),
-                ("23", "VSS", circuit_lang::PinType::PowerInput, 1),
+                ("1", "VDD", sch_check::PinType::PowerInput, 1),
+                ("9", "VDD", sch_check::PinType::PowerInput, 1),
+                ("24", "VDD", sch_check::PinType::PowerInput, 1),
+                ("7", "NRST", sch_check::PinType::Other, 1),
+                ("8", "VSS", sch_check::PinType::PowerInput, 1),
+                ("23", "VSS", sch_check::PinType::PowerInput, 1),
             ],
         );
         let netlist = r#"
@@ -1143,18 +1143,18 @@ blocks:
 
     #[test]
     fn review_subject_resolves_numeric_active_pin_functions() {
-        let mut provider = circuit_lang::SymbolTable::with_basics();
+        let mut provider = sch_check::SymbolTable::with_basics();
         provider.mock_add(
             "M:DUAL_OPAMP",
             vec![
-                ("1", "~", circuit_lang::PinType::Other, 1),
-                ("2", "-", circuit_lang::PinType::Other, 1),
-                ("3", "+", circuit_lang::PinType::Other, 1),
-                ("4", "V-", circuit_lang::PinType::PowerInput, 3),
-                ("5", "+", circuit_lang::PinType::Other, 2),
-                ("6", "-", circuit_lang::PinType::Other, 2),
-                ("7", "~", circuit_lang::PinType::Other, 2),
-                ("8", "V+", circuit_lang::PinType::PowerInput, 3),
+                ("1", "~", sch_check::PinType::Other, 1),
+                ("2", "-", sch_check::PinType::Other, 1),
+                ("3", "+", sch_check::PinType::Other, 1),
+                ("4", "V-", sch_check::PinType::PowerInput, 3),
+                ("5", "+", sch_check::PinType::Other, 2),
+                ("6", "-", sch_check::PinType::Other, 2),
+                ("7", "~", sch_check::PinType::Other, 2),
+                ("8", "V+", sch_check::PinType::PowerInput, 3),
             ],
         );
         let netlist = r#"
@@ -1179,12 +1179,12 @@ blocks:
 
     #[test]
     fn review_subject_resolves_numeric_diode_polarity() {
-        let mut provider = circuit_lang::SymbolTable::with_basics();
+        let mut provider = sch_check::SymbolTable::with_basics();
         provider.mock_add(
             "Device:D",
             vec![
-                ("1", "K", circuit_lang::PinType::Passive, 1),
-                ("2", "A", circuit_lang::PinType::Passive, 1),
+                ("1", "K", sch_check::PinType::Passive, 1),
+                ("2", "A", sch_check::PinType::Passive, 1),
             ],
         );
         let netlist = r#"
@@ -1207,16 +1207,16 @@ blocks:
 
     #[test]
     fn passive_protection_supply_pin_is_annotated_and_cannot_be_grounded() {
-        let mut provider = circuit_lang::SymbolTable::with_basics();
+        let mut provider = sch_check::SymbolTable::with_basics();
         provider.mock_add(
             "Protection:USB_ESD",
             vec![
-                ("1", "I/O1", circuit_lang::PinType::Passive, 1),
-                ("2", "GND", circuit_lang::PinType::Passive, 1),
-                ("3", "I/O2", circuit_lang::PinType::Passive, 1),
-                ("4", "I/O2", circuit_lang::PinType::Passive, 1),
-                ("5", "VBUS", circuit_lang::PinType::Passive, 1),
-                ("6", "I/O1", circuit_lang::PinType::Passive, 1),
+                ("1", "I/O1", sch_check::PinType::Passive, 1),
+                ("2", "GND", sch_check::PinType::Passive, 1),
+                ("3", "I/O2", sch_check::PinType::Passive, 1),
+                ("4", "I/O2", sch_check::PinType::Passive, 1),
+                ("5", "VBUS", sch_check::PinType::Passive, 1),
+                ("6", "I/O1", sch_check::PinType::Passive, 1),
             ],
         );
         let netlist = r#"
@@ -1244,13 +1244,13 @@ blocks:
 
     #[test]
     fn symbol_pin_rail_check_accepts_matching_supply_and_ground_rails() {
-        let mut provider = circuit_lang::SymbolTable::with_basics();
+        let mut provider = sch_check::SymbolTable::with_basics();
         provider.mock_add(
             "M:POWERED",
             vec![
-                ("1", "VDD", circuit_lang::PinType::PowerInput, 1),
-                ("2", "VSS", circuit_lang::PinType::PowerInput, 1),
-                ("3", "OUT", circuit_lang::PinType::Other, 1),
+                ("1", "VDD", sch_check::PinType::PowerInput, 1),
+                ("2", "VSS", sch_check::PinType::PowerInput, 1),
+                ("3", "OUT", sch_check::PinType::Other, 1),
             ],
         );
         let netlist = r#"
@@ -1268,16 +1268,16 @@ blocks:
 
     #[test]
     fn protection_flow_through_inputs_and_outputs_require_distinct_nets() {
-        let mut provider = circuit_lang::SymbolTable::with_basics();
+        let mut provider = sch_check::SymbolTable::with_basics();
         provider.mock_add(
             "Power_Protection:TPD2S017",
             vec![
-                ("1", "CH1Out", circuit_lang::PinType::Passive, 1),
-                ("2", "GND", circuit_lang::PinType::PowerInput, 1),
-                ("3", "CH1In", circuit_lang::PinType::Passive, 1),
-                ("4", "CH2Int", circuit_lang::PinType::Passive, 1),
-                ("5", "VCC", circuit_lang::PinType::PowerInput, 1),
-                ("6", "CH2Out", circuit_lang::PinType::Passive, 1),
+                ("1", "CH1Out", sch_check::PinType::Passive, 1),
+                ("2", "GND", sch_check::PinType::PowerInput, 1),
+                ("3", "CH1In", sch_check::PinType::Passive, 1),
+                ("4", "CH2Int", sch_check::PinType::Passive, 1),
+                ("5", "VCC", sch_check::PinType::PowerInput, 1),
+                ("6", "CH2Out", sch_check::PinType::Passive, 1),
             ],
         );
         let netlist = r#"
@@ -1304,16 +1304,16 @@ blocks:
 
     #[test]
     fn protection_flow_through_accepts_separate_connector_and_device_nets() {
-        let mut provider = circuit_lang::SymbolTable::with_basics();
+        let mut provider = sch_check::SymbolTable::with_basics();
         provider.mock_add(
             "Power_Protection:TPD2S017",
             vec![
-                ("1", "CH1Out", circuit_lang::PinType::Passive, 1),
-                ("2", "GND", circuit_lang::PinType::PowerInput, 1),
-                ("3", "CH1In", circuit_lang::PinType::Passive, 1),
-                ("4", "CH2Int", circuit_lang::PinType::Passive, 1),
-                ("5", "VCC", circuit_lang::PinType::PowerInput, 1),
-                ("6", "CH2Out", circuit_lang::PinType::Passive, 1),
+                ("1", "CH1Out", sch_check::PinType::Passive, 1),
+                ("2", "GND", sch_check::PinType::PowerInput, 1),
+                ("3", "CH1In", sch_check::PinType::Passive, 1),
+                ("4", "CH2Int", sch_check::PinType::Passive, 1),
+                ("5", "VCC", sch_check::PinType::PowerInput, 1),
+                ("6", "CH2Out", sch_check::PinType::Passive, 1),
             ],
         );
         let netlist = r#"
@@ -1364,7 +1364,7 @@ blocks:
 
     #[test]
     fn intent_contracts_reject_superficial_can_substitutes() {
-        let provider = circuit_lang::SymbolTable::with_basics();
+        let provider = sch_check::SymbolTable::with_basics();
         let netlist = r#"
 version: 1
 blocks:
@@ -1398,7 +1398,7 @@ nets:
 
     #[test]
     fn intent_contracts_accept_concrete_can_structures() {
-        let provider = circuit_lang::SymbolTable::with_basics();
+        let provider = sch_check::SymbolTable::with_basics();
         let netlist = r#"
 version: 1
 blocks:
@@ -1430,19 +1430,19 @@ nets:
 
     #[test]
     fn intent_contract_rejects_pc817_input_resistor_bypass() {
-        let mut provider = circuit_lang::SymbolTable::with_basics();
+        let mut provider = sch_check::SymbolTable::with_basics();
         provider.mock_add(
             "Isolator:PC817",
             vec![
-                ("1", "A", circuit_lang::PinType::Passive, 1),
-                ("2", "K", circuit_lang::PinType::Passive, 1),
-                ("3", "E", circuit_lang::PinType::Passive, 1),
-                ("4", "C", circuit_lang::PinType::Passive, 1),
+                ("1", "A", sch_check::PinType::Passive, 1),
+                ("2", "K", sch_check::PinType::Passive, 1),
+                ("3", "E", sch_check::PinType::Passive, 1),
+                ("4", "C", sch_check::PinType::Passive, 1),
             ],
         );
         provider.mock_add(
             "Connector:Conn_01x01_Pin",
-            vec![("1", "Pin_1", circuit_lang::PinType::Passive, 1)],
+            vec![("1", "Pin_1", sch_check::PinType::Passive, 1)],
         );
         let compile = |body: &str| {
             circuit_lang::compile(
@@ -1480,7 +1480,7 @@ nets:
 
     #[test]
     fn conditional_status_does_not_create_a_false_contract() {
-        let provider = circuit_lang::SymbolTable::with_basics();
+        let provider = sch_check::SymbolTable::with_basics();
         let netlist = r#"
 version: 1
 blocks:
@@ -1519,7 +1519,7 @@ blocks:
 
     #[test]
     fn named_test_points_require_each_explicit_canonical_net() {
-        let provider = circuit_lang::SymbolTable::with_basics();
+        let provider = sch_check::SymbolTable::with_basics();
         let netlist = r#"
 version: 1
 blocks:
@@ -1542,7 +1542,7 @@ blocks:
 
     #[test]
     fn intent_contracts_reject_missing_explicit_board_essentials() {
-        let provider = circuit_lang::SymbolTable::with_basics();
+        let provider = sch_check::SymbolTable::with_basics();
         let netlist = r#"
 version: 1
 blocks:
@@ -1580,12 +1580,12 @@ blocks:
 
     #[test]
     fn intent_contract_recognizes_standard_avalanche_tvs_families() {
-        let mut provider = circuit_lang::SymbolTable::with_basics();
+        let mut provider = sch_check::SymbolTable::with_basics();
         provider.mock_add(
             "Diode:SMAJ15A",
             vec![
-                ("1", "K", circuit_lang::PinType::Passive, 1),
-                ("2", "A", circuit_lang::PinType::Passive, 1),
+                ("1", "K", sch_check::PinType::Passive, 1),
+                ("2", "A", sch_check::PinType::Passive, 1),
             ],
         );
         let compiled = circuit_lang::compile(
@@ -1609,7 +1609,7 @@ blocks:
 
     #[test]
     fn intent_contract_recognizes_decoupling_on_named_rail_variants() {
-        let provider = circuit_lang::SymbolTable::with_basics();
+        let provider = sch_check::SymbolTable::with_basics();
         for rail in ["V5", "V5_PRE", "5V_PROTECTED", "VDD_A"] {
             let yaml = format!(
                 r#"
@@ -1633,20 +1633,20 @@ blocks:
 
     #[test]
     fn intent_contracts_accept_explicit_board_essentials() {
-        let mut provider = circuit_lang::SymbolTable::with_basics();
+        let mut provider = sch_check::SymbolTable::with_basics();
         provider.mock_add(
             "Connector:Conn_01x02_Pin",
             vec![
-                ("1", "Pin_1", circuit_lang::PinType::Passive, 1),
-                ("2", "Pin_2", circuit_lang::PinType::Passive, 1),
+                ("1", "Pin_1", sch_check::PinType::Passive, 1),
+                ("2", "Pin_2", sch_check::PinType::Passive, 1),
             ],
         );
         for part in ["Device:D_TVS", "Device:Fuse"] {
             provider.mock_add(
                 part,
                 vec![
-                    ("1", "1", circuit_lang::PinType::Passive, 1),
-                    ("2", "2", circuit_lang::PinType::Passive, 1),
+                    ("1", "1", sch_check::PinType::Passive, 1),
+                    ("2", "2", sch_check::PinType::Passive, 1),
                 ],
             );
         }
@@ -1684,12 +1684,12 @@ blocks:
 
     #[test]
     fn bme_sdo_jumper_satisfies_selectable_address_contract() {
-        let mut provider = circuit_lang::SymbolTable::with_basics();
+        let mut provider = sch_check::SymbolTable::with_basics();
         provider.mock_add(
             "Connector:Conn_01x02_Pin",
             vec![
-                ("1", "Pin_1", circuit_lang::PinType::Passive, 1),
-                ("2", "Pin_2", circuit_lang::PinType::Passive, 1),
+                ("1", "Pin_1", sch_check::PinType::Passive, 1),
+                ("2", "Pin_2", sch_check::PinType::Passive, 1),
             ],
         );
         let design = circuit_lang::compile(

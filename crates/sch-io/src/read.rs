@@ -56,8 +56,8 @@ use std::io;
 use std::path::Path;
 
 use circuit_lang::canon::to_canonical_yaml;
-use circuit_lang::model::{Block, Component, Design, Origin, PinTarget};
 use kicad::KicadInstallation;
+use sch_check::model::{Block, Component, Design, Origin, PinTarget};
 
 use sch_place::result::{AP_BLOCK, AP_INDEX, AP_PARENT, AP_ROLE, ROLE_AUTHORED};
 
@@ -68,7 +68,7 @@ const DEFAULT_BLOCK: &str = "main";
 /// Lift a `.kicad_sch` at `sch_path` back into canonical kernel YAML.
 ///
 /// Runs `kicad-cli` for connectivity, reads `ap_*` semantics off the netlist
-/// components, reconstructs a [`circuit_lang::Design`], and emits it via
+/// components, reconstructs a [`sch_check::Design`], and emits it via
 /// [`circuit_lang::canon`]. See the module docs for the source-of-truth split
 /// and the (connectivity-preserving) round-trip differences.
 ///

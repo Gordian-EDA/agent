@@ -344,12 +344,16 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     eprintln!("config: {}", loaded.path.display());
 
     // 2. Build the LLM client from TOML config.
-    let client = gordian_core::GenaiProvider::from_config(&config.llm).with_context(|| {
+    let mut client = gordian_core::GenaiProvider::from_config(&config.llm).with_context(|| {
         format!(
             "could not build the LLM client — set llm.adapter, llm.model, and llm.apiKey in {}",
             loaded.path.display()
         )
     })?;
+    if let Ok(thread) = std::env::var("GORDIAN_THREAD_ID") {
+        client = client.with_thread_identifier(thread);
+    }
+    eprintln!("thread:  {}", client.thread_identifier());
 
     // 3. Tool context over the real project directory. `apply_design` derives
     //    its human-style floorplan from the netlist (`infer_ir`), so no separate

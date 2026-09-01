@@ -1,10 +1,10 @@
 //! Strict walker: yaml::Node -> SurfaceDesign. Unknown keys are errors
 //! with did-you-mean suggestions.
 
-use crate::diag::{Diagnostic, Diagnostics, Span};
 use crate::surface::*;
 use crate::yaml::{self, Node};
 use indexmap::IndexMap;
+use sch_check::diag::{Diagnostic, Diagnostics, Span};
 
 pub fn parse_str(src: &str) -> (Option<SurfaceDesign>, Diagnostics) {
     let mut diags = Diagnostics::default();
@@ -34,16 +34,8 @@ fn suggest(key: &str, allowed: &[&str]) -> Option<String> {
 }
 
 /// Strict `[A-Z]+[0-9]+`: an uppercase-letter prefix followed by a digit
-/// suffix, with nothing interleaved (e.g. `U1`, `R10`). Shared by the
-/// refdes validator here and the pin-ref detector in `desugar`.
-/// Natural refdes sort key: alpha prefix + numeric suffix, so `J2` < `J10`.
-/// Malformed suffixes sort last within their prefix.
-pub fn refdes_key(r: &str) -> (&str, u64) {
-    let split = r.find(|c: char| c.is_ascii_digit()).unwrap_or(r.len());
-    let (alpha, num) = r.split_at(split);
-    (alpha, num.parse().unwrap_or(u64::MAX))
-}
-
+/// suffix, with nothing interleaved (e.g. `U1`, `R10`). Shared by the refdes
+/// validator here and the pin-ref detector in `desugar`.
 pub fn looks_like_refdes(s: &str) -> bool {
     match s.find(|c: char| c.is_ascii_digit()) {
         Some(i) if i > 0 => {
@@ -455,7 +447,7 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diag::Severity;
+    use sch_check::diag::Severity;
 
     const MINIMAL: &str = "
 version: 1
@@ -700,7 +692,8 @@ blocks:
         );
         assert!(
             d.0.iter()
-                .any(|x| x.code == "net-name-case" && x.severity == crate::diag::Severity::Warning)
+                .any(|x| x.code == "net-name-case"
+                    && x.severity == sch_check::diag::Severity::Warning)
         );
     }
 }

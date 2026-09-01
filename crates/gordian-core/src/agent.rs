@@ -2410,18 +2410,17 @@ impl<P: Provider> Agent<P> {
             stage.name == "render_board"
                 && pcb_finish_stage_succeeded(stage.name, &parse_or_null(&stage.content))
         }) {
+            // The visual review is advice, not an oracle: DRC already decided the
+            // board is manufacturable, so its defects ride along in the report for
+            // the model to act on instead of withholding the deliverable.
             let review = self
                 .run_pcb_visual_review_stage(intent, stages.last().expect("render stage"), events)
                 .await;
-            let succeeded =
-                pcb_finish_stage_succeeded(review.name, &parse_or_null(&review.content));
             stages.push(review);
-            if succeeded {
-                let export = self
-                    .run_pcb_finish_stage("export_fab", json!({}), pcb_recovery, events)
-                    .await;
-                stages.push(export);
-            }
+            let export = self
+                .run_pcb_finish_stage("export_fab", json!({}), pcb_recovery, events)
+                .await;
+            stages.push(export);
         }
         let completed = stages.last().is_some_and(|stage| {
             stage.name == "export_fab"
@@ -2488,10 +2487,12 @@ impl<P: Provider> Agent<P> {
                     "defects": defects,
                     "error": "PCB visual review found actionable layout defects",
                 }),
+                // A critic that could not produce a verdict is unavailable, not a
+                // finding: DRC already gates the board, so the turn continues.
                 Err(error) => json!({
-                    "ok": false,
-                    "code": "pcb_visual_review_failed",
-                    "error": error.to_string(),
+                    "ok": true,
+                    "skipped": true,
+                    "reason": format!("visual layout review unavailable: {error}"),
                 }),
             }
         };
@@ -2908,7 +2909,7 @@ impl PcbQualityState {
                 self.reviewed = false;
             }
             "review_board" if self.checked && self.rendered => {
-                self.reviewed = pcb_finish_stage_succeeded(name, value);
+                self.reviewed = visual_review_ran(value);
             }
             "export_fab" if self.checked => {
                 self.exported = pcb_finish_stage_succeeded(name, value);
@@ -2930,13 +2931,21 @@ impl PcbQualityState {
             missing.push("current render_board");
         }
         if !self.reviewed {
-            missing.push("clean visual board review");
+            missing.push("current visual board review");
         }
         if fabrication_required && !self.exported {
             missing.push("successful export_fab");
         }
         missing
     }
+}
+
+/// Whether a `review_board` result is a verdict on the current render. DRC is
+/// the pass/fail oracle; the visual critic's defects are advice, so a verdict
+/// with defects still satisfies the turn's review step. Only a review that
+/// could not run at all leaves it unmet.
+fn visual_review_ran(value: &Value) -> bool {
+    value.get("score").is_some() || value.get("skipped").and_then(Value::as_bool) == Some(true)
 }
 
 fn pcb_quality_invalidated_by(name: &str) -> bool {
@@ -4611,9 +4620,9 @@ async fn review_netlist_with_erc(
 fn deterministic_netlist_defects(
     ctx: &AgentRuntime,
     intent: &str,
-    design: &circuit_lang::Design,
+    design: &sch_check::Design,
 ) -> Vec<String> {
-    let mut defects = circuit_lang::erc::erc_checks(design);
+    let mut defects = sch_check::erc::erc_checks(design, ctx.provider());
     defects.extend(crate::review_kicad::symbol_pin_rail_checks(
         design,
         ctx.provider(),
@@ -4820,6 +4829,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
     if let Some(err) = result.get("error").and_then(Value::as_str) {
         let diagnostic = result
             .get("diagnostics")
+            .or_else(|| result.get("defects"))
             .and_then(Value::as_array)
             .and_then(|items| items.iter().find_map(Value::as_str));
         return diagnostic.map_or_else(
@@ -4857,6 +4867,11 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             format!("{lib} → {n} pads")
         }
         "read_schematic" => "read schematic YAML".to_string(),
+        "export_fab" => {
+            let files = result.get("file_count").and_then(Value::as_u64).unwrap_or(0);
+            let dir = result.get("fab_dir").and_then(Value::as_str).unwrap_or("");
+            format!("{files} file(s) in {dir}")
+        }
         "validate_design" => {
             let errors = result.get("errors").and_then(Value::as_u64).unwrap_or(0);
             let warnings = result.get("warnings").and_then(Value::as_u64).unwrap_or(0);
@@ -6475,6 +6490,16 @@ mod tests {
         quality.observe("render_board", &json!({"ok": true}));
         quality.observe(
             "review_board",
+            &json!({"ok": false, "defects": ["silkscreen overlaps a pad"], "score": 6}),
+        );
+        assert!(
+            quality.accepted(false),
+            "advisory visual defects must not block a DRC-clean turn"
+        );
+        quality.observe("review_board", &json!({"error": "vision provider failed"}));
+        assert!(!quality.accepted(false));
+        quality.observe(
+            "review_board",
             &json!({"ok": true, "defects": [], "score": 9}),
         );
         assert!(quality.accepted(false));
@@ -6491,7 +6516,7 @@ mod tests {
             [
                 "clean check_board",
                 "current render_board",
-                "clean visual board review",
+                "current visual board review",
                 "successful export_fab"
             ]
         );

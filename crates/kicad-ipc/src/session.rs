@@ -234,7 +234,15 @@ impl Session {
             Self::await_socket(&mut child, &mut owned_board_lock, Duration::from_secs(90))
         {
             cleanup_launch(&mut child, xvfb, owned_board_lock, None);
-            return Err(err);
+            return Err(match api_server_disabled(expected_major) {
+                Some(cfg) => Error::Spawn(format!(
+                    "{err}: `api.enable_server` is false in {}. KiCAD rewrites that file on exit, \
+                     so set `kicad.enableApiConfig = true` in the Gordian config rather than \
+                     editing it by hand",
+                    cfg.display()
+                )),
+                None => err,
+            });
         }
         let owned_socket = socket_identity(Path::new(SOCKET_FILE));
         // Let the server finish binding before the first request.
@@ -482,12 +490,29 @@ fn board_lock_path(board: &Path) -> Option<PathBuf> {
 ///
 /// This is called only when the frontend opted into `enableApiConfig`; ordinary
 /// IPC connection and launch paths never rewrite user preferences.
+/// The selected KiCAD's preferences file when it has the API server switched
+/// off - the usual reason the IPC socket never appears.
+fn api_server_disabled(major: Option<u32>) -> Option<PathBuf> {
+    let cfg = kicad_common_config(major?)?;
+    std::fs::read_to_string(&cfg)
+        .ok()?
+        .contains("\"enable_server\": false")
+        .then_some(cfg)
+}
+
+fn kicad_common_config(major: u32) -> Option<PathBuf> {
+    let base = directories::BaseDirs::new()?;
+    Some(
+        base.config_dir()
+            .join("kicad")
+            .join(format!("{major}.0/kicad_common.json")),
+    )
+}
+
 fn enable_api_for_major(major: u32) {
-    let Some(base_dirs) = directories::BaseDirs::new() else {
+    let Some(cfg) = kicad_common_config(major) else {
         return;
     };
-    let cfg_root = base_dirs.config_dir().join("kicad");
-    let cfg = cfg_root.join(format!("{major}.0/kicad_common.json"));
     if cfg.exists() {
         enable_api_in_config(&cfg);
     } else {

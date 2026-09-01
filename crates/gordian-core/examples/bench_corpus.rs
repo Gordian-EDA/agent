@@ -123,8 +123,8 @@ fn bench_one(
     ))
 }
 
-fn pin_net_counts(design: &circuit_lang::Design) -> (usize, usize) {
-    use circuit_lang::model::PinTarget;
+fn pin_net_counts(design: &sch_check::Design) -> (usize, usize) {
+    use sch_check::model::PinTarget;
     use std::collections::BTreeSet;
     let mut pins = 0usize;
     let mut nets: BTreeSet<String> = BTreeSet::new();

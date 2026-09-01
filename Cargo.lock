@@ -55,10 +55,10 @@ name = "anneal-place"
 version = "0.1.0"
 dependencies = [
  "circuit-graph",
- "circuit-lang",
  "geom",
  "kicad",
  "rayon",
+ "sch-check",
  "sch-floorplan",
  "sch-place",
 ]
@@ -348,13 +348,13 @@ version = "0.1.0"
 name = "circuit-lang"
 version = "0.1.0"
 dependencies = [
- "circuit-graph",
  "geom",
  "indexmap 2.14.0",
  "kicad",
- "kicad-symbol",
  "saphyr",
  "saphyr-parser",
+ "sch-check",
+ "serde_json",
  "strsim",
 ]
 
@@ -364,10 +364,10 @@ version = "0.1.0"
 dependencies = [
  "anneal-place",
  "circuit-graph",
- "circuit-lang",
  "geom",
  "kicad",
  "rayon",
+ "sch-check",
  "sch-floorplan",
  "sch-place",
  "spine-place",
@@ -1040,6 +1040,7 @@ dependencies = [
  "prost-types",
  "rayon",
  "resvg",
+ "sch-check",
  "sch-floorplan",
  "sch-io",
  "sch-place",
@@ -1062,6 +1063,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -1069,13 +1071,14 @@ name = "gordian-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "circuit-lang",
+ "directories",
  "gordian-llm",
  "kicad",
  "kicad-footprint",
  "kicad-ipc",
  "kicad-symbol",
  "resvg",
+ "sch-check",
  "sch-io",
  "serde",
  "serde_json",
@@ -2156,6 +2159,7 @@ dependencies = [
  "pcb-route-grid",
  "pcb-route-mesh",
  "prost-types",
+ "sch-check",
  "sch-io",
  "serde",
  "serde_json",
@@ -2936,6 +2940,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sch-check"
+version = "0.1.0"
+dependencies = [
+ "circuit-graph",
+ "indexmap 2.14.0",
+ "kicad-symbol",
+ "sch-place",
+ "serde",
+ "serde_json",
+ "strsim",
+]
+
+[[package]]
 name = "sch-doc"
 version = "0.1.0"
 dependencies = [
@@ -2960,6 +2977,7 @@ dependencies = [
  "kicad",
  "kicad-symbol",
  "rayon",
+ "sch-check",
  "sch-io",
  "sch-place",
  "serde_json",
@@ -2976,6 +2994,7 @@ dependencies = [
  "kicad",
  "kicad-symbol",
  "kiutils_kicad",
+ "sch-check",
  "sch-place",
  "tempfile",
  "uuid",
@@ -3263,6 +3282,7 @@ dependencies = [
  "geom",
  "kicad",
  "kicad-symbol",
+ "sch-check",
  "sch-floorplan",
  "sch-place",
 ]

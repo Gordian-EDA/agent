@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import tempfile
 import tomllib
 import urllib.error
@@ -21,9 +22,9 @@ ROOT = Path(__file__).resolve().parents[1]
 CASES = Path(__file__).resolve().parent / "cases"
 
 
-def command(args, *, timeout=600, check=True):
+def command(args, *, timeout=600, check=True, env=None):
     result = subprocess.run(
-        args, cwd=ROOT, text=True, capture_output=True, timeout=timeout
+        args, cwd=ROOT, text=True, capture_output=True, timeout=timeout, env=env
     )
     if check and result.returncode:
         raise RuntimeError(
@@ -136,6 +137,7 @@ def deterministic_facts(project, artifacts, agent_result):
     erc_findings = violations(erc)
     drc_findings = violations(drc)
     unconnected = drc.get("unconnected_items", []) if isinstance(drc, dict) else []
+    fab = sorted(path.name for path in (project / "fab").glob("*")) if (project / "fab").is_dir() else []
     return {
         "agent_exit": agent_result.returncode,
         "schematic_created": schematic is not None,
@@ -145,6 +147,7 @@ def deterministic_facts(project, artifacts, agent_result):
         "drc_errors": sum(v.get("severity") == "error" for v in drc_findings),
         "drc_warnings": sum(v.get("severity") == "warning" for v in drc_findings),
         "unconnected_items": len(unconnected),
+        "fab_files": fab,
     }
 
 
@@ -268,6 +271,7 @@ def run_case(case, output_root):
         agent_command(project, prompt),
         timeout=int(os.environ.get("QUALITY_TIMEOUT", "900")),
         check=False,
+        env={**os.environ, "GORDIAN_THREAD_ID": f"quality-{case.name}-{int(time.time())}"},
     )
     (artifacts / "agent.stdout.txt").write_text(result.stdout, encoding="utf-8")
     (artifacts / "agent.stderr.txt").write_text(result.stderr, encoding="utf-8")

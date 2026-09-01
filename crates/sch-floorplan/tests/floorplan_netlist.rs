@@ -75,7 +75,7 @@ fn nl_pin_matches(provider: &SymbolTable, lib_id: &str, authored: &str, nl_pin: 
     let Some(sym) = provider.symbol(lib_id) else {
         return false;
     };
-    circuit_lang::provider::find_pin(&sym.pins, authored).map(|p| p.number.as_str()) == Some(nl_pin)
+    sch_check::find_pin(&sym.pins, authored).map(|p| p.number.as_str()) == Some(nl_pin)
 }
 
 #[test]
@@ -299,7 +299,7 @@ fn validate_fixture(
                     continue;
                 }
                 for (pin, target) in &comp.pins {
-                    let circuit_lang::model::PinTarget::Net(want) = target else {
+                    let sch_check::model::PinTarget::Net(want) = target else {
                         continue;
                     };
                     let got = nl.nets.iter().position(|n| {

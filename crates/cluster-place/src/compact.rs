@@ -27,8 +27,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use circuit_lang::model::Design;
 use geom::{Point2, Rect};
+use sch_check::model::Design;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
 
@@ -92,7 +92,7 @@ fn repeated_channel_relayout(items: &mut [Item], inc: &Incidence, ir: &LayoutIr)
     }
     let natural_refdes = |i: usize| {
         let rd = items[i].refdes.as_str();
-        let (alpha, num) = circuit_lang::parse::refdes_key(rd);
+        let (alpha, num) = sch_check::model::refdes_key(rd);
         (alpha.to_owned(), num, rd.to_owned())
     };
     hubs.sort_by_key(|&i| natural_refdes(i));

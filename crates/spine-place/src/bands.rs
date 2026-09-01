@@ -14,7 +14,7 @@ use sch_place::item::Item;
 
 use crate::scene::Scene;
 use crate::snap;
-use circuit_lang::parse::refdes_key;
+use sch_check::model::refdes_key;
 
 const PITCH_GAP: f64 = 7.62;
 

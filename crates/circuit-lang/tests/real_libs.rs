@@ -3,7 +3,7 @@
 //! install is detected).
 
 use kicad::KicadInstallation;
-use kicad_symbol::SymbolTable;
+use sch_check::SymbolTable;
 
 #[test]
 fn compiles_minimal_design_against_real_libs() {

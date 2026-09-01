@@ -1,8 +1,8 @@
 //! Surface AST: what the parser produces. Sugar is still present;
 //! pin targets are raw strings (may be net names, pin-refs, or `nc`).
 
-use crate::diag::Span;
 use indexmap::IndexMap;
+use sch_check::diag::Span;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SurfaceDesign {

@@ -640,9 +640,9 @@ struct PlacementSizeEstimate {
     total_area: f64,
 }
 
-fn pin_net(component: &circuit_lang::model::Component, pin: &str) -> Option<String> {
+fn pin_net(component: &sch_check::model::Component, pin: &str) -> Option<String> {
     match component.pins.get(pin) {
-        Some(circuit_lang::model::PinTarget::Net(net)) => Some(net.clone()),
+        Some(sch_check::model::PinTarget::Net(net)) => Some(net.clone()),
         _ => None,
     }
 }
@@ -664,7 +664,7 @@ fn is_817(part: &str) -> bool {
 /// check. The narrow part predicate and corrected draft topology keep this plan
 /// off unrelated four-pad devices and electrically reversed drafts.
 fn opto817_channels(
-    design: &circuit_lang::model::Design,
+    design: &sch_check::model::Design,
     board: &IpcBoardSnapshot,
 ) -> Vec<Opto817Channel> {
     let imported: BTreeMap<&str, &ImportedPart> = board
@@ -789,7 +789,7 @@ fn opto_bridge_midpoint_y(part: &Part, channel: &Opto817Channel, rotation: f64) 
 /// bank. Returns `None` without changing hints unless at least eight verified
 /// channels are present, preserving generic placement on every other board.
 fn add_817_array_hints(
-    design: &circuit_lang::model::Design,
+    design: &sch_check::model::Design,
     board: &IpcBoardSnapshot,
     problem: &PlacementView,
     hints: &mut PlacementHints,
@@ -1927,7 +1927,13 @@ fn illegal_placement_error(result: &Value) -> String {
     )
 }
 
-fn write_placement(ctx: &AgentRuntime, moves: &[FootprintMove]) -> std::result::Result<(), String> {
+/// Write footprint positions to the board: one live IPC commit when the
+/// installed KiCAD supports footprint updates, otherwise the equivalent
+/// offline s-expression edit.
+pub(crate) fn write_placement(
+    ctx: &AgentRuntime,
+    moves: &[FootprintMove],
+) -> std::result::Result<(), String> {
     let path = ctx.pcb_path();
     let live = ctx.kicad().with_session(&path, |session| {
         session.kicad().move_footprints(moves)?;
@@ -2007,12 +2013,12 @@ mod tests {
     fn opto817_fixture(
         count: usize,
         reversed: bool,
-    ) -> (circuit_lang::model::Design, IpcBoardSnapshot, PlacementView) {
-        let mut design = circuit_lang::model::Design::default();
-        let mut block = circuit_lang::model::Block::default();
+    ) -> (sch_check::model::Design, IpcBoardSnapshot, PlacementView) {
+        let mut design = sch_check::model::Design::default();
+        let mut block = sch_check::model::Block::default();
         let mut imported = Vec::new();
         for index in 1..=count {
-            let mut component = circuit_lang::model::Component {
+            let mut component = sch_check::model::Component {
                 part: "Isolator:PC817".into(),
                 ..Default::default()
             };
@@ -2038,7 +2044,7 @@ mod tests {
             ] {
                 component
                     .pins
-                    .insert(pin.into(), circuit_lang::model::PinTarget::Net(net));
+                    .insert(pin.into(), sch_check::model::PinTarget::Net(net));
             }
             block.components.insert(format!("U{index}"), component);
             imported.push(imported_part(
@@ -2244,7 +2250,7 @@ mod tests {
         for component in design.blocks["channels"].components.values_mut() {
             component.pins.insert(
                 "3".into(),
-                circuit_lang::model::PinTarget::Net("LOGIC_GND".into()),
+                sch_check::model::PinTarget::Net("LOGIC_GND".into()),
             );
         }
         for imported in board
@@ -2402,7 +2408,7 @@ mod tests {
         for component in design.blocks["channels"].components.values_mut() {
             component.pins.insert(
                 "2".into(),
-                circuit_lang::model::PinTarget::Net("FIELD_GND".into()),
+                sch_check::model::PinTarget::Net("FIELD_GND".into()),
             );
         }
         for imported in &mut board.imported.parts {

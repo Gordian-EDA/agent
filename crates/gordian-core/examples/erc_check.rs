@@ -1,4 +1,4 @@
-//! Run the deterministic quantitative ERC (`circuit_lang::erc::erc_checks`) on a circuit-YAML and
+//! Run the deterministic quantitative ERC (`sch_check::erc::erc_checks`) on a circuit-YAML and
 //! print the defect lines — the exact-math layer (feedback-divider ratios, LED current) that runs
 //! under the LLM review ensemble. Useful for debugging the checks on real generated designs.
 //!
@@ -17,7 +17,7 @@ fn main() -> anyhow::Result<()> {
     let design = circuit_lang::compile(&src, &provider)
         .design
         .ok_or_else(|| anyhow::anyhow!("compile produced no design"))?;
-    let defects = circuit_lang::erc::erc_checks(&design);
+    let defects = sch_check::erc::erc_checks(&design, &provider);
     if defects.is_empty() {
         println!("erc: clean (no deterministic quantitative defect)");
     }

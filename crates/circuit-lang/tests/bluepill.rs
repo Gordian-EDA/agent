@@ -1,4 +1,5 @@
-use circuit_lang::{PinType, SymbolTable, compile};
+use circuit_lang::compile;
+use sch_check::{PinType, SymbolTable};
 
 fn provider() -> SymbolTable {
     use PinType::*;
@@ -65,7 +66,7 @@ fn bluepill_compiles_clean() {
         .diagnostics
         .0
         .iter()
-        .filter(|d| d.severity == circuit_lang::Severity::Error)
+        .filter(|d| d.severity == sch_check::Severity::Error)
         .collect();
     assert!(errors.is_empty(), "{errors:#?}");
     let d = r.design.unwrap();
@@ -77,14 +78,14 @@ fn bluepill_compiles_clean() {
         .values()
         .filter(|c| {
             matches!(&c.origin,
-            circuit_lang::model::Origin::Synthesized { parent, role, .. }
+            sch_check::model::Origin::Synthesized { parent, role, .. }
                 if parent == "U1" && role == "decouple")
         })
         .count();
     assert_eq!(caps, 12);
 
     // pin-refs: J2.3 joined I2C1_SCL via U1.PB6; CC pulldowns synthesized nets
-    use circuit_lang::model::PinTarget;
+    use sch_check::model::PinTarget;
     assert_eq!(
         d.blocks["headers"].components["J2"].pins["3"],
         PinTarget::Net("I2C1_SCL".into())

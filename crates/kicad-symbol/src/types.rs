@@ -49,7 +49,7 @@ pub struct SymbolMeta {
 }
 
 /// Resolve a pin reference (`id`) within a pin list, matching by **number
-/// first, then by name**. This is `circuit-lang`'s canonical pin-resolution
+/// first, then by name**. This is `sch-check`'s canonical pin-resolution
 /// order; reuse it instead of hand-rolling the same `find().or_else(find())`.
 pub fn find_pin<'a>(pins: &'a [PinMeta], id: &str) -> Option<&'a PinMeta> {
     pins.iter()

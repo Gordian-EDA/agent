@@ -7,10 +7,13 @@ repository.workspace = true
 description = "Deterministic grammar-typesetting schematic placement engine: parses the netlist into net/part roles, series chains, and anchor modules, then typesets them (columns of modules, wire-first spines, corpus-mined conventions) in one deterministic pass — no stochastic search, sub-100ms placement."
 
 [dependencies]
-circuit-lang = { path = "../circuit-lang" }
+sch-check = { path = "../sch-check" }
 circuit-graph = { path = "../circuit-graph" }
 geom = { path = "../geom" }
 kicad = { path = "../kicad" }
 kicad-symbol = { path = "../kicad-symbol" }
 sch-place = { path = "../sch-place" }
 sch-floorplan = { path = "../sch-floorplan" }
+
+[dev-dependencies]
+circuit-lang = { path = "../circuit-lang" }

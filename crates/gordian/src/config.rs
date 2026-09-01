@@ -10,8 +10,6 @@ use anyhow::{Context, Result, anyhow};
 use gordian_core::GordianConfig;
 use kicad::KicadInstallation;
 
-const CONFIG_FILE: &str = "config.toml";
-
 pub struct LoadedConfig {
     pub path: PathBuf,
     pub config: GordianConfig,
@@ -45,9 +43,8 @@ pub fn detect_kicad(config: &GordianConfig) -> Option<KicadInstallation> {
 }
 
 fn default_config_path() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "Gordian", "gordian")
-        .ok_or_else(|| anyhow!("could not determine platform config directory"))?;
-    Ok(dirs.config_dir().join(CONFIG_FILE))
+    gordian_core::platform::config_path()
+        .ok_or_else(|| anyhow!("could not determine platform config directory"))
 }
 
 fn write_default_config(path: &Path, config: &GordianConfig) -> Result<()> {
