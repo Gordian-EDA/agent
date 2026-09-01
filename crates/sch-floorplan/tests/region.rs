@@ -11,40 +11,29 @@ use sch_floorplan::floorplan;
 use sch_floorplan::region::{RegionProblem, arrange};
 use sch_place::item::Item;
 
-const SHEET: &str = r#"
-version: 1
-name: region-sheet
-blocks:
-  power:
-    components:
-      PWR1: {part: power:VCC, pins: {1: VCC}}
-      PWR2: {part: power:GND, pins: {1: GND}}
-  existing:
-    components:
-      R1: {part: Device:R, value: 1k, between: [VCC, N1]}
-      R2: {part: Device:R, value: 2k, between: [N1, N2]}
-      R3: {part: Device:R, value: 3k, between: [N2, N3]}
-      C1: {part: Device:C, value: 100n, between: [N1, GND]}
-      C2: {part: Device:C, value: 100n, between: [N2, GND]}
-  added:
-    components:
-      R4: {part: Device:R, value: 4k, between: [N3, N4]}
-      C3: {part: Device:C, value: 100n, between: [N3, GND]}
-      C4: {part: Device:C, value: 100n, between: [N4, GND]}
-"#;
+const SHEET: &str = r#"{
+  "parts": [
+    {"ref":"PWR1","part":"power:VCC","pins":{"1":"VCC"}},
+    {"ref":"PWR2","part":"power:GND","pins":{"1":"GND"}},
+    {"ref":"R1","part":"Device:R","value":"1k","pins":{"1":"VCC","2":"N1"}},
+    {"ref":"R2","part":"Device:R","value":"2k","pins":{"1":"N1","2":"N2"}},
+    {"ref":"R3","part":"Device:R","value":"3k","pins":{"1":"N2","2":"N3"}},
+    {"ref":"C1","part":"Device:C","value":"100n","pins":{"1":"N1","2":"GND"}},
+    {"ref":"C2","part":"Device:C","value":"100n","pins":{"1":"N2","2":"GND"}},
+    {"ref":"R4","part":"Device:R","value":"4k","pins":{"1":"N3","2":"N4"}},
+    {"ref":"C3","part":"Device:C","value":"100n","pins":{"1":"N3","2":"GND"}},
+    {"ref":"C4","part":"Device:C","value":"100n","pins":{"1":"N4","2":"GND"}}
+  ]
+}"#;
 
 /// Five neighbours seated on a live sheet, three parts still to place.
 const FIXED: &[&str] = &["R1", "R2", "R3", "C1", "C2"];
 
 fn gathered(env: &KicadInstallation) -> (sch_check::Design, Vec<Item>) {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    let compiled = circuit_lang::compile(SHEET, &provider);
-    assert!(
-        !compiled.diagnostics.has_errors(),
-        "{:#?}",
-        compiled.diagnostics
-    );
-    let design = compiled.design.unwrap();
+    let input: sch_check::PlacePartsInput = serde_json::from_str(SHEET).unwrap();
+    let (design, diagnostics) = sch_check::into_design(&input, &provider);
+    assert!(!diagnostics.has_errors(), "{:#?}", diagnostics);
     let problem = SchematicPlaceProblem::from_design(env, &design).unwrap();
     (design, problem.items)
 }

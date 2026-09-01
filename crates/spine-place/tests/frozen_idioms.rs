@@ -4,10 +4,11 @@ use sch_check::model::Design;
 use sch_floorplan::contract::{PlacementEngine, SchematicPlaceProblem};
 use spine_place::SpinePlace;
 
-fn compile_source(provider: &SymbolTable, yaml: &str) -> Design {
-    circuit_lang::compile(yaml, provider)
-        .design
-        .expect("test design compiles")
+fn compile_source(provider: &SymbolTable, json: &str) -> Design {
+    let input: sch_check::PlacePartsInput = serde_json::from_str(json).unwrap();
+    let (design, diagnostics) = sch_check::into_design(&input, provider);
+    assert!(!diagnostics.has_errors(), "{diagnostics:#?}");
+    design
 }
 
 #[test]
@@ -19,21 +20,18 @@ fn spine_preserves_inferred_pc817_channel_cells() {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let design = compile_source(
         &provider,
-        r#"
-version: 1
-blocks:
-  main:
-    components:
-      R1: {part: Device:R, pins: {1: IN1, 2: A1}}
-      U1: {part: Isolator:PC817, pins: {1: A1, 2: FIELD_GND, 3: LOGIC_GND, 4: OUT1}}
-      R9: {part: Device:R, pins: {1: OUT1, 2: V5}}
-      R17: {part: Device:R, pins: {1: V5, 2: LED_A1}}
-      D1: {part: Device:LED, pins: {1: OUT1, 2: LED_A1}}
-      R2: {part: Device:R, pins: {1: IN2, 2: A2}}
-      U2: {part: Isolator:PC817, pins: {1: A2, 2: FIELD_GND, 3: LOGIC_GND, 4: OUT2}}
-      R10: {part: Device:R, pins: {1: OUT2, 2: V5}}
-      R18: {part: Device:R, pins: {1: V5, 2: LED_A2}}
-      D2: {part: Device:LED, pins: {1: OUT2, 2: LED_A2}}
+        r#"{"parts":[
+          {"ref":"R1","part":"Device:R","pins":{"1":"IN1","2":"A1"}},
+          {"ref":"U1","part":"Isolator:PC817","pins":{"1":"A1","2":"FIELD_GND","3":"LOGIC_GND","4":"OUT1"}},
+          {"ref":"R9","part":"Device:R","pins":{"1":"OUT1","2":"V5"}},
+          {"ref":"R17","part":"Device:R","pins":{"1":"V5","2":"LED_A1"}},
+          {"ref":"D1","part":"Device:LED","pins":{"1":"OUT1","2":"LED_A1"}},
+          {"ref":"R2","part":"Device:R","pins":{"1":"IN2","2":"A2"}},
+          {"ref":"U2","part":"Isolator:PC817","pins":{"1":"A2","2":"FIELD_GND","3":"LOGIC_GND","4":"OUT2"}},
+          {"ref":"R10","part":"Device:R","pins":{"1":"OUT2","2":"V5"}},
+          {"ref":"R18","part":"Device:R","pins":{"1":"V5","2":"LED_A2"}},
+          {"ref":"D2","part":"Device:LED","pins":{"1":"OUT2","2":"LED_A2"}}
+        ]}
 "#,
     );
     let mut problem = SchematicPlaceProblem::from_design(&env, &design).unwrap();

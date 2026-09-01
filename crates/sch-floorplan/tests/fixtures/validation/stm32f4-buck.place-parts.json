@@ -1,0 +1,724 @@
+{
+  "parts": [
+    {
+      "ref": "PWR100",
+      "part": "power:+12V",
+      "pins": {
+        "1": "+12V"
+      }
+    },
+    {
+      "ref": "PWR1",
+      "part": "power:+3.3VA",
+      "pins": {
+        "1": "+3V3A"
+      }
+    },
+    {
+      "ref": "PWR2",
+      "part": "power:+3.3VA",
+      "pins": {
+        "1": "+3V3A"
+      }
+    },
+    {
+      "ref": "PWR3",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "PWR4",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "F1",
+      "part": "Device:Polyfuse_Small",
+      "value": "500mA",
+      "pins": {
+        "1": "+12V",
+        "2": "N_Q1_D"
+      }
+    },
+    {
+      "ref": "Q1",
+      "part": "Transistor_FET:AO3401A",
+      "pins": {
+        "1": "GND",
+        "2": "BUCK_IN",
+        "3": "N_Q1_D"
+      }
+    },
+    {
+      "ref": "D1",
+      "part": "Device:D_Schottky_Small",
+      "pins": {
+        "1": "BUCK_IN",
+        "2": "+3V3A"
+      }
+    },
+    {
+      "ref": "FB1",
+      "part": "Device:FerriteBead_Small",
+      "value": "600 @ 600MHz",
+      "pins": {
+        "1": "BUCK_IN",
+        "2": "BUCK_IN"
+      }
+    },
+    {
+      "ref": "R4",
+      "part": "Device:R_Small",
+      "value": "100k",
+      "pins": {
+        "1": "BUCK_EN",
+        "2": "BUCK_IN"
+      }
+    },
+    {
+      "ref": "R5",
+      "part": "Device:R_Small",
+      "value": "68k",
+      "pins": {
+        "1": "GND",
+        "2": "BUCK_EN"
+      }
+    },
+    {
+      "ref": "C13",
+      "part": "Device:C_Small",
+      "value": "4n7",
+      "pins": {
+        "1": "BUCK_COMP",
+        "2": "N_C13_PAD2"
+      }
+    },
+    {
+      "ref": "R8",
+      "part": "Device:R_Small",
+      "value": "7k5",
+      "pins": {
+        "1": "GND",
+        "2": "N_C13_PAD2"
+      }
+    },
+    {
+      "ref": "C14",
+      "part": "Device:C_Small",
+      "value": "0.1u",
+      "pins": {
+        "1": "BUCK_SS",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "U2",
+      "part": "Regulator_Switching:MP2303ADN",
+      "pins": {
+        "1": "N_U2_BS",
+        "2": "BUCK_IN",
+        "3": "N_U2_SW",
+        "4": "GND",
+        "5": "BUCK_FB",
+        "6": "BUCK_COMP",
+        "7": "BUCK_EN",
+        "8": "BUCK_SS"
+      }
+    },
+    {
+      "ref": "C15",
+      "part": "Device:C_Polarized_Small",
+      "value": "10u",
+      "pins": {
+        "1": "BUCK_IN",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C16",
+      "part": "Device:C_Polarized_Small",
+      "value": "10u",
+      "pins": {
+        "1": "BUCK_IN",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C17",
+      "part": "Device:C_Small",
+      "value": "10n",
+      "pins": {
+        "1": "N_U2_BS",
+        "2": "N_U2_SW"
+      }
+    },
+    {
+      "ref": "L2",
+      "part": "Device:L_Small",
+      "value": "15u",
+      "pins": {
+        "1": "N_U2_SW",
+        "2": "+3V3A"
+      }
+    },
+    {
+      "ref": "R13",
+      "part": "Device:R_Small",
+      "value": "31k25",
+      "pins": {
+        "1": "BUCK_FB",
+        "2": "+3V3A"
+      }
+    },
+    {
+      "ref": "R14",
+      "part": "Device:R_Small",
+      "value": "10k",
+      "pins": {
+        "1": "GND",
+        "2": "BUCK_FB"
+      }
+    },
+    {
+      "ref": "C18",
+      "part": "Device:C_Polarized_Small",
+      "value": "22u",
+      "pins": {
+        "1": "+3V3A",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C20",
+      "part": "Device:C_Polarized_Small",
+      "value": "22u",
+      "pins": {
+        "1": "+3V3A",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "D3",
+      "part": "Device:LED_Small",
+      "pins": {
+        "1": "N_D3_K",
+        "2": "+3V3A"
+      }
+    },
+    {
+      "ref": "R19",
+      "part": "Device:R_Small",
+      "value": "1k",
+      "pins": {
+        "1": "GND",
+        "2": "N_D3_K"
+      }
+    },
+    {
+      "ref": "PWR5",
+      "part": "power:+3.3VA",
+      "pins": {
+        "1": "+3V3A"
+      }
+    },
+    {
+      "ref": "PWR6",
+      "part": "power:+3.3VA",
+      "pins": {
+        "1": "+3V3A"
+      }
+    },
+    {
+      "ref": "PWR7",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "PWR8",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "U1",
+      "part": "MCU_ST_STM32F4:STM32F405RGTx",
+      "value": "STM32F405RGT6",
+      "pins": {
+        "1": "+3V3A",
+        "5": "HSE_IN",
+        "6": "HSE_OUT",
+        "7": "NRST",
+        "12": "GND",
+        "13": "+3V3A",
+        "16": "LED_STATUS",
+        "18": "GND",
+        "19": "+3V3A",
+        "29": "USART3_TX",
+        "30": "USART3_RX",
+        "31": "N_U1_VCAP_1",
+        "32": "+3V3A",
+        "44": "USB_D_2",
+        "45": "USB_D",
+        "46": "SWDIO",
+        "47": "N_U1_VCAP_2",
+        "48": "+3V3A",
+        "49": "SWCLK",
+        "55": "SWO",
+        "58": "I2C1_SCL",
+        "59": "I2C1_SDA",
+        "60": "BOOT0",
+        "63": "GND",
+        "64": "+3V3A",
+        "54": "nc",
+        "8": "nc",
+        "9": "nc",
+        "10": "nc",
+        "11": "nc",
+        "24": "nc",
+        "25": "nc",
+        "37": "nc",
+        "38": "nc",
+        "39": "nc",
+        "40": "nc",
+        "51": "nc",
+        "52": "nc",
+        "53": "nc",
+        "2": "nc",
+        "3": "nc",
+        "4": "nc",
+        "14": "nc",
+        "15": "nc",
+        "17": "nc",
+        "20": "nc",
+        "21": "nc",
+        "22": "nc",
+        "23": "nc",
+        "41": "nc",
+        "42": "nc",
+        "43": "nc",
+        "50": "nc",
+        "26": "nc",
+        "27": "nc",
+        "28": "nc",
+        "56": "nc",
+        "57": "nc",
+        "61": "nc",
+        "62": "nc",
+        "33": "nc",
+        "34": "nc",
+        "35": "nc",
+        "36": "nc"
+      }
+    },
+    {
+      "ref": "C1",
+      "part": "Device:C_Small",
+      "value": "2u2",
+      "pins": {
+        "1": "N_U1_VCAP_1",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C2",
+      "part": "Device:C_Small",
+      "value": "4u7",
+      "pins": {
+        "1": "+3V3A",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C3",
+      "part": "Device:C_Small",
+      "value": "2u2",
+      "pins": {
+        "1": "N_U1_VCAP_2",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C4",
+      "part": "Device:C_Small",
+      "value": "100n",
+      "pins": {
+        "1": "+3V3A",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C5",
+      "part": "Device:C_Small",
+      "value": "100n",
+      "pins": {
+        "1": "+3V3A",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C6",
+      "part": "Device:C_Small",
+      "value": "100n",
+      "pins": {
+        "1": "+3V3A",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C7",
+      "part": "Device:C_Small",
+      "value": "100n",
+      "pins": {
+        "1": "+3V3A",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C8",
+      "part": "Device:C_Small",
+      "value": "100n",
+      "pins": {
+        "1": "+3V3A",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C10",
+      "part": "Device:C_Small",
+      "value": "1u",
+      "pins": {
+        "1": "+3V3A",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C12",
+      "part": "Device:C_Small",
+      "value": "10n",
+      "pins": {
+        "1": "+3V3A",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "L1",
+      "part": "Device:L_Small",
+      "value": "39n",
+      "pins": {
+        "1": "+3V3A",
+        "2": "+3V3A"
+      }
+    },
+    {
+      "ref": "R2",
+      "part": "Device:R_Small",
+      "value": "10k",
+      "pins": {
+        "1": "BOOT0",
+        "2": "N_SW1_B"
+      }
+    },
+    {
+      "ref": "SW1",
+      "part": "Switch:SW_SPDT",
+      "pins": {
+        "1": "+3V3A",
+        "2": "N_SW1_B",
+        "3": "GND"
+      }
+    },
+    {
+      "ref": "D2",
+      "part": "Device:LED_Small",
+      "value": "BLUE",
+      "pins": {
+        "1": "N_D2_K",
+        "2": "LED_STATUS"
+      }
+    },
+    {
+      "ref": "R1",
+      "part": "Device:R_Small",
+      "value": "1k5",
+      "pins": {
+        "1": "N_D2_K",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "Y1",
+      "part": "Device:Crystal_GND24_Small",
+      "value": "16MHz",
+      "pins": {
+        "1": "HSE_IN",
+        "2": "GND",
+        "3": "N_C11_PAD1",
+        "4": "GND"
+      }
+    },
+    {
+      "ref": "C9",
+      "part": "Device:C_Small",
+      "value": "12p",
+      "pins": {
+        "1": "HSE_IN",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C11",
+      "part": "Device:C_Small",
+      "value": "12p",
+      "pins": {
+        "1": "N_C11_PAD1",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R6",
+      "part": "Device:R_Small",
+      "value": "47",
+      "pins": {
+        "1": "HSE_OUT",
+        "2": "N_C11_PAD1"
+      }
+    },
+    {
+      "ref": "R3",
+      "part": "Device:R_Small",
+      "value": "4k7",
+      "pins": {
+        "1": "+3V3A",
+        "2": "I2C1_SCL"
+      }
+    },
+    {
+      "ref": "R7",
+      "part": "Device:R_Small",
+      "value": "4k7",
+      "pins": {
+        "1": "+3V3A",
+        "2": "I2C1_SDA"
+      }
+    },
+    {
+      "ref": "PWR101",
+      "part": "power:+12V",
+      "pins": {
+        "1": "+12V"
+      }
+    },
+    {
+      "ref": "PWR9",
+      "part": "power:+3.3VA",
+      "pins": {
+        "1": "+3V3A"
+      }
+    },
+    {
+      "ref": "PWR10",
+      "part": "power:+3.3VA",
+      "pins": {
+        "1": "+3V3A"
+      }
+    },
+    {
+      "ref": "PWR11",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "PWR12",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "J1",
+      "part": "Connector:Screw_Terminal_01x02",
+      "pins": {
+        "1": "+12V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "J2",
+      "part": "Connector:USB_B_Micro",
+      "pins": {
+        "1": "+3V3A",
+        "2": "USB_CONN_D_2",
+        "3": "USB_CONN_D",
+        "5": "GND",
+        "6": "nc",
+        "4": "nc"
+      }
+    },
+    {
+      "ref": "J3",
+      "part": "Connector_Generic:Conn_01x04",
+      "pins": {
+        "1": "+3V3A",
+        "2": "N_J3_PIN_2",
+        "3": "N_J3_PIN_3",
+        "4": "GND"
+      }
+    },
+    {
+      "ref": "J4",
+      "part": "Connector_Generic:Conn_01x04",
+      "pins": {
+        "1": "+3V3A",
+        "2": "N_J4_PIN_2",
+        "3": "N_J4_PIN_3",
+        "4": "GND"
+      }
+    },
+    {
+      "ref": "J5",
+      "part": "Connector:Conn_ARM_JTAG_SWD_10",
+      "pins": {
+        "1": "+3V3A",
+        "2": "N_J5_SWDIO_TMS",
+        "3": "GND",
+        "4": "N_J5_SWCLK_TCK",
+        "5": "GND",
+        "6": "N_J5_SWO_TDO",
+        "9": "GND",
+        "10": "N_J5_RESET",
+        "7": "nc",
+        "8": "nc"
+      }
+    },
+    {
+      "ref": "U3",
+      "part": "Power_Protection:USBLC6-2SC6",
+      "pins": {
+        "1": "USB_CONN_D_2",
+        "2": "GND",
+        "3": "USB_CONN_D",
+        "4": "USB_D",
+        "5": "+3V3A",
+        "6": "USB_D_2"
+      }
+    },
+    {
+      "ref": "R9",
+      "part": "Device:R_Small",
+      "value": "22",
+      "pins": {
+        "1": "I2C1_SCL",
+        "2": "N_J3_PIN_2"
+      }
+    },
+    {
+      "ref": "R10",
+      "part": "Device:R_Small",
+      "value": "22",
+      "pins": {
+        "1": "N_J3_PIN_3",
+        "2": "I2C1_SDA"
+      }
+    },
+    {
+      "ref": "R11",
+      "part": "Device:R_Small",
+      "value": "22",
+      "pins": {
+        "1": "N_J4_PIN_2",
+        "2": "USART3_TX"
+      }
+    },
+    {
+      "ref": "R12",
+      "part": "Device:R_Small",
+      "value": "22",
+      "pins": {
+        "1": "N_J4_PIN_3",
+        "2": "USART3_RX"
+      }
+    },
+    {
+      "ref": "R15",
+      "part": "Device:R_Small",
+      "value": "22",
+      "pins": {
+        "1": "SWCLK",
+        "2": "N_J5_SWCLK_TCK"
+      }
+    },
+    {
+      "ref": "R16",
+      "part": "Device:R_Small",
+      "value": "22",
+      "pins": {
+        "1": "SWDIO",
+        "2": "N_J5_SWDIO_TMS"
+      }
+    },
+    {
+      "ref": "R17",
+      "part": "Device:R_Small",
+      "value": "22",
+      "pins": {
+        "1": "SWO",
+        "2": "N_J5_SWO_TDO"
+      }
+    },
+    {
+      "ref": "R18",
+      "part": "Device:R_Small",
+      "value": "22",
+      "pins": {
+        "1": "NRST",
+        "2": "N_J5_RESET"
+      }
+    },
+    {
+      "ref": "C19",
+      "part": "Device:C_Small",
+      "value": "5n",
+      "pins": {
+        "1": "N_J5_RESET",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "H1",
+      "part": "Mechanical:MountingHole_Pad",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "H2",
+      "part": "Mechanical:MountingHole_Pad",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "H3",
+      "part": "Mechanical:MountingHole_Pad",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "H4",
+      "part": "Mechanical:MountingHole_Pad",
+      "pins": {
+        "1": "GND"
+      }
+    }
+  ]
+}

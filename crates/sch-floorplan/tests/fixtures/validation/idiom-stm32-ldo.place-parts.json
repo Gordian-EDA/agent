@@ -1,0 +1,224 @@
+{
+  "parts": [
+    {
+      "ref": "C1",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C2",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C3",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C4",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C5",
+      "part": "Device:C",
+      "value": "10uF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C6",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "Net-(U1-NRST)",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C7",
+      "part": "Device:C",
+      "value": "22pF",
+      "pins": {
+        "1": "Net-(U1-PD0)",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C8",
+      "part": "Device:C",
+      "value": "22pF",
+      "pins": {
+        "1": "Net-(U1-PD1)",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "D1",
+      "part": "Device:LED",
+      "pins": {
+        "1": "Net-(D1-K)",
+        "2": "Net-(D1-A)"
+      }
+    },
+    {
+      "ref": "R1",
+      "part": "Device:R",
+      "value": "10k",
+      "pins": {
+        "1": "Net-(U1-NRST)",
+        "2": "+3V3"
+      }
+    },
+    {
+      "ref": "R2",
+      "part": "Device:R",
+      "value": "10k",
+      "pins": {
+        "1": "Net-(U1-BOOT0)",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R3",
+      "part": "Device:R",
+      "value": "330R",
+      "pins": {
+        "1": "Net-(D1-K)",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "U1",
+      "part": "MCU_ST_STM32F1:STM32F103C8Tx",
+      "value": "STM32F103C8Tx",
+      "pins": {
+        "1": "+3V3",
+        "2": "Net-(D1-A)",
+        "5": "Net-(U1-PD0)",
+        "6": "Net-(U1-PD1)",
+        "7": "Net-(U1-NRST)",
+        "8": "GND",
+        "9": "+3V3",
+        "23": "GND",
+        "24": "+3V3",
+        "34": "SWDIO",
+        "35": "GND",
+        "36": "+3V3",
+        "37": "SWCLK",
+        "44": "Net-(U1-BOOT0)",
+        "47": "GND",
+        "48": "+3V3",
+        "3": "nc",
+        "4": "nc",
+        "18": "nc",
+        "19": "nc",
+        "20": "nc",
+        "39": "nc",
+        "40": "nc",
+        "41": "nc",
+        "42": "nc",
+        "43": "nc",
+        "45": "nc",
+        "46": "nc",
+        "21": "nc",
+        "22": "nc",
+        "25": "nc",
+        "26": "nc",
+        "27": "nc",
+        "28": "nc",
+        "10": "nc",
+        "11": "nc",
+        "12": "nc",
+        "13": "nc",
+        "14": "nc",
+        "15": "nc",
+        "16": "nc",
+        "17": "nc",
+        "29": "nc",
+        "30": "nc",
+        "31": "nc",
+        "32": "nc",
+        "33": "nc",
+        "38": "nc"
+      }
+    },
+    {
+      "ref": "U2",
+      "part": "Regulator_Linear:AMS1117-3.3",
+      "value": "AMS1117-3.3",
+      "pins": {
+        "1": "GND",
+        "2": "+3V3",
+        "3": "VIN"
+      }
+    },
+    {
+      "ref": "C9",
+      "part": "Device:C",
+      "value": "10uF",
+      "pins": {
+        "1": "VIN",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "J1",
+      "part": "Connector_Generic:Conn_01x02",
+      "pins": {
+        "1": "VIN",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "Y1",
+      "part": "Device:Crystal",
+      "value": "8MHz",
+      "pins": {
+        "1": "Net-(U1-PD0)",
+        "2": "Net-(U1-PD1)"
+      }
+    },
+    {
+      "ref": "PWR1",
+      "part": "power:+3V3",
+      "pins": {
+        "1": "+3V3"
+      }
+    },
+    {
+      "ref": "G1",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "G2",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    }
+  ],
+  "block": "main"
+}

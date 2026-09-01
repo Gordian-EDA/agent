@@ -1,0 +1,584 @@
+{
+  "parts": [
+    {
+      "ref": "PWR1",
+      "part": "power:+3V3",
+      "pins": {
+        "1": "+3V3"
+      }
+    },
+    {
+      "ref": "PWR2",
+      "part": "power:+9V",
+      "pins": {
+        "1": "+9V"
+      }
+    },
+    {
+      "ref": "PWR3",
+      "part": "power:+9V",
+      "pins": {
+        "1": "+9V"
+      }
+    },
+    {
+      "ref": "PWR4",
+      "part": "power:-9V",
+      "pins": {
+        "1": "-9V"
+      }
+    },
+    {
+      "ref": "PWR5",
+      "part": "power:-9V",
+      "pins": {
+        "1": "-9V"
+      }
+    },
+    {
+      "ref": "PWR6",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "PWR7",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "J1",
+      "part": "Connector:Conn_01x05_Pin",
+      "value": "PWR",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical",
+      "pins": {
+        "1": "-9V",
+        "2": "GND",
+        "3": "+9V",
+        "4": "GND",
+        "5": "+3V3"
+      }
+    },
+    {
+      "ref": "C1",
+      "part": "Device:C",
+      "value": "10u",
+      "footprint": "Capacitor_SMD:C_0805_2012Metric",
+      "pins": {
+        "1": "+9V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C2",
+      "part": "Device:C",
+      "value": "0.1u",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "+9V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C6",
+      "part": "Device:C",
+      "value": "0.1u",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "-9V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C7",
+      "part": "Device:C",
+      "value": "10u",
+      "footprint": "Capacitor_SMD:C_0805_2012Metric",
+      "pins": {
+        "1": "-9V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "H1",
+      "part": "Mechanical:MountingHole_Pad",
+      "footprint": "MountingHole:MountingHole_3.2mm_M3_Pad_Via",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "H2",
+      "part": "Mechanical:MountingHole_Pad",
+      "footprint": "MountingHole:MountingHole_3.2mm_M3_Pad_Via",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "H3",
+      "part": "Mechanical:MountingHole_Pad",
+      "footprint": "MountingHole:MountingHole_3.2mm_M3_Pad_Via",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "H4",
+      "part": "Mechanical:MountingHole_Pad",
+      "footprint": "MountingHole:MountingHole_3.2mm_M3_Pad_Via",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "PWR8",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "J2",
+      "part": "Connector:Conn_01x03_Pin",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+      "pins": {
+        "1": "IN_N",
+        "2": "IN_P",
+        "3": "GND"
+      }
+    },
+    {
+      "ref": "J3",
+      "part": "Connector:Conn_01x05_Pin",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical",
+      "pins": {
+        "1": "PRE_AMP",
+        "2": "HPF",
+        "3": "LPF",
+        "4": "OUT",
+        "5": "DCO"
+      }
+    },
+    {
+      "ref": "PWR9",
+      "part": "power:+3V3",
+      "pins": {
+        "1": "+3V3"
+      }
+    },
+    {
+      "ref": "PWR10",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "C14",
+      "part": "Device:C",
+      "value": "0.1u",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "OUT",
+        "2": "DCO"
+      }
+    },
+    {
+      "ref": "R9",
+      "part": "Device:R",
+      "value": "10K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "DCO"
+      }
+    },
+    {
+      "ref": "R10",
+      "part": "Device:R",
+      "value": "10K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "DCO",
+        "2": "DCO_POT"
+      }
+    },
+    {
+      "ref": "RV1",
+      "part": "Device:R_Potentiometer",
+      "footprint": "Potentiometer_SMD:Potentiometer_Bourns_3314G_Vertical",
+      "pins": {
+        "1": "DCO_POT",
+        "2": "GND",
+        "3": "nc"
+      }
+    },
+    {
+      "ref": "PWR11",
+      "part": "power:+9V",
+      "pins": {
+        "1": "+9V"
+      }
+    },
+    {
+      "ref": "PWR12",
+      "part": "power:+9V",
+      "pins": {
+        "1": "+9V"
+      }
+    },
+    {
+      "ref": "PWR13",
+      "part": "power:-9V",
+      "pins": {
+        "1": "-9V"
+      }
+    },
+    {
+      "ref": "PWR14",
+      "part": "power:-9V",
+      "pins": {
+        "1": "-9V"
+      }
+    },
+    {
+      "ref": "PWR15",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "PWR16",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "U2",
+      "part": "Amplifier_Instrumentation:AD620",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "pins": {
+        "1": "RG_B",
+        "2": "INA_N",
+        "3": "INA_P",
+        "4": "-9V",
+        "5": "GND",
+        "6": "PRE_AMP",
+        "7": "+9V",
+        "8": "RG_A"
+      }
+    },
+    {
+      "ref": "R1",
+      "part": "Device:R",
+      "value": "1K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "IN_N",
+        "2": "INA_N"
+      }
+    },
+    {
+      "ref": "R2",
+      "part": "Device:R",
+      "value": "1K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "IN_P",
+        "2": "INA_P"
+      }
+    },
+    {
+      "ref": "R3",
+      "part": "Device:R",
+      "value": "1K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "RG_A",
+        "2": "RG_B"
+      }
+    },
+    {
+      "ref": "C3",
+      "part": "Device:C",
+      "value": "1n",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "GND",
+        "2": "INA_N"
+      }
+    },
+    {
+      "ref": "C4",
+      "part": "Device:C",
+      "value": "10n",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "INA_N",
+        "2": "INA_P"
+      }
+    },
+    {
+      "ref": "C5",
+      "part": "Device:C",
+      "value": "1n",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "INA_P",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C8",
+      "part": "Device:C",
+      "value": "10u",
+      "footprint": "Capacitor_SMD:C_0805_2012Metric",
+      "pins": {
+        "1": "+9V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C9",
+      "part": "Device:C",
+      "value": "10u",
+      "footprint": "Capacitor_SMD:C_0805_2012Metric",
+      "pins": {
+        "1": "-9V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C10",
+      "part": "Device:C",
+      "value": "0.1u",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "+9V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C11",
+      "part": "Device:C",
+      "value": "0.1u",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "-9V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "PWR17",
+      "part": "power:+9V",
+      "pins": {
+        "1": "+9V"
+      }
+    },
+    {
+      "ref": "PWR18",
+      "part": "power:-9V",
+      "pins": {
+        "1": "-9V"
+      }
+    },
+    {
+      "ref": "PWR19",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "PWR20",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "U1",
+      "part": "Amplifier_Operational:LM324",
+      "footprint": "Package_SO:SOIC-14_3.9x8.7mm_P1.27mm",
+      "pins": {
+        "4": "+9V",
+        "11": "-9V",
+        "5": "nc",
+        "6": "nc",
+        "7": "nc",
+        "1": "HPF",
+        "2": "FLT_A_N",
+        "3": "FLT_A_P",
+        "8": "LPF",
+        "9": "FLT_C_N",
+        "10": "FLT_C_P",
+        "12": "LPF",
+        "13": "FB_D_N",
+        "14": "OUT"
+      }
+    },
+    {
+      "ref": "C12",
+      "part": "Device:C",
+      "value": "0.1u",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "PRE_AMP",
+        "2": "HPF_TAP"
+      }
+    },
+    {
+      "ref": "C13",
+      "part": "Device:C",
+      "value": "0.1u",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "HPF_TAP",
+        "2": "FLT_A_P"
+      }
+    },
+    {
+      "ref": "R4",
+      "part": "Device:R",
+      "value": "56K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "FLT_A_P",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R5",
+      "part": "Device:R",
+      "value": "10K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "FLT_A_N",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R6",
+      "part": "Device:R",
+      "value": "56K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "HPF_TAP",
+        "2": "HPF"
+      }
+    },
+    {
+      "ref": "R7",
+      "part": "Device:R",
+      "value": "6.2K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "FLT_A_N",
+        "2": "HPF"
+      }
+    },
+    {
+      "ref": "R8",
+      "part": "Device:R",
+      "value": "2.7K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "HPF",
+        "2": "LPF_TAP"
+      }
+    },
+    {
+      "ref": "R11",
+      "part": "Device:R",
+      "value": "2.7K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "LPF_TAP",
+        "2": "FLT_C_P"
+      }
+    },
+    {
+      "ref": "C15",
+      "part": "Device:C",
+      "value": "0.1u",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "GND",
+        "2": "FLT_C_P"
+      }
+    },
+    {
+      "ref": "C16",
+      "part": "Device:C",
+      "value": "0.1u",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "LPF_TAP",
+        "2": "LPF"
+      }
+    },
+    {
+      "ref": "R12",
+      "part": "Device:R",
+      "value": "10K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "GND",
+        "2": "FLT_C_N"
+      }
+    },
+    {
+      "ref": "R13",
+      "part": "Device:R",
+      "value": "6.2K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "FLT_C_N",
+        "2": "LPF"
+      }
+    },
+    {
+      "ref": "PWR21",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "R14",
+      "part": "Device:R",
+      "value": "2K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "FB_D_N",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "RV2",
+      "part": "Device:R_Potentiometer",
+      "footprint": "Potentiometer_SMD:Potentiometer_Bourns_3314G_Vertical",
+      "pins": {
+        "1": "FB_D_N",
+        "2": "OUT_POT",
+        "3": "OUT_POT"
+      }
+    },
+    {
+      "ref": "R15",
+      "part": "Device:R",
+      "value": "10K",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "OUT",
+        "2": "OUT_POT"
+      }
+    }
+  ]
+}

@@ -3038,7 +3038,6 @@ dependencies = [
  "anneal-place",
  "anyhow",
  "circuit-graph",
- "circuit-lang",
  "cluster-place",
  "geom",
  "indexmap 2.14.0",
@@ -3356,13 +3355,13 @@ name = "spine-place"
 version = "0.1.0"
 dependencies = [
  "circuit-graph",
- "circuit-lang",
  "geom",
  "kicad",
  "kicad-symbol",
  "sch-check",
  "sch-floorplan",
  "sch-place",
+ "serde_json",
  "tracing",
 ]
 

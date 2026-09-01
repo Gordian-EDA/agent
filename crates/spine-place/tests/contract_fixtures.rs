@@ -18,7 +18,7 @@ fn fixtures() -> Vec<std::path::PathBuf> {
         .expect("fixtures dir")
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.to_string_lossy().ends_with(".circuit.yaml"))
+        .filter(|p| p.to_string_lossy().ends_with(".place-parts.json"))
         .collect();
     v.sort();
     v
@@ -32,10 +32,10 @@ fn fixtures_contract_cleanly() {
     };
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     for path in fixtures() {
-        let yaml = std::fs::read_to_string(&path).unwrap();
-        let Some(design) = circuit_lang::compile(&yaml, &provider).design else {
-            panic!("{path:?}: no design");
-        };
+        let json = std::fs::read_to_string(&path).unwrap();
+        let input: sch_check::PlacePartsInput = serde_json::from_str(&json).unwrap();
+        let (design, diagnostics) = sch_check::into_design(&input, &provider);
+        assert!(!diagnostics.has_errors(), "{path:?}: {diagnostics:#?}");
         let problem = SchematicPlaceProblem::from_design(&env, &design).unwrap();
         let classes = classify_nets(&problem.inc, &LayoutIr::default());
         let g = contract(&problem.items, &problem.inc, &classes);

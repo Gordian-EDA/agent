@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 use geom::Rect;
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
-use sch_check::model::{Design, PinTarget};
-use sch_check::place_parts::{PartSpec, PlacePartsInput};
+use sch_check::model::Design;
+use sch_check::place_parts::PlacePartsInput;
 use sch_doc::{SchDoc, connect};
 use sch_floorplan::contract::PlacementEngine;
 use sch_floorplan::live::{self, Selection};
@@ -63,7 +63,7 @@ fn fixture_names() -> Vec<String> {
         .filter_map(|entry| {
             let path = entry.ok()?.path();
             let name = path.file_name()?.to_str()?;
-            Some(name.strip_suffix(".circuit.yaml")?.to_string())
+            Some(name.strip_suffix(".place-parts.json")?.to_string())
         })
         .collect();
     names.sort();
@@ -72,7 +72,7 @@ fn fixture_names() -> Vec<String> {
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("tests/fixtures/validation/{name}.circuit.yaml"))
+        .join(format!("tests/fixtures/validation/{name}.place-parts.json"))
 }
 
 /// One KiCAD demo sheet: hand-drawn, project-local symbol library, five parts.
@@ -82,37 +82,6 @@ fn demo_sheet() -> Option<PathBuf> {
     let root = Path::new("/home/mimi/agent/.local/kicad-10.0.4/AppDir");
     let path = root.join(DEMO);
     path.is_file().then_some(path)
-}
-
-/// A compiled design restated as the tool input an LLM would send: parts, pins, nets —
-/// no coordinates. This is the conversion the parity gate rests on.
-fn as_input(design: &Design) -> PlacePartsInput {
-    let mut parts = Vec::new();
-    for block in design.blocks.values() {
-        for (refdes, comp) in &block.components {
-            let mut spec = PartSpec {
-                refdes: refdes.clone(),
-                part: comp.part.clone(),
-                value: comp.value.clone(),
-                footprint: comp.footprint.clone(),
-                dnp: comp.dnp,
-                ..PartSpec::default()
-            };
-            let unit_pins = comp.units.values().flat_map(|u| u.iter());
-            for (pin, target) in comp.pins.iter().chain(unit_pins) {
-                let net = match target {
-                    PinTarget::Net(net) => net.clone(),
-                    PinTarget::NoConnect => "nc".to_string(),
-                };
-                spec.pins.insert(pin.clone(), net);
-            }
-            parts.push(spec);
-        }
-    }
-    PlacePartsInput {
-        parts,
-        ..PlacePartsInput::default()
-    }
 }
 
 /// The extractor's partition, as `kicad-cli` would report it: power-symbol pins and
@@ -255,18 +224,16 @@ fn bulk_create_matches_the_whole_sheet_pipeline() {
     let mut failures: Vec<String> = Vec::new();
     for name in fixture_names() {
         let source = std::fs::read_to_string(fixture(&name)).unwrap();
-        let Some(authored) = circuit_lang::compile(&source, &provider).design else {
-            continue;
-        };
-        // The lowering `place_parts` performs, so both paths draw the same design.
-        let (design, _) = sch_check::into_design(&as_input(&authored), &provider);
+        let input: PlacePartsInput = serde_json::from_str(&source).unwrap();
+        let (design, diagnostics) = sch_check::into_design(&input, &provider);
+        assert!(!diagnostics.has_errors(), "{name}: {diagnostics:#?}");
 
         let old = whole_sheet(&env, &design, dir.path(), &name);
         let old_truthful = live::verify(&SchDoc::read(&old).unwrap(), &design).is_empty();
         let old_erc = env.erc(&old).expect("erc").error_count();
 
         let mut doc = live::blank_sheet().unwrap();
-        let report = live::place_parts(&env, &mut doc, &as_input(&authored), &engine).unwrap();
+        let report = live::place_parts(&env, &mut doc, &input, &engine).unwrap();
         if !report.committed {
             if old_truthful {
                 failures.push(format!(

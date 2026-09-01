@@ -1,0 +1,108 @@
+{
+  "parts": [
+    {
+      "ref": "PWR1",
+      "part": "power:VCC",
+      "pins": {
+        "1": "5V"
+      }
+    },
+    {
+      "ref": "PWR2",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "J1",
+      "part": "Connector:Conn_Coaxial",
+      "pins": {
+        "In": "RF_IN",
+        "Ext": "GND"
+      }
+    },
+    {
+      "ref": "C1",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "RF_IN",
+        "2": "RFIN_AMP"
+      }
+    },
+    {
+      "ref": "U1",
+      "part": "RF_Amplifier:ADL5542",
+      "pins": {
+        "1": "RFIN_AMP",
+        "8": "RFOUT_AMP",
+        "5": "5V",
+        "2": "GND",
+        "4": "CB_NODE"
+      }
+    },
+    {
+      "ref": "C5",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "5V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C6",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "5V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C7",
+      "part": "Device:C",
+      "value": "10nF",
+      "pins": {
+        "1": "5V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C2",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "CB_NODE",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C3",
+      "part": "Device:C",
+      "value": "10uF",
+      "pins": {
+        "1": "5V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C4",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "RFOUT_AMP",
+        "2": "RF_OUT"
+      }
+    },
+    {
+      "ref": "J2",
+      "part": "Connector:Conn_Coaxial",
+      "pins": {
+        "In": "RF_OUT",
+        "Ext": "GND"
+      }
+    }
+  ]
+}

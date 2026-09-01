@@ -17,4 +17,4 @@ sch-floorplan = { path = "../sch-floorplan" }
 tracing.workspace = true
 
 [dev-dependencies]
-circuit-lang = { path = "../circuit-lang" }
+serde_json.workspace = true

@@ -82,7 +82,7 @@ def prepare_project(case, project):
     source = case / "input"
     if source.is_dir():
         for item in source.iterdir():
-            if item.name in {"seed.circuit.yaml", "seed-board"}:
+            if item.name in {"seed.place-parts.json", "seed-board"}:
                 continue
             target = project / item.name
             if item.is_dir():
@@ -90,16 +90,10 @@ def prepare_project(case, project):
             else:
                 shutil.copy2(item, target)
 
-    seed = source / "seed.circuit.yaml"
+    seed = source / "seed.place-parts.json"
     if not seed.exists():
         return
-    state = project / ".gordian"
-    state.mkdir(exist_ok=True)
-    shutil.copy2(seed, state / "draft.circuit.yaml")
-    (state / "draft.meta.json").write_text(
-        '{"seeded_from_sch_hash":null}', encoding="utf-8"
-    )
-    tool(project, "apply_design", {"__commit": True})
+    tool(project, "place_parts", json.loads(seed.read_text(encoding="utf-8")))
     if (source / "seed-board").exists():
         tool(project, "regenerate_board")
         tool(project, "place_board")
