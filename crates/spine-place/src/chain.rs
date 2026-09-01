@@ -344,6 +344,7 @@ mod tests {
             unit: 1,
             mirror: false,
             frozen: false,
+            preseeded: false,
         }
     }
 

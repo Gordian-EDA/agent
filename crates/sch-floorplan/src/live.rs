@@ -274,6 +274,7 @@ fn rearrange(
     }
     for it in &mut movable {
         it.frozen = false;
+        it.preseeded = false;
     }
 
     // The selection's own drawing is about to be erased and redrawn, so it must not
@@ -564,6 +565,7 @@ fn seated_items(doc: &SchDoc, netlist: &Netlist) -> Vec<Item> {
                 unit,
                 mirror: symbol.mirror == sch_doc::Mirror::Y,
                 frozen: true,
+                preseeded: true,
             })
         })
         .collect()
