@@ -136,7 +136,7 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "render_schematic".into(),
-            description: "Render schematic PNG.".into(),
+            description: "Render schematic PNG, once, at the end.".into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         Def {

@@ -32,12 +32,28 @@ fn rotation(rot: f64) -> String {
     }
 }
 
-/// `1=VCC 2=N_TR`, a symbol's pins and the nets they land on.
+/// A pin's number, with its function name appended when the symbol names it
+/// distinctly (a tube's `G`/`K`, a connector's `TX`) — never for an
+/// unnamed `~` pin or a name that just repeats the number, which would only
+/// echo noise. Without this, a same-shaped part with several unlabelled pins
+/// (a triode's grid vs. cathode) is a guess from the number alone.
+fn pin_label(p: &PlacedPin) -> String {
+    if p.name.is_empty() || p.name == "~" || p.name == p.number {
+        p.number.clone()
+    } else {
+        format!("{}({})", p.number, p.name)
+    }
+}
+
+/// `1=VCC 2(G)=N_TR`, a symbol's pins and the nets they land on.
 fn pin_map(pins: &[&PlacedPin], netlist: &Netlist) -> String {
     pins.iter()
-        .map(|p| match refs::net_of(netlist, &p.refdes, &p.number) {
-            Some(net) => format!("{}={net}", p.number),
-            None => format!("{}=-", p.number),
+        .map(|p| {
+            let label = pin_label(p);
+            match refs::net_of(netlist, &p.refdes, &p.number) {
+                Some(net) => format!("{label}={net}"),
+                None => format!("{label}=-"),
+            }
         })
         .collect::<Vec<_>>()
         .join(" ")
