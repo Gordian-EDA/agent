@@ -1,7 +1,7 @@
 //! The schematic + PCB tool registry the agent drives.
 //!
 //! Each tool is a thin, deterministic wrapper over logic that already lives in
-//! `circuit-lang`, `kicad-footprint`/`kicad`, and `sch-floorplan`/`sch-io`. The registry
+//! `circuit-lang`/`sch-check`, `kicad-footprint`/`kicad`, and `sch-floorplan`/`sch-io`. The registry
 //! exposes two free functions, both driven directly by the [`crate::Agent`] loop:
 //!
 //! - [`tool_defs`] — the JSON-Schema genai [`Tool`]s handed to the LLM.

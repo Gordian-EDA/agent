@@ -55,7 +55,6 @@ name = "anneal-place"
 version = "0.1.0"
 dependencies = [
  "circuit-graph",
- "circuit-lang",
  "geom",
  "kicad",
  "rayon",
@@ -364,7 +363,6 @@ version = "0.1.0"
 dependencies = [
  "anneal-place",
  "circuit-graph",
- "circuit-lang",
  "geom",
  "kicad",
  "rayon",
@@ -1071,7 +1069,6 @@ name = "gordian-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "circuit-lang",
  "gordian-llm",
  "kicad",
  "kicad-footprint",

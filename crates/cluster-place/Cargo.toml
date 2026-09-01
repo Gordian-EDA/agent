@@ -7,7 +7,6 @@ repository.workspace = true
 description = "Cluster-and-pack schematic placement engine: peels 2-pin satellites onto their hub IC, shapes each hub+satellites as a rigid templated module, then searches module poses (position + hub rotation/mirror) against the routed-sheet measurement library — so placement is crossing-faithful and satellites never sprawl."
 
 [dependencies]
-circuit-lang = { path = "../circuit-lang" }
 sch-check = { path = "../sch-check" }
 circuit-graph = { path = "../circuit-graph" }
 geom = { path = "../geom" }

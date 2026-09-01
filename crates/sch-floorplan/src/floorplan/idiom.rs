@@ -594,6 +594,6 @@ fn detect_pc817_channel_bank(
 
 /// Natural refdes order via the canonical key, with the full string as tiebreak.
 fn refdes_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    use circuit_lang::parse::refdes_key;
+    use sch_check::model::refdes_key;
     refdes_key(a).cmp(&refdes_key(b)).then_with(|| a.cmp(b))
 }

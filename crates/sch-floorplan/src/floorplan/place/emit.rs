@@ -22,7 +22,7 @@ use super::*;
 use sch_place::item::{Incidence, Item};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `geom::union_find`, shared with circuit-lang's pin reconciler.
+// `geom::union_find`, shared with the desugar pin reconciler.
 use sch_place::ir::{Cell, LayoutIr, Orient};
 
 /// Compose every block's per-block `layout:` grid into one global relative seed:
