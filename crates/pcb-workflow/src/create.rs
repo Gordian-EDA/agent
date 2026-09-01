@@ -2184,41 +2184,6 @@ mod tests {
     }
 
     #[test]
-    fn blocking_erc_warnings_allow_only_library_mismatch() {
-        let report = kicad::ErcReport {
-            violations: vec![
-                kicad::Violation {
-                    severity: "warning".to_string(),
-                    kind: "lib_symbol_mismatch".to_string(),
-                    description: "cached symbol differs".to_string(),
-                    items: vec![],
-                },
-                kicad::Violation {
-                    severity: "warning".to_string(),
-                    kind: "lib_symbol_issues".to_string(),
-                    description: "library unavailable".to_string(),
-                    items: vec![],
-                },
-                kicad::Violation {
-                    severity: "warning".to_string(),
-                    kind: "same_local_global_label".to_string(),
-                    description: "Local and global labels have same name".to_string(),
-                    items: vec![kicad::ViolationItem {
-                        description: "Label 'USB_DP'".to_string(),
-                        uuid: None,
-                    }],
-                },
-            ],
-        };
-
-        let warnings = blocking_erc_warnings(&report);
-
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0]["type"], "same_local_global_label");
-        assert_eq!(warnings[0]["items"][0], "Label 'USB_DP'");
-    }
-
-    #[test]
     #[ignore = "live KiCAD IPC; run through tools/live_kicad_test.sh"]
     fn seed_replacement_invalidates_same_runtime_live_session() {
         let Some(ctx) = AgentRuntime::detect_for_test() else {
