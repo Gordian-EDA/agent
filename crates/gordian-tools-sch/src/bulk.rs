@@ -93,6 +93,11 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "dangling": audit.dangling,
                 "did_you_mean": audit.did_you_mean,
                 "unknown_pins": audit.unknown_pins,
+                "note": "each dangling pin names a net that would carry no second pin. \
+                         `on_sheet: false` means the sheet has no such net — name a net the \
+                         payload or the sheet already carries, or declare the pin that joins it \
+                         in this same call. Re-read the schematic before retrying if an earlier \
+                         edit emptied the net.",
             }));
         }
         Err(error) => return Err(error.into()),

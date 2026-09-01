@@ -1123,12 +1123,22 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     // A definition that brings supply pins the old part did not have is not the
     // pin-compatible replacement a swap claims to be: nothing on the sheet drives them
-    // and KiCAD calls every one of them an error.
+    // and KiCAD calls every one of them an error. A pin that keeps its number but
+    // turns into a supply pin is the same defect wearing the connectivity guard's
+    // clothes — the net partition is untouched while KiCAD gains an ERC error.
     let added_supplies: Vec<String> = plan
         .new_unassigned
         .iter()
         .map(|index| &new_pins[*index])
         .filter(|pin| pin.etype == "power_in")
+        .chain(
+            plan.assignments
+                .iter()
+                .filter(|a| {
+                    new_pins[a.new].etype == "power_in" && old_pins[a.old].etype != "power_in"
+                })
+                .map(|a| &new_pins[a.new]),
+        )
         .map(|p| match p.name.as_str() {
             "" | "~" => p.number.clone(),
             name => format!("{} ({name})", p.number),
@@ -1137,8 +1147,8 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !added_supplies.is_empty() {
         return Ok(json!({
             "error": format!(
-                "{lib_id} adds supply pin(s) {} that {refdes} does not have, so nothing on the \
-                 sheet drives them; it is not a pin-compatible replacement. Use \
+                "{lib_id} makes {refdes} pin(s) {} supply pins the old symbol did not have, so \
+                 nothing on the sheet drives them; it is not a pin-compatible replacement. Use \
                  `set_fields({{ref, fields:{{Value:…}}}})` if the part is electrically the same, \
                  or pick a symbol with the same supply pins.",
                 added_supplies.join(", ")

@@ -268,3 +268,34 @@ fn adding_a_multi_unit_part_places_every_unit() {
         "LM358 is a multi-unit part; only {units} unit reached the sheet:\n{after}"
     );
 }
+
+/// A swap that keeps every pin number but turns one into a supply pin passes the
+/// connectivity guard untouched — the net partition is identical — while KiCAD
+/// gains a `power_pin_not_driven` error the sheet has no way to answer. Swapping
+/// a plain 2-pin part for a power symbol is the smallest form of that change.
+#[test]
+fn a_swap_that_makes_a_mapped_pin_a_supply_pin_is_refused() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "Connector_Generic:Conn_01x01", "ref": "J1"}]}),
+    );
+    assert!(placed.get("error").is_none(), "fixture failed: {placed}");
+    let before = std::fs::read(ctx.sch_path()).unwrap();
+
+    let result = call(&ctx, "swap_symbol", json!({"ref": "J1", "lib_id": "power:GND"}));
+    let error = result["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("supply pin"),
+        "the swap must name the newly undriven supply pin: {result}"
+    );
+    assert_eq!(
+        std::fs::read(ctx.sch_path()).unwrap(),
+        before,
+        "a refused swap must not write the schematic"
+    );
+}
