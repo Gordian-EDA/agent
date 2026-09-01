@@ -67,3 +67,28 @@ async fn reviewed_turn_uses_check_schematic_without_a_reviewer_model_call() {
     assert_eq!(outcome.stop_reason, StopReason::Completed);
     assert_eq!(seen.lock().unwrap().len(), 3, "review used no VLM request");
 }
+
+#[tokio::test]
+async fn unchanged_tool_cycles_reach_the_provider_request_limit() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let script = (0..32)
+        .map(|index| tool_call(&format!("read-{index}"), "project_info", json!({})))
+        .collect();
+    let (client, seen) = ScriptedClient::recording(script);
+    let mut agent = Agent::new(client, ctx, system_prompt());
+
+    let outcome = agent
+        .run_turn("inspect the project repeatedly", None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome.stop_reason,
+        StopReason::ProviderRequestLimit { requests: 32 }
+    );
+    assert_eq!(outcome.tool_calls_made, 32);
+    assert_eq!(seen.lock().unwrap().len(), 32);
+}
