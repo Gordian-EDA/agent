@@ -76,3 +76,10 @@ Also in that lane (user, 2026-09-01): **delete the no-progress watchdog** — `S
 `no_progress_final_text`, and `is_inspection_tool` (only exists to feed it) in
 `gordian-core/src/agent.rs`; the "stopped after N model completions made no durable
 progress" text goes with it. Keep only the per-turn provider-request cap.
+
+## Open (found by the pin-order lane, 2026-09-01): per-pin name-vs-number shadowing
+`sch-floorplan/src/floorplan/place/emit.rs` `resolve_pin_target` does
+`comp.pins.get(&pin.number).or_else(|| comp.pins.get(&pin.name))` PER physical pin, while
+the canonical resolvers (`sch_check::pins::resolve`, `find_pin`, `pin_endpoints`) are
+globally number-first. On a symbol whose pin is *named* `2` the emitter can attach one net
+to two pins. No reproduction yet — needs a fixture with such a symbol + a netlist gate.
