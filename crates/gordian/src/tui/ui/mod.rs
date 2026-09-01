@@ -934,6 +934,59 @@ mod tests {
     }
 
     #[test]
+    fn the_worked_divider_keeps_a_blank_line_below_when_it_is_the_newest_thing() {
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::AssistantText("done.".into())));
+        a.transcript
+            .push(crate::tui::app::Entry::notice(
+                crate::tui::app::NoticeLevel::Plain,
+                "Worked for 9s",
+            ));
+        let text = render_to_string(&mut a, 96, 24);
+        let rows: Vec<&str> = text.lines().collect();
+        let divider = rows
+            .iter()
+            .position(|r| r.contains("Worked for 9s"))
+            .expect("the divider renders");
+        assert!(
+            rows[divider + 1].trim().is_empty(),
+            "a blank line separates the divider from the composer below it:
+{text}"
+        );
+    }
+
+    #[test]
+    fn the_worked_divider_gets_no_extra_gap_once_a_new_turn_follows() {
+        // The next turn's own leading gap already separates it from the
+        // divider — a second blank line here would be a double gap.
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::AssistantText("done.".into())));
+        a.transcript
+            .push(crate::tui::app::Entry::notice(
+                crate::tui::app::NoticeLevel::Plain,
+                "Worked for 9s",
+            ));
+        a.transcript
+            .push(crate::tui::app::Entry::user("what about routing?"));
+        let text = render_to_string(&mut a, 96, 24);
+        let rows: Vec<&str> = text.lines().collect();
+        let divider = rows
+            .iter()
+            .position(|r| r.contains("Worked for 9s"))
+            .expect("the divider renders");
+        assert!(
+            rows[divider + 1].trim().is_empty(),
+            "exactly one blank line before the next turn:
+{text}"
+        );
+        assert!(
+            !rows[divider + 2].trim().is_empty(),
+            "not two — the next turn starts right after it:
+{text}"
+        );
+    }
+
+    #[test]
     fn help_overlay_renders_when_toggled() {
         let mut a = app();
         a.help = true;

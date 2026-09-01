@@ -152,6 +152,14 @@ fn layout_blocks(app: &App, body_w: usize, ctx: &RenderCtx) -> Vec<Block> {
             text.push(Line::from(""));
         }
         text.extend(render_entry(e, body_w));
+        // The divider is usually followed by the next turn, whose own leading
+        // gap already separates the two — but when it's still the newest thing
+        // in the transcript (the common moment right after a turn finishes),
+        // nothing follows to open that gap, and the rule would otherwise sit
+        // flush against the composer below it.
+        if is_worked_divider(e) && i + 1 == app.transcript.len() {
+            text.push(Line::from(""));
+        }
         prev = Some(e.speaker);
         i += 1;
     }
@@ -461,12 +469,15 @@ fn gap_above(prev: Option<Speaker>, cur: &Entry) -> bool {
     }
 }
 
+/// Whether `e` renders as the "Worked for Ns" turn-summary rule rather than an
+/// ordinary system notice.
+fn is_worked_divider(e: &Entry) -> bool {
+    e.speaker == Speaker::System && e.level == NoticeLevel::Plain && e.text.starts_with("Worked for ")
+}
+
 /// `first` is the row-0 marker, `cont` the indent repeated on wrapped rows.
 fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
-    if e.speaker == Speaker::System
-        && e.level == NoticeLevel::Plain
-        && e.text.starts_with("Worked for ")
-    {
+    if is_worked_divider(e) {
         return vec![render_worked_divider(&e.text, width, e.level)];
     }
 

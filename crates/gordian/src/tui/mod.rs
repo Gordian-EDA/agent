@@ -45,7 +45,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event, EventStream,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream,
     KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
@@ -646,6 +647,14 @@ fn build_picker() -> Option<Picker> {
 
 /// Enter raw mode + the alternate screen and build the ratatui terminal.
 ///
+/// Mouse capture is on so a genuine wheel scroll arrives as a real
+/// `Event::Mouse`, distinct from an arrow-key press — without it, most
+/// terminals translate wheel motion into synthetic Up/Down key events when in
+/// the alternate screen, which is indistinguishable from the user's own key
+/// presses and forces Up/Down to guess which one happened. The trade is
+/// native click-drag text selection in the terminal, which most terminals
+/// still offer behind a modifier (e.g. Shift-drag).
+///
 /// On terminals that speak the Kitty keyboard protocol we push
 /// `DISAMBIGUATE_ESCAPE_CODES` so chords like Shift+Enter arrive distinct from a
 /// bare Enter; terminals without that protocol are left untouched (the composer hint still
@@ -653,7 +662,12 @@ fn build_picker() -> Option<Picker> {
 fn setup_terminal() -> Result<(Terminal<CrosstermBackend<Stdout>>, bool)> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     let keyboard_enhancement = supports_keyboard_enhancement().unwrap_or(false);
     if keyboard_enhancement {
         execute!(
