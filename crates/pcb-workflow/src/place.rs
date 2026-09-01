@@ -1927,7 +1927,13 @@ fn illegal_placement_error(result: &Value) -> String {
     )
 }
 
-fn write_placement(ctx: &AgentRuntime, moves: &[FootprintMove]) -> std::result::Result<(), String> {
+/// Write footprint positions to the board: one live IPC commit when the
+/// installed KiCAD supports footprint updates, otherwise the equivalent
+/// offline s-expression edit.
+pub(crate) fn write_placement(
+    ctx: &AgentRuntime,
+    moves: &[FootprintMove],
+) -> std::result::Result<(), String> {
     let path = ctx.pcb_path();
     let live = ctx.kicad().with_session(&path, |session| {
         session.kicad().move_footprints(moves)?;

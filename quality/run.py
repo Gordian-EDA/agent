@@ -137,6 +137,7 @@ def deterministic_facts(project, artifacts, agent_result):
     erc_findings = violations(erc)
     drc_findings = violations(drc)
     unconnected = drc.get("unconnected_items", []) if isinstance(drc, dict) else []
+    fab = sorted(path.name for path in (project / "fab").glob("*")) if (project / "fab").is_dir() else []
     return {
         "agent_exit": agent_result.returncode,
         "schematic_created": schematic is not None,
@@ -146,6 +147,7 @@ def deterministic_facts(project, artifacts, agent_result):
         "drc_errors": sum(v.get("severity") == "error" for v in drc_findings),
         "drc_warnings": sum(v.get("severity") == "warning" for v in drc_findings),
         "unconnected_items": len(unconnected),
+        "fab_files": fab,
     }
 
 

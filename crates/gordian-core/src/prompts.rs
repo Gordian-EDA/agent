@@ -46,7 +46,7 @@ Schematic flow:
 5. Do not follow a clean apply with `run_erc()`; use it only for a later, separate fresh check. Fix ERC errors and re-apply before PCB work.
 
 # PCB flow
-GEOMETRY IS THE ENGINEERING: placement, layers, widths, and route shape matter. Footprints live in YAML. Batch `assign_footprints`, then `apply_design()` before `regenerate_board`; if footprints are missing/unapplied, fix and apply them instead of retrying. Regeneration is destructive seed/regeneration, not F8 sync: use only for a fresh/explicitly regenerated board. Resize/reshape an existing PCB with `update_board_outline`.
+GEOMETRY IS THE ENGINEERING: placement, layers, widths, and route shape matter. Footprints live in YAML. Batch `assign_footprints`, then `apply_design()` before `regenerate_board`; if footprints are missing/unapplied, fix and apply them instead of retrying. Regeneration is a destructive reseed, not F8 sync.
 
 PCB order:
 1. `regenerate_board({bounds?, rules?})` from an ERC-clean committed schematic. For USB-C/QFN, use e.g. `clearance: 0.15`, `min_trace_width: 0.15`; set wide copper for power in `rules.net_widths`, e.g. `{GND: 0.6, V3V3: 0.5}`. Dense RP2040/USB-C boards prefer `layer_count: 6` and generous initial bounds.
@@ -54,7 +54,8 @@ PCB order:
 3. `route_board()`.
 4. `check_board()`.
 5. `export_fab()` only after DRC passes.
-6. Deliberate live refinements: `open_board`, `get_board`, `update_board_outline`, `move_parts`, `route_track`, `delete_copper`, `set_net_width`, `render_board`. Prefer get→move→route→check. `update_board_outline({fit_to_geometry:true, margin:...})` shrinks/centers. `route_board` replaces all tracks/vias from current live state.
+6. Live refinements: `open_board`, `get_board`, `update_board_outline`, `move_parts`, `route_track`, `delete_copper`, `set_net_width`, `render_board`; prefer get→move→route→check. `update_board_outline({fit_to_geometry:true, margin:...})` shrinks/centers. `route_board` replaces all tracks/vias from current live state.
+EDITING AN EXISTING BOARD: skip steps 1-2; use step 6, then `check_board` and `export_fab`. Only a netlist change reseeds.
 
 Hard rules:
 - NEVER guess a footprint lib_id; use `search_footprints`.
@@ -148,6 +149,8 @@ mod tests {
         assert!(p.contains("external QSPI flash"));
         assert!(p.contains("BOOTSEL must pull the QSPI flash chip-select"));
         assert!(p.contains("not one header per spare pin"));
+        // Editing an existing board must not go through destructive regeneration.
+        assert!(p.contains("EDITING AN EXISTING BOARD"));
         assert!(p.contains("mark unused GPIO/QSPI pins `nc`"));
         assert!(p.contains("USB-C device receptacles"));
     }

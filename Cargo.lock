@@ -1071,6 +1071,7 @@ name = "gordian-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "directories",
  "gordian-llm",
  "kicad",
  "kicad-footprint",

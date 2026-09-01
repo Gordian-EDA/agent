@@ -40,6 +40,7 @@ pub mod tools;
 
 pub use agent::{Agent, AgentEvent, Approvals, AutoApprove, ContextStats, StopReason, TurnOutcome};
 pub use gordian_runtime::AgentRuntime;
+pub use gordian_runtime::platform;
 pub use gordian_runtime::config::{
     AgentConfig, CONFIG_SCHEMA_VERSION, ConfigError, DEFAULT_MAX_TOKENS, DEFAULT_RENDER_MAX_PX,
     DEFAULT_SCHEMATIC_FILENAME, DEFAULT_SEARCH_LIMIT, EngineConfig, GordianConfig, KicadConfig,

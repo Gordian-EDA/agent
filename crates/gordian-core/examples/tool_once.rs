@@ -23,8 +23,15 @@ fn main() -> anyhow::Result<()> {
         bail!("usage: tool_once <project-directory> <tool-name> [json-input]");
     }
 
-    let env = KicadInstallation::detect().context("no KiCad environment detected")?;
-    let ctx = AgentRuntime::for_project(env, project)?;
+    let config = gordian_core::platform::load_config()?;
+    let env = KicadInstallation::detect_with(
+        config.kicad.symbol_dir.as_deref(),
+        config.kicad.footprint_dir.as_deref(),
+        config.kicad.cli_path.as_deref(),
+        config.kicad.pcbnew_path.as_deref(),
+    )
+    .context("no KiCad environment detected")?;
+    let ctx = AgentRuntime::for_project_with_config(env, project, config)?;
     let result = run_tool(&tool, input, &ctx).with_context(|| format!("running {tool}"))?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     ctx.close_kicad_session();

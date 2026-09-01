@@ -6,8 +6,6 @@
 //!
 //! Usage: cargo run --release -p gordian-core --example design_review -- <out.png> "<prompt>"
 
-mod config_support;
-
 use gordian_core::{Agent, AgentEvent, AutoApprove};
 use kicad::KicadInstallation;
 use tokio::sync::mpsc;
@@ -22,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
         .next()
         .expect("usage: design_review <out.png> <prompt>");
 
-    let config = config_support::load_config()?;
+    let config = gordian_core::platform::load_config()?;
     let env = KicadInstallation::detect_with(
         config.kicad.symbol_dir.as_deref(),
         config.kicad.footprint_dir.as_deref(),
