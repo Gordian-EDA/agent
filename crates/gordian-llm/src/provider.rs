@@ -37,6 +37,9 @@ pub struct GenaiProvider {
     reasoning_effort: Option<ReasoningEffort>,
     capture_reasoning: bool,
     vision: bool,
+    /// Sent as `thread_identifier` in every request body so gateways that
+    /// understand it (respan.ai) group one conversation's calls together.
+    thread_identifier: String,
 }
 
 impl GenaiProvider {
@@ -103,7 +106,19 @@ impl GenaiProvider {
                 .map(to_genai_reasoning_effort),
             capture_reasoning: config.capture_reasoning,
             vision: config.vision_capable,
+            thread_identifier: format!("gordian-{}", uuid::Uuid::new_v4()),
         })
+    }
+
+    /// Label this conversation's requests with a caller-chosen thread id
+    /// instead of the generated one.
+    pub fn with_thread_identifier(mut self, id: impl Into<String>) -> Self {
+        self.thread_identifier = id.into();
+        self
+    }
+
+    pub fn thread_identifier(&self) -> &str {
+        &self.thread_identifier
     }
 }
 
@@ -230,7 +245,7 @@ impl GenaiProvider {
         if self.ephemeral_cache {
             opts = opts.with_cache_control(CacheControl::Ephemeral);
         }
-        opts
+        opts.with_extra_body(serde_json::json!({ "thread_identifier": self.thread_identifier }))
     }
 }
 
@@ -436,6 +451,20 @@ mod tests {
                 .contains("unsupported llm.adapter `not_a_provider`"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn chat_options_carry_the_thread_identifier() {
+        let provider = GenaiProvider::from_config(&LlmConfig {
+            adapter: Some("openai".to_string()),
+            model: Some("gpt-5".to_string()),
+            ..LlmConfig::default()
+        })
+        .unwrap()
+        .with_thread_identifier("thread_001");
+
+        let body = provider.chat_options().extra_body.unwrap();
+        assert_eq!(body["thread_identifier"], "thread_001");
     }
 
     #[test]

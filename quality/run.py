@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import tempfile
 import tomllib
 import urllib.error
@@ -21,9 +22,9 @@ ROOT = Path(__file__).resolve().parents[1]
 CASES = Path(__file__).resolve().parent / "cases"
 
 
-def command(args, *, timeout=600, check=True):
+def command(args, *, timeout=600, check=True, env=None):
     result = subprocess.run(
-        args, cwd=ROOT, text=True, capture_output=True, timeout=timeout
+        args, cwd=ROOT, text=True, capture_output=True, timeout=timeout, env=env
     )
     if check and result.returncode:
         raise RuntimeError(
@@ -268,6 +269,7 @@ def run_case(case, output_root):
         agent_command(project, prompt),
         timeout=int(os.environ.get("QUALITY_TIMEOUT", "900")),
         check=False,
+        env={**os.environ, "GORDIAN_THREAD_ID": f"quality-{case.name}-{int(time.time())}"},
     )
     (artifacts / "agent.stdout.txt").write_text(result.stdout, encoding="utf-8")
     (artifacts / "agent.stderr.txt").write_text(result.stderr, encoding="utf-8")

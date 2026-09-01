@@ -16,7 +16,7 @@ kasuari = "0.4"
 saphyr = "0.0.6"
 saphyr-parser = "0.0.6"
 indexmap = "2"
-uuid = { version = "1", features = ["v5"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 kiutils_kicad = "0.3"
 kiutils_sexpr = "0.1.1"
 strsim = "0.11"
