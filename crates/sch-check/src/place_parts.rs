@@ -24,9 +24,14 @@ pub struct PlacePartsInput {
     /// Sheet title, drawn in the frame's title block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Sheet these parts belong to. One tool call fills one sheet.
+    /// Region every part without its own `block` joins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block: Option<BlockName>,
+    /// Region → its internal placement grid: rows of refdes, `null` for a hole.
+    /// A refdes repeated down a column spans those rows. Regions left out are
+    /// arranged from connectivity.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub layout: BTreeMap<BlockName, LayoutGrid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<Intent>,
 }
@@ -38,6 +43,10 @@ pub struct PartSpec {
     /// Refdes, e.g. `U1`.
     #[serde(rename = "ref")]
     pub refdes: RefDes,
+    /// Placement region this part joins, when the sheet has more than one.
+    /// Defaults to the payload's `block`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<BlockName>,
     /// Full KiCAD lib_id, e.g. `Device:R`.
     pub part: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,10 +121,15 @@ pub const DEFAULT_BLOCK: &str = "main";
 /// decides whether to apply a design that carries them.
 pub fn into_design(input: &PlacePartsInput, provider: &SymbolTable) -> (Design, Diagnostics) {
     let mut diags = Diagnostics::default();
-    let name = input.block.as_deref().unwrap_or(DEFAULT_BLOCK);
-    let mut block = Block::default();
+    let mut design = Design {
+        name: input.name.clone(),
+        ..Design::default()
+    };
+    let default_block = input.block.as_deref().unwrap_or(DEFAULT_BLOCK);
     for spec in &input.parts {
+        let name = spec.block.as_deref().unwrap_or(default_block);
         let comp = component(spec, provider, &mut diags);
+        let block = design.blocks.entry(name.to_string()).or_default();
         if block.components.insert(spec.refdes.clone(), comp).is_some() {
             diags.push(Diagnostic::error(
                 "duplicate-ref",
@@ -123,12 +137,19 @@ pub fn into_design(input: &PlacePartsInput, provider: &SymbolTable) -> (Design, 
             ));
         }
     }
-    let mut design = Design {
-        name: input.name.clone(),
-        ..Design::default()
-    };
-    design.blocks.insert(name.to_string(), block);
-    expand_decouple(input, name, &mut design, provider, &mut diags);
+    if design.blocks.is_empty() {
+        design.blocks.insert(default_block.to_string(), Block::default());
+    }
+    for (name, grid) in &input.layout {
+        match design.blocks.get_mut(name) {
+            Some(block) => block.layout = grid.clone(),
+            None => diags.push(Diagnostic::error(
+                "unknown-block",
+                format!("`layout` names region `{name}`, which no part joins"),
+            )),
+        }
+    }
+    expand_decouple(input, default_block, &mut design, provider, &mut diags);
     decouple::renumber(&mut design);
     pins::mark_unused_no_connect(&mut design, provider);
     nets::derive_attrs(&mut design);
@@ -186,7 +207,7 @@ fn target(net: &str) -> PinTarget {
 
 fn expand_decouple(
     input: &PlacePartsInput,
-    block: &str,
+    default_block: &str,
     design: &mut Design,
     provider: &SymbolTable,
     diags: &mut Diagnostics,
@@ -195,6 +216,7 @@ fn expand_decouple(
         if spec.decouple.is_empty() {
             continue;
         }
+        let block = spec.block.as_deref().unwrap_or(default_block);
         let comp = &design.blocks[block].components[&spec.refdes];
         match decouple::rails(&spec.refdes, comp, provider) {
             Ok(rails) => {
@@ -228,6 +250,10 @@ pub fn place_parts_input_schema() -> Value {
                     "properties": {
                         "ref": {"type": "string", "description": "Refdes, e.g. U1."},
                         "part": {"type": "string", "description": "KiCAD lib_id, e.g. Device:R."},
+                        "block": {
+                            "type": "string",
+                            "description": "Placement region this part joins. Defaults to the payload's block."
+                        },
                         "value": {"type": "string"},
                         "footprint": {"type": "string"},
                         "dnp": {"type": "boolean"},
@@ -260,7 +286,20 @@ pub fn place_parts_input_schema() -> Value {
             },
             "block": {
                 "type": "string",
-                "description": "Sheet these parts belong to. Defaults to the root sheet."
+                "description": "Region every part without its own `block` joins."
+            },
+            "layout": {
+                "type": "object",
+                "description":
+                    "Region -> rows of refdes (null for a hole): that region's internal grid. \
+                     A refdes repeated down a column spans those rows.",
+                "additionalProperties": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "items": {"type": ["string", "null"]}
+                    }
+                }
             },
             "intent": {
                 "type": "object",

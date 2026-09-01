@@ -226,8 +226,8 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "ok": false,
             "error": "schematic symbol and assigned footprint have incompatible numbered pins/pads",
             "footprint_pin_mismatches": footprint_pin_mismatches,
-            "next_tool": "assign_footprints",
-            "next": "choose a package whose named pad numbers match the symbol pins, assign it, then regenerate_board again",
+            "next_tool": "swap_symbol",
+            "next": "make the two agree: swap_symbol to a part whose pin numbers are the footprint's pad numbers, or assign_footprints a package whose pads match the pins — then regenerate_board again",
             "note": "Every named electrical pad must match a symbol pin and every symbol pin must have a physical pad. Unnumbered mechanical pads and repeated pads with a valid shared number are allowed.",
         }));
     }
