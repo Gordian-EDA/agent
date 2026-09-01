@@ -83,11 +83,11 @@ fn place_parts_keeps_numbered_pin_assignments_distinct() {
     };
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let input: sch_check::PlacePartsInput = serde_json::from_value(serde_json::json!({
-        "parts": [{
-            "ref": "U1",
-            "part": "PinShadow:ThreePin",
-            "pins": {"1": "A", "2": "B", "3": "C"}
-        }]
+        "parts": [
+            { "ref": "U1", "part": "PinShadow:ThreePin", "pins": {"1": "A", "2": "B", "3": "C"} },
+            { "ref": "R1", "part": "Device:R", "pins": {"1": "A", "2": "B"} },
+            { "ref": "R2", "part": "Device:R", "pins": {"1": "C", "2": "B"} }
+        ]
     }))
     .unwrap();
     let (design, diagnostics, _) = sch_check::into_design(&input, &provider, &Default::default());
