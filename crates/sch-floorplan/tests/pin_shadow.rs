@@ -90,7 +90,7 @@ fn place_parts_keeps_numbered_pin_assignments_distinct() {
         }]
     }))
     .unwrap();
-    let (design, diagnostics) = sch_check::into_design(&input, &provider);
+    let (design, diagnostics, _) = sch_check::into_design(&input, &provider, &Default::default());
     assert!(!diagnostics.has_errors(), "{diagnostics:#?}");
 
     let mut doc = live::blank_sheet().unwrap();
