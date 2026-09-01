@@ -13,7 +13,7 @@ use sch_floorplan::engine_support::{align_idiom_clusters, align_led_chains, deco
 /// Cohesion pull on a multi-unit part's units (same refdes, no shared net).
 const SIB_COHESION: f64 = 3.0;
 
-/// The base routed objective: the 16 raw routed-sheet terms weighted into one straightness
+/// The base routed objective: the 18 raw routed-sheet terms weighted into one straightness
 /// scalar — the engine's tiebreak once truthfulness/warnings/crossings tie. The known-good
 /// base weighting. Build failure (saturated length) ⇒ ∞.
 pub(crate) fn base_cost(m: &RawMetrics) -> f64 {

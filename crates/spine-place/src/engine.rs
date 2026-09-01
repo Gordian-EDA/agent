@@ -15,7 +15,8 @@ use sch_floorplan::contract::{
     PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
 };
 use sch_floorplan::engine_support::{
-    apply_cells, assign_cells, body_overlap_count, decongest, normalize,
+    apply_cells, assign_cells, body_overlap_count, decongest, normalize, relation_viol,
+    repair_relations,
 };
 use sch_place::ir::LayoutIr;
 use sch_place::place::PlaceResult;
@@ -384,8 +385,8 @@ impl SpinePlace {
             ((w * h * shape) / 100.0) as i64
         };
         // One A/B gate serves every self-proving pass: snapshot, measure the
-        // 6-tuple (breaks, overlaps, through-body, warnings, labels, area —
-        // area zeroed when the pass shouldn't trade shape), apply, re-measure,
+        // 7-tuple (breaks, overlaps, relation violations, through-body, warnings,
+        // labels, area — area zeroed when the pass shouldn't trade shape), apply, re-measure,
         // keep on `b <= a` else restore. Returns whether the variant stuck.
         let dbg = problem.options.debug_timing;
         let mut breaks = run_variant(&mut problem.items, crate::order::Variants::default());
@@ -394,6 +395,9 @@ impl SpinePlace {
             (
                 brk,
                 body_overlap_count(items),
+                // The author's relational intent ranks above aesthetics: every
+                // self-proving pass below self-rejects if it would break a relation.
+                relation_viol(items, &ir),
                 x.body + x.ic,
                 eval.warnings(items),
                 crate::compact::labeled_nets(items, &problem_inc, &classes).len(),
@@ -562,6 +566,23 @@ impl SpinePlace {
                 },
             );
         }
+
+        // The grammar typesetter has no relational move of its own, so its intent is
+        // honoured by PROJECTION: run the shared repair, then keep it only if the same
+        // gate every other pass answers to says it did not regress anything.
+        ab_gate(
+            &mut problem.items,
+            &mut breaks,
+            "relations",
+            false,
+            &mut |it| {
+                repair_relations(it, &ir);
+                seat_frozen(it);
+                decongest(it);
+                normalize(it);
+                eval.truthfulness_breaks(it)
+            },
+        );
 
         let overlaps = body_overlap_count(&problem.items);
         if overlaps > 0 && problem.options.debug_timing {

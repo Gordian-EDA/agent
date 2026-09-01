@@ -62,7 +62,7 @@ fn doc(name: &str, ext: &str) -> std::path::PathBuf {
 
 fn validation_corpus_available() -> bool {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/validation")
+        .join("tests/fixtures/validation")
         .is_dir()
 }
 

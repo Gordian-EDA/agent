@@ -8,7 +8,7 @@
 //! Three surfaces:
 //! - [`RoutedSheetRealizer`] — build + route a candidate into a [`SchematicWriter`].
 //! - [`RoutedEvaluator`] — read metrics from routed realizations.
-//! - [`RawMetrics`] — the 16 raw count/length terms, weight-free. An engine's objective
+//! - [`RawMetrics`] — the 18 raw count/length terms, weight-free. An engine's objective
 //!   multiplies these by its own weights and sums them.
 
 use std::collections::BTreeMap;
@@ -33,6 +33,7 @@ use super::score::{
     count_corners, count_crossings, count_foreign_taps, count_ic_body_crossings, count_merges,
     count_parallel_body_crossings, count_shorts, count_stray, grid_order_viol, item_rect,
 };
+use super::relation::{relation_group_spread, relation_viol};
 use super::*;
 
 /// A schematic placement+routing ENGINE: searches over a neutral
@@ -169,6 +170,8 @@ impl<'a> RoutedEvaluator<'a> {
                 spread: f64::INFINITY,
                 grid_order: usize::MAX,
                 sib_spread: f64::INFINITY,
+                relation: usize::MAX,
+                group_spread: f64::INFINITY,
             },
         }
     }
@@ -256,7 +259,7 @@ impl<'a> RoutedEvaluator<'a> {
     }
 }
 
-/// The raw, weight-FREE measurements of a routed candidate placement — the 16 terms an
+/// The raw, weight-FREE measurements of a routed candidate placement — the 18 terms an
 /// engine's objective combines under its own weights. Built by [`SchematicPlaceProblem::measure`]
 /// from the `fan_risers=false` routed build (the per-move objective build, which differs
 /// from the shipped `fan_risers=true` sheet `warnings`/`crossings` measure). Splitting
@@ -296,6 +299,10 @@ pub struct RawMetrics {
     pub grid_order: usize,
     /// Same-refdes (multi-unit) bounding-box spread (cohesion).
     pub sib_spread: f64,
+    /// Unsatisfied [`sch_place::ir::Relation`] statements (the LLM's relational intent).
+    pub relation: usize,
+    /// Bounding-box half-perimeter of every `Relation::Group` (group cohesion).
+    pub group_spread: f64,
 }
 
 /// Body / IC / wire crossing triple read from a shipped (`fan_risers=true`) writer.
@@ -537,5 +544,7 @@ pub fn raw_metrics(
         spread,
         grid_order,
         sib_spread,
+        relation: relation_viol(items, ir),
+        group_spread: relation_group_spread(items, ir),
     }
 }

@@ -39,7 +39,7 @@ use sch_place::place::{Crossings, PlaceResult};
 use sch_floorplan::contract::{
     PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
 };
-use sch_floorplan::engine_support::FAST_PINS;
+use sch_floorplan::engine_support::{FAST_PINS, relation_viol};
 
 /// Cluster-pose placement: the SA's leaf seating + a strictly-additive rigid hub-pose search.
 pub struct ClusterPlace;
@@ -97,6 +97,10 @@ impl PlacementEngine for ClusterPlace {
                 None => (usize::MAX, usize::MAX, f64::MAX),
             };
         let baseline_parts = compact::part_sprawl(&problem.items);
+        // Relations arrive already satisfied from the anneal baseline (which searches under
+        // a hard feasibility rule); pose and the de-sprawl floorplanner are relation-blind
+        // rigid moves, so the Pareto gate below refuses any of their results that breaks one.
+        let baseline_relation = relation_viol(&problem.items, &out.ir);
         // Snapshot the SA placement so the whole pose+compact result can fall back to it.
         let sa_snap = crate::eval::save(&problem.items);
         // 2. THE lever the SA never searches: re-pose each hub (+ its satellite cluster,
@@ -137,6 +141,7 @@ impl PlacementEngine for ClusterPlace {
         // spread the parts +20%) is NOT a more human-like sheet, so revert it.
         let final_parts = compact::part_sprawl(&problem.items);
         let earned_keep = final_warnings <= sa_warnings
+            && relation_viol(&problem.items, &out.ir) <= baseline_relation
             && final_crossings <= sa_crossings
             && final_rendered <= baseline_rendered + 1e-3
             && final_parts <= baseline_parts + 1e-3;
@@ -169,7 +174,8 @@ impl PlacementEngine for ClusterPlace {
                 let got = ev
                     .shipped(design, &problem.items)
                     .map(|(cr, w, r)| (cr.total(), w, compact::rendered_sprawl(&r, n)));
-                let keep = rail_candidate_wins((cur_x, cur_w, cur_spr), got);
+                let keep = rail_candidate_wins((cur_x, cur_w, cur_spr), got)
+                    && relation_viol(&problem.items, &ir_rail) <= baseline_relation;
                 if DEBUG_DIAGNOSTICS {
                     eprintln!(
                         "[cluster] rails: {cur_spr:.1} -> {:?}  keep={keep}",

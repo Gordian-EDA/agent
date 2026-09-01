@@ -3,7 +3,7 @@
 //! shorts, congestion, body-crossings), the orientation/spine/stray/grid-order
 //! classifiers, and the geometry primitives (`item_rect`, `body_overlap_count`).
 //! The MEASUREMENT library [`super::measure`] assembles these
-//! into the raw 16 terms; each ENGINE then weights them into its own objective. This
+//! into the raw 18 terms; each ENGINE then weights them into its own objective. This
 //! module bakes in NO weights and NO `premium` policy — those are engine-owned.
 
 use std::collections::{BTreeMap, BTreeSet};
