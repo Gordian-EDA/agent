@@ -119,7 +119,9 @@ pub(crate) fn unit_count(def: &Node) -> u32 {
         .filter_map(|child| items(child).get(1).and_then(sexpr::text))
         .map(|name| unit_and_style(name).0)
         .max()
+        // A definition with only a unit-0 block still draws one unit.
         .unwrap_or(1)
+        .max(1)
 }
 
 /// Whether a `lib_symbols` definition is a power symbol.
@@ -183,15 +185,18 @@ pub(crate) fn pins_of(doc: &SchDoc, inst: &SymbolInst) -> Vec<PlacedPin> {
     };
     let power_symbol = is_power_definition(def);
     let style = body_style(inst);
-    let multi_unit = unit_count(def) > 1;
+    let units = unit_count(def);
+    // KiCAD clamps an instance whose unit the definition does not have; taking
+    // it at its word would leave the symbol with no pins and say nothing.
+    let unit = inst.unit.clamp(1, units);
     lib_pins(def)
         .into_iter()
-        .filter(|p| belongs(p, inst.unit, style))
+        .filter(|p| belongs(p, unit, style))
         .map(|p| PlacedPin {
             owner: inst.uuid.clone(),
             refdes: inst.refdes().to_string(),
-            unit: inst.unit,
-            multi_unit,
+            unit,
+            multi_unit: units > 1,
             number: p.number,
             name: p.name,
             etype: p.etype,

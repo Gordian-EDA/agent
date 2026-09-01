@@ -7,10 +7,13 @@
 //! A wire joins its own two ends, and *only* its ends. Touching a wire partway
 //! along is not a connection: KiCAD leaves a pin sitting in the middle of a
 //! wire unconnected, and leaves a wire that ends on another wire's middle
-//! unconnected too. Three things do attach anywhere along a wire — a junction,
-//! a label, and a sheet pin — and a junction is how two crossing wires are
-//! joined. Every one of these rules is checked against `kicad-cli` by the
-//! fixtures in `tests/pitfalls.rs`.
+//! unconnected too. A junction and a sheet pin do attach anywhere along a wire,
+//! and a junction is how two crossing wires are joined; a label attaches that
+//! way only where there is no pin — on a pin tip it binds to the pin and leaves
+//! the wire running past alone.
+//!
+//! A no-connect marker makes its point inert: nothing joins through it, which
+//! is what severs the pin it settles rather than merely excusing it.
 //!
 //! Names then merge partitions: same-named labels within the sheet, and power
 //! symbols and hidden power pins by the name they carry.
@@ -106,7 +109,8 @@ pub struct Netlist {
     /// Pins alone on their node with no name — loose ends, in the same sense as
     /// `kicad-cli`'s `unconnected-(…)` nets.
     pub unconnected: Vec<PinRef>,
-    /// Pins that would be loose ends but carry a no-connect marker.
+    /// Pins a no-connect marker severed. The marker makes its point inert, so
+    /// these are loose ends on purpose rather than by oversight.
     pub no_connect: Vec<PinRef>,
     /// Anything the extractor could not model, such as buses.
     pub warnings: Vec<String>,
@@ -186,24 +190,37 @@ struct Segment {
 pub fn extract(doc: &SchDoc) -> Netlist {
     let warnings = survey(doc);
     let placed: Vec<PlacedPin> = doc.symbols().flat_map(|s| pins_of(doc, s)).collect();
-    let (nodes, segments, attachments) = intern(doc, &placed);
+    let interned = intern(doc, &placed);
+    let Interned {
+        nodes,
+        segments,
+        attachments,
+        severed,
+    } = &interned;
 
     let mut sets = UnionFind::new(nodes.points.len());
-    for seg in &segments {
-        sets.union(seg.a, seg.b);
+    for seg in segments {
+        if !severed.contains(&seg.a) && !severed.contains(&seg.b) {
+            sets.union(seg.a, seg.b);
+        }
     }
-    attach(&nodes, &segments, &attachments, &mut sets);
+    attach(nodes, segments, attachments, severed, &mut sets);
 
-    let named = names(doc, &nodes, &placed);
+    let named = names(doc, nodes, &placed);
     for (_, members) in named.values() {
-        for pair in members.windows(2) {
+        let live: Vec<usize> = members
+            .iter()
+            .copied()
+            .filter(|node| !severed.contains(node))
+            .collect();
+        for pair in live.windows(2) {
             sets.union(pair[0], pair[1]);
         }
     }
 
     let roots: Vec<usize> = (0..nodes.points.len()).map(|n| sets.find(n)).collect();
-    let anchors = Anchors::new(doc, &nodes, &named, &roots);
-    let (nets, unconnected, no_connect) = emit(&placed, &nodes, &roots, &anchors);
+    let anchors = Anchors::new(doc, nodes, &named, &roots);
+    let (nets, unconnected, no_connect) = emit(&placed, nodes, &roots, &anchors);
     Netlist {
         nets,
         unconnected,
@@ -212,9 +229,19 @@ pub fn extract(doc: &SchDoc) -> Netlist {
     }
 }
 
-/// Intern every connection point on the sheet, the wire segments over them, and
-/// the nodes that attach to a wire anywhere along its length.
-fn intern(doc: &SchDoc, placed: &[PlacedPin]) -> (Nodes, Vec<Segment>, Vec<usize>) {
+/// The interned sheet: its connection points, its wires, and the two node
+/// classes the partitioner treats specially.
+struct Interned {
+    nodes: Nodes,
+    segments: Vec<Segment>,
+    /// Nodes that join a wire anywhere along its length, not just at its ends.
+    attachments: Vec<usize>,
+    /// Nodes a no-connect marker made inert.
+    severed: HashSet<usize>,
+}
+
+/// Intern every connection point on the sheet and the wires over them.
+fn intern(doc: &SchDoc, placed: &[PlacedPin]) -> Interned {
     let mut nodes = Nodes::default();
     let mut segments = Vec::new();
     for wire in doc.wires() {
@@ -228,14 +255,21 @@ fn intern(doc: &SchDoc, placed: &[PlacedPin]) -> (Nodes, Vec<Segment>, Vec<usize
             });
         }
     }
-    for pin in placed {
-        nodes.intern(pin.at);
-    }
+    let pin_nodes: HashSet<usize> = placed.iter().map(|pin| nodes.intern(pin.at)).collect();
+
     let mut attachments = Vec::new();
+    let mut severed = HashSet::new();
     for item in doc.items() {
         match item {
             Item::Junction(junction) => attachments.push(nodes.intern(junction.at)),
-            Item::Label(label) => attachments.push(nodes.intern(label.at.point())),
+            Item::Label(label) => {
+                // A label on a pin tip binds to the pin; the wire running past
+                // the pin is not part of that net.
+                let node = nodes.intern(label.at.point());
+                if !pin_nodes.contains(&node) {
+                    attachments.push(node);
+                }
+            }
             Item::Sheet(sheet) => {
                 // A sheet pin's `at` is already in sheet coordinates.
                 for pin in &sheet.pins {
@@ -243,12 +277,17 @@ fn intern(doc: &SchDoc, placed: &[PlacedPin]) -> (Nodes, Vec<Segment>, Vec<usize
                 }
             }
             Item::NoConnect(no_connect) => {
-                nodes.intern(no_connect.at);
+                severed.insert(nodes.intern(no_connect.at));
             }
             _ => {}
         }
     }
-    (nodes, segments, attachments)
+    Interned {
+        nodes,
+        segments,
+        attachments,
+        severed,
+    }
 }
 
 /// Every name claimed on the sheet, with the strongest source that claimed it
@@ -316,8 +355,9 @@ impl Anchors {
                 continue;
             };
             let root = roots[first];
-            // Strongest source wins; at equal strength KiCAD keeps the name
-            // that sorts first.
+            // Strongest source wins. At equal strength KiCAD keeps the label
+            // that sorts *first* — the opposite of the sheet-pin rule below,
+            // which keeps the last; both are what kicad-cli does.
             let candidate = (*source, text.clone());
             let better =
                 name.get(&root)
@@ -340,6 +380,7 @@ impl Anchors {
                 let Some(node) = nodes.get(pin.at.point()) else {
                     continue;
                 };
+                // Sheet pins tie-break the other way: the name that sorts last.
                 let candidate = (NetSource::SheetPin, crate::text::unescape(&pin.name));
                 let root = roots[node];
                 if name.get(&root).is_none_or(|held| *held < candidate) {
@@ -526,19 +567,30 @@ fn unit_letter(pin: &PlacedPin) -> String {
 
 /// Join each attaching node to every wire whose length passes through it.
 ///
-/// Only junctions, labels and sheet pins attach this way; a pin or a wire end
-/// that merely touches a wire partway along is not connected to it, which is
-/// what makes a junction meaningful. Axis-aligned wires — everything KiCAD
+/// Only junctions, sheet pins, and labels away from a pin attach this way; a
+/// pin or a wire end that merely touches a wire partway along is not connected
+/// to it, which is what makes a junction meaningful. Axis-aligned wires — everything KiCAD
 /// normally draws — are answered from a row/column index over the attachment
 /// points, so this stays near-linear on boards with tens of thousands of wires;
 /// the rare diagonal wire falls back to a scan.
-fn attach(nodes: &Nodes, segments: &[Segment], attachments: &[usize], sets: &mut UnionFind) {
+fn attach(
+    nodes: &Nodes,
+    segments: &[Segment],
+    attachments: &[usize],
+    severed: &HashSet<usize>,
+    sets: &mut UnionFind,
+) {
+    let attachments: Vec<usize> = attachments
+        .iter()
+        .copied()
+        .filter(|node| !severed.contains(node))
+        .collect();
     if attachments.is_empty() {
         return;
     }
     let mut rows: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
     let mut cols: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
-    for &idx in attachments {
+    for &idx in &attachments {
         let (x, y) = key(nodes.points[idx]);
         rows.entry(y).or_default().push((x, idx));
         cols.entry(x).or_default().push((y, idx));
@@ -554,7 +606,7 @@ fn attach(nodes: &Nodes, segments: &[Segment], attachments: &[usize], sets: &mut
         } else if from.0 == to.0 {
             cols.get(&from.0).map(|b| (b, from.1, to.1))
         } else {
-            for &idx in attachments {
+            for &idx in &attachments {
                 if inside(nodes.points[idx], seg.from, seg.to) {
                     sets.union(idx, seg.a);
                 }
