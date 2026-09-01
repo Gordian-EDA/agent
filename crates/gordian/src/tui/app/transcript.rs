@@ -190,6 +190,28 @@ impl App {
         }
     }
 
+    /// Publish whatever prose never reached a paragraph break or a finalizing
+    /// `AssistantText`, opening a new entry if none was ever started.
+    ///
+    /// `AssistantText` normally does this (it `.take()`s `live_assistant`, so
+    /// by the time this runs there is nothing left to flush); this is the
+    /// fallback for a turn that ends without one arriving — a single short
+    /// reply with no blank line in it is the common case, so this is not a
+    /// rare corner: without it, a real reply can go to a completed turn with
+    /// nothing shown for it.
+    fn flush_live_assistant(&mut self) {
+        let Some(live) = self.live_assistant.take() else {
+            return;
+        };
+        let text = live.buffer.trim_end().to_string();
+        match live.entry {
+            Some(i) if !text.is_empty() => self.transcript[i].text = text,
+            Some(_) => {}
+            None if !text.is_empty() => self.transcript.push(Entry::assistant(text)),
+            None => {}
+        }
+    }
+
     /// Fold an agent event into the transcript / status.
     pub(super) fn on_agent_event(&mut self, ev: AgentEvent) {
         match ev {
@@ -309,9 +331,10 @@ impl App {
                 // upcoming `TurnEnded` to read the elapsed time from. `TurnEnded`
                 // owns the rest of teardown and is the sole indicator source, so
                 // the two signals can arrive in either order without double-
-                // printing or losing the clock. Any unfinalized streamed entry is
-                // closed so the next turn's deltas can't append to it.
-                self.live_assistant = None;
+                // printing or losing the clock. Flush (not just close) any
+                // unfinalized streamed entry, so a reply that ended without a
+                // paragraph break or a proper finalize is never silently lost.
+                self.flush_live_assistant();
                 self.running = false;
                 self.active_work = None;
             }

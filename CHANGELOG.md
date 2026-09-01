@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **A completed turn could show nothing for a real reply.** Paragraph-gated
+  streaming (see below) buffers assistant text until a blank line closes a
+  paragraph or the turn finalizes it. `TurnDone` used to just drop that buffer
+  outright, so a short reply with no blank line in it — the common case — went
+  missing whenever the turn ended without a clean finalizing `AssistantText`
+  (a provider quirk, not something the UI can assume never happens). `TurnDone`
+  now flushes whatever is still buffered instead of discarding it.
+
 ### Changed
 - **The status-bar model label is no longer clipped to three words**: it used
   to cut every model id down to its first three dash-separated segments after

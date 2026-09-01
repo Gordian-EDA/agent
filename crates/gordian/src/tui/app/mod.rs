@@ -1116,11 +1116,49 @@ mod tests {
     }
 
     #[test]
-    fn turn_done_closes_an_unfinalized_live_entry() {
+    fn turn_done_flushes_an_unfinalized_live_entry_instead_of_dropping_it() {
+        // A regression guard: a short reply with no blank line in it never
+        // reaches a paragraph break, so if the turn ends without a proper
+        // `AssistantText` finalize (a missing or empty one — a provider quirk,
+        // not something the UI can rely on never happening), TurnDone used to
+        // just drop the buffered text. A completed turn must never show nothing
+        // for a reply the model actually sent.
         let mut a = app();
-        a.update(Msg::Agent(AgentEvent::AssistantDelta("partial".into())));
+        a.update(Msg::Agent(AgentEvent::AssistantDelta(
+            "Hi, I'm Gordian.".into(),
+        )));
         assert!(a.live_assistant.is_some());
         a.update(Msg::Agent(AgentEvent::TurnDone));
         assert!(a.live_assistant.is_none(), "TurnDone closes the live entry");
+        let assistants: Vec<&str> = a
+            .transcript
+            .iter()
+            .filter(|e| e.speaker == Speaker::Assistant)
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(
+            assistants,
+            vec!["Hi, I'm Gordian."],
+            "the streamed reply is not lost just because it never got a paragraph break"
+        );
+    }
+
+    #[test]
+    fn a_normal_finalize_still_wins_over_the_turn_done_fallback() {
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::AssistantDelta("Hi".into())));
+        a.update(Msg::Agent(AgentEvent::AssistantText("Hi there!".into())));
+        a.update(Msg::Agent(AgentEvent::TurnDone));
+        let assistants: Vec<&str> = a
+            .transcript
+            .iter()
+            .filter(|e| e.speaker == Speaker::Assistant)
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(
+            assistants,
+            vec!["Hi there!"],
+            "AssistantText already took live_assistant, so TurnDone has nothing left to flush"
+        );
     }
 }
