@@ -6,6 +6,7 @@
 //! Pure: no I/O.
 
 pub mod authored;
+pub mod completeness;
 pub mod decouple;
 pub mod diag;
 pub mod erc;
