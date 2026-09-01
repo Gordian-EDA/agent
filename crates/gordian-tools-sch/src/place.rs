@@ -160,7 +160,7 @@ pub(crate) fn facing_rotation(doc: &mut SchDoc, refdes: &str, side: Side) -> f64
 
 fn extents(doc: &SchDoc) -> Vec<(String, Rect)> {
     doc.symbols()
-        .filter_map(|s| Some((s.refdes().to_string(), extent(doc, s)?)))
+        .filter_map(|s| Some((s.uuid.clone(), extent(doc, s)?)))
         .collect()
 }
 
@@ -178,12 +178,12 @@ impl Occupancy {
     pub fn skipping(doc: &SchDoc, skip: &[String]) -> Occupancy {
         let mut blocks: Vec<Rect> = extents(doc)
             .into_iter()
-            .filter(|(refdes, _)| !skip.contains(refdes))
+            .filter(|(uuid, _)| !skip.contains(uuid))
             .map(|(_, r)| r)
             .collect();
         let own: Vec<Point2> = placed_pins(doc)
             .into_iter()
-            .filter(|p| skip.contains(&p.refdes))
+            .filter(|p| skip.contains(&p.owner))
             .map(|p| p.at)
             .collect();
         let attached = |a: Point2, b: Point2| {

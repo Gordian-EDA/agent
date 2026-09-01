@@ -1,7 +1,7 @@
 //! Mutators. Every one of them invalidates only the items it rewrote, so the
 //! rest of the file is still written back from its original bytes.
 
-use geom::{Point2, stable_uuid};
+use geom::{Point2, Rect, stable_uuid};
 use kiutils_sexpr::Node;
 
 use crate::doc::SchDoc;
@@ -174,11 +174,11 @@ impl SchDoc {
         Ok(())
     }
 
-    /// Place a new symbol at unit 1, embedding its library definition first.
+    /// Place every unit of a new symbol, embedding its library definition first.
     ///
     /// Refused on a sheet the hierarchy places more than once: each placement
     /// needs its own reference, and one call cannot say what the others are.
-    /// Returns the new symbol's UUID.
+    /// Returns the new unit UUIDs in unit order.
     pub fn add_symbol(
         &mut self,
         lib_id: &str,
@@ -186,7 +186,7 @@ impl SchDoc {
         value: &str,
         at: Pose,
         source: &SymbolSource,
-    ) -> Result<String> {
+    ) -> Result<Vec<String>> {
         if self
             .symbols()
             .any(|s| instance_paths(s.retained().node()) > 1)
@@ -194,12 +194,38 @@ impl SchDoc {
             return Err(Error::ReInstantiatedSheet);
         }
         self.ensure_lib_symbol(lib_id, source)?;
-        let uuid = self.derive_uuid("symbol", &format!("{lib_id}|{refdes}"));
-        // One `(pin …)` uuid per pin of the unit being placed, as KiCAD writes.
+        let unit_count = self
+            .lib_symbols()
+            .and_then(|libs| crate::pins::resolve(libs, lib_id))
+            .map(crate::pins::unit_count)
+            .unwrap_or(1);
+        let mut uuids = Vec::new();
+        let mut previous_bottom = None;
+        for unit in 1..=unit_count {
+            let uuid = self.add_symbol_unit(lib_id, refdes, value, at, unit);
+            if let (Some(bottom), Some(extent)) = (previous_bottom, self.symbol_extent(&uuid)) {
+                let dy = bottom + 2.54 - extent.min_y;
+                self.move_symbol(&uuid, at.x, at.y + dy)?;
+            }
+            previous_bottom = self.symbol_extent(&uuid).map(|extent| extent.max_y);
+            uuids.push(uuid);
+        }
+        Ok(uuids)
+    }
+
+    fn add_symbol_unit(
+        &mut self,
+        lib_id: &str,
+        refdes: &str,
+        value: &str,
+        at: Pose,
+        unit: u32,
+    ) -> String {
+        let uuid = self.derive_uuid("symbol", &format!("{lib_id}|{refdes}|{unit}"));
         let pins: Vec<String> = self
             .lib_symbols()
             .and_then(|libs| crate::pins::resolve(libs, lib_id))
-            .map(|def| crate::pins::pin_numbers(def, 1, 1))
+            .map(|def| crate::pins::pin_numbers(def, unit, 1))
             .unwrap_or_default();
         let pin_nodes: Vec<Node> = pins
             .iter()
@@ -217,7 +243,7 @@ impl SchDoc {
             sym("symbol"),
             tagged("lib_id", vec![quoted(lib_id)]),
             tagged("at", vec![num(at.x), num(at.y), num(at.rot)]),
-            tagged("unit", vec![num(1.0)]),
+            tagged("unit", vec![num(unit as f64)]),
             tagged("exclude_from_sim", vec![yes_no(false)]),
             tagged("in_bom", vec![yes_no(true)]),
             tagged("on_board", vec![yes_no(true)]),
@@ -235,10 +261,24 @@ impl SchDoc {
             property_node("Description", "", Pose::new(at.x, at.y, 0.0), true),
         ];
         children.extend(pin_nodes);
-        children.push(self.instances_node(refdes));
+        children.push(self.instances_node(refdes, unit));
 
         self.insert_item(Item::Symbol(SymbolInst::decode(&list(children))));
-        Ok(uuid)
+        uuid
+    }
+
+    fn symbol_extent(&self, uuid: &str) -> Option<Rect> {
+        let symbol = self.symbol(uuid)?;
+        let mut points: Vec<Point2> = crate::placed_pins(self)
+            .into_iter()
+            .filter(|pin| pin.owner == uuid)
+            .map(|pin| pin.at)
+            .collect();
+        if let Some(body) = crate::body_rect(self, symbol) {
+            points.push(Point2::new(body.min_x, body.min_y));
+            points.push(Point2::new(body.max_x, body.max_y));
+        }
+        Rect::bounding(&points)
     }
 
     /// Remove a symbol and every field it owned.
@@ -532,7 +572,7 @@ impl SchDoc {
     /// Clone the project and path an existing symbol uses, so a new symbol
     /// lands in the same hierarchy; fall back to this sheet's own root path.
     /// Only reached once the sheet is known to have a single placement.
-    fn instances_node(&self, refdes: &str) -> Node {
+    fn instances_node(&self, refdes: &str, unit: u32) -> Node {
         let project = self
             .symbols()
             .find_map(|s| {
@@ -568,7 +608,7 @@ impl SchDoc {
                     sym("path"),
                     quoted(path),
                     tagged("reference", vec![sym(refdes)]),
-                    tagged("unit", vec![num(1.0)]),
+                    tagged("unit", vec![num(unit as f64)]),
                 ]),
             ])],
         )

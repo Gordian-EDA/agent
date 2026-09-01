@@ -1,7 +1,7 @@
 //! The symbol mutators: place, remove, move, retag and swap parts.
 
 use anyhow::Result;
-use geom::{EPS, Point2};
+use geom::{EPS, Point2, Rect};
 use gordian_runtime::AgentRuntime;
 use sch_doc::{LabelKind, Pose, SchDoc, placed_pins};
 use serde_json::{Value, json};
@@ -28,6 +28,52 @@ pub(crate) fn next_refdes(doc: &SchDoc, prefix: &str) -> String {
 /// KiCAD writes for a pin with no name, so they name nothing and match nothing.
 fn named_as(pin: &sch_doc::PlacedPin, key: &str) -> bool {
     !matches!(pin.name.as_str(), "" | "~") && pin.name.eq_ignore_ascii_case(key)
+}
+
+fn valid_refdes(refdes: &str) -> bool {
+    let refdes = refdes.strip_prefix('#').unwrap_or(refdes);
+    let letters = refdes.chars().take_while(char::is_ascii_alphabetic).count();
+    letters > 0
+        && letters < refdes.len()
+        && refdes[..letters].chars().all(|ch| ch.is_ascii_alphabetic())
+        && refdes[letters..].chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn combined_extent(doc: &SchDoc, uuids: &[String]) -> Option<Rect> {
+    let corners: Vec<Point2> = uuids
+        .iter()
+        .filter_map(|uuid| doc.symbol(uuid))
+        .filter_map(|symbol| crate::place::extent(doc, symbol))
+        .flat_map(|extent| {
+            [
+                Point2::new(extent.min_x, extent.min_y),
+                Point2::new(extent.max_x, extent.max_y),
+            ]
+        })
+        .collect();
+    Rect::bounding(&corners)
+}
+
+fn stack_units(doc: &mut SchDoc, uuids: &[String]) -> Result<(), sch_doc::Error> {
+    let mut previous_bottom = None;
+    for uuid in uuids {
+        let Some(symbol) = doc.symbol(uuid) else {
+            continue;
+        };
+        let at = symbol.at;
+        let Some(extent) = crate::place::extent(doc, symbol) else {
+            continue;
+        };
+        if let Some(bottom) = previous_bottom {
+            let y = at.y + bottom + crate::place::CLEARANCE - extent.min_y;
+            doc.move_symbol(uuid, at.x, snap(y))?;
+        }
+        previous_bottom = doc
+            .symbol(uuid)
+            .and_then(|symbol| crate::place::extent(doc, symbol))
+            .map(|extent| extent.max_y);
+    }
+    Ok(())
 }
 
 /// Where a part should end up, and which of its two anchors the answer is
@@ -122,9 +168,17 @@ fn place_one(
     {
         return Err(format!("`{refdes}` is already on the sheet"));
     }
+    if let Some(refdes) = spec.get("ref").and_then(Value::as_str)
+        && !valid_refdes(refdes)
+    {
+        return Err(format!(
+            "`{refdes}` is not a valid reference; use letters followed by digits, such as R12, U3, or #PWR01"
+        ));
+    }
     let park = Pose::new(5000.0, 5000.0, 0.0);
     let provisional = next_refdes(&edit.doc, "ZZ");
-    edit.doc
+    let uuids = edit
+        .doc
         .add_symbol(lib_id, &provisional, value, park, source)
         .map_err(|error| format!("could not place {lib_id}: {error}"))?;
     let refdes = match spec.get("ref").and_then(Value::as_str) {
@@ -138,15 +192,14 @@ fn place_one(
         }
     };
     let fail = |error: sch_doc::Error| error.to_string();
-    edit.doc
-        .set_field(&provisional, "Reference", &refdes)
-        .map_err(fail)?;
+    edit.doc.set_reference(&uuids, &refdes).map_err(fail)?;
     if let Some(footprint) = spec.get("footprint").and_then(Value::as_str) {
-        edit.doc
-            .set_field(&refdes, "Footprint", footprint)
-            .map_err(fail)?;
+        for uuid in &uuids {
+            edit.doc
+                .set_field(uuid, "Footprint", footprint)
+                .map_err(fail)?;
+        }
     }
-
     let side = spec
         .get("side")
         .and_then(Value::as_str)
@@ -154,23 +207,23 @@ fn place_one(
     let rot = match spec.get("rot").and_then(Value::as_f64) {
         Some(rot) => {
             let rot = geom::snap_quadrant(rot);
-            edit.doc
-                .set_symbol_orientation(&refdes, rot, sch_doc::Mirror::None)
-                .map_err(fail)?;
+            for uuid in &uuids {
+                edit.doc
+                    .set_symbol_orientation(uuid, rot, sch_doc::Mirror::None)
+                    .map_err(fail)?;
+            }
             rot
         }
-        None if spec.get("near").is_some() => {
+        None if spec.get("near").is_some() && uuids.len() == 1 => {
             crate::place::facing_rotation(&mut edit.doc, &refdes, side.unwrap_or(Side::Right))
         }
         None => 0.0,
     };
+    stack_units(&mut edit.doc, &uuids).map_err(fail)?;
 
-    let body = edit
-        .doc
-        .symbol_by_ref(&refdes)
-        .and_then(|s| crate::place::extent(&edit.doc, s));
+    let body = combined_extent(&edit.doc, &uuids);
     let (w, h) = body.map_or((10.0, 10.0), |r| (r.width(), r.height()));
-    let skip = vec![refdes.clone()];
+    let skip = uuids.clone();
     let (want, mut note) = destination(&edit.doc, spec, w, h, &skip)?;
     let centre = body.map_or(park.point(), |r| r.center());
     let mut at = snap_point(want.origin_for(park.point(), centre));
@@ -189,19 +242,33 @@ fn place_one(
             landing.x, landing.y
         ));
     }
-    edit.doc
-        .move_symbol(&refdes, snap(at.x), snap(at.y))
-        .map_err(fail)?;
+    let delta = Point2::new(at.x - park.x, at.y - park.y);
+    for uuid in &uuids {
+        let unit_at = edit
+            .doc
+            .symbol(uuid)
+            .map(|symbol| symbol.at)
+            .unwrap_or(park);
+        edit.doc
+            .move_symbol(uuid, snap(unit_at.x + delta.x), snap(unit_at.y + delta.y))
+            .map_err(fail)?;
+    }
 
-    let placed = edit
-        .doc
-        .symbol_by_ref(&refdes)
-        .map(|s| (s.at.x, s.at.y))
-        .unwrap_or_default();
+    let units: Vec<Value> = uuids
+        .iter()
+        .filter_map(|uuid| edit.doc.symbol(uuid))
+        .map(|symbol| json!({ "unit": symbol.unit, "at": [symbol.at.x, symbol.at.y] }))
+        .collect();
+    let placed = units
+        .first()
+        .and_then(|unit| unit.get("at"))
+        .cloned()
+        .unwrap_or_else(|| json!([at.x, at.y]));
     let mut report = json!({
         "ref": refdes,
         "lib_id": lib_id,
-        "at": [placed.0, placed.1],
+        "at": placed,
+        "units": units,
         "rot": rot,
     });
     if let Some(note) = note {
@@ -440,7 +507,22 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut placed = Vec::new();
     // A part still waiting its turn is not an obstacle to the one being placed;
     // one already placed in this batch is.
-    let mut pending = all.clone();
+    let mut pending: Vec<String> = moves
+        .iter()
+        .filter_map(|step| {
+            let refdes = step.get("ref")?.as_str()?;
+            let units = refs::units(&edit.doc, refdes);
+            let wanted = step.get("unit").and_then(Value::as_u64);
+            match (units.as_slice(), wanted) {
+                ([(_, uuid)], _) => Some(uuid.clone()),
+                (many, Some(unit)) => many
+                    .iter()
+                    .find(|(candidate, _)| u64::from(*candidate) == unit)
+                    .map(|(_, uuid)| uuid.clone()),
+                _ => None,
+            }
+        })
+        .collect();
     for step in &moves {
         let refdes = step["ref"].as_str().unwrap_or_default().to_string();
         if ["to", "at", "by", "near", "rot", "mirror"]
@@ -553,7 +635,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             landed.push(to);
         }
         let straightened = crate::wiring::straighten(&mut edit.doc, &landed);
-        pending.retain(|r| *r != refdes);
+        pending.retain(|pending_uuid| *pending_uuid != uuid);
         let mut report = json!({ "ref": refdes, "at": [at.x, at.y] });
         if let Some(to) = nudge {
             report["nudged_to"] = json!(to);
@@ -796,4 +878,20 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }),
         Allow::nothing().nets(was.clone()).part(refdes).creating(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_refdes;
+
+    /// Tool-created references use KiCad's letter-prefix and numeric-suffix form.
+    #[test]
+    fn reference_validation_rejects_descriptive_names() {
+        for valid in ["R12", "U3", "#PWR01"] {
+            assert!(valid_refdes(valid), "{valid}");
+        }
+        for invalid in ["D_NEW2", "R", "12", ""] {
+            assert!(!valid_refdes(invalid), "{invalid}");
+        }
+    }
 }
