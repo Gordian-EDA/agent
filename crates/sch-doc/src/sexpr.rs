@@ -257,9 +257,11 @@ mod tests {
         out
     }
 
+    /// Atoms are re-emitted verbatim; only values the typed model rewrites go
+    /// through `fmt_number`.
     #[test]
     fn all_atom_lists_stay_on_one_line() {
-        assert_eq!(render("(at 1.0 2.0 90)"), "(at 1 2 90)\n");
+        assert_eq!(render("(at  1.0   2.0  90 )"), "(at 1.0 2.0 90)\n");
     }
 
     #[test]

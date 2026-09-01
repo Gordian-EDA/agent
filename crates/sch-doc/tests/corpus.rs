@@ -1,6 +1,8 @@
 //! Locating the schematic corpus the round-trip and extractor gates run over:
 //! KiCAD's own hand-drawn demos plus this workspace's placement snapshots.
 
+#![allow(dead_code)] // each test binary uses a different slice of this helper
+
 use std::path::{Path, PathBuf};
 
 use kicad::KicadInstallation;

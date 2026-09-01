@@ -203,15 +203,18 @@ mod tests {
     fn mirror_applies_after_rotation() {
         let at = Pose::new(0.0, 0.0, 90.0);
         let p = Point2::new(0.0, 3.81);
-        assert_eq!(to_sheet(p, at, Mirror::None), Point2::new(-3.81, 0.0));
-        assert_eq!(to_sheet(p, at, Mirror::X), Point2::new(-3.81, 0.0));
-        assert_eq!(to_sheet(p, at, Mirror::Y), Point2::new(3.81, 0.0));
+        let close = |got: Point2, want: Point2| {
+            assert!(got.near_eq(want, 1e-9), "got {got:?}, want {want:?}");
+        };
+        close(to_sheet(p, at, Mirror::None), Point2::new(-3.81, 0.0));
+        close(to_sheet(p, at, Mirror::X), Point2::new(-3.81, 0.0));
+        close(to_sheet(p, at, Mirror::Y), Point2::new(3.81, 0.0));
     }
 
     #[test]
     fn rotation_is_counter_clockwise_in_symbol_space() {
         let at = Pose::new(0.0, 0.0, 90.0);
         let got = to_sheet(Point2::new(0.0, 3.81), at, Mirror::None);
-        assert!((got.x + 3.81).abs() < 1e-9 && got.y.abs() < 1e-9, "{got:?}");
+        assert!(got.near_eq(Point2::new(-3.81, 0.0), 1e-9), "{got:?}");
     }
 }
