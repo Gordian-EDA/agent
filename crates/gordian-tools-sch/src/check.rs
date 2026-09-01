@@ -110,6 +110,16 @@ pub fn check_schematic(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             sch_check::Diagnostic::warning("electrical", defect.line)
         });
     }
+    for problem in gordian_runtime::footprint_compat::unresolvable_footprints(ctx, &design)? {
+        diagnostics.push(if problem.malformed {
+            sch_check::Diagnostic::error("footprint-id", problem.message)
+        } else {
+            // The id is well-formed; this install just has no such library. A
+            // hand-authored sheet carrying its own footprint library is not the
+            // editing agent's defect to fix.
+            sch_check::Diagnostic::warning("footprint-unknown", problem.message)
+        });
+    }
     // A symbol whose pins no pad on its footprint carries cannot be seeded onto a
     // board. `regenerate_board` refuses it, so the schematic gate must say so first
     // rather than letting the PCB stage discover it.
