@@ -300,6 +300,35 @@ fn reconcile_file_stackup(
     for (net, layer) in crate::patch::board_file_plane_nets(&text)? {
         snapshot.problem.plane_nets.insert(net, layer);
     }
+    snapshot
+        .problem
+        .net_widths
+        .extend(crate::board_net_widths(&text)?);
+    let project_path = path.with_extension("kicad_pro");
+    match std::fs::read_to_string(&project_path) {
+        Ok(project) => snapshot
+            .problem
+            .net_widths
+            .extend(crate::project_net_widths(&project)?),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(format!(
+                "could not read project net classes {}: {err}",
+                project_path.display()
+            ));
+        }
+    }
+    let known_nets: std::collections::BTreeSet<_> = snapshot
+        .imported
+        .parts
+        .iter()
+        .flat_map(|part| part.pads.iter())
+        .filter_map(|pad| pad.net.as_deref())
+        .collect();
+    snapshot
+        .problem
+        .net_widths
+        .retain(|net, _| known_nets.contains(net.as_str()));
     snapshot.problem.escape_layers.retain(|_, layer| {
         let Some(name) = ipc_layer_names.get(*layer as usize) else {
             return false;

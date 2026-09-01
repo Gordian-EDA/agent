@@ -249,17 +249,17 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "set_net_width".into(),
-            description: "Set net-class width/clearance; prefer regeneration rules pre-route."
+            description: "Set one existing board net's net-class width; prefer regeneration rules pre-route."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string" },
-                    "width": { "type": "number", "description": "mm; default 0.5." },
+                    "net": { "type": "string" },
+                    "name": { "type": "string", "description": "Optional net-class name." },
+                    "width": { "type": "number", "description": "Track width in mm." },
                     "clearance": { "type": "number", "description": "mm; default 0.2." },
-                    "nets": { "type": "array", "items": {"type":"string"} }
                 },
-                "required": ["name", "nets"]
+                "required": ["net", "width"]
             }),
         },
         Def {
