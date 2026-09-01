@@ -16,8 +16,13 @@
 //! positive would make the agent "fix" a correct design, which is worse than a miss. Each topological
 //! check therefore leans conservative (high IC-pin threshold for decoupling, exact `SDA`/`SCL` token
 //! match, name-driven input/output vocabularies, a power-flag gate for undriven rails) and is
-//! calibrated to produce ZERO findings on the known-good `crates/sch-floorplan/tests/fixtures/validation/*` corpus. The per-check
-//! rustdoc states the heuristic and its known limits.
+//! calibrated against the known-good `crates/sch-floorplan/tests/fixtures/validation/*` corpus, where
+//! it finds only real defects (two fixtures genuinely lack I2C pull-ups). The per-check rustdoc
+//! states the heuristic and its known limits.
+//!
+//! The name-driven rules resolve each pin key through the symbol table, so they read a
+//! number-keyed design — what an extractor or a tool call produces — exactly as they read an
+//! authored one.
 
 use crate::model::*;
 use crate::{SymbolMeta, SymbolTable};
