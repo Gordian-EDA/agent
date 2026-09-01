@@ -192,7 +192,7 @@ fn shift(items: &mut [Item], refdes: &str, axis_ix: usize, d: f64) {
 }
 
 /// Whether a refdes has any movable item.
-fn movable(items: &[Item], refdes: &str) -> bool {
+fn is_movable(items: &[Item], refdes: &str) -> bool {
     items.iter().any(|it| it.refdes == refdes && !it.frozen)
 }
 
@@ -221,9 +221,9 @@ fn repair_group_sides(items: &mut [Item], ir: &LayoutIr) {
             };
             let want = pa[ix] - sign * (anchor_half + half_extent(items, m, ix) + TOL);
             let need = want - pm[ix];
-            // `sign > 0` means the member must decrease along the axis, so the binding
-            // requirement is the most negative delta (and vice versa).
-            if sign * need > sign * delta {
+            // `sign > 0` means the member must DECREASE along the axis, so the binding
+            // requirement is the most negative delta (and the mirror image for `sign < 0`).
+            if sign * need < sign * delta {
                 delta = need;
             }
         }
@@ -282,24 +282,66 @@ fn repair_axis(items: &mut [Item], ir: &LayoutIr, axis_ix: usize) {
         }
     }
 
-    let mut coord: BTreeMap<&str, f64> = nodes.iter().map(|n| (*n, pos[n][axis_ix])).collect();
-    for n in order {
-        if !movable(items, n) {
-            continue;
-        }
-        let mut want = coord[n];
-        if let Some(ps) = preds.get(n) {
-            for p in ps.iter().filter(|p| nodes.contains(*p)) {
-                let sep = half_extent(items, p, axis_ix) + half_extent(items, n, axis_ix) + TOL;
-                want = want.max(coord[p] + sep);
-            }
-        }
-        let d = want - coord[n];
-        if d.abs() > EPS {
-            shift(items, n, axis_ix, d);
-            coord.insert(n, want);
+    let mut succs: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (n, ps) in &preds {
+        for p in ps {
+            succs.entry(p).or_default().insert(n);
         }
     }
+    let mut coord: BTreeMap<&str, f64> = nodes.iter().map(|n| (*n, pos[n][axis_ix])).collect();
+    let movable: BTreeSet<&str> = nodes
+        .iter()
+        .copied()
+        .filter(|n| is_movable(items, n))
+        .collect();
+
+    // Relax both ways: the forward sweep pushes a part clear of its predecessors, the
+    // backward sweep pulls it clear of its successors. One direction alone cannot satisfy a
+    // relation whose other side is frozen. Alternating converges (each sweep is monotone in
+    // its own direction) and is capped so a contradiction can never spin.
+    const SWEEPS: usize = 8;
+    for _ in 0..SWEEPS {
+        let mut moved = false;
+        for n in order.iter().copied().filter(|n| movable.contains(n)) {
+            let mut want = coord[n];
+            for p in preds.get(n).into_iter().flatten().filter(|p| nodes.contains(*p)) {
+                want = want.max(coord[p] + separation(items, p, n, axis_ix));
+            }
+            moved |= set_coord(&mut coord, n, want);
+        }
+        for n in order.iter().rev().copied().filter(|n| movable.contains(n)) {
+            let mut want = coord[n];
+            for q in succs.get(n).into_iter().flatten().filter(|q| nodes.contains(*q)) {
+                want = want.min(coord[q] - separation(items, n, q, axis_ix));
+            }
+            moved |= set_coord(&mut coord, n, want);
+        }
+        if !moved {
+            break;
+        }
+    }
+    let deltas: Vec<(String, f64)> = movable
+        .iter()
+        .map(|n| ((*n).to_owned(), coord[n] - pos[n][axis_ix]))
+        .filter(|(_, d)| d.abs() > EPS)
+        .collect();
+    for (n, d) in deltas {
+        shift(items, &n, axis_ix, d);
+    }
+}
+
+/// Clearance between two parts ordered along `axis_ix`: their half-extents plus a step.
+fn separation(items: &[Item], a: &str, b: &str, axis_ix: usize) -> f64 {
+    half_extent(items, a, axis_ix) + half_extent(items, b, axis_ix) + TOL
+}
+
+/// Write `want` if it differs; reports whether it moved.
+fn set_coord(coord: &mut BTreeMap<&str, f64>, n: &str, want: f64) -> bool {
+    let moved = (coord[n] - want).abs() > EPS;
+    if moved {
+        *coord.get_mut(n).unwrap() = want;
+    }
+    moved
 }
 
 /// Snap each aligned member onto the shared line (the members' median coordinate).

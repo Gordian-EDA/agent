@@ -51,8 +51,15 @@ impl PlacementEngine for SpinePlace {
         let ir = ir.unwrap_or_else(|| {
             sch_floorplan::floorplan::infer_ir_with_options(env, design, problem.options)
         });
+        // An item already frozen on arrival carries a LIVE pose its caller owns (the
+        // region adapter's fixed neighbours); the IR's idiom clusters are pinned on top.
+        let preseeded: Vec<Option<(Point2, f64)>> = problem
+            .items
+            .iter()
+            .map(|it| it.frozen.then_some((it.at, it.angle)))
+            .collect();
         for item in &mut problem.items {
-            item.frozen = ir.frozen.contains(&item.refdes);
+            item.frozen |= ir.frozen.contains(&item.refdes);
         }
 
         // Two-pass label fixpoint: pass 1 reserves optimistically (wire-first).
@@ -60,7 +67,7 @@ impl PlacementEngine for SpinePlace {
         // realized as labels reserving their full names — breaking the
         // reserve→spread→label fixpoint (designed into form_modules, wired
         // here). Keep whichever pass measures better.
-        let out1 = self.place_pass(env, design, problem, ir.clone(), None);
+        let out1 = self.place_pass(env, design, problem, ir.clone(), None, &preseeded);
         if out1.result.warnings == 0 || out1.result.engine != "spine" {
             return out1;
         }
@@ -70,7 +77,7 @@ impl PlacementEngine for SpinePlace {
             return out1;
         }
         let items1: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
-        let out2 = self.place_pass(env, design, problem, ir, Some(labeled));
+        let out2 = self.place_pass(env, design, problem, ir, Some(labeled), &preseeded);
         let key = |o: &PlacementOutput| {
             (
                 o.result.truthfulness_breaks,
@@ -111,6 +118,7 @@ impl SpinePlace {
         problem: &mut SchematicPlaceProblem,
         ir: LayoutIr,
         labeled: Option<std::collections::BTreeSet<String>>,
+        preseeded: &[Option<(Point2, f64)>],
     ) -> PlacementOutput {
         let t0 = std::time::Instant::now();
         // Spine owns the free-form grammar, but inferred frozen idioms are a
@@ -134,7 +142,8 @@ impl SpinePlace {
             problem
                 .items
                 .iter()
-                .map(|item| poses.get(&item.refdes).copied())
+                .zip(preseeded)
+                .map(|(item, live)| live.or_else(|| poses.get(&item.refdes).copied()))
                 .collect::<Vec<_>>()
         };
         let seat_frozen = |items: &mut [sch_place::item::Item]| {

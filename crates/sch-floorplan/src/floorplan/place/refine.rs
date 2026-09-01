@@ -5,7 +5,7 @@ use sch_place::item::Item;
 
 /// Default deterministic seed for the placement search (a stochastic engine's PRNG).
 /// Threaded into the `PlacementView` by emit so a search is reproducible by seed.
-pub(crate) const SEARCH_SEED: u64 = 0xD1B54A32D192ED03;
+pub const SEARCH_SEED: u64 = 0xD1B54A32D192ED03;
 
 /// Pin-count threshold above which the premium anneal takes the router-free FAST
 /// LANE. The tuned routed paths (greedy refine + anneals A/B/C + routed polish)

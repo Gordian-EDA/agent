@@ -54,10 +54,15 @@ impl PlacementEngine for Anneal {
         });
         for it in &mut problem.items {
             it.mirror = ir.mirror.contains(&it.refdes);
-            it.frozen = ir.frozen.contains(&it.refdes);
         }
         let cells = assign_cells(&problem.items, &ir);
+        // Seed FIRST: an item already frozen on arrival keeps its live pose (the region
+        // adapter's fixed neighbours), while the IR's idiom clusters are seeded here and
+        // only then pinned.
         apply_cells(&mut problem.items, &cells);
+        for it in &mut problem.items {
+            it.frozen |= ir.frozen.contains(&it.refdes);
+        }
         // Project the cell seed onto the author's relations BEFORE the search, so the SA
         // starts inside the constraint set and its hard rejection rule can keep it there.
         if repair_relations(&mut problem.items, &ir) {
