@@ -76,7 +76,7 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | Crate | Role |
 |-------|------|
 | `gordian` | CLI + ratatui copilot TUI — the entry point |
-| `gordian-core` / `gordian-llm` / `gordian-runtime` | Agent loop and prompts, provider abstraction, configuration, project context, and per-mutation approval contracts |
+| `gordian-core` / `gordian-llm` / `gordian-runtime` | Agent loop and prompts, provider abstraction, configuration, project context, and the tool-result contract |
 | `gordian-tools-sch` | Live `.kicad_sch` queries, guarded mutators, bulk placement, rewiring, and authoritative checks |
 | `pcb-workflow` | Application workflows that coordinate PCB creation, placement, routing, validation, rendering, and fabrication export |
 | `kicad-board` | KiCad PCB persistence boundary: live IPC snapshots, domain conversion, and atomic offline board edits |
