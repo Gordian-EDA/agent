@@ -66,3 +66,8 @@ connectivity guard + `undo` make it safe), the `Approvals`/`AutoApprove` seam an
 CLI, and the TUI's approve/reject cockpit (`crates/gordian/src/tui`). PCB mutators
 (`move_parts`, `route_track`, `delete_copper`, `regenerate_board`, `export_fab`) run
 directly too. Start after the wave-3 close-out lane merges (it edits agent.rs + TUI).
+Also in that lane (user, 2026-09-01): **delete the no-progress watchdog** — `StopReason::NoProgress`,
+`MAX_CONSECUTIVE_NO_PROGRESS_COMPLETIONS`, `consecutive_no_progress_completions`,
+`no_progress_final_text`, and `is_inspection_tool` (only exists to feed it) in
+`gordian-core/src/agent.rs`; the "stopped after N model completions made no durable
+progress" text goes with it. Keep only the per-turn provider-request cap.
