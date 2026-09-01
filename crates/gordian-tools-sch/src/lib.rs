@@ -119,8 +119,8 @@ pub fn tool_defs() -> Vec<Tool> {
         (
             "add_symbols",
             "Place one or many parts at collision-free grid positions and report each final spot. \
-             `near`+`side` sits beside a part and turns a two-pin body to face it; `rot` overrides. \
-             `ref` is optional. The tool owns coordinates. All-or-nothing; wire with `connect`.",
+             `near`+`side` puts a series part by its upstream part and faces it; keep the reported \
+             spot. `rot` overrides; `ref` is optional. All-or-nothing; wire with `connect`.",
             json!({
                 "type": "object",
                 "properties": {
@@ -151,8 +151,8 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "move_symbols",
-            "Move or turn parts, wires and rails following along. `rot`/`mirror` alone turns a \
-             part in place. A taken spot is slid to the final `nudged_to`; success is \
+            "Move or turn parts, wires and rails following along; `rot`/`mirror` alone reverses a \
+             diode in place. A taken spot is slid to final `nudged_to`; success is \
              collision-free and needs no follow-up. Refused if no nearby spot fits or a net changes.",
             json!({
                 "type": "object",
@@ -233,7 +233,8 @@ pub fn tool_defs() -> Vec<Tool> {
         (
             "connect",
             "Join two ends — a pin like \"R1.1\" / \"U1.VDD\", or a point [x,y] — or every pair in \
-             `pairs` at once, which is how to wire a block. The route is solved around the existing \
+             `pairs` at once. For series insertion, delete the old wire then join both sides in one \
+             `pairs` call. The route is solved around the existing \
              drawing and junctions are added for you; if nothing fits, both ends are named with \
              `net` instead and the result says so. Never draw wires by coordinate.",
             json!({
