@@ -171,6 +171,11 @@ fn swap_symbol_maps_differently_numbered_connector_pins_by_name() {
         json!({"1": "A4", "2": "A7", "3": "A6", "4": "A1", "5": "S1"}),
         "the response must expose every automatic name mapping: {result}"
     );
+    assert_eq!(
+        result["changed"]["dropped_pins"],
+        json!([]),
+        "remapped pins must not also be reported as dropped: {result}"
+    );
     let after = listing(&ctx);
     for net in ["VBUS_NET", "DM_NET", "DP_NET", "GND_NET", "SHIELD_NET"] {
         assert!(after.contains(net), "{net} was lost:\n{after}");

@@ -1192,6 +1192,11 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             restored.join(" ")
         ));
     }
+    dropped.retain(|number| {
+        plan.assignments
+            .iter()
+            .all(|assignment| old_pins[assignment.old].number != *number)
+    });
     let mapped_by_name = plan.mapped_by_name(&old_pins, &new_pins);
     let mut result = edit.commit(
         json!({
