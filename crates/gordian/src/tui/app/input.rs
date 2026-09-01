@@ -25,10 +25,6 @@ pub const COMMANDS: &[CommandSpec] = &[
         desc: "show keys and commands",
     },
     CommandSpec {
-        name: "/auto",
-        desc: "toggle auto-approve (yolo)",
-    },
-    CommandSpec {
         name: "/clear",
         desc: "clear the transcript AND the agent's context",
     },
@@ -69,9 +65,6 @@ impl App {
     /// matching commands and which one (if any) the input currently is.
     /// `None` when completion does not apply.
     pub fn completion_view(&self) -> Option<(Vec<&'static CommandSpec>, Option<usize>)> {
-        if self.pending.is_some() {
-            return None;
-        }
         let stem = self.completion_stem.as_deref().unwrap_or(&self.input);
         let matches = Self::matches_for(stem);
         if matches.is_empty() {
@@ -129,7 +122,6 @@ impl App {
             }
         }
     }
-
 
     /// The composer text with each intact paste token expanded exactly once.
     /// Scanning only the visible input prevents token-looking text inside one

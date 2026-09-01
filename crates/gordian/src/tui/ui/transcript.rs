@@ -20,7 +20,7 @@ use super::super::theme;
 use super::{RenderCtx, body};
 
 /// The most rows an inline image preview may occupy, so a render can never eat the
-/// viewport (mirrors the approval pane's height cap).
+/// viewport.
 const MAX_IMAGE_ROWS: u16 = 20;
 const IMAGE_PREVIEW_COLS: u16 = 60;
 const TOP_PADDING_ROWS: u16 = 1;
@@ -418,7 +418,10 @@ fn draw_welcome(f: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::styled("Gordian", wordmark)),
         Line::from(vec![
             Span::styled("the schematic & PCB design copilot", theme::SUBTLE),
-            Span::styled(format!("  ·  {}", project_dir(&app.status.sch_path)), theme::META),
+            Span::styled(
+                format!("  ·  {}", project_dir(&app.status.sch_path)),
+                theme::META,
+            ),
         ]),
         Line::from(""),
         Line::from(Span::styled("  Try:", dim)),
@@ -426,10 +429,7 @@ fn draw_welcome(f: &mut Frame, area: Rect, app: &App) {
         example("add a USB-C connector with CC pull-down resistors"),
         example("lay out and route the PCB for this schematic"),
         Line::from(""),
-        Line::from(Span::styled(
-            "  /help for commands  ·  Tab completes  ·  /auto toggles auto-apply",
-            dim,
-        )),
+        Line::from(Span::styled("  /help for commands  ·  Tab completes", dim)),
     ]);
 
     // Centre vertically; the splash shares the header's left edge (its area is
@@ -472,7 +472,9 @@ fn gap_above(prev: Option<Speaker>, cur: &Entry) -> bool {
 /// Whether `e` renders as the "Worked for Ns" turn-summary rule rather than an
 /// ordinary system notice.
 fn is_worked_divider(e: &Entry) -> bool {
-    e.speaker == Speaker::System && e.level == NoticeLevel::Plain && e.text.starts_with("Worked for ")
+    e.speaker == Speaker::System
+        && e.level == NoticeLevel::Plain
+        && e.text.starts_with("Worked for ")
 }
 
 /// `first` is the row-0 marker, `cont` the indent repeated on wrapped rows.
@@ -500,13 +502,9 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
             // row so failures stand out from the recessed metadata around them.
             let (glyph, color) = match e.level {
                 NoticeLevel::Plain => ("• ", theme::FAINT),
-                NoticeLevel::Success => ("✓ ", theme::OK),
                 NoticeLevel::Error => ("✗ ", theme::ERR),
             };
-            let body = match e.level {
-                NoticeLevel::Plain | NoticeLevel::Success => Style::default().fg(color),
-                _ => Style::default().fg(color),
-            };
+            let body = Style::default().fg(color);
             // Continuation rows of a loud notice keep a colored rule; quiet ones
             // just indent under the glyph.
             let loud = matches!(e.level, NoticeLevel::Error);
@@ -576,7 +574,7 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
 fn render_worked_divider(text: &str, width: usize, level: NoticeLevel) -> Line<'static> {
     let (rule, label_style) = match level {
         NoticeLevel::Error => (theme::DANGER, theme::DANGER),
-        NoticeLevel::Plain | NoticeLevel::Success => (theme::RULE, theme::META),
+        NoticeLevel::Plain => (theme::RULE, theme::META),
     };
     let label = format!(" {text} ");
     let label_w = label.chars().count();

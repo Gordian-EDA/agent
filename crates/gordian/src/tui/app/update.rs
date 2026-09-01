@@ -2,14 +2,11 @@
 //!
 //! [`App::update`] is the single entry point — it maps a keypress, an agent
 //! event, or an async arrival into a state transition and returns the [`Action`]
-//! the shell performs. The submit / command-dispatch / mutation-approval transitions it
-//! delegates to live here too ([`App::submit`], [`App::run_command`],
-//! [`App::cancel`], [`App::resolve_pending`]).
+//! the shell performs. The submit, command-dispatch, and cancel transitions it
+//! delegates to live here too ([`App::submit`], [`App::run_command`], [`App::cancel`]).
 
+use super::{App, Entry};
 use gordian_core::AgentEvent;
-use serde_json::Value;
-
-use super::{App, Entry, PendingApproval};
 
 /// An input event or async arrival the [`App`] reacts to.
 #[derive(Clone, Debug)]
@@ -38,10 +35,6 @@ pub enum Msg {
     Complete,
     /// Enter — submit the input line (a prompt or a `/command`).
     Submit,
-    /// Approve the pending diff (`a`).
-    Approve,
-    /// Reject the pending diff (`r`).
-    Reject,
     /// Scroll the transcript up / down by one line.
     ScrollUp,
     ScrollDown,
@@ -58,7 +51,7 @@ pub enum Msg {
     /// a `[Pasted N chars]` placeholder in the composer (the real text expands
     /// back in on submit); a small one is inserted verbatim.
     Paste(String),
-    /// Esc — close help / reject a gate / clear input / cancel a turn / arm
+    /// Esc — close help / clear input / cancel a turn / arm
     /// (then perform) a context unwind, in that order of precedence.
     Cancel,
     /// Ctrl-C — arm quit; a second Ctrl-C exits.
@@ -67,8 +60,6 @@ pub enum Msg {
     Tick,
     /// An event from the running agent turn.
     Agent(AgentEvent),
-    /// A previewed schematic diff or immediate operation awaits approval.
-    PendingApproval(Value),
     /// A turn finished (the spawned task joined). This is the single, reliable
     /// teardown point — it fires exactly once per turn (from the join channel,
     /// or directly from the shell on a user abort) and carries *why* the turn
@@ -89,8 +80,6 @@ pub enum TurnEndReason {
     ProviderRequestLimit { requests: usize },
     /// A project mutation timed out and may still be running in the background.
     MutationTimedOut,
-    /// Repeated model completions made no durable project progress.
-    NoProgress { completions: usize },
     /// Required artifact checks or independent review still have findings.
     QualityGateFailed { failures: usize },
     /// The user pressed Esc to abort the turn.
@@ -108,8 +97,6 @@ pub enum Action {
     None,
     /// Spawn an agent turn with this prompt.
     SpawnTurn(String),
-    /// Resolve the pending mutation approval with this decision.
-    ResolveApproval(bool),
     /// Abort the in-flight agent turn.
     CancelTurn,
     /// `/clear` — drop the agent's conversation history (the transcript is
@@ -137,10 +124,7 @@ impl App {
         }
 
         // Any user action other than Ctrl-C disarms the two-step quit catcher.
-        if !matches!(
-            msg,
-            Msg::Tick | Msg::Agent(_) | Msg::PendingApproval(_) | Msg::TurnEnded(_)
-        ) {
+        if !matches!(msg, Msg::Tick | Msg::Agent(_) | Msg::TurnEnded(_)) {
             self.ctrl_c_armed = false;
         }
 
@@ -157,7 +141,7 @@ impl App {
                     self.unwind_move(1);
                     Action::None
                 }
-                Msg::Submit | Msg::Approve => self.confirm_unwind(),
+                Msg::Submit => self.confirm_unwind(),
                 Msg::Cancel => {
                     self.unwind = None;
                     Action::None
@@ -166,37 +150,10 @@ impl App {
             };
         }
 
-        // The approval card is modal. Preserve the existing draft byte-for-byte
-        // while it is open; bracketed paste and readline control keys must not
-        // edit a hidden composer behind the gate.
-        if self.pending.is_some()
-            && matches!(
-                msg,
-                Msg::Backspace
-                    | Msg::Delete
-                    | Msg::CursorLeft
-                    | Msg::CursorRight
-                    | Msg::WordLeft
-                    | Msg::WordRight
-                    | Msg::Home
-                    | Msg::End
-                    | Msg::KillToStart
-                    | Msg::KillWordBack
-                    | Msg::HistoryPrev
-                    | Msg::HistoryNext
-                    | Msg::Complete
-                    | Msg::Submit
-                    | Msg::Paste(_)
-                    | Msg::Newline
-            )
-        {
-            return Action::None;
-        }
-
         // Any user action other than another Esc disarms the pending unwind.
         if !matches!(
             msg,
-            Msg::Cancel | Msg::Tick | Msg::Agent(_) | Msg::PendingApproval(_) | Msg::TurnEnded(_)
+            Msg::Cancel | Msg::Tick | Msg::Agent(_) | Msg::TurnEnded(_)
         ) {
             self.esc_armed = false;
         }
@@ -209,7 +166,6 @@ impl App {
                 | Msg::Submit
                 | Msg::Tick
                 | Msg::Agent(_)
-                | Msg::PendingApproval(_)
                 | Msg::TurnEnded(_)
                 | Msg::ScrollUp
                 | Msg::ScrollDown
@@ -222,14 +178,6 @@ impl App {
 
         match msg {
             Msg::Char(c) => {
-                // While a diff is pending, the keyboard belongs to the gate.
-                if self.pending.is_some() {
-                    match c {
-                        'a' => return self.resolve_pending(true),
-                        'r' => return self.resolve_pending(false),
-                        _ => return Action::None,
-                    }
-                }
                 self.insert_char(c);
                 Action::None
             }
@@ -291,9 +239,7 @@ impl App {
                 Action::None
             }
             Msg::Complete => {
-                if self.pending.is_some() {
-                    // The gate owns the keyboard.
-                } else if self.completion_view().is_some() {
+                if self.completion_view().is_some() {
                     // A `/command` stem: Tab completes / cycles it.
                     self.complete_next();
                 }
@@ -304,8 +250,6 @@ impl App {
                 self.paste_text(text);
                 Action::None
             }
-            Msg::Approve => self.resolve_pending(true),
-            Msg::Reject => self.resolve_pending(false),
             Msg::ScrollUp => {
                 self.scroll = self.scroll.saturating_add(1);
                 Action::None
@@ -327,9 +271,7 @@ impl App {
                 Action::None
             }
             Msg::Newline => {
-                if self.pending.is_none() {
-                    self.insert_char('\n');
-                }
+                self.insert_char('\n');
                 Action::None
             }
             Msg::Cancel => self.cancel(),
@@ -342,13 +284,6 @@ impl App {
             }
             Msg::Agent(ev) => {
                 self.on_agent_event(ev);
-                Action::None
-            }
-            Msg::PendingApproval(v) => {
-                self.pending = Some(PendingApproval::from_payload(&v));
-                // The turn is now blocked on the user — stop billing the elapsed
-                // clock for human deliberation.
-                self.pause_clock();
                 Action::None
             }
             Msg::TurnEnded(reason) => {
@@ -374,15 +309,13 @@ impl App {
         }
     }
 
-    /// Esc, layered: close help → reject the gate → clear a non-empty input →
-    /// cancel a running turn → arm, then perform, a one-turn context unwind.
+    /// Esc, layered: close help → clear a non-empty input → cancel a running
+    /// turn → arm, then perform, a one-turn context unwind.
     /// Esc never quits; that's double Ctrl-C or `/quit`.
     fn cancel(&mut self) -> Action {
         if self.help {
             self.help = false;
             Action::None
-        } else if self.pending.is_some() {
-            self.resolve_pending(false)
         } else if !self.input.is_empty() {
             self.clear_input();
             Action::None
@@ -473,13 +406,6 @@ impl App {
     /// Run a `/command` (the leading slash is included in `line`).
     fn run_command(&mut self, line: &str) -> Action {
         match line.trim() {
-            "/auto" => {
-                self.auto = !self.auto;
-                let state = if self.auto { "ON (yolo)" } else { "OFF" };
-                self.transcript
-                    .push(Entry::system(format!("mutation auto-approve: {state}")));
-                Action::None
-            }
             "/clear" => {
                 self.transcript.clear();
                 self.images.clear();
@@ -522,19 +448,5 @@ impl App {
                 Action::None
             }
         }
-    }
-
-    /// Resolve a pending mutation-approval decision. No-op (returns `None`) if nothing
-    /// is pending.
-    fn resolve_pending(&mut self, approve: bool) -> Action {
-        if self.pending.take().is_none() {
-            return Action::None;
-        }
-        // The turn resumes — restart the elapsed clock from where it froze.
-        self.resume_clock();
-        let note = if approve { "approved" } else { "rejected" };
-        self.transcript
-            .push(Entry::system(format!("change {note}")));
-        Action::ResolveApproval(approve)
     }
 }

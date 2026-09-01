@@ -10,20 +10,10 @@
 //! ```text
 //!   crossterm EventStream ─┐
 //!   agent AgentEvent mpsc ─┼─ tokio::select! ─► App::update ─► Action ─► Shell
-//!   approval mpsc         ─┤                                   (spawn turn,
-//!   animation tick        ─┘                                    resolve gate,
-//!                                                               cancel,
-//!                                                               quit)
+//!   animation tick        ─┘                                   (spawn turn,
+//!                                                              cancel,
+//!                                                              quit)
 //! ```
-//!
-//! ### Mutation approval across tasks
-//!
-//! The agent runs in a spawned task holding a [`TuiApprovals`]. When it reaches
-//! an approval gate, `TuiApprovals::approve` sends the proposal **plus a
-//! oneshot reply channel** over `gate_tx`. The main loop receives it, shows the
-//! diff or operation in the App, and stashes the oneshot sender. When the user presses `a`/`r`
-//! the loop fulfils the oneshot, unblocking the agent task. This is exactly why
-//! [`gordian_core::Approvals::approve`] is async.
 
 pub mod app;
 pub mod event;
@@ -43,7 +33,6 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
     EventStream, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
@@ -58,13 +47,12 @@ use futures::{FutureExt, StreamExt};
 use gordian_core::AgentRuntime;
 use gordian_core::GordianConfig;
 use gordian_core::prompts::system_prompt;
-use gordian_core::{Agent, AgentEvent, Approvals, Provider as _, StopReason};
+use gordian_core::{Agent, AgentEvent, Provider as _, StopReason};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui_image::picker::Picker;
-use serde_json::Value;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 
 use app::{Action, App, Msg, Status, TurnEndReason};
@@ -77,35 +65,6 @@ const TICK: Duration = Duration::from_millis(120);
 type TaskId = u64;
 type TaskEvent = (TaskId, AgentEvent);
 type TaskDone = (TaskId, TurnEndReason);
-
-/// A pending mutation proposal and the channel the UI uses to answer it.
-type GateRequest = (TaskId, Value, oneshot::Sender<bool>);
-
-/// The [`Approvals`] implementation that bridges the agent's gate to the UI.
-///
-/// On `approve`, it forwards the preview/operation proposal to the main loop and awaits the
-/// user's decision over a oneshot. If auto-approve is on, the loop answers
-/// immediately; otherwise it waits for an `a`/`r` keypress.
-struct TuiApprovals {
-    task_id: TaskId,
-    gate_tx: UnboundedSender<GateRequest>,
-}
-
-#[async_trait]
-impl Approvals for TuiApprovals {
-    async fn approve(&mut self, proposal: &Value) -> bool {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .gate_tx
-            .send((self.task_id, proposal.clone(), tx))
-            .is_err()
-        {
-            // UI is gone — fail safe (reject the write).
-            return false;
-        }
-        rx.await.unwrap_or(false)
-    }
-}
 
 /// The shared agent handle: the spawned (local) turn task locks it for the
 /// turn's duration. `Rc<Mutex<...>>` keeps the TUI side single-threaded, so the
@@ -222,12 +181,9 @@ pub async fn run(project_dir: PathBuf, config: GordianConfig, config_path: PathB
 struct Shell {
     agent: Option<SharedAgent>,
     events_tx: UnboundedSender<TaskEvent>,
-    gate_tx: UnboundedSender<GateRequest>,
     done_tx: UnboundedSender<TaskDone>,
     post_commit_review: bool,
     review_fix_rounds: u8,
-    /// The oneshot answering the currently open mutation approval, if any.
-    pending_gate: Option<oneshot::Sender<bool>>,
     /// The in-flight turn task (aborted by [`Action::CancelTurn`]).
     turn_task: Option<JoinHandle<()>>,
     /// Identity of `turn_task`; cleared before cancellation closes the App turn.
@@ -238,12 +194,8 @@ struct Shell {
 }
 
 impl Shell {
-    /// Fail closed on every shell exit path, including terminal-stream errors:
-    /// reject an unanswered mutation and stop any detached local turn.
+    /// Stop any detached local turn on every shell exit path.
     fn shutdown(&mut self) {
-        if let Some(reply) = self.pending_gate.take() {
-            let _ = reply.send(false);
-        }
         if let Some(task) = self.turn_task.take() {
             task.abort();
         }
@@ -255,11 +207,6 @@ impl Shell {
             Action::None => {}
             Action::Quit => {
                 app.should_quit = true;
-            }
-            Action::ResolveApproval(decision) => {
-                if let Some(reply) = self.pending_gate.take() {
-                    let _ = reply.send(decision);
-                }
             }
             Action::CancelTurn => self.cancel_turn(app),
             Action::ClearContext => self.clear_context(app),
@@ -280,7 +227,6 @@ impl Shell {
             return;
         };
         let events_tx = self.events_tx.clone();
-        let gate_tx = self.gate_tx.clone();
         let done_tx = self.done_tx.clone();
         let post_commit_review = self.post_commit_review;
         let review_fix_rounds = self.review_fix_rounds as usize;
@@ -295,7 +241,6 @@ impl Shell {
                 }
             });
             let reason = guard_turn_task(async move {
-                let mut approvals = TuiApprovals { task_id, gate_tx };
                 let mut agent = handle.lock().await;
                 // Route through the self-correction loop: after a turn that COMMITS a
                 // design change, an independent reviewer scores the netlist and feeds
@@ -309,15 +254,12 @@ impl Shell {
                         .run_turn_reviewed(
                             &prompt,
                             &prompt,
-                            &mut approvals,
                             Some(&task_events_tx),
                             review_fix_rounds,
                         )
                         .await
                 } else {
-                    agent
-                        .run_turn(&prompt, &mut approvals, Some(&task_events_tx))
-                        .await
+                    agent.run_turn(&prompt, Some(&task_events_tx)).await
                 };
                 match result {
                     Ok(o) => match o.stop_reason {
@@ -326,9 +268,6 @@ impl Shell {
                             TurnEndReason::ProviderRequestLimit { requests }
                         }
                         StopReason::MutationTimedOut => TurnEndReason::MutationTimedOut,
-                        StopReason::NoProgress { completions } => {
-                            TurnEndReason::NoProgress { completions }
-                        }
                         StopReason::QualityGateFailed { failures } => {
                             TurnEndReason::QualityGateFailed { failures }
                         }
@@ -352,17 +291,13 @@ impl Shell {
     }
 
     /// Esc on a running turn: abort the task mid-flight. The agent gives up
-    /// whatever it was doing (an LLM round-trip, a tool call). An open gate is
-    /// answered "no" here, so no unapproved mutation begins.
+    /// whatever it was doing (an LLM round-trip or a tool call).
     fn cancel_turn(&mut self, app: &mut App) {
         // Invalidate async messages before aborting. A task can have queued its
-        // gate/completion immediately before this handler won the select race.
+        // completion immediately before this handler won the select race.
         self.active_task_id = None;
         if let Some(task) = self.turn_task.take() {
             task.abort();
-        }
-        if let Some(reply) = self.pending_gate.take() {
-            let _ = reply.send(false);
         }
         // The aborted task never sends done_tx, so close the turn ourselves —
         // flagged as a user interruption so the indicator reads "Interrupted".
@@ -407,8 +342,8 @@ impl Shell {
         let mut lines = vec![
             format!("schematic: {}", s.sch_path),
             format!(
-                "model: {} ({}) · turns {} · applied {}",
-                s.model, s.provider, s.turn_count, s.applied_count
+                "model: {} ({}) · turns {}",
+                s.model, s.provider, s.turn_count
             ),
             {
                 let l = &s.ledger;
@@ -473,30 +408,6 @@ impl Shell {
         }));
     }
 
-    /// Accept a gate only from the active task. Rejected stale requests are
-    /// answered explicitly so their sender can finish if it has not been
-    /// aborted yet.
-    fn receive_gate(
-        &mut self,
-        app: &mut App,
-        task_id: TaskId,
-        proposal: Value,
-        reply: oneshot::Sender<bool>,
-    ) {
-        if self.active_task_id != Some(task_id) || !app.running {
-            let _ = reply.send(false);
-            return;
-        }
-        if app.auto {
-            let _ = reply.send(true);
-            app.transcript
-                .push(app::Entry::system("auto-approved (yolo)"));
-        } else {
-            self.pending_gate = Some(reply);
-            app.update(Msg::PendingApproval(proposal));
-        }
-    }
-
     /// Drop buffered events from an aborted/finished task rather than letting
     /// them append to or alter the counters of a later turn.
     fn receive_agent_event(&self, app: &mut App, task_id: TaskId, event: AgentEvent) {
@@ -532,8 +443,8 @@ impl Drop for Shell {
     }
 }
 
-/// The async event loop: select over keyboard/mouse input, agent events, gate
-/// requests, and the animation tick; update the app; act on the returned
+/// The async event loop: select over keyboard/mouse input, agent events, turn
+/// completion, and the animation tick; update the app; act on the returned
 /// action; redraw.
 async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -545,8 +456,6 @@ async fn event_loop(
     let mut input = EventStream::new();
     let (events_tx, mut events_rx): (UnboundedSender<TaskEvent>, UnboundedReceiver<TaskEvent>) =
         unbounded_channel();
-    let (gate_tx, mut gate_rx): (UnboundedSender<GateRequest>, UnboundedReceiver<GateRequest>) =
-        unbounded_channel();
     // Joins back when the spawned turn finishes (so input unlocks even on error).
     let (done_tx, mut done_rx): (UnboundedSender<TaskDone>, UnboundedReceiver<TaskDone>) =
         unbounded_channel();
@@ -554,11 +463,9 @@ async fn event_loop(
     let mut shell = Shell {
         agent: agent_handle,
         events_tx,
-        gate_tx,
         done_tx,
         post_commit_review,
         review_fix_rounds,
-        pending_gate: None,
         turn_task: None,
         active_task_id: None,
         next_task_id: 0,
@@ -627,18 +534,12 @@ async fn event_loop(
             Some((task_id, ev)) = events_rx.recv() => {
                 shell.receive_agent_event(app, task_id, ev);
             }
-            // ── mutation approval requests from the agent task ───────
-            Some((task_id, proposal, reply)) = gate_rx.recv() => {
-                shell.receive_gate(app, task_id, proposal, reply);
-            }
             // ── spawned turn finished ─────────────────────────────────
             Some((task_id, reason)) = done_rx.recv() => {
                 shell.finish_task(app, task_id, reason);
             }
         }
 
-        // A pending gate that's still open when we quit must be answered, or the
-        // agent task would hang forever waiting on the oneshot.
         if app.should_quit {
             shell.shutdown();
             break;
@@ -735,44 +636,17 @@ mod shell_tests {
 
     fn shell() -> Shell {
         let (events_tx, _events_rx) = unbounded_channel();
-        let (gate_tx, _gate_rx) = unbounded_channel();
         let (done_tx, _done_rx) = unbounded_channel();
         Shell {
             agent: None,
             events_tx,
-            gate_tx,
             done_tx,
             post_commit_review: false,
             review_fix_rounds: 0,
-            pending_gate: None,
             turn_task: None,
             active_task_id: None,
             next_task_id: 0,
         }
-    }
-
-    #[tokio::test]
-    async fn dropping_shell_rejects_an_unanswered_approval() {
-        let (events_tx, _events_rx) = unbounded_channel();
-        let (gate_tx, _gate_rx) = unbounded_channel();
-        let (done_tx, _done_rx) = unbounded_channel();
-        let (reply, answer) = oneshot::channel();
-        let shell = Shell {
-            agent: None,
-            events_tx,
-            gate_tx,
-            done_tx,
-            post_commit_review: false,
-            review_fix_rounds: 0,
-            pending_gate: Some(reply),
-            turn_task: None,
-            active_task_id: None,
-            next_task_id: 0,
-        };
-
-        drop(shell);
-
-        assert!(!answer.await.expect("shell sends an explicit decision"));
     }
 
     #[tokio::test]
@@ -786,30 +660,6 @@ mod shell_tests {
             reason,
             TurnEndReason::Error("agent task panicked: simulated turn panic".into())
         );
-    }
-
-    #[tokio::test]
-    async fn stale_gate_after_cancellation_is_rejected_without_opening_the_card() {
-        let mut shell = shell();
-        let mut app = app();
-        shell.active_task_id = Some(2);
-        app.running = true;
-        let (reply, answer) = oneshot::channel();
-
-        shell.receive_gate(
-            &mut app,
-            1,
-            serde_json::json!({"operation": "write"}),
-            reply,
-        );
-
-        assert!(
-            !answer
-                .await
-                .expect("stale gate receives an explicit rejection")
-        );
-        assert!(app.pending.is_none());
-        assert_eq!(shell.active_task_id, Some(2));
     }
 
     #[test]

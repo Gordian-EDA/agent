@@ -1,9 +1,9 @@
 //! The [`App`] struct itself, its [`Status`] sidebar data, and the turn-lifecycle
 //! helpers that bracket an in-flight turn.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use super::{Entry, LiveAssistant, NoticeLevel, PendingApproval, TurnEndReason, UnwindPicker};
+use super::{Entry, LiveAssistant, NoticeLevel, TurnEndReason, UnwindPicker};
 use crate::tui::pricing::Ledger;
 
 #[derive(Clone, Debug)]
@@ -23,8 +23,6 @@ pub struct Status {
     pub sch_path: String,
     /// Whether a KiCAD install was detected (cli + symbol libs).
     pub kicad_connected: bool,
-    /// How many turns committed a write this session.
-    pub applied_count: usize,
     /// How many user turns ran this session.
     pub turn_count: usize,
     /// Live context size: prompt tokens of the latest model call (system +
@@ -47,7 +45,6 @@ impl Status {
             model: model.into(),
             sch_path: sch_path.into(),
             kicad_connected,
-            applied_count: 0,
             turn_count: 0,
             ctx_tokens: 0,
             ledger: Ledger::default(),
@@ -97,23 +94,10 @@ pub struct App {
     pub(super) completion_stem: Option<String>,
     /// Index into the stem's matches that the input currently shows.
     pub completion_idx: Option<usize>,
-    /// Approval mode: when `false` (default), schematic applies and immediate
-    /// project/board mutations need approval; project-local draft edits do not.
-    /// When `true` (`:auto`), gated mutations proceed without a prompt.
-    pub auto: bool,
-    /// A change awaiting approval, if any. While `Some`, `a`/`r` resolve it.
-    pub pending: Option<PendingApproval>,
     /// Whether an agent turn is in flight (submit is blocked, typing is not).
     pub running: bool,
     /// When the in-flight turn started (drives the elapsed display).
     pub turn_started: Option<Instant>,
-    /// Total time the elapsed clock has been PAUSED this turn (while an approval
-    /// gate held the turn waiting on the user). Subtracted from the raw elapsed so
-    /// the working clock reflects model/tool time, not human deliberation.
-    pub paused_total: Duration,
-    /// When the current pause began, if a gate is open right now. `None` between
-    /// gates; folded into `paused_total` when the gate resolves.
-    pub paused_since: Option<Instant>,
     /// Tool calls started during the current turn, counted from `ToolStarted`
     /// events. Tracked here (not read from `TurnOutcome`) so the end indicator
     /// can report a count even when the turn was interrupted or errored — paths
@@ -165,12 +149,8 @@ impl App {
             ctrl_c_armed: false,
             completion_stem: None,
             completion_idx: None,
-            auto: false,
-            pending: None,
             running: false,
             turn_started: None,
-            paused_total: Duration::ZERO,
-            paused_since: None,
             turn_tool_calls: 0,
             active_work: None,
             spinner: 0,
@@ -184,10 +164,9 @@ impl App {
         }
     }
 
-    /// Whether keystrokes currently edit the input line (only an open
-    /// mutation approval takes the keyboard away; typing during a turn is fine).
+    /// Whether keystrokes currently edit the input line.
     pub fn input_active(&self) -> bool {
-        self.pending.is_none()
+        true
     }
 
     /// Mark a turn (a prompt or `/compact`) as started: spin up the running
@@ -195,31 +174,13 @@ impl App {
     pub(super) fn begin_turn(&mut self) {
         self.running = true;
         self.turn_started = Some(Instant::now());
-        self.paused_total = Duration::ZERO;
-        self.paused_since = None;
         self.turn_tool_calls = 0;
         self.active_work = None;
         self.scroll = 0;
     }
 
-    /// Freeze the elapsed clock: called when an approval gate opens, so human
-    /// deliberation isn't billed to the working time. Idempotent.
-    pub(super) fn pause_clock(&mut self) {
-        if self.paused_since.is_none() {
-            self.paused_since = Some(Instant::now());
-        }
-    }
-
-    /// Resume the elapsed clock: fold the just-ended pause into `paused_total`.
-    /// Idempotent (a no-op if the clock wasn't paused).
-    pub(super) fn resume_clock(&mut self) {
-        if let Some(since) = self.paused_since.take() {
-            self.paused_total += since.elapsed();
-        }
-    }
-
     /// Tear a turn down and post its end indicator. The sole teardown point:
-    /// clears `running`/`turn_started`/`pending` and pushes one labelled,
+    /// clears `running`/`turn_started` and pushes one labelled,
     /// tinted system line saying *why* the turn stopped — a clean finish, the
     /// iteration-cap cutoff, a user interruption, or an error — with the elapsed
     /// time and tool-call count. `Compacted` posts no line (the shrink note from
@@ -231,9 +192,7 @@ impl App {
         let elapsed = format_duration(secs);
         self.running = false;
         self.turn_started = None;
-        self.paused_since = None;
         self.active_work = None;
-        self.pending = None;
 
         // The level glyph is the renderer's job (it tints the whole notice as a
         // callout); the text carries none, or each line would show two markers.
@@ -253,12 +212,6 @@ impl App {
                 NoticeLevel::Error,
                 format!(
                     "Worked for {elapsed} — stopped after a project mutation timed out (it may still be finishing)"
-                ),
-            )),
-            TurnEndReason::NoProgress { completions } => Some(Entry::notice(
-                NoticeLevel::Error,
-                format!(
-                    "Worked for {elapsed} — stopped after {completions} model completions made no durable progress"
                 ),
             )),
             TurnEndReason::QualityGateFailed { failures } => Some(Entry::notice(
@@ -281,18 +234,9 @@ impl App {
         }
     }
 
-    /// Seconds the in-flight turn has been actively running (with any
-    /// gate-open pause time subtracted), if a turn is in flight.
+    /// Seconds the in-flight turn has been running, if a turn is in flight.
     pub fn turn_elapsed_secs(&self) -> Option<u64> {
-        self.turn_started.map(|t| {
-            // Total wall time, minus the closed pauses, minus the pause in
-            // progress right now (if a gate is currently open).
-            let mut paused = self.paused_total;
-            if let Some(since) = self.paused_since {
-                paused += since.elapsed();
-            }
-            t.elapsed().saturating_sub(paused).as_secs()
-        })
+        self.turn_started.map(|t| t.elapsed().as_secs())
     }
 }
 

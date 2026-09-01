@@ -31,8 +31,7 @@ use gordian_llm::Tool;
 use gordian_runtime::AgentRuntime;
 use serde_json::{Value, json};
 
-/// The tools that write the schematic. The turn loop approves these before
-/// they run — they mutate the project and have no dry-run.
+/// The tools that write the schematic.
 pub const MUTATORS: [&str; 16] = [
     "undo",
     "place_parts",

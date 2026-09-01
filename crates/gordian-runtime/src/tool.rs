@@ -1,13 +1,11 @@
-//! The minimal gating vocabulary the turn loop drives KiCAD tools through.
+//! The shared tool outcome types used by the KiCAD turn loop.
 //!
 //! There is exactly one domain (KiCAD, forever), so there is no tool-provider
 //! trait — the loop calls the tool registry (`tools::run_tool` / `tools::tool_defs` in
 //! `gordian-core`) directly (off-loaded onto a blocking pool at the call site). These types are
-//! just the structured facts the gate's choreography needs:
+//! just the structured facts the loop needs:
 //!
-//! - [`ToolEffect`] distinguishes reads from pre-execution approval.
-//! - A [`ToolEffect::ApprovalRequired`] mutation that has no dry-run is approved
-//!   from its operation name and arguments before it executes once.
+//! - [`ToolEffect`] distinguishes reads from mutations.
 //! - An authoritative post-turn schematic check comes back as a [`ReviewOutcome`].
 
 use anyhow::{Result, anyhow, bail};
@@ -22,9 +20,8 @@ use crate::AgentRuntime;
 pub enum ToolEffect {
     /// Reads only; never changes project state (search, info, render, validate).
     ReadOnly,
-    /// Mutates project files or a live KiCAD board and must be approved before
-    /// its first and only execution because it has no dry-run implementation.
-    ApprovalRequired,
+    /// Mutates project files or a live KiCAD board.
+    Mutating,
 }
 
 /// An authoritative post-turn check of committed schematic work, folded into the review→fix loop by

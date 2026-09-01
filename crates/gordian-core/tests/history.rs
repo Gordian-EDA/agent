@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use gordian_core::AgentRuntime;
 use gordian_core::prompts::system_prompt;
 use gordian_core::testing::{ScriptedClient, final_text};
-use gordian_core::{Agent, AutoApprove, ChatMessage, ChatRole, ContentPart};
+use gordian_core::{Agent, ChatMessage, ChatRole, ContentPart};
 
 type SeenMessages = Arc<Mutex<Vec<Vec<ChatMessage>>>>;
 
@@ -52,16 +52,8 @@ async fn second_turn_sees_the_first_turns_messages() {
         ctx,
         vec![final_text("answer one"), final_text("answer two")],
     );
-    let mut approvals = AutoApprove::yes();
-
-    agent
-        .run_turn("first prompt", &mut approvals, None)
-        .await
-        .unwrap();
-    agent
-        .run_turn("second prompt", &mut approvals, None)
-        .await
-        .unwrap();
+    agent.run_turn("first prompt", None).await.unwrap();
+    agent.run_turn("second prompt", None).await.unwrap();
 
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 2, "one model call per turn");
@@ -87,12 +79,10 @@ async fn pop_last_turn_unwinds_the_last_exchange() {
         ctx,
         vec![final_text("a1"), final_text("a2"), final_text("a3")],
     );
-    let mut approvals = AutoApprove::yes();
-
-    agent.run_turn("one", &mut approvals, None).await.unwrap();
-    agent.run_turn("two", &mut approvals, None).await.unwrap();
+    agent.run_turn("one", None).await.unwrap();
+    agent.run_turn("two", None).await.unwrap();
     assert!(agent.pop_last_turn(), "there is a turn to pop");
-    agent.run_turn("three", &mut approvals, None).await.unwrap();
+    agent.run_turn("three", None).await.unwrap();
 
     let seen = seen.lock().unwrap();
     let third = &seen[2];
@@ -110,17 +100,15 @@ async fn pop_with_no_turns_is_false_and_clear_resets() {
         return;
     };
     let (mut agent, seen) = recording_agent(ctx, vec![final_text("a1"), final_text("a2")]);
-    let mut approvals = AutoApprove::yes();
-
     assert!(!agent.pop_last_turn(), "nothing to pop on a fresh agent");
 
-    agent.run_turn("one", &mut approvals, None).await.unwrap();
+    agent.run_turn("one", None).await.unwrap();
     agent.clear_history();
     let stats = agent.context_stats();
     assert_eq!(stats.messages, 0, "clear empties the history");
     assert_eq!(stats.turns, 0);
 
-    agent.run_turn("two", &mut approvals, None).await.unwrap();
+    agent.run_turn("two", None).await.unwrap();
     let seen = seen.lock().unwrap();
     let second = &seen[1];
     assert_eq!(second.len(), 1, "post-clear turn starts fresh: {second:#?}");
@@ -134,15 +122,10 @@ async fn context_stats_reflect_the_session() {
         return;
     };
     let (mut agent, _seen) = recording_agent(ctx, vec![final_text("a1")]);
-    let mut approvals = AutoApprove::yes();
-
     let empty = agent.context_stats();
     assert_eq!((empty.turns, empty.messages), (0, 0));
 
-    agent
-        .run_turn("hello there", &mut approvals, None)
-        .await
-        .unwrap();
+    agent.run_turn("hello there", None).await.unwrap();
     let stats = agent.context_stats();
     assert_eq!(stats.turns, 1);
     assert_eq!(stats.messages, 2, "user + assistant");
@@ -163,14 +146,12 @@ async fn compact_replaces_history_with_a_summary_pair() {
             final_text("a2"),
         ],
     );
-    let mut approvals = AutoApprove::yes();
-
-    agent.run_turn("one", &mut approvals, None).await.unwrap();
+    agent.run_turn("one", None).await.unwrap();
     let (before, after) = agent.compact(None).await.unwrap();
     assert_eq!(before, 2, "user + assistant before compaction");
     assert_eq!(after, 2, "summary pair after compaction");
 
-    agent.run_turn("two", &mut approvals, None).await.unwrap();
+    agent.run_turn("two", None).await.unwrap();
     let seen = seen.lock().unwrap();
     let compaction = &seen[1];
     assert_eq!(
@@ -216,13 +197,9 @@ async fn usage_tokens_flow_through_completions() {
         ..Default::default()
     };
     let (mut agent, _seen) = recording_agent(ctx, vec![completion]);
-    let mut approvals = AutoApprove::yes();
     let (tx, mut rx) = unbounded_channel();
 
-    agent
-        .run_turn("hi", &mut approvals, Some(&tx))
-        .await
-        .unwrap();
+    agent.run_turn("hi", Some(&tx)).await.unwrap();
 
     let mut saw_usage = false;
     while let Ok(ev) = rx.try_recv() {

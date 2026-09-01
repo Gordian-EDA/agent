@@ -1,10 +1,9 @@
-//! The agent turn loop with per-mutation approval, wired directly to the KiCAD tools.
+//! The agent turn loop, wired directly to the KiCAD tools.
 //!
 //! [`Agent::run_turn`] drives one user turn: it repeatedly calls the
-//! [`Provider`], executes each tool the model requests (approving writes through
-//! [`Approvals`]), and feeds the structured result back, until the model returns a
-//! final text (or a safety iteration cap is hit). There is one domain (KiCAD,
-//! forever), so the loop dispatches [`crate::tools::run_tool`] /
+//! [`Provider`], executes each tool the model requests, and feeds the structured
+//! result back, until the model returns a final text (or a safety iteration cap
+//! is hit). There is one domain (KiCAD, forever), so the loop dispatches [`crate::tools::run_tool`] /
 //! [`crate::tools::tool_defs`] DIRECTLY — off-loading synchronous [`AgentRuntime`]
 //! work onto the blocking pool at the call site.
 //!
@@ -13,9 +12,6 @@
 //! The conversation lives in `Agent::history` and is carried across turns. It can
 //! be unwound one turn at a time ([`Agent::pop_last_turn`]), cleared
 //! ([`Agent::clear_history`]), or compacted into a summary ([`Agent::compact`]).
-//!
-//! [`AutoApprove`] is the headless test/automation implementation; an interactive
-//! UI supplies its own approval decision.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -150,12 +146,6 @@ impl<P: Provider> Provider for MeteredProvider<P> {
     }
 }
 
-/// Stop a model that keeps issuing tools without changing the durable design or
-/// its authoring diagnostics. This is intentionally much lower than the global
-/// request ceiling: three unchanged completions are enough evidence that the
-/// current repair strategy is stuck.
-const MAX_CONSECUTIVE_NO_PROGRESS_COMPLETIONS: usize = 4;
-
 /// Base cap on each kind of catalog exploration before the model must reuse
 /// its best prior hits. One assistant completion may batch several same-kind
 /// discovery calls and still costs that tool only one round. An explicit
@@ -189,53 +179,9 @@ impl TurnBudgets {
     }
 }
 
-/// One retry when a provider exhausts its output budget before completing a
-/// tool call. The retry is explicitly compact; a second truncation stops
-/// honestly instead of being misreported as a blank successful completion.
-const MAX_OUTPUT_TRUNCATION_NUDGES: usize = 1;
-
 /// One chance for a model that has not touched the requested PCB workflow to
 /// start it before final prose is rejected by the end-to-end quality gate.
 const MAX_PCB_COMPLETION_NUDGES: usize = 1;
-
-/// The human mutation gate. The loop calls [`Approvals::approve`] with either a
-/// dry-run preview or a structured immediate-operation proposal; returning
-/// `false` prevents the mutation.
-///
-/// `approve` is **async**: in a UI the gate blocks the turn until the user
-/// answers, which is inherently a wait on another task. Headless implementations
-/// ([`AutoApprove`]) return immediately.
-#[async_trait]
-pub trait Approvals: Send {
-    /// Decide whether to execute the proposed change, given its preview or
-    /// structured operation payload.
-    async fn approve(&mut self, proposal: &Value) -> bool;
-}
-
-/// A non-interactive [`Approvals`] that always answers the same way. Used by
-/// tests and headless automation.
-pub struct AutoApprove {
-    answer: bool,
-}
-
-impl AutoApprove {
-    /// Always approve.
-    pub fn yes() -> Self {
-        Self { answer: true }
-    }
-
-    /// Always reject.
-    pub fn no() -> Self {
-        Self { answer: false }
-    }
-}
-
-#[async_trait]
-impl Approvals for AutoApprove {
-    async fn approve(&mut self, _preview: &Value) -> bool {
-        self.answer
-    }
-}
 
 /// Events the agent loop emits as it runs, for a live UI. Headless paths pass
 /// `None` and never see these.
@@ -259,9 +205,6 @@ pub enum AgentEvent {
         summary: String,
         image_path: Option<String>,
     },
-    /// An approved gated write committed; `summary` is the domain's one-line
-    /// post-write digest (e.g. ERC counts).
-    Applied { summary: String },
     /// Provider invocation and token usage accumulated since the last telemetry
     /// flush. Usually this represents one call; concurrent review lenses can be
     /// aggregated. `input_tokens` includes `cache_write_tokens` and
@@ -438,14 +381,6 @@ fn is_schematic_mutator(name: &str) -> bool {
     gordian_tools_sch::MUTATORS.contains(&name)
 }
 
-/// Tools that only look: catalog discovery and reading the live schematic.
-///
-/// `check_schematic` is deliberately excluded — re-checking without changing
-/// anything is the stuck pattern the no-progress watchdog exists to catch.
-fn is_inspection_tool(name: &str) -> bool {
-    is_discovery_tool(name) || matches!(name, "read_schematic" | "get_symbol" | "get_net")
-}
-
 fn request_supplies_multiple_library_ids(intent: &str) -> bool {
     let ids = intent
         .split_whitespace()
@@ -566,11 +501,6 @@ pub enum StopReason {
     /// same subturn are unsafe, so the loop reported the incomplete state
     /// without spending more provider requests on impossible recovery.
     MutationTimedOut,
-    /// The model repeatedly used tools without changing durable project state.
-    NoProgress {
-        /// Consecutive non-discovery completions that made no progress.
-        completions: usize,
-    },
     /// The model stopped, but required end-to-end artifact checks did not pass.
     QualityGateFailed {
         /// Number of unresolved gate failures or review findings.
@@ -743,19 +673,11 @@ impl<P: Provider> Agent<P> {
 
     /// Drive one user turn to completion.
     ///
-    /// Loops: call the model → run any requested tools (gating gated-commit calls
-    /// through `approvals`) → feed results back → repeat, until the model returns
-    /// a final text with no pending tool calls.
+    /// Loops: call the model → run any requested tools → feed results back →
+    /// repeat, until the model returns a final text with no pending tool calls.
     #[tracing::instrument(skip_all, fields(history_messages = self.history.len()))]
-    pub async fn run_turn(
-        &mut self,
-        user_msg: &str,
-        approvals: &mut dyn Approvals,
-        events: Events<'_>,
-    ) -> Result<TurnOutcome> {
-        let outcome = self
-            .run_agent_subturn(user_msg, user_msg, approvals, events)
-            .await?;
+    pub async fn run_turn(&mut self, user_msg: &str, events: Events<'_>) -> Result<TurnOutcome> {
+        let outcome = self.run_agent_subturn(user_msg, user_msg, events).await?;
         emit(events, AgentEvent::TurnDone);
         Ok(outcome)
     }
@@ -764,7 +686,6 @@ impl<P: Provider> Agent<P> {
         &mut self,
         instruction: &str,
         authoritative_intent: &str,
-        approvals: &mut dyn Approvals,
         events: Events<'_>,
     ) -> Result<TurnOutcome> {
         repair_history(&mut self.history);
@@ -781,8 +702,6 @@ impl<P: Provider> Agent<P> {
         let mut schematic_checked_clean = false;
         let mut check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
-        let mut output_truncation_nudges_left = MAX_OUTPUT_TRUNCATION_NUDGES;
-        let mut output_truncations = 0usize;
         let mut provider_requests = 0usize;
         let mut provider_error_retries_left = MAX_PROVIDER_ERROR_RETRIES;
         let mut stream_transport_available = true;
@@ -791,7 +710,6 @@ impl<P: Provider> Agent<P> {
         let mut discovery_rounds_used: HashMap<String, usize> = HashMap::new();
         let mut revision_read_uses: HashMap<String, u64> = HashMap::new();
         let mut timed_out_tool_calls: Vec<(String, Value, u64)> = Vec::new();
-        let mut consecutive_no_progress_completions = 0usize;
         let mut last_tool_status: Option<String> = None;
         let mut pcb_recovery = PcbRecoveryState::default();
         let mut pcb_quality = PcbQualityState::default();
@@ -910,25 +828,9 @@ impl<P: Provider> Agent<P> {
 
             if tool_calls.is_empty() {
                 if output_truncated {
-                    output_truncations += 1;
-                    if output_truncation_nudges_left > 0 {
-                        output_truncation_nudges_left -= 1;
-                        self.history
-                            .push(ChatMessage::user(OUTPUT_TRUNCATION_NUDGE));
-                        continue;
-                    }
-                    let final_text = format!(
-                        "Stopped after {output_truncations} truncated provider responses without a usable tool call."
-                    );
-                    emit(events, AgentEvent::AssistantText(final_text.clone()));
-                    return Ok(TurnOutcome {
-                        applied,
-                        final_text,
-                        tool_calls_made,
-                        stop_reason: StopReason::NoProgress {
-                            completions: output_truncations,
-                        },
-                    });
+                    self.history
+                        .push(ChatMessage::user(OUTPUT_TRUNCATION_NUDGE));
+                    continue;
                 }
                 if schematic_mutated && !schematic_checked_clean && check_nudges_left > 0 {
                     check_nudges_left -= 1;
@@ -954,7 +856,6 @@ impl<P: Provider> Agent<P> {
 
             let mut responses = Vec::with_capacity(tool_calls.len());
             let mut result_images = Vec::new();
-            let mut completion_progressed = false;
             let mut pcb_finish_completed = false;
             let mut discovery_seen = HashSet::new();
             for call in &tool_calls {
@@ -980,7 +881,7 @@ impl<P: Provider> Agent<P> {
                 let mutation_after_clean =
                     schematic_checked_clean && is_schematic_mutator(&call.fn_name);
                 let mutation_blocked = timed_out_mutation_name(&timed_out_tool_calls).is_some()
-                    && effect == ToolEffect::ApprovalRequired;
+                    && effect == ToolEffect::Mutating;
 
                 let (mut content, images, image_path, dispatched) = if discovery_duplicate {
                     (
@@ -1045,12 +946,7 @@ impl<P: Provider> Agent<P> {
                     }
                     let effective = authoritative_regenerate_call(call, authoritative_intent)
                         .or_else(|| coalesced_discovery_call(call, &tool_calls));
-                    self.run_tool_call(
-                        effective.as_ref().unwrap_or(call),
-                        effect == ToolEffect::ApprovalRequired,
-                        approvals,
-                    )
-                    .await
+                    self.run_tool_call(effective.as_ref().unwrap_or(call)).await
                 };
                 let parsed = parse_or_null(&content);
                 if tool_result_is_timeout(&parsed) {
@@ -1066,23 +962,13 @@ impl<P: Provider> Agent<P> {
                 let prior_revision = tool_state_revision;
                 tool_state_revision =
                     next_tool_state_revision(tool_state_revision, dispatched, effect, &parsed);
-                completion_progressed |= tool_state_revision != prior_revision;
-
                 if dispatched && schematic_mutation_succeeded(&call.fn_name, &parsed) {
                     applied = true;
                     schematic_mutated = true;
                     schematic_checked_clean = false;
-                    completion_progressed = true;
-                    emit(
-                        events,
-                        AgentEvent::Applied {
-                            summary: tool_summary(&call.fn_name, &call.fn_arguments, &parsed),
-                        },
-                    );
                 }
                 if dispatched && call.fn_name == "check_schematic" {
                     let clean = check_schematic_is_clean(&parsed);
-                    completion_progressed |= clean && !schematic_checked_clean;
                     if schematic_mutated {
                         schematic_checked_clean = clean;
                     }
@@ -1118,12 +1004,7 @@ impl<P: Provider> Agent<P> {
                 if dispatched && should_auto_finish_pcb(pcb_work_requested, &call.fn_name, &parsed)
                 {
                     let pipeline = self
-                        .run_pcb_finish_pipeline(
-                            authoritative_intent,
-                            approvals,
-                            &mut pcb_recovery,
-                            events,
-                        )
+                        .run_pcb_finish_pipeline(authoritative_intent, &mut pcb_recovery, events)
                         .await;
                     tool_calls_made += pipeline.stages.len();
                     for stage in &pipeline.stages {
@@ -1136,7 +1017,6 @@ impl<P: Provider> Agent<P> {
                         object.insert("automatic_pcb_finish".into(), pipeline.report());
                         content = result.to_string();
                     }
-                    completion_progressed = true;
                     pcb_finish_completed = pipeline.completed;
                 }
 
@@ -1180,32 +1060,6 @@ impl<P: Provider> Agent<P> {
                 });
             }
 
-            let inspection_only = tool_calls
-                .iter()
-                .all(|call| is_inspection_tool(&call.fn_name));
-            if !completion_progressed && !inspection_only {
-                consecutive_no_progress_completions += 1;
-                if consecutive_no_progress_completions >= MAX_CONSECUTIVE_NO_PROGRESS_COMPLETIONS {
-                    let final_text = no_progress_final_text(
-                        consecutive_no_progress_completions,
-                        schematic_checked_clean,
-                        tool_calls_made,
-                        last_tool_status.as_deref(),
-                    );
-                    emit(events, AgentEvent::AssistantText(final_text.clone()));
-                    return Ok(TurnOutcome {
-                        applied,
-                        final_text,
-                        tool_calls_made,
-                        stop_reason: StopReason::NoProgress {
-                            completions: consecutive_no_progress_completions,
-                        },
-                    });
-                }
-            } else if completion_progressed {
-                consecutive_no_progress_completions = 0;
-            }
-
             if self.history.len().saturating_sub(current_turn_start) > 96 {
                 prune_stale_tool_results(&mut self.history);
             }
@@ -1223,13 +1077,10 @@ impl<P: Provider> Agent<P> {
         &mut self,
         user_msg: &str,
         intent: &str,
-        approvals: &mut dyn Approvals,
         events: Events<'_>,
         max_fix: usize,
     ) -> Result<TurnOutcome> {
-        let mut outcome = self
-            .run_agent_subturn(user_msg, intent, approvals, events)
-            .await?;
+        let mut outcome = self.run_agent_subturn(user_msg, intent, events).await?;
         if !outcome.applied || outcome.stop_reason != StopReason::Completed {
             emit(events, AgentEvent::TurnDone);
             return Ok(outcome);
@@ -1262,7 +1113,7 @@ impl<P: Provider> Agent<P> {
                 break;
             }
             outcome = self
-                .run_agent_subturn(&fix_prompt(&review.defects), intent, approvals, events)
+                .run_agent_subturn(&fix_prompt(&review.defects), intent, events)
                 .await?;
             if outcome.stop_reason != StopReason::Completed {
                 break;
@@ -1275,18 +1126,9 @@ impl<P: Provider> Agent<P> {
     async fn run_pcb_finish_pipeline(
         &self,
         intent: &str,
-        approvals: &mut dyn Approvals,
         pcb_recovery: &mut PcbRecoveryState,
         events: Events<'_>,
     ) -> PcbFinishRun {
-        if !approvals.approve(&pcb_finish_pipeline_approval()).await {
-            return PcbFinishRun {
-                approved: false,
-                completed: false,
-                stages: Vec::new(),
-            };
-        }
-
         let mut stages = Vec::new();
         let mut placement_retries = 0usize;
         loop {
@@ -1302,7 +1144,6 @@ impl<P: Provider> Agent<P> {
             }
             let Some(bounds) = resize.filter(|_| placement_retries < 3) else {
                 return PcbFinishRun {
-                    approved: true,
                     completed: false,
                     stages,
                 };
@@ -1319,7 +1160,6 @@ impl<P: Provider> Agent<P> {
             stages.push(regenerated);
             if !regenerated_ok {
                 return PcbFinishRun {
-                    approved: true,
                     completed: false,
                     stages,
                 };
@@ -1357,11 +1197,7 @@ impl<P: Provider> Agent<P> {
             stage.name == "export_fab"
                 && pcb_finish_stage_succeeded(stage.name, &parse_or_null(&stage.content))
         });
-        PcbFinishRun {
-            approved: true,
-            completed,
-            stages,
-        }
+        PcbFinishRun { completed, stages }
     }
 
     async fn run_pcb_visual_review_stage(
@@ -1482,46 +1318,7 @@ impl<P: Provider> Agent<P> {
         }
     }
 
-    async fn run_tool_call(
-        &self,
-        call: &ToolCall,
-        approval_required: bool,
-        approvals: &mut dyn Approvals,
-    ) -> (String, Vec<Binary>, Option<String>, bool) {
-        if approval_required {
-            return self.approved_operation(call, approvals).await;
-        }
-        let outcome = run_kicad_tool(&self.runtime, call).await;
-        (
-            tool_result_text(&outcome.value),
-            outcome.images,
-            outcome.image_path,
-            true,
-        )
-    }
-
-    /// Approve a project mutation before its single execution.
-    async fn approved_operation(
-        &self,
-        call: &ToolCall,
-        approvals: &mut dyn Approvals,
-    ) -> (String, Vec<Binary>, Option<String>, bool) {
-        if !approvals.approve(&operation_approval(call)).await {
-            return (
-                json!({
-                    "ok": true,
-                    "executed": false,
-                    "written": false,
-                    "rejected": true,
-                    "operation": call.fn_name,
-                    "note": "user rejected the proposed operation; nothing was executed or written",
-                })
-                .to_string(),
-                Vec::new(),
-                None,
-                false,
-            );
-        }
+    async fn run_tool_call(&self, call: &ToolCall) -> (String, Vec<Binary>, Option<String>, bool) {
         let outcome = run_kicad_tool(&self.runtime, call).await;
         (
             tool_result_text(&outcome.value),
@@ -1586,29 +1383,9 @@ fn mutation_timeout_final_text(
     )
 }
 
-fn no_progress_final_text(
-    completions: usize,
-    applied: bool,
-    tool_calls_made: usize,
-    last_tool_status: Option<&str>,
-) -> String {
-    let committed = if applied {
-        " The schematic passed its latest check."
-    } else {
-        " The schematic has not passed a post-mutation check."
-    };
-    let last_tool = last_tool_status
-        .map(|status| format!(" Last tool result: {status}."))
-        .unwrap_or_default();
-    format!(
-        "Stopped after {completions} consecutive model completions made no durable design progress ({tool_calls_made} tool calls).{committed}{last_tool} The current repair strategy is stuck; inspect the reported blocker before retrying a materially different change."
-    )
-}
-
 fn schematic_mutation_succeeded(name: &str, value: &Value) -> bool {
     gordian_tools_sch::MUTATORS.contains(&name)
         && value.get("error").is_none()
-        && value.get("rejected").and_then(Value::as_bool) != Some(true)
         && value.get("changed").is_some()
 }
 
@@ -1623,37 +1400,9 @@ fn parse_or_null(result_json: &str) -> Value {
     serde_json::from_str(result_json).unwrap_or(Value::Null)
 }
 
-fn operation_approval(call: &ToolCall) -> Value {
-    json!({
-        "approval_kind": "operation",
-        "operation": call.fn_name,
-        "arguments": call.fn_arguments,
-        "note": "This operation can mutate project files or the live KiCAD board and has no dry-run preview.",
-    })
-}
-
-const PCB_FINISH_PIPELINE_STEPS: [&str; 6] = [
-    "place_board",
-    "route_board",
-    "check_board",
-    "render_board",
-    "review_board",
-    "export_fab",
-];
-
-fn pcb_finish_pipeline_approval() -> Value {
-    json!({
-        "approval_kind": "operation",
-        "operation": "finish_pcb_pipeline",
-        "steps": PCB_FINISH_PIPELINE_STEPS,
-        "note": "Run the fixed post-regeneration PCB sequence, including up to three board-resize recoveries from honest placement suggestions. It stops before every later step when placement, routing, or DRC is not clean.",
-    })
-}
-
 fn regenerate_board_succeeded(value: &Value) -> bool {
     value.get("ok").and_then(Value::as_bool) == Some(true)
         && value.get("error").is_none()
-        && value.get("rejected").and_then(Value::as_bool) != Some(true)
         && value.get("executed").and_then(Value::as_bool) != Some(false)
 }
 
@@ -1673,9 +1422,7 @@ fn placement_resize_bounds(value: &Value) -> Option<Value> {
 }
 
 fn pcb_finish_stage_succeeded(name: &str, value: &Value) -> bool {
-    if value.get("error").is_some()
-        || value.get("rejected").and_then(Value::as_bool) == Some(true)
-        || value.get("executed").and_then(Value::as_bool) == Some(false)
+    if value.get("error").is_some() || value.get("executed").and_then(Value::as_bool) == Some(false)
     {
         return false;
     }
@@ -1700,7 +1447,6 @@ struct PcbFinishStage {
 }
 
 struct PcbFinishRun {
-    approved: bool,
     completed: bool,
     stages: Vec<PcbFinishStage>,
 }
@@ -1708,7 +1454,6 @@ struct PcbFinishRun {
 impl PcbFinishRun {
     fn report(&self) -> Value {
         json!({
-            "approved": self.approved,
             "completed": self.completed,
             "stages": self.stages.iter().map(|stage| json!({
                 "tool": stage.name,
@@ -1716,10 +1461,8 @@ impl PcbFinishRun {
             })).collect::<Vec<_>>(),
             "note": if self.completed {
                 "The deterministic PCB finish pipeline completed without another provider request."
-            } else if self.approved {
-                "The deterministic PCB finish pipeline stopped at the first unsuccessful stage; inspect that stage result before recovery."
             } else {
-                "The user rejected the deterministic PCB finish pipeline; no downstream stage ran."
+                "The deterministic PCB finish pipeline stopped at the first unsuccessful stage; inspect that stage result before recovery."
             },
         })
     }
@@ -1851,7 +1594,6 @@ impl PcbRecoveryState {
 
         if fn_name == "route_board" {
             if value.get("error").is_none()
-                && value.get("rejected").and_then(Value::as_bool) != Some(true)
                 && value.get("executed").and_then(Value::as_bool) != Some(false)
             {
                 self.awaiting_clean_drc = true;
@@ -1949,7 +1691,7 @@ fn request_requires_fabrication(user_msg: &str) -> bool {
 fn timed_out_mutation_name(timed_out: &[(String, Value, u64)]) -> Option<&str> {
     timed_out
         .iter()
-        .find(|(name, _, _)| tool_effect(name) != ToolEffect::ReadOnly)
+        .find(|(name, _, _)| tool_effect(name) == ToolEffect::Mutating)
         .map(|(name, _, _)| name.as_str())
 }
 
@@ -1972,11 +1714,7 @@ fn next_tool_state_revision(
 ) -> u64 {
     let changed = match effect {
         ToolEffect::ReadOnly => false,
-        ToolEffect::ApprovalRequired => {
-            result.get("error").is_none()
-                && result.get("rejected").and_then(Value::as_bool) != Some(true)
-                && !tool_result_is_timeout(result)
-        }
+        ToolEffect::Mutating => result.get("error").is_none() && !tool_result_is_timeout(result),
     };
     if dispatched && changed {
         current.saturating_add(1)
@@ -1987,7 +1725,6 @@ fn next_tool_state_revision(
 
 fn route_retry_budget_reset_by_fix(fn_name: &str, value: &Value) -> bool {
     let successful = value.get("error").is_none()
-        && value.get("rejected").and_then(Value::as_bool) != Some(true)
         && value.get("ok").and_then(Value::as_bool) != Some(false)
         && value.get("legal").and_then(Value::as_bool) != Some(false);
     if !successful {
@@ -2135,11 +1872,9 @@ fn is_image_only_message(msg: &ChatMessage) -> bool {
 
 // ── KiCAD-concrete tool dispatch ───────────────────────────────────────────────
 
-/// The effect class of a KiCAD tool name (drives the loop's gate dispatch).
+/// The effect class of a KiCAD tool name.
 fn tool_effect(name: &str) -> ToolEffect {
     match name {
-        // Immediate project/PCB mutations lack a safe dry-run, so approve the
-        // operation and arguments before their first execution.
         "regenerate_board"
         | "place_board"
         | "route_board"
@@ -2149,10 +1884,8 @@ fn tool_effect(name: &str) -> ToolEffect {
         | "delete_copper"
         | "set_net_width"
         | "update_board_outline"
-        | "export_fab" => ToolEffect::ApprovalRequired,
-        // Everything else reads only — except the live-schematic mutators,
-        // which write the project file the same way the board ones do.
-        name if gordian_tools_sch::MUTATORS.contains(&name) => ToolEffect::ApprovalRequired,
+        | "export_fab" => ToolEffect::Mutating,
+        name if gordian_tools_sch::MUTATORS.contains(&name) => ToolEffect::Mutating,
         _ => ToolEffect::ReadOnly,
     }
 }
@@ -2526,9 +2259,6 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 )
             },
         );
-    }
-    if result.get("rejected").and_then(Value::as_bool) == Some(true) {
-        return "rejected".to_string();
     }
     match name {
         "search_symbols" | "search_footprints" => search_summary(input, result),

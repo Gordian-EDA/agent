@@ -1,9 +1,8 @@
 //! The copilot-cockpit **state machine** — pure-ish, non-rendering, testable.
 //!
 //! [`App`] is the whole UI state. [`App::update`] maps a [`Msg`] (a keypress,
-//! an agent event, or a pending-diff arrival) into a state transition and
-//! returns an [`Action`] the shell performs (spawn a turn, resolve the
-//! mutation approval, cancel, undo, quit). Nothing here touches a terminal or the
+//! an agent event, or an async arrival) into a state transition and returns an
+//! [`Action`] the shell performs (spawn a turn, cancel, undo, quit). Nothing here touches a terminal or the
 //! network, so it is unit-testable in full.
 //!
 //! The shell ([`super::run`]) owns the terminal, the crossterm event stream, and
@@ -26,14 +25,13 @@ mod update;
 pub use image_cell::{ImageCell, ImageState};
 pub use input::*;
 pub use state::{App, Status};
-pub use transcript::{Entry, LiveAssistant, NoticeLevel, PendingApproval, Speaker, UnwindPicker};
+pub use transcript::{Entry, LiveAssistant, NoticeLevel, Speaker, UnwindPicker};
 pub use update::{Action, Msg, TurnEndReason};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use gordian_core::AgentEvent;
-    use serde_json::{Value, json};
     use std::time::Instant;
 
     fn app() -> App {
@@ -49,14 +47,6 @@ mod tests {
         for c in s.chars() {
             a.update(Msg::Char(c));
         }
-    }
-
-    fn dry_run_json() -> Value {
-        json!({
-            "approval_kind": "operation",
-            "operation": "place_parts",
-            "arguments": {"parts": [{"ref": "U1", "part": "Device:R", "pins": {"1": "VCC", "2": "GND"}}]}
-        })
     }
 
     #[test]
@@ -328,18 +318,6 @@ mod tests {
         a.update(Msg::Paste("add a 10k resistor".into()));
         assert_eq!(a.input, "add a 10k resistor");
         assert!(a.pastes.is_empty(), "no stash for a small paste");
-    }
-
-    #[test]
-    fn auto_command_toggles_the_gate_flag() {
-        let mut a = app();
-        assert!(!a.auto);
-        type_str(&mut a, "/auto");
-        assert_eq!(a.update(Msg::Submit), Action::None);
-        assert!(a.auto, "/auto should toggle the flag ON");
-        type_str(&mut a, "/auto");
-        a.update(Msg::Submit);
-        assert!(!a.auto, "/auto again toggles it OFF");
     }
 
     #[test]
@@ -771,96 +749,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_operation_arrives_and_approve_resolves_it() {
-        let mut a = app();
-        a.update(Msg::PendingApproval(dry_run_json()));
-        let pending = a.pending.as_ref().expect("operation is pending");
-        assert_eq!(pending.operation, "place_parts");
-        assert_eq!(pending.arguments["parts"][0]["ref"], "U1");
-        assert!(!a.input_active(), "input locked while a gate is open");
-
-        // Pressing 'a' resolves approval and clears the pending diff.
-        let action = a.update(Msg::Char('a'));
-        assert_eq!(action, Action::ResolveApproval(true));
-        assert!(a.pending.is_none());
-    }
-
-    #[test]
-    fn reject_key_resolves_false() {
-        let mut a = app();
-        a.update(Msg::PendingApproval(dry_run_json()));
-        let action = a.update(Msg::Char('r'));
-        assert_eq!(action, Action::ResolveApproval(false));
-        assert!(a.pending.is_none());
-    }
-
-    #[test]
-    fn the_elapsed_clock_pauses_while_a_gate_is_open() {
-        let mut a = app();
-        type_str(&mut a, "go");
-        a.update(Msg::Submit);
-        assert!(a.paused_since.is_none(), "no pause before a gate");
-        // Opening the gate freezes the clock; resolving it resumes and banks the
-        // paused span.
-        a.update(Msg::PendingApproval(dry_run_json()));
-        assert!(a.paused_since.is_some(), "gate open → clock frozen");
-        a.update(Msg::Char('a'));
-        assert!(a.paused_since.is_none(), "resolved → clock running again");
-        assert!(
-            a.paused_total >= std::time::Duration::ZERO,
-            "the pause was banked"
-        );
-    }
-
-    #[test]
-    fn other_chars_do_not_leak_into_input_while_gate_open() {
-        let mut a = app();
-        a.update(Msg::PendingApproval(dry_run_json()));
-        a.update(Msg::Char('x'));
-        assert!(a.input.is_empty(), "gate keys only while pending");
-    }
-
-    #[test]
-    fn approval_modal_preserves_the_hidden_draft_for_all_editor_inputs() {
-        let mut a = app();
-        a.input = "draft".into();
-        a.cursor = 3;
-        a.update(Msg::PendingApproval(dry_run_json()));
-
-        for msg in [
-            Msg::Char('x'),
-            Msg::Backspace,
-            Msg::Delete,
-            Msg::CursorLeft,
-            Msg::CursorRight,
-            Msg::WordLeft,
-            Msg::WordRight,
-            Msg::Home,
-            Msg::End,
-            Msg::KillToStart,
-            Msg::KillWordBack,
-            Msg::HistoryPrev,
-            Msg::HistoryNext,
-            Msg::Complete,
-            Msg::Submit,
-            Msg::Paste("pasted".into()),
-            Msg::Newline,
-        ] {
-            assert_eq!(a.update(msg), Action::None);
-            assert_eq!(a.input, "draft");
-            assert_eq!(a.cursor, 3);
-            assert!(a.pastes.is_empty());
-            assert!(a.pending.is_some());
-        }
-    }
-
-    #[test]
-    fn resolving_with_nothing_pending_is_a_noop() {
-        let mut a = app();
-        assert_eq!(a.update(Msg::Approve), Action::None);
-    }
-
-    #[test]
     fn tool_finished_event_appends_or_replaces_a_card() {
         let mut a = app();
         a.update(Msg::Agent(AgentEvent::ToolStarted {
@@ -883,20 +771,6 @@ mod tests {
             .collect();
         assert_eq!(cards.len(), 1, "the card collapses in place");
         assert!(cards[0].text.contains("→ \"STM32\" → 4 hits"));
-    }
-
-    #[test]
-    fn applied_event_bumps_count_and_notes_erc() {
-        let mut a = app();
-        a.update(Msg::Agent(AgentEvent::Applied {
-            summary: "ERC 0 errors, 2 warnings".into(),
-        }));
-        assert_eq!(a.status.applied_count, 1);
-        assert!(
-            a.transcript
-                .iter()
-                .any(|e| e.text.contains("ERC 0 errors, 2 warnings"))
-        );
     }
 
     #[test]
@@ -956,16 +830,6 @@ mod tests {
         let last = a.transcript.last().unwrap();
         assert!(last.text.contains("quality gate failed"), "{}", last.text);
         assert!(last.text.contains("2 unresolved"), "{}", last.text);
-        assert_eq!(last.level, NoticeLevel::Error);
-
-        // Repeated unchanged-state tool cycles → red, with the bounded count.
-        let mut a = app();
-        type_str(&mut a, "go");
-        a.update(Msg::Submit);
-        a.update(Msg::TurnEnded(TurnEndReason::NoProgress { completions: 3 }));
-        let last = a.transcript.last().unwrap();
-        assert!(last.text.contains("3 model completions"), "{}", last.text);
-        assert!(last.text.contains("no durable progress"), "{}", last.text);
         assert_eq!(last.level, NoticeLevel::Error);
 
         // Non-cancellable mutation timeout → red and explicit about background work.

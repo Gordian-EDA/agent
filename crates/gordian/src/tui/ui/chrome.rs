@@ -77,10 +77,7 @@ fn draw_jump_hint(f: &mut Frame, inner: Rect) {
         Span::styled("End", theme::BAND.patch(theme::POPUP_TITLE)),
         Span::styled(" jump to latest ", theme::BAND.patch(theme::META)),
     ];
-    let w: u16 = spans
-        .iter()
-        .map(|s| s.content.chars().count() as u16)
-        .sum();
+    let w: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
     if w > inner.width || inner.height == 0 {
         return;
     }
@@ -104,7 +101,7 @@ const MAX_QUEUED_ROWS: usize = 3;
 
 /// Rows [`draw_running`] needs at the current queue depth — shared with the
 /// layout in `ui::mod` so the reserved space and what actually renders can
-/// never drift apart (the [`super::composer::approval_height`] pattern).
+/// never drift apart.
 pub(super) fn running_rows(app: &App) -> u16 {
     let queued = if app.queued.is_empty() {
         0
@@ -120,22 +117,12 @@ pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
     let frame = SPINNER[app.spinner % SPINNER.len()];
     let secs = app.turn_elapsed_secs().unwrap_or(0);
     let dim = theme::META;
-    // While an approval gate holds the turn the verb says so, and the elapsed
-    // clock is already frozen (see `App::turn_elapsed_secs`); else it's "working".
-    let gated = app.pending.is_some();
-    let verb = if gated {
-        "waiting for approval"
-    } else {
-        "working"
-    };
-    let mut spans = vec![
+    let spans = vec![
         Span::styled(format!("{frame} "), theme::SPINNER),
-        Span::styled(verb, Style::default().fg(theme::ACC)),
+        Span::styled("working", Style::default().fg(theme::ACC)),
         Span::styled(format!(" · {secs}s"), dim),
+        Span::styled(" · esc to interrupt", dim),
     ];
-    if !gated {
-        spans.push(Span::styled(" · esc to interrupt", dim));
-    }
 
     let mut lines = vec![Line::from(spans)];
     // The detail row names the current unit of work, so a long call or async
@@ -177,8 +164,7 @@ pub(super) fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let area = body(area);
     let dim = theme::META;
     let armed_quit = theme::WARNING.add_modifier(Modifier::BOLD);
-    // The right side only carries a hint that isn't already on screen. A pending
-    // change shows its actions on the card, so the footer stays quiet there.
+    // The right side only carries a hint that is not already on screen.
     let right = if app.ctrl_c_armed {
         "Ctrl-C again to quit"
     } else if app.esc_armed {
@@ -227,9 +213,6 @@ fn status_left(app: &App, avail: usize) -> String {
     // priority order — earlier fields survive longer as the bar narrows.
     let anchor = format!("{} · {}", s.provider, short_model(&s.model));
     let mut fields: Vec<String> = Vec::new();
-    if s.applied_count > 0 {
-        fields.push(format!("{} applied", s.applied_count));
-    }
     if l.provider_requests > 0 {
         fields.push(format!("{} provider req", l.provider_requests));
     }
@@ -283,7 +266,10 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
     let indent = " ".repeat(MARGIN as usize);
     let kv = |k: &str, d: &str| {
         Line::from(vec![
-            Span::styled(format!("{indent}{k:<15} "), Style::default().fg(theme::INFO)),
+            Span::styled(
+                format!("{indent}{k:<15} "),
+                Style::default().fg(theme::INFO),
+            ),
             Span::styled(d.to_string(), theme::SUBTLE),
         ])
     };
@@ -295,13 +281,15 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
     };
 
     let mut lines = vec![
-        Line::from(Span::styled(format!("{indent}help · keys & commands"), accent)),
+        Line::from(Span::styled(
+            format!("{indent}help · keys & commands"),
+            accent,
+        )),
         Line::from(""),
         section("KEYS"),
         kv("Enter", "send the prompt"),
         kv("Shift/Alt-Enter", "newline (multi-line prompt)"),
         kv("Tab", "complete a /command"),
-        kv("a / r", "approve / reject a proposed change"),
         kv("Up / Down", "recall prompt history"),
         kv("Shift-Up/Down", "scroll the transcript one line"),
         kv("Mouse wheel", "scroll the transcript"),
@@ -309,7 +297,7 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
         kv("End", "jump to the latest output"),
         kv("Ctrl-U/W/A/E", "line editing (kill line/word, home/end)"),
         kv("Ctrl-Left/Right", "move by word"),
-        kv("Esc", "close help / reject gate / clear input"),
+        kv("Esc", "close help / clear input / interrupt"),
         kv("Esc Esc", "unwind the last turn (context only)"),
         kv("Ctrl-C Ctrl-C", "exit"),
         Line::from(""),
@@ -319,7 +307,10 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
         lines.push(kv(c.name, c.desc));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(format!("{indent}Esc to close"), dim)));
+    lines.push(Line::from(Span::styled(
+        format!("{indent}Esc to close"),
+        dim,
+    )));
 
     // Full width, like the completion and unwind menus — a narrower centred
     // card left the surrounding transcript visible down both sides with
@@ -336,7 +327,9 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
     // `trim: false` — `trim: true` strips each line's LEADING whitespace before
     // wrapping, which would eat the indent along with it.
     f.render_widget(
-        Paragraph::new(lines).style(theme::BAND).wrap(Wrap { trim: false }),
+        Paragraph::new(lines)
+            .style(theme::BAND)
+            .wrap(Wrap { trim: false }),
         popup,
     );
 }
