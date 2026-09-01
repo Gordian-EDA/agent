@@ -171,9 +171,24 @@ fn place_one(
         .and_then(|s| crate::place::extent(&edit.doc, s));
     let (w, h) = body.map_or((10.0, 10.0), |r| (r.width(), r.height()));
     let skip = vec![refdes.clone()];
-    let (want, note) = destination(&edit.doc, spec, w, h, &skip)?;
+    let (want, mut note) = destination(&edit.doc, spec, w, h, &skip)?;
     let centre = body.map_or(park.point(), |r| r.center());
-    let at = want.origin_for(park.point(), centre);
+    let mut at = snap_point(want.origin_for(park.point(), centre));
+    // An explicit `at` is a request, not a licence to land on someone else's
+    // drawing: slide clear, and say so.
+    let offset = Point2::new(centre.x - park.x, centre.y - park.y);
+    let landing = Point2::new(at.x + offset.x, at.y + offset.y);
+    let occupancy = Occupancy::skipping(&edit.doc, &skip);
+    if !occupancy.free(landing, w, h) {
+        let free = occupancy
+            .nearest_free(landing, w, h)
+            .ok_or("no free space on the sheet")?;
+        at = snap_point(Point2::new(free.x - offset.x, free.y - offset.y));
+        note = Some(format!(
+            "({:.2},{:.2}) was occupied; moved clear",
+            landing.x, landing.y
+        ));
+    }
     edit.doc
         .move_symbol(&refdes, snap(at.x), snap(at.y))
         .map_err(fail)?;
