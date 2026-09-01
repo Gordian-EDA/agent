@@ -17,6 +17,11 @@ use tracing_subscriber::util::SubscriberInitExt;
 /// Target whose stderr events are emitted as a bare agent transcript.
 pub const EVENTS_TARGET: &str = "gordian::events";
 
+/// The file log keeps Gordian at `debug` and caps the HTTP stack at `info`, so a
+/// session log is not dominated by frame-level connection chatter.
+const FILE_DEFAULT_FILTER: &str =
+    "debug,hyper=info,hyper_util=info,h2=info,reqwest=info,rustls=info,tokio=info,tower=info";
+
 /// Keeps the non-blocking file writer alive and flushes it when dropped.
 #[must_use = "the logging guard must be held until process exit"]
 pub struct LogGuard {
@@ -66,7 +71,7 @@ fn init_with_stderr(project_dir: &Path, thread_id: &str, stderr_enabled: bool) -
         .with_writer(file_writer)
         .with_ansi(false)
         .with_target(true)
-        .with_filter(env_filter("debug"));
+        .with_filter(env_filter(FILE_DEFAULT_FILTER));
 
     let stderr_layer = stderr_enabled.then(|| {
         tracing_subscriber::fmt::layer()

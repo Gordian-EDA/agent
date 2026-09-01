@@ -36,7 +36,7 @@ options:
   -V, --version                        print version";
 
 fn print_version() {
-    tracing::info!("gordian {}", env!("CARGO_PKG_VERSION"));
+    println!("gordian {}", env!("CARGO_PKG_VERSION"));
 }
 
 fn is_help_request(args: &[String]) -> bool {
@@ -53,8 +53,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("--help" | "-h" | "help") => {
-            logging::init_stderr_only();
-            tracing::info!("{USAGE}");
+            println!("{USAGE}");
             ExitCode::SUCCESS
         }
         Some("--version" | "-V" | "version") => {
@@ -94,8 +93,8 @@ fn main() -> ExitCode {
         },
         Some(other) => {
             logging::init_stderr_only();
-            tracing::error!("error: unknown command `{other}`");
-            tracing::info!("{USAGE}");
+            tracing::error!("unknown command `{other}`");
+            eprintln!("{USAGE}");
             ExitCode::FAILURE
         }
     }
