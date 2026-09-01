@@ -107,6 +107,21 @@ pub(crate) fn lib_pins(def: &Node) -> Vec<LibPin> {
     pins
 }
 
+/// How many units a definition draws.
+///
+/// Read from the sub-symbol names rather than from the pins: a unit that
+/// carries only graphics still counts, and a part with two units is written
+/// `U1A`/`U1B` whether or not both have pins.
+pub(crate) fn unit_count(def: &Node) -> u32 {
+    items(def)
+        .iter()
+        .filter(|child| sexpr::head(child) == Some("symbol"))
+        .filter_map(|child| items(child).get(1).and_then(sexpr::text))
+        .map(|name| unit_and_style(name).0)
+        .max()
+        .unwrap_or(1)
+}
+
 /// Whether a `lib_symbols` definition is a power symbol.
 pub(crate) fn is_power_definition(def: &Node) -> bool {
     items(def).iter().any(|c| sexpr::head(c) == Some("power"))
@@ -168,9 +183,9 @@ pub(crate) fn pins_of(doc: &SchDoc, inst: &SymbolInst) -> Vec<PlacedPin> {
     };
     let power_symbol = is_power_definition(def);
     let style = body_style(inst);
-    let pins = lib_pins(def);
-    let multi_unit = pins.iter().any(|p| p.unit > 1);
-    pins.into_iter()
+    let multi_unit = unit_count(def) > 1;
+    lib_pins(def)
+        .into_iter()
         .filter(|p| belongs(p, inst.unit, style))
         .map(|p| PlacedPin {
             owner: inst.uuid.clone(),

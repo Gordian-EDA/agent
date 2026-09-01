@@ -214,6 +214,12 @@ fn extraction_matches_the_kicad_netlist_partition() {
          loose ends only, \
          skipped after a warning: {skipped:?}"
     );
+    assert!(
+        unreadable.is_empty(),
+        "kicad-cli could not netlist {} sheets, which would silently shrink this \
+         gate: {unreadable:?}",
+        unreadable.len()
+    );
     assert!(compared > 20, "only {compared} sheets were comparable");
     assert!(
         failures.is_empty(),
@@ -297,6 +303,10 @@ fn no_sheet_is_ever_over_connected() {
     eprintln!(
         "over-connection: {checked} sheets checked, {ambiguous} with ambiguous \
          references, {unreadable} kicad-cli could not netlist"
+    );
+    assert_eq!(
+        unreadable, 0,
+        "kicad-cli could not netlist {unreadable} sheets"
     );
     assert!(checked > 90, "only {checked} sheets were checked");
     assert!(

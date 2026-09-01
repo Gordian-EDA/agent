@@ -267,19 +267,18 @@ fn names(
         entry.1.push(node);
     };
     for label in doc.labels() {
-        if let Some(node) = nodes.get(label.at.point()) {
-            let source = match label.kind {
-                LabelKind::Local => NetSource::Local,
-                LabelKind::Global => NetSource::Global,
-                LabelKind::Hier => NetSource::Hier,
-            };
-            note(crate::text::unescape(&label.text), source, node);
-        }
+        let node = nodes
+            .get(label.at.point())
+            .expect("label anchors are interned");
+        let source = match label.kind {
+            LabelKind::Local => NetSource::Local,
+            LabelKind::Global => NetSource::Global,
+            LabelKind::Hier => NetSource::Hier,
+        };
+        note(crate::text::unescape(&label.text), source, node);
     }
     for pin in placed {
-        let Some(node) = nodes.get(pin.at) else {
-            continue;
-        };
+        let node = nodes.get(pin.at).expect("placed pins are interned");
         if pin.etype != "power_in" {
             continue;
         }
