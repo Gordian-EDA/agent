@@ -66,6 +66,7 @@ mod text;
 
 pub use connect::{Net, NetDelta, NetSource, Netlist, PinRef};
 pub use doc::{SchDoc, SnapshotId};
+pub use edit::is_drawing;
 pub use error::{Error, Result};
 pub use libsyms::SymbolSource;
 pub use model::{

@@ -218,7 +218,7 @@ pub fn place_parts(
     crate::realize::graft(doc, writer)?;
 
     let mut mismatch = verify(doc, &design);
-    mismatch.disturbed = disturbed(&Netlist::diff(&before, &connect::extract(doc)));
+    mismatch.disturbed = disturbed(&before, &connect::extract(doc));
     let committed = mismatch.is_empty();
     if !committed {
         doc.restore(snapshot)?;
@@ -287,7 +287,7 @@ fn rearrange(
                 env,
                 &design,
                 movable.clone(),
-                held,
+                held.clone(),
                 obstacles(doc, &owned),
                 ir,
                 engine,
@@ -301,7 +301,8 @@ fn rearrange(
     }
 
     owned.extend(footprints(&placed));
-    let redrawn = doc.retain_drawing(|item| !touches(item, &owned));
+    let erase = selection_drawing(doc, &owned, &held);
+    let redrawn = doc.retain_drawing(|item| !erase.contains(&drawing_key(item)));
 
     let inc = incidence(&placed);
     let writer = crate::realize::realize_block(
@@ -315,9 +316,8 @@ fn rearrange(
     let warnings = writer.layout_warnings();
     crate::realize::graft_drawing(doc, writer)?;
 
-    let delta = Netlist::diff(&before, &connect::extract(doc));
     let mismatch = Mismatch {
-        disturbed: disturbed(&delta),
+        disturbed: disturbed(&before, &connect::extract(doc)),
         ..Default::default()
     };
     let committed = mismatch.is_empty();
@@ -357,9 +357,9 @@ fn seat(doc: &mut SchDoc, item: &Item) -> Result<()> {
     Ok(())
 }
 
-/// Whether a drawing item has any geometry inside one of `region`'s rectangles.
-fn touches(item: &sch_doc::Item, region: &[Rect]) -> bool {
-    let points: Vec<Point2> = match item {
+/// The points a drawing item occupies — where it can join another.
+fn anchors(item: &sch_doc::Item) -> Vec<Point2> {
+    match item {
         sch_doc::Item::Wire(w) => w.points.clone(),
         sch_doc::Item::Junction(j) => vec![j.at],
         sch_doc::Item::NoConnect(n) => vec![n.at],
@@ -367,8 +367,76 @@ fn touches(item: &sch_doc::Item, region: &[Rect]) -> bool {
         sch_doc::Item::Text(t) => vec![t.at.point()],
         sch_doc::Item::Symbol(s) => vec![s.at.point()],
         _ => Vec::new(),
-    };
-    points.iter().any(|p| region.iter().any(|r| r.contains(*p)))
+    }
+}
+
+/// An item's identity for the erase set: its UUID.
+fn drawing_key(item: &sch_doc::Item) -> String {
+    match item {
+        sch_doc::Item::Wire(w) => w.uuid.clone(),
+        sch_doc::Item::Junction(j) => j.uuid.clone(),
+        sch_doc::Item::NoConnect(n) => n.uuid.clone(),
+        sch_doc::Item::Label(l) => l.uuid.clone(),
+        sch_doc::Item::Text(t) => t.uuid.clone(),
+        sch_doc::Item::Symbol(s) => s.uuid.clone(),
+        _ => String::new(),
+    }
+}
+
+/// Quantise to 1 um, as the connectivity extractor does, so float dust never splits a
+/// join.
+fn coord(p: Point2) -> (i64, i64) {
+    ((p.x * 1000.0).round() as i64, (p.y * 1000.0).round() as i64)
+}
+
+/// The drawing that belongs to the selection: everything reachable from the parts being
+/// moved without passing through a pin of a part that is staying put.
+///
+/// Erasing only what sits inside the selection's own footprints cuts wire chains in
+/// half and leaves the far end — a rail terminal, a label — hanging. Following the
+/// joins instead takes the whole run, and stopping at a foreign pin is what keeps it
+/// from swallowing the sheet through a shared ground.
+fn selection_drawing(doc: &SchDoc, owned: &[Rect], held: &[Item]) -> BTreeSet<String> {
+    let stop: BTreeSet<(i64, i64)> =
+        held.iter()
+            .flat_map(|it| {
+                it.geom.pins.iter().filter(|p| p.unit == it.unit).map(|p| {
+                    coord(crate::write::pin_endpoint(p, it.at, it.angle, it.mirror).into())
+                })
+            })
+            .collect();
+
+    let items: Vec<(String, Vec<Point2>)> = doc
+        .items()
+        .iter()
+        .filter(|item| sch_doc::is_drawing(item))
+        .map(|item| (drawing_key(item), anchors(item)))
+        .collect();
+
+    let mut erase: BTreeSet<String> = items
+        .iter()
+        .filter(|(_, points)| points.iter().any(|p| owned.iter().any(|r| r.contains(*p))))
+        .map(|(key, _)| key.clone())
+        .collect();
+
+    // Spread along shared coordinates until nothing new joins.
+    loop {
+        let front: BTreeSet<(i64, i64)> = items
+            .iter()
+            .filter(|(key, _)| erase.contains(key))
+            .flat_map(|(_, points)| points.iter().map(|p| coord(*p)))
+            .filter(|c| !stop.contains(c))
+            .collect();
+        let grown: BTreeSet<String> = items
+            .iter()
+            .filter(|(_, points)| points.iter().any(|p| front.contains(&coord(*p))))
+            .map(|(key, _)| key.clone())
+            .collect();
+        if grown.is_subset(&erase) {
+            return erase;
+        }
+        erase.extend(grown);
+    }
 }
 
 /// Apply the caller's intent over the inferred IR, keeping everything the engine
@@ -582,15 +650,7 @@ fn intended(design: &Design) -> BTreeMap<String, BTreeSet<String>> {
 /// This is the truthfulness question on its own, with no history involved — what
 /// [`place_parts`] gates on, and what any caller can ask of a document it did not draw.
 pub fn verify(doc: &SchDoc, design: &Design) -> Mismatch {
-    let after = connect::extract(doc);
-    // A pin's home: the extracted net it landed on, or a name unique to itself so two
-    // loose ends never look like one net.
-    let mut home: HashMap<String, String> = HashMap::new();
-    for (index, net) in after.nets.iter().enumerate() {
-        for pin in &net.pins {
-            home.insert(format!("{}.{}", pin.refdes, pin.pin), index.to_string());
-        }
-    }
+    let home = homes(&connect::extract(doc));
     let mut mismatch = Mismatch::default();
     let mut owner: HashMap<String, String> = HashMap::new();
     for (net, pins) in intended(design) {
@@ -612,22 +672,53 @@ pub fn verify(doc: &SchDoc, design: &Design) -> Mismatch {
     mismatch
 }
 
-/// Names of pre-existing nets an edit broke: split apart, dropped, fused with another,
-/// or left with a pin hanging.
-fn disturbed(delta: &sch_doc::NetDelta) -> Vec<String> {
-    let mut out: Vec<String> = delta
-        .split
+/// Where each pin of `netlist` ended up, as a comparable key: the net it is on, or a
+/// name unique to the pin itself so two loose ends never read as one net.
+///
+/// Only real parts count. The rail terminals and PWR_FLAGs a drawing is made of carry a
+/// hidden `#` reference and are the drawing's own business — a re-wire replaces them,
+/// and that is not a change to the circuit.
+fn homes(netlist: &Netlist) -> HashMap<String, String> {
+    netlist
+        .nets
         .iter()
-        .map(|(name, _)| name.clone())
-        .chain(delta.removed.iter().cloned())
-        .chain(delta.merged.iter().flat_map(|(sources, _)| sources.clone()))
-        .chain(
-            delta
-                .pins_now_unconnected
+        .enumerate()
+        .flat_map(|(index, net)| {
+            net.pins
                 .iter()
-                .map(|p| format!("{}.{}", p.refdes, p.pin)),
-        )
-        .collect();
+                .map(move |pin| (format!("{}.{}", pin.refdes, pin.pin), index.to_string()))
+        })
+        .filter(|(pin, _)| !pin.starts_with('#'))
+        .collect()
+}
+
+/// Names of nets the sheet already had that the edit broke: split apart, dropped, or
+/// fused with another. A net that merely GAINED pins is not disturbed — that is what
+/// adding a part to it looks like.
+fn disturbed(before: &Netlist, after: &Netlist) -> Vec<String> {
+    let home = homes(after);
+    let mut out = Vec::new();
+    let mut claimed: HashMap<String, String> = HashMap::new();
+    for net in &before.nets {
+        let landed: BTreeSet<String> = net
+            .pins
+            .iter()
+            .map(|p| format!("{}.{}", p.refdes, p.pin))
+            .filter(|pin| !pin.starts_with('#'))
+            .map(|pin| home.get(&pin).cloned().unwrap_or(format!("~{pin}")))
+            .collect();
+        match landed.len() {
+            0 => continue,
+            1 => {
+                let one = landed.into_iter().next().expect("just counted");
+                if let Some(other) = claimed.insert(one, net.name.clone()) {
+                    out.push(other);
+                    out.push(net.name.clone());
+                }
+            }
+            _ => out.push(net.name.clone()),
+        }
+    }
     out.sort();
     out.dedup();
     out
