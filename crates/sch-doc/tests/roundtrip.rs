@@ -28,7 +28,10 @@ fn write_reproduces_the_input_byte_for_byte() {
             differing.push(corpus::label(path));
         }
     }
-    assert!(compared > 100, "only {compared} files were in the modern layout");
+    assert!(
+        compared > 100,
+        "only {compared} files were in the modern layout"
+    );
     assert!(
         differing.is_empty(),
         "{} of {} files did not round-trip byte-identically: {:?}",

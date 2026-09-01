@@ -11,7 +11,8 @@
 //!
 //! A partition holding one pin and no name is not a net — a dangling wire off a
 //! pin does not make one — which is the same line `kicad-cli` draws when it
-//! calls such a pin `unconnected-(…)`.
+//! calls such a pin `unconnected-(…)`. A hierarchical sheet pin counts as a
+//! name: the child sheet drives that net even though this file cannot see how.
 
 use std::collections::{HashMap, HashSet};
 
@@ -29,11 +30,14 @@ pub use diff::NetDelta;
 /// driver on a partition names it.
 ///
 /// The order is KiCAD's own: a global label outranks a power symbol, which
-/// outranks a local label, which outranks a hierarchical one.
+/// outranks a local label, which outranks a hierarchical one, which outranks a
+/// sheet pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NetSource {
     /// Generated, e.g. `Net-(R1-Pad1)`.
     Auto,
+    /// A pin on a hierarchical sheet, named `sheet/pin`.
+    SheetPin,
     /// A hierarchical label.
     Hier,
     /// A local label.
@@ -52,6 +56,17 @@ pub struct PinRef {
     pub pin: String,
     /// The owning symbol is marked do-not-populate. DNP symbols still connect.
     pub dnp: bool,
+}
+
+impl PinRef {
+    fn of(pin: &PlacedPin) -> PinRef {
+        PinRef {
+            refdes: pin.refdes.clone(),
+            unit: pin.unit,
+            pin: pin.number.clone(),
+            dnp: pin.dnp,
+        }
+    }
 }
 
 /// A net and the pins on it.
@@ -103,10 +118,7 @@ impl Netlist {
 
 /// Quantise to 1 µm so float dust never splits a node.
 fn key(p: Point2) -> (i64, i64) {
-    (
-        (p.x * 1000.0).round() as i64,
-        (p.y * 1000.0).round() as i64,
-    )
+    ((p.x * 1000.0).round() as i64, (p.y * 1000.0).round() as i64)
 }
 
 #[derive(Default)]
@@ -242,6 +254,19 @@ fn names(
             note(crate::text::unescape(&label.text), source, node);
         }
     }
+    for sheet in doc.items().iter().filter_map(|item| match item {
+        Item::Sheet(sheet) => Some(sheet),
+        _ => None,
+    }) {
+        // The child sheet names this net; from here the best that can be said
+        // is which sheet pin it arrives on.
+        for pin in &sheet.pins {
+            if let Some(node) = nodes.get(pin.at.point()) {
+                let name = crate::text::unescape(&format!("{}/{}", sheet.name, pin.name));
+                note(name, NetSource::SheetPin, node);
+            }
+        }
+    }
     for pin in placed {
         let Some(node) = nodes.get(pin.at) else {
             continue;
@@ -286,13 +311,13 @@ impl Anchors {
             // Strongest source wins; at equal strength KiCAD keeps the name
             // that sorts first.
             let candidate = (*source, text.clone());
-            let better = name
-                .get(&root)
-                .is_none_or(|(held_source, held)| match held_source.cmp(source) {
-                    std::cmp::Ordering::Less => true,
-                    std::cmp::Ordering::Equal => *text < *held,
-                    std::cmp::Ordering::Greater => false,
-                });
+            let better =
+                name.get(&root)
+                    .is_none_or(|(held_source, held)| match held_source.cmp(source) {
+                        std::cmp::Ordering::Less => true,
+                        std::cmp::Ordering::Equal => *text < *held,
+                        std::cmp::Ordering::Greater => false,
+                    });
             if better {
                 name.insert(root, candidate);
             }
@@ -314,26 +339,22 @@ impl Anchors {
 ///
 /// `kicad-cli` names a one-pin net `unconnected-(…)` unless something names it,
 /// so that is exactly what counts as a loose end here.
-fn emit(
-    placed: &[PlacedPin],
+fn emit<'a>(
+    placed: &'a [PlacedPin],
     nodes: &Nodes,
     roots: &[usize],
     anchors: &Anchors,
 ) -> (Vec<Net>, Vec<PinRef>, Vec<PinRef>) {
-    let mut groups: HashMap<usize, Vec<PinRef>> = HashMap::new();
+    let mut groups: HashMap<usize, Vec<&'a PlacedPin>> = HashMap::new();
     for pin in placed {
         let node = nodes.get(pin.at).expect("every placed pin is interned");
-        groups.entry(roots[node]).or_default().push(PinRef {
-            refdes: pin.refdes.clone(),
-            unit: pin.unit,
-            pin: pin.number.clone(),
-            dnp: pin.dnp,
-        });
+        groups.entry(roots[node]).or_default().push(pin);
     }
 
     let (mut nets, mut unconnected, mut no_connect) = (Vec::new(), Vec::new(), Vec::new());
-    for (root, mut pins) in groups {
+    for (root, members) in groups {
         let named = anchors.name.get(&root);
+        let mut pins: Vec<PinRef> = members.iter().map(|p| PinRef::of(p)).collect();
         if pins.len() < 2 && named.is_none() {
             match anchors.settled.contains(&root) {
                 true => no_connect.append(&mut pins),
@@ -343,7 +364,7 @@ fn emit(
         }
         let (source, name) = named
             .cloned()
-            .unwrap_or_else(|| (NetSource::Auto, auto_name(&pins)));
+            .unwrap_or_else(|| (NetSource::Auto, auto_name(&members)));
         pins.sort();
         nets.push(Net { name, source, pins });
     }
@@ -433,10 +454,63 @@ fn definition<'a>(doc: &'a SchDoc, lib_id: &str) -> Option<&'a kiutils_sexpr::No
     crate::pins::resolve(doc.lib_symbols()?, lib_id)
 }
 
-/// KiCAD's fallback name for an unnamed net.
-fn auto_name(pins: &[PinRef]) -> String {
-    let lead = pins.iter().min().expect("nets always hold a pin");
-    format!("Net-({}-Pad{})", lead.refdes, lead.pin)
+/// KiCAD's fallback name for an unnamed net: `Net-(<lead pin>)`.
+///
+/// The lead is the net's strongest pin driver. Symbols whose reference starts
+/// with `#` — power flags and the like — are not real components and never
+/// lead; a pin with a name of its own outranks an unnamed (`~`) one; ties go to
+/// whichever label sorts first.
+fn auto_name(pins: &[&PlacedPin]) -> String {
+    let pool = narrow(pins.to_vec(), |p| !p.refdes.starts_with('#'));
+    let pool = narrow(pool, has_pin_name);
+    let lead = pool
+        .iter()
+        .map(|p| driver_label(p))
+        .min()
+        .expect("nets always hold a pin");
+    format!("Net-({lead})")
+}
+
+/// Keep only the pins that pass, unless that would leave none.
+fn narrow<'a>(pool: Vec<&'a PlacedPin>, keep: fn(&PlacedPin) -> bool) -> Vec<&'a PlacedPin> {
+    let kept: Vec<&'a PlacedPin> = pool.iter().copied().filter(|p| keep(p)).collect();
+    match kept.is_empty() {
+        true => pool,
+        false => kept,
+    }
+}
+
+/// How KiCAD writes a pin when it names a net after it: the reference, a unit
+/// letter for a multi-unit part, then the pin's name — or `Pad<number>` when it
+/// has none.
+fn driver_label(pin: &PlacedPin) -> String {
+    let pad = match has_pin_name(pin) {
+        true => crate::text::unescape(&pin.name),
+        false => format!("Pad{}", pin.number),
+    };
+    format!("{}{}-{pad}", pin.refdes, unit_letter(pin))
+}
+
+/// Whether a pin says anything its number does not. A name that is empty, `~`,
+/// or a restatement of the number is no name at all.
+fn has_pin_name(pin: &PlacedPin) -> bool {
+    !pin.name.is_empty() && pin.name != "~" && pin.name != pin.number
+}
+
+/// `1` -> `A`, `27` -> `AA`, as KiCAD suffixes a multi-unit reference.
+fn unit_letter(pin: &PlacedPin) -> String {
+    if !pin.multi_unit {
+        return String::new();
+    }
+    let mut index = pin.unit.max(1) - 1;
+    let mut out = String::new();
+    loop {
+        out.insert(0, char::from(b'A' + (index % 26) as u8));
+        if index < 26 {
+            return out;
+        }
+        index = index / 26 - 1;
+    }
 }
 
 /// Join every node that lies strictly inside a wire to that wire.

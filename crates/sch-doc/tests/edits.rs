@@ -74,7 +74,8 @@ fn symbol_source() -> Option<SymbolSource> {
 fn setting_a_field_touches_one_block_and_no_net() {
     let (source, text, delta) = edited(|doc| {
         doc.set_field("R7", "Value", "22k").expect("set_field");
-        doc.set_field("R7", "MPN", "RC0603FR-0722KL").expect("set_field");
+        doc.set_field("R7", "MPN", "RC0603FR-0722KL")
+            .expect("set_field");
     });
     assert!(delta.is_empty(), "{delta:?}");
     let (kept, lost) = surviving(&source, &text);
@@ -96,10 +97,7 @@ fn moving_a_symbol_carries_its_fields_and_drops_only_its_own_pins() {
         doc.move_symbol("R7", x, y).expect("move");
     });
     assert!(
-        delta
-            .pins_now_unconnected
-            .iter()
-            .all(|p| p.refdes == "R7"),
+        delta.pins_now_unconnected.iter().all(|p| p.refdes == "R7"),
         "{:?}",
         delta.pins_now_unconnected
     );
@@ -161,7 +159,11 @@ fn adding_a_symbol_embeds_its_definition_and_leaves_nets_alone() {
     });
     assert!(delta.is_empty(), "{delta:?}");
     let (_, lost) = surviving(&source, &text);
-    assert_eq!(lost.len(), 1, "only lib_symbols should change, lost {lost:?}");
+    assert_eq!(
+        lost.len(),
+        1,
+        "only lib_symbols should change, lost {lost:?}"
+    );
     assert!(lost[0].contains("lib_symbols"), "{lost:?}");
 
     let doc = SchDoc::parse(&text).expect("reparse");
@@ -170,7 +172,13 @@ fn adding_a_symbol_embeds_its_definition_and_leaves_nets_alone() {
     assert_eq!(l9.lib_id, "Device:L");
     assert_eq!(l9.value(), "10uH");
     assert_eq!(l9.pin_uuids.len(), 2, "pin uuids: {:?}", l9.pin_uuids);
-    assert_eq!(sch_doc::placed_pins(&doc).iter().filter(|p| p.refdes == "L9").count(), 2);
+    assert_eq!(
+        sch_doc::placed_pins(&doc)
+            .iter()
+            .filter(|p| p.refdes == "L9")
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -180,12 +188,24 @@ fn adding_a_symbol_is_deterministic() {
         return;
     };
     let once = edited(|doc| {
-        doc.add_symbol("Device:L", "L9", "10uH", Pose::new(20.0, 20.0, 0.0), &source_lib)
-            .expect("add");
+        doc.add_symbol(
+            "Device:L",
+            "L9",
+            "10uH",
+            Pose::new(20.0, 20.0, 0.0),
+            &source_lib,
+        )
+        .expect("add");
     });
     let twice = edited(|doc| {
-        doc.add_symbol("Device:L", "L9", "10uH", Pose::new(20.0, 20.0, 0.0), &source_lib)
-            .expect("add");
+        doc.add_symbol(
+            "Device:L",
+            "L9",
+            "10uH",
+            Pose::new(20.0, 20.0, 0.0),
+            &source_lib,
+        )
+        .expect("add");
     });
     assert_eq!(once.1, twice.1, "UUIDs are not content-derived");
 }
@@ -197,18 +217,34 @@ fn adding_a_symbol_is_deterministic() {
 fn added_wires_merge_two_nets_and_the_stronger_name_wins() {
     let (source, text, delta) = edited(|doc| {
         let pins = sch_doc::placed_pins(doc);
-        let a = pins.iter().find(|p| p.refdes == "R7" && p.number == "1").expect("R7.1");
-        let b = pins.iter().find(|p| p.refdes == "C3" && p.number == "1").expect("C3.1");
+        let a = pins
+            .iter()
+            .find(|p| p.refdes == "R7" && p.number == "1")
+            .expect("R7.1");
+        let b = pins
+            .iter()
+            .find(|p| p.refdes == "C3" && p.number == "1")
+            .expect("C3.1");
         let corner = Point2::new(a.at.x, b.at.y);
         doc.add_wire(a.at, corner);
         doc.add_wire(corner, b.at);
-        doc.add_label(LabelKind::Local, "STITCH", Pose::new(corner.x, corner.y, 0.0));
+        doc.add_label(
+            LabelKind::Local,
+            "STITCH",
+            Pose::new(corner.x, corner.y, 0.0),
+        );
     });
     let (_, lost) = surviving(&source, &text);
-    assert!(lost.is_empty(), "additions rewrote existing blocks: {lost:?}");
+    assert!(
+        lost.is_empty(),
+        "additions rewrote existing blocks: {lost:?}"
+    );
     assert_eq!(
         delta.merged,
-        vec![(vec!["OUT".to_string(), "VCC".to_string()], "OUT".to_string())],
+        vec![(
+            vec!["OUT".to_string(), "VCC".to_string()],
+            "OUT".to_string()
+        )],
         "{delta:?}"
     );
     assert!(delta.pins_now_unconnected.is_empty(), "{delta:?}");
@@ -224,7 +260,12 @@ fn removing_a_symbol_takes_its_pins_and_nothing_else() {
     );
     let (_, lost) = surviving(&source, &text);
     assert_eq!(lost.len(), 1, "{lost:?}");
-    assert!(SchDoc::parse(&text).expect("reparse").symbol_by_ref("C3").is_none());
+    assert!(
+        SchDoc::parse(&text)
+            .expect("reparse")
+            .symbol_by_ref("C3")
+            .is_none()
+    );
 }
 
 #[test]
@@ -256,7 +297,10 @@ fn a_re_instantiated_sheet_keeps_its_per_placement_references() {
     let source = std::fs::read_to_string(&path).expect("read");
     let mut doc = SchDoc::parse(&source).expect("parse");
     let refdes = doc.symbols().next().expect("a symbol").refdes().to_string();
-    assert!(references(&source).len() > 4, "fixture has no instance table");
+    assert!(
+        references(&source).len() > 4,
+        "fixture has no instance table"
+    );
 
     doc.move_symbol(&refdes, 10.0, 10.0).expect("move");
     let moved = doc.to_text();
@@ -309,8 +353,14 @@ fn kicad_sees_an_added_symbol_on_the_net_it_was_wired_to() {
     };
     let (_, source) = fixture();
     let mut doc = SchDoc::parse(&source).expect("parse");
-    doc.add_symbol("Device:L", "L9", "10uH", Pose::new(60.0, 40.0, 0.0), &source_lib)
-        .expect("add_symbol");
+    doc.add_symbol(
+        "Device:L",
+        "L9",
+        "10uH",
+        Pose::new(60.0, 40.0, 0.0),
+        &source_lib,
+    )
+    .expect("add_symbol");
     let anchor = sch_doc::placed_pins(&doc)
         .into_iter()
         .find(|p| p.refdes == "R8" && p.number == "2")

@@ -33,6 +33,9 @@ pub struct PlacedPin {
     pub owner: String,
     pub refdes: String,
     pub unit: u32,
+    /// Whether the definition splits into several units, which is what makes
+    /// KiCAD qualify the reference with a unit letter (`U1A`).
+    pub multi_unit: bool,
     pub number: String,
     pub name: String,
     pub etype: String,
@@ -156,18 +159,23 @@ pub(crate) fn pin_numbers(def: &Node, unit: u32, style: u32) -> Vec<String> {
 /// Only pins of the instance's own unit and body style are placed, plus the
 /// unit-0 / style-0 pins every unit shares.
 pub(crate) fn pins_of(doc: &SchDoc, inst: &SymbolInst) -> Vec<PlacedPin> {
-    let Some(def) = doc.lib_symbols().and_then(|libs| resolve(libs, &inst.lib_id)) else {
+    let Some(def) = doc
+        .lib_symbols()
+        .and_then(|libs| resolve(libs, &inst.lib_id))
+    else {
         return Vec::new();
     };
     let power_symbol = is_power_definition(def);
     let style = body_style(inst);
-    lib_pins(def)
-        .into_iter()
+    let pins = lib_pins(def);
+    let multi_unit = pins.iter().any(|p| p.unit > 1);
+    pins.into_iter()
         .filter(|p| belongs(p, inst.unit, style))
         .map(|p| PlacedPin {
             owner: inst.uuid.clone(),
             refdes: inst.refdes().to_string(),
             unit: inst.unit,
+            multi_unit,
             number: p.number,
             name: p.name,
             etype: p.etype,

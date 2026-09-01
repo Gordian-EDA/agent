@@ -2,14 +2,15 @@
 //! sheet it claims to model.
 //!
 //! Two exclusions, both reported rather than silently passed: sheets carrying
-//! buses (the extractor warns instead of guessing), and hierarchical roots
-//! (`kicad-cli` netlists the whole tree, this crate scopes to one file).
+//! buses (the extractor warns instead of guessing), and hierarchical roots,
+//! whose partition `kicad-cli` takes over the whole tree while this crate
+//! scopes to one file — those are still held to their loose ends.
 
 mod corpus;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use sch_doc::{Item, NetSource, SchDoc, connect};
+use sch_doc::{Item, SchDoc, connect};
 
 type Partition = BTreeSet<Vec<String>>;
 
@@ -97,6 +98,7 @@ fn extraction_matches_the_kicad_netlist_partition() {
     let mut shape_only = 0;
     let mut skipped: BTreeMap<&str, usize> = BTreeMap::new();
     let mut hierarchical = 0;
+    let mut unreadable: Vec<String> = Vec::new();
     let mut failures = Vec::new();
 
     for path in corpus::files() {
@@ -117,13 +119,29 @@ fn extraction_matches_the_kicad_netlist_partition() {
             *skipped.entry(reason).or_default() += 1;
             continue;
         }
-        if doc.items().iter().any(|i| matches!(i, Item::Sheet(_))) {
+        let hierarchical_root = doc.items().iter().any(|i| matches!(i, Item::Sheet(_)));
+        let oracle = match kicad.netlist(&path) {
+            Ok(oracle) => oracle,
+            Err(err) => {
+                unreadable.push(format!("{}: {err}", corpus::label(&path)));
+                continue;
+            }
+        };
+        // A hierarchical root's partition is not comparable — kicad-cli
+        // netlists the whole tree — but its loose ends are: a pin this file
+        // calls loose has to be loose there too.
+        if hierarchical_root {
             hierarchical += 1;
+            let (mine, theirs) = (our_loose_ends(&netlist), oracle_loose_ends(&oracle));
+            if !mine.is_subset(&theirs) {
+                failures.push(format!(
+                    "{}: called {:?} loose, kicad did not",
+                    corpus::label(&path),
+                    mine.difference(&theirs).take(3).collect::<Vec<_>>()
+                ));
+            }
             continue;
         }
-        let Ok(oracle) = kicad.netlist(&path) else {
-            continue;
-        };
         let (mine, reference) = (ours(&netlist), theirs(&oracle));
         if shape_check {
             shape_only += 1;
@@ -152,7 +170,7 @@ fn extraction_matches_the_kicad_netlist_partition() {
                 loose.1.difference(&loose.0).take(3).collect::<Vec<_>>()
             ));
         }
-        for net in netlist.nets.iter().filter(|n| n.source != NetSource::Auto) {
+        for net in &netlist.nets {
             let pins: BTreeSet<String> = net
                 .pins
                 .iter()
@@ -192,7 +210,8 @@ fn extraction_matches_the_kicad_netlist_partition() {
 
     eprintln!(
         "extractor: {compared} matched exactly, {shape_only} matched by net shape \
-         (re-instantiated sheets), {hierarchical} skipped as hierarchical roots, \
+         (re-instantiated sheets), {hierarchical} hierarchical roots checked for \
+         loose ends only, \
          skipped after a warning: {skipped:?}"
     );
     assert!(compared > 20, "only {compared} sheets were comparable");
@@ -262,7 +281,10 @@ fn no_sheet_is_ever_over_connected() {
         checked += 1;
         let theirs = theirs(&oracle);
         for ours in ours(&netlist) {
-            if !theirs.iter().any(|net| ours.iter().all(|p| net.contains(p))) {
+            if !theirs
+                .iter()
+                .any(|net| ours.iter().all(|p| net.contains(p)))
+            {
                 failures.push(format!(
                     "{}: {:?} is not inside any kicad net",
                     corpus::label(&path),

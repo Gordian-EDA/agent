@@ -40,12 +40,9 @@ fn pin_to_net(netlist: &Netlist) -> HashMap<PinKey, &str> {
         .nets
         .iter()
         .flat_map(|net| {
-            net.pins.iter().map(move |p| {
-                (
-                    (p.refdes.clone(), p.unit, p.pin.clone()),
-                    net.name.as_str(),
-                )
-            })
+            net.pins
+                .iter()
+                .map(move |p| ((p.refdes.clone(), p.unit, p.pin.clone()), net.name.as_str()))
         })
         .collect()
 }

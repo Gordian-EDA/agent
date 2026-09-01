@@ -61,18 +61,44 @@ impl SchDoc {
         Ok(())
     }
 
-    /// Drop `(lib_symbols)` entries no placed symbol refers to. Called for you
-    /// on [`SchDoc::write`] whenever the document has been edited.
+    /// Drop `(lib_symbols)` entries nothing refers to. Called for you on
+    /// [`SchDoc::write`] whenever the document has been edited.
+    ///
+    /// "Refers to" is transitive: a derived symbol has no body of its own, so
+    /// the parent it `extends` stays even though nothing is placed under the
+    /// parent's own `lib_id`. Dropping it would leave every derived symbol in
+    /// the file with no pins.
     pub fn gc_lib_symbols(&mut self) {
-        let used: Vec<String> = self.symbols().map(|s| s.lib_id.clone()).collect();
+        let mut used: Vec<String> = self.symbols().map(|s| s.lib_id.clone()).collect();
+        used.sort();
+        used.dedup();
         let Some(libs) = self.items_mut().iter_mut().find_map(|item| match item {
             Item::LibSymbols(l) => Some(l),
             _ => None,
         }) else {
             return;
         };
+        let mut frontier = 0;
+        while frontier < used.len() {
+            let lib_id = used[frontier].clone();
+            frontier += 1;
+            let Some((lib, _)) = lib_id.split_once(':') else {
+                continue;
+            };
+            let parent = libs
+                .defs
+                .get(&lib_id)
+                .and_then(|def| crate::sexpr::child_text(&def.node, "extends"))
+                .map(|parent| format!("{lib}:{parent}"));
+            if let Some(parent) = parent
+                && !used.contains(&parent)
+            {
+                used.push(parent);
+            }
+        }
         let before = libs.defs.len();
-        libs.defs.retain(|lib_id, _| used.iter().any(|u| u == lib_id));
+        libs.defs
+            .retain(|lib_id, _| used.iter().any(|u| u == lib_id));
         if libs.defs.len() != before
             && let Some(raw) = libs.raw.as_mut()
         {

@@ -203,7 +203,8 @@ impl SchDoc {
                 .iter()
                 .rposition(|i| HEADER.contains(&i.head()))
                 .map_or(0, |i| i + 1);
-            self.items.insert(at, Item::LibSymbols(LibSymbols::default()));
+            self.items
+                .insert(at, Item::LibSymbols(LibSymbols::default()));
         }
         self.items
             .iter_mut()

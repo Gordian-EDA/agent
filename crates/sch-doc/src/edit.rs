@@ -161,12 +161,16 @@ impl SchDoc {
             tagged("on_board", vec![yes_no(true)]),
             tagged("dnp", vec![yes_no(false)]),
             tagged("uuid", vec![quoted(uuid.clone())]),
-            property_node("Reference", refdes, Pose::new(at.x, at.y - 2.54, 0.0), false),
+            property_node(
+                "Reference",
+                refdes,
+                Pose::new(at.x, at.y - 2.54, 0.0),
+                false,
+            ),
             property_node("Value", value, Pose::new(at.x, at.y + 2.54, 0.0), false),
             property_node("Footprint", "", Pose::new(at.x, at.y, 0.0), true),
             property_node("Datasheet", "", Pose::new(at.x, at.y, 0.0), true),
             property_node("Description", "", Pose::new(at.x, at.y, 0.0), true),
-
         ];
         children.extend(pin_nodes);
         children.push(self.instances_node(refdes));
@@ -186,10 +190,7 @@ impl SchDoc {
 
     /// Draw a wire between two points. Returns its UUID.
     pub fn add_wire(&mut self, from: Point2, to: Point2) -> String {
-        let uuid = self.derive_uuid(
-            "wire",
-            &format!("{},{}->{},{}", from.x, from.y, to.x, to.y),
-        );
+        let uuid = self.derive_uuid("wire", &format!("{},{}->{},{}", from.x, from.y, to.x, to.y));
         let node = list(vec![
             sym("wire"),
             tagged(
@@ -199,7 +200,13 @@ impl SchDoc {
                     tagged("xy", vec![num(to.x), num(to.y)]),
                 ],
             ),
-            tagged("stroke", vec![tagged("width", vec![num(0.0)]), tagged("type", vec![sym("default")])]),
+            tagged(
+                "stroke",
+                vec![
+                    tagged("width", vec![num(0.0)]),
+                    tagged("type", vec![sym("default")]),
+                ],
+            ),
             tagged("uuid", vec![quoted(uuid.clone())]),
         ]);
         self.insert_item(Item::Wire(Wire {

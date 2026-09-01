@@ -88,7 +88,10 @@ fn a_pin_inside_a_wire_joins_it() {
             wire(100.0, 96.19, 140.0, 96.19),
         ),
     );
-    assert_eq!(nets(&doc), vec![vec!["R1.1".to_string(), "R2.1".to_string()]]);
+    assert_eq!(
+        nets(&doc),
+        vec![vec!["R1.1".to_string(), "R2.1".to_string()]]
+    );
 }
 
 /// Two wires whose interiors cross are not connected — that is a drawing, not
@@ -143,7 +146,10 @@ fn a_wire_end_inside_a_wire_joins_it() {
             wire(10.0, 10.0, 10.0, 20.0),
         ),
     );
-    assert_eq!(nets(&doc), vec![vec!["R1.1".to_string(), "R2.1".to_string()]]);
+    assert_eq!(
+        nets(&doc),
+        vec![vec!["R1.1".to_string(), "R2.1".to_string()]]
+    );
 }
 
 /// Rail symbols name their net from `Value`, and same-named rails are one net
@@ -168,8 +174,8 @@ fn power_symbols_name_their_net_from_value_and_merge_by_it() {
     assert_eq!(refs, ["#PWR01", "#PWR02", "R1", "R2"]);
 
     // Renaming one rail splits them.
-    let split = SchDoc::parse(&doc.to_text().replace("\"GND\" (at 50", "\"VSS\" (at 50"))
-        .expect("reparse");
+    let split =
+        SchDoc::parse(&doc.to_text().replace("\"GND\" (at 50", "\"VSS\" (at 50")).expect("reparse");
     let after = connect::extract(&split);
     assert_eq!(net_named(&after, "GND").pins.len(), 2);
     assert_eq!(net_named(&after, "VSS").pins.len(), 2);
@@ -185,8 +191,24 @@ fn a_power_flag_names_nothing() {
             "{}\n{}\n{}\n{}",
             place("Device:R", "R1", "1k", 0.0, 3.81, 0.0, "(unit 1)"),
             place("Device:R", "R2", "1k", 50.0, 3.81, 0.0, "(unit 1)"),
-            place("power:PWR_FLAG", "#FLG01", "PWR_FLAG", 0.0, 0.0, 0.0, "(unit 1)"),
-            place("power:PWR_FLAG", "#FLG02", "PWR_FLAG", 50.0, 0.0, 0.0, "(unit 1)"),
+            place(
+                "power:PWR_FLAG",
+                "#FLG01",
+                "PWR_FLAG",
+                0.0,
+                0.0,
+                0.0,
+                "(unit 1)"
+            ),
+            place(
+                "power:PWR_FLAG",
+                "#FLG02",
+                "PWR_FLAG",
+                50.0,
+                0.0,
+                0.0,
+                "(unit 1)"
+            ),
         ),
     );
     assert_eq!(nets(&doc).len(), 2, "{:?}", connect::extract(&doc).nets);
@@ -217,7 +239,15 @@ fn dnp_symbols_still_connect_and_say_so() {
         &[RESISTOR],
         &format!(
             "{}\n{}\n{}",
-            place("Device:R", "R1", "1k", 100.0, 100.0, 0.0, "(unit 1) (dnp yes)"),
+            place(
+                "Device:R",
+                "R1",
+                "1k",
+                100.0,
+                100.0,
+                0.0,
+                "(unit 1) (dnp yes)"
+            ),
             place("Device:R", "R2", "1k", 120.0, 100.0, 0.0, "(unit 1)"),
             wire(100.0, 96.19, 120.0, 96.19),
         ),
@@ -306,8 +336,24 @@ fn rotation_and_mirror_place_pins_where_kicad_does() {
         &[RESISTOR],
         &format!(
             "{}\n{}\n{}",
-            place("Device:R", "R1", "1k", 100.0, 100.0, 90.0, "(unit 1) (mirror x)"),
-            place("Device:R", "R2", "1k", 120.0, 100.0, 90.0, "(unit 1) (mirror y)"),
+            place(
+                "Device:R",
+                "R1",
+                "1k",
+                100.0,
+                100.0,
+                90.0,
+                "(unit 1) (mirror x)"
+            ),
+            place(
+                "Device:R",
+                "R2",
+                "1k",
+                120.0,
+                100.0,
+                90.0,
+                "(unit 1) (mirror y)"
+            ),
             wire(103.81, 100.0, 116.19, 100.0),
         ),
     );
@@ -325,7 +371,10 @@ fn rotation_and_mirror_place_pins_where_kicad_does() {
             ("R2".to_string(), "2".to_string(), 116.19),
         ]
     );
-    assert_eq!(nets(&doc), vec![vec!["R1.2".to_string(), "R2.2".to_string()]]);
+    assert_eq!(
+        nets(&doc),
+        vec![vec!["R1.2".to_string(), "R2.2".to_string()]]
+    );
 }
 
 /// Same-named labels merge inside a sheet, and the strongest source names the
@@ -347,7 +396,11 @@ fn labels_merge_by_name_and_the_strongest_source_names_the_net() {
     assert_eq!(busy.source, NetSource::Global);
     let mut refs: Vec<&str> = busy.pins.iter().map(|p| p.refdes.as_str()).collect();
     refs.sort_unstable();
-    assert_eq!(refs, ["R1", "R2"], "the global label did not merge the sheet");
+    assert_eq!(
+        refs,
+        ["R1", "R2"],
+        "the global label did not merge the sheet"
+    );
     assert!(
         !netlist.nets.iter().any(|n| n.name == "SIG"),
         "SIG should have lost the naming race"
@@ -404,7 +457,10 @@ fn a_sheet_pin_joins_the_wires_that_cross_it() {
         })
         .expect("sheet");
     assert_eq!(pins[0].at.point(), geom::Point2::new(50.0, 55.0));
-    assert_eq!(nets(&doc), vec![vec!["R1.1".to_string(), "R2.1".to_string()]]);
+    assert_eq!(
+        nets(&doc),
+        vec![vec!["R1.1".to_string(), "R2.1".to_string()]]
+    );
 }
 
 /// A hierarchical label names its sheet-scoped net, and loses to a local label
@@ -513,6 +569,59 @@ fn the_delta_reports_creation_removal_and_loose_ends() {
     assert!(back.pins_now_unconnected.is_empty(), "{back:?}");
 }
 
+/// A pin wired to a sheet pin and nothing else is on a net — the child sheet
+/// drives it — so it must not be reported as a loose end. The best name this
+/// file can give it is the sheet pin it arrives on.
+#[test]
+fn a_pin_wired_only_to_a_sheet_pin_is_on_a_net() {
+    let doc = sheet(
+        &[RESISTOR],
+        &format!(
+            "{}\n{}\n(sheet (at 50 50) (size 20 20) (uuid \"s\")\n\
+             (property \"Sheetname\" \"child\" (at 50 49 0))\n\
+             (property \"Sheetfile\" \"child.kicad_sch\" (at 50 71 0))\n\
+             (pin \"IN\" input (at 50 55 180) (uuid \"sp\")))",
+            place("Device:R", "R1", "1k", 20.0, 58.81, 0.0, "(unit 1)"),
+            wire(20.0, 55.0, 50.0, 55.0),
+        ),
+    );
+    let netlist = connect::extract(&doc);
+    let net = net_named(&netlist, "child/IN");
+    assert_eq!(net.source, NetSource::SheetPin);
+    assert_eq!(net.pins.len(), 1);
+    assert_eq!(net.pins[0].pin, "1");
+    assert_eq!(
+        netlist
+            .unconnected
+            .iter()
+            .map(|p| p.pin.as_str())
+            .collect::<Vec<_>>(),
+        ["2"],
+        "the sheet pin end was reported as a loose end"
+    );
+}
+
+/// A sheet pin is the weakest driver there is: any label on the same net names
+/// it instead.
+#[test]
+fn a_label_outranks_the_sheet_pin_it_shares_a_net_with() {
+    let doc = sheet(
+        &[RESISTOR],
+        &format!(
+            "{}\n{}\n(label \"SIG\" (at 20 55 0) (uuid \"l1\"))\n\
+             (sheet (at 50 50) (size 20 20) (uuid \"s\")\n\
+             (property \"Sheetname\" \"child\" (at 50 49 0))\n\
+             (property \"Sheetfile\" \"child.kicad_sch\" (at 50 71 0))\n\
+             (pin \"IN\" input (at 50 55 180) (uuid \"sp\")))",
+            place("Device:R", "R1", "1k", 20.0, 58.81, 0.0, "(unit 1)"),
+            wire(20.0, 55.0, 50.0, 55.0),
+        ),
+    );
+    let netlist = connect::extract(&doc);
+    assert_eq!(net_named(&netlist, "SIG").source, NetSource::Local);
+    assert!(!netlist.nets.iter().any(|n| n.name == "child/IN"));
+}
+
 #[test]
 fn buses_and_missing_definitions_are_reported() {
     let bussed = sheet(
@@ -526,7 +635,10 @@ fn buses_and_missing_definitions_are_reported() {
             .any(|w| w.contains("buses"))
     );
 
-    let unknown = sheet(&[], &place("Device:R", "R1", "1k", 0.0, 0.0, 0.0, "(unit 1)"));
+    let unknown = sheet(
+        &[],
+        &place("Device:R", "R1", "1k", 0.0, 0.0, 0.0, "(unit 1)"),
+    );
     let warnings = connect::extract(&unknown).warnings;
     assert!(
         warnings.iter().any(|w| w.contains("Device:R")),
@@ -549,7 +661,10 @@ fn the_delta_distinguishes_a_merge_from_a_rename() {
     let renamed = SchDoc::parse(&apart.to_text().replace("\"B\"", "\"C\"")).expect("reparse");
     let delta = connect::Netlist::diff(&connect::extract(&apart), &connect::extract(&renamed));
     assert_eq!(delta.renamed, vec![("B".to_string(), "C".to_string())]);
-    assert!(delta.merged.is_empty() && delta.split.is_empty(), "{delta:?}");
+    assert!(
+        delta.merged.is_empty() && delta.split.is_empty(),
+        "{delta:?}"
+    );
 
     let joined = SchDoc::parse(&apart.to_text().replace("\"B\"", "\"A\"")).expect("reparse");
     let delta = connect::Netlist::diff(&connect::extract(&apart), &connect::extract(&joined));

@@ -189,9 +189,13 @@ impl SymbolInst {
         SymbolInst {
             uuid: child_text(node, "uuid").unwrap_or_default().to_string(),
             lib_id: child_text(node, "lib_id").unwrap_or_default().to_string(),
-            unit: child_text(node, "unit").and_then(|s| s.parse().ok()).unwrap_or(1),
+            unit: child_text(node, "unit")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1),
             at: child(node, "at").map(decode_pose).unwrap_or_default(),
-            mirror: child_text(node, "mirror").map(Mirror::parse).unwrap_or_default(),
+            mirror: child_text(node, "mirror")
+                .map(Mirror::parse)
+                .unwrap_or_default(),
             dnp: child_flag(node, "dnp").unwrap_or(false),
             in_bom: child_flag(node, "in_bom").unwrap_or(true),
             on_board: child_flag(node, "on_board").unwrap_or(true),
@@ -204,7 +208,9 @@ impl SymbolInst {
 
     /// Reference designator, from the `Reference` property.
     pub fn refdes(&self) -> &str {
-        self.fields.get("Reference").map_or("", |f| f.value.as_str())
+        self.fields
+            .get("Reference")
+            .map_or("", |f| f.value.as_str())
     }
 
     /// The node this symbol was decoded from, with every child the typed model
@@ -220,7 +226,10 @@ impl SymbolInst {
 
     pub(crate) fn encode(&self) -> Node {
         let mut node = self.raw.node.clone();
-        sexpr::set_child(&mut node, tagged("lib_id", vec![quoted(self.lib_id.clone())]));
+        sexpr::set_child(
+            &mut node,
+            tagged("lib_id", vec![quoted(self.lib_id.clone())]),
+        );
         sexpr::set_child(&mut node, encode_pose(self.at));
         sexpr::set_child(&mut node, tagged("unit", vec![num(self.unit as f64)]));
         sexpr::set_child(&mut node, tagged("dnp", vec![yes_no(self.dnp)]));
@@ -440,7 +449,11 @@ impl Sheet {
             .filter(|c| sexpr::head(c) == Some("pin"))
             .map(|c| SheetPin {
                 uuid: child_text(c, "uuid").unwrap_or_default().to_string(),
-                name: items(c).get(1).and_then(sexpr::text).unwrap_or_default().to_string(),
+                name: items(c)
+                    .get(1)
+                    .and_then(sexpr::text)
+                    .unwrap_or_default()
+                    .to_string(),
                 at: child(c, "at").map(decode_pose).unwrap_or_default(),
             })
             .collect();
@@ -454,7 +467,10 @@ impl Sheet {
             .unwrap_or(Point2::new(0.0, 0.0));
         Sheet {
             uuid: child_text(node, "uuid").unwrap_or_default().to_string(),
-            at: child(node, "at").map(decode_pose).unwrap_or_default().point(),
+            at: child(node, "at")
+                .map(decode_pose)
+                .unwrap_or_default()
+                .point(),
             size,
             name: property("Sheetname"),
             file: property("Sheetfile"),
@@ -812,7 +828,10 @@ mod tests {
         f.value = "#PWR01".to_string();
         let rendered = render(&f);
         assert_eq!(rendered.matches("hide").count(), 1, "{rendered}");
-        assert!(rendered.contains("(font (size 1.27 1.27)) (hide yes)"), "{rendered}");
+        assert!(
+            rendered.contains("(font (size 1.27 1.27)) (hide yes)"),
+            "{rendered}"
+        );
     }
 
     #[test]

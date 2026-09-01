@@ -62,7 +62,9 @@ pub fn child_mut<'a>(node: &'a mut Node, name: &str) -> Option<&'a mut Node> {
 
 /// `(name <atom>)` as text.
 pub fn child_text<'a>(node: &'a Node, name: &str) -> Option<&'a str> {
-    child(node, name).and_then(|c| items(c).get(1)).and_then(text)
+    child(node, name)
+        .and_then(|c| items(c).get(1))
+        .and_then(text)
 }
 
 /// `(name yes|no)`, absent reads as `None`.
