@@ -95,8 +95,12 @@ pub fn check_schematic(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let (doc, netlist) = crate::session::Edit::read(ctx)?;
     let design = design(&doc, &netlist);
     let mut diagnostics = sch_check::lint::lint(&design, ctx.provider());
-    for message in sch_check::erc::erc_checks(&design, ctx.provider()) {
-        diagnostics.push(sch_check::Diagnostic::warning("electrical", message));
+    for defect in sch_check::erc::defects(&design, ctx.provider()) {
+        diagnostics.push(if defect.blocking {
+            sch_check::Diagnostic::error("electrical", defect.line)
+        } else {
+            sch_check::Diagnostic::warning("electrical", defect.line)
+        });
     }
     let mut report = compile_report(&diagnostics);
     report["extractor_warnings"] = json!(netlist.warnings);

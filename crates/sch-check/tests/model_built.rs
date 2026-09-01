@@ -88,7 +88,10 @@ fn unconnected_power_pin_is_an_error() {
 
 #[test]
 fn a_symbol_outside_the_table_is_not_a_lint_error() {
-    let d = design(&[("U9", part("Vendor:UnknownPart", &[("A1", "SIG")]))]);
+    let d = design(&[
+        ("U9", part("Vendor:UnknownPart", &[("A1", "SIG")])),
+        ("U8", part("Vendor:UnknownPart", &[("A1", "SIG")])),
+    ]);
     let diags = lint::lint(&d, &provider());
     assert!(!diags.has_errors(), "{:?}", codes(&diags));
     assert!(!codes(&diags).contains(&"unknown-part"));
@@ -198,7 +201,7 @@ fn a_global_label_marks_its_net_as_a_port() {
     label.pins.insert("1".into(), PinTarget::Net("TX".into()));
     let d = design(&[("U1", part("M:CPU", &[("PB6", "TX")])), ("#LBL01", label)]);
     assert!(d.nets["TX"].port);
-    // A port legitimately has one pin — no typo warning.
+    // The label itself sits on the net, so the port is not a lone pin.
     let diags = lint::lint(&d, &provider());
     assert!(
         !diags

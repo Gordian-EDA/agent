@@ -106,8 +106,8 @@ mod tests {
         let mut ds = Diagnostics::default();
         assert!(!ds.has_errors());
         ds.push(Diagnostic::warning(
-            "single-pin-net",
-            "net `X` has only one pin",
+            "near-name",
+            "nets `X` and `Y` differ by one character",
         ));
         assert!(!ds.has_errors());
         ds.push(Diagnostic::error(

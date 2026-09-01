@@ -603,7 +603,7 @@ impl SchDoc {
             let h = crate::sexpr::number(args.get(3)?)?;
             return Some([w, h]);
         }
-        iso_page(&name)
+        iso_page(name)
     }
 
     /// Grow the page so `size` fits, leaving it alone when it already does.
