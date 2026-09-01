@@ -1108,7 +1108,9 @@ dependencies = [
 name = "gordian-tools-sch"
 version = "0.1.0"
 dependencies = [
+ "anneal-place",
  "anyhow",
+ "cluster-place",
  "geom",
  "gordian-llm",
  "gordian-runtime",
@@ -1118,7 +1120,9 @@ dependencies = [
  "sch-check",
  "sch-doc",
  "sch-floorplan",
+ "serde",
  "serde_json",
+ "spine-place",
  "strsim",
 ]
 

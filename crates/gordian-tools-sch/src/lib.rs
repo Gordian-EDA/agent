@@ -17,6 +17,7 @@
 //! the live obstacle scene and falls back to a matched pair of labels, saying
 //! so; that is the only way copper is drawn.
 
+mod bulk;
 mod check;
 mod edit;
 mod place;
@@ -32,8 +33,11 @@ use serde_json::{Value, json};
 
 /// The tools that write the schematic. The turn loop approves these before
 /// they run — they mutate the project and have no dry-run.
-pub const MUTATORS: [&str; 12] = [
+pub const MUTATORS: [&str; 15] = [
     "undo",
+    "place_parts",
+    "arrange",
+    "rewire",
     "add_symbols",
     "remove_symbols",
     "move_symbols",
@@ -75,6 +79,21 @@ pub fn tool_defs() -> Vec<Tool> {
         "rot": { "type": "number", "enum": [0, 90, 180, 270] }
     });
     let defs: Vec<(&str, &str, Value)> = vec![
+        (
+            "place_parts",
+            "The ONLY way to create a new design or add a multi-part block. State connectivity only: parts and pin-to-net mappings, never coordinates or wires. One call lays out the whole new sheet, or places the block as a region while freezing existing symbols. Use `intent.relations` for left_of/right_of/group side_of placement.",
+            sch_check::place_parts_input_schema(),
+        ),
+        (
+            "arrange",
+            "Re-place selected symbols and redraw only their wiring while every unselected symbol stays frozen. Select by refs or bbox; the placement engine owns all coordinates.",
+            bulk::selection_schema(true),
+        ),
+        (
+            "rewire",
+            "Redraw selected symbols' wiring in place without moving any symbol. Select by refs or bbox; wires are solver-generated, never coordinate-authored.",
+            bulk::selection_schema(false),
+        ),
         (
             "read_schematic",
             "Read the live schematic: one line per symbol with its position and pin→net map, \
@@ -336,7 +355,7 @@ pub fn tool_defs() -> Vec<Tool> {
 
 /// Dispatch one of this crate's tools. `None` when the name is not ours.
 pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>> {
-    if !ctx.sch_path().is_file() {
+    if !ctx.sch_path().is_file() && name != "place_parts" {
         return handles(name).then(|| {
             Ok(json!({
                 "error": format!(
@@ -347,6 +366,9 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         });
     }
     Some(match name {
+        "place_parts" => bulk::place_parts(input, ctx),
+        "arrange" => bulk::arrange(input, ctx),
+        "rewire" => bulk::rewire(input, ctx),
         "read_schematic" => query::read_schematic(input, ctx),
         "get_symbol" => query::get_symbol(input, ctx),
         "get_net" => query::get_net(input, ctx),

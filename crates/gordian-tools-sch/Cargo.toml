@@ -15,8 +15,12 @@ kicad = { path = "../kicad" }
 sch-check = { path = "../sch-check" }
 sch-doc = { path = "../sch-doc" }
 sch-floorplan = { path = "../sch-floorplan" }
+anneal-place = { path = "../anneal-place" }
+cluster-place = { path = "../cluster-place" }
+spine-place = { path = "../spine-place" }
 
 anyhow.workspace = true
 indexmap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 strsim.workspace = true

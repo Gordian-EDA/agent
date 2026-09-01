@@ -176,6 +176,21 @@ impl Edit {
         })
     }
 
+    /// Begin an edit for a project that does not have a schematic yet.
+    pub fn create(ctx: &AgentRuntime, mut doc: SchDoc) -> Edit {
+        let before = connect::extract(&doc);
+        let rollback = doc.snapshot();
+        Edit {
+            path: ctx.sch_path().to_path_buf(),
+            undo_dir: undo_dir(ctx),
+            original: String::new(),
+            warnings: before.warnings.clone(),
+            before,
+            rollback,
+            doc,
+        }
+    }
+
     /// Read the schematic without intending to change it.
     pub fn read(ctx: &AgentRuntime) -> Result<(SchDoc, Netlist)> {
         let edit = Edit::open(ctx)?;
@@ -255,8 +270,17 @@ pub fn undo(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": format!("no snapshot `{id}`") }));
     }
     let before = Edit::open(ctx).map(|e| e.before).unwrap_or_default();
-    std::fs::copy(&stash, ctx.sch_path())?;
-    let after = Edit::open(ctx)?.before;
+    let restored = std::fs::read(&stash)?;
+    if restored.is_empty() {
+        match std::fs::remove_file(ctx.sch_path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        std::fs::write(ctx.sch_path(), restored)?;
+    }
+    let after = Edit::open(ctx).map(|e| e.before).unwrap_or_default();
     Ok(json!({
         "changed": format!("restored the schematic to snapshot {id}"),
         "net_delta": delta_json(&Netlist::diff(&before, &after)),
