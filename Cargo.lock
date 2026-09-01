@@ -88,12 +88,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arraydeque"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -344,20 +338,6 @@ dependencies = [
 [[package]]
 name = "circuit-graph"
 version = "0.1.0"
-
-[[package]]
-name = "circuit-lang"
-version = "0.1.0"
-dependencies = [
- "geom",
- "indexmap 2.14.0",
- "kicad",
- "saphyr",
- "saphyr-parser",
- "sch-check",
- "serde_json",
- "strsim",
-]
 
 [[package]]
 name = "cluster-place"
@@ -1031,36 +1011,24 @@ dependencies = [
 name = "gordian-core"
 version = "0.1.0"
 dependencies = [
- "anneal-place",
  "anyhow",
  "async-trait",
  "base64",
- "circuit-graph",
- "circuit-lang",
- "cluster-place",
  "directories",
  "futures",
  "genai",
- "geom",
  "gordian-llm",
  "gordian-runtime",
  "gordian-tools-sch",
  "indexmap 2.14.0",
  "kicad",
- "kicad-footprint",
- "kicad-symbol",
  "pcb-workflow",
  "prost",
  "prost-types",
- "rayon",
  "resvg",
  "sch-check",
- "sch-floorplan",
- "sch-io",
- "sch-place",
  "serde",
  "serde_json",
- "spine-place",
  "tempfile",
  "tokio",
  "toml",
@@ -1094,7 +1062,6 @@ dependencies = [
  "kicad-symbol",
  "resvg",
  "sch-check",
- "sch-io",
  "serde",
  "serde_json",
  "tempfile",
@@ -1116,6 +1083,7 @@ dependencies = [
  "gordian-runtime",
  "indexmap 2.14.0",
  "kicad",
+ "kicad-footprint",
  "kicad-symbol",
  "sch-check",
  "sch-doc",
@@ -1178,15 +1146,6 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-
-[[package]]
-name = "hashlink"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
-dependencies = [
- "hashbrown 0.15.5",
-]
 
 [[package]]
 name = "heck"
@@ -2087,15 +2046,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
-name = "ordered-float"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7d950ca161dc355eaf28f82b11345ed76c6e1f6eb1f4f4479e0323b9e2fbd0e"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
 name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2210,7 +2160,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "circuit-graph",
- "circuit-lang",
  "geom",
  "gordian-runtime",
  "kicad",
@@ -2225,7 +2174,7 @@ dependencies = [
  "pcb-route-mesh",
  "prost-types",
  "sch-check",
- "sch-io",
+ "sch-doc",
  "serde",
  "serde_json",
  "tempfile",
@@ -2983,29 +2932,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "saphyr"
-version = "0.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3767dfe8889ebb55a21409df2b6f36e66abfbe1eb92d64ff76ae799d3f91016"
-dependencies = [
- "arraydeque",
- "encoding_rs",
- "hashlink",
- "ordered-float",
- "saphyr-parser",
-]
-
-[[package]]
-name = "saphyr-parser"
-version = "0.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fb771b59f6b1985d1406325ec28f97cfb14256abcec4fdfb37b36a1766d6af7"
-dependencies = [
- "arraydeque",
- "hashlink",
-]
-
-[[package]]
 name = "sch-check"
 version = "0.1.0"
 dependencies = [
@@ -3047,7 +2973,6 @@ dependencies = [
  "rayon",
  "sch-check",
  "sch-doc",
- "sch-io",
  "sch-place",
  "serde",
  "serde_json",
@@ -3056,16 +2981,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "sch-io"
-version = "0.1.0"
-dependencies = [
- "circuit-lang",
- "kicad",
- "sch-check",
- "sch-place",
 ]
 
 [[package]]

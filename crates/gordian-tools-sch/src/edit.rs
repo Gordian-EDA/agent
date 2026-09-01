@@ -721,6 +721,73 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     )
 }
 
+/// Set a validated batch of footprint fields without changing connectivity.
+pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let Some(assignments) = input.get("assignments").and_then(Value::as_array) else {
+        return Ok(json!({ "error": "assign_footprints needs a non-empty `assignments` array" }));
+    };
+    if assignments.is_empty() {
+        return Ok(json!({ "error": "assign_footprints needs a non-empty `assignments` array" }));
+    }
+    let catalog = ctx.footprint_catalog()?;
+    let mut requested = Vec::with_capacity(assignments.len());
+    for assignment in assignments {
+        let (Some(reference), Some(footprint)) = (
+            assignment.get("reference").and_then(Value::as_str),
+            assignment.get("footprint").and_then(Value::as_str),
+        ) else {
+            return Ok(json!({ "error": "every assignment needs `reference` and `footprint`" }));
+        };
+        let id = match kicad_footprint::FootprintId::parse(footprint) {
+            Ok(id) => id,
+            Err(error) => {
+                return Ok(json!({
+                    "error": format!("{reference}: invalid footprint `{footprint}`: {error}"),
+                    "suggestions": catalog.suggest_text(footprint),
+                }));
+            }
+        };
+        if let Err(error) = catalog.footprint(&id) {
+            return Ok(json!({
+                "error": format!("{reference}: footprint `{footprint}` could not be used: {error}"),
+                "suggestions": catalog.suggest(&id),
+            }));
+        }
+        requested.push((reference.to_string(), footprint.to_string()));
+    }
+
+    let mut edit = Edit::open(ctx)?;
+    for (reference, _) in &requested {
+        let units = refs::units(&edit.doc, reference);
+        if units.is_empty() {
+            return Ok(json!({ "error": format!("no symbol `{reference}` on the sheet") }));
+        }
+        if units.iter().any(|(_, uuid)| {
+            edit.doc
+                .symbols()
+                .find(|symbol| symbol.uuid == *uuid)
+                .is_some_and(|symbol| symbol.dnp || symbol.refdes().starts_with('#'))
+        }) {
+            return Ok(json!({
+                "error": format!("{reference} is virtual or DNP and cannot receive a footprint")
+            }));
+        }
+    }
+    for (reference, footprint) in &requested {
+        for (_, uuid) in refs::units(&edit.doc, reference) {
+            edit.doc.set_field(&uuid, "Footprint", footprint)?;
+        }
+    }
+    edit.commit(
+        json!({
+            "assigned": requested.iter().map(|(reference, footprint)| {
+                json!({ "reference": reference, "footprint": footprint })
+            }).collect::<Vec<_>>()
+        }),
+        Allow::nothing(),
+    )
+}
+
 /// Set a part's build attributes.
 pub fn set_flags(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let Some(refdes) = input.get("ref").and_then(Value::as_str) else {

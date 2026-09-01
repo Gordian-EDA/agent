@@ -1,6 +1,6 @@
 //! Pin geometry and `(lib_symbols)` definition extraction for a single symbol.
 //!
-//! The schematic writer (`sch-io::write`) needs two things per used symbol that the
+//! The schematic writer needs two things per used symbol that the
 //! geometry-free `crate::PinMeta` deliberately omits:
 //!
 //! 1. **Pin geometry** — each pin's local position (`at`), `angle`, and
@@ -45,7 +45,7 @@ use kiutils_sexpr::{Atom, Node, parse_one};
 ///
 /// `at` is the pin's connection-point root in millimetres (symbol Y grows
 /// upward); the pin line extends `length` mm from there along `angle`
-/// (degrees). The schematic-space endpoint is computed by `sch-io::write` after
+/// (degrees). The schematic-space endpoint is computed by the writer after
 /// applying the instance's position/rotation/mirror.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PinGeom {

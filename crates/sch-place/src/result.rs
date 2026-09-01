@@ -1,7 +1,7 @@
 //! Shared emission types and identity-property keys.
 //!
 //! These live in `sch-place` so the floorplan engine (`sch-floorplan`) and the
-//! round-trip reader (`sch-io::read`) can share them.
+//! live schematic tools can share them.
 
 /// Property key for the block a component belongs to.
 pub const AP_BLOCK: &str = "ap_block";
@@ -42,6 +42,6 @@ pub struct EmitOutput {
     /// over-reports these, so they are the objective signal behind its complaints.
     pub crossings: crate::place::Crossings,
     /// Idioms the engine recognized + co-placed (crystal, decoupling, feedback),
-    /// surfaced to the agent loop via `apply_design`.
+    /// surfaced to the agent loop by schematic mutators.
     pub detected_idioms: Vec<IdiomReport>,
 }

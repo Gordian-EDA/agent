@@ -656,13 +656,45 @@ fn is_817(part: &str) -> bool {
     part.contains("PC817") || part.contains("LTV-817") || part.contains("LTV817")
 }
 
-/// Detect a real 817 bank from the compiled durable draft. Besides the part
+fn live_schematic_design(ctx: &AgentRuntime) -> anyhow::Result<sch_check::model::Design> {
+    let doc = sch_doc::SchDoc::read(ctx.sch_path())?;
+    let netlist = sch_doc::connect::extract(&doc);
+    let placed = sch_doc::placed_pins(&doc);
+    let mut block = sch_check::model::Block::default();
+    for symbol in doc.symbols() {
+        let component = block
+            .components
+            .entry(symbol.refdes().to_string())
+            .or_insert_with(|| sch_check::model::Component {
+                part: symbol.lib_id.clone(),
+                ..Default::default()
+            });
+        for pin in placed.iter().filter(|pin| pin.owner == symbol.uuid) {
+            let target = netlist
+                .nets
+                .iter()
+                .find(|net| {
+                    net.pins.iter().any(|candidate| {
+                        candidate.refdes == pin.refdes && candidate.pin == pin.number
+                    })
+                })
+                .map(|net| sch_check::model::PinTarget::Net(net.name.clone()))
+                .unwrap_or(sch_check::model::PinTarget::NoConnect);
+            component.pins.insert(pin.number.clone(), target);
+        }
+    }
+    let mut design = sch_check::model::Design::default();
+    design.blocks.insert("main".to_string(), block);
+    Ok(design)
+}
+
+/// Detect a real 817 bank from the live schematic. Besides the part
 /// family, require the corrected common-emitter topology (3=ground, 4=output),
 /// then take the physical domains from the actual numbered board pads. KiCad
 /// may legitimately rename private authored nets (for example to
 /// `Net-(R1-Pad2)`), so authored-to-board net-name equality is not an identity
 /// check. The narrow part predicate and corrected draft topology keep this plan
-/// off unrelated four-pad devices and electrically reversed drafts.
+/// off unrelated four-pad devices and electrically reversed schematics.
 fn opto817_channels(
     design: &sch_check::model::Design,
     board: &IpcBoardSnapshot,
@@ -1700,14 +1732,10 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
     // A repeated phototransistor-isolator bank is a physical grammar the generic
     // net-force placer cannot infer from a bag of footprints: keep the barrier in
-    // the centre, field copper above, and logic copper below. Invalid/missing
-    // durable drafts simply retain the generic behavior above.
-    let mut opto817_requirements = None;
-    if let Ok(Some(draft)) = ctx.workspace().read_draft()
-        && let Some(design) = circuit_lang::compile(&draft, ctx.provider()).design
-    {
-        opto817_requirements = add_817_array_hints(&design, &board, &problem, &mut hints);
-    }
+    // the centre, field copper above, and logic copper below.
+    let opto817_requirements = live_schematic_design(ctx)
+        .ok()
+        .and_then(|design| add_817_array_hints(&design, &board, &problem, &mut hints));
     if let Some(required) = opto817_requirements {
         let board_w = problem.bounds.max_x - problem.bounds.min_x;
         let board_h = problem.bounds.max_y - problem.bounds.min_y;

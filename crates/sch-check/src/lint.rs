@@ -4,7 +4,7 @@
 //! design extracted from a live `.kicad_sch` as over one compiled from text. The
 //! spelling checks that only an authored document can fail — an unknown lib_id,
 //! an unknown pin key, one physical pin claimed by two map keys — belong to the
-//! front end that accepted the text (`circuit_lang::authored`), not here:
+//! authoring front end, not here:
 //! a live document names its symbols and pins by construction.
 
 use crate::diag::{Diagnostic, Diagnostics};

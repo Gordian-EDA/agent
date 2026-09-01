@@ -137,14 +137,12 @@ fn blocking_erc_warnings(report: &kicad::ErcReport) -> Vec<Value> {
 
 /// `regenerate_board` — seed the PCB from KiCAD's own schematic netlist export.
 ///
-/// Footprints must already be assigned in the schematic. Missing footprints are a
-/// hard error: the agent should edit the circuit YAML, apply it, then regenerate
-/// the board again.
+/// Footprints must already be assigned in the live schematic. Missing footprints are
+/// a hard error: the agent assigns them before regenerating the board again.
 pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !ctx.sch_path().exists() {
         return Ok(json!({
-            "error": "no .kicad_sch yet — commit the schematic with apply_design first, \
-                      then regenerate_board"
+            "error": "no .kicad_sch yet — create the schematic with place_parts first"
         }));
     }
     let netlist = match ctx.env().netlist(ctx.sch_path()) {
@@ -153,16 +151,6 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             return Ok(json!({ "error": format!("could not export the schematic netlist: {e}") }));
         }
     };
-    let unapplied_footprints = unapplied_draft_footprint_changes(ctx, &netlist)?;
-    if !unapplied_footprints.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "unapplied_draft_footprints": unapplied_footprints,
-            "next_tool": "apply_design",
-            "next": "call apply_design() to write the draft footprint fields, then regenerate_board again",
-            "note": "footprint fields live in circuit-YAML/schematic state; do not retry regenerate_board until the draft footprint changes are applied",
-        }));
-    }
     let erc = match ctx.env().erc(ctx.sch_path()) {
         Ok(report) => report,
         Err(e) => {
@@ -186,7 +174,7 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({
             "ok": false,
             "error": format!(
-                "schematic ERC has {} error(s); fix and apply_design before regenerate_board",
+                "schematic ERC has {} error(s); fix the live schematic before regenerate_board",
                 erc.error_count()
             ),
             "erc": {
@@ -201,7 +189,7 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({
             "ok": false,
             "error": format!(
-                "schematic ERC has {} actionable warning(s); fix and apply_design before regenerate_board",
+                "schematic ERC has {} actionable warning(s); fix the live schematic before regenerate_board",
                 blocking_warnings.len()
             ),
             "erc": {
@@ -277,8 +265,8 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "part_count": part_count,
             "missing_footprints": missing_footprints,
             "next_tool": "assign_footprints",
-            "next": "call assign_footprints({assignments:[{reference, footprint}, ...]}), then apply_design(), then regenerate_board again",
-            "note": "some schematic symbols have no footprint field — do not retry regenerate_board until footprints are assigned in the circuit-YAML draft and applied",
+            "next": "call assign_footprints({assignments:[{reference, footprint}, ...]}), then regenerate_board again",
+            "note": "some live schematic symbols have no footprint field — do not retry regenerate_board until footprints are assigned",
         }));
     }
 
@@ -290,7 +278,7 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "error": "schematic symbol and assigned footprint have incompatible numbered pins/pads",
             "footprint_pin_mismatches": footprint_pin_mismatches,
             "next_tool": "assign_footprints",
-            "next": "choose a package whose named pad numbers match the symbol pins, apply_design(), then regenerate_board again",
+            "next": "choose a package whose named pad numbers match the symbol pins, assign it, then regenerate_board again",
             "note": "Every named electrical pad must match a symbol pin and every symbol pin must have a physical pad. Unnumbered mechanical pads and repeated pads with a valid shared number are allowed.",
         }));
     }
@@ -328,45 +316,6 @@ fn apply_complexity_default_layer_count(
     if part_count >= 40 && !explicitly_selected {
         rules.layer_count = 4;
     }
-}
-
-fn unapplied_draft_footprint_changes(
-    ctx: &AgentRuntime,
-    netlist: &kicad::Netlist,
-) -> anyhow::Result<Vec<Value>> {
-    let Some(draft) = ctx.workspace().read_draft()? else {
-        return Ok(Vec::new());
-    };
-    let Some(design) = circuit_lang::compile(&draft, ctx.provider()).design else {
-        return Ok(Vec::new());
-    };
-    let committed: BTreeMap<String, String> = netlist
-        .components
-        .iter()
-        .map(|c| {
-            (
-                c.reference.clone(),
-                c.properties.get("Footprint").cloned().unwrap_or_default(),
-            )
-        })
-        .collect();
-    let mut changes = Vec::new();
-    for block in design.blocks.values() {
-        for (reference, component) in &block.components {
-            let Some(draft_fp) = component.footprint.as_deref().filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            let committed_fp = committed.get(reference).map(String::as_str).unwrap_or("");
-            if committed_fp != draft_fp {
-                changes.push(json!({
-                    "reference": reference,
-                    "draft": draft_fp,
-                    "committed": committed_fp,
-                }));
-            }
-        }
-    }
-    Ok(changes)
 }
 
 fn write_seed_board(spec: &BoardSeedSpec, ctx: &AgentRuntime) -> std::result::Result<(), String> {

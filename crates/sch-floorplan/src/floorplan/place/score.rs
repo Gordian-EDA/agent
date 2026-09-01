@@ -59,7 +59,7 @@ pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
 /// `Reference`/`Value` text, as a pad per side of its body: `[left, right, top, bottom]`
 /// in the PLACED frame, given the body's rotated size.
 ///
-/// `sch_io::write::textsolve` bands an IC's (≥3-pin) or a wide body's field pair
+/// The text solver bands an IC's (≥3-pin) or a wide body's field pair
 /// ABOVE/BELOW the body, centred, and stacks a tall 2-pin part's to the RIGHT. The band's
 /// two 1.6 mm lines reach ~4.8 mm past the SOLID body, of which `approx_size` already
 /// pads 2.54 mm.

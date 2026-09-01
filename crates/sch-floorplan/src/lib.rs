@@ -26,7 +26,7 @@
 //! cost is measured on, so it cannot sit in another crate without the two drifting apart.
 //!
 //! The shared placement vocabulary lives in `sch-place`; pure geometry and grid
-//! snapping live in `geom`; reading a `.kicad_sch` back into a `Design` lives in `sch-io`.
+//! snapping live in `geom`; live `.kicad_sch` editing lives in `sch-doc`.
 
 pub mod contract;
 pub mod engine_support;
@@ -37,8 +37,6 @@ pub mod realize;
 pub mod region;
 pub mod wire;
 pub mod write;
-
-pub use sch_io::read;
 
 /// Test support: read/rewrite a symbol's `(at x y angle)` in emitted text by
 /// locating the `(property "Reference" "<refdes>"` block's parent symbol.

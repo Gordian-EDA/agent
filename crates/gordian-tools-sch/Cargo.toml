@@ -11,6 +11,7 @@ geom = { path = "../geom" }
 gordian-llm = { path = "../gordian-llm" }
 gordian-runtime = { path = "../gordian-runtime" }
 kicad-symbol = { path = "../kicad-symbol" }
+kicad-footprint = { path = "../kicad-footprint" }
 kicad = { path = "../kicad" }
 sch-check = { path = "../sch-check" }
 sch-doc = { path = "../sch-doc" }

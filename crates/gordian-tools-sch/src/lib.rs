@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 
 /// The tools that write the schematic. The turn loop approves these before
 /// they run — they mutate the project and have no dry-run.
-pub const MUTATORS: [&str; 15] = [
+pub const MUTATORS: [&str; 16] = [
     "undo",
     "place_parts",
     "arrange",
@@ -42,6 +42,7 @@ pub const MUTATORS: [&str; 15] = [
     "remove_symbols",
     "move_symbols",
     "set_fields",
+    "assign_footprints",
     "set_flags",
     "swap_symbol",
     "connect",
@@ -215,6 +216,30 @@ pub fn tool_defs() -> Vec<Tool> {
             }),
         ),
         (
+            "assign_footprints",
+            "Set footprint fields directly on one or more live schematic parts. Use search_footprints first; the complete batch is validated and written atomically.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "assignments": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "reference": { "type": "string" },
+                                "footprint": { "type": "string", "description": "KiCAD Lib:Name." }
+                            },
+                            "required": ["reference", "footprint"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["assignments"],
+                "additionalProperties": false
+            }),
+        ),
+        (
             "set_flags",
             "Set a part's do-not-populate / in-BOM attributes.",
             json!({
@@ -377,6 +402,7 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "remove_symbols" => edit::remove_symbols(input, ctx),
         "move_symbols" => edit::move_symbols(input, ctx),
         "set_fields" => edit::set_fields(input, ctx),
+        "assign_footprints" => edit::assign_footprints(input, ctx),
         "set_flags" => edit::set_flags(input, ctx),
         "swap_symbol" => edit::swap_symbol(input, ctx),
         "connect" => wiring::connect_tool(input, ctx),

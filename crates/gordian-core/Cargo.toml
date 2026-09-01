@@ -4,26 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The Gordian KiCAD agent: the turn loop + human apply-gate, the schematic/PCB tools, prompts, review and render — over a genai-backed, provider-agnostic LLM client."
+description = "The Gordian KiCAD agent: the turn loop, per-mutation approval, schematic/PCB tools, prompts, review, and render over a provider-agnostic LLM client."
 
 [dependencies]
-circuit-graph = { path = "../circuit-graph" }
-circuit-lang = { path = "../circuit-lang" }
 sch-check = { path = "../sch-check" }
 kicad = { path = "../kicad" }
-kicad-footprint = { path = "../kicad-footprint" }
-kicad-symbol = { path = "../kicad-symbol" }
 gordian-llm = { path = "../gordian-llm" }
 gordian-runtime = { path = "../gordian-runtime" }
 gordian-tools-sch = { path = "../gordian-tools-sch" }
 pcb-workflow = { path = "../pcb-workflow" }
-geom = { path = "../geom" }
-sch-floorplan = { path = "../sch-floorplan" }
-sch-io = { path = "../sch-io" }
-sch-place = { path = "../sch-place" }
-anneal-place = { path = "../anneal-place" }
-cluster-place = { path = "../cluster-place" }
-spine-place = { path = "../spine-place" }
 
 anyhow.workspace = true
 async-trait.workspace = true
@@ -46,6 +35,5 @@ tokio.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
-rayon.workspace = true
 toml.workspace = true
 directories.workspace = true

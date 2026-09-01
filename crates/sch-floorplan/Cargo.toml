@@ -8,7 +8,6 @@ description = "The engine-agnostic schematic placement core: gather, IR inferenc
 
 [dependencies]
 sch-place = { path = "../sch-place" }
-sch-io = { path = "../sch-io" }
 sch-doc = { path = "../sch-doc" }
 sch-check = { path = "../sch-check" }
 circuit-graph = { path = "../circuit-graph" }
