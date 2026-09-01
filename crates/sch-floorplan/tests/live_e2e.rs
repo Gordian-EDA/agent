@@ -35,6 +35,20 @@ fn engine() -> impl PlacementEngine {
     cluster_place::ClusterPlace
 }
 
+/// Every validation fixture, in a stable order.
+fn fixture_names() -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(fixture("x").parent().unwrap())
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let name = path.file_name()?.to_str()?;
+            Some(name.strip_suffix(".circuit.yaml")?.to_string())
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(format!("tests/fixtures/validation/{name}.circuit.yaml"))
@@ -146,6 +160,33 @@ fn dump_parity_pair(env: &KicadInstallation, name: &str, design: &Design, new_sh
     std::fs::write(old.join(format!("{name}.kicad_sch")), emitted.sch).unwrap();
 }
 
+/// The gate has to be right before it can gate anything: the whole-sheet pipeline is
+/// the proven path, so the sheets it emits must pass [`live::verify`] unchanged. A
+/// failure here is the checker's fault, not the placement's.
+#[test]
+fn verify_accepts_the_whole_sheet_pipeline() {
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no KiCad environment detected");
+        return;
+    };
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
+    for name in ["divider-filter", "stm32f4-buck", "mcp1703-power-entry"] {
+        let source = std::fs::read_to_string(fixture(name)).unwrap();
+        let authored = circuit_lang::compile(&source, &provider).design.unwrap();
+        // The same lowering `place_parts` performs, so both sides speak pin numbers.
+        let (design, _) = sch_check::into_design(&as_input(&authored), &provider);
+        let emitted =
+            sch_floorplan::floorplan::emit_strategy(&env, &design, Box::new(engine()), None)
+                .unwrap();
+        let doc = SchDoc::parse(&emitted.sch).unwrap();
+        assert_eq!(
+            live::verify(&doc, &design),
+            Default::default(),
+            "{name}: verify rejects a sheet the proven pipeline drew"
+        );
+    }
+}
+
 /// Every validation fixture, placed from nothing: the extractor must agree with
 /// `kicad-cli` on the partition, and ERC must report no errors.
 #[test]
@@ -158,40 +199,38 @@ fn bulk_create_agrees_with_kicad() {
     let dir = tempfile::tempdir().unwrap();
     let engine = engine();
 
+    // Every fixture runs even after one fails: which circuits break, and how, is the
+    // whole point of a corpus gate.
+    let mut failures: Vec<String> = Vec::new();
     let mut checked = 0;
-    for entry in std::fs::read_dir(fixture("x").parent().unwrap()).unwrap() {
-        let path = entry.unwrap().path();
-        let Some(name) = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_suffix(".circuit.yaml"))
-        else {
+    for name in fixture_names() {
+        let source = std::fs::read_to_string(fixture(&name)).unwrap();
+        let Some(design) = circuit_lang::compile(&source, &provider).design else {
             continue;
         };
-        let source = std::fs::read_to_string(&path).unwrap();
-        let compiled = circuit_lang::compile(&source, &provider);
-        let Some(design) = compiled.design else {
-            continue;
-        };
+        checked += 1;
 
-        let input = as_input(&design);
         let mut doc = live::blank_sheet().unwrap();
-        let report = live::place_parts(&env, &mut doc, &input, &engine).unwrap();
-        assert!(
-            report.committed,
-            "{name}: rolled back — {:?}",
-            report.mismatch
-        );
+        let report = live::place_parts(&env, &mut doc, &as_input(&design), &engine).unwrap();
+        if !report.committed {
+            failures.push(format!("{name}: rolled back — {:?}", report.mismatch));
+            continue;
+        }
 
-        let saved = save(&mut doc, dir.path(), name);
-        assert_eq!(
-            extracted_partition(&doc),
-            cli_partition(&env, &saved),
-            "{name}: the extractor and kicad-cli disagree"
-        );
-        dump_parity_pair(&env, name, &design, &saved);
+        let saved = save(&mut doc, dir.path(), &name);
+        let (ours, theirs) = (extracted_partition(&doc), cli_partition(&env, &saved));
+        if ours != theirs {
+            failures.push(format!(
+                "{name}: extractor and kicad-cli disagree\n  only ours: {:?}\n  only kicad: {:?}",
+                ours.difference(&theirs).collect::<Vec<_>>(),
+                theirs.difference(&ours).collect::<Vec<_>>(),
+            ));
+        }
+        dump_parity_pair(&env, &name, &design, &saved);
         let erc = env.erc(&saved).expect("erc");
-        assert_eq!(erc.error_count(), 0, "{name}: ERC errors");
+        if erc.error_count() > 0 {
+            failures.push(format!("{name}: {} ERC errors", erc.error_count()));
+        }
         eprintln!(
             "{name}: {} parts, {} nets, {} ERC warnings, {} layout warnings",
             report.placed.len(),
@@ -199,9 +238,9 @@ fn bulk_create_agrees_with_kicad() {
             erc.warning_count(),
             report.warnings.len()
         );
-        checked += 1;
     }
     assert!(checked >= 10, "only {checked} fixtures ran");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// The block used for the incremental gates: an LDO and its passives, asked to sit to

@@ -203,8 +203,12 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
         it.angle = live.angle;
     }
 
-    let (moved, held) = place.items.split_at_mut(movable);
-    legalize(moved, held, &obstacles);
+    // With nothing to avoid, the engine's own overlap handling is authoritative — walking
+    // parts apart here would only undo the placement it spent its whole search tuning.
+    if !obstacles.is_empty() || !fixed.is_empty() {
+        let (moved, held) = place.items.split_at_mut(movable);
+        legalize(moved, held, &obstacles);
+    }
 
     let result = {
         let realizer = RoutedSheetRealizer::new(env, &place.inc, &out.ir, options);

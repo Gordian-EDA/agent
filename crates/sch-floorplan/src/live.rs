@@ -196,7 +196,7 @@ pub fn place_parts(
         &design,
         movable.clone(),
         held,
-        obstacles(doc, &BTreeSet::new()),
+        obstacles(doc, &[]),
         ir,
         engine,
     ));
@@ -217,7 +217,8 @@ pub fn place_parts(
     let warnings = writer.layout_warnings();
     crate::realize::graft(doc, writer)?;
 
-    let mismatch = gate(doc, &design, &new_refs, &before);
+    let mut mismatch = verify(doc, &design);
+    mismatch.disturbed = disturbed(&Netlist::diff(&before, &connect::extract(doc)));
     let committed = mismatch.is_empty();
     if !committed {
         doc.restore(snapshot)?;
@@ -275,6 +276,9 @@ fn rearrange(
         it.frozen = false;
     }
 
+    // The selection's own drawing is about to be erased and redrawn, so it must not
+    // constrain the placement: obstacles are what is left once it is discounted.
+    let mut owned = footprints(&movable);
     let ir = crate::floorplan::infer_ir(env, &design);
     let snapshot = doc.snapshot();
     let (placed, ir) = match engine {
@@ -284,7 +288,7 @@ fn rearrange(
                 &design,
                 movable.clone(),
                 held,
-                obstacles(doc, &chosen),
+                obstacles(doc, &owned),
                 ir,
                 engine,
             ));
@@ -296,11 +300,8 @@ fn rearrange(
         seat(doc, part)?;
     }
 
-    let footprint: Vec<Rect> = placed
-        .iter()
-        .map(|it| item_rect(it, it.at).inflate(TOUCH_MARGIN))
-        .collect();
-    let redrawn = doc.retain_drawing(|item| !touches(item, &footprint));
+    owned.extend(footprints(&placed));
+    let redrawn = doc.retain_drawing(|item| !touches(item, &owned));
 
     let inc = incidence(&placed);
     let writer = crate::realize::realize_block(
@@ -364,6 +365,7 @@ fn touches(item: &sch_doc::Item, region: &[Rect]) -> bool {
         sch_doc::Item::NoConnect(n) => vec![n.at],
         sch_doc::Item::Label(l) => vec![l.at.point()],
         sch_doc::Item::Text(t) => vec![t.at.point()],
+        sch_doc::Item::Symbol(s) => vec![s.at.point()],
         _ => Vec::new(),
     };
     points.iter().any(|p| region.iter().any(|r| r.contains(*p)))
@@ -380,11 +382,19 @@ fn apply_intent(ir: &mut LayoutIr, intent: LayoutIr) {
     ir.relations.extend(intent.relations);
 }
 
+/// Move `items` onto the poses the engine chose, matched by part identity rather than
+/// by position in the list — an engine is free to reorder what it was handed.
 fn posed(mut items: Vec<Item>, poses: &[crate::region::Pose]) -> Vec<Item> {
-    for (item, pose) in items.iter_mut().zip(poses) {
-        item.at = pose.at;
-        item.angle = pose.angle;
-        item.mirror = pose.mirror;
+    let by_part: HashMap<(&str, u8), &crate::region::Pose> = poses
+        .iter()
+        .map(|pose| ((pose.refdes.as_str(), pose.unit), pose))
+        .collect();
+    for item in &mut items {
+        if let Some(pose) = by_part.get(&(item.refdes.as_str(), item.unit)) {
+            item.at = pose.at;
+            item.angle = pose.angle;
+            item.mirror = pose.mirror;
+        }
     }
     items
 }
@@ -394,18 +404,10 @@ fn posed(mut items: Vec<Item>, poses: &[crate::region::Pose]) -> Vec<Item> {
 /// Power symbols are left out: they declare a rail rather than occupy a slot, and the
 /// placement pipeline draws its own. They stay behind as obstacles.
 fn lift_sheet(doc: &SchDoc, netlist: &Netlist) -> Block {
-    let mut net_of: HashMap<(&str, &str), &str> = HashMap::new();
-    for net in &netlist.nets {
-        for pin in &net.pins {
-            net_of.insert((&pin.refdes, &pin.pin), &net.name);
-        }
-    }
+    let net_of = net_by_pin(netlist);
     let mut block = Block::default();
-    for symbol in doc.symbols() {
+    for symbol in doc.symbols().filter(|s| !placement_ignores(s)) {
         let refdes = symbol.refdes();
-        if refdes.is_empty() || refdes.starts_with('#') || symbol.lib_id.starts_with("power:") {
-            continue;
-        }
         let comp = block
             .components
             .entry(refdes.to_string())
@@ -430,6 +432,19 @@ fn lift_sheet(doc: &SchDoc, netlist: &Netlist) -> Block {
     block
 }
 
+/// `(refdes, pin number)` → the net the extractor found it on.
+fn net_by_pin(netlist: &Netlist) -> HashMap<(&str, &str), &str> {
+    netlist
+        .nets
+        .iter()
+        .flat_map(|net| {
+            net.pins
+                .iter()
+                .map(move |pin| ((pin.refdes.as_str(), pin.pin.as_str()), net.name.as_str()))
+        })
+        .collect()
+}
+
 /// Nets the new parts share with something already on the sheet.
 fn shared_nets(design: &Design, before: &Netlist) -> Vec<String> {
     let live: BTreeSet<&str> = before.nets.iter().map(|n| n.name.as_str()).collect();
@@ -451,12 +466,7 @@ fn shared_nets(design: &Design, before: &Netlist) -> Vec<String> {
 /// project-local library — which nothing outside that project can resolve — is still
 /// something the placement can see and stay clear of.
 fn seated_items(doc: &SchDoc, netlist: &Netlist) -> Vec<Item> {
-    let mut net_of: HashMap<(&str, &str), &str> = HashMap::new();
-    for net in &netlist.nets {
-        for pin in &net.pins {
-            net_of.insert((&pin.refdes, &pin.pin), &net.name);
-        }
-    }
+    let net_of = net_by_pin(netlist);
     doc.symbols()
         .filter(|s| !placement_ignores(s))
         .filter_map(|symbol| {
@@ -498,9 +508,19 @@ fn placement_ignores(symbol: &sch_doc::SymbolInst) -> bool {
     refdes.is_empty() || refdes.starts_with('#') || symbol.lib_id.starts_with("power:")
 }
 
-/// What a placement must not land on: the wires, labels and power symbols that belong
-/// to parts the operation is not touching.
-fn obstacles(doc: &SchDoc, ignoring: &BTreeSet<String>) -> Vec<Rect> {
+/// The bodies of `items` at their current poses, with the clearance a re-wire uses to
+/// decide what belongs to them.
+fn footprints(items: &[Item]) -> Vec<Rect> {
+    items
+        .iter()
+        .map(|it| item_rect(it, it.at).inflate(TOUCH_MARGIN))
+        .collect()
+}
+
+/// What a placement must not land on: the drawing already on the sheet — wires, label
+/// text, generated rail terminals — minus whatever falls inside `owned`, which the
+/// caller is about to erase and draw again.
+fn obstacles(doc: &SchDoc, owned: &[Rect]) -> Vec<Rect> {
     let mut out = Vec::new();
     for wire in doc.wires() {
         for pair in wire.points.windows(2) {
@@ -520,10 +540,7 @@ fn obstacles(doc: &SchDoc, ignoring: &BTreeSet<String>) -> Vec<Rect> {
         let at = label.at.point();
         out.push(Rect::new(at.x, at.y - 1.6, at.x + width, at.y + 1.6));
     }
-    for symbol in doc.symbols() {
-        if !symbol.lib_id.starts_with("power:") || ignoring.contains(symbol.refdes()) {
-            continue;
-        }
+    for symbol in doc.symbols().filter(|s| placement_ignores(s)) {
         out.push(Rect::new(
             symbol.at.x - 2.54,
             symbol.at.y - 2.54,
@@ -531,15 +548,16 @@ fn obstacles(doc: &SchDoc, ignoring: &BTreeSet<String>) -> Vec<Rect> {
             symbol.at.y + 2.54,
         ));
     }
+    out.retain(|r| !owned.iter().any(|o| o.overlaps(r)));
     out
 }
 
 /// Intended net → the design pins on it, as `REF.pin`.
-fn intended(design: &Design, only: &BTreeSet<String>) -> BTreeMap<String, BTreeSet<String>> {
+fn intended(design: &Design) -> BTreeMap<String, BTreeSet<String>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for block in design.blocks.values() {
         for (refdes, comp) in &block.components {
-            if !only.contains(refdes) || comp.dnp || !comp.part.contains(':') {
+            if comp.dnp || !comp.part.contains(':') {
                 continue;
             }
             if comp.part.starts_with("power:") || comp.part.starts_with("label:") {
@@ -558,8 +576,12 @@ fn intended(design: &Design, only: &BTreeSet<String>) -> BTreeMap<String, BTreeS
     out
 }
 
-/// The full gate: the design's nets landed one-to-one, and the sheet's own nets survived.
-fn gate(doc: &SchDoc, design: &Design, new_refs: &BTreeSet<String>, before: &Netlist) -> Mismatch {
+/// Check a drawn sheet against the design it is supposed to draw: every intended net's
+/// pins on one extracted net, and no two intended nets on the same one.
+///
+/// This is the truthfulness question on its own, with no history involved — what
+/// [`place_parts`] gates on, and what any caller can ask of a document it did not draw.
+pub fn verify(doc: &SchDoc, design: &Design) -> Mismatch {
     let after = connect::extract(doc);
     // A pin's home: the extracted net it landed on, or a name unique to itself so two
     // loose ends never look like one net.
@@ -571,7 +593,7 @@ fn gate(doc: &SchDoc, design: &Design, new_refs: &BTreeSet<String>, before: &Net
     }
     let mut mismatch = Mismatch::default();
     let mut owner: HashMap<String, String> = HashMap::new();
-    for (net, pins) in intended(design, new_refs) {
+    for (net, pins) in intended(design) {
         let landed: BTreeSet<String> = pins
             .iter()
             .map(|pin| home.get(pin).cloned().unwrap_or_else(|| format!("~{pin}")))
@@ -587,7 +609,6 @@ fn gate(doc: &SchDoc, design: &Design, new_refs: &BTreeSet<String>, before: &Net
             mismatch.shorted.push((other, net));
         }
     }
-    mismatch.disturbed = disturbed(&Netlist::diff(before, &after));
     mismatch
 }
 

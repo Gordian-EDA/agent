@@ -14,6 +14,30 @@ use crate::model::{
 };
 use crate::sexpr::{list, num, quoted, sym, tagged};
 
+/// Whether an item is part of the DRAWING rather than the design: wires,
+/// junctions, no-connect markers, labels, free text, and the generated symbols
+/// a drawing is made of — power-rail terminals and PWR_FLAGs, which carry a
+/// hidden `#`-prefixed reference and belong to no bill of materials.
+///
+/// This is the set a re-wire owns: erase it around a selection and draw it again,
+/// and the parts themselves are untouched.
+pub fn is_drawing(item: &Item) -> bool {
+    match item {
+        Item::Wire(_) | Item::Junction(_) | Item::NoConnect(_) | Item::Label(_) | Item::Text(_) => {
+            true
+        }
+        Item::Symbol(symbol) => generated(symbol),
+        _ => false,
+    }
+}
+
+/// A symbol the drawing generated rather than the design declared. KiCAD marks
+/// these with a `#`-prefixed reference so they stay out of the netlist's component
+/// list.
+fn generated(symbol: &SymbolInst) -> bool {
+    symbol.refdes().starts_with('#')
+}
+
 impl SchDoc {
     /// A UUID derived from the root UUID, a kind and a content key, made unique
     /// against the UUIDs already in the document.
@@ -306,9 +330,9 @@ impl SchDoc {
         self.merge(source, true)
     }
 
-    /// Merge only `source`'s drawing — wires, junctions, no-connects, labels and
-    /// text — leaving its symbols behind. What a re-wire of symbols this document
-    /// already holds needs.
+    /// Merge only `source`'s DRAWING — see [`is_drawing`]. What a re-wire of parts
+    /// this document already holds needs: the wires and labels come across, the
+    /// parts themselves do not.
     pub fn adopt_drawing(&mut self, source: &SchDoc) -> Result<()> {
         self.merge(source, false)?;
         Ok(())
@@ -322,14 +346,12 @@ impl SchDoc {
         {
             return Err(Error::ReInstantiatedSheet);
         }
-        if symbols {
-            self.union_lib_symbols(source);
-        }
+        self.union_lib_symbols(source);
         let sheet_path = self.sheet_path();
         let mut adopted = Vec::new();
         for item in source.items().to_vec() {
             match item {
-                Item::Symbol(symbol) if symbols => {
+                Item::Symbol(symbol) if symbols || generated(&symbol) => {
                     let symbol = self.regraft_symbol(symbol, &sheet_path);
                     adopted.push(symbol.uuid.clone());
                     self.insert_item(Item::Symbol(symbol));
@@ -348,19 +370,13 @@ impl SchDoc {
         Ok(adopted)
     }
 
-    /// Drop the drawing items — wires, junctions, no-connects, labels, text —
-    /// that `keep` rejects. Symbols, sheets and the header sections are never
-    /// offered to it. Returns how many items were removed.
+    /// Drop the drawing items — see [`is_drawing`] — that `keep` rejects. Placed
+    /// parts, sheets and the header sections are never offered to it. Returns how
+    /// many items were removed.
     pub fn retain_drawing(&mut self, mut keep: impl FnMut(&Item) -> bool) -> usize {
         let before = self.items().len();
-        self.items_mut().retain(|item| match item {
-            Item::Wire(_)
-            | Item::Junction(_)
-            | Item::NoConnect(_)
-            | Item::Label(_)
-            | Item::Text(_) => keep(item),
-            _ => true,
-        });
+        self.items_mut()
+            .retain(|item| !is_drawing(item) || keep(item));
         let removed = before - self.items().len();
         if removed > 0 {
             self.mark_edited();
