@@ -49,11 +49,27 @@ def command(args, *, timeout=600, check=True, env=None):
     return result
 
 
+BUILT = {}
+
+
+def example(package, name):
+    """Path to a release example, built once per run.
+
+    Every invocation used to go through `cargo run`, which takes the workspace
+    target-dir lock — so a concurrent `cargo test` elsewhere on the machine
+    could stall a case for as long as that build ran, and land in the timings.
+    """
+    if name not in BUILT:
+        command(
+            ["cargo", "build", "--release", "-p", package, "--example", name],
+            timeout=1800,
+        )
+        BUILT[name] = str(ROOT / "target" / "release" / "examples" / name)
+    return BUILT[name]
+
+
 def tool(project, name, payload=None):
-    args = [
-        "cargo", "run", "--release", "--quiet", "-p", "gordian-core",
-        "--example", "tool_once", "--", str(project), name,
-    ]
+    args = [example("gordian-core", "tool_once"), str(project), name]
     if payload is not None:
         args.append(json.dumps(payload, separators=(",", ":")))
     value = json.loads(command(args).stdout)
@@ -99,11 +115,7 @@ def sch_facts_binary():
     configured = os.environ.get("SCH_FACTS_BIN")
     if configured:
         return [configured]
-    command(
-        ["cargo", "build", "--release", "-p", "sch-doc", "--example", "sch_facts"],
-        timeout=1800,
-    )
-    return [str(ROOT / "target" / "release" / "examples" / "sch_facts")]
+    return [example("sch-doc", "sch_facts")]
 
 
 def sch_facts(*args):
