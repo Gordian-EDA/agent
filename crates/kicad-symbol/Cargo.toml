@@ -12,6 +12,7 @@ kiutils_kicad.workspace = true
 kiutils_sexpr.workspace = true
 fuzzy-matcher.workspace = true
 strsim.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 kicad = { path = "../kicad" }

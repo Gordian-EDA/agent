@@ -9,9 +9,34 @@ use crate::error::{Error, Result};
 use crate::libsyms::SymbolSource;
 use crate::model::{
     Item, Junction, Label, LabelKind, Mirror, NoConnect, Pose, Retained, SymbolInst, Wire,
-    instance_path, instance_paths, new_field, property_node, set_instance_reference, yes_no,
+    instance_path, instance_paths, new_field, property_node, retarget_instances,
+    set_instance_reference, set_pin_uuid, yes_no,
 };
 use crate::sexpr::{list, num, quoted, sym, tagged};
+
+/// Whether an item is part of the DRAWING rather than the design: wires,
+/// junctions, no-connect markers, labels, free text, and the generated symbols
+/// a drawing is made of — power-rail terminals and PWR_FLAGs, which carry a
+/// hidden `#`-prefixed reference and belong to no bill of materials.
+///
+/// This is the set a re-wire owns: erase it around a selection and draw it again,
+/// and the parts themselves are untouched.
+pub fn is_drawing(item: &Item) -> bool {
+    match item {
+        Item::Wire(_) | Item::Junction(_) | Item::NoConnect(_) | Item::Label(_) | Item::Text(_) => {
+            true
+        }
+        Item::Symbol(symbol) => generated(symbol),
+        _ => false,
+    }
+}
+
+/// A symbol the drawing generated rather than the design declared. KiCAD marks
+/// these with a `#`-prefixed reference so they stay out of the netlist's component
+/// list.
+fn generated(symbol: &SymbolInst) -> bool {
+    symbol.refdes().starts_with('#')
+}
 
 impl SchDoc {
     /// A UUID derived from the root UUID, a kind and a content key, made unique
@@ -448,6 +473,145 @@ impl SchDoc {
             raw: Retained::owned(node),
         }));
         uuid
+    }
+
+    /// Merge the drawable content of `source` into this document.
+    ///
+    /// Symbols, wires, junctions, no-connects, labels and text are appended;
+    /// `(lib_symbols)` definitions are unioned by `lib_id`; header and trailer
+    /// sections are ignored. Every adopted item is given a UUID derived here, and
+    /// a symbol's `(instances)` path is retargeted at this sheet — otherwise the
+    /// graft would point at the sheet it was drawn on and drop out of the
+    /// netlist. Returns the UUIDs of the symbols adopted, in source order.
+    pub fn adopt(&mut self, source: &SchDoc) -> Result<Vec<String>> {
+        self.merge(source, true)
+    }
+
+    /// Merge only `source`'s DRAWING — see [`is_drawing`]. What a re-wire of parts
+    /// this document already holds needs: the wires and labels come across, the
+    /// parts themselves do not.
+    pub fn adopt_drawing(&mut self, source: &SchDoc) -> Result<()> {
+        self.merge(source, false)?;
+        Ok(())
+    }
+
+    fn merge(&mut self, source: &SchDoc, symbols: bool) -> Result<Vec<String>> {
+        if symbols
+            && self
+                .symbols()
+                .any(|s| instance_paths(s.retained().node()) > 1)
+        {
+            return Err(Error::ReInstantiatedSheet);
+        }
+        self.union_lib_symbols(source);
+        let sheet_path = self.sheet_path();
+        let mut adopted = Vec::new();
+        for item in source.items().to_vec() {
+            match item {
+                Item::Symbol(symbol) if symbols || generated(&symbol) => {
+                    let symbol = self.regraft_symbol(symbol, &sheet_path);
+                    adopted.push(symbol.uuid.clone());
+                    self.insert_item(Item::Symbol(symbol));
+                }
+                Item::Wire(_)
+                | Item::Junction(_)
+                | Item::NoConnect(_)
+                | Item::Label(_)
+                | Item::Text(_) => {
+                    let item = self.regraft(item);
+                    self.insert_item(item);
+                }
+                Item::Symbol(_) | Item::Sheet(_) | Item::LibSymbols(_) | Item::Other(_) => {}
+            }
+        }
+        Ok(adopted)
+    }
+
+    /// Drop the drawing items — see [`is_drawing`] — that `keep` rejects. Placed
+    /// parts, sheets and the header sections are never offered to it. Returns how
+    /// many items were removed.
+    pub fn retain_drawing(&mut self, mut keep: impl FnMut(&Item) -> bool) -> usize {
+        let before = self.items().len();
+        self.items_mut()
+            .retain(|item| !is_drawing(item) || keep(item));
+        let removed = before - self.items().len();
+        if removed > 0 {
+            self.mark_edited();
+        }
+        removed
+    }
+
+    /// Add every definition `source` embeds that this document does not have.
+    fn union_lib_symbols(&mut self, source: &SchDoc) {
+        let Some(incoming) = source.lib_symbols() else {
+            return;
+        };
+        let missing: Vec<(String, Retained)> = incoming
+            .defs
+            .iter()
+            .filter(|(lib_id, _)| {
+                !self
+                    .lib_symbols()
+                    .is_some_and(|libs| libs.contains(lib_id.as_str()))
+            })
+            .map(|(lib_id, def)| (lib_id.clone(), def.clone()))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let libs = self.lib_symbols_mut();
+        libs.defs.extend(missing);
+        libs.defs.sort_keys();
+        if let Some(raw) = libs.raw.as_mut() {
+            raw.touch();
+        }
+        self.mark_edited();
+    }
+
+    /// A UUID for a grafted item, keyed on everything about it but its old UUID.
+    fn graft_uuid(&self, kind: &str, node: &Node) -> String {
+        let mut keyed = node.clone();
+        crate::sexpr::remove_children(&mut keyed, "uuid");
+        self.derive_uuid(kind, &crate::sexpr::flat(&keyed))
+    }
+
+    fn regraft(&mut self, item: Item) -> Item {
+        macro_rules! reuuid {
+            ($value:expr, $head:expr) => {{
+                let mut value = $value;
+                value.uuid = self.graft_uuid($head, &value.raw.node);
+                value.raw.touch();
+                value
+            }};
+        }
+        let head = item.head().to_string();
+        match item {
+            Item::Wire(w) => Item::Wire(reuuid!(w, &head)),
+            Item::Junction(j) => Item::Junction(reuuid!(j, &head)),
+            Item::NoConnect(n) => Item::NoConnect(reuuid!(n, &head)),
+            Item::Label(l) => Item::Label(reuuid!(l, &head)),
+            Item::Text(t) => Item::Text(reuuid!(t, &head)),
+            other => other,
+        }
+    }
+
+    fn regraft_symbol(&mut self, mut symbol: SymbolInst, sheet_path: &str) -> SymbolInst {
+        symbol.uuid = self.graft_uuid("symbol", &symbol.raw.node);
+        let pins: Vec<(String, String)> = symbol
+            .pin_uuids
+            .keys()
+            .map(|number| {
+                let key = format!("{}|{number}", symbol.uuid);
+                (number.clone(), self.derive_uuid("pin", &key))
+            })
+            .collect();
+        for (number, uuid) in pins {
+            set_pin_uuid(&mut symbol.raw.node, &number, &uuid);
+            symbol.pin_uuids.insert(number, uuid);
+        }
+        retarget_instances(&mut symbol.raw.node, sheet_path);
+        symbol.raw.touch();
+        symbol
     }
 
     /// Whether this sheet, rather than a parent hierarchy, decides what this

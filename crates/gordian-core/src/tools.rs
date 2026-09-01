@@ -1,7 +1,7 @@
 //! The schematic + PCB tool registry the agent drives.
 //!
 //! Each tool is a thin, deterministic wrapper over logic that already lives in
-//! `circuit-lang`/`sch-check`, `kicad-footprint`/`kicad`, and `sch-floorplan`/`sch-io`. The registry
+//! `circuit-lang`/`sch-check`, `kicad-footprint`/`kicad`, and `sch-floorplan`. The registry
 //! exposes two free functions, both driven directly by the [`crate::Agent`] loop:
 //!
 //! - [`tool_defs`] — the JSON-Schema genai [`Tool`]s handed to the LLM.
@@ -488,7 +488,8 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "export_fab".into(),
-            description: "Export fabrication files to <project>/fab after clean check_board.".into(),
+            description: "Export fabrication files to <project>/fab after clean check_board."
+                .into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
     ];

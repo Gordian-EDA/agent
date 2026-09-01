@@ -520,6 +520,13 @@ impl LibSymbols {
         self.defs.get(lib_id).map(|r| &r.node)
     }
 
+    /// The embedded definition for `lib_id` as S-expression text — what a reader
+    /// that wants the symbol's own geometry needs when the library it came from is
+    /// not installed.
+    pub fn definition_text(&self, lib_id: &str) -> Option<String> {
+        self.defs.get(lib_id).map(|def| sexpr::flat(&def.node))
+    }
+
     /// Embedded `Lib:Name` keys in document order.
     pub fn lib_ids(&self) -> impl Iterator<Item = &str> {
         self.defs.keys().map(String::as_str)
@@ -774,6 +781,41 @@ pub(crate) fn set_instance_reference(node: &mut Node, sheet_path: &str, refdes: 
             {
                 sexpr::set_child(path, tagged("reference", vec![quoted(refdes)]));
             }
+        }
+    }
+}
+
+/// Rewrite every `(instances … (path …))` entry onto `sheet_path`, so a symbol
+/// drawn on one sheet is annotated by the sheet it is grafted into.
+pub(crate) fn retarget_instances(node: &mut Node, sheet_path: &str) {
+    let Some(instances) = sexpr::child_mut(node, "instances") else {
+        return;
+    };
+    let Some(projects) = sexpr::items_mut(instances) else {
+        return;
+    };
+    for project in projects.iter_mut() {
+        let Some(paths) = sexpr::items_mut(project) else {
+            continue;
+        };
+        for path in paths.iter_mut() {
+            if sexpr::head(path) == Some("path") {
+                set_positional(path, 1, quoted(sheet_path));
+            }
+        }
+    }
+}
+
+/// Set the UUID KiCAD assigned to one `(pin …)` of a placed symbol.
+pub(crate) fn set_pin_uuid(node: &mut Node, number: &str, uuid: &str) {
+    let Some(children) = sexpr::items_mut(node) else {
+        return;
+    };
+    for child in children.iter_mut() {
+        if sexpr::head(child) == Some("pin")
+            && items(child).get(1).and_then(sexpr::text) == Some(number)
+        {
+            sexpr::set_child(child, tagged("uuid", vec![quoted(uuid)]));
         }
     }
 }

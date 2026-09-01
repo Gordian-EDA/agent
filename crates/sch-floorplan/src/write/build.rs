@@ -46,6 +46,24 @@ impl SchematicWriter {
         )
     }
 
+    /// Take a symbol's definition and pin geometry from the caller instead of the
+    /// installed libraries.
+    ///
+    /// A placement already carries the geometry of every part it moves, and an edited
+    /// sheet may hold parts from a project-local library nothing else can resolve.
+    /// Registering the geometry up front means the following `add_symbol_full` never
+    /// reads a library at all.
+    pub fn register(&mut self, geom: &SymbolGeometry) {
+        if self.lib_symbols.contains_key(&geom.lib_id) {
+            return;
+        }
+        self.sym_sizes
+            .insert(geom.lib_id.clone(), geom.approx_size());
+        self.sym_pins.insert(geom.lib_id.clone(), geom.pins.clone());
+        self.lib_symbols
+            .insert(geom.lib_id.clone(), geom.raw_definition.clone());
+    }
+
     /// Place one symbol instance with reconciliation metadata.
     ///
     /// The fuller form of [`Self::add_symbol`]: in addition to the placement, it
@@ -77,12 +95,7 @@ impl SchematicWriter {
         // caches the symbol's approximate size by lib_id so field placement need
         // not reload geometry per instance.
         if !self.lib_symbols.contains_key(lib_id) {
-            let geom = SymbolGeometry::load(env.symbol_dir(), lib_id)?;
-            self.sym_sizes
-                .insert(lib_id.to_string(), geom.approx_size());
-            self.sym_pins.insert(lib_id.to_string(), geom.pins.clone());
-            self.lib_symbols
-                .insert(lib_id.to_string(), geom.raw_definition);
+            self.register(&SymbolGeometry::load(env.symbol_dir(), lib_id)?);
         }
 
         // Cached above on the first instance of this lib_id; reused for the rest.
@@ -524,16 +537,21 @@ impl SchematicWriter {
                 )
             })?;
 
-        let geom = SymbolGeometry::load(env.symbol_dir(), &any.lib_id)?;
+        // Registered when the symbol was placed; a load is the fallback for a writer
+        // that was handed a position without its geometry.
+        let pins: Vec<PinGeom> = match self.sym_pins.get(&any.lib_id).cloned() {
+            Some(pins) => pins,
+            None => SymbolGeometry::load(env.symbol_dir(), &any.lib_id)?.pins,
+        };
 
         // Resolve the pin: number first, then name. A name may match several
         // physical pins (e.g. multiple GND pins), so collect all matches.
         let matches: Vec<&PinGeom> = {
-            let by_number: Vec<&PinGeom> = geom.pins.iter().filter(|p| p.number == pin).collect();
+            let by_number: Vec<&PinGeom> = pins.iter().filter(|p| p.number == pin).collect();
             if !by_number.is_empty() {
                 by_number
             } else {
-                geom.pins.iter().filter(|p| p.name == pin).collect()
+                pins.iter().filter(|p| p.name == pin).collect()
             }
         };
         if matches.is_empty() {

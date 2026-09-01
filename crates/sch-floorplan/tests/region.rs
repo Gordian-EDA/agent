@@ -118,7 +118,12 @@ fn arrange_places_new_parts_without_disturbing_the_neighbours() {
             assert!(!ra.overlaps(o), "{} sits on obstacle {o:?}", a.refdes);
         }
         for (n, r) in fixed.iter().zip(&neighbours) {
-            assert!(!ra.overlaps(r), "{} sits on neighbour {}", a.refdes, n.refdes);
+            assert!(
+                !ra.overlaps(r),
+                "{} sits on neighbour {}",
+                a.refdes,
+                n.refdes
+            );
         }
         for b in placed.iter().skip(i + 1) {
             assert!(

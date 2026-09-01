@@ -5,7 +5,7 @@
 //! to [`crate::Agent`]. The core crate does not own config persistence or any
 //! process-global runtime.
 
-use sch_io::write::escape_sexpr_string as sexpr_escape;
+use kicad::sexpr_escape;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 

@@ -19,8 +19,8 @@
 
 use geom::{EPS, Point2, Rect};
 
-use sch_check::Design;
 use kicad::KicadInstallation;
+use sch_check::Design;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
 use sch_place::place::{PlaceOptions, PlaceResult};
@@ -65,6 +65,9 @@ pub struct Pose {
 /// New poses for the movable set, in input order, plus what the engine measured.
 pub struct RegionOutput {
     pub poses: Vec<Pose>,
+    /// The IR the engine finished with — its recognized idioms and rail decisions, which
+    /// the realiser needs to draw the same sheet the engine scored.
+    pub ir: LayoutIr,
     pub result: PlaceResult,
 }
 
@@ -103,10 +106,9 @@ fn clear_of(r: &Rect, obstacles: &[Rect], others: &[Rect]) -> bool {
 
 /// Offsets on the ring `max(|dx|, |dy|) == ring`, nearest-first and deterministic.
 fn ring_offsets(ring: i32) -> Vec<(i32, i32)> {
-    let mut out: Vec<(i32, i32)> = (-ring..=ring)
-        .flat_map(|dx| (-ring..=ring).map(move |dy| (dx, dy)))
-        .filter(|(dx, dy)| dx.abs().max(dy.abs()) == ring)
-        .collect();
+    let edges = (-ring..=ring).flat_map(move |d| [(d, -ring), (d, ring)]);
+    let sides = (-ring + 1..ring).flat_map(move |d| [(-ring, d), (ring, d)]);
+    let mut out: Vec<(i32, i32)> = edges.chain(sides).collect();
     out.sort_by_key(|(dx, dy)| (dx.abs() + dy.abs(), *dx, *dy));
     out
 }
@@ -201,19 +203,26 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
         it.angle = live.angle;
     }
 
-    let (moved, held) = place.items.split_at_mut(movable);
-    legalize(moved, held, &obstacles);
+    // With nothing to avoid, the engine's own overlap handling is authoritative — walking
+    // parts apart here would only undo the placement it spent its whole search tuning.
+    if !obstacles.is_empty() || !fixed.is_empty() {
+        let (moved, held) = place.items.split_at_mut(movable);
+        legalize(moved, held, &obstacles);
+    }
 
-    let realizer = RoutedSheetRealizer::new(env, &place.inc, &out.ir, options);
-    let eval = RoutedEvaluator::new(&realizer);
-    let result = PlaceResult {
-        engine: out.result.engine,
-        truthfulness_breaks: eval.truthfulness_breaks(&place.items),
-        warnings: eval.warnings(&place.items),
-        crossings: eval.crossings(&place.items),
-        cost: out.result.cost,
+    let result = {
+        let realizer = RoutedSheetRealizer::new(env, &place.inc, &out.ir, options);
+        let eval = RoutedEvaluator::new(&realizer);
+        PlaceResult {
+            engine: out.result.engine,
+            truthfulness_breaks: eval.truthfulness_breaks(&place.items),
+            warnings: eval.warnings(&place.items),
+            crossings: eval.crossings(&place.items),
+            cost: out.result.cost,
+        }
     };
     RegionOutput {
+        ir: out.ir,
         poses: place.items[..movable]
             .iter()
             .map(|it| Pose {

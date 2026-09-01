@@ -560,6 +560,9 @@ pub fn build_writer(
         w.set_title(name);
     }
     for it in items {
+        // The item already carries its geometry — including for a part whose library
+        // only this sheet has — so the writer never needs to look one up.
+        w.register(&it.geom);
         w.add_symbol_full(
             env,
             &it.part,

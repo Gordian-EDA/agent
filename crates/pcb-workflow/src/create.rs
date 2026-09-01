@@ -1,6 +1,6 @@
 //! Board-construction tools and shared input parsers.
 
-use sch_io::write::escape_sexpr_string as sexpr_escape;
+use kicad::sexpr_escape;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io;

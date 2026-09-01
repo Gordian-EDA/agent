@@ -8,8 +8,8 @@ use geom::{Point2, Rect};
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
-use sch_floorplan::engine_support::{relation_group_spread, relation_viol, repair_relations};
 use sch_floorplan::contract::{PlacementEngine, SchematicPlaceProblem};
+use sch_floorplan::engine_support::{relation_group_spread, relation_viol, repair_relations};
 use sch_place::ir::{Axis, LayoutIr, Relation, Side};
 use sch_place::item::Item;
 
@@ -71,19 +71,40 @@ fn ordering_relations_count_exactly_the_pairs_out_of_order() {
     let items = vec![passive("R1", [0.0, 0.0]), passive("R2", [30.0, 0.0])];
     let (a, b) = ("R1".to_string(), "R2".to_string());
     assert_eq!(
-        relation_viol(&items, &ir(vec![Relation::LeftOf { a: a.clone(), b: b.clone() }])),
+        relation_viol(
+            &items,
+            &ir(vec![Relation::LeftOf {
+                a: a.clone(),
+                b: b.clone()
+            }])
+        ),
         0
     );
     assert_eq!(
-        relation_viol(&items, &ir(vec![Relation::RightOf { a: a.clone(), b: b.clone() }])),
+        relation_viol(
+            &items,
+            &ir(vec![Relation::RightOf {
+                a: a.clone(),
+                b: b.clone()
+            }])
+        ),
         1
     );
     // Same `y` satisfies neither Above nor Below — both need a strict order.
     assert_eq!(
-        relation_viol(&items, &ir(vec![Relation::Above { a: a.clone(), b: b.clone() }])),
+        relation_viol(
+            &items,
+            &ir(vec![Relation::Above {
+                a: a.clone(),
+                b: b.clone()
+            }])
+        ),
         1
     );
-    assert_eq!(relation_viol(&items, &ir(vec![Relation::Below { a, b }])), 1);
+    assert_eq!(
+        relation_viol(&items, &ir(vec![Relation::Below { a, b }])),
+        1
+    );
 }
 
 #[test]
@@ -339,7 +360,11 @@ blocks:
 fn chain_problem(env: &KicadInstallation) -> (sch_check::Design, SchematicPlaceProblem) {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let compiled = circuit_lang::compile(CHAIN, &provider);
-    assert!(!compiled.diagnostics.has_errors(), "{:#?}", compiled.diagnostics);
+    assert!(
+        !compiled.diagnostics.has_errors(),
+        "{:#?}",
+        compiled.diagnostics
+    );
     let design = compiled.design.unwrap();
     let problem = SchematicPlaceProblem::from_design(env, &design).unwrap();
     (design, problem)

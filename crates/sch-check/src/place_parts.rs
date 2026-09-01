@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use indexmap::IndexMap;
-use sch_place::ir::{Band, Cell, Flow, LayoutIr, Side};
+use sch_place::ir::{Band, Cell, Flow, LayoutIr, Relation, Side};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -76,6 +76,10 @@ pub struct Intent {
     /// Anchors to flip left-to-right.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub mirror: BTreeSet<RefDes>,
+    /// Relative statements about parts — `left_of`, `group`, `align`. The only way
+    /// to say where new parts go with respect to parts already on the sheet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<Relation>,
 }
 
 impl Intent {
@@ -87,6 +91,7 @@ impl Intent {
             ports: self.ports,
             place: self.place,
             mirror: self.mirror,
+            relations: self.relations,
             ..Default::default()
         }
     }
@@ -281,6 +286,16 @@ pub fn place_parts_input_schema() -> Value {
                         "type": "array",
                         "description": "Refdes to flip left-to-right.",
                         "items": {"type": "string"}
+                    },
+                    "relations": {
+                        "type": "array",
+                        "description":
+                            "Relative placement. Each entry is tagged by \"kind\": \
+                             left_of|right_of|above|below with {a, b}; \
+                             group with {name, members, side: [edge, anchor]}; \
+                             align with {members, axis}. `b` and `anchor` may name a \
+                             part that is already on the sheet.",
+                        "items": {"type": "object"}
                     }
                 }
             }

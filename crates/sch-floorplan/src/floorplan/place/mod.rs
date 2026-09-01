@@ -45,10 +45,10 @@ pub(crate) use route::*;
 mod grid_tests {
     use super::*;
     use crate::wire::DrawnSegment;
+    use crate::write::SchematicWriter;
     use geom::{Dir, Rect};
     use indexmap::IndexMap;
     use sch_check::model::{Block, Component, Design, LayoutGrid};
-    use sch_io::write::SchematicWriter;
     use sch_place::ir::Side;
 
     fn cells(names: &[&str]) -> Vec<Option<String>> {
@@ -369,7 +369,7 @@ mod grid_tests {
 
     #[test]
     fn forced_single_port_wire_requires_the_original_clear_short_stub() {
-        let clear = sch_io::wire::RouteScene {
+        let clear = crate::wire::RouteScene {
             solids: Vec::new(),
             points: Vec::new(),
             segments: Vec::new(),
@@ -388,7 +388,7 @@ mod grid_tests {
             &clear,
         ));
 
-        let blocked = sch_io::wire::RouteScene {
+        let blocked = crate::wire::RouteScene {
             solids: vec![Rect::new(10.5, 9.0, 12.0, 11.0)],
             points: Vec::new(),
             segments: Vec::new(),

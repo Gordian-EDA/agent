@@ -687,7 +687,7 @@ pub(crate) fn safe_forced_single_port_stub(
     pin: ::geom::Point2,
     exit: ::geom::Point2,
     net: &str,
-    scene: &sch_io::wire::RouteScene,
+    scene: &crate::wire::RouteScene,
 ) -> bool {
     let dx = (pin[0] - exit[0]).abs();
     let dy = (pin[1] - exit[1]).abs();
@@ -971,7 +971,7 @@ pub(crate) fn ic_port_exit_override(
 /// land the pennant inside an unrelated neighbour's body. No overlap, no move
 /// — clean sheets stay byte-identical.
 pub(crate) fn nudge_port_exit(
-    scene: &sch_io::wire::RouteScene,
+    scene: &crate::wire::RouteScene,
     mut at: [f64; 2],
     side: Side,
     net: &str,
