@@ -9,3 +9,4 @@ expect: lib_ids_changed != []
 expect: net_delta_removed == []
 expect: net_delta_pins_now_unconnected == []
 expect: len(net_delta_pins_now_connected) >= 1
+expect: paths_broken == []

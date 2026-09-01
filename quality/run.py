@@ -201,6 +201,48 @@ def flat_net_delta(delta):
     return {f"net_delta_{key}": value for key, value in delta.items()}
 
 
+def paths_broken(before_partition, kicad_nets, added_refs):
+    """Pins that shared a net before and no longer reach each other.
+
+    Inserting a series part splits a net in two, and that split is what the
+    edit was asked for — `net_delta_split` cannot tell it from a severed signal
+    path. Reachability can: every added part bridges its own pins, so a correct
+    insertion leaves the old net's pins in one component of the after-netlist
+    once those bridges are laid in. A pair still apart was cut.
+    """
+    if kicad_nets is None:
+        return []
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    on_net = {}
+    for net, nodes in kicad_nets.items():
+        for node in nodes:
+            union(node, net)
+            on_net.setdefault(node.split(".")[0], set()).add(net)
+    for ref in added_refs:
+        nets = sorted(on_net.get(ref, ()))
+        for net in nets[1:]:
+            union(nets[0], net)
+
+    broken = []
+    for group in before_partition:
+        live = [pin for pin in group if pin in parent]
+        for pin in live[1:]:
+            if find(pin) != find(live[0]):
+                broken.append([live[0], pin])
+    return sorted(broken)
+
+
 def schematic_facts(project, before_project, artifacts):
     """Everything measurable about the schematic, before against after.
 
@@ -244,6 +286,11 @@ def schematic_facts(project, before_project, artifacts):
             set(after["unconnected_pins"]) - set(before["unconnected_pins"])
         )
         facts.update(flat_net_delta(sch_facts("--diff", before_project, project)))
+        facts["paths_broken"] = paths_broken(
+            normalize_partition(before["partition"]),
+            kicad_nets,
+            {key.split("/")[0] for key in facts["symbols_added"]},
+        )
         detail["sch_before"] = before
     return facts, detail
 
