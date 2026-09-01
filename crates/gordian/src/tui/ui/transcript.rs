@@ -52,7 +52,7 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App, ctx: &mu
         .any(|e| matches!(e.speaker, Speaker::User | Speaker::Assistant));
     if !started {
         app.scroll_max = 0;
-        draw_welcome(f, inner);
+        draw_welcome(f, inner, app);
         return;
     }
 
@@ -362,7 +362,23 @@ fn decode(
 /// The first-launch splash, shown in the transcript pane until the first turn:
 /// the brand, a tagline, a few example prompts, and the key hints — vertically
 /// centred so an empty cockpit feels intentional rather than blank.
-fn draw_welcome(f: &mut Frame, area: Rect) {
+/// The schematic's project directory, tildified when it sits under `$HOME` so
+/// the welcome line reads as a place rather than a full path.
+fn project_dir(sch_path: &str) -> String {
+    let dir = std::path::Path::new(sch_path)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| ".".to_string());
+    if let Some(home) = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf())
+        && let Ok(rest) = std::path::Path::new(&dir).strip_prefix(&home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    dir
+}
+
+fn draw_welcome(f: &mut Frame, area: Rect, app: &App) {
     let logo = theme::LOGO;
     let wordmark = theme::LOGO;
     let dim = theme::META;
@@ -392,7 +408,10 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
     lines.extend([
         Line::from(""),
         Line::from(Span::styled("Gordian", wordmark)),
-        Line::from(Span::styled("the schematic & PCB design copilot", theme::SUBTLE)),
+        Line::from(vec![
+            Span::styled("the schematic & PCB design copilot", theme::SUBTLE),
+            Span::styled(format!("  ·  {}", project_dir(&app.status.sch_path)), theme::META),
+        ]),
         Line::from(""),
         Line::from(Span::styled("  Try:", dim)),
         example("design a 3.3V LDO regulator with input and output caps"),
@@ -798,6 +817,17 @@ fn spans_of(chars: &[(char, Style)]) -> Vec<Span<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_dir_is_the_schematics_parent() {
+        // Not asserting the `~` form here — it depends on this machine's actual
+        // $HOME, which the test can't control without changing process env.
+        assert_eq!(
+            project_dir("/opt/projects/buck/design.kicad_sch"),
+            "/opt/projects/buck"
+        );
+        assert_eq!(project_dir("design.kicad_sch"), ".");
+    }
 
     /// Plain text of one wrapped row.
     fn row_text(row: &[Span]) -> String {
