@@ -158,7 +158,12 @@ fn selection(input: &SelectionInput) -> Result<Selection> {
 }
 
 fn with_check(mut value: Value, ctx: &AgentRuntime) -> Result<Value> {
-    value["check_schematic"] = crate::check::check_schematic(json!({}), ctx)?;
+    let check = crate::check::check_schematic(json!({}), ctx)?;
+    value["gaps"] = check
+        .pointer("/completeness/gaps")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    value["check_schematic"] = check;
     Ok(value)
 }
 

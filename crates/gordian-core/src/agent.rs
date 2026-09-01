@@ -40,7 +40,7 @@ const MAX_FAILED_ROUTE_RETRIES: usize = 3;
 
 const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 
-const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. If it reports ok and erc_clean, finish immediately without further edits; otherwise fix only the reported defects and check once more.";
+const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. Fix errors. If completeness.gaps is nonempty and this request calls for a complete powered/interface design, add exactly the listed support circuitry and check again. Those warnings are advisory for deliberately minimal designs and focused edits; do not add unrelated parts. Finish once ERC is clean and every applicable gap is resolved.";
 
 const UNCHANGED_SCHEMATIC_NUDGE: &str = "the schematic is unchanged since the turn began (your edits were undone or refused); the request is not satisfied — either complete it (e.g. `set_fields` when no compatible symbol exists) or state plainly that it cannot be done and why";
 
@@ -297,7 +297,7 @@ fn tool_defs_for_phase(
     discovery_rounds_used: &HashMap<String, usize>,
     discovery_rounds_allowed: usize,
     revision_reads_used: &HashSet<String>,
-    schematic_checked_clean: bool,
+    schematic_check_complete: bool,
 ) -> Vec<Tool> {
     tool_defs()
         .into_iter()
@@ -324,7 +324,7 @@ fn tool_defs_for_phase(
         // may still be required by the request, but no schematic writer remains
         // available for a speculative tidy pass after the verified result.
         .filter(|tool| {
-            !schematic_checked_clean
+            !schematic_check_complete
                 || (!is_schematic_mutator(tool.name.as_str())
                     && tool.name.as_str() != "check_schematic")
         })
@@ -705,8 +705,9 @@ impl<P: Provider> Agent<P> {
         let mut applied = false;
         let mut schematic_mutator_issued = false;
         let mut schematic_mutated = false;
-        let mut schematic_checked_clean = false;
+        let mut schematic_check_complete = false;
         let mut unchanged_schematic_feedback_sent = false;
+        let mut successful_place_parts = 0usize;
         let mut check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
         let mut provider_requests = 0usize;
@@ -752,7 +753,7 @@ impl<P: Provider> Agent<P> {
                 &discovery_rounds_used,
                 budgets.discovery_rounds_per_subturn,
                 &revision_reads_used,
-                schematic_checked_clean,
+                schematic_check_complete,
             );
             if request_supplies_multiple_library_ids(authoritative_intent)
                 && !self.runtime.sch_path().exists()
@@ -846,12 +847,12 @@ impl<P: Provider> Agent<P> {
                 {
                     unchanged_schematic_feedback_sent = true;
                     schematic_mutated = false;
-                    schematic_checked_clean = false;
+                    schematic_check_complete = false;
                     self.history
                         .push(ChatMessage::user(UNCHANGED_SCHEMATIC_NUDGE));
                     continue;
                 }
-                if schematic_mutated && !schematic_checked_clean && check_nudges_left > 0 {
+                if schematic_mutated && !schematic_check_complete && check_nudges_left > 0 {
                     check_nudges_left -= 1;
                     self.history.push(ChatMessage::user(CHECK_SCHEMATIC_NUDGE));
                     continue;
@@ -899,7 +900,7 @@ impl<P: Provider> Agent<P> {
                 let repeated_read = is_revision_scoped_read(&call.fn_name)
                     && revision_read_uses.get(&call.fn_name) == Some(&tool_state_revision);
                 let mutation_after_clean =
-                    schematic_checked_clean && is_schematic_mutator(&call.fn_name);
+                    schematic_check_complete && is_schematic_mutator(&call.fn_name);
                 let mutation_blocked = timed_out_mutation_name(&timed_out_tool_calls).is_some()
                     && effect == ToolEffect::Mutating;
 
@@ -985,12 +986,18 @@ impl<P: Provider> Agent<P> {
                 if dispatched && schematic_mutation_succeeded(&call.fn_name, &parsed) {
                     applied = true;
                     schematic_mutated = true;
-                    schematic_checked_clean = false;
+                    if call.fn_name == "place_parts" {
+                        successful_place_parts += 1;
+                    }
+                    schematic_check_complete = successful_place_parts > 1
+                        && parsed
+                            .get("check_schematic")
+                            .is_some_and(check_schematic_is_complete);
                 }
                 if dispatched && call.fn_name == "check_schematic" {
-                    let clean = check_schematic_is_clean(&parsed);
+                    let complete = check_schematic_is_complete(&parsed);
                     if schematic_mutated {
-                        schematic_checked_clean = clean;
+                        schematic_check_complete = complete;
                     }
                 }
 
@@ -1412,6 +1419,14 @@ fn schematic_mutation_succeeded(name: &str, value: &Value) -> bool {
 fn check_schematic_is_clean(value: &Value) -> bool {
     value.get("ok").and_then(Value::as_bool) == Some(true)
         && value.get("erc_clean").and_then(Value::as_bool) == Some(true)
+}
+
+fn check_schematic_is_complete(value: &Value) -> bool {
+    check_schematic_is_clean(value)
+        && value
+            .pointer("/completeness/gaps")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
 }
 
 /// Parse a tool result back into JSON (Null on a malformed result), for the UI
@@ -2317,7 +2332,17 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 .and_then(|erc| erc.get("errors"))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            format!("{errors} errors, {warnings} warnings, {erc} ERC errors")
+            let completeness = result
+                .pointer("/completeness/warnings")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            format!(
+                "{errors} errors, {warnings} warnings, {erc} ERC errors, {completeness} completeness gaps"
+            )
+        }
+        "place_parts" => {
+            let gaps = result.get("gaps").and_then(Value::as_array).map_or(0, Vec::len);
+            format!("placed block; {gaps} completeness gaps remain")
         }
         "project_info" => result
             .get("sch_path")

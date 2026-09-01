@@ -90,7 +90,7 @@ pub fn tool_defs() -> Vec<Tool> {
     let defs: Vec<(&str, &str, Value)> = vec![
         (
             "place_parts",
-            "The ONLY way to create a new design or add a multi-part block. Submit the COMPLETE electrically finished block in one call, including every requested support, protection, decoupling, bias, termination, indicator, and connector part; every powered design needs local supply bypass/decoupling even when the request leaves it implicit. Never submit a minimal or partial first pass. State connectivity only: real KiCAD parts and pin-to-net mappings, never coordinates or wires. One call lays out the whole new sheet, or places the block as a region while freezing existing symbols. Use `intent.relations` for left_of/right_of/group/side_of placement. If rejected, correct every reported diagnostic before retrying; unknown-pin errors list valid physical pins.",
+            "The ONLY way to create a new design or add a multi-part block. Submit the COMPLETE electrically finished block in one call, including every requested support, protection, decoupling, bias, termination, indicator, and connector part. State connectivity only: real KiCAD parts and pin-to-net mappings, never coordinates or wires. One call lays out the whole new sheet, or places the block as a region while freezing existing symbols. The result's `gaps` are deterministic missing-support findings; for a complete powered/interface design, add the listed parts in one follow-up place_parts call. They are advisory for deliberately minimal designs and focused edits. Use `intent.relations` for left_of/right_of/group/side_of placement. If rejected, correct every reported diagnostic before retrying; unknown-pin errors list valid physical pins.",
             sch_check::place_parts_input_schema(),
         ),
         (
@@ -139,7 +139,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "check_schematic",
-            "Lint + electrical rules + KiCAD ERC over the live file. Run this before you finish.",
+            "Lint + electrical rules + KiCAD ERC over the live file. `completeness.gaps` lists advisory missing support circuitry; resolve it when the request implies a complete powered/interface design, but never expand a deliberately minimal or focused edit.",
             json!({ "type": "object", "properties": {}, "additionalProperties": false }),
         ),
         (
