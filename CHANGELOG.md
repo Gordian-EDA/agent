@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Changed
+- **The floating menus are borderless**: the `/command` completion list and the
+  unwind picker drop their rounded box, title, and selection caret. They are now
+  full-width lists seated on the composer, with the selected row as a solid
+  accent bar that is legible from anywhere along it.
 - **TUI transcript view**: the `↑n` scrollback badge is replaced by a proportional
   scrollbar in the right-hand gutter, whose thumb takes the accent while scrolled
   back and recedes at the tail. `End` (on an empty prompt) and `Ctrl-End` (always)

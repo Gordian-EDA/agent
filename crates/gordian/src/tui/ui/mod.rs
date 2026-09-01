@@ -580,11 +580,37 @@ mod tests {
         let text = render_to_string(&mut a, 80, 24);
         assert!(text.contains("/clear"), "popup lists /clear:\n{text}");
         assert!(text.contains("/compact"), "popup lists /compact:\n{text}");
-        assert!(text.contains("commands"), "popup title:\n{text}");
+        assert!(
+            !text.contains("commands · Tab"),
+            "the list is borderless and untitled — the rows are the widget:\n{text}"
+        );
 
         a.update(Msg::Complete);
         let text = render_to_string(&mut a, 80, 24);
         assert!(text.contains("/clear"), "first match filled:\n{text}");
+    }
+
+    #[test]
+    fn the_selected_completion_is_a_full_width_bar() {
+        let mut a = app();
+        for c in "/c".chars() {
+            a.update(Msg::Char(c));
+        }
+        a.update(Msg::Complete); // select the first match
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut a)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let bar = (0..buf.area.height)
+            .find(|&y| (0..buf.area.width).all(|x| buf[(x, y)].style().bg == Some(theme::ACC)))
+            .expect("the selected row is an unbroken accent bar across the full width");
+        // The first match is selected, so the unselected siblings sit below it.
+        assert!(
+            (0..buf.area.width).all(|x| buf[(x, bar + 1)].style().bg == Some(theme::SEL)),
+            "unselected rows sit on the menu surface"
+        );
     }
 
     #[test]
@@ -692,7 +718,10 @@ mod tests {
         let mut a = app();
         a.open_unwind(vec!["swap the regulator".into(), "add usb-c".into()]);
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("unwind to"), "picker title:\n{text}");
+        assert!(
+            !text.contains("unwind to"),
+            "the picker is borderless and untitled, like the completion list:\n{text}"
+        );
         assert!(
             text.contains("swap the regulator"),
             "newest prompt:\n{text}"

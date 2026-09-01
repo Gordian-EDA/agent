@@ -83,9 +83,16 @@ pub const RULE_FOCUS: Style = fg(ACC);
 
 pub const POPUP_BORDER: Style = fg(BORDER);
 pub const POPUP_TITLE: Style = bold(fg(ACC));
-/// The selected popup row: a soft wash plus the accent caret, never an inverted bar.
-pub const SEL_ROW: Style = bold(Style::new().bg(SEL).fg(FG));
-pub const SEL_CARET: Style = bold(Style::new().bg(SEL).fg(ACC));
+
+/// The floating menus (`/command` completion, the unwind picker) are borderless
+/// lists seated on [`SEL`], one surface step above the composer band they cover.
+/// The selected row is a solid accent bar — legible from anywhere along the row,
+/// where a caret is only legible at its start.
+pub const MENU: Style = Style::new().bg(SEL).fg(FG);
+pub const MENU_LABEL: Style = bold(Style::new().bg(SEL).fg(FG));
+pub const MENU_DETAIL: Style = Style::new().bg(SEL).fg(DIM);
+pub const MENU_SEL: Style = Style::new().bg(ACC).fg(BG0);
+pub const MENU_SEL_LABEL: Style = bold(Style::new().bg(ACC).fg(BG0));
 
 pub const SUCCESS: Style = fg(OK);
 pub const DANGER: Style = fg(ERR);

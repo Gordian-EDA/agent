@@ -7,70 +7,66 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::super::app::{App, PendingApproval};
 use super::super::theme;
 use super::{MARGIN, body};
 
-/// The `/command` completion popup, floated just above the input pane.
+/// The `/command` completion list, seated directly on top of the composer.
+///
+/// No border, no title, no caret: the rows *are* the widget, so the list reads
+/// as the composer growing upward rather than as a dialog opening over it.
 pub(super) fn draw_completions(f: &mut Frame, input_area: Rect, app: &App) {
     let Some((matches, selected)) = app.completion_view() else {
         return;
     };
-    let name_w = matches.iter().map(|c| c.name.len()).max().unwrap_or(0);
-    let lines: Vec<Line> = matches
+    let label_w = matches.iter().map(|c| c.name.chars().count()).max().unwrap_or(0);
+    let rows: Vec<Line> = matches
         .iter()
         .enumerate()
-        .map(|(i, c)| {
-            // Selected row: an accent caret + bold name. Others: a blank gutter,
-            // plain name, dim description — the soft Codex selection, not an
-            // inverted bar.
-            let sel = selected == Some(i);
-            let (caret, name_style, desc_style) = if sel {
-                (theme::SEL_CARET, theme::SEL_ROW, theme::SEL_ROW)
-            } else {
-                (theme::BAND, theme::TOOL_NAME, theme::META)
-            };
-            Line::from(vec![
-                Span::styled(if sel { "❯ " } else { "  " }, caret),
-                Span::styled(format!("{:<name_w$}  ", c.name), name_style),
-                Span::styled(c.desc.to_string(), desc_style),
-            ])
-        })
+        .map(|(i, c)| menu_row(c.name, c.desc, label_w, input_area.width, selected == Some(i)))
         .collect();
+    draw_menu(f, input_area, rows);
+}
 
-    let content_w = lines
-        .iter()
-        .map(|l| {
-            l.spans
-                .iter()
-                .map(|s| s.content.chars().count())
-                .sum::<usize>()
-        })
-        .max()
-        .unwrap_or(0) as u16;
-    let maxw = input_area.width.saturating_sub(2 * MARGIN);
-    let w = (content_w + 2).max(24).min(maxw);
-    let h = (matches.len() as u16 + 2).min(input_area.y); // never above the screen top
+/// One full-width menu row: the composer's own left indent, a padded label, then
+/// the detail column. Every cell is painted out to the right edge so a selected
+/// row reads as one unbroken bar instead of a highlight that stops at the text.
+fn menu_row(label: &str, detail: &str, label_w: usize, width: u16, selected: bool) -> Line<'static> {
+    let (label_style, detail_style) = if selected {
+        (theme::MENU_SEL_LABEL, theme::MENU_SEL)
+    } else {
+        (theme::MENU_LABEL, theme::MENU_DETAIL)
+    };
+    let indent = MARGIN as usize;
+    let label = format!("{label:<label_w$}");
+    // Trim the detail (never the label) when the terminal is too narrow, then pad
+    // the row out to the full width so the bar spans it.
+    let room = (width as usize).saturating_sub(indent + label.chars().count() + 2);
+    let detail: String = detail.chars().take(room).collect();
+    let pad = room - detail.chars().count();
+    Line::from(vec![
+        Span::styled(" ".repeat(indent), detail_style),
+        Span::styled(label, label_style),
+        Span::styled(format!("  {detail}{}", " ".repeat(pad)), detail_style),
+    ])
+}
+
+/// Float a borderless menu on top of the composer, growing upward from it.
+fn draw_menu(f: &mut Frame, input_area: Rect, rows: Vec<Line<'static>>) {
+    let h = (rows.len() as u16).min(input_area.y);
+    if h == 0 {
+        return;
+    }
     let popup = Rect {
-        x: input_area.x + MARGIN, // align the popup's left edge with the composer
-        y: input_area.y.saturating_sub(h),
-        width: w,
+        x: input_area.x,
+        y: input_area.y - h,
+        width: input_area.width,
         height: h,
     };
     f.render_widget(Clear, popup);
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .style(theme::BAND)
-                .border_style(theme::POPUP_BORDER)
-                .title(Span::styled(" commands · Tab ", theme::POPUP_TITLE)),
-        ),
-        popup,
-    );
+    f.render_widget(Paragraph::new(rows).style(theme::MENU), popup);
 }
 
 /// Rows the approval pane needs at this terminal width: action row, summary row,
@@ -346,7 +342,7 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 placeholder,
-                theme::META.add_modifier(Modifier::ITALIC),
+                theme::META,
             ))),
             inner,
         );
@@ -440,68 +436,29 @@ fn cursor_line_col(input: &str, cursor: usize) -> (usize, usize) {
     (line, col)
 }
 
-/// The double-Esc unwind picker, floated just above the input pane. Lists the
-/// agent's recent prompts newest-first; the selected row (and everything below
-/// it in time) is what an Enter would unwind.
+/// The double-Esc unwind picker, in the same borderless menu idiom as the
+/// completion list. Prompts are newest-first; the selected row (and everything
+/// below it in time) is what an Enter would unwind.
 pub(super) fn draw_unwind(f: &mut Frame, input_area: Rect, app: &App) {
     let Some(p) = app.unwind.as_ref() else {
         return;
     };
-    let idx_w = p.prompts.len().to_string().len();
-    let lines: Vec<Line> = p
+    let idx_w = p.prompts.len().to_string().len() + 1; // the ↶ rides the index
+    let rows: Vec<Line> = p
         .prompts
         .iter()
         .enumerate()
         .map(|(i, prompt)| {
-            // Soft selection: accent caret + bold on the chosen row; others dim.
-            let sel = i == p.selected;
-            let (caret, idx_style, text_style) = if sel {
-                (theme::SEL_CARET, theme::SEL_ROW, theme::SEL_ROW)
-            } else {
-                (theme::BAND, theme::META, theme::SUBTLE)
-            };
-            Line::from(vec![
-                Span::styled(if sel { "❯ " } else { "  " }, caret),
-                Span::styled(format!("↶{:<idx_w$}  ", i + 1), idx_style),
-                Span::styled(prompt.clone(), text_style),
-            ])
+            menu_row(
+                &format!("↶{}", i + 1),
+                prompt,
+                idx_w,
+                input_area.width,
+                i == p.selected,
+            )
         })
         .collect();
-
-    let content_w = lines
-        .iter()
-        .map(|l| {
-            l.spans
-                .iter()
-                .map(|s| s.content.chars().count())
-                .sum::<usize>()
-        })
-        .max()
-        .unwrap_or(0) as u16;
-    // `.max().min()` not `clamp()`: a terminal narrower than the floor would
-    // make clamp(lo, hi) panic with lo > hi.
-    let w = (content_w + 2)
-        .max(24)
-        .min(input_area.width.saturating_sub(2 * MARGIN));
-    let h = (p.prompts.len() as u16 + 2).min(input_area.y); // never above the screen top
-    let popup = Rect {
-        x: input_area.x + MARGIN, // align with the composer
-        y: input_area.y.saturating_sub(h),
-        width: w,
-        height: h,
-    };
-    f.render_widget(Clear, popup);
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .style(theme::BAND)
-                .border_style(theme::POPUP_BORDER)
-                .title(Span::styled(" unwind to… · ↑↓ Enter · Esc ", theme::POPUP_TITLE)),
-        ),
-        popup,
-    );
+    draw_menu(f, input_area, rows);
 }
 
 #[cfg(test)]
