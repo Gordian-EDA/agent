@@ -190,8 +190,9 @@ fn adding_a_symbol_is_deterministic() {
     assert_eq!(once.1, twice.1, "UUIDs are not content-derived");
 }
 
-/// Two added wires fuse two nets; the label riding the corner does not get to
-/// name the result, because a power rail outranks a local label.
+/// Two added wires fuse a global-labelled net with a power rail. The local
+/// label riding the corner does not get to name the result, and neither does
+/// the rail: KiCAD ranks a global label above a power symbol above a local one.
 #[test]
 fn added_wires_merge_two_nets_and_the_stronger_name_wins() {
     let (source, text, delta) = edited(|doc| {
@@ -207,7 +208,7 @@ fn added_wires_merge_two_nets_and_the_stronger_name_wins() {
     assert!(lost.is_empty(), "additions rewrote existing blocks: {lost:?}");
     assert_eq!(
         delta.merged,
-        vec![(vec!["OUT".to_string(), "VCC".to_string()], "VCC".to_string())],
+        vec![(vec!["OUT".to_string(), "VCC".to_string()], "OUT".to_string())],
         "{delta:?}"
     );
     assert!(delta.pins_now_unconnected.is_empty(), "{delta:?}");
@@ -238,6 +239,49 @@ fn write_collects_definitions_the_edit_orphaned() {
     let written = SchDoc::read(&out).expect("reparse");
     assert!(!written.lib_symbols().expect("libs").contains("Device:C"));
     assert!(written.lib_symbols().expect("libs").contains("Device:R"));
+}
+
+/// A sheet the hierarchy places several times carries one `(instances)` path
+/// per placement, each with its own reference. Moving a symbol must not touch
+/// that table, and renaming one has to be refused rather than flattening it.
+#[test]
+fn a_re_instantiated_sheet_keeps_its_per_placement_references() {
+    let Some(path) = corpus::files()
+        .into_iter()
+        .find(|p| p.ends_with("multichannel/channel_strip.kicad_sch"))
+    else {
+        eprintln!("SKIP: corpus not found");
+        return;
+    };
+    let source = std::fs::read_to_string(&path).expect("read");
+    let mut doc = SchDoc::parse(&source).expect("parse");
+    let refdes = doc.symbols().next().expect("a symbol").refdes().to_string();
+    assert!(references(&source).len() > 4, "fixture has no instance table");
+
+    doc.move_symbol(&refdes, 10.0, 10.0).expect("move");
+    let moved = doc.to_text();
+    assert_eq!(
+        references(&moved),
+        references(&source),
+        "moving a symbol rewrote the instance table"
+    );
+
+    let refused = doc.set_field(&refdes, "Reference", "R999");
+    assert!(
+        matches!(refused, Err(sch_doc::Error::ForeignInstances(_))),
+        "renaming was allowed: {refused:?}"
+    );
+    assert_eq!(references(&doc.to_text()), references(&source));
+}
+
+/// Every `(reference "…")` in the file, in order.
+fn references(text: &str) -> Vec<&str> {
+    text.match_indices("(reference \"")
+        .filter_map(|(at, tag)| {
+            let rest = &text[at + tag.len()..];
+            rest.find('"').map(|end| &rest[..end])
+        })
+        .collect()
 }
 
 #[test]

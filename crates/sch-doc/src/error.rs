@@ -15,6 +15,11 @@ pub enum Error {
     UnknownReference(String),
     #[error("no snapshot {0}")]
     UnknownSnapshot(usize),
+    #[error(
+        "{0} is annotated by the parent hierarchy, not by this sheet; \
+         rename it where the sheet is instantiated"
+    )]
+    ForeignInstances(String),
     #[error("symbol library: {0}")]
     Library(String),
 }

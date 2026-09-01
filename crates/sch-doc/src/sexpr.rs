@@ -131,10 +131,14 @@ pub fn set_child(node: &mut Node, replacement: Node) {
     }
 }
 
-/// Remove every `(name …)` child.
+/// Remove every child named `name`, in both spellings [`flag_present`] accepts:
+/// the `(name …)` list and the bare `name` atom older KiCAD wrote for flags.
 pub fn remove_children(node: &mut Node, name: &str) {
     if let Some(children) = items_mut(node) {
-        children.retain(|c| head(c) != Some(name));
+        children.retain(|c| match c {
+            Node::List { .. } => head(c) != Some(name),
+            Node::Atom { atom, .. } => !matches!(atom, Atom::Symbol(s) if s == name),
+        });
     }
 }
 
@@ -158,6 +162,14 @@ fn escape(value: &str) -> String {
         out.push(ch);
     }
     out.push('"');
+    out
+}
+
+/// One-line rendering of a node.
+#[cfg(test)]
+pub fn flat(node: &Node) -> String {
+    let mut out = String::new();
+    flat_into(node, &mut out);
     out
 }
 

@@ -104,7 +104,13 @@ pub struct Field {
 impl Field {
     fn decode(node: &Node) -> Option<(String, Field)> {
         let name = sexpr::text(items(node).get(1)?)?.to_string();
-        let value = sexpr::text(items(node).get(2)?).unwrap_or_default().to_string();
+        // A property with no value slot is malformed, but dropping it would
+        // lose the field; read it as empty and let `encode` fill the slot.
+        let value = items(node)
+            .get(2)
+            .and_then(sexpr::text)
+            .unwrap_or_default()
+            .to_string();
         let at = child(node, "at").map(decode_pose);
         let hidden = sexpr::flag_present(node, "hide")
             || child(node, "effects").is_some_and(|e| sexpr::flag_present(e, "hide"));
@@ -119,15 +125,12 @@ impl Field {
         ))
     }
 
-    fn new(name: &str, value: &str, at: Pose) -> Field {
+    fn new(name: &str, value: &str, at: Pose, hidden: bool) -> Field {
         Field {
             value: value.to_string(),
             at: Some(at),
-            hidden: false,
-            node: tagged(
-                "property",
-                vec![quoted(name), quoted(value), encode_pose(at)],
-            ),
+            hidden,
+            node: property_node(name, value, at, hidden),
         }
     }
 
@@ -233,7 +236,6 @@ impl SymbolInst {
             None => sexpr::remove_children(&mut node, "mirror"),
         }
         sync_properties(&mut node, &self.fields);
-        sync_instance_reference(&mut node, self.refdes(), self.unit);
         node
     }
 }
@@ -461,14 +463,11 @@ impl Sheet {
         }
     }
 
+    /// Sheets are decoded so tools can see the hierarchy and its border pins;
+    /// nothing edits one yet, so this hands back what was parsed rather than
+    /// pretending the typed fields are writable.
     pub(crate) fn encode(&self) -> Node {
-        let mut node = self.raw.node.clone();
-        sexpr::set_child(&mut node, tagged("at", vec![num(self.at.x), num(self.at.y)]));
-        sexpr::set_child(
-            &mut node,
-            tagged("size", vec![num(self.size.x), num(self.size.y)]),
-        );
-        node
+        self.raw.node.clone()
     }
 }
 
@@ -655,17 +654,22 @@ pub(crate) fn yes_no(value: bool) -> Node {
 /// Set or clear a `(hide yes)` flag, preferring the location KiCAD uses for the
 /// node at hand: symbol properties carry it inside `(effects …)`.
 fn set_hide(node: &mut Node, hidden: bool) {
+    // KiCAD has written this flag on the property and inside its effects, as a
+    // list and as a bare atom. Clear all of them, then write one back where the
+    // node already kept it.
     let nested = sexpr::child(node, "effects").is_some_and(|e| sexpr::flag_present(e, "hide"));
-    let target = if nested {
-        sexpr::child_mut(node, "effects").expect("just checked")
-    } else {
-        node
-    };
-    if hidden {
-        sexpr::set_child(target, tagged("hide", vec![sym("yes")]));
-    } else {
-        sexpr::remove_children(target, "hide");
+    sexpr::remove_children(node, "hide");
+    if let Some(effects) = sexpr::child_mut(node, "effects") {
+        sexpr::remove_children(effects, "hide");
     }
+    if !hidden {
+        return;
+    }
+    let target = match nested {
+        true => sexpr::child_mut(node, "effects").expect("just checked"),
+        false => node,
+    };
+    sexpr::set_child(target, tagged("hide", vec![sym("yes")]));
 }
 
 /// Rewrite the `(property …)` children to match `fields`, keeping document
@@ -702,34 +706,119 @@ fn sync_properties(node: &mut Node, fields: &IndexMap<String, Field>) {
         }
     }
     for (offset, (_, added)) in encoded.into_iter().enumerate() {
-        children.insert(insert_at + offset, added);
+        children.insert((insert_at + offset).min(children.len()), added);
     }
 }
 
-/// Keep `(instances (project … (path … (reference …) (unit …))))` in step with
-/// the typed refdes and unit, wherever the paths happen to point.
-fn sync_instance_reference(node: &mut Node, refdes: &str, unit: u32) {
+/// Rewrite the reference on the one `(instances … (path …))` entry that belongs
+/// to this sheet.
+///
+/// A sheet placed several times in a hierarchy carries one path per placement,
+/// each with its own reference; only the entry whose path is this sheet's own
+/// may be touched, and a re-instantiated sheet has none.
+pub(crate) fn set_instance_reference(node: &mut Node, sheet_path: &str, refdes: &str) -> bool {
     let Some(instances) = sexpr::child_mut(node, "instances") else {
-        return;
+        return false;
     };
     let Some(projects) = sexpr::items_mut(instances) else {
-        return;
+        return false;
     };
+    let mut touched = false;
     for project in projects.iter_mut() {
         let Some(paths) = sexpr::items_mut(project) else {
             continue;
         };
         for path in paths.iter_mut() {
-            if sexpr::head(path) != Some("path") {
+            if sexpr::head(path) != Some("path")
+                || items(path).get(1).and_then(sexpr::text) != Some(sheet_path)
+            {
                 continue;
             }
             sexpr::set_child(path, tagged("reference", vec![quoted(refdes)]));
-            sexpr::set_child(path, tagged("unit", vec![num(unit as f64)]));
+            touched = true;
         }
     }
+    touched
 }
 
-/// Build a fresh `(property …)` node for a symbol field.
-pub(crate) fn new_field(name: &str, value: &str, at: Pose) -> Field {
-    Field::new(name, value, at)
+/// Build a fresh symbol field in the shape KiCAD writes.
+pub(crate) fn new_field(name: &str, value: &str, at: Pose, hidden: bool) -> Field {
+    Field::new(name, value, at, hidden)
+}
+
+/// A `(property …)` node with the effects block KiCAD always emits.
+pub(crate) fn property_node(name: &str, value: &str, at: Pose, hidden: bool) -> Node {
+    let mut effects = vec![tagged(
+        "font",
+        vec![tagged("size", vec![num(1.27), num(1.27)])],
+    )];
+    if hidden {
+        effects.push(tagged("hide", vec![sym("yes")]));
+    }
+    list(vec![
+        sym("property"),
+        quoted(name),
+        quoted(value),
+        encode_pose(at),
+        tagged("effects", effects),
+    ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kiutils_sexpr::parse_one;
+
+    fn field(text: &str) -> Field {
+        let cst = parse_one(text).expect("parse");
+        Field::decode(&cst.nodes[0]).expect("decode").1
+    }
+
+    fn render(field: &Field) -> String {
+        crate::sexpr::flat(&field.encode())
+    }
+
+    /// KiCAD has written this flag as a bare atom and as a list; both must read
+    /// as hidden, and re-encoding must not leave two of them behind.
+    #[test]
+    fn the_hide_flag_survives_both_spellings() {
+        for source in [
+            r#"(property "Datasheet" "" (at 0 0 0) hide)"#,
+            r#"(property "Datasheet" "" (at 0 0 0) (hide yes))"#,
+        ] {
+            let mut f = field(source);
+            assert!(f.hidden, "{source}");
+            let once = render(&f);
+            assert_eq!(once.matches("hide").count(), 1, "{once}");
+
+            f.value = "http://x".to_string();
+            let edited = render(&f);
+            assert_eq!(edited.matches("hide").count(), 1, "{edited}");
+            assert!(edited.contains(r#""http://x""#), "{edited}");
+
+            f.hidden = false;
+            let shown = render(&f);
+            assert!(!shown.contains("hide"), "{shown}");
+        }
+    }
+
+    /// A property that keeps the flag inside its effects block keeps it there.
+    #[test]
+    fn a_nested_hide_flag_stays_nested() {
+        let mut f = field(
+            r##"(property "Reference" "#PWR" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))"##,
+        );
+        assert!(f.hidden);
+        f.value = "#PWR01".to_string();
+        let rendered = render(&f);
+        assert_eq!(rendered.matches("hide").count(), 1, "{rendered}");
+        assert!(rendered.contains("(font (size 1.27 1.27)) (hide yes)"), "{rendered}");
+    }
+
+    #[test]
+    fn a_short_property_node_keeps_its_new_value() {
+        let mut f = field(r#"(property "MPN")"#);
+        f.value = "RC0603".to_string();
+        assert!(render(&f).contains(r#""RC0603""#), "{}", render(&f));
+    }
 }

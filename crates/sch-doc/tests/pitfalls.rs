@@ -92,20 +92,26 @@ fn a_pin_inside_a_wire_joins_it() {
 }
 
 /// Two wires whose interiors cross are not connected — that is a drawing, not
-/// a node.
+/// a node. Each wire carries a real two-pin net so the crossing is the only
+/// thing under test.
 #[test]
 fn crossing_wire_interiors_stay_apart() {
     let items = format!(
-        "{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}",
         place("Device:R", "R1", "1k", 0.0, 13.81, 0.0, "(unit 1)"),
+        place("Device:R", "R3", "1k", 20.0, 13.81, 0.0, "(unit 1)"),
         place("Device:R", "R2", "1k", 10.0, 23.81, 0.0, "(unit 1)"),
+        place("Device:R", "R4", "1k", 13.81, 0.0, 90.0, "(unit 1)"),
         wire(0.0, 10.0, 20.0, 10.0),
-        wire(10.0, 20.0, 10.0, 0.0),
+        wire(10.0, 0.0, 10.0, 20.0),
     );
     let doc = sheet(&[RESISTOR], &items);
     assert_eq!(
         nets(&doc),
-        vec![vec!["R1.1".to_string()], vec!["R2.1".to_string()]]
+        vec![
+            vec!["R1.1".to_string(), "R3.1".to_string()],
+            vec!["R2.1".to_string(), "R4.1".to_string()],
+        ]
     );
 
     // A junction at the crossing is what makes them one net.
@@ -115,7 +121,12 @@ fn crossing_wire_interiors_stay_apart() {
     );
     assert_eq!(
         nets(&with_dot),
-        vec![vec!["R1.1".to_string(), "R2.1".to_string()]]
+        vec![vec![
+            "R1.1".to_string(),
+            "R2.1".to_string(),
+            "R3.1".to_string(),
+            "R4.1".to_string(),
+        ]]
     );
 }
 
@@ -218,20 +229,39 @@ fn dnp_symbols_still_connect_and_say_so() {
     assert!(!pins.iter().find(|p| p.refdes == "R2").expect("R2").dnp);
 }
 
-/// A no-connect marker is an answer, so the pin is not reported as a loose end.
+/// A no-connect marker is an answer: the pin stops being a loose end without
+/// becoming a net.
 #[test]
 fn a_no_connect_settles_a_pin() {
     let placed = place("Device:R", "R1", "1k", 100.0, 100.0, 0.0, "(unit 1)");
-    let bare = sheet(&[RESISTOR], &placed);
-    assert_eq!(connect::extract(&bare).unconnected.len(), 2);
+    let bare = connect::extract(&sheet(&[RESISTOR], &placed));
+    assert_eq!(bare.unconnected.len(), 2);
+    assert!(bare.no_connect.is_empty());
 
-    let marked = sheet(
+    let marked = connect::extract(&sheet(
         &[RESISTOR],
         &format!("{placed}\n(no_connect (at 100 96.19) (uuid \"nc\"))"),
-    );
-    let netlist = connect::extract(&marked);
-    assert_eq!(netlist.unconnected.len(), 1);
-    assert_eq!(netlist.unconnected[0].pin, "2");
+    ));
+    assert_eq!(marked.unconnected.len(), 1);
+    assert_eq!(marked.unconnected[0].pin, "2");
+    assert_eq!(marked.no_connect.len(), 1);
+    assert_eq!(marked.no_connect[0].pin, "1");
+}
+
+/// A wire is not a connection. `kicad-cli` calls a lone pin on a dangling wire
+/// `unconnected-(…)`, and so does this.
+#[test]
+fn a_dangling_wire_does_not_make_a_net() {
+    let netlist = connect::extract(&sheet(
+        &[RESISTOR],
+        &format!(
+            "{}\n{}",
+            place("Device:R", "R1", "1k", 100.0, 100.0, 0.0, "(unit 1)"),
+            wire(100.0, 96.19, 120.0, 96.19),
+        ),
+    ));
+    assert!(netlist.nets.is_empty(), "{:?}", netlist.nets);
+    assert_eq!(netlist.unconnected.len(), 2);
 }
 
 /// Placing unit 2 must bring unit 2's own pins and the shared unit-0 pins, and
@@ -338,18 +368,27 @@ fn unnamed_nets_get_a_generated_name() {
 }
 
 /// A hierarchical sheet's pins sit on its border in sheet coordinates, not
-/// relative to the sheet box, and a wire ending on one connects to it.
+/// relative to the sheet box, and one is a connection point: two wires crossing
+/// over it are joined by it, exactly as a junction or a symbol pin would.
 #[test]
-fn sheet_pins_are_connection_points_in_sheet_coordinates() {
+fn a_sheet_pin_joins_the_wires_that_cross_it() {
+    let wires = format!(
+        "{}\n{}\n{}\n{}",
+        place("Device:R", "R1", "1k", 20.0, 58.81, 0.0, "(unit 1)"),
+        place("Device:R", "R2", "1k", 53.81, 30.0, 90.0, "(unit 1)"),
+        wire(20.0, 55.0, 80.0, 55.0),
+        wire(50.0, 30.0, 50.0, 80.0),
+    );
+    let bare = sheet(&[RESISTOR], &wires);
+    assert!(nets(&bare).is_empty(), "the wires crossed without a node");
+
     let doc = sheet(
         &[RESISTOR],
         &format!(
-            "{}\n{}\n(sheet (at 50 50) (size 20 20) (uuid \"s\")\n\
-             (property \"Sheetname\" \"child\" (at 50 49 0))\n\
-             (property \"Sheetfile\" \"child.kicad_sch\" (at 50 71 0))\n\
-             (pin \"IN\" input (at 50 55 180) (uuid \"sp\")))",
-            place("Device:R", "R1", "1k", 20.0, 58.81, 0.0, "(unit 1)"),
-            wire(20.0, 55.0, 50.0, 55.0),
+            "{wires}\n(sheet (at 50 55) (size 20 20) (uuid \"s\")\n\
+             (property \"Sheetname\" \"child\" (at 50 54 0))\n\
+             (property \"Sheetfile\" \"child.kicad_sch\" (at 50 76 0))\n\
+             (pin \"IN\" input (at 50 55 180) (uuid \"sp\")))"
         ),
     );
     let pins = doc
@@ -361,7 +400,113 @@ fn sheet_pins_are_connection_points_in_sheet_coordinates() {
         })
         .expect("sheet");
     assert_eq!(pins[0].at.point(), geom::Point2::new(50.0, 55.0));
-    assert_eq!(nets(&doc), vec![vec!["R1.1".to_string()]]);
+    assert_eq!(nets(&doc), vec![vec!["R1.1".to_string(), "R2.1".to_string()]]);
+}
+
+/// A hierarchical label names its sheet-scoped net, and loses to a local label
+/// on the same net — KiCAD ranks local above hierarchical.
+#[test]
+fn hierarchical_labels_name_and_rank_below_local_ones() {
+    let alone = connect::extract(&sheet(
+        &[RESISTOR],
+        &format!(
+            "{}\n(hierarchical_label \"BUS_REQ\" input (at 0 10 0) (uuid \"h1\"))",
+            place("Device:R", "R1", "1k", 0.0, 13.81, 0.0, "(unit 1)"),
+        ),
+    ));
+    let hier = net_named(&alone, "BUS_REQ");
+    assert_eq!(hier.source, NetSource::Hier);
+    assert_eq!(hier.pins.len(), 1);
+
+    let with_local = connect::extract(&sheet(
+        &[RESISTOR],
+        &format!(
+            "{}\n(hierarchical_label \"BUS_REQ\" input (at 0 10 0) (uuid \"h1\"))\n\
+             (label \"REQ\" (at 0 10 0) (uuid \"l1\"))",
+            place("Device:R", "R1", "1k", 0.0, 13.81, 0.0, "(unit 1)"),
+        ),
+    ));
+    assert_eq!(net_named(&with_local, "REQ").source, NetSource::Local);
+    assert!(!with_local.nets.iter().any(|n| n.name == "BUS_REQ"));
+}
+
+/// KiCAD escapes characters it cannot store literally; a net named after a
+/// label must come back decoded.
+#[test]
+fn label_escapes_are_decoded_into_the_net_name() {
+    let netlist = connect::extract(&sheet(
+        &[RESISTOR],
+        &format!(
+            "{}\n(label \"FB{{slash}}VSET\" (at 0 10 0) (uuid \"l1\"))",
+            place("Device:R", "R1", "1k", 0.0, 13.81, 0.0, "(unit 1)"),
+        ),
+    ));
+    assert_eq!(net_named(&netlist, "FB/VSET").source, NetSource::Local);
+}
+
+/// Before annotation every part is `R?`, so nothing keyed by reference can be
+/// trusted — including the rail names. Say so instead of shorting the rails.
+#[test]
+fn duplicate_references_are_reported_and_do_not_short_the_rails() {
+    let doc = sheet(
+        &[RESISTOR, GROUND],
+        &format!(
+            "{}\n{}\n{}\n{}",
+            place("Device:R", "R?", "1k", 0.0, 3.81, 0.0, "(unit 1)"),
+            place("Device:R", "R?", "1k", 50.0, 3.81, 0.0, "(unit 1)")
+                .replace("R?-uuid", "r-second"),
+            place("power:GND", "#PWR?", "GND", 0.0, 0.0, 0.0, "(unit 1)"),
+            place("power:GND", "#PWR?", "VCC", 50.0, 0.0, 0.0, "(unit 1)")
+                .replace("#PWR?-uuid", "pwr-second"),
+        ),
+    );
+    let netlist = connect::extract(&doc);
+    assert!(
+        netlist.warnings.iter().any(|w| w.contains("not unique")),
+        "{:?}",
+        netlist.warnings
+    );
+    let mut names: Vec<&str> = netlist.nets.iter().map(|n| n.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["GND", "VCC"], "the rails were shorted together");
+}
+
+/// A partition that gains or loses every pin is a creation or a removal, not a
+/// rename, and a pin that ends up alone is reported.
+#[test]
+fn the_delta_reports_creation_removal_and_loose_ends() {
+    let wired = sheet(
+        &[RESISTOR],
+        &format!(
+            "{}\n{}\n{}",
+            place("Device:R", "R1", "1k", 100.0, 100.0, 0.0, "(unit 1)"),
+            place("Device:R", "R2", "1k", 120.0, 100.0, 0.0, "(unit 1)"),
+            wire(100.0, 96.19, 120.0, 96.19),
+        ),
+    );
+    let cut = sheet(
+        &[RESISTOR],
+        &format!(
+            "{}\n{}",
+            place("Device:R", "R1", "1k", 100.0, 100.0, 0.0, "(unit 1)"),
+            place("Device:R", "R2", "1k", 120.0, 100.0, 0.0, "(unit 1)"),
+        ),
+    );
+    let delta = connect::Netlist::diff(&connect::extract(&wired), &connect::extract(&cut));
+    assert_eq!(delta.removed, vec!["Net-(R1-Pad1)".to_string()]);
+    assert!(delta.created.is_empty(), "{delta:?}");
+    assert_eq!(
+        delta
+            .pins_now_unconnected
+            .iter()
+            .map(|p| format!("{}.{}", p.refdes, p.pin))
+            .collect::<Vec<_>>(),
+        ["R1.1", "R2.1"]
+    );
+
+    let back = connect::Netlist::diff(&connect::extract(&cut), &connect::extract(&wired));
+    assert_eq!(back.created, vec!["Net-(R1-Pad1)".to_string()]);
+    assert!(back.pins_now_unconnected.is_empty(), "{back:?}");
 }
 
 #[test]

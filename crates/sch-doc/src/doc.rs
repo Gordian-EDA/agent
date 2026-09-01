@@ -8,6 +8,25 @@ use crate::error::{Error, Result};
 use crate::model::{Item, Label, LibSymbols, SymbolInst, Wire};
 use crate::sexpr::{self, print};
 
+/// The header sections KiCAD writes before the sheet content, in order.
+const HEADER: [&str; 7] = [
+    "version",
+    "generator",
+    "generator_version",
+    "uuid",
+    "paper",
+    "title_block",
+    "lib_symbols",
+];
+
+/// The sections KiCAD writes after it; new content goes before them.
+const TRAILER: [&str; 2] = ["sheet_instances", "embedded_fonts"];
+
+/// Whether a top-level head belongs to the file's trailing sections.
+pub(crate) fn is_trailer(head: &str) -> bool {
+    TRAILER.contains(&head)
+}
+
 /// Handle to a document state captured by [`SchDoc::snapshot`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SnapshotId(usize);
@@ -22,7 +41,7 @@ pub struct SnapshotId(usize);
 pub struct SchDoc {
     source: String,
     items: Vec<Item>,
-    snapshots: Vec<Vec<Item>>,
+    snapshots: Vec<(Vec<Item>, bool)>,
     edited: bool,
     /// KiCAD does not always terminate the file with a newline; match it.
     trailing_newline: bool,
@@ -92,6 +111,13 @@ impl SchDoc {
         self.edited = true;
     }
 
+    /// This sheet's own `(instances)` path, `"/" + root_uuid`. A symbol placed
+    /// here carries its reference under that path; a sheet the hierarchy
+    /// instantiates elsewhere carries none.
+    pub fn sheet_path(&self) -> String {
+        format!("/{}", self.root_uuid())
+    }
+
     /// The schematic's root UUID, which identifies the sheet in `(instances)`
     /// paths and seeds every UUID this crate derives.
     pub fn root_uuid(&self) -> &str {
@@ -152,7 +178,7 @@ impl SchDoc {
             let at = self
                 .items
                 .iter()
-                .rposition(|i| matches!(i.head(), "version" | "generator" | "generator_version" | "uuid" | "paper" | "title_block"))
+                .rposition(|i| HEADER.contains(&i.head()))
                 .map_or(0, |i| i + 1);
             self.items.insert(at, Item::LibSymbols(LibSymbols::default()));
         }
@@ -187,19 +213,20 @@ impl SchDoc {
 
     /// Capture the current state so [`Self::restore`] can come back to it.
     pub fn snapshot(&mut self) -> SnapshotId {
-        self.snapshots.push(self.items.clone());
+        self.snapshots.push((self.items.clone(), self.edited));
         SnapshotId(self.snapshots.len() - 1)
     }
 
     /// Restore a state captured by [`Self::snapshot`]. Snapshots stay valid
     /// after restoring, so a caller can bounce between two states.
     pub fn restore(&mut self, id: SnapshotId) -> Result<()> {
-        let state = self
+        let (items, edited) = self
             .snapshots
             .get(id.0)
             .ok_or(Error::UnknownSnapshot(id.0))?
             .clone();
-        self.items = state;
+        self.items = items;
+        self.edited = edited;
         Ok(())
     }
 }

@@ -16,16 +16,19 @@ fn write_reproduces_the_input_byte_for_byte() {
     let files = corpus::files();
     assert!(!files.is_empty(), "corpus not found");
     let mut differing = Vec::new();
+    let mut compared = 0;
     for path in &files {
         let source = std::fs::read_to_string(path).expect("read");
         if !source.starts_with("(kicad_sch\n") {
             continue;
         }
+        compared += 1;
         let doc = SchDoc::parse(&source).expect("parse");
         if doc.to_text() != source {
             differing.push(corpus::label(path));
         }
     }
+    assert!(compared > 100, "only {compared} files were in the modern layout");
     assert!(
         differing.is_empty(),
         "{} of {} files did not round-trip byte-identically: {:?}",

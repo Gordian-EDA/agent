@@ -8,14 +8,10 @@ use crate::doc::SchDoc;
 use crate::error::{Error, Result};
 use crate::libsyms::SymbolSource;
 use crate::model::{
-    Item, Junction, Label, LabelKind, Mirror, NoConnect, Pose, Retained, SymbolInst, Wire, new_field,
-    yes_no,
+    Item, Junction, Label, LabelKind, Mirror, NoConnect, Pose, Retained, SymbolInst, Wire,
+    new_field, property_node, set_instance_reference, yes_no,
 };
-use crate::pins::lib_pins;
 use crate::sexpr::{list, num, quoted, sym, tagged};
-
-/// Items KiCAD keeps at the very end of the file; new content goes before them.
-const TRAILERS: [&str; 2] = ["sheet_instances", "embedded_fonts"];
 
 impl SchDoc {
     /// A UUID derived from the root UUID, a kind and a content key, made unique
@@ -59,7 +55,7 @@ impl SchDoc {
             .iter()
             .rposition(|i| i.head() == head)
             .map(|i| i + 1)
-            .or_else(|| items.iter().position(|i| TRAILERS.contains(&i.head())))
+            .or_else(|| items.iter().position(|i| crate::doc::is_trailer(i.head())))
             .unwrap_or(items.len());
         items.insert(at, item);
         self.mark_edited();
@@ -94,18 +90,30 @@ impl SchDoc {
         Ok(())
     }
 
-    /// Set a symbol property, creating it at the symbol's origin if absent.
+    /// Set a symbol property, creating it hidden at the symbol's origin if it is
+    /// not there yet.
+    ///
+    /// Setting `Reference` also renames this sheet's own `(instances)` entry.
+    /// A sheet placed several times in a hierarchy has no such entry — its
+    /// references belong to the parent paths — so renaming one is refused
+    /// rather than flattening the table.
     pub fn set_field(&mut self, refdes: &str, name: &str, value: &str) -> Result<()> {
         let uuid = self.uuid_of(refdes)?;
+        let sheet_path = self.sheet_path();
         let symbol = self.symbol_mut(&uuid)?;
         let origin = symbol.at;
         match symbol.fields.get_mut(name) {
             Some(field) => field.value = value.to_string(),
             None => {
-                let mut field = new_field(name, value, Pose::new(origin.x, origin.y, 0.0));
-                field.hidden = true;
+                let field = new_field(name, value, Pose::new(origin.x, origin.y, 0.0), true);
                 symbol.fields.insert(name.to_string(), field);
             }
+        }
+        if name == "Reference"
+            && has_instances(&symbol.raw.node)
+            && !set_instance_reference(&mut symbol.raw.node, &sheet_path, value)
+        {
+            return Err(Error::ForeignInstances(refdes.to_string()));
         }
         symbol.raw.touch();
         self.mark_edited();
@@ -125,15 +133,11 @@ impl SchDoc {
     ) -> Result<String> {
         self.ensure_lib_symbol(lib_id, source)?;
         let uuid = self.derive_uuid("symbol", &format!("{lib_id}|{refdes}"));
+        // One `(pin …)` uuid per pin of the unit being placed, as KiCAD writes.
         let pins: Vec<String> = self
             .lib_symbols()
             .and_then(|libs| crate::pins::resolve(libs, lib_id))
-            .map(|def| {
-                let mut numbers: Vec<String> =
-                    lib_pins(def).into_iter().map(|p| p.number).collect();
-                numbers.dedup();
-                numbers
-            })
+            .map(|def| crate::pins::pin_numbers(def, 1, 1))
             .unwrap_or_default();
         let pin_nodes: Vec<Node> = pins
             .iter()
@@ -162,6 +166,7 @@ impl SchDoc {
             property_node("Footprint", "", Pose::new(at.x, at.y, 0.0), true),
             property_node("Datasheet", "", Pose::new(at.x, at.y, 0.0), true),
             property_node("Description", "", Pose::new(at.x, at.y, 0.0), true),
+
         ];
         children.extend(pin_nodes);
         children.push(self.instances_node(refdes));
@@ -205,12 +210,14 @@ impl SchDoc {
         uuid
     }
 
-    /// Attach a label. Returns its UUID.
+    /// Attach a label. `text` is plain text: characters KiCAD cannot store
+    /// literally, `/` among them, are escaped on the way in. Returns its UUID.
     pub fn add_label(&mut self, kind: LabelKind, text: &str, at: Pose) -> String {
         let uuid = self.derive_uuid(kind.head(), &format!("{text}|{},{}", at.x, at.y));
+        let text = crate::text::escape(text);
         let node = list(vec![
             sym(kind.head()),
-            quoted(text),
+            quoted(text.clone()),
             tagged("at", vec![num(at.x), num(at.y), num(at.rot)]),
             tagged(
                 "effects",
@@ -224,7 +231,7 @@ impl SchDoc {
         self.insert_item(Item::Label(Label {
             uuid: uuid.clone(),
             kind,
-            text: text.to_string(),
+            text,
             at,
             raw: Retained::owned(node),
         }));
@@ -316,19 +323,7 @@ impl SchDoc {
     }
 }
 
-fn property_node(name: &str, value: &str, at: Pose, hidden: bool) -> Node {
-    let mut effects = vec![tagged(
-        "font",
-        vec![tagged("size", vec![num(1.27), num(1.27)])],
-    )];
-    if hidden {
-        effects.push(tagged("hide", vec![sym("yes")]));
-    }
-    list(vec![
-        sym("property"),
-        quoted(name),
-        quoted(value),
-        tagged("at", vec![num(at.x), num(at.y), num(at.rot)]),
-        tagged("effects", effects),
-    ])
+/// Whether a symbol carries an `(instances …)` table at all.
+fn has_instances(node: &Node) -> bool {
+    crate::sexpr::child(node, "instances").is_some()
 }

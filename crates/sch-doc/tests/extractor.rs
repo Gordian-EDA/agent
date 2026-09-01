@@ -9,9 +9,39 @@ mod corpus;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use sch_doc::{Item, SchDoc, connect};
+use sch_doc::{Item, NetSource, SchDoc, connect};
 
 type Partition = BTreeSet<Vec<String>>;
+
+/// Pins `kicad-cli` left on a net of their own, which it names `unconnected-`.
+fn oracle_loose_ends(netlist: &kicad::Netlist) -> BTreeSet<String> {
+    netlist
+        .nets
+        .iter()
+        .filter(|net| net.name.starts_with("unconnected-"))
+        .flat_map(|net| net.nodes.iter())
+        .filter(|(refdes, _)| !is_virtual(refdes))
+        .map(|(refdes, pin)| format!("{refdes}.{pin}"))
+        .collect()
+}
+
+/// The same, as this crate reports it: a loose end is a lone unnamed pin,
+/// whether or not a no-connect marker excuses it.
+fn our_loose_ends(netlist: &connect::Netlist) -> BTreeSet<String> {
+    netlist
+        .unconnected
+        .iter()
+        .chain(&netlist.no_connect)
+        .filter(|p| !is_virtual(&p.refdes))
+        .map(|p| format!("{}.{}", p.refdes, p.pin))
+        .collect()
+}
+
+/// KiCAD qualifies a sheet-scoped name with the sheet path; this crate reports
+/// the label text itself, since one file does not know its path in the parent.
+fn same_name(ours: &str, theirs: &str) -> bool {
+    theirs == ours || theirs.strip_prefix('/') == Some(ours)
+}
 
 /// KiCAD leaves symbols whose reference starts with `#` — power flags and
 /// friends — out of the netlist entirely.
@@ -113,6 +143,41 @@ fn extraction_matches_the_kicad_netlist_partition() {
             continue;
         }
         compared += 1;
+        let loose = (our_loose_ends(&netlist), oracle_loose_ends(&oracle));
+        if loose.0 != loose.1 {
+            failures.push(format!(
+                "{}: loose ends {:?} vs {:?}",
+                corpus::label(&path),
+                loose.0.difference(&loose.1).take(3).collect::<Vec<_>>(),
+                loose.1.difference(&loose.0).take(3).collect::<Vec<_>>()
+            ));
+        }
+        for net in netlist.nets.iter().filter(|n| n.source != NetSource::Auto) {
+            let pins: BTreeSet<String> = net
+                .pins
+                .iter()
+                .filter(|p| !is_virtual(&p.refdes))
+                .map(|p| format!("{}.{}", p.refdes, p.pin))
+                .collect();
+            if pins.is_empty() {
+                continue;
+            }
+            let Some(theirs) = oracle.nets.iter().find(|n| {
+                n.nodes
+                    .iter()
+                    .any(|(refdes, pin)| pins.contains(&format!("{refdes}.{pin}")))
+            }) else {
+                continue;
+            };
+            if !same_name(&net.name, &theirs.name) {
+                failures.push(format!(
+                    "{}: named {:?}, kicad named it {:?}",
+                    corpus::label(&path),
+                    net.name,
+                    theirs.name
+                ));
+            }
+        }
         if mine != reference {
             let missing: Vec<_> = reference.difference(&mine).take(2).cloned().collect();
             let extra: Vec<_> = mine.difference(&reference).take(2).cloned().collect();

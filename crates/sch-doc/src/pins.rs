@@ -28,6 +28,9 @@ pub(crate) struct LibPin {
 /// A pin of a placed symbol, resolved into sheet coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacedPin {
+    /// UUID of the symbol this pin belongs to. Unlike a reference designator,
+    /// this is unique even before the schematic is annotated.
+    pub owner: String,
     pub refdes: String,
     pub unit: u32,
     pub number: String,
@@ -80,7 +83,9 @@ pub(crate) fn lib_pins(def: &Node) -> Vec<LibPin> {
     let mut pins = Vec::new();
     for child in items(def) {
         match sexpr::head(child) {
-            Some("pin") => pins.extend(decode_pin(child, 1, 1)),
+            // A pin declared straight on the definition belongs to no
+            // particular unit or body style, so it belongs to every one.
+            Some("pin") => pins.extend(decode_pin(child, 0, 0)),
             Some("symbol") => {
                 let (unit, style) = items(child)
                     .get(1)
@@ -122,10 +127,28 @@ pub(crate) fn to_sheet(local: Point2, at: Pose, mirror: Mirror) -> Point2 {
 
 /// The instance's body style; KiCAD defaults to the first.
 fn body_style(inst: &SymbolInst) -> u32 {
-    sexpr::child_text(&inst.raw.node, "body_style")
-        .or_else(|| sexpr::child_text(&inst.raw.node, "convert"))
+    let node = inst.retained().node();
+    sexpr::child_text(node, "body_style")
+        .or_else(|| sexpr::child_text(node, "convert"))
         .and_then(|s| s.parse().ok())
         .unwrap_or(1)
+}
+
+/// Whether a definition pin is drawn for this unit and body style. Zero means
+/// "shared by all", which is how KiCAD marks a multi-unit part's common pins.
+fn belongs(pin: &LibPin, unit: u32, style: u32) -> bool {
+    (pin.unit == 0 || pin.unit == unit) && (pin.style == 0 || pin.style == style)
+}
+
+/// The pin numbers a placed unit draws, in definition order and deduplicated.
+pub(crate) fn pin_numbers(def: &Node, unit: u32, style: u32) -> Vec<String> {
+    let mut seen = Vec::new();
+    for pin in lib_pins(def) {
+        if belongs(&pin, unit, style) && !seen.contains(&pin.number) {
+            seen.push(pin.number);
+        }
+    }
+    seen
 }
 
 /// Resolve one instance's pins into sheet coordinates.
@@ -140,8 +163,9 @@ pub(crate) fn pins_of(doc: &SchDoc, inst: &SymbolInst) -> Vec<PlacedPin> {
     let style = body_style(inst);
     lib_pins(def)
         .into_iter()
-        .filter(|p| (p.unit == 0 || p.unit == inst.unit) && (p.style == 0 || p.style == style))
+        .filter(|p| belongs(p, inst.unit, style))
         .map(|p| PlacedPin {
+            owner: inst.uuid.clone(),
             refdes: inst.refdes().to_string(),
             unit: inst.unit,
             number: p.number,
@@ -156,16 +180,20 @@ pub(crate) fn pins_of(doc: &SchDoc, inst: &SymbolInst) -> Vec<PlacedPin> {
 }
 
 /// Follow `(extends …)` to the definition that actually carries the geometry.
+///
+/// A derived symbol has no body of its own, so an unresolved chain is a miss,
+/// not a definition — returning the `extends` node would hand back a symbol
+/// with no pins as if it were the real one.
 pub(crate) fn resolve<'a>(libs: &'a crate::model::LibSymbols, lib_id: &str) -> Option<&'a Node> {
+    let (lib, _) = lib_id.split_once(':')?;
     let mut def = libs.get(lib_id)?;
     for _ in 0..8 {
         let Some(parent) = child_text(def, "extends") else {
             return Some(def);
         };
-        let lib = lib_id.split_once(':').map(|(l, _)| l).unwrap_or_default();
         def = libs.get(&format!("{lib}:{parent}"))?;
     }
-    Some(def)
+    None
 }
 
 /// Every pin of every placed symbol, in sheet coordinates.

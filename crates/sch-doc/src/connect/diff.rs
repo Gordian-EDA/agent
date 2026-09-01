@@ -111,9 +111,7 @@ impl Netlist {
         delta.merged.sort();
         delta.split.sort();
         delta.renamed.sort();
-        delta
-            .pins_now_unconnected
-            .sort_by(|a, b| a.key().cmp(&b.key()));
+        delta.pins_now_unconnected.sort();
         delta
     }
 }

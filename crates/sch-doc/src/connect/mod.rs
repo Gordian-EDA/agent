@@ -9,48 +9,45 @@
 //! special case. Names then merge partitions: same-named labels within the
 //! sheet, and power symbols and hidden power pins by the name they carry.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use geom::{Point2, UnionFind};
 
 use crate::doc::SchDoc;
-use crate::model::{Item, LabelKind};
+use crate::model::{Item, LabelKind, SymbolInst};
 use crate::pins::{PlacedPin, pins_of};
 
 mod diff;
 
 pub use diff::NetDelta;
 
-/// Where a net's name came from. Ordered weakest to strongest so the strongest
-/// source of a partition wins.
+/// Where a net's name came from, ordered weakest to strongest so the strongest
+/// driver on a partition names it.
+///
+/// The order is KiCAD's own: a global label outranks a power symbol, which
+/// outranks a local label, which outranks a hierarchical one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NetSource {
     /// Generated, e.g. `Net-(R1-Pad1)`.
     Auto,
-    /// A local label.
-    Local,
     /// A hierarchical label.
     Hier,
-    /// A global label.
-    Global,
+    /// A local label.
+    Local,
     /// A power symbol or an implicit hidden power pin.
     Power,
+    /// A global label.
+    Global,
 }
 
-/// One pin on a net.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// One pin on a net. Ordered by reference, unit and pin number.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PinRef {
     pub refdes: String,
     pub unit: u32,
     pub pin: String,
     /// The owning symbol is marked do-not-populate. DNP symbols still connect.
     pub dnp: bool,
-}
-
-impl PinRef {
-    fn key(&self) -> (&str, u32, &str) {
-        (&self.refdes, self.unit, &self.pin)
-    }
 }
 
 /// A net and the pins on it.
@@ -66,8 +63,11 @@ pub struct Net {
 pub struct Netlist {
     /// Nets sorted by name.
     pub nets: Vec<Net>,
-    /// Pins with nothing attached and no no-connect marker.
+    /// Pins alone on their node with no name — loose ends, in the same sense as
+    /// `kicad-cli`'s `unconnected-(…)` nets.
     pub unconnected: Vec<PinRef>,
+    /// Pins that would be loose ends but carry a no-connect marker.
+    pub no_connect: Vec<PinRef>,
     /// Anything the extractor could not model, such as buses.
     pub warnings: Vec<String>,
 }
@@ -161,11 +161,13 @@ pub fn extract(doc: &SchDoc) -> Netlist {
         }
     }
 
-    let anchors = Anchors::new(doc, &nodes, &segments, &named, &mut sets);
-    let (nets, unconnected) = emit(&placed, &nodes, &mut sets, &anchors);
+    let roots: Vec<usize> = (0..nodes.points.len()).map(|n| sets.find(n)).collect();
+    let anchors = Anchors::new(doc, &nodes, &named, &roots);
+    let (nets, unconnected, no_connect) = emit(&placed, &nodes, &roots, &anchors);
     Netlist {
         nets,
         unconnected,
+        no_connect,
         warnings,
     }
 }
@@ -233,7 +235,7 @@ fn names(
                 LabelKind::Global => NetSource::Global,
                 LabelKind::Hier => NetSource::Hier,
             };
-            note(label.text.clone(), source, node);
+            note(crate::text::unescape(&label.text), source, node);
         }
     }
     for pin in placed {
@@ -246,11 +248,11 @@ fn names(
         // Only a power *input* names a net: that is what separates a rail
         // symbol from a PWR_FLAG, whose power_out pin names nothing.
         if pin.power_symbol {
-            if let Some(name) = power.get(&pin.refdes) {
-                note(name.clone(), NetSource::Power, node);
+            if let Some(name) = power.get(&pin.owner) {
+                note(crate::text::unescape(name), NetSource::Power, node);
             }
         } else if pin.hidden {
-            note(pin.name.clone(), NetSource::Power, node);
+            note(crate::text::unescape(&pin.name), NetSource::Power, node);
         }
     }
     named
@@ -260,37 +262,36 @@ fn names(
 struct Anchors {
     /// The winning name and its source, for partitions that have one.
     name: HashMap<usize, (NetSource, String)>,
-    /// Partitions holding a wire or a name, so a lone pin on one is still a net.
-    held: Vec<bool>,
     /// Partitions a no-connect marker settles.
-    settled: Vec<usize>,
+    settled: HashSet<usize>,
 }
 
 impl Anchors {
     fn new(
         doc: &SchDoc,
         nodes: &Nodes,
-        segments: &[Segment],
         named: &HashMap<String, (NetSource, Vec<usize>)>,
-        sets: &mut UnionFind,
+        roots: &[usize],
     ) -> Anchors {
         let mut name: HashMap<usize, (NetSource, String)> = HashMap::new();
-        let mut held = vec![false; nodes.points.len()];
         for (text, (source, members)) in named {
-            for &member in members {
-                held[sets.find(member)] = true;
-            }
             let Some(&first) = members.first() else {
                 continue;
             };
-            let root = sets.find(first);
+            let root = roots[first];
+            // Strongest source wins; at equal strength KiCAD keeps the name
+            // that sorts first.
             let candidate = (*source, text.clone());
-            if name.get(&root).is_none_or(|held| *held < candidate) {
+            let better = name
+                .get(&root)
+                .is_none_or(|(held_source, held)| match held_source.cmp(source) {
+                    std::cmp::Ordering::Less => true,
+                    std::cmp::Ordering::Equal => *text < *held,
+                    std::cmp::Ordering::Greater => false,
+                });
+            if better {
                 name.insert(root, candidate);
             }
-        }
-        for seg in segments {
-            held[sets.find(seg.a)] = true;
         }
         let settled = doc
             .items()
@@ -299,59 +300,53 @@ impl Anchors {
                 Item::NoConnect(no_connect) => nodes.get(no_connect.at),
                 _ => None,
             })
-            .map(|node| sets.find(node))
+            .map(|node| roots[node])
             .collect();
-        Anchors {
-            name,
-            held,
-            settled,
-        }
+        Anchors { name, settled }
     }
 }
 
 /// Group the pins by partition into nets, and report the loose ends.
+///
+/// `kicad-cli` names a one-pin net `unconnected-(…)` unless something names it,
+/// so that is exactly what counts as a loose end here.
 fn emit(
     placed: &[PlacedPin],
     nodes: &Nodes,
-    sets: &mut UnionFind,
+    roots: &[usize],
     anchors: &Anchors,
-) -> (Vec<Net>, Vec<PinRef>) {
+) -> (Vec<Net>, Vec<PinRef>, Vec<PinRef>) {
     let mut groups: HashMap<usize, Vec<PinRef>> = HashMap::new();
-    let mut unconnected = Vec::new();
     for pin in placed {
-        let reference = PinRef {
+        let node = nodes.get(pin.at).expect("every placed pin is interned");
+        groups.entry(roots[node]).or_default().push(PinRef {
             refdes: pin.refdes.clone(),
             unit: pin.unit,
             pin: pin.number.clone(),
             dnp: pin.dnp,
-        };
-        match nodes.get(pin.at) {
-            Some(node) => groups.entry(sets.find(node)).or_default().push(reference),
-            None => unconnected.push(reference),
-        }
+        });
     }
 
-    let mut nets = Vec::new();
+    let (mut nets, mut unconnected, mut no_connect) = (Vec::new(), Vec::new(), Vec::new());
     for (root, mut pins) in groups {
-        // A pin alone at a point with no wire and no name is not a net: it is
-        // either an intentional dead end or an oversight.
-        if pins.len() < 2 && !anchors.held[root] {
-            if !anchors.settled.contains(&root) {
-                unconnected.extend(pins);
+        let named = anchors.name.get(&root);
+        if pins.len() < 2 && named.is_none() {
+            match anchors.settled.contains(&root) {
+                true => no_connect.append(&mut pins),
+                false => unconnected.append(&mut pins),
             }
             continue;
         }
-        let (source, name) = anchors
-            .name
-            .get(&root)
+        let (source, name) = named
             .cloned()
             .unwrap_or_else(|| (NetSource::Auto, auto_name(&pins)));
-        pins.sort_by(|a, b| a.key().cmp(&b.key()));
+        pins.sort();
         nets.push(Net { name, source, pins });
     }
-    nets.sort_by(|a, b| (&a.name, a.pins.len()).cmp(&(&b.name, b.pins.len())));
-    unconnected.sort_by(|a, b| a.key().cmp(&b.key()));
-    (nets, unconnected)
+    nets.sort_by(|a, b| (&a.name, &a.pins).cmp(&(&b.name, &b.pins)));
+    unconnected.sort();
+    no_connect.sort();
+    (nets, unconnected, no_connect)
 }
 
 /// What the extraction cannot vouch for on this sheet.
@@ -367,17 +362,27 @@ fn survey(doc: &SchDoc) -> Vec<String> {
     let mut missing: Vec<&str> = doc
         .symbols()
         .map(|s| s.lib_id.as_str())
-        .filter(|lib_id| {
-            doc.lib_symbols()
-                .and_then(|libs| crate::pins::resolve(libs, lib_id))
-                .is_none()
-        })
+        .filter(|lib_id| definition(doc, lib_id).is_none())
         .collect();
     missing.sort_unstable();
     missing.dedup();
     for lib_id in missing {
         warnings.push(format!(
             "no embedded lib_symbols definition for {lib_id}: its pins are not placed"
+        ));
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut duplicated: Vec<&str> = doc
+        .symbols()
+        .map(SymbolInst::refdes)
+        .filter(|refdes| !seen.insert(refdes))
+        .collect();
+    duplicated.sort_unstable();
+    duplicated.dedup();
+    if !duplicated.is_empty() {
+        warnings.push(format!(
+            "reference designators are not unique ({}): pins cannot be told apart by name",
+            duplicated.join(", ")
         ));
     }
     if doc.symbols().any(|s| instance_paths(s) > 1) {
@@ -391,7 +396,7 @@ fn survey(doc: &SchDoc) -> Vec<String> {
 }
 
 /// How many `(instances … (path …))` entries a symbol carries.
-fn instance_paths(symbol: &crate::model::SymbolInst) -> usize {
+fn instance_paths(symbol: &SymbolInst) -> usize {
     let Some(instances) = crate::sexpr::child(symbol.retained().node(), "instances") else {
         return 0;
     };
@@ -407,23 +412,24 @@ fn instance_paths(symbol: &crate::model::SymbolInst) -> usize {
 }
 
 /// Power symbols name their net with their `Value` field, not their pin name.
+///
+/// Keyed by UUID, not reference: an un-annotated schematic is full of `#PWR?`,
+/// and keying by that would short every rail on the sheet together.
 fn power_symbol_names(doc: &SchDoc) -> HashMap<String, String> {
     doc.symbols()
-        .filter(|s| {
-            doc.lib_symbols()
-                .and_then(|libs| crate::pins::resolve(libs, &s.lib_id))
-                .is_some_and(crate::pins::is_power_definition)
-        })
-        .map(|s| (s.refdes().to_string(), s.value().to_string()))
+        .filter(|s| definition(doc, &s.lib_id).is_some_and(crate::pins::is_power_definition))
+        .map(|s| (s.uuid.clone(), s.value().to_string()))
         .collect()
+}
+
+/// The embedded definition behind a `lib_id`, with `extends` followed.
+fn definition<'a>(doc: &'a SchDoc, lib_id: &str) -> Option<&'a kiutils_sexpr::Node> {
+    crate::pins::resolve(doc.lib_symbols()?, lib_id)
 }
 
 /// KiCAD's fallback name for an unnamed net.
 fn auto_name(pins: &[PinRef]) -> String {
-    let lead = pins
-        .iter()
-        .min_by(|a, b| a.key().cmp(&b.key()))
-        .expect("nets always hold a pin");
+    let lead = pins.iter().min().expect("nets always hold a pin");
     format!("Net-({}-Pad{})", lead.refdes, lead.pin)
 }
 

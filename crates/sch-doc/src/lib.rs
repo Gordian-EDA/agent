@@ -62,6 +62,7 @@ mod libsyms;
 mod model;
 mod pins;
 mod sexpr;
+mod text;
 
 pub use connect::{Net, NetDelta, NetSource, Netlist, PinRef};
 pub use doc::{SchDoc, SnapshotId};
@@ -72,10 +73,12 @@ pub use model::{
     SheetPin, SymbolInst, Text, Wire,
 };
 pub use pins::{PlacedPin, placed_pins};
+pub use text::{escape, unescape};
 
-/// Pretty-print one top-level item, bypassing its retained bytes. This is the
-/// path an edited item takes on write; tests use it to exercise the printer
-/// over content that has not actually been edited.
+/// Pretty-print one top-level item, bypassing its retained bytes — the path an
+/// edited item takes on write. Exposed so the round-trip gate can force every
+/// item through the printer.
+#[doc(hidden)]
 pub fn print_item(item: &Item, out: &mut String) {
     sexpr::print(&item.encode(), 1, out);
 }
