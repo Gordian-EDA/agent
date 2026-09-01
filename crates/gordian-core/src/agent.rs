@@ -5995,8 +5995,13 @@ mod tests {
     #[test]
     fn tool_effect_and_wants_apply_classify_the_gate() {
         assert_eq!(tool_effect("apply_design"), ToolEffect::Gated);
-        assert_eq!(tool_effect("edit_design"), ToolEffect::Authoring);
-        assert_eq!(tool_effect("repair_components"), ToolEffect::Authoring);
+        assert_eq!(tool_effect("create_design"), ToolEffect::Authoring);
+        // Live-schematic mutators write the project file, so they are approved
+        // before they run, exactly like the board ones.
+        assert_eq!(tool_effect("set_fields"), ToolEffect::ApprovalRequired);
+        assert_eq!(tool_effect("connect"), ToolEffect::ApprovalRequired);
+        assert_eq!(tool_effect("read_schematic"), ToolEffect::ReadOnly);
+        assert_eq!(tool_effect("check_schematic"), ToolEffect::ReadOnly);
         assert_eq!(
             tool_effect("update_board_outline"),
             ToolEffect::ApprovalRequired
@@ -6011,7 +6016,7 @@ mod tests {
         };
         let preview_call = ToolCall {
             call_id: "2".into(),
-            fn_name: "validate_design".into(),
+            fn_name: "check_schematic".into(),
             fn_arguments: json!({}),
             thought_signatures: None,
         };
@@ -6036,16 +6041,13 @@ mod tests {
 
     #[test]
     fn revision_scoped_read_classification_is_narrow() {
-        for name in [
-            "read_schematic",
-            "project_info",
-            "run_erc",
-            "validate_design",
-            "render_schematic",
-        ] {
+        for name in ["project_info", "run_erc", "render_schematic"] {
             assert!(is_revision_scoped_read(name), "{name}");
         }
+        // `read_schematic` re-reads a file every mutator changes, so it is
+        // never spent for the turn.
         for name in [
+            "read_schematic",
             "get_board",
             "review_design",
             "search_symbols",
@@ -6058,8 +6060,8 @@ mod tests {
     #[test]
     fn apply_may_follow_authoring_but_no_authoring_may_follow_apply() {
         assert!(!post_apply_authoring_batch_blocked("apply_design", false));
-        assert!(post_apply_authoring_batch_blocked("edit_design", true));
-        assert!(!post_apply_authoring_batch_blocked("edit_design", false));
+        assert!(post_apply_authoring_batch_blocked("create_design", true));
+        assert!(!post_apply_authoring_batch_blocked("create_design", false));
         assert!(!post_apply_authoring_batch_blocked("route_board", true));
     }
 
@@ -6123,60 +6125,6 @@ mod tests {
                 "error": "review failed"
             }))
             .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn incomplete_review_blocks_component_repair_before_dispatch() {
-        let runtime = test_runtime();
-        runtime
-            .workspace()
-            .write_draft(
-                "version: 1\nblocks:\n  main:\n    components:\n      R1: {part: Device:R, between: [A, GND]}\n",
-                None,
-            )
-            .unwrap();
-        let script = vec![
-            tool_call(
-                "review",
-                "review_design",
-                json!({"intent": "check the complete controller"}),
-            ),
-            final_text(
-                r#"FINAL_JSON: {"score": 3, "defects": [{"refdes": "J1", "issue": "incomplete design / missing essential support components", "why": "the requested controller topology is largely absent", "evidence": "only R1 is present", "severity": "major", "confidence": "high"}]}"#,
-            ),
-            tool_call(
-                "bad-repair",
-                "repair_components",
-                json!({"components": {"R2": {"part": "Device:R", "between": ["A", "GND"]}}}),
-            ),
-            final_text("I will replace the incomplete design in one complete edit."),
-        ];
-        let mut agent = Agent::new(ScriptedClient::new(script), runtime, "system");
-        let mut approvals = AutoApprove::no();
-
-        agent
-            .run_turn(
-                "Create a complete production controller schematic",
-                &mut approvals,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let results = tool_results(&agent.history);
-        assert_eq!(results["review"]["repair_scope"], "full_design");
-        assert_eq!(results["bad-repair"]["code"], "full_design_edit_required");
-        assert_eq!(results["bad-repair"]["next_tool"], "edit_design");
-        assert_eq!(results["bad-repair"]["repair_scope"], "full_design");
-        assert!(
-            !agent
-                .runtime
-                .workspace()
-                .read_draft()
-                .unwrap()
-                .unwrap()
-                .contains("R2")
         );
     }
 
@@ -6667,7 +6615,7 @@ mod tests {
             )
             .unwrap();
         let diagnostics = authoring_diagnostics_state(
-            "edit_design",
+            "create_design",
             &json!({
                 "design_state": {"component_count": 0, "refdes": []},
                 "errors": 1,
@@ -6716,11 +6664,8 @@ mod tests {
 
     #[test]
     fn only_one_dependent_authoring_mutation_dispatches_per_completion() {
-        assert!(!authoring_batch_dependency_blocked("edit_design", false));
-        assert!(authoring_batch_dependency_blocked(
-            "repair_components",
-            true
-        ));
+        assert!(!authoring_batch_dependency_blocked("create_design", false));
+        assert!(authoring_batch_dependency_blocked("create_design", true));
         assert!(authoring_batch_dependency_blocked(
             "assign_footprints",
             true
@@ -6829,9 +6774,9 @@ mod tests {
     }
 
     #[test]
-    fn invalid_draft_nudge_prefers_transactional_local_repair() {
-        assert!(INVALID_DRAFT_REPAIR_NUDGE.contains("`repair_components` batch"));
-        assert!(INVALID_DRAFT_REPAIR_NUDGE.contains("COMPLETE `edit_design` only"));
+    fn invalid_draft_nudge_sends_the_model_straight_back_to_authoring() {
+        assert!(INVALID_DRAFT_REPAIR_NUDGE.contains("COMPLETE corrected `create_design`"));
+        assert!(INVALID_DRAFT_REPAIR_NUDGE.contains("Do not read, render, apply, or search first"));
     }
 
     #[test]
@@ -6889,7 +6834,7 @@ blocks:
         assert_eq!(hard_prompt_floor["required_minimum"], 40);
         let dummy = ToolCall {
             call_id: "run17-dummy".into(),
-            fn_name: "edit_design".into(),
+            fn_name: "create_design".into(),
             fn_arguments: json!({"yaml": "version: 1\nname: dummy"}),
             thought_signatures: None,
         };
@@ -6901,11 +6846,9 @@ blocks:
         assert_eq!(run17_floor["required_minimum"], 40);
         assert_eq!(run17_floor["candidate_physical_components"], 0);
         assert_eq!(run17_floor["draft_written"], false);
-        let mut edit_call = call.clone();
-        edit_call.fn_name = "edit_design".into();
         assert_eq!(
-            undersized_full_draft_result("Require 40+ components", &edit_call).unwrap()["next_tool"],
-            "edit_design"
+            undersized_full_draft_result("Require 40+ components", &call).unwrap()["next_tool"],
+            "create_design"
         );
         assert!(undersized_full_draft_result("Build a compact sensor", &call).is_none());
 
@@ -6950,7 +6893,7 @@ blocks:
             .join(", ");
         let call = ToolCall {
             call_id: "run04-padding".into(),
-            fn_name: "edit_design".into(),
+            fn_name: "create_design".into(),
             fn_arguments: json!({
                 "yaml": format!("version: 1\nname: DUMMY\nblocks: {{main: {{components: {{{entries}}}}}}}\n")
             }),
@@ -6968,7 +6911,7 @@ blocks:
         assert_eq!(blocked["unique_part_ids"], 1);
         assert_eq!(blocked["unique_connected_targets"], 2);
         assert_eq!(blocked["draft_written"], false);
-        assert_eq!(blocked["next_tool"], "edit_design");
+        assert_eq!(blocked["next_tool"], "create_design");
     }
 
     #[test]
@@ -7081,7 +7024,7 @@ blocks:
         }))
         .expect("padding rejection should retain the one-tool authoring focus");
         assert_eq!(padding.shortfall, 0);
-        assert!(padding.permits("edit_design"));
+        assert!(padding.permits("create_design"));
         assert!(!padding.permits("search_symbols"));
         assert!(
             padding
@@ -7330,16 +7273,16 @@ blocks:
     #[test]
     fn tool_summary_reads_structured_results() {
         let s = tool_summary(
-            "repair_components",
+            "create_design",
             &json!({}),
             &json!({
-                "error": "component repair fragment is invalid",
+                "error": "the circuit document is invalid",
                 "diagnostics": ["error[missing_part]: D1 needs a complete part\nfield"]
             }),
         );
         assert_eq!(
             s,
-            "error: component repair fragment is invalid — error[missing_part]: D1 needs a complete part field"
+            "error: the circuit document is invalid — error[missing_part]: D1 needs a complete part field"
         );
         let s = tool_summary(
             "search_symbols",
@@ -7354,11 +7297,17 @@ blocks:
         );
         assert_eq!(s, "\"0603\" → 2 hits");
         let s = tool_summary(
-            "edit_design",
+            "create_design",
             &json!({}),
-            &json!({ "mode": "full_replace", "errors": 0, "warnings": 151, "diagnostics_omitted": 131 }),
+            &json!({ "errors": 0, "warnings": 151, "diagnostics_omitted": 131 }),
         );
-        assert_eq!(s, "full_replace: 0 errors, 151 warnings (131 omitted)");
+        assert_eq!(s, "created: 0 errors, 151 warnings (131 omitted)");
+        let s = tool_summary(
+            "check_schematic",
+            &json!({}),
+            &json!({ "errors": 0, "warnings": 2, "erc": { "errors": 1 } }),
+        );
+        assert_eq!(s, "0 errors, 2 warnings, 1 ERC errors");
         let s = tool_summary(
             "apply_design",
             &json!({}),
@@ -7459,7 +7408,7 @@ blocks:
             ChatMessage::assistant(MessageContent::from_parts(vec![ContentPart::ToolCall(
                 ToolCall {
                     call_id: id.into(),
-                    fn_name: "edit_design".into(),
+                    fn_name: "create_design".into(),
                     fn_arguments: json!({ "yaml": yaml }),
                     thought_signatures: None,
                 },
@@ -7748,14 +7697,14 @@ blocks:
         let seed_names = names(&seed);
         let active_names = names(&active);
 
-        assert_eq!(schematic.len(), 14);
+        assert_eq!(schematic.len(), 28);
         assert!(schematic_names.contains("create_design"));
         assert!(schematic_names.contains("search_footprints"));
         assert!(schematic_names.contains("assign_footprints"));
         assert!(!schematic_names.contains("regenerate_board"));
         assert!(!schematic_names.contains("route_board"));
 
-        assert_eq!(seed.len(), 15);
+        assert_eq!(seed.len(), 29);
         assert!(schematic_names.is_subset(&seed_names));
         assert!(seed_names.contains("regenerate_board"));
         assert!(!seed_names.contains("route_board"));
@@ -7765,16 +7714,14 @@ blocks:
         assert!(active_names.contains("route_board"));
         assert!(active_names.contains("check_board"));
 
-        let schematic_bytes: usize = schematic.iter().map(Tool::size).sum();
-        let seed_bytes: usize = seed.iter().map(Tool::size).sum();
-        let active_bytes: usize = active.iter().map(Tool::size).sum();
+        // Each phase pays only for its own surface: the board tools alone are
+        // a third of the whole registry's schema cost.
+        let bytes = |tools: &[Tool]| tools.iter().map(Tool::size).sum::<usize>();
+        assert!(bytes(&schematic) < bytes(&active), "schematic vs active");
+        assert!(bytes(&seed) < bytes(&active), "seed vs active");
         assert!(
-            schematic_bytes < active_bytes / 2,
-            "{schematic_bytes} vs {active_bytes}"
-        );
-        assert!(
-            seed_bytes < active_bytes / 2,
-            "{seed_bytes} vs {active_bytes}"
+            bytes(&active) - bytes(&schematic) > bytes(&active) / 4,
+            "the board tools must be a real share of the registry"
         );
     }
 
@@ -7915,19 +7862,13 @@ blocks:
         .collect::<std::collections::BTreeSet<_>>();
 
         assert!(!names.contains("create_design"));
-        assert!(names.contains("edit_design"));
+        assert!(names.contains("set_fields"));
         assert!(names.contains("apply_design"));
     }
 
     #[test]
     fn used_revision_reads_and_precommit_erc_are_not_advertised() {
-        let used = [
-            "read_schematic",
-            "project_info",
-            "run_erc",
-            "validate_design",
-            "render_schematic",
-        ]
+        let used = ["project_info", "run_erc", "render_schematic"]
         .into_iter()
         .map(str::to_string)
         .collect::<HashSet<_>>();
@@ -7960,7 +7901,7 @@ blocks:
         .map(|tool| tool.name.as_str().to_owned())
         .collect::<HashSet<_>>();
         assert!(!before_commit.contains("run_erc"));
-        assert!(before_commit.contains("validate_design"));
+        assert!(before_commit.contains("create_design"));
         assert!(before_commit.contains("review_design"));
     }
 

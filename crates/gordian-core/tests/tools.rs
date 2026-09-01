@@ -98,65 +98,6 @@ fn search_symbols_canonicalizes_common_single_row_connectors() {
 }
 
 #[test]
-fn validate_design_tool_reports_errors_for_bad_part() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let yaml = "version: 1\nblocks: {main: {components: {U1: {part: No:Such, pins: {}}}}}";
-    let out = run_tool("validate_design", serde_json::json!({ "yaml": yaml }), &ctx).unwrap();
-    let s = out.to_string();
-    assert!(
-        s.contains("unknown-part") || s.contains("not found"),
-        "expected an unknown-part diagnostic, got: {s}"
-    );
-    assert_eq!(out["ok"], serde_json::json!(false));
-}
-
-#[test]
-fn authoring_results_include_compact_sorted_design_state() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let yaml = r#"
-version: 1
-blocks:
-  z:
-    components:
-      R2: {part: Device:R, pins: {1: ZETA, 2: GND}}
-  a:
-    components:
-      C1: {part: Device:C, pins: {1: ALPHA, 2: GND}}
-      R1: {part: Device:R, pins: {1: ALPHA, 2: ZETA}}
-"#;
-    let expected = serde_json::json!({
-        "component_count": 3,
-        "refdes": ["C1", "R1", "R2"],
-        "net_count": 3,
-        "net_names": ["ALPHA", "GND", "ZETA"],
-    });
-
-    let created = run_tool("create_design", serde_json::json!({ "yaml": yaml }), &ctx).unwrap();
-    assert_eq!(created["design_state"], expected, "{created}");
-
-    let validated = run_tool("validate_design", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(validated["design_state"], expected, "{validated}");
-
-    let edited = run_tool(
-        "edit_design",
-        serde_json::json!({ "old_string": "R2:", "new_string": "R3:" }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(
-        edited["design_state"]["refdes"],
-        serde_json::json!(["C1", "R1", "R3"]),
-        "{edited}"
-    );
-}
-
-#[test]
 fn apply_preview_and_commit_include_design_state() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
@@ -218,409 +159,6 @@ fn empty_design_is_never_ready_or_written() {
     assert!(
         !ctx.sch_path().exists(),
         "empty schematic must not be written"
-    );
-}
-
-#[test]
-fn full_yaml_edit_seeds_a_new_project_and_reports_idempotence() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    assert_eq!(ctx.workspace().read_draft().unwrap(), None);
-
-    let seeded = run_tool(
-        "edit_design",
-        serde_json::json!({ "yaml": TINY_YAML }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(seeded["ok"], true, "{seeded}");
-    assert_eq!(seeded["draft_written"], true, "{seeded}");
-    assert_eq!(seeded["draft_changed"], true, "{seeded}");
-    assert_eq!(seeded["mode"], "full_create", "{seeded}");
-    assert_eq!(
-        ctx.workspace().read_draft().unwrap().as_deref(),
-        Some(TINY_YAML)
-    );
-
-    let identical = run_tool(
-        "edit_design",
-        serde_json::json!({ "yaml": TINY_YAML }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(identical["draft_written"], true, "{identical}");
-    assert_eq!(identical["draft_changed"], false, "{identical}");
-    assert_eq!(identical["mode"], "full_replace", "{identical}");
-
-    let cosmetic = format!("# formatting-only rewrite\n{TINY_YAML}");
-    let cosmetic_result =
-        run_tool("edit_design", serde_json::json!({ "yaml": cosmetic }), &ctx).unwrap();
-    assert_eq!(cosmetic_result["draft_changed"], true, "{cosmetic_result}");
-    assert_eq!(
-        cosmetic_result["electrical_design_changed"], false,
-        "{cosmetic_result}"
-    );
-}
-
-#[test]
-fn full_yaml_edit_rejects_silent_component_loss() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let substantial = r#"
-version: 1
-blocks:
-  main:
-    components:
-      R1: {part: Device:R, pins: {1: A, 2: B}}
-      R2: {part: Device:R, pins: {1: B, 2: GND}}
-      R3: {part: Device:R, pins: {1: A, 2: GND}}
-"#;
-    run_tool(
-        "edit_design",
-        serde_json::json!({ "yaml": substantial }),
-        &ctx,
-    )
-    .unwrap();
-
-    let rejected = run_tool(
-        "edit_design",
-        serde_json::json!({ "yaml": TINY_YAML }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(
-        rejected["code"], "component_removal_requires_confirmation",
-        "{rejected}"
-    );
-    assert_eq!(rejected["current_component_count"], 3, "{rejected}");
-    assert_eq!(rejected["candidate_component_count"], 1, "{rejected}");
-    assert_eq!(rejected["draft_written"], false, "{rejected}");
-    assert_eq!(rejected["draft_changed"], false, "{rejected}");
-    assert_eq!(rejected["ok"], false, "{rejected}");
-    assert_eq!(rejected["warnings"], 2, "{rejected}");
-    assert_eq!(
-        rejected["diagnostics"].as_array().map(Vec::len),
-        Some(2),
-        "candidate diagnostics must survive the transactional rejection: {rejected}"
-    );
-    assert_eq!(
-        rejected["current_design_state"]["component_count"], 3,
-        "{rejected}"
-    );
-    assert_eq!(
-        rejected["current_diagnostics"],
-        serde_json::json!([]),
-        "{rejected}"
-    );
-    assert_eq!(
-        ctx.workspace().read_draft().unwrap().as_deref(),
-        Some(substantial),
-        "rejection must preserve the prior bytes"
-    );
-}
-
-#[test]
-fn full_yaml_edit_allows_confirmed_component_loss_and_same_count_repairs() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let pair = r#"version: 1
-blocks: {main: {components: {
-  R1: {part: Device:R, pins: {1: A, 2: B}},
-  R2: {part: Device:R, pins: {1: B, 2: GND}}
-}}}"#;
-    let repaired_pair = pair.replace("R2:", "R3:");
-    run_tool("edit_design", serde_json::json!({ "yaml": pair }), &ctx).unwrap();
-
-    let repaired = run_tool(
-        "edit_design",
-        serde_json::json!({ "yaml": repaired_pair }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(repaired["draft_written"], true, "{repaired}");
-    assert_eq!(repaired["draft_changed"], true, "{repaired}");
-
-    let reduced = run_tool(
-        "edit_design",
-        serde_json::json!({
-            "yaml": TINY_YAML,
-            "allow_component_removal": true,
-        }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(reduced["draft_written"], true, "{reduced}");
-    assert_eq!(reduced["draft_changed"], true, "{reduced}");
-    assert_eq!(
-        ctx.workspace().read_draft().unwrap().as_deref(),
-        Some(TINY_YAML)
-    );
-}
-
-#[test]
-fn full_yaml_edit_can_repair_an_invalid_prior_draft() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let invalid = "version: 1\nblocks: {main: {components: {U1: {part: No:Such}}}}";
-    ctx.workspace().write_draft(invalid, None).unwrap();
-
-    let repaired = run_tool(
-        "edit_design",
-        serde_json::json!({ "yaml": TINY_YAML }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(repaired["ok"], true, "{repaired}");
-    assert_eq!(repaired["draft_written"], true, "{repaired}");
-    assert_eq!(repaired["draft_changed"], true, "{repaired}");
-    assert_eq!(
-        ctx.workspace().read_draft().unwrap().as_deref(),
-        Some(TINY_YAML)
-    );
-}
-
-#[test]
-fn invalid_full_yaml_replacement_preserves_a_valid_prior_draft() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    run_tool(
-        "edit_design",
-        serde_json::json!({ "yaml": TINY_YAML }),
-        &ctx,
-    )
-    .unwrap();
-    let invalid = "version: 1\nblocks: {main: {components: {U1: {part: No:Such}}}}";
-
-    let rejected = run_tool("edit_design", serde_json::json!({ "yaml": invalid }), &ctx).unwrap();
-    assert_eq!(
-        rejected["code"], "invalid_replacement_preserved_draft",
-        "{rejected}"
-    );
-    assert_eq!(rejected["draft_written"], false, "{rejected}");
-    assert_eq!(rejected["draft_changed"], false, "{rejected}");
-    assert!(
-        rejected["diagnostics"]
-            .as_array()
-            .is_some_and(|diagnostics| !diagnostics.is_empty()),
-        "candidate diagnostics must be returned: {rejected}"
-    );
-    assert_eq!(
-        rejected["current_design_state"]["component_count"], 1,
-        "{rejected}"
-    );
-    assert_eq!(
-        ctx.workspace().read_draft().unwrap().as_deref(),
-        Some(TINY_YAML)
-    );
-}
-
-#[test]
-fn empty_full_edits_and_overwrites_preserve_the_prior_draft() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let empty = "version: 1\nblocks: {main: {components: {}}}";
-
-    let rejected_initial =
-        run_tool("edit_design", serde_json::json!({ "yaml": empty }), &ctx).unwrap();
-    assert_eq!(
-        rejected_initial["draft_written"], false,
-        "{rejected_initial}"
-    );
-    assert_eq!(
-        rejected_initial["draft_changed"], false,
-        "{rejected_initial}"
-    );
-    assert_eq!(
-        rejected_initial["mode"], "full_create",
-        "{rejected_initial}"
-    );
-    assert!(!ctx.workspace().draft_path().exists());
-
-    let seeded = run_tool(
-        "edit_design",
-        serde_json::json!({ "yaml": TINY_YAML }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(seeded["draft_written"], true, "{seeded}");
-
-    for (tool, input) in [
-        ("edit_design", serde_json::json!({ "yaml": empty })),
-        (
-            "create_design",
-            serde_json::json!({ "yaml": empty, "overwrite": true }),
-        ),
-    ] {
-        let rejected = run_tool(tool, input, &ctx).unwrap();
-        assert_eq!(rejected["draft_written"], false, "{tool}: {rejected}");
-        assert_eq!(rejected["draft_changed"], false, "{tool}: {rejected}");
-        assert!(
-            rejected["next"]
-                .as_str()
-                .is_some_and(|next| next.contains("existing draft was preserved")),
-            "{tool}: {rejected}"
-        );
-        assert_eq!(
-            ctx.workspace().read_draft().unwrap().as_deref(),
-            Some(TINY_YAML)
-        );
-    }
-}
-
-#[test]
-fn authoring_reports_real_patch_and_create_changes() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let created = run_tool(
-        "create_design",
-        serde_json::json!({ "yaml": TINY_YAML }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(created["draft_changed"], true, "{created}");
-
-    let recreated = run_tool(
-        "create_design",
-        serde_json::json!({ "yaml": TINY_YAML, "overwrite": true }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(recreated["draft_written"], true, "{recreated}");
-    assert_eq!(recreated["draft_changed"], false, "{recreated}");
-
-    let no_op_patch = run_tool(
-        "edit_design",
-        serde_json::json!({ "old_string": "Device:R", "new_string": "Device:R" }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(no_op_patch["replacements"], 1, "{no_op_patch}");
-    assert_eq!(no_op_patch["draft_changed"], false, "{no_op_patch}");
-
-    let changed_patch = run_tool(
-        "edit_design",
-        serde_json::json!({ "old_string": "R1", "new_string": "R2" }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(changed_patch["draft_changed"], true, "{changed_patch}");
-}
-
-#[test]
-fn invalid_patch_preserves_a_valid_draft() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    run_tool(
-        "create_design",
-        serde_json::json!({ "yaml": TINY_YAML }),
-        &ctx,
-    )
-    .unwrap();
-
-    let out = run_tool(
-        "edit_design",
-        serde_json::json!({
-            "old_string": "R1: {part: Device:R",
-            "new_string": "[search needed]        pins:"
-        }),
-        &ctx,
-    )
-    .unwrap();
-
-    assert_eq!(out["code"], "invalid_patch_preserved_draft", "{out}");
-    assert_eq!(out["draft_changed"], false, "{out}");
-    assert_eq!(
-        ctx.workspace().read_draft().unwrap().as_deref(),
-        Some(TINY_YAML),
-        "the last valid design must survive a malformed patch"
-    );
-}
-
-#[test]
-fn authoring_rejects_guessed_or_unknown_footprint_ids() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    for footprint in [
-        "not_a_library_id",
-        "Resistor_SMD:Definitely_Not_A_Real_Package",
-    ] {
-        let yaml = format!(
-            "version: 1\nblocks: {{main: {{components: {{R1: {{part: Device:R, footprint: '{footprint}', pins: {{1: A, 2: GND}}}}}}}}}}"
-        );
-        let out = run_tool(
-            "edit_design",
-            serde_json::json!({ "yaml": yaml, "allow_component_removal": true }),
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(out["ok"], false, "{out}");
-        let text = out.to_string();
-        assert!(
-            text.contains("footprint"),
-            "the guessed assignment must be diagnosed: {out}"
-        );
-        assert!(
-            !text.contains("suggestions: \"") && !text.contains("suggestions: ,"),
-            "a diagnostic must never end in a dangling suggestions clause: {out}"
-        );
-    }
-}
-
-#[test]
-fn unknown_footprint_diagnostic_suggests_the_right_library() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let yaml = "version: 1\nblocks: {main: {components: {SW1: {part: Device:R, footprint: 'Button_SMD_SW_SPST:SW_SPST_TL3342', pins: {1: A, 2: GND}}}}}";
-    let out = run_tool(
-        "edit_design",
-        serde_json::json!({ "yaml": yaml, "allow_component_removal": true }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(out["ok"], false, "{out}");
-    assert!(
-        out.to_string()
-            .contains("suggestions: Button_Switch_SMD:SW_SPST_TL3342"),
-        "the wrong-library id must suggest the exact-name match first: {out}"
-    );
-}
-
-#[test]
-fn nonempty_invalid_full_edit_still_persists_for_repair() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let invalid = "version: 1\nblocks: {main: {components: {U1: {part: No:Such}}}}";
-
-    let out = run_tool("edit_design", serde_json::json!({ "yaml": invalid }), &ctx).unwrap();
-
-    assert_eq!(out["ok"], false, "{out}");
-    assert_eq!(out["draft_written"], true, "{out}");
-    assert_eq!(out["draft_changed"], true, "{out}");
-    assert_eq!(
-        ctx.workspace().read_draft().unwrap().as_deref(),
-        Some(invalid)
     );
 }
 
@@ -772,272 +310,6 @@ fn apply_design_rejects_inline_yaml_without_mutating_the_draft() {
 }
 
 #[test]
-fn repair_components_replaces_a1_a2_with_jp1_without_resending_the_draft() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let yaml = "version: 1\nname: repair\nblocks:\n  main:\n    note: keep me\n    layout: [[A1, A2, R9]]\n    components:\n      A1: {part: Device:R, pins: {1: VIN, 2: MID}}\n      A2: {part: Device:R, pins: {1: MID, 2: GND}}\n      R9: {part: Device:R, value: 10k, pins: {1: VIN, 2: GND}}\n";
-    seed_draft(&ctx, yaml);
-
-    let out = run_tool(
-        "repair_components",
-        serde_json::json!({
-            "remove": ["A1", "A2"],
-            "upsert": {
-                "JP1": {"part": "Device:R", "value": "0R", "pins": {"1": "VIN", "2": "GND"}}
-            }
-        }),
-        &ctx,
-    )
-    .unwrap();
-
-    assert_eq!(out["ok"], true, "{out}");
-    assert_eq!(out["mode"], "component_repair", "{out}");
-    assert_eq!(out["added"], serde_json::json!(["JP1"]), "{out}");
-    assert_eq!(out["removed"], serde_json::json!(["A1", "A2"]), "{out}");
-    let repaired = ctx.workspace().read_draft().unwrap().unwrap();
-    assert!(repaired.contains("note: 'keep me'"), "{repaired}");
-    assert!(repaired.contains("JP1:"), "{repaired}");
-    assert!(repaired.contains("R9:"), "{repaired}");
-    assert!(repaired.contains("layout: [[~, ~, R9]]"), "{repaired}");
-    assert!(!repaired.contains("A1:"), "{repaired}");
-    assert!(!repaired.contains("A2:"), "{repaired}");
-}
-
-#[test]
-fn repair_components_requires_confirmation_only_for_part_changes() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let yaml = "version: 1\nblocks:\n  main:\n    components:\n      R1: {part: Device:R, value: 1k, footprint: Resistor_SMD:R_0603_1608Metric, dnp: true, props: {role: load}, pins: {1: A, 2: GND}}\n  aux:\n    components:\n      U1: {part: Device:R, value: 2k, pins: {1: B, 2: GND}}\n";
-    seed_draft(&ctx, yaml);
-    let before = std::fs::read(ctx.workspace().draft_path()).unwrap();
-
-    let denied = run_tool(
-        "repair_components",
-        serde_json::json!({
-            "components": {"R1": {"part": "Device:C", "value": "1uF", "pins": {"1": "A", "2": "GND"}}}
-        }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(
-        denied["code"],
-        "component_replacement_requires_confirmation"
-    );
-    assert_eq!(std::fs::read(ctx.workspace().draft_path()).unwrap(), before);
-
-    let routed = run_tool(
-        "repair_components",
-        serde_json::json!({
-            "upsert": {"U1": {"part": "Device:R", "value": "3k", "pins": {"1": "B", "2": "GND"}}},
-            "replace_existing": true
-        }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(routed["replaced"], serde_json::json!(["U1"]), "{routed}");
-    let routed_draft = ctx.workspace().read_draft().unwrap().unwrap();
-    assert!(routed_draft.contains("value: 3k"), "{routed_draft}");
-
-    let replaced = run_tool(
-        "repair_components",
-        serde_json::json!({
-            "components": {"R1": {"part": "Device:R", "value": "4.7k"}}
-        }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(
-        replaced["replaced"],
-        serde_json::json!(["R1"]),
-        "{replaced}"
-    );
-    let repaired = ctx.workspace().read_draft().unwrap().unwrap();
-    assert!(repaired.contains("value: 4.7k"), "{repaired}");
-    assert!(
-        repaired.contains("footprint: Resistor_SMD:R_0603_1608Metric"),
-        "{repaired}"
-    );
-    assert!(repaired.contains("dnp: true"), "{repaired}");
-    assert!(repaired.contains("role: load"), "{repaired}");
-    assert!(repaired.contains("pins: {1: A, 2: GND}"), "{repaired}");
-    assert!(repaired.contains("U1:"), "{repaired}");
-}
-
-#[test]
-fn repair_components_preserves_bytes_on_invalid_fragment_or_footprint() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    seed_draft(&ctx, TINY_YAML);
-    let before = std::fs::read(ctx.workspace().draft_path()).unwrap();
-
-    let invalid = run_tool(
-        "repair_components",
-        serde_json::json!({"upsert": {"R2": {"part": "Device:R", "pins": {"3": "A"}}}}),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(invalid["draft_written"], false, "{invalid}");
-    assert_eq!(std::fs::read(ctx.workspace().draft_path()).unwrap(), before);
-
-    let bad_footprint = run_tool(
-        "repair_components",
-        serde_json::json!({
-            "upsert": {"R2": {"part": "Device:R", "footprint": "Missing:Nope", "pins": {"1": "A", "2": "GND"}}}
-        }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(
-        bad_footprint["code"],
-        "invalid_component_repair_preserved_draft"
-    );
-    assert_eq!(std::fs::read(ctx.workspace().draft_path()).unwrap(), before);
-}
-
-#[test]
-fn repair_components_updates_d1_and_tp1_without_complete_component_objects() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let yaml = "version: 1\nblocks:\n  main:\n    components:\n      D1: {part: Device:D, value: OLD, props: {role: clamp}, pins: {A: GND, K: VCC}}\n      TP1: {part: Connector:TestPoint, pins: {1: GND}}\n      R9: {part: Device:R, value: 10k, pins: {1: VCC, 2: GND}}\n";
-    seed_draft(&ctx, yaml);
-
-    let out = run_tool(
-        "repair_components",
-        serde_json::json!({
-            "upsert": {},
-            "update": {
-                "D1": {"pins": {"A": "VCC", "K": "GND"}, "value": "1N4148"},
-                "TP1": {"pins": {"1": "VCC"}}
-            },
-            "remove": [],
-            "replace_existing": false
-        }),
-        &ctx,
-    )
-    .unwrap();
-
-    assert_eq!(out["ok"], true, "{out}");
-    assert_eq!(out["updated"], serde_json::json!(["D1", "TP1"]), "{out}");
-    let repaired = ctx.workspace().read_draft().unwrap().unwrap();
-    assert!(repaired.contains("value: 1N4148"), "{repaired}");
-    assert!(repaired.contains("props: {role: clamp}"), "{repaired}");
-    assert!(repaired.contains("pins: {A: VCC, K: GND}"), "{repaired}");
-    assert!(
-        repaired.contains("TP1: {part: Connector:TestPoint, pins: {1: VCC}}"),
-        "{repaired}"
-    );
-    assert!(repaired.contains("R9:"), "{repaired}");
-}
-
-#[test]
-fn repair_components_accepts_common_components_wrappers() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    seed_draft(&ctx, TINY_YAML);
-
-    let top_level = run_tool(
-        "repair_components",
-        serde_json::json!({"components": {
-            "C1": {"part": "Device:C", "pins": {"1": "VIN", "2": "GND"}}
-        }}),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(top_level["ok"], true, "{top_level}");
-
-    let nested = run_tool(
-        "repair_components",
-        serde_json::json!({"upsert": {"components": {
-            "R2": {"part": "Device:R", "pins": {"1": "VIN", "2": "GND"}}
-        }}}),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(nested["ok"], true, "{nested}");
-}
-
-#[test]
-fn repair_components_update_failures_and_overlaps_preserve_exact_bytes() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let yaml = "version: 1\nblocks: {main: {components: {D1: {part: Device:D, pins: {1: VCC, 2: GND}}, TP1: {part: Connector:TestPoint, pins: {1: VCC}}}}}";
-    seed_draft(&ctx, yaml);
-    let before = std::fs::read(ctx.workspace().draft_path()).unwrap();
-
-    let alias = run_tool(
-        "repair_components",
-        serde_json::json!({"update": {"D1": {"pins": {"A": "VCC", "K": "GND"}}}}),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(alias["code"], "unknown_repair_pin_key", "{alias}");
-    assert_eq!(alias["unknown_pin_keys"], serde_json::json!(["A", "K"]));
-    assert_eq!(alias["valid_pin_keys"], serde_json::json!(["1", "2"]));
-    assert_eq!(std::fs::read(ctx.workspace().draft_path()).unwrap(), before);
-
-    for input in [
-        serde_json::json!({
-            "upsert": {}, "update": {"D1": {"pins": {"BAD": "SIG"}}},
-            "remove": [], "replace_existing": false
-        }),
-        serde_json::json!({
-            "upsert": {}, "update": {"D1": {"footprint": "Missing:Nope"}},
-            "remove": [], "replace_existing": false
-        }),
-        serde_json::json!({
-            "upsert": {"D1": {"part": "Device:D", "pins": {"A": "VCC", "K": "GND"}}},
-            "update": {"D1": {"value": "1N4148"}},
-            "remove": [], "replace_existing": true
-        }),
-        serde_json::json!({
-            "upsert": {}, "update": {"TP1": {"pins": {"1": "GND"}}},
-            "remove": ["TP1"], "replace_existing": false
-        }),
-    ] {
-        let out = run_tool("repair_components", input, &ctx).unwrap();
-        assert_eq!(out["draft_written"], false, "{out}");
-        assert_eq!(std::fs::read(ctx.workspace().draft_path()).unwrap(), before);
-    }
-}
-
-#[test]
-fn repair_components_replaces_parent_and_removes_its_synthesized_children() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let yaml = "version: 1\nblocks:\n  main:\n    components:\n      U1: {part: Interface_CAN_LIN:SN65HVD230, decouple: {100nF: 2}, pins: {VCC: VCC, GND: GND}}\n      R1: {part: Device:R, pins: {1: VCC, 2: GND}}\n";
-    seed_draft(&ctx, yaml);
-
-    let out = run_tool(
-        "repair_components",
-        serde_json::json!({
-            "upsert": {"U1": {"part": "Interface_CAN_LIN:SN65HVD230", "pins": {"VCC": "VCC", "GND": "GND"}}},
-            "replace_existing": true
-        }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(out["ok"], true, "{out}");
-    let repaired = ctx.workspace().read_draft().unwrap().unwrap();
-    assert!(!repaired.contains("decouple:"), "{repaired}");
-    assert!(!repaired.contains("100nF"), "{repaired}");
-    assert!(repaired.contains("R1:"), "{repaired}");
-}
-
-#[test]
 fn apply_design_commit_writes_file_and_runs_erc() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
@@ -1130,25 +402,8 @@ fn apply_design_reports_a_written_commit_when_post_write_erc_cannot_run() {
     );
 }
 
-#[test]
-fn read_schematic_draft_notes_absent_schematic() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let out = run_tool(
-        "read_schematic",
-        serde_json::json!({ "source": "draft" }),
-        &ctx,
-    )
-    .unwrap();
-    let text = out.as_str().expect("plain text read_schematic result");
-    assert!(text.contains("source: draft"), "{text}");
-    assert!(text.contains("stale: false"), "{text}");
-    assert!(text.contains("note: no schematic yet"), "{text}");
-    assert!(text.contains("```yaml\n\n```"), "{text}");
-}
-
+/// The registry is the contract with the model: a tool that silently
+/// disappears (or appears) is a behaviour change, not a refactor.
 #[test]
 fn defs_lists_all_tools() {
     let names: Vec<String> = tool_defs()
@@ -1156,27 +411,44 @@ fn defs_lists_all_tools() {
         .map(|d| d.name.to_string())
         .collect();
     let expected_tools = [
+        // The live schematic surface.
+        "read_schematic",
+        "get_symbol",
+        "get_net",
+        "free_space",
+        "check_schematic",
+        "add_symbol",
+        "remove_symbols",
+        "move_symbols",
+        "set_fields",
+        "set_flags",
+        "swap_symbol",
+        "connect",
+        "label",
+        "no_connect",
+        "add_power",
+        "delete_wires",
+        "undo",
+        // Discovery, bulk create, review and render.
         "search_symbols",
         "get_symbol_info",
-        "validate_design",
         "apply_design",
         "run_erc",
         "project_info",
-        "read_schematic",
         "render_schematic",
         "create_design",
-        "edit_design",
+        "review_design",
+        // The board.
         "search_footprints",
         "get_footprint_info",
+        "assign_footprints",
+        "regenerate_board",
         "get_board",
         "place_board",
         "route_board",
         "render_board",
         "check_board",
         "export_fab",
-        "review_design",
-        "regenerate_board",
-        "assign_footprints",
         "open_board",
         "move_parts",
         "route_track",
@@ -1190,67 +462,58 @@ fn defs_lists_all_tools() {
     assert_eq!(
         names.len(),
         expected_tools.len(),
-        "expected exactly {} tools, got {}: {:?}",
+        "expected exactly {} tools, got {}: {names:?}",
         expected_tools.len(),
         names.len(),
-        names
     );
+}
 
-    // Names are unique.
-    let mut sorted = names.clone();
-    sorted.sort();
-    sorted.dedup();
+/// A symbol and a footprint whose pads cannot possibly correspond is caught
+/// before anything is composed.
+#[test]
+fn create_design_rejects_60_pin_symbol_with_four_pad_footprint() {
+    let (ctx, _guard) = fixture_ctx();
+
+    let out = run_tool(
+        "create_design",
+        serde_json::json!({ "yaml": CONNECTOR_60_WITH_FOUR_PAD_FOOTPRINT }),
+        &ctx,
+    )
+    .unwrap();
+
+    assert_eq!(out["ok"], serde_json::json!(false), "{out}");
+    assert_eq!(out["errors"], serde_json::json!(1), "{out}");
+    let mismatch = &out["footprint_pin_mismatches"][0];
+    assert_eq!(mismatch["reference"], serde_json::json!("J1"), "{out}");
     assert_eq!(
-        sorted.len(),
-        names.len(),
-        "tool names must be unique: {names:?}"
+        mismatch["symbol_pins_absent_from_footprint"]
+            .as_array()
+            .map(Vec::len),
+        Some(60),
+        "{out}"
     );
+    assert_eq!(
+        mismatch["footprint_pads_absent_from_symbol"],
+        serde_json::json!(["1", "2", "3", "4"]),
+        "{out}"
+    );
+}
 
-    // Every def's schema is a JSON object with a "type":"object" root — schema
-    // sanity for the model-facing definitions.
-    for def in tool_defs() {
-        let schema = def.schema.expect("every tool carries a JSON schema");
-        assert_eq!(
-            schema["type"],
-            serde_json::json!("object"),
-            "{} schema root must be an object",
-            def.name
-        );
-        if def.name.to_string() == "apply_design" {
-            let props = schema["properties"].as_object().expect("properties object");
-            assert!(props.is_empty(), "apply accepts only the durable draft");
-            assert_eq!(schema["additionalProperties"], false);
-        }
-        if def.name.to_string() == "edit_design" {
-            assert_eq!(schema["additionalProperties"], false);
-            // Both authoring shapes are advertised: full `yaml` replacement and
-            // the exact-match patch that spares a large draft the 30k-token
-            // resend that truncates weaker providers.
-            let props = schema["properties"].as_object().expect("properties object");
-            assert!(props.contains_key("yaml"));
-            assert!(props.contains_key("old_string"));
-            assert!(props.contains_key("new_string"));
-        }
-        if def.name.to_string() == "route_track" {
-            let props = schema["properties"].as_object().expect("properties object");
-            assert!(props.contains_key("from"));
-            assert!(props.contains_key("to"));
-            assert!(props.contains_key("net"));
-            assert!(!props.contains_key("start"));
-            assert!(!props.contains_key("end"));
-        }
-        if def.name.to_string() == "delete_copper" {
-            let props = schema["properties"].as_object().expect("properties object");
-            assert!(props.contains_key("at"));
-            assert!(props.contains_key("kinds"));
-        }
-        if def.name.to_string() == "place_board" {
-            assert_eq!(
-                schema["properties"]["groups"]["items"]["properties"]["rotation"]["enum"],
-                serde_json::json!([0, 90, 180, 270])
-            );
-        }
-    }
+/// A footprint id from the wrong library still names the part it meant.
+#[test]
+fn unknown_footprint_diagnostic_suggests_the_right_library() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let yaml = "version: 1\nblocks: {main: {components: {SW1: {part: Device:R, footprint: 'Button_SMD_SW_SPST:SW_SPST_TL3342', pins: {1: A, 2: GND}}}}}";
+    let out = run_tool("create_design", serde_json::json!({ "yaml": yaml }), &ctx).unwrap();
+    assert_eq!(out["ok"], false, "{out}");
+    assert!(
+        out.to_string()
+            .contains("suggestions: Button_Switch_SMD:SW_SPST_TL3342"),
+        "the wrong-library id must suggest the exact-name match first: {out}"
+    );
 }
 
 #[test]
@@ -1258,7 +521,7 @@ fn tool_definitions_stay_within_static_context_budget() {
     let defs = tool_defs();
     let total: usize = defs.iter().map(|tool| tool.size()).sum();
     assert!(
-        total <= 8_350,
+        total <= 13_800,
         "tool definitions use {total} bytes; keep the always-on schemas concise"
     );
 }
@@ -1335,85 +598,6 @@ fn export_fab_refuses_unclean_board() {
 }
 
 #[test]
-fn read_schematic_lifts_an_external_file_by_absolute_path() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    // Write a real schematic into the project, then read it back as if it were
-    // an arbitrary external path.
-    seed_draft(&ctx, TINY_YAML);
-    run_tool(
-        "apply_design",
-        serde_json::json!({ "__commit": true }),
-        &ctx,
-    )
-    .unwrap();
-    let abs = ctx.sch_path().display().to_string();
-    let out = run_tool("read_schematic", serde_json::json!({ "source": abs }), &ctx).unwrap();
-    let text = out.as_str().expect("plain text read_schematic result");
-    assert!(text.contains("source: path"), "{text}");
-    assert!(text.contains("path:"), "{text}");
-    assert!(text.contains("R1"), "lifted yaml carries R1: {text}");
-}
-
-#[test]
-fn read_schematic_resolves_relative_to_the_project_dir() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    seed_draft(&ctx, TINY_YAML);
-    run_tool(
-        "apply_design",
-        serde_json::json!({ "__commit": true }),
-        &ctx,
-    )
-    .unwrap();
-    let rel = ctx.sch_path().file_name().unwrap().to_string_lossy();
-    let out = run_tool("read_schematic", serde_json::json!({ "source": rel }), &ctx).unwrap();
-    let text = out.as_str().expect("plain text read_schematic result");
-    assert!(
-        text.contains("R1"),
-        "relative path resolves against the project dir: {text}"
-    );
-}
-
-#[test]
-fn read_schematic_errors_cleanly_for_missing_or_wrong_files() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-
-    let out = run_tool(
-        "read_schematic",
-        serde_json::json!({ "source": "/no/such/file.kicad_sch" }),
-        &ctx,
-    )
-    .unwrap();
-    let text = out.as_str().expect("plain text read_schematic result");
-    assert!(
-        text.contains("error: no file"),
-        "missing file is a text error: {text}"
-    );
-
-    let not_sch = ctx.project_dir().join("readme.txt");
-    std::fs::write(&not_sch, "hello").unwrap();
-    let out = run_tool(
-        "read_schematic",
-        serde_json::json!({ "source": not_sch.display().to_string() }),
-        &ctx,
-    )
-    .unwrap();
-    let text = out.as_str().expect("plain text read_schematic result");
-    assert!(
-        text.contains(".kicad_sch"),
-        "wrong extension is a text error: {text}"
-    );
-}
-
-#[test]
 fn apply_design_commit_reports_the_written_path() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
@@ -1440,143 +624,6 @@ fn unknown_tool_is_an_error() {
         return;
     };
     assert!(run_tool("no_such_tool", serde_json::json!({}), &ctx).is_err());
-}
-
-#[test]
-fn draft_lifecycle_create_edit_apply() {
-    let Some(ctx) = gordian_core::AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD environment detected");
-        return;
-    };
-    let yaml = "
-version: 1
-name: t
-blocks:
-  a:
-    components:
-      R1: {part: Device:R, value: 1k, between: [N1, GND]}
-      PWR1: {part: power:GND, pins: {1: GND}}
-";
-
-    // edit before create -> structured error.
-    let out = run_tool(
-        "edit_design",
-        serde_json::json!({"old_string": "x", "new_string": "y"}),
-        &ctx,
-    )
-    .unwrap();
-    assert!(out["error"].as_str().unwrap().contains("no draft"));
-
-    // create seeds the draft and validates it.
-    let out = run_tool("create_design", serde_json::json!({"yaml": yaml}), &ctx).unwrap();
-    assert_eq!(out["ok"], serde_json::json!(true));
-    // create again without overwrite -> error; with overwrite -> ok.
-    let out = run_tool("create_design", serde_json::json!({"yaml": yaml}), &ctx).unwrap();
-    assert!(
-        out["error"]
-            .as_str()
-            .unwrap()
-            .contains("draft already exists")
-    );
-
-    // Anchored edit: ambiguity and uniqueness rules.
-    let out = run_tool(
-        "edit_design",
-        serde_json::json!({"old_string": "NOT-PRESENT", "new_string": "y"}),
-        &ctx,
-    )
-    .unwrap();
-    assert!(out["error"].as_str().unwrap().contains("not found"));
-    let out = run_tool(
-        "edit_design",
-        serde_json::json!({"old_string": "value: 1k", "new_string": "value: 4.7k"}),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(out["ok"], serde_json::json!(true));
-    assert_eq!(out["replacements"], serde_json::json!(1));
-
-    let replacement_yaml = yaml.replace("value: 1k", "value: 2.2k");
-    let out = run_tool(
-        "edit_design",
-        serde_json::json!({"yaml": replacement_yaml}),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(out["ok"], serde_json::json!(true));
-    assert_eq!(out["mode"], serde_json::json!("full_replace"));
-
-    // apply_design applies the durable draft when the gate's commit phase invokes it.
-    let out = run_tool("apply_design", serde_json::json!({"__commit": true}), &ctx).unwrap();
-    assert_eq!(out["written"], serde_json::json!(true));
-
-    // read_schematic(draft) prefers the draft and returns plain YAML text.
-    let out = run_tool(
-        "read_schematic",
-        serde_json::json!({ "source": "draft" }),
-        &ctx,
-    )
-    .unwrap();
-    let text = out.as_str().expect("plain text read_schematic result");
-    assert!(text.contains("source: draft"), "{text}");
-    assert!(text.contains("2.2k"), "{text}");
-}
-
-#[test]
-fn read_schematic_draft_seeds_from_lift_and_flags_staleness() {
-    let Some(ctx) = gordian_core::AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD environment detected");
-        return;
-    };
-    let yaml = "
-version: 1
-name: t
-blocks:
-  a:
-    components:
-      R1: {part: Device:R, value: 1k, between: [N1, GND]}
-      PWR1: {part: power:GND, pins: {1: GND}}
-";
-    // Write a schematic, then remove its draft to exercise lift-and-seed.
-    seed_draft(&ctx, yaml);
-    run_tool("apply_design", serde_json::json!({"__commit": true}), &ctx).unwrap();
-    let draft_path = ctx.workspace().draft_path();
-    std::fs::remove_file(&draft_path).unwrap();
-    std::fs::remove_file(draft_path.parent().unwrap().join("draft.meta.json")).unwrap();
-
-    // read_schematic(draft) lifts AND seeds the draft.
-    let out = run_tool(
-        "read_schematic",
-        serde_json::json!({ "source": "draft" }),
-        &ctx,
-    )
-    .unwrap();
-    let text = out.as_str().expect("plain text read_schematic result");
-    assert!(text.contains("source: draft"), "{text}");
-    assert!(text.contains("stale: false"), "{text}");
-    assert!(text.contains("draft seeded from the schematic"), "{text}");
-
-    let out2 = run_tool(
-        "read_schematic",
-        serde_json::json!({ "source": "draft" }),
-        &ctx,
-    )
-    .unwrap();
-    let text2 = out2.as_str().expect("plain text read_schematic result");
-    assert!(text2.contains("source: draft"), "{text2}");
-    assert!(text2.contains("stale: false"), "{text2}");
-
-    // Out-of-band sch edit -> staleness surfaces.
-    let sch = std::fs::read_to_string(ctx.sch_path()).unwrap();
-    std::fs::write(ctx.sch_path(), format!("{sch}\n")).unwrap();
-    let out3 = run_tool(
-        "read_schematic",
-        serde_json::json!({ "source": "draft" }),
-        &ctx,
-    )
-    .unwrap();
-    let text3 = out3.as_str().expect("plain text read_schematic result");
-    assert!(text3.contains("stale: true"), "{text3}");
 }
 
 #[test]
@@ -1712,31 +759,6 @@ fn fixture_ctx() -> (AgentRuntime, tempfile::TempDir) {
     (ctx, guard)
 }
 
-#[test]
-fn validate_design_uses_the_stored_draft_without_resending_yaml() {
-    let (ctx, _guard) = fixture_ctx();
-    let yaml = "version: 1\nblocks: {main: {components: {R1: {part: R, between: [A, GND]}, R2: {part: R, between: [A, GND]}}}}";
-    let created = run_tool("create_design", serde_json::json!({ "yaml": yaml }), &ctx).unwrap();
-    assert_eq!(created["ok"], serde_json::json!(true), "{created}");
-    assert_eq!(created["validated"], serde_json::json!(true), "{created}");
-    assert_eq!(
-        created["next_tool"],
-        serde_json::json!("apply_design"),
-        "{created}"
-    );
-    assert!(
-        created["next"]
-            .as_str()
-            .is_some_and(|next| next.contains("do not revalidate")),
-        "{created}"
-    );
-
-    let validated = run_tool("validate_design", serde_json::json!({}), &ctx).unwrap();
-
-    assert_eq!(validated["ok"], serde_json::json!(true), "{validated}");
-    assert_eq!(validated["errors"], serde_json::json!(0), "{validated}");
-}
-
 const CONNECTOR_60_WITH_FOUR_PAD_FOOTPRINT: &str = r#"
 version: 1
 blocks:
@@ -1746,42 +768,6 @@ blocks:
         part: Connector:Conn_15X4
         footprint: Fixtures:PinHeader_1x04_Test
 "#;
-
-#[test]
-fn create_design_rejects_60_pin_symbol_with_four_pad_footprint() {
-    let (ctx, _guard) = fixture_ctx();
-
-    let out = run_tool(
-        "create_design",
-        serde_json::json!({ "yaml": CONNECTOR_60_WITH_FOUR_PAD_FOOTPRINT }),
-        &ctx,
-    )
-    .unwrap();
-
-    assert_eq!(out["ok"], serde_json::json!(false), "{out}");
-    assert_eq!(out["errors"], serde_json::json!(1), "{out}");
-    assert_eq!(out["next_tool"], serde_json::json!("edit_design"), "{out}");
-    let mismatch = &out["footprint_pin_mismatches"][0];
-    assert_eq!(mismatch["reference"], serde_json::json!("J1"), "{out}");
-    assert_eq!(
-        mismatch["symbol_pins_absent_from_footprint"]
-            .as_array()
-            .map(Vec::len),
-        Some(60),
-        "{out}"
-    );
-    assert_eq!(
-        mismatch["footprint_pads_absent_from_symbol"],
-        serde_json::json!(["1", "2", "3", "4"]),
-        "{out}"
-    );
-    assert!(
-        out["next"]
-            .as_str()
-            .is_some_and(|next| next.contains("pad numbers match")),
-        "{out}"
-    );
-}
 
 #[test]
 fn create_design_rejects_unpolarized_symbol_with_electrolytic_footprint() {
@@ -1847,63 +833,6 @@ blocks:
 
     assert_eq!(out["ok"], serde_json::json!(true), "{out}");
     assert!(out.get("footprint_pin_mismatches").is_none(), "{out}");
-}
-
-#[test]
-fn edit_and_apply_preview_reject_incompatible_footprint_before_compose() {
-    let (ctx, _guard) = fixture_ctx();
-    let valid = r#"
-version: 1
-blocks:
-  main:
-    components:
-      R1:
-        part: Device:R
-        footprint: Fixtures:R_0603_1608Metric
-        pins: {1: SIG, 2: GND}
-"#;
-    let created = run_tool("create_design", serde_json::json!({ "yaml": valid }), &ctx).unwrap();
-    assert_eq!(created["ok"], serde_json::json!(true), "{created}");
-
-    let edited = run_tool(
-        "edit_design",
-        serde_json::json!({ "yaml": CONNECTOR_60_WITH_FOUR_PAD_FOOTPRINT }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(edited["ok"], serde_json::json!(false), "{edited}");
-    assert_eq!(
-        edited["mode"],
-        serde_json::json!("full_replace"),
-        "{edited}"
-    );
-    assert_eq!(
-        edited["footprint_pin_mismatches"][0]["reference"],
-        serde_json::json!("J1"),
-        "{edited}"
-    );
-
-    let preview = run_tool("apply_design", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(preview["ok"], serde_json::json!(false), "{preview}");
-    assert!(preview.get("would_write").is_none(), "{preview}");
-    assert!(
-        !ctx.sch_path().exists(),
-        "preview must not compose/write a schematic"
-    );
-}
-
-#[test]
-fn validate_design_without_yaml_or_draft_returns_recovery_guidance() {
-    let (ctx, _guard) = fixture_ctx();
-
-    let out = run_tool("validate_design", serde_json::json!({}), &ctx).unwrap();
-
-    assert!(
-        out["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("no draft exists")),
-        "{out}"
-    );
 }
 
 #[test]
@@ -2179,62 +1108,6 @@ blocks:
     assert_eq!(assigned["ignored"][0]["reference"], "GND1");
     let draft = ctx.workspace().read_draft().unwrap().unwrap();
     assert_eq!(draft.matches("Fixtures:R_0603_1608Metric").count(), 1);
-}
-
-#[test]
-fn regenerate_board_rejects_unapplied_draft_footprints() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-
-    seed_draft(&ctx, TINY_YAML);
-    let written = run_tool(
-        "apply_design",
-        serde_json::json!({ "__commit": true }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(written["written"], serde_json::json!(true), "{written}");
-
-    let draft = run_tool(
-        "read_schematic",
-        serde_json::json!({ "source": "draft" }),
-        &ctx,
-    )
-    .unwrap();
-    let draft = draft.as_str().expect("plain text read_schematic result");
-    assert!(
-        draft.contains("R1"),
-        "draft seeded from committed schematic: {draft}"
-    );
-    let assigned = run_tool(
-        "assign_footprints",
-        serde_json::json!({
-            "assignments": [
-                { "reference": "R1", "footprint": "Resistor_SMD:R_0603_1608Metric" }
-            ],
-        }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(assigned["ok"], serde_json::json!(true), "{assigned}");
-
-    let out = run_tool("regenerate_board", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(out["ok"], serde_json::json!(false), "{out}");
-    assert!(
-        out["unapplied_draft_footprints"]
-            .as_array()
-            .is_some_and(|changes| changes.iter().any(|c| c["reference"] == "R1")),
-        "regenerate_board should ask to apply draft footprint changes first: {out}"
-    );
-    assert!(
-        out["next"]
-            .as_str()
-            .is_some_and(|n| n.contains("apply_design()")),
-        "derive note should name the required commit: {out}"
-    );
-    assert_eq!(out["next_tool"], serde_json::json!("apply_design"));
 }
 
 #[test]

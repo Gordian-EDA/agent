@@ -34,13 +34,6 @@ blocks:\n\
 \x20     R1: {part: R, value: 10k, between: [A, GND]}\n\
 \x20     R2: {part: R, value: 10k, between: [A, GND]}\n";
 
-const CLEAN_EDITED_YAML: &str = "version: 1\n\
-blocks:\n\
-\x20 main:\n\
-\x20   components:\n\
-\x20     R1: {part: R, value: 12k, between: [A, GND]}\n\
-\x20     R2: {part: R, value: 12k, between: [A, GND]}\n";
-
 /// The shared script: (1) search, (2) author draft, (3) apply, (4) done.
 fn script() -> Vec<gordian_core::StreamEnd> {
     vec![
@@ -51,7 +44,7 @@ fn script() -> Vec<gordian_core::StreamEnd> {
         ),
         tool_call(
             "tu_2",
-            "edit_design",
+            "create_design",
             serde_json::json!({ "yaml": CLEAN_YAML }),
         ),
         tool_call("tu_3", "apply_design", serde_json::json!({})),
@@ -173,8 +166,10 @@ async fn stall_after_draft_authoring_is_nudged_until_it_commits() {
     assert_eq!(outcome.final_text, "done");
 }
 
+/// A commit whose ERC is dirty is nudged, and the repair happens on the
+/// committed schematic — not by re-applying a draft over it.
 #[tokio::test]
-async fn dirty_commit_is_nudged_until_a_clean_reapply() {
+async fn dirty_commit_is_nudged_into_repairing_the_schematic() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -187,12 +182,12 @@ async fn dirty_commit_is_nudged_until_a_clean_reapply() {
         ),
         tool_call("tu_2", "apply_design", serde_json::json!({})),
         final_text("done, despite dangling endpoints"), // → ERC cleanup nudge
-        tool_call(
-            "tu_3",
-            "edit_design",
-            serde_json::json!({ "yaml": CLEAN_YAML }),
-        ),
-        tool_call("tu_4", "apply_design", serde_json::json!({})),
+        tool_call("tu_3", "no_connect", serde_json::json!({ "pin": "R1.1" })),
+        tool_call("tu_4", "no_connect", serde_json::json!({ "pin": "R2.2" })),
+        tool_call("tu_5", "check_schematic", serde_json::json!({})),
+        // The ERC nudge is bounded; the loop gives up rather than looping.
+        final_text("clean now"),
+        final_text("clean now"),
         final_text("clean now"),
     ];
     let mut agent = agent(ctx, script);
@@ -207,17 +202,20 @@ async fn dirty_commit_is_nudged_until_a_clean_reapply() {
         .await
         .unwrap();
 
-    assert!(outcome.applied, "both applies should commit: {outcome:?}");
+    assert!(outcome.applied, "the apply should commit: {outcome:?}");
     assert_eq!(outcome.final_text, "clean now");
-    assert_eq!(outcome.tool_calls_made, 4);
+    assert_eq!(outcome.tool_calls_made, 5);
 }
 
+/// Once the schematic has been edited in place, the draft that produced it is
+/// history: re-applying it would silently revert the edit, so it is refused.
 #[tokio::test]
-async fn edit_after_commit_is_not_reported_as_applied_until_recommitted() {
+async fn applying_a_draft_over_an_edited_schematic_is_refused() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
+    let sch_path = ctx.sch_path().to_path_buf();
     let script = vec![
         tool_call(
             "tu_1",
@@ -227,74 +225,22 @@ async fn edit_after_commit_is_not_reported_as_applied_until_recommitted() {
         tool_call("tu_2", "apply_design", serde_json::json!({})),
         tool_call(
             "tu_3",
-            "edit_design",
-            serde_json::json!({"yaml": CLEAN_EDITED_YAML}),
+            "set_fields",
+            serde_json::json!({"ref": "R1", "fields": {"Value": "12k"}}),
         ),
-        final_text("edited, but forgot to apply"), // current-draft nudge
         tool_call("tu_4", "apply_design", serde_json::json!({})),
-        final_text("recommitted"),
+        final_text("kept the live edit"),
     ];
     let mut agent = agent(ctx, script);
     let mut approvals = AutoApprove::yes();
 
-    let outcome = agent
-        .run_turn("commit every schematic change", &mut approvals, None)
+    agent
+        .run_turn("commit, then change a value", &mut approvals, None)
         .await
         .unwrap();
 
-    assert!(
-        outcome.applied,
-        "latest draft must be committed: {outcome:?}"
-    );
-    assert_eq!(outcome.final_text, "recommitted");
-    assert_eq!(outcome.tool_calls_made, 4);
-}
-
-#[tokio::test]
-async fn identical_authoring_rewrites_do_not_evade_the_commit_nudge() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let script = vec![
-        tool_call(
-            "create",
-            "create_design",
-            serde_json::json!({"yaml": CLEAN_YAML}),
-        ),
-        tool_call(
-            "same-1",
-            "edit_design",
-            serde_json::json!({"yaml": CLEAN_YAML}),
-        ),
-        tool_call(
-            "same-2",
-            "edit_design",
-            serde_json::json!({"yaml": CLEAN_YAML}),
-        ),
-        tool_call(
-            "same-3",
-            "edit_design",
-            serde_json::json!({"yaml": CLEAN_YAML}),
-        ),
-        tool_call("apply", "apply_design", serde_json::json!({})),
-        final_text("committed instead of rewriting again"),
-    ];
-    let mut agent = agent(ctx, script);
-    let mut approvals = AutoApprove::yes();
-
-    let outcome = agent
-        .run_turn(
-            "author the design without rewriting it forever",
-            &mut approvals,
-            None,
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(outcome.stop_reason, StopReason::Completed);
-    assert!(outcome.applied);
-    assert_eq!(outcome.tool_calls_made, 5);
+    let text = std::fs::read_to_string(&sch_path).unwrap();
+    assert!(text.contains("12k"), "the live edit must survive the re-apply");
 }
 
 #[tokio::test]
@@ -345,7 +291,7 @@ async fn discovery_stall_is_nudged_into_full_authoring_once() {
         tool_call("inspect-3", "project_info", serde_json::json!({})),
         tool_call(
             "author",
-            "edit_design",
+            "create_design",
             serde_json::json!({"yaml": CLEAN_YAML}),
         ),
         tool_call("apply", "apply_design", serde_json::json!({})),

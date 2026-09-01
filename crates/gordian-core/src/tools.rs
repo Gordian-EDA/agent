@@ -961,6 +961,20 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .workspace()
         .draft_is_stale(current_sch_text(ctx).as_deref());
 
+    // Applying rewrites the whole file from the draft. Once the schematic has
+    // moved on — the live-edit tools have touched it, or a human has — that is
+    // no longer an apply, it is a silent revert.
+    if stale {
+        return Ok(json!({
+            "ok": false,
+            "error": "the schematic has changed since this draft was written; applying it would \
+                      discard those edits",
+            "code": "stale_draft",
+            "note": "The schematic is the design. Edit it in place with the schematic tools \
+                     (read_schematic, set_fields, add_symbol, connect, …) instead of re-applying.",
+        }));
+    }
+
     let commit = input
         .get("__commit")
         .and_then(Value::as_bool)
@@ -1002,7 +1016,6 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({
             "ok": true,
             "would_write": true,
-            "stale_draft_warning": stale,
             "diff": diff,
             "design_state": design_state,
             "layout_pending": true,
@@ -1022,7 +1035,6 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({
             "ok": true,
             "would_write": true,
-            "stale_draft_warning": stale,
             "diff": diff,
             "design_state": design_state,
             "layout_mode": "composed",
@@ -1056,7 +1068,6 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "ok": true,
         "written": true,
         "path": ctx.sch_path().display().to_string(),
-        "stale_draft_warning": stale,
         "diff": diff,
         "design_state": design_state,
         "layout_mode": "composed",

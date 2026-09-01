@@ -1,6 +1,6 @@
 //! Project-local persistent state: `<project>/.gordian/`.
 //!
-//! Holds the working draft (`draft.circuit.yaml` — the document `edit_design`
+//! Holds the working draft (`draft.circuit.yaml` — the document `create_design`
 //! patches and `apply_design` applies), `draft.meta.json` (the content hash of
 //! the `.kicad_sch` the draft was seeded from, for staleness detection), and
 //! `renders/` (PNGs from `render_schematic`). The directory ships its own

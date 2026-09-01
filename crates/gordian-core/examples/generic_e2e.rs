@@ -52,12 +52,6 @@ fn main() -> anyhow::Result<()> {
     ctx.workspace().write_draft(&yaml, None)?;
     let started = Instant::now();
 
-    let validation = step(&ctx, "validate_design", json!({}))?;
-    if validation["errors"].as_u64().unwrap_or(1) != 0
-        || validation["warnings"].as_u64().unwrap_or(1) != 0
-    {
-        bail!("draft is not authoring-clean: {validation}");
-    }
     let applied = step(&ctx, "apply_design", json!({"__commit": true}))?;
     if applied["erc"]["errors"].as_u64().unwrap_or(1) != 0
         || applied["erc"]["warnings"].as_u64().unwrap_or(1) != 0
