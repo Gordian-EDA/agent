@@ -305,14 +305,17 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
     );
 }
 
-/// A short model label for the status bar: the last dotted segment, trimmed.
+/// A model label for the status bar: the routing prefix stripped, the model's
+/// own name left whole. Only the namespace ("us.anthropic.") is noise here —
+/// the id itself is the useful part, so it isn't cut down to a fixed word
+/// count (that clipped names shorter than the vendor prefix it was meant to
+/// remove, e.g. "6-luna" instead of "gpt-6-luna").
 fn short_model(model: &str) -> String {
-    // e.g. "us.anthropic.claude-opus-4-5-20251101-v1:0" -> "claude-opus-4-5"
+    // e.g. "us.anthropic.claude-opus-4-5-20251101-v1:0" -> "claude-opus-4-5-20251101-v1:0"
     let tail = model.rsplit('.').next().unwrap_or(model);
-    let trimmed: String = tail.split('-').take(3).collect::<Vec<_>>().join("-");
-    if trimmed.is_empty() {
+    if tail.is_empty() {
         model.to_string()
     } else {
-        trimmed
+        tail.to_string()
     }
 }

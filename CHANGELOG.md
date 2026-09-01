@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Changed
+- **The status-bar model label is no longer clipped to three words**: it used
+  to cut every model id down to its first three dash-separated segments after
+  stripping the vendor namespace, which mangled short ids (`gpt-6-luna` showed
+  as `6-luna`). Only the namespace is stripped now; the footer's existing
+  ellipsis discipline already handles a bar too narrow to fit it.
+- **Welcome splash names the project**: the tagline now reads "the schematic &
+  PCB design copilot · ~/path/to/project" — the schematic's directory, tildified
+  under `$HOME` — so it's clear at a glance which project a session is open on.
 - **The floating menus are borderless**: the `/command` completion list and the
   unwind picker drop their rounded box, title, and selection caret. They are now
   full-width lists seated on the composer, with the selected row as a solid
