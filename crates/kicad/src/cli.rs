@@ -18,6 +18,7 @@ impl KicadInstallation {
     ///
     /// Returns `Ok(report)` whether or not violations were found. A nonzero
     /// "violations exist" exit code is expected and still yields a valid report.
+    #[tracing::instrument(skip_all, fields(schematic = %schematic.display()))]
     pub fn erc(&self, schematic: &Path) -> io::Result<ErcReport> {
         let out = tempfile::Builder::new()
             .prefix("gordian-erc-")
@@ -53,6 +54,7 @@ impl KicadInstallation {
     ///
     /// Mirrors [`erc`](Self::erc): violations are a normal report result, not a
     /// process failure, as long as the JSON report is parseable.
+    #[tracing::instrument(skip_all, fields(board = %pcb.display()))]
     pub fn drc(&self, pcb: &Path) -> io::Result<DrcReport> {
         let out = tempfile::Builder::new()
             .prefix("gordian-drc-")

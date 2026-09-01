@@ -1634,6 +1634,7 @@ fn placement_existing_copper_error(tracks: usize, vias: usize) -> Option<Value> 
     })
 }
 
+#[tracing::instrument(skip_all, fields(project = %ctx.project_dir().display()))]
 pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let board = match crate::active_board(ctx) {
         Ok(board) => board,

@@ -1062,6 +1062,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -1648,6 +1649,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -2221,6 +2223,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]

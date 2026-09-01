@@ -881,6 +881,7 @@ impl<P: Provider> Agent<P> {
     /// Loops: call the model → run any requested tools (gating gated-commit calls
     /// through `approvals`) → feed results back → repeat, until the model returns
     /// a final text with no pending tool calls.
+    #[tracing::instrument(skip_all, fields(history_messages = self.history.len()))]
     pub async fn run_turn(
         &mut self,
         user_msg: &str,
@@ -2207,6 +2208,7 @@ impl<P: Provider> Agent<P> {
     /// A read-only / conversational turn (nothing applied) skips review entirely,
     /// so the extra reviewer LLM call is paid only on authoring turns. A review
     /// that finds nothing to review ends the loop gracefully.
+    #[tracing::instrument(skip_all, fields(history_messages = self.history.len(), max_fix))]
     pub async fn run_turn_reviewed(
         &mut self,
         user_msg: &str,
@@ -4588,7 +4590,7 @@ fn take_images(value: &mut Value) -> (Vec<Binary>, Option<String>) {
             None,
         )],
         Err(e) => {
-            eprintln!("render image unreadable at {path}: {e}");
+            tracing::warn!(path, error = %e, "render image unreadable");
             Vec::new()
         }
     };
