@@ -97,8 +97,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "read_schematic",
-            "Read the live schematic: one line per symbol with its position and pin→net map, \
-             then the nets, loose pins and warnings. Call this first on any existing board.",
+            "Read the live schematic as aligned plain text grouped into sorted parts and units, summarized power symbols, nets, loose pins, and warnings.",
             json!({
                 "type": "object",
                 "properties": {
@@ -112,8 +111,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "get_symbol",
-            "One part in full: its fields, then one entry per unit with position, body extents \
-             and pins with their sides and nets.",
+            "Read one part as aligned plain text with fields, flags, per-unit pose and body size, and pin geometry and nets.",
             json!({
                 "type": "object",
                 "properties": { "ref": { "type": "string" } },

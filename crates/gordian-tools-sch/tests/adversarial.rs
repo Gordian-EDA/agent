@@ -150,7 +150,10 @@ fn adding_a_multi_unit_part_places_every_unit() {
         "the fixture symbol must exist: {result}"
     );
     let after = listing(&ctx);
-    let units = after.lines().filter(|l| l.starts_with("U1 ")).count();
+    let units = after
+        .lines()
+        .filter(|line| line.starts_with("  unit "))
+        .count();
     assert!(
         units > 1,
         "LM358 is a multi-unit part; only {units} unit reached the sheet:\n{after}"
