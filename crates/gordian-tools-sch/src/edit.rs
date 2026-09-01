@@ -775,8 +775,12 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     for (_, uuid) in &units {
         match edit.doc.set_lib_id(uuid, lib_id, &source) {
             Ok(lost) => dropped.extend(lost),
-            Err(error) => {
-                return Ok(json!({ "error": format!("could not swap to {lib_id}: {error}") }));
+            Err(_) => {
+                return Ok(json!({
+                    "error": format!(
+                        "no symbol `{lib_id}` exists in any library; if the replacement is electrically the same part, use `set_fields({{ref, fields:{{Value:…}}}})` instead of swapping to an unrelated same-numbered symbol"
+                    ),
+                }));
             }
         }
     }

@@ -672,7 +672,11 @@ fn contains_bounded_number(haystack: &str, needle: &str) -> bool {
 fn get_symbol_info(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let lib_id = require_str(&input, "lib_id")?;
 
-    match ctx.provider().symbol(&lib_id) {
+    match ctx
+        .provider()
+        .symbol(&lib_id)
+        .or_else(|| ctx.index().ok()?.symbol(&lib_id))
+    {
         Some(meta) => {
             let pins: Vec<Value> = meta
                 .pins

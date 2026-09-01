@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
-use crate::SymbolTable;
+use crate::{SymbolMeta, SymbolTable};
 
 /// A search hit: a fully qualified `Lib:Name` id and its resolved pin count.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,14 +91,20 @@ impl SymbolIndex {
             return Vec::new();
         }
 
-        rank(&self.entries, &needle, n)
+        rank(&self.entries, &needle, n.saturating_mul(4))
             .into_iter()
-            .map(|i| {
+            .filter_map(|i| {
                 let lib_id = self.entries[i].lib_id.clone();
-                let pin_count = self.table.symbol(&lib_id).map_or(0, |meta| meta.pins.len());
-                Hit { lib_id, pin_count }
+                let pin_count = self.table.symbol(&lib_id)?.pins.len();
+                Some(Hit { lib_id, pin_count })
             })
+            .take(n)
             .collect()
+    }
+
+    /// Resolve metadata through the same table that validates search hits.
+    pub fn symbol(&self, lib_id: &str) -> Option<SymbolMeta> {
+        self.table.symbol(lib_id)
     }
 }
 
@@ -402,5 +408,18 @@ mod tests {
   (symbol "B"))
 "#;
         assert_eq!(top_level_symbol_names(text), ["A", "B"]);
+    }
+
+    #[test]
+    fn search_never_returns_an_unresolvable_top_level_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Broken.kicad_sym"),
+            "(kicad_symbol_lib (symbol \"Ghost\"",
+        )
+        .expect("write lib");
+        let index = SymbolIndex::build(dir.path()).expect("build");
+
+        assert!(index.search("Ghost", 8).is_empty());
     }
 }
