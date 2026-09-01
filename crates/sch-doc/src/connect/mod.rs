@@ -8,6 +8,10 @@
 //! just another node, so it connects the crossing wires it sits on without a
 //! special case. Names then merge partitions: same-named labels within the
 //! sheet, and power symbols and hidden power pins by the name they carry.
+//!
+//! A partition holding one pin and no name is not a net — a dangling wire off a
+//! pin does not make one — which is the same line `kicad-cli` draws when it
+//! calls such a pin `unconnected-(…)`.
 
 use std::collections::{HashMap, HashSet};
 
