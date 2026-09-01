@@ -59,8 +59,17 @@ pub fn audit(design: &Design, symbols: &SymbolTable) -> Vec<Gap> {
                 }
             }
         }
-        matched.led_indicator |=
-            !circuit_graph::find(&graph, &circuit_graph::library::LED_INDICATOR).is_empty();
+        matched.led_indicator |= circuit_graph::find(
+            &graph,
+            &circuit_graph::library::LED_INDICATOR,
+        )
+        .iter()
+        .any(|found| {
+            block
+                .components
+                .get(&found.anchor)
+                .is_some_and(|component| component.part.to_ascii_uppercase().contains("LED"))
+        });
     }
 
     for block in design.blocks.values() {
@@ -294,6 +303,9 @@ fn audit_connector_protection(design: &Design, symbols: &SymbolTable, gaps: &mut
                 continue;
             };
             for pin in resolved_pins(component, &meta) {
+                if !is_bus_net(&pin.net) {
+                    continue;
+                }
                 let protected = has_protection(&pin.net, &components, symbols);
                 let filtered = has_signal_shunt_cap(&pin.net, &components);
                 if matches!(pin.etype, PinType::PowerInput | PinType::PowerOutput)
@@ -370,7 +382,16 @@ fn audit_bus_power_support(
         let has_entry = components.iter().copied().any(|component| {
             is_connector_like(&component.part) && component_nets(component).contains(&rail)
         });
-        if !has_entry && !has_power_output(&rail, &components, symbols) {
+        if has_entry && !has_protection(&rail, &components, symbols) {
+            gaps.push(Gap {
+                kind: "power_entry_protection".into(),
+                refdes: None,
+                net: Some(rail.clone()),
+                suggestion: format!(
+                    "add a bidirectional supply TVS from {rail} to GND at its connector"
+                ),
+            });
+        } else if !has_entry && !has_power_output(&rail, &components, symbols) {
             gaps.push(Gap {
                 kind: "power_entry".into(),
                 refdes: None,
@@ -654,7 +675,14 @@ fn is_spi_cs(net: &str) -> bool {
 }
 
 fn is_uart_signal(net: &str) -> bool {
-    matches!(normalized(net).as_str(), "TX" | "TXD" | "RX" | "RXD")
+    let name = normalized(net);
+    matches!(name.as_str(), "TX" | "TXD" | "RX" | "RXD")
+        || ["CAN", "UART", "USART"].iter().any(|prefix| {
+            name.starts_with(prefix)
+                && ["TX", "TXD", "RX", "RXD"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix))
+        })
 }
 
 fn is_bus_net(net: &str) -> bool {
