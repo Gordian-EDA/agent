@@ -483,9 +483,11 @@ pub fn get_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .fields
         .get("Footprint")
         .map_or("", |field| &field.value);
-    let unit_note = (units.len() > 1)
-        .then(|| format!("  {} units", units.len()))
-        .unwrap_or_default();
+    let unit_note = if units.len() > 1 {
+        format!("  {} units", units.len())
+    } else {
+        String::new()
+    };
     let mut out = format!(
         "{}  {}  {}{unit_note}  fp={footprint}  DNP={}  in_bom={}\n",
         symbol.refdes(),
