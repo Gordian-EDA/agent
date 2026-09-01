@@ -102,6 +102,8 @@ fn pad_clause(prefix: &str, pads: &[String]) -> String {
 pub fn check_schematic(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let (doc, netlist) = crate::session::Edit::read(ctx)?;
     let design = design(&doc, &netlist);
+    let gaps = sch_check::completeness::audit(&design, ctx.provider());
+    let has_gaps = !gaps.is_empty();
     let mut diagnostics = sch_check::lint::lint(&design, ctx.provider());
     for defect in sch_check::erc::defects(&design, ctx.provider()) {
         diagnostics.push(if defect.blocking {
@@ -150,6 +152,10 @@ pub fn check_schematic(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .map(crate::refs::label)
             .collect::<Vec<_>>()
     );
+    report["completeness"] = json!({
+        "warnings": gaps.len(),
+        "gaps": gaps,
+    });
 
     match ctx.env().erc(ctx.sch_path()) {
         Ok(erc) => {
@@ -163,8 +169,15 @@ pub fn check_schematic(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             if errors > 0 {
                 report["ok"] = json!(false);
             } else if report.get("ok").and_then(Value::as_bool) == Some(true) {
-                report["message"] =
-                    json!("schematic is clean and placement is final; no further moves are needed");
+                report["message"] = if has_gaps {
+                    json!(
+                        "schematic is electrically clean; completeness warnings are advisory and should be resolved when the request calls for a complete powered/interface design"
+                    )
+                } else {
+                    json!(
+                        "schematic is clean and complete by deterministic rules; placement is final"
+                    )
+                };
             }
         }
         Err(error) => {
