@@ -512,7 +512,15 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .parts(wanted_refs.clone())
         .parts(loosened)
         .creating();
-    edit.commit(json!(format!("deleted {removed} wire(s)")), allow)
+    let loose = refs::newly_loose(edit.before(), &connect::extract(&edit.doc));
+    let changed = match loose.is_empty() {
+        true => format!("deleted {removed} wire(s)"),
+        false => format!(
+            "deleted {removed} wire(s); these pins are now loose and need reconnecting: {}",
+            loose.join(", ")
+        ),
+    };
+    edit.commit(json!(changed), allow)
 }
 
 /// A free spot near a symbol, used by the tools that place something beside an

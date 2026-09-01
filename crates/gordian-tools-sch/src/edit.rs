@@ -259,10 +259,12 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         edit.doc.remove_symbol(refdes)?;
     }
     let retracted = retract_stubs(&mut edit.doc, &orphaned);
+    let loose = refs::newly_loose(edit.before(), &sch_doc::connect::extract(&edit.doc));
     edit.commit(
         json!({
             "removed": targets,
             "retracted_drawing": retracted,
+            "now_loose": loose,
         }),
         allow,
     )
@@ -326,6 +328,42 @@ fn retract_stubs(doc: &mut SchDoc, orphaned: &[Point2]) -> usize {
 /// How far a move may slide to clear an obstacle and still be the move that
 /// was asked for: 20 grid steps, about 25 mm.
 const NUDGE_RINGS: i32 = 20;
+
+/// Drag the symbols glued to a pin along with it.
+///
+/// A power symbol is placed straight onto the pin it feeds — that contact
+/// *is* the connection — so a move that left it behind would silently take the
+/// pin off its rail. Only symbols whose every pin sits on the moved one
+/// travel; anything with a pin elsewhere is wired, not glued.
+fn carry_glued_symbols(
+    doc: &mut SchDoc,
+    moved: &str,
+    from: Point2,
+    to: Point2,
+) -> anyhow::Result<()> {
+    if from.near_eq(to, EPS) {
+        return Ok(());
+    }
+    let pins = placed_pins(doc);
+    let glued: Vec<String> = doc
+        .symbols()
+        .filter(|s| s.uuid != moved)
+        .filter(|s| {
+            let own: Vec<&sch_doc::PlacedPin> =
+                pins.iter().filter(|p| p.owner == s.uuid).collect();
+            !own.is_empty() && own.iter().all(|p| p.at.near_eq(from, EPS))
+        })
+        .map(|s| s.uuid.clone())
+        .collect();
+    for uuid in glued {
+        let at = match doc.symbol(&uuid) {
+            Some(symbol) => symbol.at,
+            None => continue,
+        };
+        doc.move_symbol(&uuid, at.x + to.x - from.x, at.y + to.y - from.y)?;
+    }
+    Ok(())
+}
 
 /// `1, 2` — the unit numbers of a multi-unit part, for an error message.
 fn list(units: &[(u32, String)]) -> String {
@@ -451,6 +489,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .collect();
         for (from, to) in was.into_iter().zip(now) {
             edit.doc.move_attached(from, to);
+            carry_glued_symbols(&mut edit.doc, &uuid, from, to)?;
         }
         pending.retain(|r| *r != refdes);
         let mut report = json!({ "ref": refdes, "at": [at.x, at.y] });

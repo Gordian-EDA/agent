@@ -127,6 +127,25 @@ pub(crate) fn net_of<'a>(netlist: &'a Netlist, refdes: &str, number: &str) -> Op
         .map(|net| net.name.as_str())
 }
 
+/// The pins an edit has just left dangling, `R4.1` style.
+///
+/// Breaking a net to insert a part in series loosens every *other* pin that
+/// was on it, and a caller who reconnects only the two ends it named has
+/// silently deleted a branch. Saying so is how the model finds out.
+pub(crate) fn newly_loose(before: &Netlist, after: &Netlist) -> Vec<String> {
+    after
+        .unconnected
+        .iter()
+        .filter(|pin| {
+            !before
+                .unconnected
+                .iter()
+                .any(|was| was.refdes == pin.refdes && was.pin == pin.pin)
+        })
+        .map(label)
+        .collect()
+}
+
 /// Every net a set of parts has a pin on.
 pub(crate) fn nets_touching(netlist: &Netlist, refs: &[String]) -> Vec<String> {
     let mut out: Vec<String> = netlist
