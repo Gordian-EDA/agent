@@ -27,6 +27,8 @@ fn main() {
 }
 
 /// Every `.kicad_sch` under `root`, sorted; `root` itself if it is one.
+/// Hidden directories are skipped: `.gordian/` holds undo snapshots and
+/// renders, not sheets of the design.
 fn sheet_paths(root: &Path) -> Vec<PathBuf> {
     if root.is_file() {
         return vec![root.to_path_buf()];
@@ -39,6 +41,13 @@ fn sheet_paths(root: &Path) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            let hidden = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('.'));
+            if hidden {
+                continue;
+            }
             if path.is_dir() {
                 stack.push(path);
             } else if path.extension().is_some_and(|e| e == "kicad_sch") {
