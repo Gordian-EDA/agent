@@ -118,11 +118,9 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "add_symbols",
-            "Place parts — one, or a whole block in a single call — and report where each went. \
-             `near`+`side` finds a clear, grid-aligned spot beside that part and turns a two-pin \
-             body to face it, so no follow-up move is needed; `rot` overrides orientation. `ref` \
-             is auto-assigned. Placement coordinates are the tool's job. Nothing is written if \
-             any part fails. Wire them with `connect`.",
+            "Place one or many parts at collision-free grid positions and report each final spot. \
+             `near`+`side` sits beside a part and turns a two-pin body to face it; `rot` overrides. \
+             `ref` is optional. The tool owns coordinates. All-or-nothing; wire with `connect`.",
             json!({
                 "type": "object",
                 "properties": {
@@ -154,9 +152,8 @@ pub fn tool_defs() -> Vec<Tool> {
         (
             "move_symbols",
             "Move or turn parts, wires and rails following along. `rot`/`mirror` alone turns a \
-             part in place — how a diode is reversed. A taken spot is slid to the nearest free \
-             one and reported as the final `nudged_to`; a success is collision-free and needs no \
-             follow-up adjustment. Refused only if nothing near it fits, or the move changed a net.",
+             part in place. A taken spot is slid to the final `nudged_to`; success is \
+             collision-free and needs no follow-up. Refused if no nearby spot fits or a net changes.",
             json!({
                 "type": "object",
                 "properties": {
@@ -302,11 +299,9 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "delete_wires",
-            "Remove drawn wires by pin, net, the parts they touch, or uuid, reporting which pins \
-             it left loose. To insert a part IN SERIES cut at ONE pin — {pins:[\"RX.1\"]} — then \
-             `connect` it between that pin and the node it used to reach; the rest stays wired. \
-             RX.1 is a placeholder for the real target pin. `net` cuts the whole net, loosening \
-             every pin on it.",
+            "Remove wires by pin, net, touching part, or uuid; reports loose pins. For a part IN \
+             SERIES cut ONE pin — {pins:[\"RX.1\"]} — then connect through it. RX.1 is a \
+             placeholder. `net` cuts the whole net and loosens every pin.",
             json!({
                 "type": "object",
                 "properties": {
