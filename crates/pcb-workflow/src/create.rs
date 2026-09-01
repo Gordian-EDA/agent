@@ -96,55 +96,18 @@ fn resolve_pour_layer(layer: &str, layer_count: u32) -> Option<(u32, String)> {
     }
 }
 
-/// A dangling wire shorter than 0.1mm is emitter rounding residue, not a
-/// broken connection: its endpoints sit inside any pin snap tolerance.
-fn degenerate_wire_endpoint(v: &kicad::Violation) -> bool {
-    v.kind == "unconnected_wire_endpoint"
-        && v.items.iter().all(|item| {
-            item.description
-                .split("length ")
-                .nth(1)
-                .and_then(|rest| rest.split_whitespace().next())
-                .and_then(|len| len.parse::<f64>().ok())
-                .is_some_and(|len| len < 0.1)
-        })
-}
-
-fn blocking_erc_warnings(report: &kicad::ErcReport) -> Vec<Value> {
-    report
-        .violations
-        .iter()
-        .filter(|v| {
-            v.severity == "warning"
-                && !v.kind.starts_with("lib_symbol")
-                && v.kind != "global_label_dangling"
-                && !degenerate_wire_endpoint(v)
-        })
-        .map(|v| {
-            let items: Vec<_> = v
-                .items
-                .iter()
-                .map(|item| item.description.clone())
-                .collect();
-            json!({
-                "type": v.kind,
-                "description": v.description,
-                "items": items,
-            })
-        })
-        .collect()
-}
-
 /// `regenerate_board` — seed the PCB from KiCAD's own schematic netlist export.
 ///
-/// Footprints must already be assigned in the schematic. Missing footprints are a
-/// hard error: the agent should edit the circuit YAML, apply it, then regenerate
-/// the board again.
+/// Footprints must already be assigned in the live schematic. Missing footprints are
+/// a hard error: the agent assigns them before regenerating the board again.
+///
+/// The schematic gate is exactly `check_schematic`'s: ERC errors block, ERC warnings do
+/// not. One policy, so a schematic the agent was told is finished is one the board can
+/// be seeded from.
 pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !ctx.sch_path().exists() {
         return Ok(json!({
-            "error": "no .kicad_sch yet — commit the schematic with apply_design first, \
-                      then regenerate_board"
+            "error": "no .kicad_sch yet — create the schematic with place_parts first"
         }));
     }
     let netlist = match ctx.env().netlist(ctx.sch_path()) {
@@ -153,16 +116,6 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             return Ok(json!({ "error": format!("could not export the schematic netlist: {e}") }));
         }
     };
-    let unapplied_footprints = unapplied_draft_footprint_changes(ctx, &netlist)?;
-    if !unapplied_footprints.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "unapplied_draft_footprints": unapplied_footprints,
-            "next_tool": "apply_design",
-            "next": "call apply_design() to write the draft footprint fields, then regenerate_board again",
-            "note": "footprint fields live in circuit-YAML/schematic state; do not retry regenerate_board until the draft footprint changes are applied",
-        }));
-    }
     let erc = match ctx.env().erc(ctx.sch_path()) {
         Ok(report) => report,
         Err(e) => {
@@ -186,7 +139,7 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({
             "ok": false,
             "error": format!(
-                "schematic ERC has {} error(s); fix and apply_design before regenerate_board",
+                "schematic ERC has {} error(s); fix the live schematic before regenerate_board",
                 erc.error_count()
             ),
             "erc": {
@@ -194,22 +147,6 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "warnings": erc.warning_count(),
                 "violations": violations,
             },
-        }));
-    }
-    let blocking_warnings = blocking_erc_warnings(&erc);
-    if !blocking_warnings.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "error": format!(
-                "schematic ERC has {} actionable warning(s); fix and apply_design before regenerate_board",
-                blocking_warnings.len()
-            ),
-            "erc": {
-                "errors": erc.error_count(),
-                "warnings": erc.warning_count(),
-                "blocking_warnings": blocking_warnings,
-            },
-            "note": "Library symbol warnings and composed-sheet dangling global-label artifacts are allowed; same local/global labels and other connectivity warnings must be fixed before PCB work.",
         }));
     }
     let mut pad_nets_by_ref: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -277,8 +214,8 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "part_count": part_count,
             "missing_footprints": missing_footprints,
             "next_tool": "assign_footprints",
-            "next": "call assign_footprints({assignments:[{reference, footprint}, ...]}), then apply_design(), then regenerate_board again",
-            "note": "some schematic symbols have no footprint field — do not retry regenerate_board until footprints are assigned in the circuit-YAML draft and applied",
+            "next": "call assign_footprints({assignments:[{reference, footprint}, ...]}), then regenerate_board again",
+            "note": "some live schematic symbols have no footprint field — do not retry regenerate_board until footprints are assigned",
         }));
     }
 
@@ -289,8 +226,8 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "ok": false,
             "error": "schematic symbol and assigned footprint have incompatible numbered pins/pads",
             "footprint_pin_mismatches": footprint_pin_mismatches,
-            "next_tool": "assign_footprints",
-            "next": "choose a package whose named pad numbers match the symbol pins, apply_design(), then regenerate_board again",
+            "next_tool": "swap_symbol",
+            "next": "make the two agree: swap_symbol to a part whose pin numbers are the footprint's pad numbers, or assign_footprints a package whose pads match the pins — then regenerate_board again",
             "note": "Every named electrical pad must match a symbol pin and every symbol pin must have a physical pad. Unnumbered mechanical pads and repeated pads with a valid shared number are allowed.",
         }));
     }
@@ -328,45 +265,6 @@ fn apply_complexity_default_layer_count(
     if part_count >= 40 && !explicitly_selected {
         rules.layer_count = 4;
     }
-}
-
-fn unapplied_draft_footprint_changes(
-    ctx: &AgentRuntime,
-    netlist: &kicad::Netlist,
-) -> anyhow::Result<Vec<Value>> {
-    let Some(draft) = ctx.workspace().read_draft()? else {
-        return Ok(Vec::new());
-    };
-    let Some(design) = circuit_lang::compile(&draft, ctx.provider()).design else {
-        return Ok(Vec::new());
-    };
-    let committed: BTreeMap<String, String> = netlist
-        .components
-        .iter()
-        .map(|c| {
-            (
-                c.reference.clone(),
-                c.properties.get("Footprint").cloned().unwrap_or_default(),
-            )
-        })
-        .collect();
-    let mut changes = Vec::new();
-    for block in design.blocks.values() {
-        for (reference, component) in &block.components {
-            let Some(draft_fp) = component.footprint.as_deref().filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            let committed_fp = committed.get(reference).map(String::as_str).unwrap_or("");
-            if committed_fp != draft_fp {
-                changes.push(json!({
-                    "reference": reference,
-                    "draft": draft_fp,
-                    "committed": committed_fp,
-                }));
-            }
-        }
-    }
-    Ok(changes)
 }
 
 fn write_seed_board(spec: &BoardSeedSpec, ctx: &AgentRuntime) -> std::result::Result<(), String> {
@@ -2283,41 +2181,6 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn blocking_erc_warnings_allow_only_library_mismatch() {
-        let report = kicad::ErcReport {
-            violations: vec![
-                kicad::Violation {
-                    severity: "warning".to_string(),
-                    kind: "lib_symbol_mismatch".to_string(),
-                    description: "cached symbol differs".to_string(),
-                    items: vec![],
-                },
-                kicad::Violation {
-                    severity: "warning".to_string(),
-                    kind: "lib_symbol_issues".to_string(),
-                    description: "library unavailable".to_string(),
-                    items: vec![],
-                },
-                kicad::Violation {
-                    severity: "warning".to_string(),
-                    kind: "same_local_global_label".to_string(),
-                    description: "Local and global labels have same name".to_string(),
-                    items: vec![kicad::ViolationItem {
-                        description: "Label 'USB_DP'".to_string(),
-                        uuid: None,
-                    }],
-                },
-            ],
-        };
-
-        let warnings = blocking_erc_warnings(&report);
-
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0]["type"], "same_local_global_label");
-        assert_eq!(warnings[0]["items"][0], "Label 'USB_DP'");
     }
 
     #[test]

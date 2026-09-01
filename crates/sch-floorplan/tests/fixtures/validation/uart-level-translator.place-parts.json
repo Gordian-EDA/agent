@@ -1,0 +1,219 @@
+{
+  "name": "uart-level-translator",
+  "parts": [
+    {
+      "ref": "PWR1",
+      "block": "power",
+      "part": "power:VCC",
+      "pins": {
+        "1": "VCC3V3"
+      }
+    },
+    {
+      "ref": "PWR2",
+      "block": "power",
+      "part": "power:VCC",
+      "pins": {
+        "1": "VCCD"
+      }
+    },
+    {
+      "ref": "PWR3",
+      "block": "power",
+      "part": "power:GND",
+      "pins": {
+        "1": "GNDD"
+      }
+    },
+    {
+      "ref": "J1",
+      "block": "uart",
+      "part": "Connector_Generic:Conn_01x05",
+      "pins": {
+        "Pin_1": "TX_RAW",
+        "Pin_2": "RX_RAW",
+        "Pin_3": "NC_RTS",
+        "Pin_4": "NC_CTS",
+        "Pin_5": "GNDD"
+      }
+    },
+    {
+      "ref": "R7",
+      "block": "uart",
+      "part": "Device:R",
+      "value": "62R",
+      "pins": {
+        "1": "TX_RAW",
+        "2": "B1"
+      }
+    },
+    {
+      "ref": "R8",
+      "block": "uart",
+      "part": "Device:R",
+      "value": "62R",
+      "pins": {
+        "1": "RX_RAW",
+        "2": "B2"
+      }
+    },
+    {
+      "ref": "R9",
+      "block": "uart",
+      "part": "Device:R",
+      "value": "10k",
+      "pins": {
+        "1": "B1",
+        "2": "VCC3V3"
+      }
+    },
+    {
+      "ref": "R16",
+      "block": "uart",
+      "part": "Device:R",
+      "value": "10k",
+      "pins": {
+        "1": "B2",
+        "2": "VCC3V3"
+      }
+    },
+    {
+      "ref": "U2",
+      "block": "uart",
+      "part": "Logic_LevelTranslator:SN74LVC2T45DCUR",
+      "pins": {
+        "VCCA": "VCCD",
+        "VCCB": "VCC3V3",
+        "GND": "GNDD",
+        "A1": "A1_OUT",
+        "A2": "A2_OUT",
+        "B1": "B1",
+        "B2": "B2",
+        "DIR": "VCCD"
+      }
+    },
+    {
+      "ref": "R15",
+      "block": "uart",
+      "part": "Device:R",
+      "value": "62R",
+      "pins": {
+        "1": "A1_OUT",
+        "2": "TXD1"
+      }
+    },
+    {
+      "ref": "R13",
+      "block": "uart",
+      "part": "Device:R",
+      "value": "62R",
+      "pins": {
+        "1": "A2_OUT",
+        "2": "RXD1"
+      }
+    },
+    {
+      "ref": "C14",
+      "block": "uart",
+      "part": "Device:C",
+      "value": "100n",
+      "pins": {
+        "1": "VCC3V3",
+        "2": "GNDD"
+      }
+    },
+    {
+      "ref": "C16",
+      "block": "uart",
+      "part": "Device:C",
+      "value": "100n",
+      "pins": {
+        "1": "VCCD",
+        "2": "GNDD"
+      }
+    },
+    {
+      "ref": "R20",
+      "block": "mcu",
+      "part": "Device:R",
+      "value": "0R",
+      "pins": {
+        "1": "TXD1",
+        "2": "RXD1"
+      }
+    }
+  ],
+  "intent": {
+    "flow": "lr",
+    "rails": {
+      "GNDD": "bottom",
+      "VCC3V3": "top",
+      "VCCD": "top"
+    },
+    "ports": {
+      "RXD1": "right",
+      "TXD1": "right"
+    },
+    "place": {
+      "C14": {
+        "col": 5,
+        "row": 0,
+        "orient": "down"
+      },
+      "C16": {
+        "col": 6,
+        "row": 0,
+        "orient": "down"
+      },
+      "J1": {
+        "col": 0,
+        "row": 1,
+        "orient": "down"
+      },
+      "R13": {
+        "col": 4,
+        "row": 2,
+        "orient": "right"
+      },
+      "R15": {
+        "col": 4,
+        "row": 1,
+        "orient": "right"
+      },
+      "R16": {
+        "col": 3,
+        "row": 0,
+        "orient": "up"
+      },
+      "R20": {
+        "col": 7,
+        "row": 1,
+        "orient": "down"
+      },
+      "R7": {
+        "col": 1,
+        "row": 1,
+        "orient": "right"
+      },
+      "R8": {
+        "col": 1,
+        "row": 2,
+        "orient": "right"
+      },
+      "R9": {
+        "col": 2,
+        "row": 0,
+        "orient": "up"
+      },
+      "U2": {
+        "col": 2,
+        "row": 1,
+        "orient": "down"
+      }
+    },
+    "mirror": [
+      "J1",
+      "U2"
+    ]
+  }
+}

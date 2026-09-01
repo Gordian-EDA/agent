@@ -41,7 +41,7 @@ fn approx_size_scales_with_symbol() {
 
 /// Multi-unit symbols (op-amps, logic gates) flatten every unit's pins into the
 /// one `pins` Vec, so `pins.len()` overcounts a single placed unit. Each pin
-/// must carry its `unit` so `sch-io` can filter per-unit. `LM358` is a
+/// must carry its `unit` so the writer can filter per-unit. `LM358` is a
 /// dual op-amp: its pins span unit 1 and unit 2.
 #[test]
 fn multi_unit_symbol_carries_unit_identity() {

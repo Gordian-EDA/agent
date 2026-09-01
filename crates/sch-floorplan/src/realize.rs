@@ -17,7 +17,6 @@ use sch_check::Design;
 use sch_doc::SchDoc;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
-use sch_place::place::PlaceOptions;
 
 use crate::contract::{RouteRealization, RoutedSheetRealizer};
 use crate::floorplan::place::add_orphan_label_columns;
@@ -32,7 +31,9 @@ pub struct Draw<'a> {
     /// whole sheet, wrong when the caller placed them beside content that is already
     /// there — so live editing leaves it off.
     pub frame: bool,
-    pub options: PlaceOptions,
+    /// Nets a power-output pin already drives in the document being drawn into. The
+    /// realiser adds no `PWR_FLAG` for these: a second one is an ERC error.
+    pub driven: &'a [String],
 }
 
 /// Draw `items` at the poses they carry: route, label, no-connect, text-solve.
@@ -44,7 +45,7 @@ pub fn realize_block(
     ir: &LayoutIr,
     draw: Draw<'_>,
 ) -> std::io::Result<SchematicWriter> {
-    let realizer = RoutedSheetRealizer::new(env, inc, ir, draw.options);
+    let realizer = RoutedSheetRealizer::new(env, inc, ir).already_driven(draw.driven);
     let mut writer = realizer.realize_writer(draw.title, items, RouteRealization::ShippedSheet)?;
     add_orphan_label_columns(&mut writer, design, inc);
     writer.set_frame(draw.frame);
@@ -60,12 +61,23 @@ pub fn to_doc(writer: SchematicWriter) -> sch_doc::Result<SchDoc> {
 /// Graft a finished writer's content into `doc`, returning the new symbols' UUIDs.
 pub fn graft(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<Vec<String>> {
     let sheet = to_doc(writer)?;
+    fit_page(doc, &sheet);
     doc.adopt(&sheet)
+}
+
+/// Grow `doc`'s page to hold what `sheet` draws. The realiser sizes its own page to its
+/// content; a graft carries the content across, so the page has to follow or the drawing
+/// lands off the sheet and renders blank.
+fn fit_page(doc: &mut SchDoc, sheet: &SchDoc) {
+    if let Some(size) = sheet.page() {
+        doc.grow_page(size);
+    }
 }
 
 /// Graft only a writer's wiring — wires, junctions, labels, markers, text — for a
 /// re-wire of symbols the document already holds.
 pub fn graft_drawing(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<()> {
     let sheet = to_doc(writer)?;
+    fit_page(doc, &sheet);
     doc.adopt_drawing(&sheet)
 }

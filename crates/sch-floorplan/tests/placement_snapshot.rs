@@ -9,7 +9,7 @@
 
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
-use sch_floorplan::floorplan::{self, LayoutIr};
+use sch_floorplan::floorplan;
 use std::path::{Path, PathBuf};
 
 /// The aesthetic targets: the 4 tuned references (sidecar IR) + the grid demo
@@ -41,18 +41,14 @@ fn validation_corpus_available() -> bool {
 /// Render a fixture exactly as production would: sidecar IR if present, else the
 /// connectivity-inferred frame.
 fn render(env: &KicadInstallation, provider: &SymbolTable, name: &str) -> String {
-    let src = std::fs::read_to_string(doc(name, "circuit.yaml")).unwrap();
-    let result = circuit_lang::compile(&src, provider);
-    assert!(
-        !result.diagnostics.has_errors(),
-        "{name}: {:#?}",
-        result.diagnostics
-    );
-    let design = result.design.unwrap();
-    let ir = match std::fs::read_to_string(doc(name, "layout.json")) {
-        Ok(s) => LayoutIr::from_json(&s).unwrap(),
-        Err(_) => floorplan::infer_ir(env, &design),
-    };
+    let src = std::fs::read_to_string(doc(name, "place-parts.json")).unwrap();
+    let input: sch_check::PlacePartsInput = serde_json::from_str(&src).unwrap();
+    let (design, diagnostics) = sch_check::into_design(&input, provider);
+    assert!(!diagnostics.has_errors(), "{name}: {:#?}", diagnostics);
+    let ir = input
+        .intent
+        .map(sch_check::Intent::into_layout_ir)
+        .unwrap_or_else(|| floorplan::infer_ir(env, &design));
     floorplan::emit_strategy(env, &design, Box::new(anneal_place::Anneal), Some(ir))
         .unwrap_or_else(|e| panic!("{name}: {e}"))
         .sch

@@ -6,7 +6,7 @@
 //!   live transcript, turn outcome, token totals, and final ERC result. This is
 //!   the CLI form of the interactive copilot.
 //! - `gordian tui [--project <dir>]` launches the ratatui copilot cockpit
-//!   (spec §11): a chat transcript, a proposed-changes apply-gate, and an input
+//!   (spec §11): a chat transcript, a per-mutation approval gate, and an input
 //!   line, driving the same agent interactively.
 
 mod config;
@@ -363,7 +363,7 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     tracing::info!("config: {}", loaded.path.display());
     tracing::info!("thread:  {}", client.thread_identifier());
 
-    // 3. Tool context over the real project directory. `apply_design` derives
+    // 3. Tool context over the real project directory. Schematic mutators derive
     //    its human-style floorplan from the netlist (`infer_ir`), so no separate
     //    layout client is wired here.
     let ctx =

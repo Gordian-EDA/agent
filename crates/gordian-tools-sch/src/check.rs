@@ -90,13 +90,56 @@ fn erc_violations(report: &kicad::ErcReport) -> Vec<String> {
     lines
 }
 
+fn pad_clause(prefix: &str, pads: &[String]) -> String {
+    if pads.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}{})", pads.join(", "))
+    }
+}
+
 /// Lint, electrically check, and run KiCAD ERC over the live schematic.
 pub fn check_schematic(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let (doc, netlist) = crate::session::Edit::read(ctx)?;
     let design = design(&doc, &netlist);
     let mut diagnostics = sch_check::lint::lint(&design, ctx.provider());
-    for message in sch_check::erc::erc_checks(&design, ctx.provider()) {
-        diagnostics.push(sch_check::Diagnostic::warning("electrical", message));
+    for defect in sch_check::erc::defects(&design, ctx.provider()) {
+        diagnostics.push(if defect.blocking {
+            sch_check::Diagnostic::error("electrical", defect.line)
+        } else {
+            sch_check::Diagnostic::warning("electrical", defect.line)
+        });
+    }
+    for problem in gordian_runtime::footprint_compat::unresolvable_footprints(ctx, &design)? {
+        diagnostics.push(if problem.malformed {
+            sch_check::Diagnostic::error("footprint-id", problem.message)
+        } else {
+            // The id is well-formed; this install just has no such library. A
+            // hand-authored sheet carrying its own footprint library is not the
+            // editing agent's defect to fix.
+            sch_check::Diagnostic::warning("footprint-unknown", problem.message)
+        });
+    }
+    // A symbol whose pins no pad on its footprint carries cannot be seeded onto a
+    // board. `regenerate_board` refuses it, so the schematic gate must say so first
+    // rather than letting the PCB stage discover it.
+    for mismatch in gordian_runtime::footprint_compat::design_pin_mismatches(ctx, &design)? {
+        diagnostics.push(sch_check::Diagnostic::error(
+            "footprint-pins",
+            format!(
+                "{}: symbol `{}` and footprint `{}` do not agree on pads{}{}{} — swap_symbol to a \
+                 part with the footprint's pad numbers, or assign a package that matches the pins",
+                mismatch.reference,
+                mismatch.symbol,
+                mismatch.footprint,
+                pad_clause(" (pads with no pin: ", &mismatch.footprint_pads_absent_from_symbol),
+                pad_clause(" (pins with no pad: ", &mismatch.symbol_pins_absent_from_footprint),
+                mismatch
+                    .polarity_mismatch
+                    .map(|why| format!(" ({why})"))
+                    .unwrap_or_default(),
+            ),
+        ));
     }
     let mut report = compile_report(&diagnostics);
     report["extractor_warnings"] = json!(netlist.warnings);

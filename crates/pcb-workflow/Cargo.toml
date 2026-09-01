@@ -11,8 +11,8 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 circuit-graph = { path = "../circuit-graph" }
-circuit-lang = { path = "../circuit-lang" }
 sch-check = { path = "../sch-check" }
+sch-doc = { path = "../sch-doc" }
 pcb-drc = { path = "../pcb-drc" }
 geom = { path = "../geom" }
 gordian-runtime = { path = "../gordian-runtime" }
@@ -25,7 +25,6 @@ kicad-ipc = { path = "../kicad-ipc" }
 pcb-route-mesh = { path = "../pcb-route-mesh" }
 pcb-model = { path = "../pcb-model" }
 pcb-place = { path = "../pcb-place" }
-sch-io = { path = "../sch-io" }
 tempfile.workspace = true
 tracing.workspace = true
 prost-types = "0.13"

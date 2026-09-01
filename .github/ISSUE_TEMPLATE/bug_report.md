@@ -8,7 +8,7 @@ labels: bug
 A clear description of the bug.
 
 **Repro**
-- The prompt or input circuit (or a minimal `.kicad_sch` / `.kicad_pcb` / circuit-lang snippet)
+- The prompt or input circuit (or a minimal `.kicad_sch` / `.kicad_pcb` file)
 - The command you ran
 
 **Expected vs actual**

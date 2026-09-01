@@ -41,7 +41,7 @@
 //! - [`emit`] — the S-expression serialization: `finish`, the `render_*`
 //!   helpers, `escape_sexpr_string`, and coordinate formatting.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use geom::{Dir, Point2, Rect};
 use kicad_symbol::geometry::PinGeom;
@@ -184,17 +184,16 @@ pub(super) struct Junction {
     pub(super) uuid_key: String,
 }
 
-/// Free-standing sheet text (block titles / annotations).
+/// Free-standing sheet text annotation.
 pub(super) struct SheetText {
     pub(super) text: String,
     pub(super) at: Point2,
-    /// Font size (mm); titles 2.54, annotations 1.27.
     pub(super) size: f64,
     pub(super) bold: bool,
     pub(super) uuid_key: String,
 }
 
-/// A graphic rectangle (block frame).
+/// A graphic rectangle annotation.
 pub(super) struct SheetRect {
     pub(super) start: Point2,
     pub(super) end: Point2,
@@ -232,9 +231,7 @@ pub struct SchematicWriter {
     pub(super) wires: Vec<Wire>,
     /// Junction dots added via `add_junction`, sorted by `uuid_key` at `finish`.
     pub(super) junctions: Vec<Junction>,
-    /// Free-standing sheet texts (block titles / notes), sorted by `uuid_key`.
     pub(super) texts: Vec<SheetText>,
-    /// Graphic rectangles (block frames), sorted by `uuid_key`.
     pub(super) rects: Vec<SheetRect>,
     /// Approximate symbol body size keyed by `lib_id`, populated when a new
     /// lib_id's geometry is loaded (the dedup branch). Avoids reloading geometry
@@ -250,16 +247,6 @@ pub struct SchematicWriter {
     /// extend past the symbol bodies). Off for direct-writer and fixed-coordinate paths,
     /// which place content at fixed absolute coordinates.
     pub(super) frame: bool,
-    /// Refdes whose Reference/Value fields should be solved ABOVE the body in
-    /// preference to below. Set for a repeated-column anchor (a low-side
-    /// half-bridge FET) whose down-facing source pin hangs a rotated global PORT
-    /// label (`SHUNT_x`): the conventional below-body field band would crowd that
-    /// label's vertical strip and the two read as one garbled token ("V_LS" right
-    /// under "SHUNT_V_TOP"). Placing the fields above mirrors the high-side row
-    /// (text below) and leaves the port label its own clear space. Empty on every
-    /// path except the `MULTISHEET_REFINE` low-side case, so the single-sheet
-    /// reference snapshots stay byte-identical.
-    pub(super) fields_above: BTreeSet<String>,
 }
 
 impl SchematicWriter {

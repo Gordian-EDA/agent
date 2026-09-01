@@ -87,16 +87,10 @@ pub(super) fn detect_idioms(
     pin_meta: &BTreeMap<(usize, String), (PinSide, i32)>,
     anchor_col: &BTreeMap<usize, i32>,
     anchor_row: &BTreeMap<usize, i32>,
-    multisheet_refine: bool,
 ) -> Vec<Idiom> {
     let _ = (sats, pin_meta);
     let graph = build_circuit_graph(items, rails);
-    // I2C_PULLUP is gated to the multi-sheet refine path so single-sheet reference snapshots stay
-    // byte-identical (it would otherwise re-bind pull-up pairs on IC reference sheets).
-    let mut lib = circuit_graph::library::active_library();
-    if multisheet_refine {
-        lib.push(circuit_graph::library::I2C_PULLUP.clone());
-    }
+    let lib = circuit_graph::library::active_library();
     let matches = circuit_graph::find_all(&graph, &lib);
     let idx: BTreeMap<&str, usize> = items
         .iter()
@@ -180,39 +174,9 @@ pub(super) fn detect_idioms(
                 // 3-pin part and floats far from the MCU (the #1 "decoupling bank in the
                 // far corner" critic defect).
                 let ai = best_decoupling_anchor(items, anchors, rails, &caps).unwrap_or(ai);
-                if let Some(mut cells) = place_decoupling(
-                    items,
-                    inc,
-                    anchors,
-                    rails,
-                    anchor_col,
-                    anchor_row,
-                    ai,
-                    &caps,
-                    &out,
-                    multisheet_refine,
+                if let Some(cells) = place_decoupling(
+                    items, inc, anchors, rails, anchor_col, anchor_row, ai, &caps, &out,
                 ) {
-                    // A SMALL decoupling anchor (a 3-4 pin LDO/regulator) connects only through
-                    // power rails — weak cohesion, so the SA drifts it off its own FROZEN bank
-                    // (the "LDO isolated far from the caps it serves" power-entry defect). Pin it
-                    // WITH the bank so the power-conversion block stays together. Multi-pin ⇒
-                    // `orient_angle` returns 0 (no rotation). Gated to multi-sheet so single-sheet
-                    // reference snapshots stay byte-identical.
-                    if multisheet_refine
-                        && (3..=4).contains(&items[ai].geom.pins.len())
-                        && !claimed.contains(&ai)
-                        && let (Some(&acol), Some(&arow)) =
-                            (anchor_col.get(&ai), anchor_row.get(&ai))
-                    {
-                        cells.push((
-                            items[ai].refdes.clone(),
-                            Cell {
-                                col: acol,
-                                row: arow,
-                                orient: Orient::Right,
-                            },
-                        ));
-                    }
                     claimed.extend(cells.iter().filter_map(|(rd, _)| get(rd)));
                     out.push(Idiom {
                         kind: "decoupling",

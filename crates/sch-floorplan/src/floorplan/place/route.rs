@@ -30,7 +30,6 @@ pub(crate) fn wire(
     needs_flag: &BTreeSet<String>,
     flag_points: &mut BTreeMap<String, ([f64; 2], f64)>,
     fan_risers: bool,
-    multisheet_refine: bool,
 ) -> io::Result<()> {
     let refdes_of = |i: usize| items[i].refdes.clone();
     // Auto-distributing a spread rail into local power symbols only applies to LARGER
@@ -114,17 +113,6 @@ pub(crate) fn wire(
         Vec::new()
     };
 
-    // Driver-pin position per driven non-ground rail, so a rail's power symbol can be
-    // anchored at its regulator/IC OUTPUT (the LDO `VO`) instead of the trunk's left end
-    // or a bypass cap — making the regulated rail's exit unambiguous. Multi-sheet only
-    // (and finalize-only via `fan_risers`): the per-move scorer and every single-sheet
-    // reference snapshot pass an empty map ⇒ their power-symbol placement is byte-identical.
-    let rail_drivers = if fan_risers && multisheet_refine {
-        driven_rail_drivers(env, w, items, inc, ir)
-    } else {
-        BTreeMap::new()
-    };
-
     // Phase A — rails (shared wires + stubs + power symbols), so their wires are
     // in the writer before we build the routing scene. `used_lanes` records every
     // drawn riser (x, y_lo, y_hi, net) so no later rail's riser can land exactly
@@ -142,27 +130,10 @@ pub(crate) fn wire(
             // recurring "scattered caps / congested rail knot / long detour rails"
             // critic complaints. Tight/small rails (every reference fixture) stay
             // under the span gate and keep their clean short trunk → byte-identical.
-            // On a multi-sheet sub-sheet (small, so below the FAST_PINS gate) a power net
-            // whose pins still SPREAD across the sheet draws a page-spanning trunk that reads
-            // as a "bare stub" at a far pin (rule 3 violation, the CAN-node VDD defect). Give
-            // such a net distributed LOCAL symbols at each pin. Span-gated so tight 2-pin taps
-            // keep their clean short trunk. Gated on MULTISHEET_REFINE ⇒ refs byte-identical.
-            let multisheet_spread = multisheet_refine && eps.len() >= 2 && {
-                let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-                for (p, _) in eps {
-                    lo[0] = lo[0].min(p[0]);
-                    lo[1] = lo[1].min(p[1]);
-                    hi[0] = hi[0].max(p[0]);
-                    hi[1] = hi[1].max(p[1]);
-                }
-                (hi[0] - lo[0]) + (hi[1] - lo[1]) > 38.0
-            };
             let distribute = !ir.rail_force.contains(net)
                 && (ir.rail_locals.contains(net)
-                    || (pin_total > FAST_PINS && rail_should_distribute(eps))
-                    || multisheet_spread);
+                    || (pin_total > FAST_PINS && rail_should_distribute(eps)));
             let rail_y = rail_y_map.get(net).copied().filter(|_| !distribute);
-            let driver = rail_drivers.get(net).copied();
             emit_rail(
                 env,
                 w,
@@ -175,9 +146,7 @@ pub(crate) fn wire(
                 &bodies,
                 &foreign_pins,
                 &power_keepouts,
-                driver,
                 fan_risers,
-                multisheet_refine,
                 &mut used_lanes,
             )?;
         }
@@ -1437,13 +1406,6 @@ pub(crate) fn riser_hits_foreign_pin(
 /// no common band), emit a per-pin power symbol instead (the clustered case,
 /// e.g. a divider's two GNDs).
 ///
-/// `driver` (multi-sheet only) is the world position of the regulator/IC OUTPUT pin
-/// that drives this rail: when present, the rail's single power symbol is anchored
-/// there (the LDO `VO`) so the regulated rail's exit is unambiguous — instead of the
-/// trunk's left end or a bypass cap. In the per-pin path it also collapses the
-/// scattered per-pin symbols into ONE symbol at the driver with a wire to each other
-/// pin, tying the output cap to the regulator output instead of leaving it a detached
-/// implicit-net island.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_rail(
     env: &KicadInstallation,
@@ -1457,72 +1419,11 @@ pub(crate) fn emit_rail(
     bodies: &[([f64; 2], [f64; 2])],
     foreign_pins: &[([f64; 2], String)],
     power_keepouts: &[Rect],
-    driver: Option<[f64; 2]>,
     fan_risers: bool,
-    multisheet_refine: bool,
     used_lanes: &mut Vec<(f64, f64, f64, String)>,
 ) -> io::Result<()> {
     let lib = power_lib_id(net);
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
-        // DRIVEN small rail: anchor the supply symbol at the regulator OUTPUT pin and
-        // wire every other pin of the net to it, so the regulated rail's exit reads
-        // straight off the driver (the LDO `VO`) and the output cap is a drawn member
-        // of the net, not a detached implicit-net island. Only when the driver pin is
-        // actually one of this net's endpoints. Multi-sheet only (driver is `None`
-        // elsewhere), so reference snapshots keep the per-pin behaviour below.
-        //
-        // CRITICAL: the star is a hub-and-spoke whose spokes are blind Manhattan hops
-        // (no body/foreign-pin avoidance). On a SPREAD rail (a distributed power net
-        // with many pins scattered across the sheet — the MCU's stacked decoupling-cap
-        // columns) those spokes become long risers that run STRAIGHT DOWN a cap column,
-        // crossing every cap's GND pin and body in between → the rail swallows GND and
-        // the GPIO pins it grazes (the bedrock/ice40 "PA2/GPIO ↔ 3V3" short). The star
-        // is only safe for a TIGHT driven cluster (LDO VO + its 1-2 output caps), so
-        // gate it on a small pin-bounding-box extent. A spread driven rail falls through
-        // to per-pin LOCAL power symbols below — one symbol AT each pin, no riser to
-        // cross anything.
-        const DRIVEN_STAR_MAX_SPREAD: f64 = 38.0; // matches the multisheet_spread gate
-        let driver = driver.filter(|_| {
-            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-            for (p, _) in eps {
-                lo[0] = lo[0].min(p[0]);
-                lo[1] = lo[1].min(p[1]);
-                hi[0] = hi[0].max(p[0]);
-                hi[1] = hi[1].max(p[1]);
-            }
-            (hi[0] - lo[0]) + (hi[1] - lo[1]) <= DRIVEN_STAR_MAX_SPREAD
-        });
-        if let Some(dp) = driver
-            && let Some((_, ddir)) = eps
-                .iter()
-                .copied()
-                .find(|(p, _)| (p[0] - dp[0]).abs() < EPS && (p[1] - dp[1]).abs() < EPS)
-        {
-            let angle = choose_power_angle(net, ddir, dp, power_keepouts);
-            w.add_power_symbol(env, &lib, &format!("#PWR_{net}"), net, dp, angle)?;
-            for (ep, _) in eps.iter() {
-                if (ep[0] - dp[0]).abs() >= EPS || (ep[1] - dp[1]).abs() >= EPS {
-                    // Manhattan two-segment hop from the driver to this pin (a single
-                    // straight wire when they already share a row/column).
-                    if (ep[0] - dp[0]).abs() >= EPS && (ep[1] - dp[1]).abs() >= EPS {
-                        w.add_wire_on_net(dp, [ep[0], dp[1]], net);
-                        w.add_wire_on_net([ep[0], dp[1]], *ep, net);
-                    } else {
-                        w.add_wire_on_net(dp, *ep, net);
-                    }
-                }
-            }
-            if let (Some(flag_points), Some(_)) = (
-                flag,
-                eps.iter()
-                    .find(|(p, _)| (p[0] - dp[0]).abs() < EPS && (p[1] - dp[1]).abs() < EPS),
-            ) {
-                flag_points
-                    .entry(net.to_string())
-                    .or_insert((dp, flag_angle(power_glyph_dir(net, angle))));
-            }
-            return Ok(());
-        }
         // One power symbol per pin — but MERGE a pin into a nearby, COLLINEAR
         // already-placed symbol (≤2 grid, same x or y) via a short connecting wire
         // instead of stamping a second symbol. Two adjacent same-net pins (e.g. the
@@ -1531,15 +1432,6 @@ pub(crate) fn emit_rail(
         // immediate neighbour, never the whole spread (which would recreate the long
         // trunk distribution exists to avoid).
         const MERGE: f64 = 5.08;
-        // A GND tie on a SIDE (E/W) pin — a lone address-select / strap pin like the BME280 SDO=GND
-        // (I2C address 0x76) — gets a power_angle of 90°/270°, so its triangle points SIDEWAYS into
-        // open space and reads as a dangling port labelled "GND" (the i2c_sensors floating-GND defect).
-        // Convention is the GND triangle points DOWN, so we re-orient such a symbol to angle 0 below.
-        // Multi-sheet only and gated on `fan_risers`, the FINALIZE-only flag ⇒ the per-move SA scorer
-        // passes `fan_risers = false` so its cost landscape is byte-identical and the placement is never
-        // perturbed, and every single-sheet reference snapshot keeps its exact per-pin placement. Only
-        // ground (the recurring eyesore); V+ side ties keep their outward arrow.
-        let drop_side_gnd = is_ground(net) && fan_risers && multisheet_refine;
         let split_flag = flag
             .as_ref()
             .and_then(|_| split_flag_power_pair(eps, MERGE));
@@ -1564,11 +1456,7 @@ pub(crate) fn emit_rail(
             // angle change adds no wire, so the measured crossing geometry the SA scores on is
             // unchanged and the placement is not perturbed. The triangle's connection point stays at
             // the pin tip, so connectivity is identical.
-            let angle = if drop_side_gnd && matches!(dir, Dir::East | Dir::West) {
-                choose_power_angle_preferred(net, *dir, *ep, power_keepouts, 0.0)
-            } else {
-                choose_power_angle(net, *dir, *ep, power_keepouts)
-            };
+            let angle = choose_power_angle(net, *dir, *ep, power_keepouts);
             if let Some((flag_idx, symbol_idx)) = split_flag
                 && k == symbol_idx
             {
@@ -1649,18 +1537,8 @@ pub(crate) fn emit_rail(
         w.add_junction([ax, rail_y]);
     }
     // One power symbol at the left end (pin coincident with the rail). A top
-    // rail's symbol sits above, a bottom rail's below — both at angle 0. For a DRIVEN
-    // rail, anchor it at the DRIVER pin's attach point instead, so the supply label
-    // reads at the regulator OUTPUT (the rail's source) rather than at whatever cap
-    // sits leftmost on the trunk.
-    let sym_x = driver
-        .and_then(|dp| {
-            eps.iter()
-                .zip(&attaches)
-                .find(|((ep, _), _)| (ep[0] - dp[0]).abs() < EPS && (ep[1] - dp[1]).abs() < EPS)
-                .map(|(_, &ax)| ax)
-        })
-        .unwrap_or(span_lo);
+    // rail's symbol sits above, a bottom rail's below — both at angle 0.
+    let sym_x = span_lo;
     let flag_at = [sym_x, rail_y];
     w.add_power_symbol(env, &lib, &format!("#PWR_{net}"), net, flag_at, 0.0)?;
     // The ERC flag (only when this net needs one) sits COINCIDENT with the rail's
@@ -1705,16 +1583,9 @@ fn conventional_power_angle(net: &str, dir: Dir) -> f64 {
     }
 }
 
-fn power_angle_candidates(net: &str, dir: Dir, preferred: Option<f64>) -> Vec<f64> {
+fn power_angle_candidates(net: &str, dir: Dir) -> Vec<f64> {
     let mut out = Vec::new();
-    for a in [
-        preferred.unwrap_or_else(|| conventional_power_angle(net, dir)),
-        conventional_power_angle(net, dir),
-        0.0,
-        90.0,
-        180.0,
-        270.0,
-    ] {
+    for a in [conventional_power_angle(net, dir), 0.0, 90.0, 180.0, 270.0] {
         if !out.iter().any(|b: &f64| (*b - a).abs() < EPS) {
             out.push(a);
         }
@@ -1723,27 +1594,7 @@ fn power_angle_candidates(net: &str, dir: Dir, preferred: Option<f64>) -> Vec<f6
 }
 
 pub(crate) fn choose_power_angle(net: &str, dir: Dir, at: [f64; 2], keepouts: &[Rect]) -> f64 {
-    choose_power_angle_inner(net, dir, at, keepouts, None)
-}
-
-pub(crate) fn choose_power_angle_preferred(
-    net: &str,
-    dir: Dir,
-    at: [f64; 2],
-    keepouts: &[Rect],
-    preferred: f64,
-) -> f64 {
-    choose_power_angle_inner(net, dir, at, keepouts, Some(preferred))
-}
-
-fn choose_power_angle_inner(
-    net: &str,
-    dir: Dir,
-    at: [f64; 2],
-    keepouts: &[Rect],
-    preferred: Option<f64>,
-) -> f64 {
-    let candidates = power_angle_candidates(net, dir, preferred);
+    let candidates = power_angle_candidates(net, dir);
     let mut best = candidates[0];
     let mut best_score = power_glyph_overlap_score(net, at, best, keepouts);
     for &angle in &candidates[1..] {

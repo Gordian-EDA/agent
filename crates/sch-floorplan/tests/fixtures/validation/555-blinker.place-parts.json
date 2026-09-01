@@ -1,0 +1,140 @@
+{
+  "name": "555-blinker",
+  "parts": [
+    {
+      "ref": "PWR1",
+      "block": "power",
+      "part": "power:VCC",
+      "pins": {
+        "1": "9V"
+      }
+    },
+    {
+      "ref": "PWR2",
+      "block": "power",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "U1",
+      "block": "blinker",
+      "part": "Timer:NE555P",
+      "pins": {
+        "VCC": "9V",
+        "GND": "GND",
+        "TR": "N_TR",
+        "THR": "N_TR",
+        "DIS": "N_DIS",
+        "CV": "N_CV",
+        "R": "9V",
+        "Q": "N_Q"
+      }
+    },
+    {
+      "ref": "R1",
+      "block": "blinker",
+      "part": "Device:R",
+      "value": "4k7",
+      "pins": {
+        "1": "9V",
+        "2": "N_DIS"
+      }
+    },
+    {
+      "ref": "R2",
+      "block": "blinker",
+      "part": "Device:R",
+      "value": "10k",
+      "pins": {
+        "1": "N_DIS",
+        "2": "N_TR"
+      }
+    },
+    {
+      "ref": "C1",
+      "block": "blinker",
+      "part": "Device:C",
+      "value": "100u",
+      "pins": {
+        "1": "N_TR",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C2",
+      "block": "blinker",
+      "part": "Device:C",
+      "value": "10n",
+      "pins": {
+        "1": "N_CV",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R3",
+      "block": "blinker",
+      "part": "Device:R",
+      "value": "1k",
+      "pins": {
+        "1": "N_Q",
+        "2": "N_LED"
+      }
+    },
+    {
+      "ref": "D1",
+      "block": "blinker",
+      "part": "Device:LED",
+      "value": "red",
+      "pins": {
+        "K": "GND",
+        "A": "N_LED"
+      }
+    }
+  ],
+  "intent": {
+    "flow": "lr",
+    "rails": {
+      "9V": "top",
+      "GND": "bottom"
+    },
+    "place": {
+      "C1": {
+        "col": 1,
+        "row": 2,
+        "orient": "down"
+      },
+      "C2": {
+        "col": 0,
+        "row": 2,
+        "orient": "down"
+      },
+      "D1": {
+        "col": 3,
+        "row": 2,
+        "orient": "up"
+      },
+      "R1": {
+        "col": 1,
+        "row": 0,
+        "orient": "down"
+      },
+      "R2": {
+        "col": 1,
+        "row": 1,
+        "orient": "down"
+      },
+      "R3": {
+        "col": 3,
+        "row": 1,
+        "orient": "down"
+      },
+      "U1": {
+        "col": 2,
+        "row": 1,
+        "orient": "down"
+      }
+    }
+  }
+}

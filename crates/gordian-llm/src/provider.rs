@@ -557,8 +557,8 @@ mod tests {
         let end = StreamEnd {
             captured_content: Some(MessageContent::from_tool_calls(vec![ToolCall {
                 call_id: "c1".into(),
-                fn_name: "create_design".into(),
-                fn_arguments: json!({ "yaml": "version: 1" }),
+                fn_name: "place_parts".into(),
+                fn_arguments: json!({ "parts": [] }),
                 thought_signatures: None,
             }])),
             ..Default::default()

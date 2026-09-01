@@ -15,7 +15,7 @@ use sch_floorplan::contract::{
     PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
 };
 use sch_floorplan::engine_support::{
-    apply_cells, assign_cells, body_overlap_count, decongest, normalize, relation_viol,
+    apply_cells_with_gaps, assign_cells, body_overlap_count, decongest, normalize, relation_viol,
     repair_relations,
 };
 use sch_place::ir::LayoutIr;
@@ -29,6 +29,7 @@ use crate::scene::build_scene;
 
 const COL_GAP: f64 = 10.16;
 const ROW_GAP: f64 = 7.62;
+const FROZEN_IDIOM_COLUMN_GAP: f64 = 3.81;
 
 /// Deterministic grammar-typesetting engine.
 pub struct SpinePlace;
@@ -48,9 +49,7 @@ impl PlacementEngine for SpinePlace {
         // Authored cells and grids are input to this engine, not a reason to
         // silently substitute a sibling engine. Engine selection remains a
         // caller-owned decision.
-        let ir = ir.unwrap_or_else(|| {
-            sch_floorplan::floorplan::infer_ir_with_options(env, design, problem.options)
-        });
+        let ir = ir.unwrap_or_else(|| sch_floorplan::floorplan::infer_ir(env, design));
         // A PRESEEDED item carries a LIVE pose its caller owns (the region adapter's fixed
         // neighbours) and keeps it; the IR's idiom clusters are only pinned, and are still
         // seeded from their cells below.
@@ -134,8 +133,16 @@ impl SpinePlace {
                 .filter(|item| item.frozen)
                 .cloned()
                 .collect::<Vec<_>>();
+            for item in &mut canonical {
+                item.frozen = false;
+            }
             let cells = assign_cells(&canonical, &ir);
-            apply_cells(&mut canonical, &cells);
+            apply_cells_with_gaps(
+                &mut canonical,
+                &cells,
+                FROZEN_IDIOM_COLUMN_GAP,
+                sch_floorplan::engine_support::ROW_GAP,
+            );
             normalize(&mut canonical);
             let poses = canonical
                 .into_iter()
@@ -250,7 +257,7 @@ impl SpinePlace {
         // One full placement variant: arrange (folded or not), commit, orphan
         // sweep, safety passes, truthfulness self-check with collinearity
         // stagger. Returns the metrics the fold A/B decides on.
-        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir, problem.options);
+        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
         let eval = RoutedEvaluator::new(&realizer);
         // Bundle-freed nodes: every wired chain of the node rides a BUNDLE (>=4
         // parallel nets between one item pair — always realized as labels), so

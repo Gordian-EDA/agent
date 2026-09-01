@@ -17,7 +17,7 @@
 //!
 //! Split by pane: [`transcript`] draws the scrollable chat (and owns the styled
 //! word-wrap that keeps the scroll math exact); [`composer`] draws the input box
-//! plus the floating popups and the apply-gate card that sit just above it;
+//! plus the floating popups and the mutation-approval card that sit just above it;
 //! [`chrome`] draws the frame furniture (status footer, running indicator,
 //! scrollback badge, help overlay). The transcript is wrapped by
 //! [`transcript::wrap_segments`] (not `Paragraph::wrap`) so the scroll arithmetic
@@ -467,17 +467,17 @@ mod tests {
     }
 
     #[test]
-    fn pending_diff_shows_approve_and_reject() {
+    fn pending_mutation_shows_approve_and_reject() {
         let mut a = app();
         a.update(Msg::PendingApproval(json!({
-            "ok": true,
-            "would_write": true,
-            "diff": { "added": ["U1"], "removed": [], "changed": [], "nets_before": 0, "nets_after": 5 }
+            "approval_kind": "operation",
+            "operation": "place_parts",
+            "arguments": {"parts": [{"ref": "U1"}]}
         })));
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("change pending"), "diff header:\n{text}");
-        assert!(text.contains("+1 added"), "diff summary:\n{text}");
-        assert!(text.contains("+U1"), "added refdes:\n{text}");
+        assert!(text.contains("operation pending"), "gate header:\n{text}");
+        assert!(text.contains("place_parts"), "operation name:\n{text}");
+        assert!(text.contains("U1"), "operation arguments:\n{text}");
         assert!(text.contains("approve"), "approve hint:\n{text}");
         assert!(text.contains("reject"), "reject hint:\n{text}");
     }
@@ -849,7 +849,9 @@ mod tests {
         );
 
         a.update(Msg::PendingApproval(json!({
-            "diff": { "added": ["U1"], "removed": [], "changed": [] }
+            "approval_kind": "operation",
+            "operation": "place_parts",
+            "arguments": {"parts": [{"ref": "U1"}]}
         })));
         let gated = render_to_string(&mut a, 80, 24);
         // The gate's actions live on the card, not duplicated in the footer.
@@ -938,11 +940,10 @@ mod tests {
     fn the_worked_divider_keeps_a_blank_line_below_when_it_is_the_newest_thing() {
         let mut a = app();
         a.update(Msg::Agent(AgentEvent::AssistantText("done.".into())));
-        a.transcript
-            .push(crate::tui::app::Entry::notice(
-                crate::tui::app::NoticeLevel::Plain,
-                "Worked for 9s",
-            ));
+        a.transcript.push(crate::tui::app::Entry::notice(
+            crate::tui::app::NoticeLevel::Plain,
+            "Worked for 9s",
+        ));
         let text = render_to_string(&mut a, 96, 24);
         let rows: Vec<&str> = text.lines().collect();
         let divider = rows
@@ -962,11 +963,10 @@ mod tests {
         // divider — a second blank line here would be a double gap.
         let mut a = app();
         a.update(Msg::Agent(AgentEvent::AssistantText("done.".into())));
-        a.transcript
-            .push(crate::tui::app::Entry::notice(
-                crate::tui::app::NoticeLevel::Plain,
-                "Worked for 9s",
-            ));
+        a.transcript.push(crate::tui::app::Entry::notice(
+            crate::tui::app::NoticeLevel::Plain,
+            "Worked for 9s",
+        ));
         a.transcript
             .push(crate::tui::app::Entry::user("what about routing?"));
         let text = render_to_string(&mut a, 96, 24);
@@ -1017,9 +1017,8 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, &mut a)).unwrap();
         let buf = terminal.backend().buffer().clone();
-        let row_text = |y: u16| -> String {
-            (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
-        };
+        let row_text =
+            |y: u16| -> String { (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect() };
         let title_row = (0..buf.area.height)
             .find(|&y| row_text(y).contains("help · keys & commands"))
             .expect("the help title renders somewhere");

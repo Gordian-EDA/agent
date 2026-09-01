@@ -5,19 +5,15 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Caller-chosen knobs an engine reads from the placement problem. Replaces the
-/// ad-hoc `std::env` flags the engines used to read directly (`DEBUG_SA_TIME`,
-/// `MULTISHEET_REFINE`, `MOTIF_TILE`) so the engine never touches the environment;
-/// the caller sets these fields when it constructs the placement problem.
+/// Caller-chosen knobs an engine reads from the placement problem. The caller
+/// sets these fields when it constructs the placement problem; engines never
+/// inspect process-global environment state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PlaceOptions {
-    /// Emit per-phase SA timing to stderr (was `DEBUG_SA_TIME`).
+    /// Emit per-phase SA timing to stderr.
     pub debug_timing: bool,
-    /// Force the router-free fast lane even below the pin threshold — the
-    /// multi-sheet sub-sheet refine path (was `MULTISHEET_REFINE`).
-    pub force_fast: bool,
-    /// Tile repeated same-part anchor blocks on a regular lattice (was `MOTIF_TILE`).
+    /// Tile repeated same-part anchor blocks on a regular lattice.
     pub motif_tile: bool,
 }
 

@@ -1,9 +1,9 @@
 //! Gordian's KiCAD schematic + PCB design agent.
 //!
-//! This crate IS the agent: the [`Agent`] turn loop with a human apply-gate, the
+//! This crate IS the agent: the [`Agent`] turn loop with human approval for each mutation, the
 //! conversation history (unwind / clear / [`Agent::compact`]), the schematic/PCB
 //! tool registry ([`tools`]), the composed-sheet emit
-//! ([`multisheet`]), the SVG→PNG [`render`], the netlist + vision [`review`]
+//! the SVG→PNG [`render`], the schematic checks, and the PCB workflow
 //! mechanics, and the [`prompts`] system prompt.
 //!
 //! The loop is built around ONE external seam — the [`Provider`] trait, whose one
@@ -30,7 +30,6 @@
 //! without a network; tools always run against a real [`AgentRuntime`].
 
 mod agent;
-pub mod multisheet;
 pub mod prompts;
 pub mod review;
 pub mod review_kicad;
@@ -40,14 +39,14 @@ pub mod tools;
 
 pub use agent::{Agent, AgentEvent, Approvals, AutoApprove, ContextStats, StopReason, TurnOutcome};
 pub use gordian_runtime::AgentRuntime;
-pub use gordian_runtime::platform;
 pub use gordian_runtime::config::{
     AgentConfig, CONFIG_SCHEMA_VERSION, ConfigError, DEFAULT_MAX_TOKENS, DEFAULT_RENDER_MAX_PX,
     DEFAULT_SCHEMATIC_FILENAME, DEFAULT_SEARCH_LIMIT, EngineConfig, GordianConfig, KicadConfig,
     LlmConfig, LlmReasoningEffort, ProjectConfig, ReviewConfig, SchematicPlacementEngine,
     ToolConfig,
 };
-pub use gordian_runtime::tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
+pub use gordian_runtime::platform;
+pub use gordian_runtime::tool::{ReviewOutcome, ToolEffect, ToolOutcome};
 pub use review::{review, review_image};
 
 // Re-export the LLM (the production `GenaiProvider`, the `Provider` seam, and

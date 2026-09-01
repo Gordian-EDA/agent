@@ -1,6 +1,6 @@
 //! `decouple` sugar: "give this IC N caps of value V across its rails".
 //!
-//! Model-level, not syntax — the YAML front end and the bulk-create tool both
+//! Model-level, not syntax — the bulk-create tool
 //! expand it the same way — so it lives with the model. The caps are ordinary
 //! [`Component`]s tagged [`Origin::Synthesized`], which is what lets a round trip
 //! re-collapse them onto their parent.

@@ -9,9 +9,8 @@
 //! assembly stay together here.
 //!
 //! Two surfaces, kept strictly apart:
-//! - [`floorplan`] — the pipeline ENTRY POINTS callers run (`infer_ir` / `emit_strategy`
-//!   / `emit_writer` / `compose_writers`). The `place` submodule's internals are
-//!   `pub(crate)`: a caller cannot reach `floorplan::place::<internal>`.
+//! - [`floorplan`] — the pipeline entry points callers run (`infer_ir` and
+//!   `emit_strategy`). The `place` submodule's internals are `pub(crate)`.
 //! - [`contract`] — the small stable engine API.
 //! - [`engine_support`] — lower-level geometry and realization helpers for engine
 //!   implementations; public because engines live in separate crates.
@@ -26,7 +25,7 @@
 //! cost is measured on, so it cannot sit in another crate without the two drifting apart.
 //!
 //! The shared placement vocabulary lives in `sch-place`; pure geometry and grid
-//! snapping live in `geom`; reading a `.kicad_sch` back into a `Design` lives in `sch-io`.
+//! snapping live in `geom`; live `.kicad_sch` editing lives in `sch-doc`.
 
 pub mod contract;
 pub mod engine_support;
@@ -37,8 +36,6 @@ pub mod realize;
 pub mod region;
 pub mod wire;
 pub mod write;
-
-pub use sch_io::read;
 
 /// Test support: read/rewrite a symbol's `(at x y angle)` in emitted text by
 /// locating the `(property "Reference" "<refdes>"` block's parent symbol.

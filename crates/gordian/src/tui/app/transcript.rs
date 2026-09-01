@@ -88,53 +88,21 @@ impl Entry {
 /// real dry-run diff; immediate PCB/project operations carry their exact name
 /// and model-supplied arguments because they cannot be previewed safely.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PendingApproval {
-    Schematic {
-        added: Vec<String>,
-        removed: Vec<String>,
-        changed: Vec<String>,
-        nets_before: usize,
-        nets_after: usize,
-    },
-    Operation {
-        operation: String,
-        arguments: Value,
-    },
+pub struct PendingApproval {
+    pub operation: String,
+    pub arguments: Value,
 }
 
 impl PendingApproval {
-    /// Parse either an immediate-operation proposal or the `apply_design`
-    /// dry-run JSON. Missing schematic diff fields default to empty.
+    /// Parse a per-mutator operation proposal.
     pub fn from_payload(v: &Value) -> Self {
-        if v.get("approval_kind").and_then(Value::as_str) == Some("operation") {
-            return Self::Operation {
-                operation: v
-                    .get("operation")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown operation")
-                    .to_string(),
-                arguments: v.get("arguments").cloned().unwrap_or(Value::Null),
-            };
-        }
-
-        let diff = v.get("diff").cloned().unwrap_or(Value::Null);
-        let strings = |key: &str| -> Vec<String> {
-            diff.get(key)
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        let num = |key: &str| diff.get(key).and_then(Value::as_u64).unwrap_or(0) as usize;
-        Self::Schematic {
-            added: strings("added"),
-            removed: strings("removed"),
-            changed: strings("changed"),
-            nets_before: num("nets_before"),
-            nets_after: num("nets_after"),
+        Self {
+            operation: v
+                .get("operation")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown operation")
+                .to_string(),
+            arguments: v.get("arguments").cloned().unwrap_or(Value::Null),
         }
     }
 }

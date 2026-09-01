@@ -10,9 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{EPS, Point2, Segment};
 use kicad::KicadInstallation;
-use kicad_symbol::SymbolTable;
 use sch_check::model::Design;
-use sch_check::{PinType, find_pin};
 
 use crate::label::text_width;
 use crate::wire::DrawnSegment;
@@ -59,7 +57,7 @@ pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
 /// `Reference`/`Value` text, as a pad per side of its body: `[left, right, top, bottom]`
 /// in the PLACED frame, given the body's rotated size.
 ///
-/// `sch_io::write::textsolve` bands an IC's (≥3-pin) or a wide body's field pair
+/// The text solver bands an IC's (≥3-pin) or a wide body's field pair
 /// ABOVE/BELOW the body, centred, and stacks a tall 2-pin part's to the RIGHT. The band's
 /// two 1.6 mm lines reach ~4.8 mm past the SOLID body, of which `approx_size` already
 /// pads 2.54 mm.
@@ -432,49 +430,6 @@ pub fn supply_pin_target(
         }
     }
     best.map(|(p, _)| p)
-}
-
-/// For each DRIVEN, non-ground power rail, the world position of the regulator/IC
-/// OUTPUT pin that drives it. A rail's power symbol belongs at its DRIVER's output
-/// (the LDO `VO`, the buck `SW→VOUT`) so the regulated rail's *exit* is unambiguous —
-/// not at whatever bypass cap happens to sit nearest the trunk's left end. The driver
-/// is a ≥3-pin anchor whose pin on the net carries `PinType::PowerOutput` (which by
-/// construction excludes inputs and grounds — the task's "≥3-pin pin that drives, not
-/// an input/ground"). Ground rails are skipped (the GND symbol's home is its return,
-/// not a driver). Returns at most one driver per net (first wins — a rail has one
-/// source); empty when nothing drives the net (the common undriven-bus case), so the
-/// caller's existing placement is untouched.
-pub(crate) fn driven_rail_drivers(
-    env: &KicadInstallation,
-    w: &SchematicWriter,
-    items: &[Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-) -> BTreeMap<String, [f64; 2]> {
-    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    let mut out: BTreeMap<String, [f64; 2]> = BTreeMap::new();
-    for (net, pins) in inc {
-        if !ir.rails.contains_key(net) || is_ground(net) {
-            continue;
-        }
-        for (i, num) in pins {
-            if items[*i].geom.pins.len() < 3 {
-                continue; // only an IC/regulator pin can drive a rail
-            }
-            let Some(meta) = provider.symbol(&items[*i].part) else {
-                continue;
-            };
-            if find_pin(&meta.pins, num).map(|p| p.etype) != Some(PinType::PowerOutput) {
-                continue;
-            }
-            if let Ok(eps) = w.pin_dirs(env, &items[*i].refdes, num)
-                && let Some((p, _)) = eps.first()
-            {
-                out.entry(net.clone()).or_insert(*p);
-            }
-        }
-    }
-    out
 }
 
 /// Two parallel axis-aligned segments running too close for a sustained length —

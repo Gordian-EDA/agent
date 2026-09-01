@@ -185,7 +185,7 @@ impl App {
     }
 
     /// Whether keystrokes currently edit the input line (only an open
-    /// apply-gate takes the keyboard away; typing during a turn is fine).
+    /// mutation approval takes the keyboard away; typing during a turn is fine).
     pub fn input_active(&self) -> bool {
         self.pending.is_none()
     }

@@ -344,29 +344,20 @@ fn repair_moves_a_group_onto_the_named_side_of_its_anchor() {
 // ---------------------------------------------------------------------------
 
 const CHAIN: &str = r#"
-version: 1
-name: relation-chain
-blocks:
-  power:
-    components:
-      PWR1: {part: power:VCC, pins: {1: VCC}}
-      PWR2: {part: power:GND, pins: {1: GND}}
-  chain:
-    components:
-      R1: {part: Device:R, value: 1k, between: [VCC, N1]}
-      R2: {part: Device:R, value: 2k, between: [N1, N2]}
-      R3: {part: Device:R, value: 3k, between: [N2, GND]}
+{"parts":[
+  {"ref":"PWR1","part":"power:VCC","pins":{"1":"VCC"}},
+  {"ref":"PWR2","part":"power:GND","pins":{"1":"GND"}},
+  {"ref":"R1","part":"Device:R","value":"1k","pins":{"1":"VCC","2":"N1"}},
+  {"ref":"R2","part":"Device:R","value":"2k","pins":{"1":"N1","2":"N2"}},
+  {"ref":"R3","part":"Device:R","value":"3k","pins":{"1":"N2","2":"GND"}}
+]}
 "#;
 
 fn chain_problem(env: &KicadInstallation) -> (sch_check::Design, SchematicPlaceProblem) {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    let compiled = circuit_lang::compile(CHAIN, &provider);
-    assert!(
-        !compiled.diagnostics.has_errors(),
-        "{:#?}",
-        compiled.diagnostics
-    );
-    let design = compiled.design.unwrap();
+    let input: sch_check::PlacePartsInput = serde_json::from_str(CHAIN).unwrap();
+    let (design, diagnostics) = sch_check::into_design(&input, &provider);
+    assert!(!diagnostics.has_errors(), "{:#?}", diagnostics);
     let problem = SchematicPlaceProblem::from_design(env, &design).unwrap();
     (design, problem)
 }

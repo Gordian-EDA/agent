@@ -21,11 +21,23 @@ pub(super) fn draw_completions(f: &mut Frame, input_area: Rect, app: &App) {
     let Some((matches, selected)) = app.completion_view() else {
         return;
     };
-    let label_w = matches.iter().map(|c| c.name.chars().count()).max().unwrap_or(0);
+    let label_w = matches
+        .iter()
+        .map(|c| c.name.chars().count())
+        .max()
+        .unwrap_or(0);
     let rows: Vec<Line> = matches
         .iter()
         .enumerate()
-        .map(|(i, c)| menu_row(c.name, c.desc, label_w, input_area.width, selected == Some(i)))
+        .map(|(i, c)| {
+            menu_row(
+                c.name,
+                c.desc,
+                label_w,
+                input_area.width,
+                selected == Some(i),
+            )
+        })
         .collect();
     draw_menu(f, input_area, rows);
 }
@@ -33,7 +45,13 @@ pub(super) fn draw_completions(f: &mut Frame, input_area: Rect, app: &App) {
 /// One full-width menu row: the composer's own left indent, a padded label, then
 /// the detail column. Every cell is painted out to the right edge so a selected
 /// row reads as one unbroken bar instead of a highlight that stops at the text.
-fn menu_row(label: &str, detail: &str, label_w: usize, width: u16, selected: bool) -> Line<'static> {
+fn menu_row(
+    label: &str,
+    detail: &str,
+    label_w: usize,
+    width: u16,
+    selected: bool,
+) -> Line<'static> {
     let (label_style, detail_style) = if selected {
         (theme::MENU_SEL_LABEL, theme::MENU_SEL)
     } else {
@@ -88,16 +106,10 @@ pub(super) fn draw_approval(f: &mut Frame, area: Rect, app: &App) {
 
     // The key letters are sourced from the keybinding definitions, not hardcoded,
     // so the labels can never drift from what `event::map_key` actually accepts.
-    let accent = Style::default()
-        .fg(theme::ACC)
-        .add_modifier(Modifier::BOLD);
+    let accent = Style::default().fg(theme::ACC).add_modifier(Modifier::BOLD);
     let dim = theme::META;
-    let pending_label = match pending {
-        PendingApproval::Schematic { .. } => "schematic change pending",
-        PendingApproval::Operation { .. } => "operation pending",
-    };
     let action = Line::from(vec![
-        Span::styled(pending_label, accent),
+        Span::styled("operation pending", accent),
         Span::styled("   ", dim),
         Span::styled(
             format!("[{}] approve", super::super::event::APPROVE_KEY),
@@ -110,136 +122,29 @@ pub(super) fn draw_approval(f: &mut Frame, area: Rect, app: &App) {
         ),
         Span::styled("   Esc cancel", dim),
     ]);
-    let (summary, preview) = match pending {
-        PendingApproval::Schematic {
-            added,
-            removed,
-            changed,
-            nets_before,
-            nets_after,
-        } => (
-            Line::from(vec![
-                Span::styled(
-                    format!("+{} added", added.len()),
-                    theme::ADDED,
-                ),
-                Span::styled("   ", dim),
-                Span::styled(
-                    format!("-{} removed", removed.len()),
-                    theme::REMOVED,
-                ),
-                Span::styled("   ", dim),
-                Span::styled(
-                    format!("~{} changed", changed.len()),
-                    theme::CHANGED,
-                ),
-                Span::styled("   ", dim),
-                Span::styled(
-                    format!("nets {nets_before} -> {nets_after}"),
-                    theme::SUBTLE,
-                ),
-            ]),
-            Line::from(diff_preview_spans(added, removed, changed, 8)),
+    let summary = Line::from(vec![
+        Span::styled("run  ", dim),
+        Span::styled(
+            pending.operation.clone(),
+            theme::WARNING.add_modifier(Modifier::BOLD),
         ),
-        PendingApproval::Operation {
-            operation,
-            arguments,
-        } => (
-            Line::from(vec![
-                Span::styled("run  ", dim),
-                Span::styled(
-                    operation.clone(),
-                    theme::WARNING.add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  (mutates project/board)", dim),
-            ]),
-            Line::from(vec![
-                Span::styled("args  ", dim),
-                Span::styled(
-                    operation_args_text(arguments),
-                    theme::SUBTLE,
-                ),
-            ]),
-        ),
-    };
+        Span::styled("  (mutates project)", dim),
+    ]);
+    let preview = Line::from(vec![
+        Span::styled("args  ", dim),
+        Span::styled(operation_args_text(&pending.arguments), theme::SUBTLE),
+    ]);
 
     let para = Paragraph::new(vec![action, summary, preview]).wrap(Wrap { trim: true });
     f.render_widget(para, body(area));
 }
 
 fn approval_preview_text(pending: &PendingApproval) -> String {
-    match pending {
-        PendingApproval::Schematic {
-            added,
-            removed,
-            changed,
-            ..
-        } => diff_preview_text(added, removed, changed, 8),
-        PendingApproval::Operation {
-            operation,
-            arguments,
-        } => format!("run {operation}  args {}", operation_args_text(arguments)),
-    }
-}
-
-fn diff_preview_text(
-    added: &[String],
-    removed: &[String],
-    changed: &[String],
-    limit: usize,
-) -> String {
-    let mut parts = Vec::new();
-    let mut total = 0usize;
-    for (prefix, refs) in [("+", added), ("-", removed), ("~", changed)] {
-        for r in refs {
-            total += 1;
-            if parts.len() < limit {
-                parts.push(format!("{prefix}{r}"));
-            }
-        }
-    }
-    if total > parts.len() {
-        parts.push(format!("+{} more", total - parts.len()));
-    }
-    if parts.is_empty() {
-        "no component changes".into()
-    } else {
-        parts.join("  ")
-    }
-}
-
-fn diff_preview_spans(
-    added: &[String],
-    removed: &[String],
-    changed: &[String],
-    limit: usize,
-) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::styled("refs  ", theme::META)];
-    let mut shown = 0usize;
-    let mut total = 0usize;
-    for (prefix, refs, style) in [
-        ("+", added, theme::ADDED),
-        ("-", removed, theme::REMOVED),
-        ("~", changed, theme::CHANGED),
-    ] {
-        for r in refs {
-            total += 1;
-            if shown < limit {
-                if shown > 0 {
-                    spans.push(Span::styled("  ", theme::META));
-                }
-                spans.push(Span::styled(format!("{prefix}{r}"), style));
-                shown += 1;
-            }
-        }
-    }
-    if total == 0 {
-        spans.push(Span::styled("no component changes", theme::META));
-    } else if total > shown {
-        spans.push(Span::styled("  ", theme::META));
-        spans.push(Span::styled(format!("+{} more", total - shown), theme::META));
-    }
-    spans
+    format!(
+        "run {}  args {}",
+        pending.operation,
+        operation_args_text(&pending.arguments)
+    )
 }
 
 fn operation_args_text(arguments: &serde_json::Value) -> String {
@@ -338,10 +243,7 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
             "Ask Gordian anything..."
         };
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                placeholder,
-                theme::META,
-            ))),
+            Paragraph::new(Line::from(Span::styled(placeholder, theme::META))),
             inner,
         );
         if app.input_active() {
@@ -464,21 +366,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn big_diffs_get_a_taller_pane_capped() {
-        let small = PendingApproval::Schematic {
-            added: vec!["U1".into()],
-            removed: vec![],
-            changed: vec![],
-            nets_before: 0,
-            nets_after: 1,
+    fn large_arguments_get_a_taller_pane_capped() {
+        let small = PendingApproval {
+            operation: "set_fields".into(),
+            arguments: serde_json::json!({"ref": "U1"}),
         };
         assert_eq!(approval_height(&small, 80), 3);
-        let big = PendingApproval::Schematic {
-            added: (0..60).map(|i| format!("LONG_REF_{i}")).collect(),
-            removed: vec![],
-            changed: vec![],
-            nets_before: 0,
-            nets_after: 60,
+        let big = PendingApproval {
+            operation: "place_parts".into(),
+            arguments: serde_json::json!({"parts": (0..60).map(|i| format!("LONG_REF_{i}")).collect::<Vec<_>>() }),
         };
         assert_eq!(
             approval_height(&big, 24),
@@ -489,7 +385,7 @@ mod tests {
 
     #[test]
     fn operation_approval_names_the_tool_and_arguments() {
-        let pending = PendingApproval::Operation {
+        let pending = PendingApproval {
             operation: "move_parts".into(),
             arguments: serde_json::json!({
                 "moves": [{"reference": "U1", "by": [1, 2]}]

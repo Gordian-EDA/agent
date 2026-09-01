@@ -4,7 +4,7 @@
 //! design extracted from a live `.kicad_sch` as over one compiled from text. The
 //! spelling checks that only an authored document can fail — an unknown lib_id,
 //! an unknown pin key, one physical pin claimed by two map keys — belong to the
-//! front end that accepted the text (`circuit_lang::authored`), not here:
+//! authoring front end, not here:
 //! a live document names its symbols and pins by construction.
 
 use crate::diag::{Diagnostic, Diagnostics};
@@ -258,14 +258,20 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
 
     if !allow("single-pin-net") {
         for (net, pins) in &net_pins {
-            // A power rail or an author-marked PORT legitimately has one pin (the
-            // symbol/label is the connection) — not a typo, so don't warn on it.
+            // A power rail legitimately has one pin: the power symbol IS the
+            // connection. Everything else with a single pin — a port label
+            // included — names a node nothing else reaches, which no board can
+            // build. The design covers every sheet, so an off-sheet consumer
+            // would already be counted here.
             let attrs = d.nets.get(*net);
-            let exempt = attrs.map(|a| a.power || a.port).unwrap_or(false);
-            if pins.len() == 1 && !exempt {
-                diags.push(Diagnostic::warning(
+            if pins.len() == 1 && !attrs.map(|a| a.power).unwrap_or(false) {
+                diags.push(Diagnostic::error(
                     "single-pin-net",
-                    format!("net `{net}` has only one pin ({}) — typo?", pins[0]),
+                    format!(
+                        "net `{net}` reaches only {} — connect it to its other end, \
+                         or mark the pin no-connect",
+                        pins[0]
+                    ),
                 ));
             }
         }

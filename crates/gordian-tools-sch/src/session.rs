@@ -101,7 +101,11 @@ impl Allow {
         for (pin, net) in moved {
             let named = self.refs.contains(&pin.refdes)
                 || net.as_ref().is_some_and(|net| self.nets.contains(net))
-                || (self.creating && net.as_ref().is_none_or(|net| is_auto(net)));
+                || (self.creating
+                    && (generated_support_ref(&pin.refdes)
+                        || net
+                            .as_ref()
+                            .is_none_or(|net| is_auto(net) || delta.created.contains(net))));
             if !named {
                 offenders.insert(format!("{}.{}", pin.refdes, pin.pin));
             }
@@ -114,6 +118,10 @@ impl Allow {
 /// Whether a net name was generated rather than authored.
 fn is_auto(name: &str) -> bool {
     name.starts_with("Net-(")
+}
+
+fn generated_support_ref(refdes: &str) -> bool {
+    refdes.starts_with("#PWR_") || refdes.starts_with("#FLG_")
 }
 
 /// Every pin that gained or lost a connection, with the net it changed against:
@@ -174,6 +182,21 @@ impl Edit {
             rollback,
             doc,
         })
+    }
+
+    /// Begin an edit for a project that does not have a schematic yet.
+    pub fn create(ctx: &AgentRuntime, mut doc: SchDoc) -> Edit {
+        let before = connect::extract(&doc);
+        let rollback = doc.snapshot();
+        Edit {
+            path: ctx.sch_path().to_path_buf(),
+            undo_dir: undo_dir(ctx),
+            original: String::new(),
+            warnings: before.warnings.clone(),
+            before,
+            rollback,
+            doc,
+        }
     }
 
     /// Read the schematic without intending to change it.
@@ -255,8 +278,17 @@ pub fn undo(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": format!("no snapshot `{id}`") }));
     }
     let before = Edit::open(ctx).map(|e| e.before).unwrap_or_default();
-    std::fs::copy(&stash, ctx.sch_path())?;
-    let after = Edit::open(ctx)?.before;
+    let restored = std::fs::read(&stash)?;
+    if restored.is_empty() {
+        match std::fs::remove_file(ctx.sch_path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        std::fs::write(ctx.sch_path(), restored)?;
+    }
+    let after = Edit::open(ctx).map(|e| e.before).unwrap_or_default();
     Ok(json!({
         "changed": format!("restored the schematic to snapshot {id}"),
         "net_delta": delta_json(&Netlist::diff(&before, &after)),

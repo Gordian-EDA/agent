@@ -1,0 +1,25 @@
+{
+  "parts": [
+    {
+      "ref": "R1",
+      "part": "Device:R",
+      "value": "10k",
+      "footprint": "Resistor_SMD:R_0805_2012Metric",
+      "pins": {
+        "1": "VIN",
+        "2": "SENSE"
+      }
+    },
+    {
+      "ref": "R2",
+      "part": "Device:R",
+      "value": "10k",
+      "footprint": "Resistor_SMD:R_0805_2012Metric",
+      "pins": {
+        "1": "SENSE",
+        "2": "GND"
+      }
+    }
+  ],
+  "block": "divider"
+}

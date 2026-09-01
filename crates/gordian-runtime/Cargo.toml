@@ -23,7 +23,6 @@ kicad = { path = "../kicad" }
 kicad-ipc = { path = "../kicad-ipc" }
 kicad-footprint = { path = "../kicad-footprint" }
 kicad-symbol = { path = "../kicad-symbol" }
-sch-io = { path = "../sch-io" }
 
 [dev-dependencies]
 serde_json.workspace = true

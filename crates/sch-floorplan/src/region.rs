@@ -218,7 +218,7 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
     }
 
     let result = {
-        let realizer = RoutedSheetRealizer::new(env, &place.inc, &out.ir, options);
+        let realizer = RoutedSheetRealizer::new(env, &place.inc, &out.ir);
         let eval = RoutedEvaluator::new(&realizer);
         PlaceResult {
             engine: out.result.engine,

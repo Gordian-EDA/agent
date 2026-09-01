@@ -1,6 +1,6 @@
 //! Connectivity regression oracle for the FLOORPLAN engine (the active layout
-//! path). For each reference fixture, compile the YAML, lay it out per its
-//! `*.layout.json` IR sidecar, emit, export the netlist via kicad, and
+//! path). For each reference fixture, lower its connectivity-only input, emit,
+//! export the netlist via kicad, and
 //! assert the netlist is TRUTHFUL: every authored pin lands connected, no
 //! authored net is split across netlist nets, and no two authored nets are
 //! shorted onto one.
@@ -16,18 +16,14 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-/// The floorplan engine reads `MULTISHEET_REFINE` from the PROCESS environment deep
-/// in the emit path, so a test that toggles it must not run concurrently with one
-/// that reads it. Every env-sensitive test in this file takes this lock for its whole
-/// body; the multisheet variant additionally sets+restores the var inside the locked
-/// region, so the two single-sheet-mode tests never observe it mid-flight. (Tests
-/// serialize, but each is the same ~8 min either way — correctness over parallelism.)
+/// The KiCAD CLI and fixture environment are process-global, so this suite
+/// serializes its long-running fixture checks.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 use kicad::KicadInstallation;
 use kicad::Netlist;
 use kicad_symbol::SymbolTable;
-use sch_floorplan::floorplan::{self, LayoutIr};
+use sch_floorplan::floorplan;
 
 /// TIER 1 — the hand-tuned reference targets. Held to the FULL bar: electrically
 /// truthful AND zero layout warnings AND ERC-clean. These match the human
@@ -66,7 +62,7 @@ fn validation_corpus_available() -> bool {
         .is_dir()
 }
 
-/// The YAML keys pins by NAME; the KiCAD netlist reports pins by NUMBER. Resolve
+/// The place input keys pins by name; the KiCAD netlist reports pins by number. Resolve
 /// the authored token (number-first then name, `find_pin` order) and compare.
 fn nl_pin_matches(provider: &SymbolTable, lib_id: &str, authored: &str, nl_pin: &str) -> bool {
     if authored == nl_pin {
@@ -199,8 +195,7 @@ const TOLERATED_ERC_KINDS: &[&str] = &[
     "multiple_net_names",
 ];
 
-/// Compile `<name>.circuit.yaml`, emit through the floorplan engine (sidecar IR if
-/// present, else `baseline_ir`), and assert the emitted sheet is electrically
+/// Load `<name>.place-parts.json`, emit through the floorplan engine, and assert the sheet is electrically
 /// TRUTHFUL + on-grid + ERC-clean. With `strict_warnings`, also assert zero
 /// layout warnings (tier-1 readability bar).
 fn validate_fixture(
@@ -210,19 +205,14 @@ fn validate_fixture(
     strict_warnings: bool,
 ) {
     {
-        let src = std::fs::read_to_string(doc(name, "circuit.yaml")).unwrap();
-        let result = circuit_lang::compile(&src, provider);
-        assert!(
-            !result.diagnostics.has_errors(),
-            "{name}: {:#?}",
-            result.diagnostics
-        );
-        let design = result.design.unwrap();
-
-        let ir = match std::fs::read_to_string(doc(name, "layout.json")) {
-            Ok(s) => LayoutIr::from_json(&s).unwrap(),
-            Err(_) => floorplan::baseline_ir(&design),
-        };
+        let src = std::fs::read_to_string(doc(name, "place-parts.json")).unwrap();
+        let input: sch_check::PlacePartsInput = serde_json::from_str(&src).unwrap();
+        let (design, diagnostics) = sch_check::into_design(&input, provider);
+        assert!(!diagnostics.has_errors(), "{name}: {:#?}", diagnostics);
+        let ir = input
+            .intent
+            .map(sch_check::Intent::into_layout_ir)
+            .unwrap_or_else(|| floorplan::baseline_ir(&design));
         // `SCH_ENGINE=spine` runs the same oracle over the spine engine; the
         // default stays anneal so existing runs are untouched.
         let engine: Box<dyn sch_floorplan::contract::PlacementEngine> =

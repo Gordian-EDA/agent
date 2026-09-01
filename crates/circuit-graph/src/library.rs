@@ -188,8 +188,7 @@ pub static CC_PULLDOWN: Pattern = Pattern {
 /// side-by-side beside the IC; left to the generic search they drift far below it (the
 /// sensor-sheet "pull-ups placed far below the IC, long detours" defect). The mirror of
 /// CC_PULLDOWN (resistors to a shared rail, distinct signals, freeze beside the anchor) but the
-/// rail is POWER (pull-UP) and the anchor is an IC, NOT a connector. The host gates this idiom
-/// behind MULTISHEET_REFINE so single-sheet reference snapshots stay byte-identical.
+/// rail is POWER (pull-UP) and the anchor is an IC, NOT a connector.
 static I2C_PULLUP_ROLES: &[Role] = &[
     Role::one(
         "anchor",

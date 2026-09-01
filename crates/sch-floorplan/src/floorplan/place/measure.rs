@@ -22,7 +22,6 @@ use circuit_graph::netclass::is_ground;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
 use sch_place::place::Crossings;
-use sch_place::place::PlaceOptions;
 
 use sch_place::place::PlaceResult;
 
@@ -89,22 +88,25 @@ pub struct RoutedSheetRealizer<'a> {
     env: &'a KicadInstallation,
     inc: &'a Incidence,
     ir: &'a LayoutIr,
-    options: PlaceOptions,
+    driven: &'a [String],
 }
 
 impl<'a> RoutedSheetRealizer<'a> {
-    pub fn new(
-        env: &'a KicadInstallation,
-        inc: &'a Incidence,
-        ir: &'a LayoutIr,
-        options: PlaceOptions,
-    ) -> Self {
+    pub fn new(env: &'a KicadInstallation, inc: &'a Incidence, ir: &'a LayoutIr) -> Self {
         Self {
             env,
             inc,
             ir,
-            options,
+            driven: &[],
         }
+    }
+
+    /// Nets a power-output pin already drives elsewhere in the document these items
+    /// are drawn into. Two power outputs on one net is an ERC error, so the realiser
+    /// draws no `PWR_FLAG` for them.
+    pub fn already_driven(mut self, driven: &'a [String]) -> Self {
+        self.driven = driven;
+        self
     }
 
     pub fn env(&self) -> &'a KicadInstallation {
@@ -117,7 +119,8 @@ impl<'a> RoutedSheetRealizer<'a> {
         items: &[Item],
         mode: RouteRealization,
     ) -> std::io::Result<SchematicWriter> {
-        let needs_flag = compute_needs_flag(self.env, items, self.ir);
+        let mut needs_flag = compute_needs_flag(self.env, items, self.ir);
+        needs_flag.retain(|net| !self.driven.iter().any(|d| d == net));
         build_writer(
             self.env,
             title,
@@ -126,7 +129,6 @@ impl<'a> RoutedSheetRealizer<'a> {
             self.ir,
             &needs_flag,
             mode.fan_risers(),
-            self.options.force_fast,
         )
     }
 }

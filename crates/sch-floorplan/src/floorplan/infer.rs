@@ -80,15 +80,6 @@ fn local_rail_nets(design: &Design) -> BTreeSet<String> {
 /// whole layout and needs no LLM `place`. The coarse cells it emits are polished
 /// by the same refine/align/decongest passes the LLM-frame path uses.
 pub fn infer_ir(env: &KicadInstallation, design: &Design) -> LayoutIr {
-    infer_ir_with_options(env, design, sch_place::place::PlaceOptions::default())
-}
-
-/// Infer layout using explicit caller-owned placement options.
-pub fn infer_ir_with_options(
-    env: &KicadInstallation,
-    design: &Design,
-    options: sch_place::place::PlaceOptions,
-) -> LayoutIr {
     let Ok(items) = gather(env, design) else {
         return baseline_ir(design);
     };
@@ -277,7 +268,6 @@ pub fn infer_ir_with_options(
         &pin_meta,
         &anchor_col,
         &anchor_row,
-        options.force_fast,
     );
     let mut placed: BTreeSet<String> = BTreeSet::new();
     let mut idiom_reports: Vec<sch_place::result::IdiomReport> = Vec::new();
@@ -688,7 +678,6 @@ pub(super) fn place_decoupling(
     ai: usize,
     caps: &[usize],
     out: &[idiom::Idiom],
-    multisheet_refine: bool,
 ) -> Option<Vec<(String, Cell)>> {
     // Group qualifying caps by their V+ rail; a cap whose own nets reach a *different*
     // IC is not unambiguously this IC's bypass, so drop it. EXCLUDE connectors: a power
@@ -724,25 +713,13 @@ pub(super) fn place_decoupling(
         let vp = if is_ground(cn[0]) { cn[1] } else { cn[0] };
         by_rail.entry(vp.to_string()).or_default().push(ci);
     }
-    // Single-sheet references keep the strict per-rail≥3 bank (snapshot-locked, e.g. mcp1703). On
-    // MULTI-SHEET sub-sheets, bank ALL of the IC's bypass caps even when split thin ACROSS rails: a
-    // multi-rail regulator/DDR3/FPGA has only 1-2 caps on ANY single rail (V_in + V_out, or VDD+VDDQ+
-    // VREF), so the per-rail gate dropped the whole bank → the caps scattered (DDR3 sdram=6, "5 caps
-    // scattered not in a tidy bank"; multi-rail LDO power sheets). The circuit-graph matcher already
-    // accepts caps across rails (per-cap power-net binding), so the only blocker was THIS filter.
-    // Banking them into one aligned row above the IC reads far cleaner than the scatter.
-    let multisheet = multisheet_refine;
-    let mut bank: Vec<usize> = if multisheet {
-        by_rail.into_values().flatten().collect()
-    } else {
-        by_rail
-            .into_values()
-            .filter(|v| v.len() >= 3)
-            .flatten()
-            .collect()
-    };
+    let mut bank: Vec<usize> = by_rail
+        .into_values()
+        .filter(|v| v.len() >= 3)
+        .flatten()
+        .collect();
     bank.sort_unstable();
-    if bank.len() < if multisheet { 2 } else { 3 } {
+    if bank.len() < 3 {
         return None;
     }
     let (acol, arow) = (anchor_col[&ai], anchor_row[&ai]);
@@ -750,19 +727,9 @@ pub(super) fn place_decoupling(
     let crystal_l = out.iter().any(|id| {
         id.kind == "crystal" && id.anchor == ai && id.cells.iter().any(|(_, c)| c.col < acol)
     });
-    // Past the right edge (crystal on the left) or past the left edge. EXCEPT a SMALL anchor
-    // (a 3-4 pin LDO/regulator, pinned with its bank on multi-sheet): a tall-IC bank seats far
-    // to the left, but a small LDO is the same width as its caps, so `-(n+1)` flings the bank to
-    // the far (often negative) left and it sprawls away. Seat it DIRECTLY ABOVE the LDO (base 0)
-    // so the cap row hugs the pinned regulator — the textbook compact power-entry block.
-    let small_anchor = multisheet && (3..=4).contains(&items[ai].geom.pins.len());
-    let base = if small_anchor {
-        0
-    } else if crystal_l {
-        2
-    } else {
-        -(n + 1)
-    };
+    // Past the right edge when the crystal occupies the left, otherwise past
+    // the left edge so the two support clusters do not collide.
+    let base = if crystal_l { 2 } else { -(n + 1) };
     // One row above the IC's pin band (arow-1), not two: the IC renders tall, so an
     // extra ordinal row leaves a wide empty gap between the bank and the power pins it
     // serves; one row hugs it while still clearing the body.

@@ -1,7 +1,0 @@
-version: 1
-name: divider-led-seed
-blocks:
-  divider:
-    components:
-      R1: {part: Device:R, value: 10k, footprint: Resistor_SMD:R_0603_1608Metric, pins: {1: VIN, 2: SENSE}}
-      R2: {part: Device:R, value: 10k, footprint: Resistor_SMD:R_0603_1608Metric, pins: {1: SENSE, 2: GND}}

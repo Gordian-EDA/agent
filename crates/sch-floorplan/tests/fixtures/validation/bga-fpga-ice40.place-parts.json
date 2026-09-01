@@ -1,0 +1,427 @@
+{
+  "name": "ice40hx8k_bga_core",
+  "parts": [
+    {
+      "ref": "PWR1",
+      "block": "supply",
+      "part": "power:VCC",
+      "pins": {
+        "1": "3V3"
+      }
+    },
+    {
+      "ref": "PWR2",
+      "block": "supply",
+      "part": "power:VCC",
+      "pins": {
+        "1": "1V2"
+      }
+    },
+    {
+      "ref": "PWR3",
+      "block": "supply",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "U1",
+      "block": "power",
+      "part": "Regulator_Linear:AMS1117-3.3",
+      "pins": {
+        "VI": "VIN",
+        "VO": "3V3",
+        "GND": "GND"
+      }
+    },
+    {
+      "ref": "C1",
+      "block": "power",
+      "part": "Device:C",
+      "value": "10uF",
+      "pins": {
+        "1": "VIN",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C2",
+      "block": "power",
+      "part": "Device:C",
+      "value": "22uF",
+      "pins": {
+        "1": "3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C3",
+      "block": "power",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "U2",
+      "block": "power",
+      "part": "Regulator_Linear:AMS1117",
+      "pins": {
+        "VI": "3V3",
+        "VO": "1V2",
+        "ADJ": "V12_FB"
+      }
+    },
+    {
+      "ref": "R4",
+      "block": "power",
+      "part": "Device:R",
+      "value": "120",
+      "pins": {
+        "1": "1V2",
+        "2": "V12_FB"
+      }
+    },
+    {
+      "ref": "R5",
+      "block": "power",
+      "part": "Device:R",
+      "value": "1.5k",
+      "pins": {
+        "1": "V12_FB",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C4",
+      "block": "power",
+      "part": "Device:C",
+      "value": "10uF",
+      "pins": {
+        "1": "1V2",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C5",
+      "block": "power",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "1V2",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "U3",
+      "block": "fpga",
+      "part": "FPGA_Lattice:ICE40HX8K-BG121",
+      "pins": {
+        "D4": "1V2",
+        "D8": "1V2",
+        "H4": "1V2",
+        "H8": "1V2",
+        "VCCPLL0": "1V2",
+        "VCCPLL1": "1V2",
+        "VCCIO_0": "3V3",
+        "VCCIO_1": "3V3",
+        "VCCIO_2": "3V3",
+        "E4": "3V3",
+        "G4": "3V3",
+        "VCC_SPI": "3V3",
+        "VPP_2V5": "3V3",
+        "VPP_FAST": "3V3",
+        "E5": "GND",
+        "E6": "GND",
+        "E7": "GND",
+        "F5": "GND",
+        "F6": "GND",
+        "F7": "GND",
+        "G5": "GND",
+        "G6": "GND",
+        "G7": "GND",
+        "H5": "GND",
+        "GNDPLL0": "GND",
+        "GNDPLL1": "GND",
+        "IOB_105_SDO": "SPI_SO",
+        "IOB_106_SDI": "SPI_SI",
+        "IOB_107_SCK": "SPI_SCK",
+        "IOB_108_SS": "SPI_SS",
+        "~{CRESET}": "CRESET_B",
+        "CDONE": "CDONE",
+        "IOL_2A": "GPIO0",
+        "IOL_2B": "GPIO1",
+        "IOR_114": "GPIO2",
+        "IOR_115": "GPIO3",
+        "IOT_168": "GPIO4",
+        "IOT_170": "GPIO5",
+        "C9": "nc",
+        "B9": "nc",
+        "B8": "nc",
+        "A9": "nc",
+        "C8": "nc",
+        "D7": "nc",
+        "A8": "nc",
+        "C7": "nc",
+        "A7": "nc",
+        "B7": "nc",
+        "B6": "nc",
+        "A6": "nc",
+        "A5": "nc",
+        "B5": "nc",
+        "A4": "nc",
+        "D5": "nc",
+        "B4": "nc",
+        "B3": "nc",
+        "A2": "nc",
+        "A3": "nc",
+        "A1": "nc",
+        "H10": "nc",
+        "J10": "nc",
+        "G8": "nc",
+        "H11": "nc",
+        "G10": "nc",
+        "G9": "nc",
+        "G11": "nc",
+        "F10": "nc",
+        "F9": "nc",
+        "F11": "nc",
+        "E10": "nc",
+        "E9": "nc",
+        "E8": "nc",
+        "D9": "nc",
+        "E11": "nc",
+        "D11": "nc",
+        "D10": "nc",
+        "C11": "nc",
+        "B11": "nc",
+        "L1": "nc",
+        "J3": "nc",
+        "L2": "nc",
+        "K3": "nc",
+        "J4": "nc",
+        "L3": "nc",
+        "L4": "nc",
+        "K4": "nc",
+        "J5": "nc",
+        "K5": "nc",
+        "L5": "nc",
+        "K6": "nc",
+        "J7": "nc",
+        "H7": "nc",
+        "K7": "nc",
+        "J8": "nc",
+        "L7": "nc",
+        "L8": "nc",
+        "H9": "nc",
+        "C4": "nc",
+        "C3": "nc",
+        "C2": "nc",
+        "C1": "nc",
+        "E1": "nc",
+        "D1": "nc",
+        "D2": "nc",
+        "D3": "nc",
+        "E2": "nc",
+        "E3": "nc",
+        "F1": "nc",
+        "F2": "nc",
+        "F4": "nc",
+        "F3": "nc",
+        "G1": "nc",
+        "G2": "nc",
+        "G3": "nc",
+        "H3": "nc",
+        "H1": "nc",
+        "H2": "nc",
+        "J1": "nc",
+        "K1": "nc",
+        "K2": "nc",
+        "J2": "nc"
+      }
+    },
+    {
+      "ref": "R1",
+      "block": "fpga",
+      "part": "Device:R",
+      "value": "10k",
+      "pins": {
+        "1": "CRESET_B",
+        "2": "3V3"
+      }
+    },
+    {
+      "ref": "R2",
+      "block": "fpga",
+      "part": "Device:R",
+      "value": "10k",
+      "pins": {
+        "1": "CDONE",
+        "2": "3V3"
+      }
+    },
+    {
+      "ref": "C6",
+      "block": "fpga",
+      "part": "Device:C",
+      "value": "10nF",
+      "pins": {
+        "1": "CRESET_B",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C10",
+      "block": "fpga",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "1V2",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C11",
+      "block": "fpga",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "1V2",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C12",
+      "block": "fpga",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "1V2",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C13",
+      "block": "fpga",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "1V2",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C14",
+      "block": "fpga",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C15",
+      "block": "fpga",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C16",
+      "block": "fpga",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C17",
+      "block": "fpga",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C18",
+      "block": "fpga",
+      "part": "Device:C",
+      "value": "4.7uF",
+      "pins": {
+        "1": "1V2",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C19",
+      "block": "fpga",
+      "part": "Device:C",
+      "value": "4.7uF",
+      "pins": {
+        "1": "3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "U4",
+      "block": "config_flash",
+      "part": "Memory_Flash:W25Q32JVSS",
+      "pins": {
+        "1": "SPI_SS",
+        "6": "SPI_SCK",
+        "5": "SPI_SI",
+        "2": "SPI_SO",
+        "8": "3V3",
+        "4": "GND",
+        "3": "3V3",
+        "7": "3V3"
+      }
+    },
+    {
+      "ref": "C7",
+      "block": "config_flash",
+      "part": "Device:C",
+      "value": "100nF",
+      "pins": {
+        "1": "3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R6",
+      "block": "config_flash",
+      "part": "Device:R",
+      "value": "10k",
+      "pins": {
+        "1": "SPI_SS",
+        "2": "3V3"
+      }
+    },
+    {
+      "ref": "J1",
+      "block": "headers",
+      "part": "Connector_Generic:Conn_01x08",
+      "pins": {
+        "1": "3V3",
+        "2": "GND",
+        "3": "GPIO0",
+        "4": "GPIO1",
+        "5": "GPIO2",
+        "6": "GPIO3",
+        "7": "GPIO4",
+        "8": "GPIO5"
+      }
+    }
+  ]
+}

@@ -112,6 +112,50 @@ fn assignment_mismatches<'a>(
     Ok(mismatches)
 }
 
+/// A footprint the catalog cannot produce, and whether the id itself is at fault.
+pub struct UnresolvableFootprint {
+    /// A `Lib:Name` the author got wrong, as opposed to one this install simply
+    /// does not carry — a project-local library is absent, not mis-assigned.
+    pub malformed: bool,
+    pub message: String,
+}
+
+/// Footprints a design names that the catalog cannot produce, each with the ids
+/// it was probably reaching for.
+///
+/// The board seed fails on all of them, so the schematic gate says so while the
+/// schematic is still the thing being edited.
+pub fn unresolvable_footprints(
+    ctx: &AgentRuntime,
+    design: &Design,
+) -> Result<Vec<UnresolvableFootprint>> {
+    let catalog = ctx.footprint_catalog()?;
+    let mut out = Vec::new();
+    for block in design.blocks.values() {
+        for (reference, component) in &block.components {
+            let Some(footprint) = component.footprint.as_deref().filter(|f| !f.is_empty()) else {
+                continue;
+            };
+            let (malformed, problem, suggestions) = match FootprintId::parse(footprint) {
+                Err(e) => (true, e.to_string(), catalog.suggest_text(footprint)),
+                Ok(id) => match catalog.footprint(&id) {
+                    Ok(_) => continue,
+                    Err(e) => (false, e.to_string(), catalog.suggest(&id)),
+                },
+            };
+            out.push(UnresolvableFootprint {
+                malformed,
+                message: format!(
+                    "{reference}: footprint `{footprint}` {problem}{} — search_footprints for a \
+                     real `Library:Name`, then assign_footprints",
+                    crate::tool::footprint_suggestion_clause(&suggestions),
+                ),
+            });
+        }
+    }
+    Ok(out)
+}
+
 fn pad_number_differences<'a>(
     symbol_pin_numbers: impl IntoIterator<Item = &'a str>,
     footprint_pad_numbers: impl IntoIterator<Item = &'a str>,

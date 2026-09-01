@@ -1,0 +1,78 @@
+{
+  "name": "divider-filter",
+  "parts": [
+    {
+      "ref": "PWR1",
+      "block": "power",
+      "part": "power:VCC",
+      "pins": {
+        "1": "VCC"
+      }
+    },
+    {
+      "ref": "PWR2",
+      "block": "power",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "R7",
+      "block": "divider",
+      "part": "Device:R",
+      "value": "649k",
+      "pins": {
+        "1": "VCC",
+        "2": "OUT"
+      }
+    },
+    {
+      "ref": "R8",
+      "block": "divider",
+      "part": "Device:R",
+      "value": "200k",
+      "pins": {
+        "1": "OUT",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C3",
+      "block": "divider",
+      "part": "Device:C",
+      "value": "47n",
+      "pins": {
+        "1": "OUT",
+        "2": "GND"
+      }
+    }
+  ],
+  "intent": {
+    "flow": "lr",
+    "rails": {
+      "GND": "bottom",
+      "VCC": "top"
+    },
+    "ports": {
+      "OUT": "right"
+    },
+    "place": {
+      "C3": {
+        "col": 1,
+        "row": 1,
+        "orient": "down"
+      },
+      "R7": {
+        "col": 0,
+        "row": 0,
+        "orient": "down"
+      },
+      "R8": {
+        "col": 0,
+        "row": 1,
+        "orient": "down"
+      }
+    }
+  }
+}

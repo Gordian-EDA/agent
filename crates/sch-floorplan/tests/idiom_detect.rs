@@ -5,6 +5,7 @@
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan;
+use serde_json::json;
 use std::path::Path;
 
 fn validation_corpus_available() -> bool {
@@ -15,25 +16,23 @@ fn validation_corpus_available() -> bool {
 
 fn compile_fixture(provider: &SymbolTable, name: &str) -> sch_check::Design {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("tests/fixtures/validation/{name}.circuit.yaml"));
+        .join(format!("tests/fixtures/validation/{name}.place-parts.json"));
     let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
-    let result = circuit_lang::compile(&src, provider);
-    assert!(
-        !result.diagnostics.has_errors(),
-        "{name}: {:#?}",
-        result.diagnostics
-    );
-    result.design.expect("design")
+    let input: sch_check::PlacePartsInput = serde_json::from_str(&src).unwrap();
+    let (design, diagnostics) = sch_check::into_design(&input, provider);
+    assert!(!diagnostics.has_errors(), "{name}: {:#?}", diagnostics);
+    design
 }
 
-fn compile_source(provider: &SymbolTable, name: &str, src: &str) -> sch_check::Design {
-    let result = circuit_lang::compile(src, provider);
-    assert!(
-        !result.diagnostics.has_errors(),
-        "{name}: {:#?}",
-        result.diagnostics
-    );
-    result.design.expect("design")
+fn compile_source(
+    provider: &SymbolTable,
+    name: &str,
+    input: serde_json::Value,
+) -> sch_check::Design {
+    let input: sch_check::PlacePartsInput = serde_json::from_value(input).unwrap();
+    let (design, diagnostics) = sch_check::into_design(&input, provider);
+    assert!(!diagnostics.has_errors(), "{name}: {:#?}", diagnostics);
+    design
 }
 
 #[test]
@@ -152,26 +151,21 @@ fn repeated_pc817_channels_are_frozen_as_signal_flow_rows() {
     let design = compile_source(
         &provider,
         "pc817-bank",
-        r#"
-version: 1
-name: pc817-bank
-blocks:
-  isolation:
-    components:
-      P1: {part: power:+5V, pins: {1: +5V}}
-      P2: {part: power:GND, pins: {1: FIELD_GND}}
-      P3: {part: power:GND, pins: {1: LOGIC_GND}}
-      RIN1: {part: Device:R, value: 4.7k, pins: {1: IN1, 2: OPTO_IN1}}
-      U1: {part: Isolator:PC817, pins: {1: OPTO_IN1, 2: FIELD_GND, 3: LOGIC_GND, 4: OUT1}}
-      RPU1: {part: Device:R, value: 10k, pins: {1: +5V, 2: OUT1}}
-      RLED1: {part: Device:R, value: 1k, pins: {1: +5V, 2: LED_A1}}
-      DLED1: {part: Device:LED, pins: {A: LED_A1, K: OUT1}}
-      RIN2: {part: Device:R, value: 4.7k, pins: {1: IN2, 2: OPTO_IN2}}
-      U2: {part: Isolator:PC817, pins: {1: OPTO_IN2, 2: FIELD_GND, 3: LOGIC_GND, 4: OUT2}}
-      RPU2: {part: Device:R, value: 10k, pins: {1: +5V, 2: OUT2}}
-      RLED2: {part: Device:R, value: 1k, pins: {1: +5V, 2: LED_A2}}
-      DLED2: {part: Device:LED, pins: {A: LED_A2, K: OUT2}}
-"#,
+        json!({"parts": [
+            {"ref":"P1","part":"power:+5V","pins":{"1":"+5V"}},
+            {"ref":"P2","part":"power:GND","pins":{"1":"FIELD_GND"}},
+            {"ref":"P3","part":"power:GND","pins":{"1":"LOGIC_GND"}},
+            {"ref":"RIN1","part":"Device:R","value":"4.7k","pins":{"1":"IN1","2":"OPTO_IN1"}},
+            {"ref":"U1","part":"Isolator:PC817","pins":{"1":"OPTO_IN1","2":"FIELD_GND","3":"LOGIC_GND","4":"OUT1"}},
+            {"ref":"RPU1","part":"Device:R","value":"10k","pins":{"1":"+5V","2":"OUT1"}},
+            {"ref":"RLED1","part":"Device:R","value":"1k","pins":{"1":"+5V","2":"LED_A1"}},
+            {"ref":"DLED1","part":"Device:LED","pins":{"A":"LED_A1","K":"OUT1"}},
+            {"ref":"RIN2","part":"Device:R","value":"4.7k","pins":{"1":"IN2","2":"OPTO_IN2"}},
+            {"ref":"U2","part":"Isolator:PC817","pins":{"1":"OPTO_IN2","2":"FIELD_GND","3":"LOGIC_GND","4":"OUT2"}},
+            {"ref":"RPU2","part":"Device:R","value":"10k","pins":{"1":"+5V","2":"OUT2"}},
+            {"ref":"RLED2","part":"Device:R","value":"1k","pins":{"1":"+5V","2":"LED_A2"}},
+            {"ref":"DLED2","part":"Device:LED","pins":{"A":"LED_A2","K":"OUT2"}}
+        ]}),
     );
     let ir = floorplan::infer_ir(&env, &design);
 
@@ -222,18 +216,26 @@ fn large_pc817_bank_folds_into_bounded_channel_columns() {
         return;
     };
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    let mut components = String::from(
-        "      P1: {part: power:+5V, pins: {1: +5V}}\n      P2: {part: power:GND, pins: {1: FIELD_GND}}\n      P3: {part: power:GND, pins: {1: LOGIC_GND}}\n      J1: {part: Connector:Conn_01x08_Pin, pins: {1: IN1, 2: IN2, 3: IN3, 4: IN4, 5: IN5, 6: IN6, 7: IN7, 8: IN8}}\n      J2: {part: Connector:Conn_01x08_Pin, pins: {1: OUT1, 2: OUT2, 3: OUT3, 4: OUT4, 5: OUT5, 6: OUT6, 7: OUT7, 8: OUT8}}\n      J3: {part: Connector:Conn_01x02_Pin, pins: {1: +5V, 2: FIELD_GND}}\n      C1: {part: Device:C, value: 100n, pins: {1: +5V, 2: LOGIC_GND}}\n      H1: {part: Mechanical:MountingHole}\n",
-    );
+    let mut parts = vec![
+        json!({"ref":"P1","part":"power:+5V","pins":{"1":"+5V"}}),
+        json!({"ref":"P2","part":"power:GND","pins":{"1":"FIELD_GND"}}),
+        json!({"ref":"P3","part":"power:GND","pins":{"1":"LOGIC_GND"}}),
+        json!({"ref":"J1","part":"Connector:Conn_01x08_Pin","pins":{"1":"IN1","2":"IN2","3":"IN3","4":"IN4","5":"IN5","6":"IN6","7":"IN7","8":"IN8"}}),
+        json!({"ref":"J2","part":"Connector:Conn_01x08_Pin","pins":{"1":"OUT1","2":"OUT2","3":"OUT3","4":"OUT4","5":"OUT5","6":"OUT6","7":"OUT7","8":"OUT8"}}),
+        json!({"ref":"J3","part":"Connector:Conn_01x02_Pin","pins":{"1":"+5V","2":"FIELD_GND"}}),
+        json!({"ref":"C1","part":"Device:C","value":"100n","pins":{"1":"+5V","2":"LOGIC_GND"}}),
+        json!({"ref":"H1","part":"Mechanical:MountingHole"}),
+    ];
     for n in 1..=8 {
-        components.push_str(&format!(
-            "      RIN{n}: {{part: Device:R, value: 4.7k, pins: {{1: IN{n}, 2: OPTO_IN{n}}}}}\n      U{n}: {{part: Isolator:PC817, pins: {{1: OPTO_IN{n}, 2: FIELD_GND, 3: LOGIC_GND, 4: OUT{n}}}}}\n      RPU{n}: {{part: Device:R, value: 10k, pins: {{1: +5V, 2: OUT{n}}}}}\n      RLED{n}: {{part: Device:R, value: 1k, pins: {{1: +5V, 2: LED_A{n}}}}}\n      DLED{n}: {{part: Device:LED, pins: {{A: LED_A{n}, K: OUT{n}}}}}\n"
-        ));
+        parts.extend([
+            json!({"ref":format!("RIN{n}"),"part":"Device:R","value":"4.7k","pins":{"1":format!("IN{n}"),"2":format!("OPTO_IN{n}")}}),
+            json!({"ref":format!("U{n}"),"part":"Isolator:PC817","pins":{"1":format!("OPTO_IN{n}"),"2":"FIELD_GND","3":"LOGIC_GND","4":format!("OUT{n}")}}),
+            json!({"ref":format!("RPU{n}"),"part":"Device:R","value":"10k","pins":{"1":"+5V","2":format!("OUT{n}")}}),
+            json!({"ref":format!("RLED{n}"),"part":"Device:R","value":"1k","pins":{"1":"+5V","2":format!("LED_A{n}")}}),
+            json!({"ref":format!("DLED{n}"),"part":"Device:LED","pins":{"A":format!("LED_A{n}"),"K":format!("OUT{n}")}}),
+        ]);
     }
-    let source = format!(
-        "version: 1\nname: pc817-bank-8\nblocks:\n  isolation:\n    components:\n{components}"
-    );
-    let design = compile_source(&provider, "pc817-bank-8", &source);
+    let design = compile_source(&provider, "pc817-bank-8", json!({"parts": parts}));
     let ir = floorplan::infer_ir(&env, &design);
 
     let optos: Vec<_> = (1..=8).map(|n| ir.place[&format!("U{n}")]).collect();

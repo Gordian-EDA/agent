@@ -8,9 +8,7 @@ description = "The engine-agnostic schematic placement core: gather, IR inferenc
 
 [dependencies]
 sch-place = { path = "../sch-place" }
-sch-io = { path = "../sch-io" }
 sch-doc = { path = "../sch-doc" }
-circuit-lang = { path = "../circuit-lang" }
 sch-check = { path = "../sch-check" }
 circuit-graph = { path = "../circuit-graph" }
 kicad-symbol = { path = "../kicad-symbol" }
@@ -31,5 +29,4 @@ tracing.workspace = true
 anneal-place = { path = "../anneal-place" }
 spine-place = { path = "../spine-place" }
 cluster-place = { path = "../cluster-place" }
-circuit-lang = { path = "../circuit-lang" }
 tempfile.workspace = true

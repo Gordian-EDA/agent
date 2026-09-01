@@ -17,6 +17,7 @@
 //! the live obstacle scene and falls back to a matched pair of labels, saying
 //! so; that is the only way copper is drawn.
 
+mod bulk;
 mod check;
 mod edit;
 mod place;
@@ -32,12 +33,16 @@ use serde_json::{Value, json};
 
 /// The tools that write the schematic. The turn loop approves these before
 /// they run — they mutate the project and have no dry-run.
-pub const MUTATORS: [&str; 12] = [
+pub const MUTATORS: [&str; 16] = [
     "undo",
+    "place_parts",
+    "arrange",
+    "rewire",
     "add_symbols",
     "remove_symbols",
     "move_symbols",
     "set_fields",
+    "assign_footprints",
     "set_flags",
     "swap_symbol",
     "connect",
@@ -75,6 +80,21 @@ pub fn tool_defs() -> Vec<Tool> {
         "rot": { "type": "number", "enum": [0, 90, 180, 270] }
     });
     let defs: Vec<(&str, &str, Value)> = vec![
+        (
+            "place_parts",
+            "The ONLY way to create a new design or add a multi-part block. Submit the COMPLETE electrically finished block in one call, including every requested support, protection, decoupling, bias, termination, indicator, and connector part; every powered design needs local supply bypass/decoupling even when the request leaves it implicit. Never submit a minimal or partial first pass. State connectivity only: real KiCAD parts and pin-to-net mappings, never coordinates or wires. One call lays out the whole new sheet, or places the block as a region while freezing existing symbols. Use `intent.relations` for left_of/right_of/group/side_of placement. If rejected, correct every reported diagnostic before retrying; unknown-pin errors list valid physical pins.",
+            sch_check::place_parts_input_schema(),
+        ),
+        (
+            "arrange",
+            "Re-place selected symbols and redraw only their wiring while every unselected symbol stays frozen. Select by refs or bbox; the placement engine owns all coordinates.",
+            bulk::selection_schema(true),
+        ),
+        (
+            "rewire",
+            "Redraw selected symbols' wiring in place without moving any symbol. Select by refs or bbox; wires are solver-generated, never coordinate-authored.",
+            bulk::selection_schema(false),
+        ),
         (
             "read_schematic",
             "Read the live schematic: one line per symbol with its position and pin→net map, \
@@ -192,6 +212,30 @@ pub fn tool_defs() -> Vec<Tool> {
                                 "additionalProperties": { "type": ["string", "null"] } }
                 },
                 "required": ["ref", "fields"],
+                "additionalProperties": false
+            }),
+        ),
+        (
+            "assign_footprints",
+            "Set footprint fields directly on one or more live schematic parts. Use search_footprints first; the complete batch is validated and written atomically.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "assignments": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "reference": { "type": "string" },
+                                "footprint": { "type": "string", "description": "KiCAD Lib:Name." }
+                            },
+                            "required": ["reference", "footprint"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["assignments"],
                 "additionalProperties": false
             }),
         ),
@@ -336,7 +380,7 @@ pub fn tool_defs() -> Vec<Tool> {
 
 /// Dispatch one of this crate's tools. `None` when the name is not ours.
 pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>> {
-    if !ctx.sch_path().is_file() {
+    if !ctx.sch_path().is_file() && name != "place_parts" {
         return handles(name).then(|| {
             Ok(json!({
                 "error": format!(
@@ -347,6 +391,9 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         });
     }
     Some(match name {
+        "place_parts" => bulk::place_parts(input, ctx),
+        "arrange" => bulk::arrange(input, ctx),
+        "rewire" => bulk::rewire(input, ctx),
         "read_schematic" => query::read_schematic(input, ctx),
         "get_symbol" => query::get_symbol(input, ctx),
         "get_net" => query::get_net(input, ctx),
@@ -355,6 +402,7 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "remove_symbols" => edit::remove_symbols(input, ctx),
         "move_symbols" => edit::move_symbols(input, ctx),
         "set_fields" => edit::set_fields(input, ctx),
+        "assign_footprints" => edit::assign_footprints(input, ctx),
         "set_flags" => edit::set_flags(input, ctx),
         "swap_symbol" => edit::swap_symbol(input, ctx),
         "connect" => wiring::connect_tool(input, ctx),

@@ -20,7 +20,7 @@
 //!
 //! Cell paths are converted to mm polylines, split at layer changes (a [`Via`]
 //! is emitted at each transition) and collinear runs are merged (a fresh copy
-//! of the simplify idea from `sch-io/src/wire.rs` — the crates stay
+//! of the schematic wire simplifier — the crates stay
 //! decoupled). The result is the unified [`RouteResult`]: the [`RouteSolution`]
 //! plus a list of [`FailedNet`]s. A net that cannot be routed is reported, never
 //! silently dropped, and the router never panics.

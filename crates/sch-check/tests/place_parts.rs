@@ -128,7 +128,7 @@ fn decouple_expands_into_synthesized_caps() {
 fn only_attributed_nets_get_an_entry() {
     let (design, _) = into_design(&parse(), &provider());
     // No power symbol in the fixture, so no net earns an attribute — the same
-    // design the YAML front end produces for the same circuit.
+    // design the kernel produces for the same circuit.
     assert!(design.nets.is_empty(), "{:?}", design.nets);
 
     let input: PlacePartsInput = serde_json::from_str(

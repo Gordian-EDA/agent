@@ -211,7 +211,7 @@ pub fn place_parts(
         crate::realize::Draw {
             title: design.name.as_deref(),
             frame: fresh,
-            ..Default::default()
+            driven: &driven_nets(doc, &before),
         },
     )?;
     let warnings = writer.layout_warnings();
@@ -312,7 +312,10 @@ fn rearrange(
         &placed,
         &inc,
         &ir,
-        crate::realize::Draw::default(),
+        crate::realize::Draw {
+            driven: &driven_nets(doc, &before),
+            ..Default::default()
+        },
     )?;
     let warnings = writer.layout_warnings();
     crate::realize::graft_drawing(doc, writer)?;
@@ -511,6 +514,32 @@ fn net_by_pin(netlist: &Netlist) -> HashMap<(&str, &str), &str> {
                 .iter()
                 .map(move |pin| ((pin.refdes.as_str(), pin.pin.as_str()), net.name.as_str()))
         })
+        .collect()
+}
+
+/// Nets a power-output pin on the sheet already drives — a `PWR_FLAG`, a regulator
+/// output.
+///
+/// The realiser draws one `PWR_FLAG` per undriven power net among the items it is
+/// drawing, and those are the only items it sees. Without this, an edit beside an
+/// already-flagged rail lands a second flag on it and KiCAD reports two power outputs
+/// connected. Call it once the drawing a re-wire owns has been erased, so a flag that
+/// is about to be redrawn does not count.
+fn driven_nets(doc: &SchDoc, netlist: &Netlist) -> Vec<String> {
+    let drivers: BTreeSet<(String, String)> = sch_doc::placed_pins(doc)
+        .into_iter()
+        .filter(|pin| pin.etype == "power_out")
+        .map(|pin| (pin.refdes, pin.number))
+        .collect();
+    netlist
+        .nets
+        .iter()
+        .filter(|net| {
+            net.pins
+                .iter()
+                .any(|pin| drivers.contains(&(pin.refdes.clone(), pin.pin.clone())))
+        })
+        .map(|net| net.name.clone())
         .collect()
 }
 

@@ -1,0 +1,108 @@
+{
+  "block": "main",
+  "parts": [
+    {
+      "ref": "Q1",
+      "part": "Transistor_FET:Q_NMOS_GSD",
+      "value": "Q_NMOS_GSD",
+      "pins": {
+        "1": "HA",
+        "2": "OUTA",
+        "3": "P12V"
+      }
+    },
+    {
+      "ref": "Q2",
+      "part": "Transistor_FET:Q_NMOS_GSD",
+      "value": "Q_NMOS_GSD",
+      "pins": {
+        "1": "LA",
+        "2": "GND",
+        "3": "OUTA"
+      }
+    },
+    {
+      "ref": "Q3",
+      "part": "Transistor_FET:Q_NMOS_GSD",
+      "value": "Q_NMOS_GSD",
+      "pins": {
+        "1": "HB",
+        "2": "OUTB",
+        "3": "P12V"
+      }
+    },
+    {
+      "ref": "Q4",
+      "part": "Transistor_FET:Q_NMOS_GSD",
+      "value": "Q_NMOS_GSD",
+      "pins": {
+        "1": "LB",
+        "2": "GND",
+        "3": "OUTB"
+      }
+    },
+    {
+      "ref": "PWR1",
+      "part": "power:+12V",
+      "pins": {
+        "1": "P12V"
+      }
+    },
+    {
+      "ref": "G1",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "G2",
+      "part": "power:GND",
+      "pins": {
+        "1": "GND"
+      }
+    },
+    {
+      "ref": "LBL1",
+      "part": "label:global",
+      "pins": {
+        "1": "HA"
+      }
+    },
+    {
+      "ref": "LBL2",
+      "part": "label:global",
+      "pins": {
+        "1": "LA"
+      }
+    },
+    {
+      "ref": "LBL3",
+      "part": "label:global",
+      "pins": {
+        "1": "HB"
+      }
+    },
+    {
+      "ref": "LBL4",
+      "part": "label:global",
+      "pins": {
+        "1": "LB"
+      }
+    },
+    {
+      "ref": "LBL5",
+      "part": "label:global",
+      "pins": {
+        "1": "OUTA"
+      }
+    },
+    {
+      "ref": "LBL6",
+      "part": "label:global",
+      "pins": {
+        "1": "OUTB"
+      }
+    }
+  ]
+}
