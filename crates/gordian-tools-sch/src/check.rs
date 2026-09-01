@@ -119,6 +119,9 @@ pub fn check_schematic(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             report["erc_clean"] = json!(errors == 0);
             if errors > 0 {
                 report["ok"] = json!(false);
+            } else if report.get("ok").and_then(Value::as_bool) == Some(true) {
+                report["message"] =
+                    json!("schematic is clean and placement is final; no further moves are needed");
             }
         }
         Err(error) => {

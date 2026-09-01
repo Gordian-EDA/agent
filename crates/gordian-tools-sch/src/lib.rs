@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 /// they run — they mutate the project and have no dry-run.
 pub const MUTATORS: [&str; 12] = [
     "undo",
-    "add_symbol",
+    "add_symbols",
     "remove_symbols",
     "move_symbols",
     "set_fields",
@@ -53,13 +53,7 @@ pub fn handles(name: &str) -> bool {
 }
 
 fn tool_names() -> Vec<&'static str> {
-    let mut names = vec![
-        "read_schematic",
-        "get_symbol",
-        "get_net",
-        "free_space",
-        "check_schematic",
-    ];
+    let mut names = vec!["read_schematic", "get_symbol", "get_net", "check_schematic"];
     names.extend(MUTATORS);
     names
 }
@@ -71,6 +65,15 @@ pub fn tool_defs() -> Vec<Tool> {
     let side = json!({ "type": "string", "enum": ["left", "right", "above", "below"] });
     let point =
         json!({ "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 });
+    let part = json!({
+        "lib_id": { "type": "string", "description": "KiCAD Lib:Name, e.g. Device:R." },
+        "ref": { "type": "string" },
+        "value": { "type": "string" },
+        "footprint": { "type": "string" },
+        "near": { "type": "string", "description": "Reference to sit beside." },
+        "side": side.clone(),
+        "rot": { "type": "number", "enum": [0, 90, 180, 270] }
+    });
     let defs: Vec<(&str, &str, Value)> = vec![
         (
             "read_schematic",
@@ -89,7 +92,8 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "get_symbol",
-            "One part in full: position, fields, body extents, and every pin with its side and net.",
+            "One part in full: its fields, then one entry per unit with position, body extents \
+             and pins with their sides and nets.",
             json!({
                 "type": "object",
                 "properties": { "ref": { "type": "string" } },
@@ -108,40 +112,29 @@ pub fn tool_defs() -> Vec<Tool> {
             }),
         ),
         (
-            "free_space",
-            "A free [x,y] with room for a w×h block, optionally near a part.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "w": { "type": "number" }, "h": { "type": "number" },
-                    "near": { "type": "string", "description": "Reference to stay close to." }
-                },
-                "required": ["w", "h"],
-                "additionalProperties": false
-            }),
-        ),
-        (
             "check_schematic",
             "Lint + electrical rules + KiCAD ERC over the live file. Run this before you finish.",
             json!({ "type": "object", "properties": {}, "additionalProperties": false }),
         ),
         (
-            "add_symbol",
-            "Place a part. Position it with `near`+`side` (preferred) or `at`; with neither it \
-             lands in free space. `ref` is auto-assigned when omitted. The part starts unconnected \
-             — wire it with `connect`.",
+            "add_symbols",
+            "Place one or many parts at collision-free grid positions and report each final spot. \
+             `near`+`side` puts a series part by its upstream part and faces it; keep the reported \
+             spot. `rot` overrides; `ref` is optional. All-or-nothing; wire with `connect`.",
             json!({
                 "type": "object",
                 "properties": {
-                    "lib_id": { "type": "string", "description": "KiCAD Lib:Name, e.g. Device:R." },
-                    "ref": { "type": "string" },
-                    "value": { "type": "string" },
-                    "footprint": { "type": "string" },
-                    "near": { "type": "string", "description": "Reference to sit beside." },
-                    "side": side.clone(),
-                    "at": point.clone()
+                    "parts": {
+                        "type": "array", "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": part.clone(),
+                            "required": ["lib_id"],
+                            "additionalProperties": false
+                        }
+                    }
                 },
-                "required": ["lib_id"],
+                "required": ["parts"],
                 "additionalProperties": false
             }),
         ),
@@ -158,7 +151,9 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "move_symbols",
-            "Move parts. Refused if a part would overlap another or if the move changed any net.",
+            "Move or turn parts, wires and rails following along; `rot`/`mirror` alone reverses a \
+             diode in place. A taken spot is slid to final `nudged_to`; success is \
+             collision-free and needs no follow-up. Refused if no nearby spot fits or a net changes.",
             json!({
                 "type": "object",
                 "properties": {
@@ -168,6 +163,9 @@ pub fn tool_defs() -> Vec<Tool> {
                             "type": "object",
                             "properties": {
                                 "ref": { "type": "string" },
+                                "unit": { "type": "integer", "minimum": 1 },
+                                "rot": { "type": "number", "enum": [0, 90, 180, 270] },
+                                "mirror": { "type": "string", "enum": ["none", "x", "y"] },
                                 "to": point.clone(),
                                 "by": point.clone(),
                                 "near": { "type": "string" },
@@ -184,8 +182,8 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "set_fields",
-            "Set properties on one part (Value, Footprint, Reference, user fields). This is how you \
-             change a resistor's value or footprint — it moves nothing.",
+            "Set properties on one part (Value, Footprint, Reference, user fields), on every unit \
+             of it — how a resistor's value or footprint changes. Moves nothing.",
             json!({
                 "type": "object",
                 "properties": {
@@ -214,8 +212,11 @@ pub fn tool_defs() -> Vec<Tool> {
         (
             "swap_symbol",
             "Retarget a part at a different library symbol, keeping every pin's net by number then \
-             by name. Use `pin_map` {old_pin: new_pin} when the pinout differs; unmapped pins are \
-             reported. For a value or footprint change alone, use set_fields instead.",
+             by name. `ref` names the whole part, so every unit of a dual or quad swaps at once. \
+             Use `pin_map` {old_pin: new_pin} when the pinout differs; unmapped pins are reported. \
+             For a value/footprint change alone, or when no real match exists anywhere, use \
+             set_fields instead — a same-named part in an unrelated library is not proven \
+             pin-compatible.",
             json!({
                 "type": "object",
                 "properties": {
@@ -231,18 +232,31 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "connect",
-            "Join two ends. Each end is a pin like \"R1.1\" / \"U1.VDD\", or a point [x,y]. The route \
-             is solved around the existing drawing and junctions are added for you; if nothing fits, \
-             both ends are named with `net` instead and the result says so. NEVER draw wires by \
-             coordinate — this is the only way to connect.",
+            "Join two ends — a pin like \"R1.1\" / \"U1.VDD\", or a point [x,y] — or every pair in \
+             `pairs` at once. For series insertion, delete the old wire then join both sides in one \
+             `pairs` call. The route is solved around the existing \
+             drawing and junctions are added for you; if nothing fits, both ends are named with \
+             `net` instead and the result says so. Never draw wires by coordinate.",
             json!({
                 "type": "object",
                 "properties": {
                     "from": { "description": PIN },
                     "to": { "description": PIN },
-                    "net": { "type": "string", "description": "Name for the resulting net." }
+                    "net": { "type": "string", "description": "Name for the resulting net." },
+                    "pairs": {
+                        "type": "array", "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "from": { "description": PIN },
+                                "to": { "description": PIN },
+                                "net": { "type": "string" }
+                            },
+                            "required": ["from", "to"],
+                            "additionalProperties": false
+                        }
+                    }
                 },
-                "required": ["from", "to"],
                 "additionalProperties": false
             }),
         ),
@@ -286,13 +300,13 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "delete_wires",
-            "Remove drawn wires by net, by the parts they touch, or by uuid. This is how you break \
-             a net: to insert a part IN SERIES on an existing net, delete_wires({net}) first, then \
-             `connect` each side of the new part to its own half. Adding a part without breaking \
-             the net leaves it shunted across, not in series.",
+            "Remove wires by pin, net, touching part, or uuid; reports loose pins. For a part IN \
+             SERIES cut ONE pin — {pins:[\"RX.1\"]} — then connect through it. RX.1 is a \
+             placeholder. `net` cuts the whole net and loosens every pin.",
             json!({
                 "type": "object",
                 "properties": {
+                    "pins": { "type": "array", "items": { "type": "string" } },
                     "net": { "type": "string" },
                     "refs": { "type": "array", "items": { "type": "string" } },
                     "uuids": { "type": "array", "items": { "type": "string" } }
@@ -336,9 +350,8 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "read_schematic" => query::read_schematic(input, ctx),
         "get_symbol" => query::get_symbol(input, ctx),
         "get_net" => query::get_net(input, ctx),
-        "free_space" => query::free_space(input, ctx),
         "check_schematic" => check::check_schematic(input, ctx),
-        "add_symbol" => edit::add_symbol(input, ctx),
+        "add_symbols" => edit::add_symbols(input, ctx),
         "remove_symbols" => edit::remove_symbols(input, ctx),
         "move_symbols" => edit::move_symbols(input, ctx),
         "set_fields" => edit::set_fields(input, ctx),

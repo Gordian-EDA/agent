@@ -546,10 +546,7 @@ fn is_discovery_tool(name: &str) -> bool {
 /// anything is the stuck pattern the no-progress watchdog exists to catch.
 fn is_inspection_tool(name: &str) -> bool {
     is_discovery_tool(name)
-        || matches!(
-            name,
-            "read_schematic" | "get_symbol" | "get_net" | "free_space"
-        )
+        || matches!(name, "read_schematic" | "get_symbol" | "get_net")
 }
 
 fn request_supplies_multiple_library_ids(intent: &str) -> bool {
@@ -6051,7 +6048,6 @@ mod tests {
             "read_schematic",
             "get_symbol",
             "get_net",
-            "free_space",
             "search_symbols",
         ] {
             assert!(is_inspection_tool(name), "{name}");
@@ -7720,14 +7716,14 @@ blocks:
         let seed_names = names(&seed);
         let active_names = names(&active);
 
-        assert_eq!(schematic.len(), 28);
+        assert_eq!(schematic.len(), 27);
         assert!(schematic_names.contains("create_design"));
         assert!(schematic_names.contains("search_footprints"));
         assert!(schematic_names.contains("assign_footprints"));
         assert!(!schematic_names.contains("regenerate_board"));
         assert!(!schematic_names.contains("route_board"));
 
-        assert_eq!(seed.len(), 29);
+        assert_eq!(seed.len(), 28);
         assert!(schematic_names.is_subset(&seed_names));
         assert!(seed_names.contains("regenerate_board"));
         assert!(!seed_names.contains("route_board"));

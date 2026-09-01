@@ -779,7 +779,7 @@ pub(crate) fn set_instance_reference(node: &mut Node, sheet_path: &str, refdes: 
             if sexpr::head(path) == Some("path")
                 && items(path).get(1).and_then(sexpr::text) == Some(sheet_path)
             {
-                sexpr::set_child(path, tagged("reference", vec![quoted(refdes)]));
+                sexpr::set_child(path, tagged("reference", vec![sym(refdes)]));
             }
         }
     }

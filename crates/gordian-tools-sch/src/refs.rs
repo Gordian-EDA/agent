@@ -99,6 +99,21 @@ fn summarize(pins: &[&PlacedPin]) -> String {
         .join(" ")
 }
 
+/// Every placed unit of a part, in unit order, as `(unit, uuid)`.
+///
+/// A reference designator names a *part*, and the halves of a dual op-amp or a
+/// dual triode are one part: `U1` is both. Tools address them through this so
+/// a value or a library swap lands on all of them at once, the way KiCAD does.
+pub(crate) fn units(doc: &SchDoc, refdes: &str) -> Vec<(u32, String)> {
+    let mut units: Vec<(u32, String)> = doc
+        .symbols()
+        .filter(|s| s.refdes() == refdes)
+        .map(|s| (s.unit, s.uuid.clone()))
+        .collect();
+    units.sort_by_key(|(unit, _)| *unit);
+    units
+}
+
 /// The net a pin currently sits on, if it is on one.
 pub(crate) fn net_of<'a>(netlist: &'a Netlist, refdes: &str, number: &str) -> Option<&'a str> {
     netlist
@@ -110,6 +125,25 @@ pub(crate) fn net_of<'a>(netlist: &'a Netlist, refdes: &str, number: &str) -> Op
                 .any(|p| p.refdes == refdes && p.pin == number)
         })
         .map(|net| net.name.as_str())
+}
+
+/// The pins an edit has just left dangling, `R4.1` style.
+///
+/// Breaking a net to insert a part in series loosens every *other* pin that
+/// was on it, and a caller who reconnects only the two ends it named has
+/// silently deleted a branch. Saying so is how the model finds out.
+pub(crate) fn newly_loose(before: &Netlist, after: &Netlist) -> Vec<String> {
+    after
+        .unconnected
+        .iter()
+        .filter(|pin| {
+            !before
+                .unconnected
+                .iter()
+                .any(|was| was.refdes == pin.refdes && was.pin == pin.pin)
+        })
+        .map(label)
+        .collect()
 }
 
 /// Every net a set of parts has a pin on.

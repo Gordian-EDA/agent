@@ -4,12 +4,11 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use geom::{Point2, Rect};
+use geom::Rect;
 use gordian_runtime::AgentRuntime;
 use sch_doc::{Netlist, PlacedPin, body_rect, placed_pins};
 use serde_json::{Value, json};
 
-use crate::place::{Occupancy, snap_point};
 use crate::refs;
 use crate::session::Edit;
 
@@ -33,12 +32,28 @@ fn rotation(rot: f64) -> String {
     }
 }
 
-/// `1=VCC 2=N_TR`, a symbol's pins and the nets they land on.
+/// A pin's number, with its function name appended when the symbol names it
+/// distinctly (a tube's `G`/`K`, a connector's `TX`) — never for an
+/// unnamed `~` pin or a name that just repeats the number, which would only
+/// echo noise. Without this, a same-shaped part with several unlabelled pins
+/// (a triode's grid vs. cathode) is a guess from the number alone.
+fn pin_label(p: &PlacedPin) -> String {
+    if p.name.is_empty() || p.name == "~" || p.name == p.number {
+        p.number.clone()
+    } else {
+        format!("{}({})", p.number, p.name)
+    }
+}
+
+/// `1=VCC 2(G)=N_TR`, a symbol's pins and the nets they land on.
 fn pin_map(pins: &[&PlacedPin], netlist: &Netlist) -> String {
     pins.iter()
-        .map(|p| match refs::net_of(netlist, &p.refdes, &p.number) {
-            Some(net) => format!("{}={net}", p.number),
-            None => format!("{}=-", p.number),
+        .map(|p| {
+            let label = pin_label(p);
+            match refs::net_of(netlist, &p.refdes, &p.number) {
+                Some(net) => format!("{label}={net}"),
+                None => format!("{label}=-"),
+            }
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -66,14 +81,22 @@ pub fn read_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             continue;
         }
         let pins: Vec<&PlacedPin> = placed.iter().filter(|p| p.owner == symbol.uuid).collect();
+        // The halves of a dual part share one reference; say so on every line
+        // so `U1` twice reads as one two-unit part rather than a duplicate.
+        let units = refs::units(&doc, symbol.refdes()).len();
+        let unit = match units {
+            0 | 1 => String::new(),
+            n => format!(" unit {}/{n}", symbol.unit),
+        };
         out.push_str(&format!(
-            "{} {} \"{}\" @({:.2},{:.2}){} [{}]",
+            "{} {} \"{}\" @({:.2},{:.2}){}{} [{}]",
             symbol.refdes(),
             symbol.lib_id,
             symbol.value(),
             symbol.at.x,
             symbol.at.y,
             rotation(symbol.at.rot),
+            unit,
             pin_map(&pins, &netlist),
         ));
         if symbol.dnp {
@@ -135,18 +158,34 @@ pub fn get_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let Some(symbol) = doc.symbol_by_ref(refdes) else {
         return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
     };
-    let pins: Vec<Value> = placed_pins(&doc)
+    let placed = placed_pins(&doc);
+    let units: Vec<Value> = refs::units(&doc, refdes)
         .iter()
-        .filter(|p| p.owner == symbol.uuid)
-        .map(|p| {
-            json!({
-                "number": p.number,
-                "name": p.name,
-                "type": p.etype,
-                "side": side_of(p),
-                "at": [p.at.x, p.at.y],
-                "net": refs::net_of(&netlist, &p.refdes, &p.number),
-            })
+        .filter_map(|(unit, uuid)| {
+            let instance = doc.symbol(uuid)?;
+            let pins: Vec<Value> = placed
+                .iter()
+                .filter(|p| p.owner == *uuid)
+                .map(|p| {
+                    json!({
+                        "number": p.number,
+                        "name": p.name,
+                        "type": p.etype,
+                        "side": side_of(p),
+                        "at": [p.at.x, p.at.y],
+                        "net": refs::net_of(&netlist, &p.refdes, &p.number),
+                    })
+                })
+                .collect();
+            let body = body_rect(&doc, instance);
+            Some(json!({
+                "unit": unit,
+                "uuid": uuid,
+                "at": [instance.at.x, instance.at.y],
+                "rotation": instance.at.rot,
+                "body": body.map(|r| json!([r.min_x, r.min_y, r.max_x, r.max_y])),
+                "pins": pins,
+            }))
         })
         .collect();
     let fields: BTreeMap<&str, &str> = symbol
@@ -154,18 +193,16 @@ pub fn get_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .map(|(name, field)| (name.as_str(), field.value.as_str()))
         .collect();
-    let body = body_rect(&doc, symbol);
     Ok(json!({
         "ref": symbol.refdes(),
         "lib_id": symbol.lib_id,
-        "at": [symbol.at.x, symbol.at.y],
-        "rotation": symbol.at.rot,
-        "unit": symbol.unit,
         "dnp": symbol.dnp,
         "in_bom": symbol.in_bom,
         "fields": fields,
-        "body": body.map(|r| json!([r.min_x, r.min_y, r.max_x, r.max_y])),
-        "pins": pins,
+        // One entry per unit. A single-unit part has exactly one; the halves of
+        // a dual part are one part with one value and one footprint, and every
+        // mutator but `move_symbols` addresses them together through `ref`.
+        "units": units,
     }))
 }
 
@@ -199,29 +236,4 @@ pub fn get_net(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "pins": net.pins.iter().map(refs::label).collect::<Vec<_>>(),
         "labels": labels,
     }))
-}
-
-/// Somewhere a `w`×`h` block fits without disturbing anything.
-pub fn free_space(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let w = input.get("w").and_then(Value::as_f64).unwrap_or(10.0);
-    let h = input.get("h").and_then(Value::as_f64).unwrap_or(10.0);
-    let (doc, _) = Edit::read(ctx)?;
-    let occupancy = Occupancy::of(&doc);
-    let from = match input.get("near").and_then(Value::as_str) {
-        Some(refdes) => match doc.symbol_by_ref(refdes) {
-            Some(symbol) => symbol.at.point(),
-            None => return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") })),
-        },
-        None => right_of(occupancy.content()),
-    };
-    match occupancy.nearest_free(snap_point(from), w, h) {
-        Some(at) => Ok(json!({ "at": [at.x, at.y], "w": w, "h": h })),
-        None => Ok(json!({ "error": "no free space that size on the sheet" })),
-    }
-}
-
-/// Fresh ground to the right of everything drawn — where a block with no
-/// anchor naturally belongs.
-fn right_of(content: Rect) -> Point2 {
-    Point2::new(content.max_x + 12.7, content.center().y)
 }

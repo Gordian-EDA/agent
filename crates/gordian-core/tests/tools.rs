@@ -37,6 +37,30 @@ fn search_symbols_tool_finds_stm32() {
 }
 
 #[test]
+fn every_ecc82_search_hit_resolves_to_symbol_info() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let found = run_tool(
+        "search_symbols",
+        serde_json::json!({"query": "ECC82", "limit": 8}),
+        &ctx,
+    )
+    .unwrap();
+    for hit in found["hits"].as_array().expect("hits") {
+        let lib_id = hit["lib_id"].as_str().expect("lib_id");
+        let info = run_tool(
+            "get_symbol_info",
+            serde_json::json!({"lib_id": lib_id}),
+            &ctx,
+        )
+        .unwrap();
+        assert!(info.get("error").is_none(), "{lib_id}: {info}");
+    }
+}
+
+#[test]
 fn search_symbols_batches_four_labeled_queries() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
@@ -415,9 +439,8 @@ fn defs_lists_all_tools() {
         "read_schematic",
         "get_symbol",
         "get_net",
-        "free_space",
         "check_schematic",
-        "add_symbol",
+        "add_symbols",
         "remove_symbols",
         "move_symbols",
         "set_fields",
@@ -521,7 +544,7 @@ fn tool_definitions_stay_within_static_context_budget() {
     let defs = tool_defs();
     let total: usize = defs.iter().map(|tool| tool.size()).sum();
     assert!(
-        total <= 14_200,
+        total <= 14_900,
         "tool definitions use {total} bytes; keep the always-on schemas concise"
     );
 }

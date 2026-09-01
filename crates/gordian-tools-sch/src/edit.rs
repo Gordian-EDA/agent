@@ -1,7 +1,7 @@
 //! The symbol mutators: place, remove, move, retag and swap parts.
 
 use anyhow::Result;
-use geom::{EPS, Point2};
+use geom::{EPS, Point2, Rect};
 use gordian_runtime::AgentRuntime;
 use sch_doc::{LabelKind, Pose, SchDoc, placed_pins};
 use serde_json::{Value, json};
@@ -30,12 +30,58 @@ fn named_as(pin: &sch_doc::PlacedPin, key: &str) -> bool {
     !matches!(pin.name.as_str(), "" | "~") && pin.name.eq_ignore_ascii_case(key)
 }
 
+fn valid_refdes(refdes: &str) -> bool {
+    let refdes = refdes.strip_prefix('#').unwrap_or(refdes);
+    let letters = refdes.chars().take_while(char::is_ascii_alphabetic).count();
+    letters > 0
+        && letters < refdes.len()
+        && refdes[..letters].chars().all(|ch| ch.is_ascii_alphabetic())
+        && refdes[letters..].chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn combined_extent(doc: &SchDoc, uuids: &[String]) -> Option<Rect> {
+    let corners: Vec<Point2> = uuids
+        .iter()
+        .filter_map(|uuid| doc.symbol(uuid))
+        .filter_map(|symbol| crate::place::extent(doc, symbol))
+        .flat_map(|extent| {
+            [
+                Point2::new(extent.min_x, extent.min_y),
+                Point2::new(extent.max_x, extent.max_y),
+            ]
+        })
+        .collect();
+    Rect::bounding(&corners)
+}
+
+fn stack_units(doc: &mut SchDoc, uuids: &[String]) -> Result<(), sch_doc::Error> {
+    let mut previous_bottom = None;
+    for uuid in uuids {
+        let Some(symbol) = doc.symbol(uuid) else {
+            continue;
+        };
+        let at = symbol.at;
+        let Some(extent) = crate::place::extent(doc, symbol) else {
+            continue;
+        };
+        if let Some(bottom) = previous_bottom {
+            let y = at.y + bottom + crate::place::CLEARANCE - extent.min_y;
+            doc.move_symbol(uuid, at.x, snap(y))?;
+        }
+        previous_bottom = doc
+            .symbol(uuid)
+            .and_then(|symbol| crate::place::extent(doc, symbol))
+            .map(|extent| extent.max_y);
+    }
+    Ok(())
+}
+
 /// Where a part should end up, and which of its two anchors the answer is
 /// about.
 ///
-/// `at`/`to` name the symbol's own position — the one `read_schematic` prints,
-/// so a coordinate read back and written out again lands where it started.
-/// A free-space search instead yields where the part's *extent* should be
+/// `to` names the symbol's own position — the one `read_schematic` prints, so
+/// a coordinate read back and written out again lands where it started. A
+/// free-space search instead yields where the part's *extent* should be
 /// centred, which is the only way to reason about clearance.
 enum Destination {
     Origin(Point2),
@@ -61,17 +107,16 @@ fn destination(
     w: f64,
     h: f64,
     skip: &[String],
-) -> Result<Destination, String> {
-    if let Some(at) = input
-        .get("at")
-        .or_else(|| input.get("to"))
-        .and_then(Value::as_array)
-    {
+) -> Result<(Destination, Option<String>), String> {
+    if let Some(at) = input.get("to").and_then(Value::as_array) {
         let n: Vec<f64> = at.iter().filter_map(Value::as_f64).collect();
         if n.len() != 2 {
-            return Err("`at`/`to` must be [x, y] in mm".to_string());
+            return Err("`to` must be [x, y] in mm".to_string());
         }
-        return Ok(Destination::Origin(snap_point(Point2::new(n[0], n[1]))));
+        return Ok((
+            Destination::Origin(snap_point(Point2::new(n[0], n[1]))),
+            None,
+        ));
     }
     if let Some(anchor) = input.get("near").and_then(Value::as_str) {
         if doc.symbol_by_ref(anchor).is_none() {
@@ -82,9 +127,11 @@ fn destination(
             .and_then(Value::as_str)
             .and_then(Side::parse)
             .unwrap_or(Side::Right);
-        return spot_beside(doc, anchor, side, w, h, skip)
-            .map(Destination::Centre)
-            .ok_or_else(|| format!("no room {side:?} of {anchor}"));
+        let (at, on_side) =
+            spot_beside(doc, anchor, side, w, h, skip).ok_or("no free space on the sheet")?;
+        let note = (!on_side)
+            .then(|| format!("nothing fits {side:?} {anchor}; used the nearest free spot"));
+        return Ok((Destination::Centre(at), note));
     }
     let content = Occupancy::skipping(doc, skip).content();
     spot_near(
@@ -94,35 +141,49 @@ fn destination(
         h,
         skip,
     )
-    .map(Destination::Centre)
+    .map(|at| (Destination::Centre(at), None))
     .ok_or_else(|| "no free space on the sheet".to_string())
 }
 
-/// Place a new part.
-pub fn add_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let Some(lib_id) = input.get("lib_id").and_then(Value::as_str) else {
-        return Ok(json!({ "error": "add_symbol needs `lib_id` (e.g. Device:R)" }));
+/// Place one part and report where it landed.
+///
+/// The part is parked far off-sheet first: its extents are only knowable once
+/// its definition is embedded, and both the orientation and the destination
+/// depend on them.
+fn place_one(
+    edit: &mut Edit,
+    spec: &Value,
+    source: &sch_doc::SymbolSource,
+) -> Result<Value, String> {
+    let Some(lib_id) = spec.get("lib_id").and_then(Value::as_str) else {
+        return Err("every part needs `lib_id` (e.g. Device:R)".to_string());
     };
-    let mut edit = Edit::open(ctx)?;
-    let source = symbol_source(ctx);
-    let value = input.get("value").and_then(Value::as_str).unwrap_or("");
-
-    // Park the part far off-sheet first: its body extents are only knowable
-    // once its definition is embedded, and the destination depends on them.
-    if let Some(refdes) = input.get("ref").and_then(Value::as_str)
+    if spec.get("at").is_some() {
+        return Err(
+            "add_symbols chooses collision-free placement; use `near`+`side`, or use move_symbols({moves:[{ref,to}]}) only when the user explicitly requested coordinates"
+                .to_string(),
+        );
+    }
+    let value = spec.get("value").and_then(Value::as_str).unwrap_or("");
+    if let Some(refdes) = spec.get("ref").and_then(Value::as_str)
         && edit.doc.symbol_by_ref(refdes).is_some()
     {
-        return Ok(json!({ "error": format!("`{refdes}` is already on the sheet") }));
+        return Err(format!("`{refdes}` is already on the sheet"));
+    }
+    if let Some(refdes) = spec.get("ref").and_then(Value::as_str)
+        && !valid_refdes(refdes)
+    {
+        return Err(format!(
+            "`{refdes}` is not a valid reference; use letters followed by digits, such as R12, U3, or #PWR01"
+        ));
     }
     let park = Pose::new(5000.0, 5000.0, 0.0);
     let provisional = next_refdes(&edit.doc, "ZZ");
-    if let Err(error) = edit
+    let uuids = edit
         .doc
-        .add_symbol(lib_id, &provisional, value, park, &source)
-    {
-        return Ok(json!({ "error": format!("could not place {lib_id}: {error}") }));
-    }
-    let refdes = match input.get("ref").and_then(Value::as_str) {
+        .add_symbol(lib_id, &provisional, value, park, source)
+        .map_err(|error| format!("could not place {lib_id}: {error}"))?;
+    let refdes = match spec.get("ref").and_then(Value::as_str) {
         Some(refdes) => refdes.to_string(),
         None => {
             let prefix = edit
@@ -132,37 +193,120 @@ pub fn add_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             next_refdes(&edit.doc, &prefix)
         }
     };
-    edit.doc.set_field(&provisional, "Reference", &refdes)?;
-    if let Some(footprint) = input.get("footprint").and_then(Value::as_str) {
-        edit.doc.set_field(&refdes, "Footprint", footprint)?;
+    let fail = |error: sch_doc::Error| error.to_string();
+    edit.doc.set_reference(&uuids, &refdes).map_err(fail)?;
+    if let Some(footprint) = spec.get("footprint").and_then(Value::as_str) {
+        for uuid in &uuids {
+            edit.doc
+                .set_field(uuid, "Footprint", footprint)
+                .map_err(fail)?;
+        }
+    }
+    let side = spec
+        .get("side")
+        .and_then(Value::as_str)
+        .and_then(Side::parse);
+    let rot = match spec.get("rot").and_then(Value::as_f64) {
+        Some(rot) => {
+            let rot = geom::snap_quadrant(rot);
+            for uuid in &uuids {
+                edit.doc
+                    .set_symbol_orientation(uuid, rot, sch_doc::Mirror::None)
+                    .map_err(fail)?;
+            }
+            rot
+        }
+        None if spec.get("near").is_some() && uuids.len() == 1 => {
+            crate::place::facing_rotation(&mut edit.doc, &refdes, side.unwrap_or(Side::Right))
+        }
+        None => 0.0,
+    };
+    stack_units(&mut edit.doc, &uuids).map_err(fail)?;
+
+    let body = combined_extent(&edit.doc, &uuids);
+    let (w, h) = body.map_or((10.0, 10.0), |r| (r.width(), r.height()));
+    let skip = uuids.clone();
+    let (want, mut note) = destination(&edit.doc, spec, w, h, &skip)?;
+    let centre = body.map_or(park.point(), |r| r.center());
+    let mut at = snap_point(want.origin_for(park.point(), centre));
+    // An explicit `at` is a request, not a licence to land on someone else's
+    // drawing: slide clear, and say so.
+    let offset = Point2::new(centre.x - park.x, centre.y - park.y);
+    let landing = Point2::new(at.x + offset.x, at.y + offset.y);
+    let occupancy = Occupancy::skipping(&edit.doc, &skip);
+    if !occupancy.free(landing, w, h) {
+        let free = occupancy
+            .nearest_free(landing, w, h)
+            .ok_or("no free space on the sheet")?;
+        at = snap_point(Point2::new(free.x - offset.x, free.y - offset.y));
+        note = Some(format!(
+            "({:.2},{:.2}) was occupied; moved clear",
+            landing.x, landing.y
+        ));
+    }
+    let delta = Point2::new(at.x - park.x, at.y - park.y);
+    for uuid in &uuids {
+        let unit_at = edit
+            .doc
+            .symbol(uuid)
+            .map(|symbol| symbol.at)
+            .unwrap_or(park);
+        edit.doc
+            .move_symbol(uuid, snap(unit_at.x + delta.x), snap(unit_at.y + delta.y))
+            .map_err(fail)?;
     }
 
-    let body = edit
-        .doc
-        .symbol_by_ref(&refdes)
-        .and_then(|s| crate::place::extent(&edit.doc, s));
-    let (w, h) = body.map_or((10.0, 10.0), |r| (r.width(), r.height()));
-    let skip = vec![refdes.clone()];
-    let want = match destination(&edit.doc, &input, w, h, &skip) {
-        Ok(want) => want,
-        Err(error) => return Ok(json!({ "error": error })),
-    };
-    let centre = body.map_or(park.point(), |r| r.center());
-    let at = want.origin_for(park.point(), centre);
-    edit.doc.move_symbol(&refdes, snap(at.x), snap(at.y))?;
+    let units: Vec<Value> = uuids
+        .iter()
+        .filter_map(|uuid| edit.doc.symbol(uuid))
+        .map(|symbol| json!({ "unit": symbol.unit, "at": [symbol.at.x, symbol.at.y] }))
+        .collect();
+    let placed = units
+        .first()
+        .and_then(|unit| unit.get("at"))
+        .cloned()
+        .unwrap_or_else(|| json!([at.x, at.y]));
+    let mut report = json!({
+        "ref": refdes,
+        "lib_id": lib_id,
+        "at": placed,
+        "units": units,
+        "rot": rot,
+    });
+    if let Some(note) = note {
+        report["note"] = json!(note);
+    }
+    Ok(report)
+}
 
-    let placed = edit
-        .doc
-        .symbol_by_ref(&refdes)
-        .map(|s| (s.at.x, s.at.y))
+/// Place a block of new parts in one transaction, each clear of the last.
+pub fn add_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let specs: Vec<Value> = input
+        .get("parts")
+        .and_then(Value::as_array)
+        .cloned()
         .unwrap_or_default();
-    edit.commit(
-        json!(format!(
-            "placed {refdes} ({lib_id}) at ({:.2},{:.2})",
-            placed.0, placed.1
-        )),
-        Allow::nothing().part(&refdes).creating(),
-    )
+    if specs.is_empty() {
+        return Ok(json!({ "error": "add_symbols needs a non-empty `parts` list" }));
+    }
+    let mut edit = Edit::open(ctx)?;
+    let source = symbol_source(ctx);
+    let mut allow = Allow::nothing().creating();
+    let mut placed = Vec::new();
+    for spec in &specs {
+        match place_one(&mut edit, spec, &source) {
+            Ok(report) => {
+                if let Some(refdes) = report["ref"].as_str() {
+                    allow = allow.part(refdes);
+                }
+                placed.push(report);
+            }
+            // A half-placed block is worse than none: report the first
+            // failure and write nothing.
+            Err(error) => return Ok(json!({ "error": error, "placed": placed })),
+        }
+    }
+    edit.commit(json!({ "placed": placed }), allow)
 }
 
 /// Remove parts, together with the stubs and labels that only served them.
@@ -202,11 +346,15 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     for refdes in &targets {
         edit.doc.remove_symbol(refdes)?;
     }
-    let retracted = retract_stubs(&mut edit.doc, &orphaned);
+    let mut retracted = retract_stubs(&mut edit.doc, &orphaned);
+    let floating = crate::wiring::floating_wires(&edit.doc);
+    retracted += edit.doc.remove_drawing(&floating);
+    let loose = refs::newly_loose(edit.before(), &sch_doc::connect::extract(&edit.doc));
     edit.commit(
         json!({
             "removed": targets,
             "retracted_drawing": retracted,
+            "now_loose": loose,
         }),
         allow,
     )
@@ -267,7 +415,80 @@ fn retract_stubs(doc: &mut SchDoc, orphaned: &[Point2]) -> usize {
     removed
 }
 
-/// Move parts, refusing any move that would land one on top of another.
+/// How far a move may slide to clear an obstacle and still be the move that
+/// was asked for: 20 grid steps, about 25 mm.
+const NUDGE_RINGS: i32 = 20;
+
+/// Drag the symbols glued to a pin along with it.
+///
+/// A power symbol is placed straight onto the pin it feeds — that contact
+/// *is* the connection — so a move that left it behind would silently take the
+/// pin off its rail. Only symbols whose every pin sits on the moved one
+/// travel; anything with a pin elsewhere is wired, not glued.
+fn carry_glued_symbols(
+    doc: &mut SchDoc,
+    moved: &str,
+    from: Point2,
+    to: Point2,
+) -> anyhow::Result<()> {
+    if from.near_eq(to, EPS) {
+        return Ok(());
+    }
+    let pins = placed_pins(doc);
+    let glued: Vec<String> = doc
+        .symbols()
+        .filter(|s| s.uuid != moved)
+        .filter(|s| {
+            let own: Vec<&sch_doc::PlacedPin> = pins.iter().filter(|p| p.owner == s.uuid).collect();
+            !own.is_empty() && own.iter().all(|p| p.at.near_eq(from, EPS))
+        })
+        .map(|s| s.uuid.clone())
+        .collect();
+    for uuid in glued {
+        let at = match doc.symbol(&uuid) {
+            Some(symbol) => symbol.at,
+            None => continue,
+        };
+        doc.move_symbol(&uuid, at.x + to.x - from.x, at.y + to.y - from.y)?;
+    }
+    Ok(())
+}
+
+/// Apply a `rot`/`mirror` to a symbol, returning the rotation it now carries.
+///
+/// Rotating in place is how a diode is reversed or a part turned to meet a
+/// wire; without it the only way to change an orientation is to delete the
+/// part and place it again, losing its connections.
+fn orient(doc: &mut SchDoc, uuid: &str, step: &Value) -> Result<Option<f64>> {
+    let rot = step.get("rot").and_then(Value::as_f64);
+    let mirror = step.get("mirror").and_then(Value::as_str);
+    if rot.is_none() && mirror.is_none() {
+        return Ok(None);
+    }
+    let current = doc
+        .symbol(uuid)
+        .map_or((0.0, sch_doc::Mirror::None), |s| (s.at.rot, s.mirror));
+    let mirror = match mirror {
+        Some("x") => sch_doc::Mirror::X,
+        Some("y") => sch_doc::Mirror::Y,
+        Some(_) => sch_doc::Mirror::None,
+        None => current.1,
+    };
+    let rot = rot.map_or(current.0, geom::snap_quadrant);
+    doc.set_symbol_orientation(uuid, rot, mirror)?;
+    Ok(Some(rot))
+}
+
+/// `1, 2` — the unit numbers of a multi-unit part, for an error message.
+fn list(units: &[(u32, String)]) -> String {
+    units
+        .iter()
+        .map(|(unit, _)| unit.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Move parts, sliding clear of anything already in the way.
 pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let moves: Vec<Value> = input
         .get("moves")
@@ -288,25 +509,86 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut placed = Vec::new();
     // A part still waiting its turn is not an obstacle to the one being placed;
     // one already placed in this batch is.
-    let mut pending = all.clone();
+    let mut pending: Vec<String> = moves
+        .iter()
+        .filter_map(|step| {
+            let refdes = step.get("ref")?.as_str()?;
+            let units = refs::units(&edit.doc, refdes);
+            let wanted = step.get("unit").and_then(Value::as_u64);
+            match (units.as_slice(), wanted) {
+                ([(_, uuid)], _) => Some(uuid.clone()),
+                (many, Some(unit)) => many
+                    .iter()
+                    .find(|(candidate, _)| u64::from(*candidate) == unit)
+                    .map(|(_, uuid)| uuid.clone()),
+                _ => None,
+            }
+        })
+        .collect();
     for step in &moves {
         let refdes = step["ref"].as_str().unwrap_or_default().to_string();
-        if ["to", "at", "by", "near"]
+        if ["to", "by", "near", "rot", "mirror"]
             .iter()
             .all(|key| step.get(key).is_none())
         {
             return Ok(json!({
-                "error": format!("the move of {refdes} says nowhere to put it — give `to`, `by`, or `near`+`side`"),
+                "error": format!("the move of {refdes} does nothing — give `to`, `by`, `near`+`side`, `rot` or `mirror`"),
             }));
         }
-        let Some(symbol) = edit.doc.symbol_by_ref(&refdes) else {
+        // The units of one part sit in different places, so a move — unlike a
+        // value or a swap — has to say which one it means.
+        let units = refs::units(&edit.doc, &refdes);
+        let wanted = step.get("unit").and_then(Value::as_u64);
+        let uuid = match (units.as_slice(), wanted) {
+            ([], _) => {
+                return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
+            }
+            ([(_, uuid)], _) => uuid.clone(),
+            (many, Some(want)) => match many.iter().find(|(unit, _)| u64::from(*unit) == want) {
+                Some((_, uuid)) => uuid.clone(),
+                None => {
+                    return Ok(json!({
+                        "error": format!("{refdes} has no unit {want}; it has {}", list(many)),
+                    }));
+                }
+            },
+            (many, None) => {
+                return Ok(json!({
+                    "error": format!(
+                        "{refdes} is a {}-unit part whose units sit apart; add `unit` to say \
+                         which one to move — it has {}",
+                        many.len(), list(many)
+                    ),
+                }));
+            }
+        };
+        if edit.doc.symbol(&uuid).is_none() {
             return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
+        }
+        // Where the pins are *now*, before any turn: their wires follow them
+        // through both the rotation and the move.
+        let was: Vec<Point2> = placed_pins(&edit.doc)
+            .into_iter()
+            .filter(|p| p.owner == uuid)
+            .map(|p| p.at)
+            .collect();
+        // Turning a part is how a diode is reversed, and it changes the shape
+        // that has to fit, so it happens before the destination is chosen.
+        let turned = orient(&mut edit.doc, &uuid, step)?;
+        let symbol = match edit.doc.symbol(&uuid) {
+            Some(symbol) => symbol,
+            None => return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") })),
         };
         let origin = symbol.at.point();
         let body = crate::place::extent(&edit.doc, symbol);
         let (w, h) = body.map_or((10.0, 10.0), |r| (r.width(), r.height()));
         let centre = body.map_or(origin, |r| r.center());
-        let want = if let Some(by) = step.get("by").and_then(Value::as_array) {
+        let staying = ["to", "by", "near"]
+            .iter()
+            .all(|key| step.get(key).is_none());
+        let want = if staying {
+            Destination::Origin(origin)
+        } else if let Some(by) = step.get("by").and_then(Value::as_array) {
             let n: Vec<f64> = by.iter().filter_map(Value::as_f64).collect();
             if n.len() != 2 {
                 return Ok(json!({ "error": "`by` must be [dx, dy] in mm" }));
@@ -314,41 +596,67 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             Destination::Centre(Point2::new(centre.x + n[0], centre.y + n[1]))
         } else {
             match destination(&edit.doc, step, w, h, &pending) {
-                Ok(want) => want,
+                Ok((want, _)) => want,
                 Err(error) => return Ok(json!({ "error": error })),
             }
         };
-        let at = snap_point(want.origin_for(origin, centre));
+        let mut at = snap_point(want.origin_for(origin, centre));
         // Clearance is about the extent, which sits `centre - origin` away.
-        let landing = Point2::new(at.x + centre.x - origin.x, at.y + centre.y - origin.y);
-        if !Occupancy::skipping(&edit.doc, &pending).free(landing, w, h) {
-            return Ok(json!({
-                "error": format!(
-                    "{refdes} would overlap another part at ({:.2},{:.2}); nothing was moved",
-                    at.x, at.y
-                ),
-            }));
+        let offset = Point2::new(centre.x - origin.x, centre.y - origin.y);
+        let landing = Point2::new(at.x + offset.x, at.y + offset.y);
+        let occupancy = Occupancy::skipping(&edit.doc, &pending);
+        let mut nudge = None;
+        if !occupancy.free(landing, w, h) {
+            // The spot the caller picked is taken, but the intent — put this
+            // part about here — still holds: slide to the nearest grid spot
+            // that fits and say where it went.
+            let Some(free) = occupancy.nearest_free_within(landing, w, h, NUDGE_RINGS) else {
+                return Ok(json!({
+                    "error": format!(
+                        "nothing within {:.0} mm of ({:.2},{:.2}) has room for {refdes}; \
+                         nothing was moved",
+                        NUDGE_RINGS as f64 * 1.27, at.x, at.y
+                    ),
+                }));
+            };
+            at = snap_point(Point2::new(free.x - offset.x, free.y - offset.y));
+            nudge = Some([at.x, at.y]);
         }
         // Whatever met this part's pins comes with it, the way KiCAD drags a
         // symbol: leaving the wires behind would silently unwire the board.
-        let was: Vec<Point2> = placed_pins(&edit.doc)
-            .into_iter()
-            .filter(|p| p.refdes == refdes)
-            .map(|p| p.at)
-            .collect();
-        edit.doc.move_symbol(&refdes, at.x, at.y)?;
+        edit.doc.move_symbol(&uuid, at.x, at.y)?;
         let now: Vec<Point2> = placed_pins(&edit.doc)
             .into_iter()
-            .filter(|p| p.refdes == refdes)
+            .filter(|p| p.owner == uuid)
             .map(|p| p.at)
             .collect();
+        let mut landed = Vec::new();
         for (from, to) in was.into_iter().zip(now) {
             edit.doc.move_attached(from, to);
+            carry_glued_symbols(&mut edit.doc, &uuid, from, to)?;
+            landed.push(to);
         }
-        pending.retain(|r| *r != refdes);
-        placed.push(json!({ "ref": refdes, "at": [at.x, at.y] }));
+        let straightened = crate::wiring::straighten(&mut edit.doc, &landed);
+        pending.retain(|pending_uuid| *pending_uuid != uuid);
+        let mut report = json!({ "ref": refdes, "at": [at.x, at.y] });
+        if let Some(to) = nudge {
+            report["nudged_to"] = json!(to);
+        }
+        if let Some(rot) = turned {
+            report["rot"] = json!(rot);
+        }
+        if straightened > 0 {
+            report["rerouted_wires"] = json!(straightened);
+        }
+        placed.push(report);
     }
-    edit.commit(json!({ "moved": placed }), Allow::nothing())
+    edit.commit(
+        json!({
+            "moved": placed,
+            "placement": "final and clean; any nudged_to coordinate is the collision-free final position, so do not move it again",
+        }),
+        Allow::nothing(),
+    )
 }
 
 /// Set or clear a part's properties.
@@ -362,10 +670,30 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut edit = Edit::open(ctx)?;
     // Address the symbol by UUID: setting `Reference` renames it, and every
     // later field in the same call would then be looking for a part that is
-    // no longer there.
-    let Some(uuid) = edit.doc.symbol_by_ref(refdes).map(|s| s.uuid.clone()) else {
+    // no longer there. Every unit gets the value — KiCAD shares one property
+    // table across the halves of a part.
+    let units = refs::units(&edit.doc, refdes);
+    if units.is_empty() {
         return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
-    };
+    }
+    let renamed_to = fields.get("Reference").and_then(Value::as_str);
+    if let Some(new_refdes) = renamed_to
+        && new_refdes != refdes
+    {
+        let clashes = refs::units(&edit.doc, new_refdes);
+        if !clashes.is_empty() {
+            let units = clashes
+                .iter()
+                .map(|(unit, _)| unit.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Ok(json!({
+                "error": format!(
+                    "reference clash: cannot rename {refdes} to {new_refdes}; {new_refdes} is already used by unit(s) {units}; nothing was written"
+                ),
+            }));
+        }
+    }
     let was = refs::nets_touching(edit.before(), &[refdes.to_string()]);
     let mut allow = Allow::nothing().nets(was).part(refdes);
     if let Some(new) = fields.get("Reference").and_then(Value::as_str) {
@@ -377,10 +705,20 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             Value::Null => "",
             other => other.as_str().unwrap_or_default(),
         };
-        edit.doc.set_field(&uuid, name, text)?;
+        if name == "Reference" {
+            let uuids: Vec<String> = units.iter().map(|(_, uuid)| uuid.clone()).collect();
+            edit.doc.set_reference(&uuids, text)?;
+        } else {
+            for (_, uuid) in &units {
+                edit.doc.set_field(uuid, name, text)?;
+            }
+        }
         applied.insert(name.clone(), json!(text));
     }
-    edit.commit(json!({ "ref": refdes, "fields": applied }), allow)
+    edit.commit(
+        json!({ "ref": refdes, "units": units.len(), "fields": applied }),
+        allow,
+    )
 }
 
 /// Set a part's build attributes.
@@ -389,16 +727,18 @@ pub fn set_flags(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "set_flags needs `ref`" }));
     };
     let mut edit = Edit::open(ctx)?;
-    let uuid = match edit.doc.symbol_by_ref(refdes) {
-        Some(symbol) => symbol.uuid.clone(),
-        None => return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") })),
-    };
+    let units = refs::units(&edit.doc, refdes);
+    if units.is_empty() {
+        return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
+    }
     let dnp = input.get("dnp").and_then(Value::as_bool);
     let in_bom = input.get("in_bom").and_then(Value::as_bool);
     if dnp.is_none() && in_bom.is_none() {
         return Ok(json!({ "error": "set_flags needs `dnp` and/or `in_bom`" }));
     }
-    edit.doc.set_flags(&uuid, dnp, in_bom)?;
+    for (_, uuid) in &units {
+        edit.doc.set_flags(uuid, dnp, in_bom)?;
+    }
     let mut applied = serde_json::Map::new();
     if let Some(dnp) = dnp {
         applied.insert("dnp".into(), json!(dnp));
@@ -421,7 +761,10 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "swap_symbol needs `ref` and `lib_id`" }));
     };
     let mut edit = Edit::open(ctx)?;
-    if edit.doc.symbol_by_ref(refdes).is_none() {
+    // Every unit of the part moves together: half an ECC83 and half an ECC82
+    // is not a part.
+    let units = refs::units(&edit.doc, refdes);
+    if units.is_empty() {
         return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
     }
     // Where each connected pin sat, so whatever met it can follow it across.
@@ -435,15 +778,44 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .collect();
     let was = refs::nets_touching(edit.before(), &[refdes.to_string()]);
 
-    let dropped = match edit.doc.set_lib_id(refdes, lib_id, &symbol_source(ctx)) {
-        Ok(dropped) => dropped,
-        Err(error) => {
-            return Ok(json!({ "error": format!("could not swap to {lib_id}: {error}") }));
+    let source = symbol_source(ctx);
+    let mut dropped: Vec<String> = Vec::new();
+    for (_, uuid) in &units {
+        match edit.doc.set_lib_id(uuid, lib_id, &source) {
+            Ok(lost) => dropped.extend(lost),
+            Err(_) => {
+                return Ok(json!({
+                    "error": format!(
+                        "no symbol `{lib_id}` exists in any library; if the replacement is electrically the same part, use `set_fields({{ref, fields:{{Value:…}}}})` instead of swapping to an unrelated same-numbered symbol"
+                    ),
+                }));
+            }
         }
-    };
+    }
+    dropped.sort_unstable();
+    dropped.dedup();
+    // A definition with fewer units than the part uses would leave a unit with
+    // no pins at all — an invisible amputation, so refuse it outright.
+    let now = placed_pins(&edit.doc);
+    let missing: Vec<String> = units
+        .iter()
+        .filter(|(_, uuid)| !now.iter().any(|p| p.owner == *uuid))
+        .map(|(unit, _)| unit.to_string())
+        .collect();
+    if !missing.is_empty() {
+        return Ok(json!({
+            "error": format!(
+                "{lib_id} has no unit {}; {refdes} is a {}-unit part and every unit must swap \
+                 together — pick a symbol with at least {} units",
+                missing.join(", "), units.len(), units.len()
+            ),
+        }));
+    }
     for (key, field) in [("value", "Value"), ("footprint", "Footprint")] {
         if let Some(text) = input.get(key).and_then(Value::as_str) {
-            edit.doc.set_field(refdes, field, text)?;
+            for (_, uuid) in &units {
+                edit.doc.set_field(uuid, field, text)?;
+            }
         }
     }
 
@@ -451,9 +823,8 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // where the old ones were. Drag each pin's wires across to it; only a pin
     // that still cannot reach its net gets named in place.
     let pin_map = input.get("pin_map").and_then(Value::as_object);
-    let now = placed_pins(&edit.doc);
     let mut unmapped = Vec::new();
-    let mut restored = Vec::new();
+    let mut mapped = Vec::new();
     // One new pin can stand in for at most one old pin: letting two old nets
     // land on the same pin would short them together.
     let mut taken: Vec<String> = Vec::new();
@@ -479,16 +850,23 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         };
         taken.push(pin.number.clone());
         let landed = pin.at;
-        edit.doc.move_attached(*was_at, landed);
-        // Re-extract: dragging this pin's wires, or a label written for an
-        // earlier pin, changes what this one is already connected to.
+        mapped.push((pin.number.clone(), net.clone(), *was_at, landed));
+    }
+    let moves: Vec<(Point2, Point2)> = mapped
+        .iter()
+        .map(|(_, _, was_at, landed)| (*was_at, *landed))
+        .collect();
+    edit.doc.move_attached_many(&moves);
+
+    let mut restored = Vec::new();
+    for (number, net, _, landed) in mapped {
         let after = sch_doc::connect::extract(&edit.doc);
-        if refs::net_of(&after, refdes, &pin.number) == Some(net.as_str()) {
+        if refs::net_of(&after, refdes, &number) == Some(net.as_str()) {
             continue;
         }
         edit.doc
-            .add_label(LabelKind::Local, net, Pose::new(landed.x, landed.y, 0.0));
-        restored.push(format!("{refdes}.{}={net}", pin.number));
+            .add_label(LabelKind::Local, &net, Pose::new(landed.x, landed.y, 0.0));
+        restored.push(format!("{refdes}.{number}={net}"));
     }
     if !restored.is_empty() {
         edit.warn(format!(
@@ -512,4 +890,20 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }),
         Allow::nothing().nets(was.clone()).part(refdes).creating(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_refdes;
+
+    /// Tool-created references use KiCad's letter-prefix and numeric-suffix form.
+    #[test]
+    fn reference_validation_rejects_descriptive_names() {
+        for valid in ["R12", "U3", "#PWR01"] {
+            assert!(valid_refdes(valid), "{valid}");
+        }
+        for invalid in ["D_NEW2", "R", "12", ""] {
+            assert!(!valid_refdes(invalid), "{invalid}");
+        }
+    }
 }

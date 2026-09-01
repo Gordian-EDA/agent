@@ -36,11 +36,11 @@ async fn the_loop_reads_swaps_and_checks_a_live_schematic() {
 
     // Two resistors wired together, then R1 retargeted at a different symbol.
     let script = vec![
-        tool_call("t1", "add_symbol", json!({"lib_id": "Device:R", "ref": "R1", "value": "10k"})),
+        tool_call("t1", "add_symbols", json!({"parts": [{"lib_id": "Device:R", "ref": "R1", "value": "10k"}]})),
         tool_call(
             "t2",
-            "add_symbol",
-            json!({"lib_id": "Device:R", "ref": "R2", "value": "10k", "near": "R1", "side": "right"}),
+            "add_symbols",
+            json!({"parts": [{"lib_id": "Device:R", "ref": "R2", "value": "10k", "near": "R1", "side": "right"}]}),
         ),
         tool_call("t3", "connect", json!({"from": "R1.2", "to": "R2.1", "net": "MID"})),
         tool_call("t4", "read_schematic", json!({})),
@@ -75,11 +75,11 @@ async fn a_move_that_would_change_connectivity_is_refused() {
     std::fs::write(&sch_path, EMPTY_SHEET).unwrap();
 
     let script = vec![
-        tool_call("t1", "add_symbol", json!({"lib_id": "Device:R", "ref": "R1"})),
+        tool_call("t1", "add_symbols", json!({"parts": [{"lib_id": "Device:R", "ref": "R1"}]})),
         tool_call(
             "t2",
-            "add_symbol",
-            json!({"lib_id": "Device:R", "ref": "R2", "near": "R1", "side": "right"}),
+            "add_symbols",
+            json!({"parts": [{"lib_id": "Device:R", "ref": "R2", "near": "R1", "side": "right"}]}),
         ),
         tool_call("t3", "connect", json!({"from": "R1.2", "to": "R2.1", "net": "MID"})),
         tool_call("t4", "move_symbols", json!({"moves": [{"ref": "R2", "by": [0.0, 25.4]}]})),

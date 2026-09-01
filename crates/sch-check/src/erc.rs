@@ -415,13 +415,18 @@ fn check_polarity(items: &[Item], net_items: &HashMap<&str, Vec<usize>>, out: &m
             .as_deref()
             .and_then(rail_voltage)
             .is_some_and(|v| v > 0.0);
+        // The far side of that resistor need not be a *named* rail: an
+        // indicator fed from a connector pin sits on a generated net, and
+        // anode-to-ground with the series resistor on the cathode is the
+        // reversed indicator either way. Only a negative rail there is
+        // legitimate, so that is the one case left alone.
         let cathode_through_resistor_to_positive = is_led(it.comp)
             && cathode.as_deref().is_some_and(|cathode| {
                 net_items.get(cathode).into_iter().flatten().any(|&ri| {
                     let r = &items[ri];
                     is_resistor(r.comp)
                         && r.nets.len() == 2
-                        && rail_voltage(far(r, cathode)).is_some_and(|v| v > 0.0)
+                        && rail_voltage(far(r, cathode)).is_none_or(|v| v > 0.0)
                 })
             });
         let anode_on_gnd_cathode_positive =

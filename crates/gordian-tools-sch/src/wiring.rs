@@ -37,7 +37,11 @@ const ROUTING_NET: &str = "#routing";
 /// router must be free to touch what it is about to join, and would otherwise
 /// refuse to leave its own start point. Everything else keeps its own name and
 /// stays untouchable.
-fn scene(doc: &SchDoc, a: Point2, b: Point2) -> RouteScene {
+///
+/// The two symbols being joined are also lifted out of the solids: a pin tip
+/// often falls inside its own body's bounding box — an LED's does — and a
+/// router that treats that box as a wall can never reach the pin at all.
+fn scene(doc: &SchDoc, a: Point2, b: Point2, own: &[String]) -> RouteScene {
     let live = connect::scene(doc);
     let joined: Vec<String> = live
         .points
@@ -61,7 +65,11 @@ fn scene(doc: &SchDoc, a: Point2, b: Point2) -> RouteScene {
         })
         .collect();
     RouteScene {
-        solids: body_rects(doc).into_iter().map(|(_, r)| r).collect(),
+        solids: body_rects(doc)
+            .into_iter()
+            .filter(|(refdes, _)| !own.contains(refdes))
+            .map(|(_, r)| r)
+            .collect(),
         points: live
             .points
             .iter()
@@ -117,8 +125,32 @@ fn draw(doc: &mut SchDoc, path: &[Point2]) -> Vec<String> {
     uuids
 }
 
-/// Route a connection between two ends of the sheet.
+/// Route one connection, or every connection in `pairs`.
 pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let Some(pairs) = input.get("pairs").and_then(Value::as_array) else {
+        return connect_one(input, ctx);
+    };
+    // Each pair is its own transaction: a route that cannot be drawn falls
+    // back to a label rather than failing, so there is nothing to roll back.
+    // Every pair is tried — one bad reference must not silently drop the rest
+    // of a block's wiring — and each result says which ends it was about.
+    let mut done = Vec::new();
+    let mut failures = 0;
+    for pair in pairs {
+        let mut result = connect_one(pair.clone(), ctx)?;
+        failures += usize::from(result.get("error").is_some());
+        result["from"] = pair.get("from").cloned().unwrap_or(Value::Null);
+        result["to"] = pair.get("to").cloned().unwrap_or(Value::Null);
+        done.push(result);
+    }
+    if failures == done.len() {
+        return Ok(json!({ "error": "every connection failed", "connected": done }));
+    }
+    Ok(json!({ "connected": done, "failed": failures }))
+}
+
+/// Route a connection between two ends of the sheet.
+fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut edit = Edit::open(ctx)?;
     let (from, to) = match (input.get("from"), input.get("to")) {
         (Some(from), Some(to)) => (from, to),
@@ -155,14 +187,19 @@ pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
 
     let allow = Allow::nothing()
-        .nets(net.clone())
-        .nets(from_net.clone())
-        .nets(to_net.clone())
+        .joining_nets(net.clone())
+        .joining_nets(from_net.clone())
+        .joining_nets(to_net.clone())
         .parts(from.owner().map(str::to_string))
         .parts(to.owner().map(str::to_string))
         .creating();
 
-    let scene = scene(&edit.doc, a, b);
+    let own: Vec<String> = [from.owner(), to.owner()]
+        .into_iter()
+        .flatten()
+        .map(str::to_string)
+        .collect();
+    let scene = scene(&edit.doc, a, b, &own);
     let drawn = route_edge(a, dir_a, b, ROUTING_NET, &scene)
         .map(|path| draw(&mut edit.doc, &path))
         // Drawing a path is not the same as making a connection: if the two
@@ -274,8 +311,8 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     edit.commit(
         json!(format!("named {spec} `{net}`")),
         Allow::nothing()
-            .net(net)
-            .nets(was)
+            .joining_nets([net.to_string()])
+            .joining_nets(was)
             .part(&pin.refdes)
             .creating(),
     )
@@ -379,16 +416,51 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             ),
         }));
     };
-    align_onto_pin(&mut edit.doc, &refdes, pin.at, pin.out);
+    let stub = stand_off(&mut edit.doc, &refdes, &pin);
     edit.commit(
-        json!(format!("attached {lib_id} `{net}` to {spec}")),
+        json!(format!(
+            "attached {lib_id} `{net}` to {spec}{}",
+            if stub { " through a short wire" } else { "" }
+        )),
         Allow::nothing()
-            .net(net)
-            .nets(was)
+            .joining_nets([net.to_string()])
+            .joining_nets(was)
             .part(&refdes)
             .part(&pin.refdes)
             .creating(),
     )
+}
+
+/// Seat a rail symbol on its pin, backing it off along the pin until its body
+/// clears the part it feeds and drawing a stub to bridge the gap.
+///
+/// A rail dropped straight onto the pin of a diode lands inside the diode's
+/// own outline — the pin tip is inside that body — and the two print on top of
+/// each other. Returns whether a stub wire was needed.
+fn stand_off(doc: &mut SchDoc, refdes: &str, pin: &sch_doc::PlacedPin) -> bool {
+    let owner = doc
+        .symbol(&pin.owner)
+        .and_then(|inst| crate::place::extent(doc, inst));
+    let mut at = pin.at;
+    for _ in 0..6 {
+        align_onto_pin(doc, refdes, at, pin.out);
+        let rail = doc
+            .symbol_by_ref(refdes)
+            .and_then(|inst| crate::place::extent(doc, inst));
+        let clashes = match (owner, rail) {
+            (Some(owner), Some(rail)) => owner.overlaps(&rail),
+            _ => false,
+        };
+        if !clashes {
+            break;
+        }
+        at = Point2::new(at.x + pin.out.x * 1.27, at.y + pin.out.y * 1.27);
+    }
+    if at.near_eq(pin.at, EPS) {
+        return false;
+    }
+    doc.add_wire(pin.at, at);
+    true
 }
 
 /// Rotate and shift a just-placed one-pin symbol so its pin sits exactly on
@@ -428,7 +500,97 @@ fn align_onto_pin(doc: &mut SchDoc, refdes: &str, at: Point2, out: Point2) {
     );
 }
 
-/// Remove drawn wires by net, by the parts they touch, or by UUID.
+/// Redraw the wires a move left slanting.
+///
+/// Dragging a symbol carries its wires' endpoints with it, which turns a
+/// right-angled route into a diagonal one — the thing that makes a moved part
+/// look wrong and sends the model off deleting and re-wiring by hand. Each
+/// slanted wire is re-routed; one the router cannot redraw goes back exactly
+/// as it was, because a slanted wire still connects.
+pub(crate) fn straighten(doc: &mut SchDoc, moved: &[Point2]) -> usize {
+    let touches = |p: Point2| moved.iter().any(|q| q.near_eq(p, EPS));
+    let slanted: Vec<(String, Point2, Point2)> = doc
+        .wires()
+        .filter_map(|wire| Some((wire.uuid.clone(), refs::ends(wire)?)))
+        .filter(|(_, (a, b))| (a.x - b.x).abs() > EPS && (a.y - b.y).abs() > EPS)
+        .filter(|(_, (a, b))| touches(*a) || touches(*b))
+        .map(|(uuid, (a, b))| (uuid, a, b))
+        .collect();
+    let mut redrawn = 0;
+    for (uuid, a, b) in slanted {
+        let (a, b) = if touches(a) { (a, b) } else { (b, a) };
+        let pin = sch_doc::placed_pins(doc).into_iter().find(|p| p.at == a);
+        let dir = pin.as_ref().map_or_else(
+            || dir_of(Point2::new(b.x - a.x, b.y - a.y)),
+            |p| dir_of(p.out),
+        );
+        let own: Vec<String> = pin.iter().map(|p| p.refdes.clone()).collect();
+        doc.remove_drawing(&[uuid]);
+        let scene = scene(doc, a, b, &own);
+        match route_edge(a, dir, b, ROUTING_NET, &scene) {
+            Some(path) if joined_after(doc, &path, a, b) => redrawn += 1,
+            _ => {
+                doc.add_wire(a, b);
+            }
+        }
+    }
+    redrawn
+}
+
+/// Draw `path` and keep it only if it really joined `a` to `b`.
+fn joined_after(doc: &mut SchDoc, path: &[Point2], a: Point2, b: Point2) -> bool {
+    let uuids = draw(doc, path);
+    if joined(doc, a, b) {
+        return true;
+    }
+    doc.remove_drawing(&uuids);
+    false
+}
+
+/// Every wire belonging to a run that no longer reaches a pin, a label or a
+/// no-connect marker.
+///
+/// Cutting a net at one pin leaves the rest of that pin's route behind: an
+/// L-bend whose far half still sits on the sheet, joined to nothing. KiCAD
+/// calls that a dangling-wire *error*, and it carries no connection, so it
+/// goes with the cut.
+pub(crate) fn floating_wires(doc: &SchDoc) -> Vec<String> {
+    let runs: Vec<(String, Segment)> = doc
+        .wires()
+        .filter_map(|wire| Some((wire.uuid.clone(), refs::ends(wire)?)))
+        .map(|(uuid, (a, b))| (uuid, Segment::new(a, b)))
+        .collect();
+    let mut groups = geom::UnionFind::new(runs.len());
+    for (i, (_, one)) in runs.iter().enumerate() {
+        for (j, (_, other)) in runs.iter().enumerate().skip(i + 1) {
+            let meets = [one.a, one.b].iter().any(|p| other.contains_point(*p))
+                || [other.a, other.b].iter().any(|p| one.contains_point(*p));
+            if meets {
+                groups.union(i, j);
+            }
+        }
+    }
+    let mut anchors: Vec<Point2> = sch_doc::placed_pins(doc).iter().map(|p| p.at).collect();
+    anchors.extend(doc.labels().map(|l| l.at.point()));
+    anchors.extend(doc.items().iter().filter_map(|item| match item {
+        sch_doc::Item::NoConnect(marker) => Some(marker.at),
+        _ => None,
+    }));
+    let roots: Vec<usize> = (0..runs.len()).map(|i| groups.find(i)).collect();
+    let held: Vec<usize> = runs
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, run))| anchors.iter().any(|p| run.contains_point(*p)))
+        .map(|(i, _)| roots[i])
+        .collect();
+    runs.iter()
+        .zip(&roots)
+        .filter(|(_, root)| !held.contains(root))
+        .map(|((uuid, _), _)| uuid.clone())
+        .collect()
+}
+
+/// Remove drawn wires by pin, by net, by the parts they touch, or by UUID.
 pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut edit = Edit::open(ctx)?;
     let live = connect::scene(&edit.doc);
@@ -453,10 +615,38 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 .collect()
         })
         .unwrap_or_default();
-    if wanted_net.is_none() && wanted_refs.is_empty() && wanted_uuids.is_empty() {
-        return Ok(json!({ "error": "delete_wires needs one of `net`, `refs` or `uuids`" }));
+    let mut wanted_pins: Vec<Point2> = Vec::new();
+    let mut pin_owners: Vec<String> = Vec::new();
+    for spec in input
+        .get("pins")
+        .and_then(Value::as_array)
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(Value::as_str)
+    {
+        match refs::pin(&edit.doc, spec) {
+            Ok(pin) => {
+                wanted_pins.push(pin.at);
+                pin_owners.push(pin.refdes);
+            }
+            Err(error) => return Ok(json!({ "error": error })),
+        }
+    }
+    if wanted_net.is_none()
+        && wanted_refs.is_empty()
+        && wanted_uuids.is_empty()
+        && wanted_pins.is_empty()
+    {
+        return Ok(json!({
+            "error": "delete_wires needs one of `pins`, `net`, `refs` or `uuids`",
+        }));
     }
     let pins = sch_doc::placed_pins(&edit.doc);
+    let touches_pin = |a: Point2, b: Point2| {
+        wanted_pins
+            .iter()
+            .any(|p| p.near_eq(a, EPS) || p.near_eq(b, EPS))
+    };
     let touches_ref = |a: Point2, b: Point2| {
         pins.iter().any(|p| {
             wanted_refs.contains(&p.refdes) && (p.at.near_eq(a, EPS) || p.at.near_eq(b, EPS))
@@ -476,6 +666,7 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 return false;
             };
             wanted_uuids.contains(&wire.uuid)
+                || touches_pin(a, b)
                 || touches_ref(a, b)
                 || wanted_net.is_some_and(|net| net_of_segment(a, b).as_deref() == Some(net))
         })
@@ -484,22 +675,35 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if doomed.is_empty() {
         return Ok(json!({ "changed": "no wire matched", "net_delta": "connectivity unchanged" }));
     }
-    let removed = edit.doc.remove_drawing(&doomed);
-    // Deleting a net's wires loosens its pins, which is the whole point.
+    let mut removed = edit.doc.remove_drawing(&doomed);
+    removed += edit.doc.remove_drawing(&floating_wires(&edit.doc));
+    // Deleting copper loosens the pins that shared it, which is the point of
+    // the call: every net the request named, and every pin on one, is fair game.
+    let mut named: Vec<String> = wanted_refs.clone();
+    named.extend(pin_owners);
+    let mut nets = refs::nets_touching(edit.before(), &named);
+    nets.extend(wanted_net.map(str::to_string));
     let loosened: Vec<String> = edit
         .before()
         .nets
         .iter()
-        .filter(|net| wanted_net == Some(net.name.as_str()))
+        .filter(|net| nets.contains(&net.name))
         .flat_map(|net| net.pins.iter().map(|p| p.refdes.clone()))
         .collect();
     let allow = Allow::nothing()
-        .nets(wanted_net.map(str::to_string))
-        .nets(refs::nets_touching(edit.before(), &wanted_refs))
-        .parts(wanted_refs.clone())
+        .nets(nets)
+        .parts(named)
         .parts(loosened)
         .creating();
-    edit.commit(json!(format!("deleted {removed} wire(s)")), allow)
+    let loose = refs::newly_loose(edit.before(), &connect::extract(&edit.doc));
+    let changed = match loose.is_empty() {
+        true => format!("deleted {removed} wire(s)"),
+        false => format!(
+            "deleted {removed} wire(s); these pins are now loose and need reconnecting: {}",
+            loose.join(", ")
+        ),
+    };
+    edit.commit(json!(changed), allow)
 }
 
 /// A free spot near a symbol, used by the tools that place something beside an
@@ -511,7 +715,7 @@ pub(crate) fn spot_beside(
     w: f64,
     h: f64,
     skip: &[String],
-) -> Option<Point2> {
+) -> Option<(Point2, bool)> {
     let symbol = doc.symbol_by_ref(anchor)?;
     let body = crate::place::extent(doc, symbol)?;
     Occupancy::skipping(doc, skip).beside(body, side, w, h)
