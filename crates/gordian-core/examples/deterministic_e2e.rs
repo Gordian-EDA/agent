@@ -66,10 +66,6 @@ fn main() -> anyhow::Result<()> {
     ctx.workspace().write_draft(&yaml, None)?;
 
     let started = Instant::now();
-    let validation = run_step(&ctx, "validate_design", json!({ "yaml": yaml }))?;
-    if validation["errors"].as_u64().unwrap_or(0) != 0 {
-        bail!("fixture has authoring errors: {validation}");
-    }
     let applied = run_step(&ctx, "apply_design", json!({ "__commit": true }))?;
     if applied["erc"]["errors"].as_u64().unwrap_or(1) != 0
         || applied["erc"]["warnings"].as_u64().unwrap_or(1) != 0

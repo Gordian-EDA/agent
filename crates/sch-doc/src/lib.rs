@@ -54,6 +54,7 @@
 //! # Ok(()) }
 //! ```
 
+pub mod body;
 pub mod connect;
 mod doc;
 mod edit;
@@ -64,7 +65,8 @@ mod pins;
 mod sexpr;
 mod text;
 
-pub use connect::{Net, NetDelta, NetSource, Netlist, PinRef};
+pub use body::{body_rect, body_rects};
+pub use connect::{Net, NetDelta, NetSource, Netlist, PinRef, Scene};
 pub use doc::{SchDoc, SnapshotId};
 pub use error::{Error, Result};
 pub use libsyms::SymbolSource;

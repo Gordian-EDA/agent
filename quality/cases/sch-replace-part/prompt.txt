@@ -1,0 +1,1 @@
+In this existing ECC83 preamp schematic, replace R4 with a 4.7k resistor in an 0805 footprint (Resistor_SMD:R_0805_2012Metric). Change nothing else — every other part keeps its position, value and connections — then check the schematic.

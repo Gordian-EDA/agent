@@ -1031,6 +1031,7 @@ dependencies = [
  "geom",
  "gordian-llm",
  "gordian-runtime",
+ "gordian-tools-sch",
  "indexmap 2.14.0",
  "kicad",
  "kicad-footprint",
@@ -1084,6 +1085,24 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "gordian-tools-sch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "geom",
+ "gordian-llm",
+ "gordian-runtime",
+ "indexmap 2.14.0",
+ "kicad",
+ "kicad-symbol",
+ "sch-check",
+ "sch-doc",
+ "sch-io",
+ "serde_json",
+ "strsim",
 ]
 
 [[package]]

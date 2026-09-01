@@ -15,6 +15,7 @@ kicad-footprint = { path = "../kicad-footprint" }
 kicad-symbol = { path = "../kicad-symbol" }
 gordian-llm = { path = "../gordian-llm" }
 gordian-runtime = { path = "../gordian-runtime" }
+gordian-tools-sch = { path = "../gordian-tools-sch" }
 pcb-workflow = { path = "../pcb-workflow" }
 geom = { path = "../geom" }
 sch-floorplan = { path = "../sch-floorplan" }

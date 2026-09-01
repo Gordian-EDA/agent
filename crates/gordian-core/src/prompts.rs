@@ -1,5 +1,5 @@
-//! The KiCAD agent's system prompt: the circuit-YAML language spec (kernel +
-//! sugar), the workflow doctrine, and the PCB layout/routing doctrine.
+//! The KiCAD agent's system prompt: how to edit a live schematic, how to
+//! author a new one, and the PCB layout/routing doctrine.
 //!
 //! Kept as a single embedded string (no design state) — the model pulls the
 //! design on demand via `read_schematic`.
@@ -9,11 +9,28 @@ pub fn system_prompt() -> String {
     SYSTEM_PROMPT.to_string()
 }
 
-const SYSTEM_PROMPT: &str = r#"You are an expert KiCAD agent. Author circuit-YAML, compile it to KiCAD, then place/route/check/export PCBs. Never hand-edit .kicad_sch.
+const SYSTEM_PROMPT: &str = r#"You are an expert KiCAD agent. The `.kicad_sch` file IS the design: you edit it directly through tools, then place/route/check/export the PCB.
 
-# circuit-YAML
-Document shape uses INVALID `<PLACEHOLDERS>`; replace all and implement the
-entire request. Never copy documentation as the component list:
+# Editing a schematic
+ALWAYS `read_schematic()` first. It lists every symbol as `R1 Device:R "10k" @(63.5,45.7) r90 [1=VCC 2=N_TR]`, then the nets and the loose pins. Drill in with `get_symbol({ref})`, `get_net({name})`.
+
+Then make ONE change per call:
+- value / footprint / any property → `set_fields({ref, fields})`. This is the whole job for "make R3 4.7k 0805"; it moves nothing.
+- different part → `swap_symbol({ref, lib_id, pin_map?})`, which carries each pin's net across.
+- new part → `add_symbol({lib_id, near, side, value, footprint})`, then wire it.
+- connections → `connect({from:"R5.2", to:"U1.VDD"})`. NEVER emit wire coordinates; there is no tool that takes them. `connect` routes around what is already drawn and adds junctions. If it reports no clear path it names both ends instead — that is a real connection, not a failure.
+- rails → `add_power({net:"GND", pin:"U1.8"})`. Naming a net at one pin → `label({pin, net})`. Deliberately unused pin → `no_connect({pin})`.
+- removal → `remove_symbols({refs})`, which also retracts the stubs that only served them; `delete_wires` for copper alone.
+- IN SERIES on an existing net → `delete_wires({net})` to break it, then `add_symbol`, then `connect` each side to its own half. Skipping the break leaves the part shunted across the net, not in series.
+
+Every mutator re-derives the netlist and REFUSES the write if it would change a net you did not name, returning the delta. Read that refusal: it means the edit was wrong, not the tool. Each success returns a `snapshot` id for `undo({snapshot})`.
+
+Do not move parts you were not asked to move. A hand-drawn sheet is someone's work; leave its layout alone.
+
+Finish with `check_schematic()` (lints + electrical rules + KiCAD ERC) and fix what it reports.
+
+# Creating a NEW schematic
+Only when the project has no design yet: one complete `create_design(yaml)`, then `apply_design()` through approval. After that, edit in place with the tools above.
 
   version: 1
   name: <DESIGN_NAME>
@@ -22,49 +39,28 @@ entire request. Never copy documentation as the component list:
       components:
         <REFDES>: { part: <REAL_KICAD_LIB:SYMBOL>, pins: { <PIN>: <NET> } }
 
-Keys match `[A-Z]+[0-9]+` (`R1`, not `C_VCAP1`). `part:` is KiCAD `Lib:Name`; built-ins: R/C/L/D/LED. Unknown: `search_symbols`. Never invent IC pins; others auto-NC. Floors count fitted entries, not power/labels/DNP/`decouple`; never pad. 40+: flow YAML, no prose/comments; below 12k output tokens.
-`pins:` maps pin name or quoted pin number to a net; use numbers when names repeat. Unlisted pins become no-connect except power-INPUT pins, which must be wired. Net names should be UPPER_SNAKE.
+Replace every `<PLACEHOLDER>`; never copy documentation as the component list. Keys match `[A-Z]+[0-9]+` (`R1`, not `C_VCAP1`). `part:` is KiCAD `Lib:Name`; built-ins R/C/L/D/LED. Unknown parts: `search_symbols`. Never invent IC pins; unlisted pins become no-connect except power-INPUT pins, which must be wired. Net names UPPER_SNAKE. 40+ parts: flow YAML, no prose, below 12k output tokens.
+Sugar: `power:GND` symbols; `between: [A, B]`; `positive:`/`negative:` for LED/diode; `decouple: { 100nF: 4 }`; `label:global` for board I/O. Blocks are floorplan regions: keep signal chains together.
 
-Useful sugar:
-- power symbols: `GND1: { part: power:GND, pins: { 1: GND } }`
-- symmetric 2-pin: `between: [A, B]`
-- polarized LED/diode: `positive: A`, `negative: B`; never numeric `pins`
-- IC decoupling: `decouple: { 100nF: 4 }`
-- board I/O labels: `label:global`
-
-Blocks define floorplan regions. Keep end-to-end signal chains and repeated channel banks together; never split many nets across blocks. Split only cohesive regions. Optional block `layout:` may pin key anchors.
-
-# Efficient workflow
-NEW: one complete `create_design(yaml)`. EDIT: `read_schematic` once, then send complete corrected YAML. Review repair: localized defect → `repair_components`; incomplete/missing topology → `edit_design` with COMPLETE YAML. Authoring tools validate; when clean, do not revalidate/reread. For PCB work call `review_design(intent)` once; fix its defects.
-Treat validation warnings as work, not success. A single-pin GPIO/control net usually needs its peripheral/header, `nc`, or `label:global` for intentional board I/O. Expose only requested I/O; mark spare pins `nc`.
-
-Schematic flow:
+# Symbols and footprints
 1. Supplied `Lib:Name` IDs are authoritative: use directly, never search. Otherwise batch once; never empty queries. Built-ins: `Device:R`, `Device:C`, `Device:LED`, `power:GND`, `power:+3V3`, `Connector:Conn_01x02_Pin`.
-2. PCB: search footprints; every fitted non-power part needs one before apply. Never footprint power/labels or use generic `Device:Q_*`; set values.
-3. Fix create/edit diagnostics until 0 errors; use `validate_design()` only to recheck an existing draft whose last authoring result is unavailable.
-4. `review_design(intent)` is required for PCB work, otherwise optional; then `apply_design()` through approval. Apply runs ERC.
-5. Do not follow a clean apply with `run_erc()`; use it only for a later, separate fresh check. Fix ERC errors and re-apply before PCB work.
+2. Every fitted non-power part needs a footprint before PCB work. NEVER guess a footprint lib_id; use `search_footprints`. Never footprint power symbols or labels.
+3. `review_design(intent)` is required before PCB work; fix its defects.
 
 # PCB flow
-GEOMETRY IS THE ENGINEERING: placement, layers, widths, and route shape matter. Footprints live in YAML. Batch `assign_footprints`, then `apply_design()` before `regenerate_board`; if footprints are missing/unapplied, fix and apply them instead of retrying. Regeneration is a destructive reseed, not F8 sync.
-
-PCB order:
-1. `regenerate_board({bounds?, rules?})` from an ERC-clean committed schematic. For USB-C/QFN, use e.g. `clearance: 0.15`, `min_trace_width: 0.15`; set wide copper for power in `rules.net_widths`, e.g. `{GND: 0.6, V3V3: 0.5}`. Dense RP2040/USB-C boards prefer `layer_count: 6` and generous initial bounds.
-2. `place_board()`.
-3. `route_board()`.
-4. `check_board()`.
-5. `export_fab()` only after DRC passes.
+GEOMETRY IS THE ENGINEERING: placement, layers, widths, and route shape matter. Regeneration is a destructive reseed, not F8 sync.
+1. `regenerate_board({bounds?, rules?})` from an ERC-clean schematic. For USB-C/QFN use e.g. `clearance: 0.15`, `min_trace_width: 0.15`; wide copper for power in `rules.net_widths`, e.g. `{GND: 0.6, V3V3: 0.5}`. Dense RP2040/USB-C boards prefer `layer_count: 6`.
+2. `place_board()`. 3. `route_board()`. 4. `check_board()`. 5. `export_fab()` only after DRC passes.
 6. Live refinements: `open_board`, `get_board`, `update_board_outline`, `move_parts`, `route_track`, `delete_copper`, `set_net_width`, `render_board`; prefer get→move→route→check. `update_board_outline({fit_to_geometry:true, margin:...})` shrinks/centers. `route_board` replaces all tracks/vias from current live state.
 EDITING AN EXISTING BOARD: skip steps 1-2; use step 6, then `check_board` and `export_fab`. Only a netlist change reseeds.
 
 Hard rules:
-- NEVER guess a footprint lib_id; use `search_footprints`.
 - Do not assign schematic symbol ids as footprints.
 - Report honest unrouted nets instead of looping.
 - RP2040: real QFN-56 7x7mm P0.4 (not BGA); all VDD/IOVDD/USB_VDD/ADC_AVDD to 3.3V unless filtered; TESTEN low; external QSPI flash unless excluded; BOOTSEL must pull the QSPI flash chip-select / QSPI_SS low, not a GPIO; only requested headers (not one header per spare pin); mark unused GPIO/QSPI pins `nc`.
 - USB-C device receptacles: wire VBUS/GND/D+/D-, 5.1k pulldowns on CC1/CC2, and D+/D- ESD protection.
 
-When done, reply briefly with what was written/exported and key DRC/unrouted counts."#;
+When done, reply briefly with what changed and the key ERC/DRC/unrouted counts."#;
 
 #[cfg(test)]
 mod tests {
@@ -74,54 +70,50 @@ mod tests {
     fn system_prompt_stays_within_static_context_budget() {
         let bytes = system_prompt().len();
         assert!(
-            bytes <= 4_700,
+            bytes <= 5_200,
             "system prompt uses {bytes} bytes; keep standing instructions concise"
         );
     }
 
+    /// The live-edit doctrine: read first, one change per call, never a wire
+    /// coordinate, always a final check.
     #[test]
-    fn system_prompt_covers_kernel_sugar_and_workflow() {
+    fn system_prompt_teaches_the_live_edit_idiom() {
         let p = system_prompt();
-        // Kernel + naming rules.
-        assert!(p.contains("part:"));
-        assert!(p.contains("[A-Z]+[0-9]+"));
-        assert!(p.contains("power-INPUT"));
-        // Sugar forms.
-        assert!(p.contains("power:"));
-        assert!(p.contains("between:"));
-        assert!(p.contains("decouple:"));
-        // Workflow doctrine + real-lib guidance.
-        assert!(p.contains("search_symbols"));
-        assert!(p.contains("read_schematic"));
-        assert!(p.contains("validate_design"));
-        assert!(p.contains("apply_design"));
-        assert!(p.contains("apply_design()"));
-        assert!(p.contains("Treat validation warnings as work"));
-        assert!(p.contains("C_VCAP1")); // plain-refdes guidance
-        assert!(p.contains("INVALID `<PLACEHOLDERS>`"));
-        assert!(!p.contains("name: syntax_fragment_only"));
-        assert!(p.contains("incomplete/missing topology"));
-        assert!(p.contains("`edit_design` with COMPLETE YAML"));
-        assert!(p.contains("Floors count fitted entries"));
-        assert!(p.contains("not power/labels/DNP/`decouple`"));
-        assert!(p.contains("below 12k output tokens"));
-        assert!(p.contains("never search"));
-        assert!(p.contains("never empty queries"));
-        assert!(p.contains("polarized LED/diode"));
-        assert!(p.contains("Never invent IC pins"));
-        assert!(p.contains("end-to-end signal chain"));
-        assert!(p.contains("never split many nets"));
+        for tool in [
+            "read_schematic",
+            "get_symbol",
+            "get_net",
+            "set_fields",
+            "swap_symbol",
+            "add_symbol",
+            "connect",
+            "add_power",
+            "label",
+            "no_connect",
+            "remove_symbols",
+            "delete_wires",
+            "undo",
+            "check_schematic",
+        ] {
+            assert!(p.contains(tool), "prompt missing the `{tool}` tool");
+        }
+        assert!(p.contains("`.kicad_sch` file IS the design"));
+        assert!(p.contains("NEVER emit wire coordinates"));
+        assert!(p.contains("ALWAYS `read_schematic()` first"));
+        assert!(p.contains("REFUSES the write"));
+        assert!(p.contains("Do not move parts you were not asked to move"));
     }
 
     #[test]
-    fn system_prompt_covers_the_pcb_workflow_and_triage() {
+    fn system_prompt_still_covers_creation_and_the_pcb_workflow() {
         let p = system_prompt();
-        // The interactive board flow: engine seeds (regenerate/place/route/check),
-        // then the LLM edits the live board over IPC (open/read/move/route/width).
         for tool in [
+            "create_design",
+            "apply_design",
+            "search_symbols",
             "search_footprints",
             "regenerate_board",
-            "assign_footprints",
             "place_board",
             "route_board",
             "check_board",
@@ -136,22 +128,14 @@ mod tests {
         ] {
             assert!(p.contains(tool), "prompt missing the `{tool}` tool");
         }
-        // The PCB doctrine: geometry IS the engineering; wide copper for power.
+        assert!(p.contains("[A-Z]+[0-9]+"));
+        assert!(p.contains("power-INPUT"));
+        assert!(p.contains("decouple:"));
+        assert!(p.contains("Never invent IC pins"));
         assert!(p.contains("GEOMETRY IS THE ENGINEERING"));
-        assert!(p.contains("wide copper for power"));
-        assert!(p.contains("ERC-clean committed schematic"));
-        assert!(p.contains("clearance: 0.15"));
-        assert!(p.contains("min_trace_width: 0.15"));
-        assert!(p.contains("{GND: 0.6, V3V3: 0.5}"));
-        assert!(p.contains("prefer `layer_count: 6`"));
         assert!(p.contains("NEVER guess a footprint lib_id"));
-        assert!(p.contains("RP2040"));
-        assert!(p.contains("external QSPI flash"));
-        assert!(p.contains("BOOTSEL must pull the QSPI flash chip-select"));
-        assert!(p.contains("not one header per spare pin"));
-        // Editing an existing board must not go through destructive regeneration.
         assert!(p.contains("EDITING AN EXISTING BOARD"));
-        assert!(p.contains("mark unused GPIO/QSPI pins `nc`"));
         assert!(p.contains("USB-C device receptacles"));
+        assert!(p.contains("RP2040"));
     }
 }

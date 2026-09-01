@@ -17,8 +17,13 @@ design.kicad_pro
 /.history
 fab
 
-# ...but the placement-snapshot regression baselines ARE tracked (they ARE the gate).
+# ...but the placement-snapshot regression baselines ARE tracked (they ARE the gate),
+# and so are the quality cases' input schematics — a case is not reproducible without one.
 !crates/sch-floorplan/tests/snapshots/*.kicad_sch
+!quality/cases/*/input/design.kicad_sch
+
+# Quality run artifacts (renders, reports, the working project copy).
+/quality/runs/
 
 docs/validation/*.png
 
