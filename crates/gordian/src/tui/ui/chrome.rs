@@ -6,10 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Wrap,
-};
+use ratatui::widgets::{Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
 
 use super::super::app::App;
 use super::super::theme;
@@ -236,24 +233,31 @@ fn status_left(app: &App, avail: usize) -> String {
     }
 }
 
+/// The help overlay, in the same borderless idiom as the completion and
+/// unwind menus: a floating panel with no box or title bar, just an indented
+/// reference card seated on [`theme::BAND`].
 pub(super) fn draw_help(f: &mut Frame, area: Rect) {
     let accent = theme::POPUP_TITLE;
     let dim = theme::META;
-    // A key/description row: the key in accent, the description in soft gray.
+    // A key/description row: the key in accent, the description in soft gray,
+    // both indented under the heading so the card reads as a list, not a box.
+    let indent = " ".repeat(MARGIN as usize);
     let kv = |k: &str, d: &str| {
         Line::from(vec![
-            Span::styled(format!("{k:<15} "), Style::default().fg(theme::INFO)),
+            Span::styled(format!("{indent}{k:<15} "), Style::default().fg(theme::INFO)),
             Span::styled(d.to_string(), theme::SUBTLE),
         ])
     };
     let section = |t: &str| {
         Line::from(Span::styled(
-            t.to_string(),
+            format!("{indent}{t}"),
             dim.add_modifier(Modifier::BOLD),
         ))
     };
 
     let mut lines = vec![
+        Line::from(Span::styled(format!("{indent}help · keys & commands"), accent)),
+        Line::from(""),
         section("KEYS"),
         kv("Enter", "send the prompt"),
         kv("Shift/Alt-Enter", "newline (multi-line prompt)"),
@@ -275,32 +279,24 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
         lines.push(kv(c.name, c.desc));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("Esc to close", dim)));
+    lines.push(Line::from(Span::styled(format!("{indent}Esc to close"), dim)));
 
-    // Wide enough that key/description rows never wrap (longest desc + key col +
-    // border + horizontal padding), so the height stays exact. Tight vertical
-    // padding keeps every row on screen even on a short (24-row) terminal.
-    let w = 68u16.min(area.width.saturating_sub(2 * MARGIN));
-    let h = (lines.len() as u16 + 2).min(area.height); // +border; use the full height if needed
+    // Full width, like the completion and unwind menus — a narrower centred
+    // card left the surrounding transcript visible down both sides with
+    // nothing to separate the two, which read as corruption rather than a
+    // deliberate margin once the border that used to mark the edge was gone.
+    let h = (lines.len() as u16).min(area.height);
     let popup = Rect {
-        x: area.x + (area.width.saturating_sub(w)) / 2,
+        x: area.x,
         y: area.y + (area.height.saturating_sub(h)) / 2,
-        width: w,
+        width: area.width,
         height: h,
     };
     f.render_widget(Clear, popup);
+    // `trim: false` — `trim: true` strips each line's LEADING whitespace before
+    // wrapping, which would eat the indent along with it.
     f.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .style(theme::BAND)
-                    .border_style(theme::POPUP_BORDER)
-                    .padding(Padding::horizontal(2))
-                    .title(Span::styled(" help · keys & commands ", accent)),
-            )
-            .wrap(Wrap { trim: true }),
+        Paragraph::new(lines).style(theme::BAND).wrap(Wrap { trim: false }),
         popup,
     );
 }

@@ -941,5 +941,40 @@ mod tests {
         assert!(text.contains("help"), "help overlay:\n{text}");
         assert!(text.contains("/clear"), "help lists commands:\n{text}");
         assert!(text.contains("Esc Esc"), "help covers unwind:\n{text}");
+        assert!(
+            !text.contains('╭') && !text.contains('│'),
+            "the overlay is borderless, like the other floating menus:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_help_overlay_spans_the_full_width_over_a_busy_transcript() {
+        // A regression guard: a narrower centred card used to leave the busy
+        // transcript visible down both margins with nothing to separate them,
+        // which read as corruption once the border that used to mark its edge
+        // was removed. Full width leaves nothing beside it to bleed through.
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::AssistantText(
+            "a line of prose long enough to reach past where a narrower card              used to end on both sides of the terminal"
+                .into(),
+        )));
+        a.help = true;
+        let backend = TestBackend::new(96, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut a)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let row_text = |y: u16| -> String {
+            (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+        };
+        let title_row = (0..buf.area.height)
+            .find(|&y| row_text(y).contains("help · keys & commands"))
+            .expect("the help title renders somewhere");
+        for x in 0..buf.area.width {
+            assert_eq!(
+                buf[(x, title_row)].style().bg,
+                Some(theme::BG1),
+                "column {x} of the title row is not on the menu surface —                  the transcript is showing through beside the overlay"
+            );
+        }
     }
 }

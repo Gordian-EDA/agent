@@ -15,6 +15,11 @@ All notable changes to this project are documented here. The format is based on
 - **Welcome splash names the project**: the tagline now reads "the schematic &
   PCB design copilot · ~/path/to/project" — the schematic's directory, tildified
   under `$HOME` — so it's clear at a glance which project a session is open on.
+- **The help overlay is borderless and full width**, joining the completion
+  and unwind menus in dropping the rounded box and title bar. It used to be a
+  narrower card centred over the transcript; without its border to mark the
+  edge, that left the busy transcript peeking down both margins with nothing
+  separating the two, reading as corruption rather than a deliberate gap.
 - **The floating menus are borderless**: the `/command` completion list and the
   unwind picker drop their rounded box, title, and selection caret. They are now
   full-width lists seated on the composer, with the selected row as a solid
