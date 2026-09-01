@@ -14,6 +14,7 @@ use kicad_symbol::SymbolTable;
 use sch_check::model::Design;
 use sch_check::{PinType, find_pin};
 
+use crate::label::text_width;
 use crate::wire::DrawnSegment;
 use crate::write::SchematicWriter;
 
@@ -26,33 +27,55 @@ use sch_place::ir::LayoutIr;
 
 /// An item's body rect at position `at`. Uses the FULL `approx_size` (which
 /// already pads 2.54 mm/side) so the placement overlap check reserves room for
-/// the symbol body *and* its side-mounted value/refdes text — matching what the
+/// the symbol body *and* its value/refdes text — matching what the
 /// readability lint flags as an overlap, so a layout the climb accepts is one
 /// the lint passes. (The router uses its own, tighter solid extent in
 /// `emit::route_scene`; this looser one is only for symbol-vs-symbol spacing.)
+///
+/// The text reservation follows the ACTUAL emitted `Reference`/`Value` strings and
+/// the spot the writer's field solver will choose for them, for EVERY part kind —
+/// an IC's long MPN value (`emit::gather` gives a ≥3-pin part its part name when the
+/// author wrote none) needs the widest reservation of all, and reserving nothing for
+/// it is what let a neighbour land on top of the `MCP1703` label.
 pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
     let at = at.into();
     let s = it.geom.approx_size();
     let quarter = ((it.angle / 90.0).round() as i64).rem_euclid(2) == 1;
     let (w, h) = if quarter { (s[1], s[0]) } else { (s[0], s[1]) };
-    let grid = geom::GRID_50_MIL.pitch();
-    let (hw, hh) = ((w / 2.0).max(grid), (h / 2.0).max(grid));
+    let (hw, hh) = (
+        (w / 2.0).max(geom::GRID_50_MIL.pitch()),
+        (h / 2.0).max(geom::GRID_50_MIL.pitch()),
+    );
     let mut r = ::geom::Rect::new(at[0] - hw, at[1] - hh, at[0] + hw, at[1] + hh);
-    // Reserve the side-mounted refdes/value text footprint so a tight pack leaves
-    // it collision-free — the readability lint flags text-over-body, so the climb
-    // must keep a neighbour out of the conventional text spot. KiCAD draws a
-    // vertical 2-pin part's fields stacked to the RIGHT, a horizontal part's
-    // refdes above / value below. (~1.1 mm/char, ~1.6 mm/line.)
-    if it.geom.pins.len() == 2 {
-        if quarter {
-            r.min_y -= 2.0; // refdes line above
-            r.max_y += 2.0; // value line below
-        } else {
-            let chars = it.value.chars().count().max(it.refdes.chars().count()) as f64;
-            r.max_x += chars * 1.1 + grid; // field stack to the right
-        }
-    }
+    let [l, rt, t, b] = field_pad(it, hw * 2.0, hh * 2.0);
+    r.min_x -= l;
+    r.max_x += rt;
+    r.min_y -= t;
+    r.max_y += b;
     r
+}
+
+/// The room the writer's field solver will need for an item's emitted
+/// `Reference`/`Value` text, as a pad per side of its body: `[left, right, top, bottom]`
+/// in the PLACED frame, given the body's rotated size.
+///
+/// `sch_io::write::textsolve` bands an IC's (≥3-pin) or a wide body's field pair
+/// ABOVE/BELOW the body, centred, and stacks a tall 2-pin part's to the RIGHT. The band's
+/// two 1.6 mm lines reach ~4.8 mm past the SOLID body, of which `approx_size` already
+/// pads 2.54 mm.
+///
+/// [`item_rect`] grows an item's rect by this so the placement search keeps neighbours
+/// out of the text's spot, and [`super::emit::apply_cells`] sizes its grid tracks by it
+/// so an IC's long MPN gets a column wide enough to hold it in the first place.
+pub fn field_pad(it: &Item, w: f64, h: f64) -> [f64; 4] {
+    const BAND: f64 = 2.24;
+    let text = text_width(&it.value).max(text_width(&it.refdes));
+    if it.geom.pins.len() >= 3 || w > h {
+        let spill = (text / 2.0 - w / 2.0).max(0.0);
+        [spill, spill, BAND, BAND]
+    } else {
+        [0.0, text + geom::GRID_50_MIL.pitch(), 0.0, 0.0]
+    }
 }
 
 /// Count pairs of items whose bodies overlap — the hard "never let two symbols

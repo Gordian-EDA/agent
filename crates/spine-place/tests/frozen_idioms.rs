@@ -63,7 +63,12 @@ blocks:
         item("U1").at,
         item("U2").at
     );
-    assert!(item("U1").at.y < item("U2").at.y);
+    assert!(
+        item("U1").at.y < item("U2").at.y,
+        "channel 1 must sit above channel 2: U1={:?} U2={:?}",
+        item("U1").at,
+        item("U2").at
+    );
     for refs in [
         ["R1", "U1", "R9", "R17", "D1"],
         ["R2", "U2", "R10", "R18", "D2"],

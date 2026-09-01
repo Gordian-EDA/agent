@@ -845,19 +845,26 @@ pub fn apply_cells(items: &mut [Item], cells: &[Cell]) {
         .map(|(it, c)| orient_angle(&it.geom, c.orient))
         .collect();
 
-    // Rotation-aware footprint (a quarter-turn swaps width and height).
-    let dims: Vec<(f64, f64)> = items
+    // Rotation-aware footprint (a quarter-turn swaps width and height), grown by the
+    // room the item's emitted Reference/Value text will need. Without the text a
+    // long-MPN IC gets a column exactly as wide as its body and its value smears onto
+    // the neighbouring columns (the `MCP1703Ax-330xxTT` overlap). `pads` is asymmetric —
+    // a tall passive stacks its fields to the RIGHT — so the item is seeded off the
+    // track centre by half the imbalance, leaving the text's side of the track free.
+    let (pads, dims): (Vec<[f64; 4]>, Vec<(f64, f64)>) = items
         .iter()
         .zip(&angles)
         .map(|(it, &angle)| {
             let s = it.geom.approx_size();
-            if (angle / 90.0).round() as i64 % 2 == 1 {
+            let (w, h) = if (angle / 90.0).round() as i64 % 2 == 1 {
                 (s[1], s[0])
             } else {
                 (s[0], s[1])
-            }
+            };
+            let p = field_pad(it, w, h);
+            (p, (w + p[0] + p[1], h + p[2] + p[3]))
         })
-        .collect();
+        .unzip();
 
     // Track sizes: a column is as wide as its widest part, a row as tall as its
     // tallest.
@@ -872,15 +879,15 @@ pub fn apply_cells(items: &mut [Item], cells: &[Cell]) {
     let col_x = track_centres(&col_w, COL_GAP);
     let row_y = track_centres(&row_h, ROW_GAP);
 
-    for ((it, c), &angle) in items.iter_mut().zip(cells).zip(&angles) {
+    for (((it, c), &angle), p) in items.iter_mut().zip(cells).zip(&angles).zip(&pads) {
         // An item that arrives ALREADY frozen holds a live pose the caller owns (the
         // region adapter's fixed neighbours). Seeding is for parts the engine is placing.
         if it.frozen {
             continue;
         }
         it.at = [
-            geom::GRID_50_MIL.snap(col_x[&c.col]),
-            geom::GRID_50_MIL.snap(row_y[&c.row]),
+            geom::GRID_50_MIL.snap(col_x[&c.col] + (p[0] - p[1]) / 2.0),
+            geom::GRID_50_MIL.snap(row_y[&c.row] + (p[2] - p[3]) / 2.0),
         ]
         .into();
         it.angle = angle;
