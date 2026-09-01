@@ -217,6 +217,57 @@ impl SchDoc {
         Ok(())
     }
 
+    /// Drag whatever meets `from` to `to`: wire ends, junctions, labels and
+    /// no-connect markers. Returns how many items moved.
+    ///
+    /// This is what keeps a symbol's connections when the symbol moves —
+    /// leaving its wires where they were would quietly unwire the board.
+    pub fn move_attached(&mut self, from: Point2, to: Point2) -> usize {
+        if from.near_eq(to, geom::EPS) {
+            return 0;
+        }
+        let mut moved = 0;
+        for item in self.items_mut() {
+            let hit = match item {
+                Item::Wire(wire) => {
+                    let mut hit = false;
+                    for point in wire.points.iter_mut() {
+                        if point.near_eq(from, geom::EPS) {
+                            *point = to;
+                            hit = true;
+                        }
+                    }
+                    if hit {
+                        wire.raw.touch();
+                    }
+                    hit
+                }
+                Item::Junction(j) if j.at.near_eq(from, geom::EPS) => {
+                    j.at = to;
+                    j.raw.touch();
+                    true
+                }
+                Item::NoConnect(n) if n.at.near_eq(from, geom::EPS) => {
+                    n.at = to;
+                    n.raw.touch();
+                    true
+                }
+                Item::Label(l) if l.at.point().near_eq(from, geom::EPS) => {
+                    l.at.x = to.x;
+                    l.at.y = to.y;
+                    l.raw.touch();
+                    true
+                }
+                _ => false,
+            };
+            moved += usize::from(hit);
+        }
+        if moved > 0 {
+            self.mark_edited();
+        }
+        moved
+    }
+
     /// Remove the wires, junctions, labels and no-connects carrying these
     /// UUIDs, returning how many went. Symbols are not removable this way —
     /// they carry annotation state, so they go through [`Self::remove_symbol`].

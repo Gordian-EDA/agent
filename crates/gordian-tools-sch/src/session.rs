@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use gordian_runtime::AgentRuntime;
-use sch_doc::{NetDelta, Netlist, SchDoc, SnapshotId, SymbolSource, connect};
+use sch_doc::{NetDelta, Netlist, PinRef, SchDoc, SnapshotId, SymbolSource, connect};
 use serde_json::{Value, json};
 
 /// The nets and parts a call declared it was about to touch.
@@ -57,7 +57,11 @@ impl Allow {
     }
 
     /// The first change the call did not account for, if any.
-    fn violation(&self, delta: &NetDelta) -> Option<String> {
+    ///
+    /// `moved` pairs every pin that gained or lost a connection with the net it
+    /// gained it from or lost it to — a pin only leaves a net *because* that net
+    /// changed, so naming the net is as good as naming the pin's owner.
+    fn violation(&self, delta: &NetDelta, moved: &[(PinRef, Option<String>)]) -> Option<String> {
         let unnamed = |name: &String| !self.nets.contains(name);
         let mut offenders: BTreeSet<String> = BTreeSet::new();
         if !self.creating {
@@ -84,12 +88,11 @@ impl Allow {
             offenders.extend([source].into_iter().filter(|n| unnamed(n)).cloned());
             offenders.extend(targets.iter().filter(|n| unauthored(n)).cloned());
         }
-        for pin in delta
-            .pins_now_connected
-            .iter()
-            .chain(&delta.pins_now_unconnected)
-        {
-            if !self.refs.contains(&pin.refdes) {
+        for (pin, net) in moved {
+            let named = self.refs.contains(&pin.refdes)
+                || net.as_ref().is_some_and(|net| self.nets.contains(net))
+                || (self.creating && net.as_ref().is_none_or(|net| is_auto(net)));
+            if !named {
                 offenders.insert(format!("{}.{}", pin.refdes, pin.pin));
             }
         }
@@ -101,6 +104,29 @@ impl Allow {
 /// Whether a net name was generated rather than authored.
 fn is_auto(name: &str) -> bool {
     name.starts_with("Net-(")
+}
+
+/// Every pin that gained or lost a connection, with the net it changed against:
+/// the one it left, or the one it joined.
+fn pins_that_moved(
+    delta: &NetDelta,
+    before: &Netlist,
+    after: &Netlist,
+) -> Vec<(PinRef, Option<String>)> {
+    let net_of = |netlist: &Netlist, pin: &PinRef| {
+        crate::refs::net_of(netlist, &pin.refdes, &pin.pin).map(str::to_string)
+    };
+    delta
+        .pins_now_unconnected
+        .iter()
+        .map(|pin| (pin.clone(), net_of(before, pin)))
+        .chain(
+            delta
+                .pins_now_connected
+                .iter()
+                .map(|pin| (pin.clone(), net_of(after, pin))),
+        )
+        .collect()
 }
 
 /// Where rolled-back-able copies of the schematic live, one per committed edit.
@@ -125,8 +151,8 @@ impl Edit {
         let path = ctx.sch_path().to_path_buf();
         let original = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let mut doc = SchDoc::parse(&original)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let mut doc =
+            SchDoc::parse(&original).with_context(|| format!("parsing {}", path.display()))?;
         let before = connect::extract(&doc);
         let rollback = doc.snapshot();
         Ok(Edit {
@@ -159,7 +185,8 @@ impl Edit {
     pub fn commit(mut self, changed: Value, allow: Allow) -> Result<Value> {
         let after = connect::extract(&self.doc);
         let delta = Netlist::diff(&self.before, &after);
-        if let Some(offenders) = allow.violation(&delta) {
+        let moved = pins_that_moved(&delta, &self.before, &after);
+        if let Some(offenders) = allow.violation(&delta, &moved) {
             self.doc.restore(self.rollback)?;
             return Ok(json!({
                 "error": format!(
@@ -191,14 +218,21 @@ impl Edit {
             .max()
             .unwrap_or(0);
         let id = format!("sch-{next}");
-        std::fs::write(self.undo_dir.join(format!("{id}.kicad_sch")), &self.original)?;
+        std::fs::write(
+            self.undo_dir.join(format!("{id}.kicad_sch")),
+            &self.original,
+        )?;
         Ok(id)
     }
 }
 
 /// The ordinal in a `sch-<n>.kicad_sch` stash filename.
 fn stash_index(path: &Path) -> Option<u32> {
-    path.file_stem()?.to_str()?.strip_prefix("sch-")?.parse().ok()
+    path.file_stem()?
+        .to_str()?
+        .strip_prefix("sch-")?
+        .parse()
+        .ok()
 }
 
 /// Restore the schematic to a state a previous mutator stashed.
@@ -254,7 +288,6 @@ pub(crate) fn delta_json(delta: &NetDelta) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sch_doc::PinRef;
 
     fn pin(refdes: &str, number: &str) -> PinRef {
         PinRef {
@@ -265,6 +298,11 @@ mod tests {
         }
     }
 
+    /// A pin that changed connection state, and the net it changed against.
+    fn moved(refdes: &str, number: &str, net: Option<&str>) -> (PinRef, Option<String>) {
+        (pin(refdes, number), net.map(str::to_string))
+    }
+
     /// A move or a field edit claims to be inert, so any net change refuses.
     #[test]
     fn an_inert_call_refuses_every_net_change() {
@@ -272,7 +310,7 @@ mod tests {
             merged: vec![(vec!["VCC".into(), "GND".into()], "GND".into())],
             ..NetDelta::default()
         };
-        let offenders = Allow::nothing().violation(&delta).unwrap();
+        let offenders = Allow::nothing().violation(&delta, &[]).unwrap();
         assert!(offenders.contains("VCC"), "{offenders}");
         assert!(offenders.contains("GND"), "{offenders}");
     }
@@ -282,14 +320,13 @@ mod tests {
     fn a_named_merge_is_permitted() {
         let delta = NetDelta {
             merged: vec![(vec!["VCC".into(), "N1".into()], "VCC".into())],
-            pins_now_connected: vec![pin("R5", "2")],
             ..NetDelta::default()
         };
         assert!(
             Allow::nothing()
                 .nets(["VCC".to_string(), "N1".to_string()])
                 .part("R5")
-                .violation(&delta)
+                .violation(&delta, &[moved("R5", "2", Some("VCC"))])
                 .is_none()
         );
     }
@@ -300,26 +337,56 @@ mod tests {
     fn a_generated_name_re_deriving_itself_is_not_a_rewiring() {
         let delta = NetDelta {
             renamed: vec![("Net-(P4-Pad1)".into(), "Net-(D1-A)".into())],
-            pins_now_connected: vec![pin("D1", "2")],
             ..NetDelta::default()
         };
-        assert!(Allow::nothing().part("D1").violation(&delta).is_none());
+        let joined = [moved("D1", "2", Some("Net-(D1-A)"))];
+        assert!(
+            Allow::nothing()
+                .part("D1")
+                .violation(&delta, &joined)
+                .is_none()
+        );
         // An authored name is a different matter entirely.
         let authored = NetDelta {
             renamed: vec![("VCC".into(), "Net-(D1-A)".into())],
             ..NetDelta::default()
         };
-        assert!(Allow::nothing().part("D1").violation(&authored).is_some());
+        assert!(
+            Allow::nothing()
+                .part("D1")
+                .violation(&authored, &joined)
+                .is_some()
+        );
     }
 
-    /// A pin belonging to a part the call never mentioned must never move nets.
+    /// Removing a part loosens its neighbours' pins, and that is not a
+    /// surprise: the call named the net they were sharing.
     #[test]
-    fn an_unnamed_part_losing_its_net_refuses() {
+    fn a_neighbour_pin_leaving_a_named_net_is_permitted() {
         let delta = NetDelta {
-            pins_now_unconnected: vec![pin("U1", "7")],
+            removed: vec!["Net-(U1B-K)".into()],
             ..NetDelta::default()
         };
-        let offenders = Allow::nothing().part("R5").violation(&delta).unwrap();
+        let loosened = [
+            moved("R2", "1", Some("Net-(U1B-K)")),
+            moved("U1", "3", Some("Net-(U1B-K)")),
+        ];
+        assert!(
+            Allow::nothing()
+                .net("Net-(U1B-K)")
+                .part("R2")
+                .violation(&delta, &loosened)
+                .is_none()
+        );
+    }
+
+    /// A pin leaving a net nobody named is exactly what the guard is for.
+    #[test]
+    fn a_pin_leaving_an_unnamed_net_refuses() {
+        let offenders = Allow::nothing()
+            .part("R5")
+            .violation(&NetDelta::default(), &[moved("U1", "7", Some("VCC"))])
+            .unwrap();
         assert_eq!(offenders, "U1.7");
     }
 
@@ -331,13 +398,23 @@ mod tests {
             created: vec!["Net-(R5-Pad1)".into()],
             ..NetDelta::default()
         };
-        assert!(Allow::nothing().creating().violation(&created).is_none());
-        assert!(Allow::nothing().violation(&created).is_some());
+        assert!(
+            Allow::nothing()
+                .creating()
+                .violation(&created, &[])
+                .is_none()
+        );
+        assert!(Allow::nothing().violation(&created, &[]).is_some());
 
         let removed = NetDelta {
             removed: vec!["VCC".into()],
             ..NetDelta::default()
         };
-        assert!(Allow::nothing().creating().violation(&removed).is_some());
+        assert!(
+            Allow::nothing()
+                .creating()
+                .violation(&removed, &[])
+                .is_some()
+        );
     }
 }

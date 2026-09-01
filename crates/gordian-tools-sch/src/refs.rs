@@ -128,8 +128,7 @@ pub(crate) fn nets_touching(netlist: &Netlist, refs: &[String]) -> Vec<String> {
 /// A wire's two ends. A `(wire)` with fewer than two points is malformed and
 /// has none, so callers skip it rather than index into it.
 pub(crate) fn ends(wire: &sch_doc::Wire) -> Option<(Point2, Point2)> {
-    Some((*wire.points.first()?, *wire.points.last()?))
-        .filter(|_| wire.points.len() >= 2)
+    Some((*wire.points.first()?, *wire.points.last()?)).filter(|_| wire.points.len() >= 2)
 }
 
 /// `R1.1`, the way every tool result spells a pin.

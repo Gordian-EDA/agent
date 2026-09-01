@@ -182,9 +182,14 @@ async fn dirty_commit_is_nudged_into_repairing_the_schematic() {
         ),
         tool_call("tu_2", "apply_design", serde_json::json!({})),
         final_text("done, despite dangling endpoints"), // → ERC cleanup nudge
-        tool_call("tu_3", "no_connect", serde_json::json!({ "pin": "R1.1" })),
-        tool_call("tu_4", "no_connect", serde_json::json!({ "pin": "R2.2" })),
-        tool_call("tu_5", "check_schematic", serde_json::json!({})),
+        // A and B are single-pin nets, so the honest repair is to tie them
+        // together on the committed schematic.
+        tool_call(
+            "tu_3",
+            "connect",
+            serde_json::json!({ "from": "R1.1", "to": "R2.2", "net": "SENSE" }),
+        ),
+        tool_call("tu_4", "check_schematic", serde_json::json!({})),
         // The ERC nudge is bounded; the loop gives up rather than looping.
         final_text("clean now"),
         final_text("clean now"),
@@ -204,7 +209,7 @@ async fn dirty_commit_is_nudged_into_repairing_the_schematic() {
 
     assert!(outcome.applied, "the apply should commit: {outcome:?}");
     assert_eq!(outcome.final_text, "clean now");
-    assert_eq!(outcome.tool_calls_made, 5);
+    assert_eq!(outcome.tool_calls_made, 4);
 }
 
 /// Once the schematic has been edited in place, the draft that produced it is

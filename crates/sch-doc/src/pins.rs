@@ -207,18 +207,18 @@ pub(crate) fn pins_of(doc: &SchDoc, inst: &SymbolInst) -> Vec<PlacedPin> {
         .map(|p| {
             let out = out_dir(&p, inst.at, inst.mirror);
             PlacedPin {
-            owner: inst.uuid.clone(),
-            refdes: inst.refdes().to_string(),
-            unit: inst.unit,
-            multi_unit,
-            number: p.number,
-            name: p.name,
-            etype: p.etype,
-            hidden: p.hidden,
-            dnp: inst.dnp,
-            power_symbol,
-            at: to_sheet(p.at.point(), inst.at, inst.mirror),
-            out,
+                owner: inst.uuid.clone(),
+                refdes: inst.refdes().to_string(),
+                unit: inst.unit,
+                multi_unit,
+                number: p.number,
+                name: p.name,
+                etype: p.etype,
+                hidden: p.hidden,
+                dnp: inst.dnp,
+                power_symbol,
+                at: to_sheet(p.at.point(), inst.at, inst.mirror),
+                out,
             }
         })
         .collect()

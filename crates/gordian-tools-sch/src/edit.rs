@@ -24,14 +24,44 @@ pub(crate) fn next_refdes(doc: &SchDoc, prefix: &str) -> String {
     format!("{prefix}{n}")
 }
 
-/// Where the caller wants something to sit.
+/// Whether a pin answers to `key` by name. `~` and the empty string are what
+/// KiCAD writes for a pin with no name, so they name nothing and match nothing.
+fn named_as(pin: &sch_doc::PlacedPin, key: &str) -> bool {
+    !matches!(pin.name.as_str(), "" | "~") && pin.name.eq_ignore_ascii_case(key)
+}
+
+/// Where a part should end up, and which of its two anchors the answer is
+/// about.
+///
+/// `at`/`to` name the symbol's own position — the one `read_schematic` prints,
+/// so a coordinate read back and written out again lands where it started.
+/// A free-space search instead yields where the part's *extent* should be
+/// centred, which is the only way to reason about clearance.
+enum Destination {
+    Origin(Point2),
+    Centre(Point2),
+}
+
+impl Destination {
+    /// The symbol position this destination implies for a part whose extent is
+    /// currently centred at `centre` while its origin sits at `origin`.
+    fn origin_for(&self, origin: Point2, centre: Point2) -> Point2 {
+        match self {
+            Destination::Origin(at) => *at,
+            Destination::Centre(at) => {
+                Point2::new(origin.x + at.x - centre.x, origin.y + at.y - centre.y)
+            }
+        }
+    }
+}
+
 fn destination(
     doc: &SchDoc,
     input: &Value,
     w: f64,
     h: f64,
     skip: &[String],
-) -> Result<Point2, String> {
+) -> Result<Destination, String> {
     if let Some(at) = input
         .get("at")
         .or_else(|| input.get("to"))
@@ -39,9 +69,9 @@ fn destination(
     {
         let n: Vec<f64> = at.iter().filter_map(Value::as_f64).collect();
         if n.len() != 2 {
-                return Err("`at`/`to` must be [x, y] in mm".to_string());
+            return Err("`at`/`to` must be [x, y] in mm".to_string());
         }
-        return Ok(snap_point(Point2::new(n[0], n[1])));
+        return Ok(Destination::Origin(snap_point(Point2::new(n[0], n[1]))));
     }
     if let Some(anchor) = input.get("near").and_then(Value::as_str) {
         if doc.symbol_by_ref(anchor).is_none() {
@@ -53,6 +83,7 @@ fn destination(
             .and_then(Side::parse)
             .unwrap_or(Side::Right);
         return spot_beside(doc, anchor, side, w, h, skip)
+            .map(Destination::Centre)
             .ok_or_else(|| format!("no room {side:?} of {anchor}"));
     }
     let content = Occupancy::skipping(doc, skip).content();
@@ -63,6 +94,7 @@ fn destination(
         h,
         skip,
     )
+    .map(Destination::Centre)
     .ok_or_else(|| "no free space on the sheet".to_string())
 }
 
@@ -77,9 +109,17 @@ pub fn add_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
     // Park the part far off-sheet first: its body extents are only knowable
     // once its definition is embedded, and the destination depends on them.
-    let park = Pose::new(edit.doc.symbols().count() as f64 * 0.0 + 5000.0, 5000.0, 0.0);
+    if let Some(refdes) = input.get("ref").and_then(Value::as_str)
+        && edit.doc.symbol_by_ref(refdes).is_some()
+    {
+        return Ok(json!({ "error": format!("`{refdes}` is already on the sheet") }));
+    }
+    let park = Pose::new(5000.0, 5000.0, 0.0);
     let provisional = next_refdes(&edit.doc, "ZZ");
-    if let Err(error) = edit.doc.add_symbol(lib_id, &provisional, value, park, &source) {
+    if let Err(error) = edit
+        .doc
+        .add_symbol(lib_id, &provisional, value, park, &source)
+    {
         return Ok(json!({ "error": format!("could not place {lib_id}: {error}") }));
     }
     let refdes = match input.get("ref").and_then(Value::as_str) {
@@ -92,9 +132,6 @@ pub fn add_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             next_refdes(&edit.doc, &prefix)
         }
     };
-    if edit.doc.symbol_by_ref(&refdes).is_some_and(|s| s.at != park) {
-        return Ok(json!({ "error": format!("`{refdes}` is already on the sheet") }));
-    }
     edit.doc.set_field(&provisional, "Reference", &refdes)?;
     if let Some(footprint) = input.get("footprint").and_then(Value::as_str) {
         edit.doc.set_field(&refdes, "Footprint", footprint)?;
@@ -106,17 +143,13 @@ pub fn add_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .and_then(|s| crate::place::extent(&edit.doc, s));
     let (w, h) = body.map_or((10.0, 10.0), |r| (r.width(), r.height()));
     let skip = vec![refdes.clone()];
-    let at = match destination(&edit.doc, &input, w, h, &skip) {
-        Ok(at) => at,
+    let want = match destination(&edit.doc, &input, w, h, &skip) {
+        Ok(want) => want,
         Err(error) => return Ok(json!({ "error": error })),
     };
-    // `at` is where the body centre should land; move by that offset.
     let centre = body.map_or(park.point(), |r| r.center());
-    edit.doc.move_symbol(
-        &refdes,
-        snap(park.x + at.x - centre.x),
-        snap(park.y + at.y - centre.y),
-    )?;
+    let at = want.origin_for(park.point(), centre);
+    edit.doc.move_symbol(&refdes, snap(at.x), snap(at.y))?;
 
     let placed = edit
         .doc
@@ -137,7 +170,12 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let targets: Vec<String> = input
         .get("refs")
         .and_then(Value::as_array)
-        .map(|v| v.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .map(|v| {
+            v.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
     if targets.is_empty() {
         return Ok(json!({ "error": "remove_symbols needs `refs`" }));
@@ -154,9 +192,7 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     }
     let nets = refs::nets_touching(edit.before(), &targets);
-    let allow = Allow::nothing()
-        .nets(nets)
-        .parts(targets.clone());
+    let allow = Allow::nothing().nets(nets).parts(targets.clone());
 
     let orphaned: Vec<Point2> = placed_pins(&edit.doc)
         .into_iter()
@@ -183,8 +219,16 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// fixpoint.
 fn retract_stubs(doc: &mut SchDoc, orphaned: &[Point2]) -> usize {
     let mut removed = 0;
-    for _ in 0..8 {
+    for _ in 0..64 {
         let live: Vec<Point2> = placed_pins(doc).into_iter().map(|p| p.at).collect();
+        // A power symbol is placed straight onto the pin it feeds, so a
+        // removed pin's coordinate may still carry a pin that is very much
+        // there; nothing hanging off it is a stub.
+        let orphaned: Vec<Point2> = orphaned
+            .iter()
+            .copied()
+            .filter(|p| !live.iter().any(|q| q.near_eq(*p, EPS)))
+            .collect();
         let ends: Vec<Point2> = doc
             .wires()
             .filter_map(refs::ends)
@@ -242,8 +286,19 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "every move needs a `ref`" }));
     }
     let mut placed = Vec::new();
+    // A part still waiting its turn is not an obstacle to the one being placed;
+    // one already placed in this batch is.
+    let mut pending = all.clone();
     for step in &moves {
         let refdes = step["ref"].as_str().unwrap_or_default().to_string();
+        if ["to", "at", "by", "near"]
+            .iter()
+            .all(|key| step.get(key).is_none())
+        {
+            return Ok(json!({
+                "error": format!("the move of {refdes} says nowhere to put it — give `to`, `by`, or `near`+`side`"),
+            }));
+        }
         let Some(symbol) = edit.doc.symbol_by_ref(&refdes) else {
             return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
         };
@@ -251,32 +306,47 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let body = crate::place::extent(&edit.doc, symbol);
         let (w, h) = body.map_or((10.0, 10.0), |r| (r.width(), r.height()));
         let centre = body.map_or(origin, |r| r.center());
-        let target = if let Some(by) = step.get("by").and_then(Value::as_array) {
+        let want = if let Some(by) = step.get("by").and_then(Value::as_array) {
             let n: Vec<f64> = by.iter().filter_map(Value::as_f64).collect();
             if n.len() != 2 {
                 return Ok(json!({ "error": "`by` must be [dx, dy] in mm" }));
             }
-            Point2::new(centre.x + n[0], centre.y + n[1])
+            Destination::Centre(Point2::new(centre.x + n[0], centre.y + n[1]))
         } else {
-            match destination(&edit.doc, step, w, h, &all) {
-                Ok(at) => at,
+            match destination(&edit.doc, step, w, h, &pending) {
+                Ok(want) => want,
                 Err(error) => return Ok(json!({ "error": error })),
             }
         };
-        if !Occupancy::skipping(&edit.doc, &all).free(snap_point(target), w, h) {
+        let at = snap_point(want.origin_for(origin, centre));
+        // Clearance is about the extent, which sits `centre - origin` away.
+        let landing = Point2::new(at.x + centre.x - origin.x, at.y + centre.y - origin.y);
+        if !Occupancy::skipping(&edit.doc, &pending).free(landing, w, h) {
             return Ok(json!({
                 "error": format!(
                     "{refdes} would overlap another part at ({:.2},{:.2}); nothing was moved",
-                    target.x, target.y
+                    at.x, at.y
                 ),
             }));
         }
-        edit.doc.move_symbol(
-            &refdes,
-            snap(origin.x + target.x - centre.x),
-            snap(origin.y + target.y - centre.y),
-        )?;
-        placed.push(json!({ "ref": refdes, "at": [snap(target.x), snap(target.y)] }));
+        // Whatever met this part's pins comes with it, the way KiCAD drags a
+        // symbol: leaving the wires behind would silently unwire the board.
+        let was: Vec<Point2> = placed_pins(&edit.doc)
+            .into_iter()
+            .filter(|p| p.refdes == refdes)
+            .map(|p| p.at)
+            .collect();
+        edit.doc.move_symbol(&refdes, at.x, at.y)?;
+        let now: Vec<Point2> = placed_pins(&edit.doc)
+            .into_iter()
+            .filter(|p| p.refdes == refdes)
+            .map(|p| p.at)
+            .collect();
+        for (from, to) in was.into_iter().zip(now) {
+            edit.doc.move_attached(from, to);
+        }
+        pending.retain(|r| *r != refdes);
+        placed.push(json!({ "ref": refdes, "at": [at.x, at.y] }));
     }
     edit.commit(json!({ "moved": placed }), Allow::nothing())
 }
@@ -290,19 +360,16 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "set_fields needs `ref` and `fields`" }));
     };
     let mut edit = Edit::open(ctx)?;
-    if edit.doc.symbol_by_ref(refdes).is_none() {
+    // Address the symbol by UUID: setting `Reference` renames it, and every
+    // later field in the same call would then be looking for a part that is
+    // no longer there.
+    let Some(uuid) = edit.doc.symbol_by_ref(refdes).map(|s| s.uuid.clone()) else {
         return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
-    }
+    };
     let was = refs::nets_touching(edit.before(), &[refdes.to_string()]);
-    let renamed = fields.get("Reference").and_then(Value::as_str);
-    let mut allow = Allow::nothing()
-        .nets(was.clone())
-        .part(refdes);
-    if let Some(new) = renamed {
-        // Auto-named nets carry the designator, so a rename renames them too.
-        allow = allow
-            .part(new)
-            .nets(was.iter().map(|n| n.replace(refdes, new)).collect::<Vec<_>>());
+    let mut allow = Allow::nothing().nets(was).part(refdes);
+    if let Some(new) = fields.get("Reference").and_then(Value::as_str) {
+        allow = allow.part(new);
     }
     let mut applied = serde_json::Map::new();
     for (name, value) in fields {
@@ -310,7 +377,7 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             Value::Null => "",
             other => other.as_str().unwrap_or_default(),
         };
-        edit.doc.set_field(refdes, name, text)?;
+        edit.doc.set_field(&uuid, name, text)?;
         applied.insert(name.clone(), json!(text));
     }
     edit.commit(json!({ "ref": refdes, "fields": applied }), allow)
@@ -357,19 +424,22 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if edit.doc.symbol_by_ref(refdes).is_none() {
         return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
     }
-    let before: Vec<(String, String, String)> = placed_pins(&edit.doc)
+    // Where each connected pin sat, so whatever met it can follow it across.
+    let before: Vec<(String, String, String, Point2)> = placed_pins(&edit.doc)
         .into_iter()
         .filter(|p| p.refdes == refdes)
         .filter_map(|p| {
             let net = refs::net_of(edit.before(), refdes, &p.number)?;
-            Some((p.number.clone(), p.name.clone(), net.to_string()))
+            Some((p.number.clone(), p.name.clone(), net.to_string(), p.at))
         })
         .collect();
     let was = refs::nets_touching(edit.before(), &[refdes.to_string()]);
 
     let dropped = match edit.doc.set_lib_id(refdes, lib_id, &symbol_source(ctx)) {
         Ok(dropped) => dropped,
-        Err(error) => return Ok(json!({ "error": format!("could not swap to {lib_id}: {error}") })),
+        Err(error) => {
+            return Ok(json!({ "error": format!("could not swap to {lib_id}: {error}") }));
+        }
     };
     for (key, field) in [("value", "Value"), ("footprint", "Footprint")] {
         if let Some(text) = input.get(key).and_then(Value::as_str) {
@@ -378,41 +448,52 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 
     // The new part's pins sit where its own body puts them, which need not be
-    // where the old ones were. Re-name any pin whose net the swap dropped;
-    // pins that landed back on their net are left exactly as they were.
+    // where the old ones were. Drag each pin's wires across to it; only a pin
+    // that still cannot reach its net gets named in place.
     let pin_map = input.get("pin_map").and_then(Value::as_object);
     let now = placed_pins(&edit.doc);
-    let after = sch_doc::connect::extract(&edit.doc);
     let mut unmapped = Vec::new();
     let mut restored = Vec::new();
-    for (number, name, net) in &before {
+    // One new pin can stand in for at most one old pin: letting two old nets
+    // land on the same pin would short them together.
+    let mut taken: Vec<String> = Vec::new();
+    for (number, name, net, was_at) in &before {
         let wanted = pin_map
             .and_then(|m| m.get(number).or_else(|| m.get(name)))
             .and_then(Value::as_str);
-        let landed = now.iter().find(|p| {
+        let matches = |p: &&sch_doc::PlacedPin, key: Option<&str>| {
             p.refdes == refdes
-                && match wanted {
-                    Some(key) => p.number == key || p.name.eq_ignore_ascii_case(key),
-                    None => p.number == *number || (!name.is_empty() && p.name == *name),
+                && !taken.contains(&p.number)
+                && match key {
+                    Some(key) => p.number == key || named_as(p, key),
+                    // A pin's number identifies it; `~` is not a name.
+                    None => p.number == *number || named_as(p, name),
                 }
-        });
-        let Some(pin) = landed else {
+        };
+        let Some(pin) = now.iter().find(|p| matches(p, wanted)) else {
             unmapped.push(match name.as_str() {
                 "" | "~" => number.clone(),
                 name => format!("{number} ({name})"),
             });
             continue;
         };
+        taken.push(pin.number.clone());
+        let landed = pin.at;
+        edit.doc.move_attached(*was_at, landed);
+        // Re-extract: dragging this pin's wires, or a label written for an
+        // earlier pin, changes what this one is already connected to.
+        let after = sch_doc::connect::extract(&edit.doc);
         if refs::net_of(&after, refdes, &pin.number) == Some(net.as_str()) {
             continue;
         }
         edit.doc
-            .add_label(LabelKind::Local, net, Pose::new(pin.at.x, pin.at.y, 0.0));
+            .add_label(LabelKind::Local, net, Pose::new(landed.x, landed.y, 0.0));
         restored.push(format!("{refdes}.{}={net}", pin.number));
     }
     if !restored.is_empty() {
         edit.warn(format!(
-            "the new body moved pins, so their nets were re-named in place: {}",
+            "these pins could not reach their old net through wires, so it was named at \
+             them instead: {}",
             restored.join(" ")
         ));
     }
@@ -429,9 +510,6 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "dropped_pins": dropped,
             "unmapped_pins": unmapped,
         }),
-        Allow::nothing()
-            .nets(was.clone())
-            .part(refdes)
-            .creating(),
+        Allow::nothing().nets(was.clone()).part(refdes).creating(),
     )
 }

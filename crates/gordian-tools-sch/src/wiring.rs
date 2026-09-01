@@ -24,12 +24,20 @@ pub(crate) fn dir_of(out: Point2) -> Dir {
     }
 }
 
-/// The obstacle scene for a route of `net` between `a` and `b`.
+/// The name a route is drawn under while it is being solved.
 ///
-/// Everything already on the partitions those two ends belong to is relabelled
-/// `net`: the router must be free to touch what it is about to join, and would
-/// otherwise refuse to leave its own start point.
-fn scene(doc: &SchDoc, a: Point2, b: Point2, net: &str) -> RouteScene {
+/// Never the caller's `net`: if the caller says `net: "GND"` the router would
+/// treat every scrap of GND copper on the sheet as its own and be free to land
+/// on it. Only the two partitions actually being joined get this name.
+const ROUTING_NET: &str = "#routing";
+
+/// The obstacle scene for a route between `a` and `b`.
+///
+/// The partitions those two ends belong to are relabelled [`ROUTING_NET`]: the
+/// router must be free to touch what it is about to join, and would otherwise
+/// refuse to leave its own start point. Everything else keeps its own name and
+/// stays untouchable.
+fn scene(doc: &SchDoc, a: Point2, b: Point2) -> RouteScene {
     let live = connect::scene(doc);
     let joined: Vec<String> = live
         .points
@@ -38,9 +46,20 @@ fn scene(doc: &SchDoc, a: Point2, b: Point2, net: &str) -> RouteScene {
         .map(|(_, name)| name.clone())
         .collect();
     let rename = |name: &String| match joined.iter().any(|j| j == name) {
-        true => net.to_string(),
+        true => ROUTING_NET.to_string(),
         false => name.clone(),
     };
+    let labels = doc
+        .labels()
+        .map(|label| {
+            let at = label.at.point();
+            let half = (1.27 * label.text.chars().count() as f64).max(2.54);
+            (
+                geom::Rect::from_center_half(at, (half, 1.27)),
+                rename(&sch_doc::unescape(&label.text)),
+            )
+        })
+        .collect();
     RouteScene {
         solids: body_rects(doc).into_iter().map(|(_, r)| r).collect(),
         points: live
@@ -53,15 +72,17 @@ fn scene(doc: &SchDoc, a: Point2, b: Point2, net: &str) -> RouteScene {
             .iter()
             .map(|(from, to, name)| NetSegment::new(*from, *to, rename(name)))
             .collect(),
-        label_solids: Vec::new(),
+        label_solids: labels,
     }
 }
 
-/// Draw a wire path, adding a junction wherever it lands on existing copper.
+/// Draw a wire path, adding a junction wherever it meets existing copper — at
+/// its ends and at every corner, since a corner landing mid-span draws a T that
+/// KiCAD does not treat as a connection unless a dot says so.
 fn draw(doc: &mut SchDoc, path: &[Point2]) -> Vec<String> {
-    let (Some(&head), Some(&tail)) = (path.first(), path.last()) else {
+    if path.len() < 2 {
         return Vec::new();
-    };
+    }
     let existing: Vec<(Point2, Point2)> = doc
         .wires()
         .flat_map(|w| {
@@ -75,7 +96,7 @@ fn draw(doc: &mut SchDoc, path: &[Point2]) -> Vec<String> {
     for pair in path.windows(2) {
         uuids.push(doc.add_wire(pair[0], pair[1]));
     }
-    for vertex in [head, tail] {
+    for &vertex in path {
         let interior = existing.iter().any(|(from, to)| {
             Segment::new(*from, *to).contains_point(vertex)
                 && !vertex.near_eq(*from, EPS)
@@ -85,9 +106,10 @@ fn draw(doc: &mut SchDoc, path: &[Point2]) -> Vec<String> {
             .iter()
             .filter(|(from, to)| vertex.near_eq(*from, EPS) || vertex.near_eq(*to, EPS))
             .count();
-        let already = doc.items().iter().any(|item| {
-            matches!(item, sch_doc::Item::Junction(j) if j.at.near_eq(vertex, EPS))
-        });
+        let already = doc
+            .items()
+            .iter()
+            .any(|item| matches!(item, sch_doc::Item::Junction(j) if j.at.near_eq(vertex, EPS)));
         if !already && (interior || ends >= 2) {
             doc.add_junction(vertex);
         }
@@ -123,8 +145,6 @@ pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .map(str::to_string)
         .or_else(|| from_net.clone())
         .or_else(|| to_net.clone());
-    let route_net = net.clone().unwrap_or_else(|| "#new".to_string());
-
     let (a, b) = (from.at(), to.at());
     if a.near_eq(b, EPS) {
         return Ok(json!({ "error": "both ends are the same point; they already touch" }));
@@ -142,10 +162,14 @@ pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .parts(to.owner().map(str::to_string))
         .creating();
 
-    let scene = scene(&edit.doc, a, b, &route_net);
-    match route_edge(a, dir_a, b, &route_net, &scene) {
-        Some(path) => {
-            let wires = draw(&mut edit.doc, &path);
+    let scene = scene(&edit.doc, a, b);
+    let drawn = route_edge(a, dir_a, b, ROUTING_NET, &scene)
+        .map(|path| draw(&mut edit.doc, &path))
+        // Drawing a path is not the same as making a connection: if the two
+        // ends did not end up on one partition, the wire is decoration.
+        .filter(|_| joined(&edit.doc, a, b));
+    match drawn {
+        Some(wires) => {
             // An explicitly asked-for name is part of the request, not just a
             // routing hint: give the wire that name unless it already has it.
             if let Some(wanted) = input.get("net").and_then(Value::as_str)
@@ -164,7 +188,18 @@ pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         None => {
             // Nothing orthogonal fits, so join the ends by name instead — the
-            // same move a person makes when a wire would be spaghetti.
+            // same move a person makes when a wire would be spaghetti. A bare
+            // point cannot carry a label, so there is nothing to fall back to.
+            if matches!(from, Target::Point(_)) || matches!(to, Target::Point(_)) {
+                return Ok(json!({
+                    "error": format!(
+                        "no clear wire path between {} and {}, and a bare point cannot be \
+                         joined by name — connect pins, or make room first",
+                        from.describe(),
+                        to.describe()
+                    ),
+                }));
+            }
             let net = net.unwrap_or_else(|| fallback_name(&from, &to));
             for target in [&from, &to] {
                 edit.doc
@@ -180,6 +215,21 @@ pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 allow,
             )
         }
+    }
+}
+
+/// Whether two points sit on the same partition of the sheet.
+fn joined(doc: &SchDoc, a: Point2, b: Point2) -> bool {
+    let live = connect::scene(doc);
+    let name_at = |p: Point2| {
+        live.points
+            .iter()
+            .find(|(q, _)| q.near_eq(p, EPS))
+            .map(|(_, name)| name.clone())
+    };
+    match (name_at(a), name_at(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
     }
 }
 
@@ -241,7 +291,20 @@ pub fn no_connect(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(pin) => pin,
         Err(error) => return Ok(json!({ "error": error })),
     };
-    if edit.before().no_connect.iter().any(|p| p.refdes == pin.refdes && p.pin == pin.number) {
+    if let Some(net) = refs::net_of(edit.before(), &pin.refdes, &pin.number) {
+        return Ok(json!({
+            "error": format!(
+                "{spec} is connected to `{net}`; a no-connect marker on a wired pin is ignored. \
+                 Disconnect it first if that is what you meant."
+            ),
+        }));
+    }
+    if edit
+        .before()
+        .no_connect
+        .iter()
+        .any(|p| p.refdes == pin.refdes && p.pin == pin.number)
+    {
         return Ok(json!({ "changed": format!("{spec} was already marked no-connect") }));
     }
     edit.doc.add_no_connect(pin.at);
@@ -252,16 +315,19 @@ pub fn no_connect(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 }
 
 /// The `power:` symbols that could carry a rail called `net`, best first.
+///
+/// KiCAD spells a fractional rail two ways — `+3V3` and `+3.3V` — and a caller
+/// may write either, with or without the leading `+`. Offer all of them.
 fn power_candidates(net: &str) -> Vec<String> {
     let bare = net.trim_start_matches('+');
-    let mut names = vec![net.to_string(), format!("+{bare}")];
-    if let Some(rest) = bare.strip_suffix('V').or(Some(bare)) {
-        // `3V3` and `3.3V` are the two spellings KiCAD ships.
-        if let Some((whole, frac)) = rest.split_once('V') {
-            names.push(format!("+{whole}.{frac}V"));
-        }
+    let mut names = vec![net.to_string(), bare.to_string(), format!("+{bare}")];
+    if let Some((whole, frac)) = bare.trim_end_matches('V').split_once('V') {
+        names.push(format!("+{whole}.{frac}V"));
     }
-    names.push(bare.to_string());
+    if let Some((whole, frac)) = bare.trim_end_matches('V').split_once('.') {
+        names.push(format!("+{whole}V{frac}"));
+    }
+    names.dedup();
     names
         .into_iter()
         .map(|name| format!("power:{name}"))
@@ -328,17 +394,27 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// Rotate and shift a just-placed one-pin symbol so its pin sits exactly on
 /// `at`, facing back along `out`.
 fn align_onto_pin(doc: &mut SchDoc, refdes: &str, at: Point2, out: Point2) {
+    // The rail's pin must point back the way the target pin points out; keep
+    // the orientation that does that best rather than the last one tried.
+    let mut best = (f64::MAX, 0.0);
     for rot in [0.0, 90.0, 180.0, 270.0] {
         let _ = doc.set_symbol_orientation(refdes, rot, sch_doc::Mirror::None);
-        let Some(own) = sch_doc::placed_pins(doc).into_iter().find(|p| p.refdes == refdes) else {
+        let Some(own) = sch_doc::placed_pins(doc)
+            .into_iter()
+            .find(|p| p.refdes == refdes)
+        else {
             return;
         };
-        // The rail's pin must point back the way the target pin points out.
-        if own.out.x * out.x + own.out.y * out.y < -0.5 {
-            break;
+        let alignment = own.out.x * out.x + own.out.y * out.y;
+        if alignment < best.0 {
+            best = (alignment, rot);
         }
     }
-    let Some(own) = sch_doc::placed_pins(doc).into_iter().find(|p| p.refdes == refdes) else {
+    let _ = doc.set_symbol_orientation(refdes, best.1, sch_doc::Mirror::None);
+    let Some(own) = sch_doc::placed_pins(doc)
+        .into_iter()
+        .find(|p| p.refdes == refdes)
+    else {
         return;
     };
     let symbol_at = match doc.symbol_by_ref(refdes) {
@@ -360,12 +436,22 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let wanted_refs: Vec<String> = input
         .get("refs")
         .and_then(Value::as_array)
-        .map(|v| v.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .map(|v| {
+            v.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
     let wanted_uuids: Vec<String> = input
         .get("uuids")
         .and_then(Value::as_array)
-        .map(|v| v.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .map(|v| {
+            v.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
     if wanted_net.is_none() && wanted_refs.is_empty() && wanted_uuids.is_empty() {
         return Ok(json!({ "error": "delete_wires needs one of `net`, `refs` or `uuids`" }));
@@ -373,8 +459,7 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let pins = sch_doc::placed_pins(&edit.doc);
     let touches_ref = |a: Point2, b: Point2| {
         pins.iter().any(|p| {
-            wanted_refs.contains(&p.refdes)
-                && (p.at.near_eq(a, EPS) || p.at.near_eq(b, EPS))
+            wanted_refs.contains(&p.refdes) && (p.at.near_eq(a, EPS) || p.at.near_eq(b, EPS))
         })
     };
     let net_of_segment = |a: Point2, b: Point2| {
@@ -433,6 +518,12 @@ pub(crate) fn spot_beside(
 }
 
 /// A free spot anywhere, preferring near `from`.
-pub(crate) fn spot_near(doc: &SchDoc, from: Point2, w: f64, h: f64, skip: &[String]) -> Option<Point2> {
+pub(crate) fn spot_near(
+    doc: &SchDoc,
+    from: Point2,
+    w: f64,
+    h: f64,
+    skip: &[String],
+) -> Option<Point2> {
     Occupancy::skipping(doc, skip).nearest_free(snap_point(from), w, h)
 }

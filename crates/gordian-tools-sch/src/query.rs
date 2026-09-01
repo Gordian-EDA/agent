@@ -48,13 +48,10 @@ fn pin_map(pins: &[&PlacedPin], netlist: &Netlist) -> String {
 pub fn read_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let (doc, netlist) = Edit::read(ctx)?;
     let full = input.get("detail").and_then(Value::as_str) == Some("full");
-    let region = input
-        .get("region")
-        .and_then(Value::as_array)
-        .and_then(|v| {
-            let n: Vec<f64> = v.iter().filter_map(Value::as_f64).collect();
-            (n.len() == 4).then(|| Rect::new(n[0], n[1], n[2], n[3]))
-        });
+    let region = input.get("region").and_then(Value::as_array).and_then(|v| {
+        let n: Vec<f64> = v.iter().filter_map(Value::as_f64).collect();
+        (n.len() == 4).then(|| Rect::new(n[0], n[1], n[2], n[3]))
+    });
 
     let placed = placed_pins(&doc);
     let mut out = String::new();
@@ -68,10 +65,7 @@ pub fn read_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         if region.is_some_and(|r| !r.contains(symbol.at.point())) {
             continue;
         }
-        let pins: Vec<&PlacedPin> = placed
-            .iter()
-            .filter(|p| p.owner == symbol.uuid)
-            .collect();
+        let pins: Vec<&PlacedPin> = placed.iter().filter(|p| p.owner == symbol.uuid).collect();
         out.push_str(&format!(
             "{} {} \"{}\" @({:.2},{:.2}){} [{}]",
             symbol.refdes(),
@@ -186,10 +180,7 @@ pub fn get_net(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         known.sort_unstable();
         let closest = known
             .iter()
-            .max_by(|a, b| {
-                strsim::jaro_winkler(a, name)
-                    .total_cmp(&strsim::jaro_winkler(b, name))
-            })
+            .max_by(|a, b| strsim::jaro_winkler(a, name).total_cmp(&strsim::jaro_winkler(b, name)))
             .filter(|candidate| strsim::jaro_winkler(candidate, name) > 0.8);
         let error = match closest {
             Some(candidate) => format!("no net `{name}` — did you mean `{candidate}`?"),

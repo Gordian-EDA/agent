@@ -87,16 +87,29 @@ impl Occupancy {
         Occupancy::skipping(doc, &[])
     }
 
-    /// The same, minus the bodies of `skip` — what a move of those parts sees.
+    /// The same, minus `skip`'s bodies *and the wires attached to them* — what
+    /// a move of those parts sees. A part's own copper follows it, so treating
+    /// it as an obstacle would forbid every nudge.
     pub fn skipping(doc: &SchDoc, skip: &[String]) -> Occupancy {
         let mut blocks: Vec<Rect> = extents(doc)
             .into_iter()
             .filter(|(refdes, _)| !skip.contains(refdes))
             .map(|(_, r)| r)
             .collect();
+        let own: Vec<Point2> = placed_pins(doc)
+            .into_iter()
+            .filter(|p| skip.contains(&p.refdes))
+            .map(|p| p.at)
+            .collect();
+        let attached = |a: Point2, b: Point2| {
+            own.iter()
+                .any(|p| p.near_eq(a, geom::EPS) || p.near_eq(b, geom::EPS))
+        };
         for wire in doc.wires() {
             for pair in wire.points.windows(2) {
-                blocks.push(Rect::from_points(pair[0], pair[1]).inflate(0.2));
+                if !attached(pair[0], pair[1]) {
+                    blocks.push(Rect::from_points(pair[0], pair[1]).inflate(0.2));
+                }
             }
         }
         for label in doc.labels() {
@@ -105,12 +118,7 @@ impl Occupancy {
         let content = Rect::bounding(
             &blocks
                 .iter()
-                .flat_map(|r| {
-                    [
-                        Point2::new(r.min_x, r.min_y),
-                        Point2::new(r.max_x, r.max_y),
-                    ]
-                })
+                .flat_map(|r| [Point2::new(r.min_x, r.min_y), Point2::new(r.max_x, r.max_y)])
                 .collect::<Vec<_>>(),
         )
         .unwrap_or_else(|| Rect::new(25.4, 25.4, 254.0, 177.8));

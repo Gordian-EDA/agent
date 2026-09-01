@@ -69,7 +69,8 @@ const PIN: &str = "A pin as \"<ref>.<number>\" or \"<ref>.<name>\", e.g. \"U1.VD
 /// The JSON-Schema tool definitions handed to the model.
 pub fn tool_defs() -> Vec<Tool> {
     let side = json!({ "type": "string", "enum": ["left", "right", "above", "below"] });
-    let point = json!({ "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 });
+    let point =
+        json!({ "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 });
     let defs: Vec<(&str, &str, Value)> = vec![
         (
             "read_schematic",
