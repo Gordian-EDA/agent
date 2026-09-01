@@ -79,9 +79,9 @@ fn stack_units(doc: &mut SchDoc, uuids: &[String]) -> Result<(), sch_doc::Error>
 /// Where a part should end up, and which of its two anchors the answer is
 /// about.
 ///
-/// `at`/`to` name the symbol's own position — the one `read_schematic` prints,
-/// so a coordinate read back and written out again lands where it started.
-/// A free-space search instead yields where the part's *extent* should be
+/// `to` names the symbol's own position — the one `read_schematic` prints, so
+/// a coordinate read back and written out again lands where it started. A
+/// free-space search instead yields where the part's *extent* should be
 /// centred, which is the only way to reason about clearance.
 enum Destination {
     Origin(Point2),
@@ -108,14 +108,10 @@ fn destination(
     h: f64,
     skip: &[String],
 ) -> Result<(Destination, Option<String>), String> {
-    if let Some(at) = input
-        .get("at")
-        .or_else(|| input.get("to"))
-        .and_then(Value::as_array)
-    {
+    if let Some(at) = input.get("to").and_then(Value::as_array) {
         let n: Vec<f64> = at.iter().filter_map(Value::as_f64).collect();
         if n.len() != 2 {
-            return Err("`at`/`to` must be [x, y] in mm".to_string());
+            return Err("`to` must be [x, y] in mm".to_string());
         }
         return Ok((
             Destination::Origin(snap_point(Point2::new(n[0], n[1]))),
@@ -162,6 +158,12 @@ fn place_one(
     let Some(lib_id) = spec.get("lib_id").and_then(Value::as_str) else {
         return Err("every part needs `lib_id` (e.g. Device:R)".to_string());
     };
+    if spec.get("at").is_some() {
+        return Err(
+            "add_symbols chooses collision-free placement; use `near`+`side`, or use move_symbols({moves:[{ref,to}]}) only when the user explicitly requested coordinates"
+                .to_string(),
+        );
+    }
     let value = spec.get("value").and_then(Value::as_str).unwrap_or("");
     if let Some(refdes) = spec.get("ref").and_then(Value::as_str)
         && edit.doc.symbol_by_ref(refdes).is_some()
@@ -525,7 +527,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .collect();
     for step in &moves {
         let refdes = step["ref"].as_str().unwrap_or_default().to_string();
-        if ["to", "at", "by", "near", "rot", "mirror"]
+        if ["to", "by", "near", "rot", "mirror"]
             .iter()
             .all(|key| step.get(key).is_none())
         {
@@ -581,7 +583,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let body = crate::place::extent(&edit.doc, symbol);
         let (w, h) = body.map_or((10.0, 10.0), |r| (r.width(), r.height()));
         let centre = body.map_or(origin, |r| r.center());
-        let staying = ["to", "at", "by", "near"]
+        let staying = ["to", "by", "near"]
             .iter()
             .all(|key| step.get(key).is_none());
         let want = if staying {

@@ -72,7 +72,6 @@ pub fn tool_defs() -> Vec<Tool> {
         "footprint": { "type": "string" },
         "near": { "type": "string", "description": "Reference to sit beside." },
         "side": side.clone(),
-        "at": point.clone(),
         "rot": { "type": "number", "enum": [0, 90, 180, 270] }
     });
     let defs: Vec<(&str, &str, Value)> = vec![
@@ -121,8 +120,9 @@ pub fn tool_defs() -> Vec<Tool> {
             "add_symbols",
             "Place parts — one, or a whole block in a single call — and report where each went. \
              `near`+`side` finds a clear, grid-aligned spot beside that part and turns a two-pin \
-             body to face it, so no follow-up move is needed; `at`/`rot` override. `ref` is \
-             auto-assigned. Nothing is written if any part fails. Wire them with `connect`.",
+             body to face it, so no follow-up move is needed; `rot` overrides orientation. `ref` \
+             is auto-assigned. Placement coordinates are the tool's job. Nothing is written if \
+             any part fails. Wire them with `connect`.",
             json!({
                 "type": "object",
                 "properties": {
@@ -303,9 +303,10 @@ pub fn tool_defs() -> Vec<Tool> {
         (
             "delete_wires",
             "Remove drawn wires by pin, net, the parts they touch, or uuid, reporting which pins \
-             it left loose. To insert a part IN SERIES cut at ONE pin — {pins:[\"P1.2\"]} — then \
+             it left loose. To insert a part IN SERIES cut at ONE pin — {pins:[\"RX.1\"]} — then \
              `connect` it between that pin and the node it used to reach; the rest stays wired. \
-             `net` cuts the whole net, loosening every pin on it.",
+             RX.1 is a placeholder for the real target pin. `net` cuts the whole net, loosening \
+             every pin on it.",
             json!({
                 "type": "object",
                 "properties": {

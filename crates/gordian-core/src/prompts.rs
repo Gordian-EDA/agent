@@ -22,7 +22,7 @@ Then make ONE change per call:
 - connections → `connect({from:"R5.2", to:"U1.VDD"})`, or `connect({pairs:[…]})` for a block. NEVER emit wire coordinates; there is no tool that takes them. It routes around the drawing and adds junctions; "no clear path" means it named both ends instead — a real connection, not a failure.
 - rails → `add_power({net:"GND", pin:"U1.8"})`. Name a net at a pin → `label({pin, net})`. Unused pin → `no_connect({pin})`.
 - removal → `remove_symbols({refs})`, which retracts the stubs that only served them.
-- IN SERIES on an existing net → `delete_wires({pins:["P1.2"]})` to free ONE pin, then `add_symbols`, then `connect` the part between that pin and the node it used to reach. Skipping the cut shunts the part across the net; cutting by `net` loosens every pin on it.
+- IN SERIES → cut ONE real target pin with `delete_wires({pins:["RX.1"]})`; RX.1 is a placeholder, never literal. Then `add_symbols` and `connect` the part between that pin and its former node. Skipping the cut shunts the part; cutting by `net` loosens every pin.
 
 Every mutator re-derives the netlist and REFUSES the write if it would change a net you did not name, returning the delta: the edit was wrong, not the tool. Each success returns a `snapshot` id for `undo`.
 
@@ -104,6 +104,8 @@ mod tests {
         assert!(p.contains("ALWAYS `read_schematic()` first"));
         assert!(p.contains("REFUSES the write"));
         assert!(p.contains("Do not move parts you were not asked to move"));
+        assert!(p.contains("RX.1 is a placeholder"));
+        assert!(!p.contains("P1.2"));
     }
 
     #[test]
