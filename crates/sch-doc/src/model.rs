@@ -418,7 +418,8 @@ pub struct Sheet {
     pub(crate) raw: Retained,
 }
 
-/// A pin on a hierarchical sheet's border.
+/// A pin on a hierarchical sheet's border. `at` is in sheet coordinates, not
+/// relative to the sheet box.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SheetPin {
     pub uuid: String,

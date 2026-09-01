@@ -337,6 +337,33 @@ fn unnamed_nets_get_a_generated_name() {
     assert_eq!(netlist.nets[0].source, NetSource::Auto);
 }
 
+/// A hierarchical sheet's pins sit on its border in sheet coordinates, not
+/// relative to the sheet box, and a wire ending on one connects to it.
+#[test]
+fn sheet_pins_are_connection_points_in_sheet_coordinates() {
+    let doc = sheet(
+        &[RESISTOR],
+        &format!(
+            "{}\n{}\n(sheet (at 50 50) (size 20 20) (uuid \"s\")\n\
+             (property \"Sheetname\" \"child\" (at 50 49 0))\n\
+             (property \"Sheetfile\" \"child.kicad_sch\" (at 50 71 0))\n\
+             (pin \"IN\" input (at 50 55 180) (uuid \"sp\")))",
+            place("Device:R", "R1", "1k", 20.0, 58.81, 0.0, "(unit 1)"),
+            wire(20.0, 55.0, 50.0, 55.0),
+        ),
+    );
+    let pins = doc
+        .items()
+        .iter()
+        .find_map(|item| match item {
+            sch_doc::Item::Sheet(s) => Some(&s.pins),
+            _ => None,
+        })
+        .expect("sheet");
+    assert_eq!(pins[0].at.point(), geom::Point2::new(50.0, 55.0));
+    assert_eq!(nets(&doc), vec![vec!["R1.1".to_string()]]);
+}
+
 #[test]
 fn buses_and_missing_definitions_are_reported() {
     let bussed = sheet(

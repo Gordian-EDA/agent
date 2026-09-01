@@ -148,9 +148,10 @@ pub fn extract(doc: &SchDoc) -> Netlist {
             Item::Label(l) => {
                 nodes.intern(l.at.point());
             }
-            Item::Sheet(s) => {
-                for pin in &s.pins {
-                    nodes.intern(Point2::new(s.at.x + pin.at.x, s.at.y + pin.at.y));
+            Item::Sheet(sheet) => {
+                // A sheet pin's `at` is already in sheet coordinates.
+                for pin in &sheet.pins {
+                    nodes.intern(pin.at.point());
                 }
             }
             _ => {}
