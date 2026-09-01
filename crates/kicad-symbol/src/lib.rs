@@ -3,7 +3,7 @@
 //! `.kicad_sym` library reader ([`symlib`]), the per-symbol drawing geometry +
 //! embeddable definition ([`geometry`]), and cross-library [`search`].
 //!
-//! `circuit-lang` re-exports the metadata types (`circuit_lang::{PinType, …}`).
+//! `sch-check` re-exports the metadata types (`sch_check::{PinType, …}`).
 
 pub mod geometry;
 pub mod search;

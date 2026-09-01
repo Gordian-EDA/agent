@@ -1,5 +1,5 @@
 //! `sch-floorplan` — the engine-agnostic schematic placement core that turns a
-//! `circuit_lang::Design` into a real `.kicad_sch` (and back).
+//! `sch_check::Design` into a real `.kicad_sch` (and back).
 //!
 //! Owns the [`floorplan`] pipeline: **infer → place → wire → write**. It is
 //! engine-agnostic by design — placement engines (`anneal-place` today)

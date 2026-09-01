@@ -6,8 +6,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use circuit_lang::model::Design;
 use kicad::KicadInstallation;
+use sch_check::model::Design;
 
 use super::idiom;
 use super::place::{gather, grid_from_layout, grid_occurrences, incidence, unit_place_key};
@@ -54,7 +54,7 @@ fn local_rail_nets(design: &Design) -> BTreeSet<String> {
         for comp in block.components.values() {
             if comp.part.starts_with("power:") {
                 for target in comp.pins.values() {
-                    if let circuit_lang::model::PinTarget::Net(net) = target {
+                    if let sch_check::model::PinTarget::Net(net) = target {
                         *count.entry(net.clone()).or_insert(0) += 1;
                     }
                 }

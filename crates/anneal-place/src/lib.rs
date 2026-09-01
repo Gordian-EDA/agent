@@ -14,9 +14,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use circuit_graph::netclass::is_power_net;
-use circuit_lang::model::Design;
 use geom::{EPS, Point2, Rect};
 use kicad::KicadInstallation;
+use sch_check::model::Design;
 use sch_place::ir::{LayoutIr, Orient};
 use sch_place::item::{Incidence, Item};
 use sch_place::place::{Crossings, PlaceResult};

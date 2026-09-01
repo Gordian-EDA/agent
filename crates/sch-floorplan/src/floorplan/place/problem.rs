@@ -10,8 +10,8 @@
 
 use std::io;
 
-use circuit_lang::model::Design;
 use kicad::KicadInstallation;
+use sch_check::model::Design;
 
 use sch_place::item::{Incidence, Item};
 use sch_place::place::PlaceOptions;

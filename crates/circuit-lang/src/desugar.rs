@@ -1,11 +1,11 @@
 //! Sugar -> kernel lowering. The reconciler and lints see
 //! only the output of this pass.
 
-use crate::diag::{Diagnostic, Diagnostics};
-use crate::model::*;
-use crate::provider::SymbolTable;
 use crate::surface::*;
 use indexmap::IndexMap;
+use sch_check::SymbolTable;
+use sch_check::diag::{Diagnostic, Diagnostics};
+use sch_check::model::*;
 
 /// Closed alias table for terse built-ins plus one common KiCad library slip.
 fn alias(part: &str) -> String {
@@ -130,98 +130,12 @@ pub fn desugar(s: &SurfaceDesign, provider: &SymbolTable) -> (Design, Diagnostic
     }
 
     resolve_pins(&mut d, raw_pins, &mut diags);
-    synth_decouple(&mut d, s, provider, &mut diags); // Task 8
-    reannotate_decouple_caps(&mut d);
+    synth_decouple(&mut d, s, provider, &mut diags);
+    sch_check::decouple::renumber(&mut d);
     materialize_auto_nc(&mut d, provider); // Task R6
-    mark_power_nets(&mut d);
-    mark_label_nets(&mut d);
+    sch_check::nets::derive_attrs(&mut d);
 
     (d, diags)
-}
-
-/// Derive board I/O PORTS: every net a `label:global` component drives is a port
-/// (drawn as a global-label pennant). Mirrors [`mark_power_nets`] — an author marks
-/// a net as an exposed I/O by placing a label component on it, exactly as they place
-/// a `power:GND` symbol to mark a ground. (`label:local` is NOT a port — it is a
-/// plain local net-name annotation, handled separately.)
-fn mark_label_nets(d: &mut Design) {
-    let mut port_nets: Vec<NetName> = Vec::new();
-    for block in d.blocks.values() {
-        for comp in block.components.values() {
-            if comp.part != "label:global" {
-                continue;
-            }
-            for target in comp.pins.values() {
-                if let PinTarget::Net(net) = target {
-                    port_nets.push(net.clone());
-                }
-            }
-        }
-    }
-    for net in port_nets {
-        d.nets.entry(net).or_default().port = true;
-    }
-}
-
-/// Give synthesized decoupling caps a real `C<n>` refdes. They are keyed
-/// `__dec_<parent>_<n>` internally so the `decouple:` sugar can re-collapse them
-/// (canon keys off `Origin`, not the name) — but that key is exactly what
-/// `floorplan::emit` stamps as the KiCAD refdes, so a raw `__dec_U1_1` was leaking
-/// onto the rendered sheet. Renumber each synth cap to `C<n>` after the highest
-/// authored `C`, preserving its `Origin` so canon still re-sugars it. Deterministic
-/// (block then component order; global counter for cross-block uniqueness), so the
-/// canonical round-trip stays a fixpoint and `compile(canon(d)) == d` holds.
-fn reannotate_decouple_caps(d: &mut Design) {
-    let is_dec =
-        |c: &Component| matches!(&c.origin, Origin::Synthesized { role, .. } if role == "decouple");
-    let mut next = 1 + d
-        .blocks
-        .values()
-        .flat_map(|b| b.components.keys())
-        .filter_map(|k| k.strip_prefix('C').and_then(|n| n.parse::<u32>().ok()))
-        .max()
-        .unwrap_or(0);
-    for block in d.blocks.values_mut() {
-        let synth: Vec<String> = block
-            .components
-            .iter()
-            .filter(|(_, c)| is_dec(c))
-            .map(|(k, _)| k.clone())
-            .collect();
-        for old in synth {
-            if let Some(comp) = block.components.shift_remove(&old) {
-                block.components.insert(format!("C{next}"), comp);
-                next += 1;
-            }
-        }
-    }
-}
-
-/// Derive the power nets: every net a power-symbol component drives (a part in
-/// KiCAD's `power:` library) is a power net. Replaces the old top-level `power:`
-/// list — the symbol the author placed already says which net is power.
-fn mark_power_nets(d: &mut Design) {
-    let mut power_nets: Vec<NetName> = Vec::new();
-    for block in d.blocks.values() {
-        for comp in block.components.values() {
-            if !comp.part.starts_with("power:") {
-                continue;
-            }
-            for target in comp.pins.values() {
-                if let PinTarget::Net(net) = target {
-                    power_nets.push(net.clone());
-                }
-            }
-        }
-    }
-    for net in power_nets {
-        d.nets.entry(net).or_default().power = true;
-    }
-    for attrs in d.nets.values_mut() {
-        if attrs.class.as_deref() == Some("power") {
-            attrs.power = true;
-        }
-    }
 }
 
 /// Strip spans off one block's `layout:` grid into the kernel model, validating
@@ -291,7 +205,7 @@ fn materialize_auto_nc(d: &mut Design, provider: &SymbolTable) {
             let to_nc: Vec<String> = meta
                 .pins
                 .iter()
-                .filter(|p| p.etype != crate::provider::PinType::PowerInput)
+                .filter(|p| p.etype != sch_check::PinType::PowerInput)
                 .filter(|p| !covered.contains(p.number.as_str()))
                 .map(|p| p.number.clone())
                 .collect();
@@ -308,7 +222,7 @@ struct RawPin {
     unit: Option<String>,
     pin: String,
     target: String,
-    span: crate::diag::Span,
+    span: sch_check::diag::Span,
 }
 
 /// Lower the 2-pin connection sugars to a pin map:
@@ -383,7 +297,7 @@ fn apply_two_pin(
         || (anode.is_some() && cathode.is_some());
 
     // The two (pin number, net, span) bindings to write.
-    let bindings: [(String, String, crate::diag::Span); 2] = if has_pol {
+    let bindings: [(String, String, sch_check::diag::Span); 2] = if has_pol {
         if !polarized {
             diags.push(
                 Diagnostic::error(
@@ -439,7 +353,7 @@ fn apply_two_pin(
         // Map `between` args by numeric pin NUMBER, not library order: first arg →
         // lowest-numbered pin, second arg → highest. Fall back to
         // string order for non-numeric pin numbers.
-        let mut ordered: Vec<&crate::provider::PinMeta> = meta.pins.iter().collect();
+        let mut ordered: Vec<&sch_check::PinMeta> = meta.pins.iter().collect();
         ordered.sort_by(
             |x, y| match (x.number.parse::<u64>(), y.number.parse::<u64>()) {
                 (Ok(nx), Ok(ny)) => nx.cmp(&ny),
@@ -615,7 +529,7 @@ fn name_groups(
     diags: &mut Diagnostics,
 ) -> std::collections::HashMap<usize, String> {
     let mut group_name: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
-    let node_span: std::collections::HashMap<usize, crate::diag::Span> =
+    let node_span: std::collections::HashMap<usize, sch_check::diag::Span> =
         placement.iter().map(|(rp, i)| (*i, rp.span)).collect();
     // Collect all author names per group root, deterministically. HashMap
     // iteration order is randomized, so accumulate into a sorted set per root
@@ -624,7 +538,7 @@ fn name_groups(
     // `name -> span` lets the conflict diag point at a node naming the loser.
     let mut group_names: std::collections::HashMap<usize, std::collections::BTreeSet<String>> =
         std::collections::HashMap::new();
-    let mut name_span: std::collections::HashMap<(usize, String), crate::diag::Span> =
+    let mut name_span: std::collections::HashMap<(usize, String), sch_check::diag::Span> =
         std::collections::HashMap::new();
     for (i, name) in named {
         let root = uf.find(*i);
@@ -745,6 +659,9 @@ fn write_pin(d: &mut Design, rp: &RawPin, target: PinTarget) {
     }
 }
 
+/// Expand each component's `decouple:` sugar into real caps
+/// ([`sch_check::decouple`]), carrying the surface span onto an
+/// ambiguous-rails error.
 fn synth_decouple(
     d: &mut Design,
     s: &SurfaceDesign,
@@ -757,90 +674,19 @@ fn synth_decouple(
                 continue;
             }
             let comp = &d.blocks[bname].components[refdes];
-            // Author pin-map keys may be pin NUMBERS (e.g. `{1: 3V3}`), so the
-            // VDD*/VSS* prefix test must run against the symbol's pin NAME, not
-            // the raw key. Resolve each key via the provider (number-first, then
-            // name); fall back to the raw key only when the symbol is unknown.
-            let meta = provider.symbol(&comp.part);
-            let resolved_name = |key: &str| -> String {
-                let Some(meta) = &meta else {
-                    return key.to_string();
-                };
-                if let Some(pm) = meta.pins.iter().find(|p| p.number == key) {
-                    return pm.name.clone();
+            let rails = match sch_check::decouple::rails(refdes, comp, provider) {
+                Ok(rails) => rails,
+                Err(mut diag) => {
+                    if let Some(span) = sc.span {
+                        diag = diag.with_span(span);
+                    }
+                    diags.push(diag);
+                    continue;
                 }
-                if let Some(pm) = meta.pins.iter().find(|p| p.name == key) {
-                    return pm.name.clone();
-                }
-                key.to_string()
             };
-            let rail = |prefixes: &[&str]| -> Vec<NetName> {
-                let mut nets: Vec<NetName> = comp
-                    .pins
-                    .iter()
-                    .chain(comp.units.values().flatten())
-                    .filter(|(k, _)| {
-                        let k = resolved_name(k).to_ascii_uppercase();
-                        prefixes.iter().any(|p| k.starts_with(p))
-                    })
-                    .filter_map(|(_, t)| match t {
-                        PinTarget::Net(n) => Some(n.clone()),
-                        PinTarget::NoConnect => None,
-                    })
-                    .collect();
-                nets.sort();
-                nets.dedup();
-                nets
-            };
-            let vdd = rail(&["VDD", "VCC"]);
-            let gnd = rail(&["VSS", "GND"]);
-            if vdd.len() != 1 || gnd.len() != 1 {
-                let mut diag = Diagnostic::error(
-                    "decouple-ambiguous",
-                    format!(
-                        "{refdes}: decouple needs exactly one VDD*/VCC* net and one \
-                         VSS*/GND* net (found {vdd:?} / {gnd:?}) — write the caps explicitly"
-                    ),
-                );
-                if let Some(span) = sc.span {
-                    diag = diag.with_span(span);
-                }
-                diags.push(diag);
-                continue;
-            }
-            let (vdd, gnd) = (vdd[0].clone(), gnd[0].clone());
-            let mut idx = 0u32;
-            let mut synths = Vec::new();
-            // Assign `Origin::Synthesized { index }` in the SAME order `canon`
-            // re-sugars decouple — by value string — so `compile(canon(d)) == d`
-            // holds even when the author lists values out of sorted order.
-            let mut entries: Vec<(&String, &u32)> = sc.decouple.iter().collect();
-            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-            for (value, count) in entries {
-                for _ in 0..*count {
-                    idx += 1;
-                    let mut c = Component {
-                        part: "Device:C".into(),
-                        value: Some(value.clone()),
-                        // Synthesized decouplers are physical parts the board
-                        // needs a footprint for; the author never sees them to
-                        // assign one, so default to the ubiquitous 0402.
-                        footprint: Some("Capacitor_SMD:C_0402_1005Metric".into()),
-                        origin: Origin::Synthesized {
-                            parent: refdes.clone(),
-                            role: "decouple".into(),
-                            index: idx,
-                        },
-                        ..Default::default()
-                    };
-                    c.pins.insert("1".into(), PinTarget::Net(vdd.clone()));
-                    c.pins.insert("2".into(), PinTarget::Net(gnd.clone()));
-                    synths.push((format!("__dec_{refdes}_{idx}"), c));
-                }
-            }
             let block = d.blocks.get_mut(bname).unwrap();
-            for (key, c) in synths {
-                block.components.insert(key, c);
+            for (key, cap) in sch_check::decouple::expand(refdes, &sc.decouple, &rails) {
+                block.components.insert(key, cap);
             }
         }
     }
@@ -850,9 +696,9 @@ fn synth_decouple(
 mod tests {
     use super::*;
     use crate::parse::parse_str;
-    use crate::provider::SymbolTable;
+    use sch_check::SymbolTable;
 
-    pub(crate) fn run(src: &str) -> (crate::model::Design, crate::diag::Diagnostics) {
+    pub(crate) fn run(src: &str) -> (sch_check::model::Design, sch_check::diag::Diagnostics) {
         let (s, mut diags) = parse_str(src);
         let (d, ds) = desugar(&s.expect("parse failed"), &SymbolTable::with_basics());
         diags.extend(ds);
@@ -989,7 +835,7 @@ blocks:
     #[test]
     fn between_assigns_by_numeric_pin_order() {
         // symbol whose library lists pins out of numeric order: index0=number "2", index1=number "1"
-        use crate::provider::{PinType, SymbolTable};
+        use sch_check::{PinType, SymbolTable};
         let mut p = SymbolTable::with_basics();
         p.mock_add(
             "My:Weird",
@@ -1010,8 +856,8 @@ blocks:
         let (d, diags) = desugar(&s.unwrap(), &p);
         assert!(!diags.has_errors(), "{:?}", diags);
         let x1 = &d.blocks["main"].components["X1"];
-        assert_eq!(x1.pins["1"], crate::model::PinTarget::Net("AAA".into())); // a -> lowest pin number
-        assert_eq!(x1.pins["2"], crate::model::PinTarget::Net("BBB".into()));
+        assert_eq!(x1.pins["1"], sch_check::model::PinTarget::Net("AAA".into())); // a -> lowest pin number
+        assert_eq!(x1.pins["2"], sch_check::model::PinTarget::Net("BBB".into()));
     }
 
     #[test]
@@ -1209,7 +1055,7 @@ blocks:
         let caps: Vec<_> = mcu
             .components
             .iter()
-            .filter(|(_, c)| matches!(c.origin, crate::model::Origin::Synthesized { .. }))
+            .filter(|(_, c)| matches!(c.origin, sch_check::model::Origin::Synthesized { .. }))
             .collect();
         assert_eq!(caps.len(), 3);
         let (key, c) = &caps[0];
@@ -1222,7 +1068,7 @@ blocks:
         assert_eq!(c.pins["2"], PinTarget::Net("GND".into()));
         assert_eq!(
             c.origin,
-            crate::model::Origin::Synthesized {
+            sch_check::model::Origin::Synthesized {
                 parent: "U1".into(),
                 role: "decouple".into(),
                 index: 1
@@ -1276,7 +1122,7 @@ blocks:
             // U1.1 and J2.2 are joined; both groups named -> deterministic winner NET_A (smallest)
             assert_eq!(
                 d.blocks["main"].components["J2"].pins["2"],
-                crate::model::PinTarget::Net("NET_A".into())
+                sch_check::model::PinTarget::Net("NET_A".into())
             );
         }
     }
@@ -1302,7 +1148,7 @@ blocks:
 
     #[test]
     fn decouple_resolves_power_pins_by_number() {
-        use crate::provider::{PinType, SymbolTable};
+        use sch_check::{PinType, SymbolTable};
         let mut p = SymbolTable::with_basics();
         p.mock_add(
             "M:CPU",
@@ -1329,14 +1175,14 @@ blocks:
         let caps = d.blocks["mcu"]
             .components
             .values()
-            .filter(|c| matches!(c.origin, crate::model::Origin::Synthesized { .. }))
+            .filter(|c| matches!(c.origin, sch_check::model::Origin::Synthesized { .. }))
             .count();
         assert_eq!(caps, 1);
     }
 
     #[test]
     fn unmentioned_non_power_pins_become_no_connect() {
-        use crate::provider::{PinType, SymbolTable};
+        use sch_check::{PinType, SymbolTable};
         let mut p = SymbolTable::with_basics();
         p.mock_add(
             "M:Chip",
@@ -1358,14 +1204,17 @@ blocks:
         assert!(!diags.has_errors(), "{:?}", diags);
         let u1 = &d.blocks["main"].components["U1"];
         // unmentioned non-power pin PB6 (number "2") is auto-NC
-        assert_eq!(u1.pins["2"], crate::model::PinTarget::NoConnect);
+        assert_eq!(u1.pins["2"], sch_check::model::PinTarget::NoConnect);
         // mentioned pin still on its net
-        assert_eq!(u1.pins["PA0"], crate::model::PinTarget::Net("SIG".into()));
+        assert_eq!(
+            u1.pins["PA0"],
+            sch_check::model::PinTarget::Net("SIG".into())
+        );
     }
 
     #[test]
     fn auto_nc_is_idempotent_through_canon() {
-        use crate::provider::{PinType, SymbolTable};
+        use sch_check::{PinType, SymbolTable};
         let mut p = SymbolTable::with_basics();
         p.mock_add(
             "M:Chip",

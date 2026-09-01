@@ -8,6 +8,7 @@ description = "Deterministic grammar-typesetting schematic placement engine: par
 
 [dependencies]
 circuit-lang = { path = "../circuit-lang" }
+sch-check = { path = "../sch-check" }
 circuit-graph = { path = "../circuit-graph" }
 geom = { path = "../geom" }
 kicad = { path = "../kicad" }

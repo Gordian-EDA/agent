@@ -8,11 +8,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
-use circuit_lang::model::{Component, Design, PinTarget};
-use circuit_lang::{PinType, find_pin};
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::SymbolGeometry;
+use sch_check::model::{Component, Design, PinTarget};
+use sch_check::{PinType, find_pin};
 
 use crate::write::SchematicWriter;
 use geom::Dir;

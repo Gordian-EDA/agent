@@ -1,10 +1,10 @@
 //! Strict walker: yaml::Node -> SurfaceDesign. Unknown keys are errors
 //! with did-you-mean suggestions.
 
-use crate::diag::{Diagnostic, Diagnostics, Span};
 use crate::surface::*;
 use crate::yaml::{self, Node};
 use indexmap::IndexMap;
+use sch_check::diag::{Diagnostic, Diagnostics, Span};
 
 pub fn parse_str(src: &str) -> (Option<SurfaceDesign>, Diagnostics) {
     let mut diags = Diagnostics::default();
@@ -455,7 +455,7 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diag::Severity;
+    use sch_check::diag::Severity;
 
     const MINIMAL: &str = "
 version: 1
@@ -700,7 +700,8 @@ blocks:
         );
         assert!(
             d.0.iter()
-                .any(|x| x.code == "net-name-case" && x.severity == crate::diag::Severity::Warning)
+                .any(|x| x.code == "net-name-case"
+                    && x.severity == sch_check::diag::Severity::Warning)
         );
     }
 }

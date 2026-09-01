@@ -27,8 +27,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use circuit_lang::model::Design;
 use geom::{Point2, Rect};
+use sch_check::model::Design;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
 

@@ -8,11 +8,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use circuit_lang::model::Design;
-use circuit_lang::{PinType, find_pin};
 use geom::{EPS, Point2, Segment};
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
+use sch_check::model::Design;
+use sch_check::{PinType, find_pin};
 
 use crate::wire::DrawnSegment;
 use crate::write::SchematicWriter;

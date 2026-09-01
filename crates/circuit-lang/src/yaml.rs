@@ -7,11 +7,11 @@
 //! safe). saphyr's default loader would otherwise resolve
 //! scalars to typed `Scalar`s and lose the literal form.
 
-use crate::diag::{Diagnostic, Diagnostics, Span};
 use saphyr::{MarkedYaml, Scalar, ScalarStyle, YamlData};
 use saphyr_parser::{
     Event, Parser, ScalarStyle as PScalarStyle, Span as PSpan, SpannedEventReceiver,
 };
+use sch_check::diag::{Diagnostic, Diagnostics, Span};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone)]

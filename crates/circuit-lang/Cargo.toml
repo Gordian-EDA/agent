@@ -4,11 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Parser, linter, and canonical emitter for the gordian circuit markup language."
+description = "Parser and canonical emitter for the gordian circuit markup language."
 
 [dependencies]
-circuit-graph = { path = "../circuit-graph" }
-kicad-symbol = { path = "../kicad-symbol" }
+sch-check = { path = "../sch-check" }
 geom = { path = "../geom" }
 saphyr.workspace = true
 saphyr-parser.workspace = true

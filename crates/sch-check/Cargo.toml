@@ -1,0 +1,16 @@
+[package]
+name = "sch-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Kernel circuit model, symbol-aware lints, and deterministic ERC over a design — independent of how the design was authored."
+
+[dependencies]
+circuit-graph = { path = "../circuit-graph" }
+kicad-symbol = { path = "../kicad-symbol" }
+sch-place = { path = "../sch-place" }
+indexmap = { workspace = true, features = ["serde"] }
+strsim.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true

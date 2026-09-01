@@ -30,8 +30,8 @@ mod pose;
 
 const DEBUG_DIAGNOSTICS: bool = false;
 
-use circuit_lang::model::Design;
 use kicad::KicadInstallation;
+use sch_check::model::Design;
 use sch_place::ir::LayoutIr;
 use sch_place::item::Item;
 use sch_place::place::{Crossings, PlaceResult};

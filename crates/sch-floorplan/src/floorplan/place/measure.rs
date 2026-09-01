@@ -13,9 +13,9 @@
 
 use std::collections::BTreeMap;
 
-use circuit_lang::model::Design;
 use geom::{EPS, Point2, Rect};
 use kicad::KicadInstallation;
+use sch_check::model::Design;
 
 use crate::write::SchematicWriter;
 use circuit_graph::netclass::is_ground;

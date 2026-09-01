@@ -4,8 +4,8 @@
 use std::collections::BTreeSet;
 
 use anyhow::Result;
-use circuit_lang::model::Design;
 use kicad_footprint::FootprintId;
+use sch_check::model::Design;
 use serde::Serialize;
 
 use crate::AgentRuntime;

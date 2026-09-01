@@ -1,7 +1,7 @@
 //! Deterministic canonical YAML emission of the kernel model.
 
-use crate::model::*;
 use indexmap::IndexMap;
+use sch_check::model::*;
 use std::fmt::Write;
 
 /// Quote a YAML scalar only when needed.
@@ -209,7 +209,7 @@ mod tests {
     use super::*;
     use crate::desugar::desugar;
     use crate::parse::parse_str;
-    use crate::provider::SymbolTable;
+    use sch_check::SymbolTable;
 
     const SRC: &str = "
 version: 1
@@ -223,7 +223,7 @@ blocks:
       R7: {part: R, value: 4.7k, between: [SCL, 3V3]}
 ";
 
-    fn compile(src: &str) -> crate::model::Design {
+    fn compile(src: &str) -> sch_check::model::Design {
         let p = SymbolTable::with_basics();
         let (s, diags) = parse_str(src);
         assert!(!diags.has_errors(), "{diags:?}");
@@ -287,7 +287,7 @@ nets:
     #[test]
     fn decouple_multivalue_round_trip_is_model_stable() {
         // compile() lives in lib.rs; use parse+desugar here with a provider exposing VDD/VSS by name.
-        use crate::provider::{PinType, SymbolTable};
+        use sch_check::{PinType, SymbolTable};
         let mut p = SymbolTable::with_basics();
         p.mock_add(
             "M:CPU",

@@ -41,9 +41,9 @@ pub(crate) use route::*;
 mod grid_tests {
     use super::*;
     use crate::wire::DrawnSegment;
-    use circuit_lang::model::{Block, Component, Design, LayoutGrid};
     use geom::{Dir, Rect};
     use indexmap::IndexMap;
+    use sch_check::model::{Block, Component, Design, LayoutGrid};
     use sch_io::write::SchematicWriter;
     use sch_place::ir::Side;
 
