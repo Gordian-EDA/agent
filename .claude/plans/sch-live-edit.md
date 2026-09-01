@@ -52,3 +52,9 @@ parts come back with pins swapped (`R5.1`↔`R5.2`, `C11.1`↔`C11.2`, `C17`/`U2
 `N_U2_BS`) — `between: [A, B]` pin order is not honoured somewhere in the engine/realiser.
 Neither fixture is in `floorplan_netlist`'s lists, so nothing checked them. Add both to
 the netlist gate and fix the ordering (engine-owned; after the truthfulness-fix lane merges).
+
+## Open: spine channel-order regression (bisected 2026-09-01)
+`spine-place/tests/frozen_idioms.rs::spine_preserves_inferred_pc817_channel_cells` fails
+(`U1.at.y < U2.at.y` violated) from the L2 merge (`07bbb94`, relational intent) onward;
+passes at `100b3bc`. Likely the relation projection / `apply_cells` frozen-seed change in
+spine's pass ordering. Engine-owned — assign to the truthfulness-fix lane after its gate.
