@@ -1,0 +1,8 @@
+U1 must read as an ECC82/12AU7 while keeping its reference, footprint and every pin connection; the rest of the amplifier must be untouched.
+expect: agent_exit == 0
+expect: sch_errors == []
+expect: erc_errors == 0
+expect: unchanged_symbols_moved == []
+expect: fields_lost == []
+expect: net_delta_unchanged == true
+expect: len(fields_changed) >= 1

@@ -1,0 +1,10 @@
+The series resistor must sit in the signal path rather than beside it, the clamp diodes must be oriented to conduct only on an overvoltage, and no existing part may move.
+expect: agent_exit == 0
+expect: sch_errors == []
+expect: erc_errors == 0
+expect: unchanged_symbols_moved == []
+expect: fields_lost == []
+expect: symbols_removed == []
+expect: len(symbols_added) >= 3
+expect: len(symbols_added) <= 7
+expect: unconnected_pins_added == []

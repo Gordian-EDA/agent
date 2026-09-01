@@ -1,0 +1,11 @@
+The LED must have correct polarity and a series resistor sized for a 12 V rail, and must not disturb any existing net.
+expect: agent_exit == 0
+expect: sch_errors == []
+expect: erc_errors == 0
+expect: unchanged_symbols_moved == []
+expect: fields_lost == []
+expect: symbols_removed == []
+expect: len(symbols_added) >= 2
+expect: len(symbols_added) <= 5
+expect: net_delta_removed == []
+expect: unconnected_pins_added == []

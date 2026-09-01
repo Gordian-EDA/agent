@@ -1,0 +1,4 @@
+# Case inputs are hand-drawn KiCAD projects, not generated output: the
+# repo-wide `design.kicad_*` ignore must not swallow them.
+!*/input/design.kicad_sch
+!*/input/design.kicad_pro

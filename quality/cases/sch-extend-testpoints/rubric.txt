@@ -1,0 +1,11 @@
+Each test point must land on the named net without altering it, and no existing part may move or lose a field.
+expect: agent_exit == 0
+expect: sch_errors == []
+expect: erc_errors == 0
+expect: unchanged_symbols_moved == []
+expect: fields_lost == []
+expect: symbols_removed == []
+expect: len(symbols_added) >= 3
+expect: len(symbols_added) <= 6
+expect: net_delta_removed == []
+expect: unconnected_pins_added == []

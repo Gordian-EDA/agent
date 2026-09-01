@@ -1,0 +1,1 @@
+The project already contains a schematic. Add three test points using real test-point symbols: one on GND, one on pin 1 of the OUT connector P2, and one on pin 1 of the POWER connector P3. Add nothing else, keep every existing part's reference, and leave every existing part exactly where it is. Render the schematic.

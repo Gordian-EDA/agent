@@ -1,0 +1,1 @@
+Create and apply a 3.3 V CAN transceiver interface schematic. Include a real CAN transceiver, an MCU-side TX/RX header, a CANH/CANL connector, switchable 120 Ohm termination, supply decoupling, and bidirectional TVS protection at the bus connector. Render the schematic.
