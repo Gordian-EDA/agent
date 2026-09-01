@@ -268,6 +268,13 @@ pub fn emit_strategy(
 /// caller either `finish`es this single writer or composes several into one).
 /// This is the shared body of `emit_strategy` and the multi-block
 /// `emit_anneal_writer` compose entry, so both judge the same geometry.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        engine = engine.name(),
+        design = design.name.as_deref().unwrap_or("<unnamed>")
+    )
+)]
 pub(crate) fn prepare_writer(
     env: &KicadInstallation,
     design: &Design,
@@ -276,7 +283,7 @@ pub(crate) fn prepare_writer(
 ) -> io::Result<(SchematicWriter, EmitOutput)> {
     let mut problem = SchematicPlaceProblem::from_design(env, design)?;
     if problem.options.debug_timing {
-        eprintln!("[place] engine = {}", engine.name());
+        tracing::debug!("[place] engine = {}", engine.name());
     }
     let placement = engine.place(env, design, &mut problem, ir);
     let ir = placement.ir;

@@ -61,6 +61,7 @@ dependencies = [
  "sch-check",
  "sch-floorplan",
  "sch-place",
+ "tracing",
 ]
 
 [[package]]
@@ -371,6 +372,7 @@ dependencies = [
  "sch-floorplan",
  "sch-place",
  "spine-place",
+ "tracing",
 ]
 
 [[package]]
@@ -3044,6 +3046,7 @@ dependencies = [
  "spine-place",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
  "uuid",
 ]
 
@@ -3351,6 +3354,7 @@ dependencies = [
  "sch-check",
  "sch-floorplan",
  "sch-place",
+ "tracing",
 ]
 
 [[package]]

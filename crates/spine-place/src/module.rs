@@ -265,7 +265,7 @@ fn commit_free_opt(
         });
         if ep_on_wire && crate::DEBUG_DIAGNOSTICS {
             let refs: Vec<&str> = sats.iter().map(|s| items[s.item].refdes.as_str()).collect();
-            eprintln!("[ep-guard] blocked {refs:?} at ({:.1},{:.1})", at.x, at.y);
+            tracing::debug!("[ep-guard] blocked {refs:?} at ({:.1},{:.1})", at.x, at.y);
         }
         let blocked = ep_on_wire
             || body.iter().any(|r| claims.iter().any(|c| c.overlaps(r)))
@@ -278,7 +278,7 @@ fn commit_free_opt(
         if !blocked {
             if tries > 2 && crate::DEBUG_DIAGNOSTICS {
                 let refs: Vec<&str> = sats.iter().map(|s| items[s.item].refdes.as_str()).collect();
-                eprintln!(
+                tracing::debug!(
                     "[slide] {refs:?} slid {tries} steps: {:?} -> {:?}",
                     (at0.x, at0.y),
                     (at.x, at.y)
@@ -1270,9 +1270,11 @@ fn place_ladders<'a>(
         );
         if crate::DEBUG_DIAGNOSTICS {
             let refs: Vec<&str> = parts.iter().map(|&p| items[p].refdes.as_str()).collect();
-            eprintln!(
+            tracing::debug!(
                 "[attach] LADDER {refs:?} at {}:{} up={}",
-                items[*anchor].refdes, pin, up
+                items[*anchor].refdes,
+                pin,
+                up
             );
         }
         st.form.consumed.insert(*chain, mi);

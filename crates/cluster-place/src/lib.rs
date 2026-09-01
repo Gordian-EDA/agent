@@ -153,7 +153,7 @@ impl PlacementEngine for ClusterPlace {
             crate::eval::restore(&mut problem.items, &sa_snap);
         }
         if DEBUG_DIAGNOSTICS {
-            eprintln!(
+            tracing::debug!(
                 "[cluster] x {sa_crossings}->{final_crossings}  w {sa_warnings}->{final_warnings}  rendered {baseline_rendered:.1}->{final_rendered:.1}  parts {baseline_parts:.1}->{final_parts:.1}  keep={earned_keep}"
             );
         }
@@ -181,7 +181,7 @@ impl PlacementEngine for ClusterPlace {
                 let keep = rail_candidate_wins((cur_x, cur_w, cur_spr), got)
                     && relation_viol(&problem.items, &ir_rail) <= baseline_relation;
                 if DEBUG_DIAGNOSTICS {
-                    eprintln!(
+                    tracing::debug!(
                         "[cluster] rails: {cur_spr:.1} -> {:?}  keep={keep}",
                         got.map(|g| g.2)
                     );
@@ -304,7 +304,7 @@ fn spine_fast_path_pin_profile<'a>(pin_profiles: impl Iterator<Item = (&'a str, 
             .count()
             >= 4;
     if DEBUG_DIAGNOSTICS {
-        eprintln!("[cluster] pin profile {counts:?} total={pins}");
+        tracing::debug!("[cluster] pin profile {counts:?} total={pins}");
     }
     single_anchor
         || dense_interactive

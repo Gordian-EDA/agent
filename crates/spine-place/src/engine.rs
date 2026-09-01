@@ -87,9 +87,10 @@ impl PlacementEngine for SpinePlace {
         };
         if out2.result.engine == "spine" && key(&out2) < key(&out1) {
             if problem.options.debug_timing {
-                eprintln!(
+                tracing::debug!(
                     "[spine] label pass-2 kept: warn {} -> {}",
-                    out1.result.warnings, out2.result.warnings
+                    out1.result.warnings,
+                    out2.result.warnings
                 );
             }
             out2
@@ -99,7 +100,7 @@ impl PlacementEngine for SpinePlace {
                 it.angle = angle;
             }
             if problem.options.debug_timing {
-                eprintln!(
+                tracing::debug!(
                     "[spine] label pass-2 rejected: {:?} vs {:?}",
                     key(&out1),
                     key(&out2)
@@ -200,7 +201,7 @@ impl SpinePlace {
                         .iter()
                         .map(|&p| problem.items[p].refdes.as_str())
                         .collect();
-                    eprintln!(
+                    tracing::debug!(
                         "[spine] unconsumed chain {ci}: {refs:?} {} .. {} ({:?})",
                         c.a.net,
                         c.b.net,
@@ -213,7 +214,7 @@ impl SpinePlace {
             for &a in &anchors {
                 let it = &problem.items[a];
                 let conn = it.pins.iter().filter(|(_, _, n)| n.is_some()).count();
-                eprintln!(
+                tracing::debug!(
                     "[anchor] {} part={} geom_pins={} connected={} pins={:?}",
                     it.refdes,
                     it.part,
@@ -233,7 +234,7 @@ impl SpinePlace {
                         )
                     })
                     .collect();
-                eprintln!(
+                tracing::debug!(
                     "[module] {} env=({:.0},{:.0})..({:.0},{:.0}) sats={sats:?}",
                     problem.items[m.anchor].refdes,
                     m.env_min.x,
@@ -426,7 +427,7 @@ impl SpinePlace {
             if b <= a {
                 *breaks = b_breaks;
                 if dbg {
-                    eprintln!("[spine] {name} kept: {a:?} -> {b:?}");
+                    tracing::debug!("[spine] {name} kept: {a:?} -> {b:?}");
                 }
                 true
             } else {
@@ -435,7 +436,7 @@ impl SpinePlace {
                     it.angle = angle;
                 }
                 if dbg {
-                    eprintln!("[spine] {name} rejected: {a:?} vs {b:?}");
+                    tracing::debug!("[spine] {name} rejected: {a:?} vs {b:?}");
                 }
                 false
             }
@@ -561,7 +562,7 @@ impl SpinePlace {
                             .map(|p| problem.items[p.item].refdes.as_str())
                     })
                     .collect();
-                eprintln!("[band] {} members: {refs:?}", band.key);
+                tracing::debug!("[band] {} members: {refs:?}", band.key);
             }
             ab_gate(
                 &mut problem.items,
@@ -600,16 +601,21 @@ impl SpinePlace {
                 for j in (i + 1)..problem.items.len() {
                     let (a, b) = (&problem.items[i], &problem.items[j]);
                     if item_rect(a, a.at).overlaps(&item_rect(b, b.at)) {
-                        eprintln!(
+                        tracing::debug!(
                             "[spine] overlap {}({}) at {:?} vs {}({}) at {:?}",
-                            a.refdes, a.unit, a.at, b.refdes, b.unit, b.at
+                            a.refdes,
+                            a.unit,
+                            a.at,
+                            b.refdes,
+                            b.unit,
+                            b.at
                         );
                     }
                 }
             }
         }
         if problem.options.debug_timing {
-            eprintln!(
+            tracing::debug!(
                 "[spine] {} items, {} nodes, {} chains -> breaks={breaks} overlaps={overlaps} in {:.1?}",
                 problem.items.len(),
                 scene.nodes.len(),
@@ -630,7 +636,7 @@ impl SpinePlace {
             w.set_frame(true);
             w.prepare();
             for msg in w.layout_warnings() {
-                eprintln!("[spine] warn: {msg}");
+                tracing::warn!("[spine] {msg}");
             }
         }
         PlacementOutput {

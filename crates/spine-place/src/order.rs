@@ -304,7 +304,7 @@ pub fn arrange(
                     )
                 })
                 .collect();
-            eprintln!("[layer] v{v} {name} layer={} adj={adj:?}", layer[v]);
+            tracing::debug!("[layer] v{v} {name} layer={} adj={adj:?}", layer[v]);
         }
     }
 
