@@ -307,26 +307,18 @@ fn audit_connector_protection(design: &Design, symbols: &SymbolTable, gaps: &mut
                 if !is_bus_net(&pin.net) {
                     continue;
                 }
-                let protected = has_protection(&pin.net, &components, symbols);
-                let filtered = has_signal_shunt_cap(&pin.net, &components);
                 if matches!(pin.etype, PinType::PowerInput | PinType::PowerOutput)
                     || is_power_net(&pin.net)
-                    || protected && (!is_uart_signal(&pin.net) || filtered)
+                    || has_signal_protection(&pin.net, &components, symbols)
                 {
                     continue;
                 }
-                let support = match (protected, is_uart_signal(&pin.net), filtered) {
-                    (false, true, false) => "bidirectional TVS/ESD protection and a 100pF shunt capacitor",
-                    (false, _, _) => "bidirectional TVS/ESD protection",
-                    (true, true, false) => "a 100pF shunt capacitor",
-                    (true, _, _) => continue,
-                };
                 gaps.push(Gap {
                     kind: "connector_protection".into(),
                     refdes: Some(refdes.clone()),
                     net: Some(pin.net.clone()),
                     suggestion: format!(
-                        "add {support} from {refdes}.{} ({}) to GND at the connector",
+                        "add a series element, grounded TVS/ESD/zener, or shunt RC at {refdes}.{} ({})",
                         display_pin(&pin),
                         pin.net
                     ),
@@ -383,7 +375,7 @@ fn audit_bus_power_support(
         let entry_path = supply_entry_path(&rail, &components);
         let protected = entry_path.as_ref().is_some_and(|path| {
             path.iter()
-                .any(|net| has_protection(net, &components, symbols))
+                .any(|net| has_transient_shunt(net, &components, symbols))
         });
         if entry_path.is_some() && !protected {
             gaps.push(Gap {
@@ -572,7 +564,67 @@ fn has_series_resistor(net: &str, components: &[&Component]) -> bool {
         .any(|resistor| far_net(resistor, net).is_some_and(|far| !is_power_net(&far) && far != net))
 }
 
-fn has_protection(net: &str, components: &[&Component], symbols: &SymbolTable) -> bool {
+fn has_signal_protection(
+    net: &str,
+    components: &[&Component],
+    symbols: &SymbolTable,
+) -> bool {
+    has_series_signal_protection(net, components)
+        || has_transient_shunt(net, components, symbols)
+        || has_shunt_rc(net, components)
+}
+
+fn has_series_signal_protection(net: &str, components: &[&Component]) -> bool {
+    components
+        .iter()
+        .copied()
+        .filter(|component| is_resistor(component))
+        .any(|resistor| {
+            far_net(resistor, net).is_some_and(|far| {
+                !is_power_net(&far)
+                    && far != net
+                    && !is_can_termination_branch(net, &far, resistor, components)
+            })
+        })
+}
+
+fn is_can_termination_branch(
+    signal_net: &str,
+    far: &str,
+    excluded: &Component,
+    components: &[&Component],
+) -> bool {
+    let Some((family, high)) = can_kind(signal_net) else {
+        return false;
+    };
+    let is_peer = |net: &str| {
+        can_kind(net).is_some_and(|(candidate_family, candidate_high)| {
+            candidate_family == family && candidate_high != high
+        })
+    };
+    if is_peer(far) {
+        return true;
+    }
+    let attached: Vec<&Component> = components
+        .iter()
+        .copied()
+        .filter(|component| {
+            !std::ptr::eq(*component, excluded) && component_nets(component).contains(far)
+        })
+        .collect();
+    if attached.iter().copied().any(|component| {
+        !is_resistor(component) && !is_switch(component) && !is_capacitor(component)
+    }) {
+        return false;
+    }
+    attached
+        .iter()
+        .copied()
+        .filter(|component| is_resistor(component) || is_switch(component))
+        .any(|component| far_net(component, far).is_some_and(|other| is_peer(&other)))
+}
+
+fn has_transient_shunt(net: &str, components: &[&Component], symbols: &SymbolTable) -> bool {
     components.iter().copied().any(|component| {
         let part = component.part.to_ascii_uppercase();
         let metadata = symbols.symbol(&component.part);
@@ -590,24 +642,34 @@ fn has_protection(net: &str, components: &[&Component], symbols: &SymbolTable) -
             || part.contains("ESD")
             || part.contains("TRANSIL")
             || part.contains("VARISTOR")
+            || part.contains("ZENER")
             || description.contains("TVS")
             || description.contains("TRANSIENT VOLTAGE")
+            || description.contains("ZENER")
             || keywords.contains("TRANSIL")
-            || keywords.contains("TRANSIENT VOLTAGE"))
-            && component_nets(component).contains(net)
+            || keywords.contains("TRANSIENT VOLTAGE")
+            || keywords.contains("ZENER"))
+            && {
+                let nets = component_nets(component);
+                nets.contains(net) && nets.iter().any(|other| is_ground(other))
+            }
     })
 }
 
-fn has_signal_shunt_cap(net: &str, components: &[&Component]) -> bool {
-    components.iter().copied().any(|component| {
-        is_capacitor(component)
-            && component_nets(component).contains(net)
-            && component_nets(component).iter().any(|other| is_ground(other))
-            && component
-                .value
-                .as_deref()
-                .and_then(crate::erc::parse_value)
-                .is_some_and(|value| value <= 10e-9)
+fn has_shunt_rc(net: &str, components: &[&Component]) -> bool {
+    components
+        .iter()
+        .copied()
+        .filter(|component| is_resistor(component) || is_capacitor(component))
+        .filter_map(|component| {
+            far_net(component, net).map(|middle| (component, middle))
+        })
+        .any(|(first, middle)| {
+            components.iter().copied().any(|second| {
+                (is_resistor(first) && is_capacitor(second)
+                    || is_capacitor(first) && is_resistor(second))
+                    && far_net(second, &middle).is_some_and(|far| is_ground(&far))
+            })
     })
 }
 
@@ -860,7 +922,25 @@ mod tests {
                 ("4", "CANL", PinType::Other, 1),
             ],
         );
+        symbols.mock_add(
+            "Connector_Generic:Conn_01x01",
+            vec![("1", "Pin_1", PinType::Passive, 1)],
+        );
+        symbols.mock_add(
+            "Connector_Generic:Conn_01x02",
+            vec![
+                ("1", "Pin_1", PinType::Passive, 1),
+                ("2", "Pin_2", PinType::Passive, 1),
+            ],
+        );
         symbols
+    }
+
+    fn connector_protection_gaps(design: &Design) -> Vec<Gap> {
+        audit(design, &symbols())
+            .into_iter()
+            .filter(|gap| gap.kind == "connector_protection")
+            .collect()
     }
 
     #[test]
@@ -925,6 +1005,153 @@ mod tests {
     }
 
     #[test]
+    fn connector_signal_protected_by_series_has_no_gap() {
+        let design = design(&[
+            (
+                "J1",
+                component("Connector_Generic:Conn_01x01", &[("1", "TXD")]),
+            ),
+            (
+                "R1",
+                component("Device:R", &[("1", "TXD"), ("2", "MCU_TX")]),
+            ),
+        ]);
+
+        assert!(connector_protection_gaps(&design).is_empty());
+    }
+
+    #[test]
+    fn connector_signal_protected_by_tvs_has_no_gap() {
+        let design = design(&[
+            (
+                "J1",
+                component("Connector_Generic:Conn_01x01", &[("1", "RXD")]),
+            ),
+            (
+                "D1",
+                component("Device:D_TVS", &[("1", "RXD"), ("2", "GND")]),
+            ),
+        ]);
+
+        assert!(connector_protection_gaps(&design).is_empty());
+    }
+
+    #[test]
+    fn connector_signal_protected_by_shunt_rc_has_no_gap() {
+        let design = design(&[
+            (
+                "J1",
+                component("Connector_Generic:Conn_01x01", &[("1", "RXD")]),
+            ),
+            (
+                "C1",
+                component("Device:C", &[("1", "RXD"), ("2", "RX_FILTER")]),
+            ),
+            (
+                "R1",
+                component("Device:R", &[("1", "RX_FILTER"), ("2", "GND")]),
+            ),
+        ]);
+
+        assert!(connector_protection_gaps(&design).is_empty());
+    }
+
+    #[test]
+    fn unprotected_connector_signal_has_gap() {
+        let design = design(&[(
+            "J1",
+            component("Connector_Generic:Conn_01x01", &[("1", "TXD")]),
+        )]);
+
+        let gaps = connector_protection_gaps(&design);
+
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].refdes.as_deref(), Some("J1"));
+        assert_eq!(gaps[0].net.as_deref(), Some("TXD"));
+    }
+
+    #[test]
+    fn can_termination_resistor_is_not_series_protection() {
+        let design = design(&[
+            (
+                "J1",
+                component(
+                    "Connector_Generic:Conn_01x02",
+                    &[("1", "CAN_H"), ("2", "CAN_L")],
+                ),
+            ),
+            (
+                "R1",
+                component("Device:R", &[("1", "CAN_H"), ("2", "CAN_L")]),
+            ),
+        ]);
+
+        assert_eq!(connector_protection_gaps(&design).len(), 2);
+    }
+
+    #[test]
+    fn split_can_termination_is_not_series_protection() {
+        let design = design(&[
+            (
+                "J1",
+                component(
+                    "Connector_Generic:Conn_01x02",
+                    &[("1", "CAN_H"), ("2", "CAN_L")],
+                ),
+            ),
+            (
+                "R1",
+                component("Device:R", &[("1", "CAN_H"), ("2", "TERM")]),
+            ),
+            (
+                "R2",
+                component("Device:R", &[("1", "TERM"), ("2", "CAN_L")]),
+            ),
+        ]);
+
+        assert_eq!(connector_protection_gaps(&design).len(), 2);
+    }
+
+    #[test]
+    fn can_series_resistors_are_protection_with_termination_behind_them() {
+        let design = design(&[
+            (
+                "J1",
+                component(
+                    "Connector_Generic:Conn_01x02",
+                    &[("1", "CAN_H"), ("2", "CAN_L")],
+                ),
+            ),
+            (
+                "RH",
+                component("Device:R", &[("1", "CAN_H"), ("2", "CANH_INT")]),
+            ),
+            (
+                "RL",
+                component("Device:R", &[("1", "CAN_L"), ("2", "CANL_INT")]),
+            ),
+            (
+                "RT",
+                component("Device:R", &[("1", "CANH_INT"), ("2", "CANL_INT")]),
+            ),
+            (
+                "U1",
+                component(
+                    "Interface_CAN_LIN:CAN",
+                    &[
+                        ("1", "+3V3"),
+                        ("2", "GND"),
+                        ("3", "CANH_INT"),
+                        ("4", "CANL_INT"),
+                    ],
+                ),
+            ),
+        ]);
+
+        assert!(connector_protection_gaps(&design).is_empty());
+    }
+
+    #[test]
     fn protected_series_power_entry_reaches_the_rail() {
         let design = design(&[
             (
@@ -966,7 +1193,7 @@ mod tests {
         );
         assert!(
             path.iter()
-                .any(|net| has_protection(net, &components, &symbols()))
+                .any(|net| has_transient_shunt(net, &components, &symbols()))
         );
     }
 }

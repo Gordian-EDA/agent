@@ -248,6 +248,33 @@ mod tests {
     }
 
     #[test]
+    fn led_indicator_does_not_match_a_clamp_diode() {
+        let nodes = vec![
+            node("D1", "Device:D", "", &[("1", "SIGNAL"), ("2", "GND")]),
+            node("R1", "Device:R", "10k", &[("1", "+3V3"), ("2", "SIGNAL")]),
+        ];
+        let graph = CircuitGraph::new(nodes, kind_of);
+
+        assert!(find(&graph, &library::LED_INDICATOR).is_empty());
+    }
+
+    #[test]
+    fn led_indicator_does_not_match_an_led_driver_ic() {
+        let nodes = vec![
+            node(
+                "U1",
+                "Driver_LED:CL220N5-G",
+                "",
+                &[("1", "DRIVE"), ("2", "GND")],
+            ),
+            node("R1", "Device:R", "1k", &[("1", "+12V"), ("2", "DRIVE")]),
+        ];
+        let graph = CircuitGraph::new(nodes, kind_of);
+
+        assert!(find(&graph, &library::LED_INDICATOR).is_empty());
+    }
+
+    #[test]
     fn i2c_pullup_matches_small_sensor_not_large_mcu() {
         // A small I2C sensor (8 pins) with SDA/SCL pull-ups to +3V3 → one match.
         let sensor = vec![

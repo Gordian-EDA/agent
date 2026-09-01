@@ -229,22 +229,104 @@ fn a_global_label_marks_its_net_as_a_port() {
 }
 
 #[test]
-fn diode_polarity_is_read_from_the_symbol_not_the_key() {
-    // Device:LED is 1=K, 2=A. Number-keyed, and backwards: the anode sits on
-    // ground while the cathode is on the rail.
-    let d = design(&[("D1", part("Device:LED", &[("1", "+3V3"), ("2", "GND")]))]);
-    let defects = erc::erc_checks(&d, &provider());
-    assert!(
-        defects.iter().any(|s| s.contains("D1")),
-        "expected a polarity defect, got {defects:?}"
-    );
+fn correct_led_indicator_has_no_polarity_finding() {
+    let d = design(&[
+        ("R1", part("Device:R", &[("1", "+3V3"), ("2", "LED_A")])),
+        ("D1", part("Device:LED", &[("1", "GND"), ("2", "LED_A")])),
+    ]);
 
-    let right_way = design(&[("D2", part("Device:LED", &[("1", "LED_K"), ("2", "+3V3")]))]);
     assert!(
-        !erc::erc_checks(&right_way, &provider())
+        !erc::erc_checks(&d, &provider())
             .iter()
-            .any(|s| s.contains("backwards") || s.contains("BACKWARDS")),
-        "a correctly wired LED must stay silent"
+            .any(|finding| finding.contains("LED is reversed"))
+    );
+}
+
+#[test]
+fn reversed_led_indicator_is_a_blocking_error() {
+    let d = design(&[
+        ("R1", part("Device:R", &[("1", "VCC"), ("2", "LED_K")])),
+        ("D1", part("Device:LED", &[("1", "LED_K"), ("2", "GND")])),
+    ]);
+
+    let findings = erc::defects(&d, &provider());
+    let polarity = findings
+        .iter()
+        .find(|finding| finding.line.contains("LED is reversed"))
+        .expect("reversed LED finding");
+
+    assert!(polarity.blocking);
+    assert!(polarity.line.contains("swap D1: anode should face VCC"));
+}
+
+#[test]
+fn reversed_led_on_unnamed_power_connector_net_is_an_error() {
+    let mut connector = part(
+        "Legacy:CONN_2",
+        &[("1", "Net-(P3-P1)"), ("2", "GND")],
+    );
+    connector.value = Some("POWER".into());
+    let d = design(&[
+        ("P3", connector),
+        (
+            "R1",
+            part("Device:R", &[("1", "Net-(P3-P1)"), ("2", "LED_K")]),
+        ),
+        ("D1", part("Device:LED", &[("1", "LED_K"), ("2", "GND")])),
+    ]);
+
+    assert!(
+        erc::defects(&d, &provider()).iter().any(|finding| {
+            finding.blocking && finding.line.contains("swap D1: anode should face Net-(P3-P1)")
+        })
+    );
+}
+
+#[test]
+fn signal_clamp_diode_has_no_led_polarity_finding() {
+    let d = design(&[
+        ("R1", part("Device:R", &[("1", "+3V3"), ("2", "SIGNAL")])),
+        ("D1", part("Device:D", &[("1", "SIGNAL"), ("2", "GND")])),
+    ]);
+
+    assert!(
+        !erc::erc_checks(&d, &provider())
+            .iter()
+            .any(|finding| finding.contains("LED is reversed"))
+    );
+}
+
+#[test]
+fn led_driver_ic_has_no_led_polarity_finding() {
+    let d = design(&[
+        ("R1", part("Device:R", &[("1", "+12V"), ("2", "DRIVE")])),
+        (
+            "U1",
+            part("Driver_LED:CL220N5-G", &[("1", "DRIVE"), ("2", "GND")]),
+        ),
+    ]);
+
+    assert!(
+        !erc::erc_checks(&d, &provider())
+            .iter()
+            .any(|finding| finding.contains("LED is reversed"))
+    );
+}
+
+#[test]
+fn negative_rail_indicator_on_power_connector_has_no_polarity_finding() {
+    let mut connector = part("Legacy:CONN_2", &[("1", "-12V"), ("2", "GND")]);
+    connector.value = Some("POWER".into());
+    let d = design(&[
+        ("P3", connector),
+        ("R1", part("Device:R", &[("1", "-12V"), ("2", "LED_K")])),
+        ("D1", part("Device:LED", &[("1", "LED_K"), ("2", "GND")])),
+    ]);
+
+    assert!(
+        !erc::erc_checks(&d, &provider())
+            .iter()
+            .any(|finding| finding.contains("LED is reversed"))
     );
 }
 

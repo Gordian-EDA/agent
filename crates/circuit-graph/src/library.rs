@@ -11,7 +11,7 @@ use crate::pattern::{Edge, NetMatch, NodePred, Pattern, Role};
 const CRYSTAL_LIBS: &[&str] = &["Crystal", "Resonator", "Oscillator"];
 const CAP_LIBS: &[&str] = &["Device:C"];
 const RES_LIBS: &[&str] = &["Device:R"];
-const LED_LIBS: &[&str] = &["LED", "Device:D"];
+const LED_LIBS: &[&str] = &[":LED"];
 
 /// **Crystal oscillator**: an MCU/anchor whose two oscillator pins drive a crystal,
 /// each oscillator net loaded to ground by a small capacitor. The defining shape
@@ -130,7 +130,10 @@ pub static RC_LOWPASS: Pattern = Pattern {
 /// signal-net join stops the LED from pairing with an unrelated resistor that merely
 /// shares the same supply (a reset pull-up on the same V+).
 static LED_ROLES: &[Role] = &[
-    Role::one("led", NodePred::LibAny(LED_LIBS)),
+    Role::one(
+        "led",
+        NodePred::And(&[NodePred::LibAny(LED_LIBS), NodePred::Pins(2)]),
+    ),
     Role::one(
         "res",
         NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)]),

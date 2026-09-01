@@ -9,7 +9,7 @@
 //!   (LED current, feedback-divider ratio).
 //! * **Topological** — the rules a senior reviewer runs first, from netlist shape alone: missing
 //!   decoupling on a large IC, an I2C/open-drain net with no pull-up, a floating control input, an
-//!   undriven rail, two outputs shorted together (plus dangling parts, crystal load caps, diode
+//!   undriven rail, two outputs shorted together (plus dangling parts, crystal load caps, LED
 //!   polarity). Each reuses the decoupling-idiom IC→cap / rail grouping where it can.
 //!
 //! FP-averse is the governing constraint: every check fires ONLY on an unambiguous defect — a false
@@ -27,6 +27,7 @@
 
 use crate::model::*;
 use crate::{SymbolMeta, SymbolTable};
+use circuit_graph::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
 use std::collections::HashMap;
 
 /// Common regulator/converter feedback reference voltages, for divider-ratio checks.
@@ -186,7 +187,8 @@ fn is_resistor(c: &Component) -> bool {
     c.part.contains(":R") || c.part.ends_with("Device:R") || c.part == "R"
 }
 fn is_led(c: &Component) -> bool {
-    c.part.to_uppercase().contains("LED")
+    let (library, symbol) = c.part.split_once(':').unwrap_or(("", &c.part));
+    library.eq_ignore_ascii_case("LED") || symbol.to_ascii_uppercase().starts_with("LED")
 }
 fn is_cap(c: &Component) -> bool {
     c.part.contains(":C") || c.part == "C"
@@ -198,8 +200,11 @@ fn on_gnd(it: &Item) -> bool {
     it.nets.iter().any(|n| rail_voltage(n) == Some(0.0))
 }
 fn is_diode(c: &Component) -> bool {
-    let p = c.part.to_uppercase();
-    p.contains("LED") || p.contains("DIODE") || p.ends_with(":D") || p.contains(":D_")
+    let part = c.part.to_ascii_uppercase();
+    part.contains("LED")
+        || part.contains("DIODE")
+        || part.ends_with(":D")
+        || part.contains(":D_")
 }
 fn is_connector(c: &Component) -> bool {
     c.part.to_uppercase().contains("CONNECTOR")
@@ -329,10 +334,10 @@ fn run_checks(
         }
     }
     check_phototransistor_optocoupler_polarity(&items, blocking);
+    check_led_indicator_polarity(&items, &net_items, blocking);
     check_output_short(&items, &net_items, blocking);
     check_dangling(&items, blocking);
 
-    check_polarity(&items, &net_items, advisory);
     check_led_current(&items, &net_items, advisory);
     check_fb_divider(&items, &net_items, advisory);
     check_555_timing_topology(&items, &net_items, advisory);
@@ -418,70 +423,82 @@ fn check_555_timing_topology(
 /// cap; those are the borderline cases where demanding decoupling produces noise.
 const DECOUPLE_MIN_PINS: usize = 16;
 
-/// A diode/LED installed BACKWARDS: by the KiCAD Device:LED/D convention the anode is pin 2 / "A",
-/// the cathode pin 1 / "K". Current can only flow anode→cathode, so the cathode must sit at a lower
-/// potential than the anode. We flag two unambiguous reversals:
-///
-/// * anode directly on a 0 V rail **and** the cathode on a positive rail — the part is fed backwards
-///   (high side on the cathode). For LEDs, the positive rail may be reached through the required
-///   series resistor. Anode-on-GND alone is NOT enough: a negative-going clamp/protection diode
-///   (anode→GND, cathode→signal) or a negative-rail indicator is perfectly legitimate. The
-///   resistor-path form is therefore LED-only; an ordinary diode clamp with a pull-up stays valid.
-/// * anode reaches ground through a series resistor (the cathode/return side) — the classic indicator
-///   topology wired in reverse (supply → anode → LED → cathode → R → GND).
-///
-/// FP-averse: each branch needs an unambiguous rail on the relevant pin.
-fn check_polarity(items: &[Item], net_items: &HashMap<&str, Vec<usize>>, out: &mut Vec<String>) {
-    let pin_net = |it: &Item, pred: &dyn Fn(&str) -> bool| -> Option<String> {
-        it.pin_net(|s| pred(&s.to_uppercase())).map(str::to_string)
-    };
-    for it in items {
-        if !is_diode(it.comp) {
+/// Reject the reversed form of the LED-indicator idiom: an LED anode on ground whose
+/// cathode reaches a known positive rail through its current-limiting resistor.
+/// Only LED-named library symbols participate, so signal clamps and flyback diodes
+/// remain outside this rule even when they share the same rail-facing topology.
+fn check_led_indicator_polarity(
+    items: &[Item],
+    net_items: &HashMap<&str, Vec<usize>>,
+    out: &mut Vec<String>,
+) {
+    for led in items {
+        if !is_led(led.comp) || led.pins.len() != 2 {
             continue;
         }
-        let Some(an) = pin_net(it, &|ku| ku == "2" || ku == "A" || ku == "+") else {
+        let Some(anode) = pin_net_alias(led, &["2", "A", "+"]) else {
             continue;
         };
-        let cathode = pin_net(it, &|ku| ku == "1" || ku == "K" || ku == "-");
-        let anode_on_gnd = rail_voltage(&an) == Some(0.0);
-        let cathode_directly_positive = cathode
-            .as_deref()
-            .and_then(rail_voltage)
-            .is_some_and(|v| v > 0.0);
-        // The far side of that resistor need not be a *named* rail: an
-        // indicator fed from a connector pin sits on a generated net, and
-        // anode-to-ground with the series resistor on the cathode is the
-        // reversed indicator either way. Only a negative rail there is
-        // legitimate, so that is the one case left alone.
-        let cathode_through_resistor_to_positive = is_led(it.comp)
-            && cathode.as_deref().is_some_and(|cathode| {
-                net_items.get(cathode).into_iter().flatten().any(|&ri| {
-                    let r = &items[ri];
-                    is_resistor(r.comp)
-                        && r.nets.len() == 2
-                        && rail_voltage(far(r, cathode)).is_none_or(|v| v > 0.0)
-                })
+        let Some(cathode) = pin_net_alias(led, &["1", "K", "-"]) else {
+            continue;
+        };
+        if rail_voltage(anode) != Some(0.0) {
+            continue;
+        }
+        let rail_resistor = net_items
+            .get(cathode)
+            .into_iter()
+            .flatten()
+            .map(|&index| &items[index])
+            .find_map(|resistor| {
+                if !is_resistor(resistor.comp) || resistor.nets.len() != 2 {
+                    return None;
+                }
+                let rail = far(resistor, cathode);
+                is_positive_supply(rail, items, net_items)
+                    .then_some((resistor.refdes, rail))
             });
-        let anode_on_gnd_cathode_positive =
-            anode_on_gnd && (cathode_directly_positive || cathode_through_resistor_to_positive);
-        let anode_through_resistor_to_gnd =
-            net_items.get(an.as_str()).into_iter().flatten().any(|&ri| {
-                let r = &items[ri];
-                is_resistor(r.comp) && r.nets.len() == 2 && rail_voltage(far(r, &an)) == Some(0.0)
-            });
-        let reversed = anode_on_gnd_cathode_positive || anode_through_resistor_to_gnd;
-        if reversed {
-            let how = if anode_on_gnd_cathode_positive {
-                "ties to ground while its cathode reaches a positive rail"
-            } else {
-                "reaches ground through a series resistor (the cathode/return side)"
-            };
+        if let Some((resistor, rail)) = rail_resistor {
             out.push(format!(
-                "- {}: appears installed BACKWARDS — its anode {how}; a diode/LED conducts anode→cathode",
-                it.refdes
+                "- {}: LED is reversed — its cathode reaches {rail} through {resistor} while its anode is on {anode}; swap {}: anode should face {rail} through {resistor}, and cathode should face GND",
+                led.refdes, led.refdes
             ));
         }
     }
+}
+
+fn is_positive_supply(
+    net: &str,
+    items: &[Item],
+    net_items: &HashMap<&str, Vec<usize>>,
+) -> bool {
+    if is_ground(net) || is_neg_supply(net) {
+        return false;
+    }
+    if is_power_net(net) {
+        return true;
+    }
+    net_items.get(net).into_iter().flatten().any(|&index| {
+        let source = &items[index];
+        let part = source.comp.part.to_ascii_uppercase();
+        let value = source
+            .comp
+            .value
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        let supply_pin = source.pins.iter().any(|pin| {
+            pin.net == net
+                && matches!(pin.key.to_ascii_uppercase().as_str(), "1" | "P1" | "PIN1")
+        });
+        (is_connector_like(&source.comp.part)
+            || part.contains("CONN")
+            || source.refdes.starts_with('J')
+            || source.refdes.starts_with('P'))
+            && (value.contains("POWER") || value.contains("SUPPLY"))
+            && supply_pin
+            && source.nets.iter().any(|candidate| is_ground(candidate))
+    })
 }
 
 /// A 2-terminal passive that can't conduct: a pin left unconnected, or both pins on one net.
