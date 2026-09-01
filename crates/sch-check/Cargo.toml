@@ -11,6 +11,7 @@ circuit-graph = { path = "../circuit-graph" }
 kicad-symbol = { path = "../kicad-symbol" }
 sch-place = { path = "../sch-place" }
 indexmap = { workspace = true, features = ["serde"] }
+fuzzy-matcher.workspace = true
 strsim.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

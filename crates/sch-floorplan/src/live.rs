@@ -28,7 +28,7 @@ use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::SymbolGeometry;
 use sch_check::model::{Block, Component, Design, PinTarget};
-use sch_check::{Diagnostics, PlacePartsInput};
+use sch_check::{Diagnostics, ExistingNetPins, PayloadAudit, PlacePartsInput};
 use sch_doc::{Netlist, SchDoc, connect};
 use sch_place::ir::LayoutIr;
 use sch_place::item::Item;
@@ -59,6 +59,8 @@ pub enum Error {
     EmptySelection,
     #[error("input is not buildable: {0}")]
     Input(String),
+    #[error("invalid payload")]
+    InvalidPayload(PayloadAudit),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -154,7 +156,16 @@ pub fn place_parts(
     engine: &dyn PlacementEngine,
 ) -> Result<PlaceReport> {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    let (added, diags) = sch_check::into_design(input, &provider);
+    let before = connect::extract(doc);
+    let existing = before
+        .nets
+        .iter()
+        .map(|net| (net.name.clone(), net.pins.len()))
+        .collect::<ExistingNetPins>();
+    let (added, diags, audit) = sch_check::into_design(input, &provider, &existing);
+    if !audit.is_valid() {
+        return Err(Error::InvalidPayload(audit));
+    }
     if diags.has_errors() {
         return Err(Error::Input(diagnostic_summary(&diags)));
     }
@@ -168,7 +179,6 @@ pub fn place_parts(
         return Err(Error::Nothing);
     }
 
-    let before = connect::extract(doc);
     let snapshot = doc.snapshot();
     let fresh = doc.symbols().next().is_none();
 

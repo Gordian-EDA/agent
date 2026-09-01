@@ -32,7 +32,7 @@ const FIXED: &[&str] = &["R1", "R2", "R3", "C1", "C2"];
 fn gathered(env: &KicadInstallation) -> (sch_check::Design, Vec<Item>) {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let input: sch_check::PlacePartsInput = serde_json::from_str(SHEET).unwrap();
-    let (design, diagnostics) = sch_check::into_design(&input, &provider);
+    let (design, diagnostics, _) = sch_check::into_design(&input, &provider, &Default::default());
     assert!(!diagnostics.has_errors(), "{:#?}", diagnostics);
     let problem = SchematicPlaceProblem::from_design(env, &design).unwrap();
     (design, problem.items)

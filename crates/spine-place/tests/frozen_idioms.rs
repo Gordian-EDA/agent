@@ -6,7 +6,7 @@ use spine_place::SpinePlace;
 
 fn compile_source(provider: &SymbolTable, json: &str) -> Design {
     let input: sch_check::PlacePartsInput = serde_json::from_str(json).unwrap();
-    let (design, diagnostics) = sch_check::into_design(&input, provider);
+    let (design, diagnostics, _) = sch_check::into_design(&input, provider, &Default::default());
     assert!(!diagnostics.has_errors(), "{diagnostics:#?}");
     design
 }

@@ -19,7 +19,7 @@ fn compile_fixture(provider: &SymbolTable, name: &str) -> sch_check::Design {
         .join(format!("tests/fixtures/validation/{name}.place-parts.json"));
     let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
     let input: sch_check::PlacePartsInput = serde_json::from_str(&src).unwrap();
-    let (design, diagnostics) = sch_check::into_design(&input, provider);
+    let (design, diagnostics, _) = sch_check::into_design(&input, provider, &Default::default());
     assert!(!diagnostics.has_errors(), "{name}: {:#?}", diagnostics);
     design
 }
@@ -30,7 +30,7 @@ fn compile_source(
     input: serde_json::Value,
 ) -> sch_check::Design {
     let input: sch_check::PlacePartsInput = serde_json::from_value(input).unwrap();
-    let (design, diagnostics) = sch_check::into_design(&input, provider);
+    let (design, diagnostics, _) = sch_check::into_design(&input, provider, &Default::default());
     assert!(!diagnostics.has_errors(), "{name}: {:#?}", diagnostics);
     design
 }

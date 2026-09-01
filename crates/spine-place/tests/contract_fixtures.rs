@@ -34,7 +34,8 @@ fn fixtures_contract_cleanly() {
     for path in fixtures() {
         let json = std::fs::read_to_string(&path).unwrap();
         let input: sch_check::PlacePartsInput = serde_json::from_str(&json).unwrap();
-        let (design, diagnostics) = sch_check::into_design(&input, &provider);
+        let (design, diagnostics, _) =
+            sch_check::into_design(&input, &provider, &Default::default());
         assert!(!diagnostics.has_errors(), "{path:?}: {diagnostics:#?}");
         let problem = SchematicPlaceProblem::from_design(&env, &design).unwrap();
         let classes = classify_nets(&problem.inc, &LayoutIr::default());

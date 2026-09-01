@@ -12,7 +12,7 @@ fn main() {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let src = std::fs::read_to_string(format!("{dir}/{name}.place-parts.json")).unwrap();
     let input: sch_check::PlacePartsInput = serde_json::from_str(&src).unwrap();
-    let (design, diags) = sch_check::into_design(&input, &provider);
+    let (design, diags, _) = sch_check::into_design(&input, &provider, &Default::default());
     assert!(!diags.has_errors(), "{diags:#?}");
     let ir = input
         .intent

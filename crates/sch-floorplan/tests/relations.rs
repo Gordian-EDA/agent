@@ -356,7 +356,7 @@ const CHAIN: &str = r#"
 fn chain_problem(env: &KicadInstallation) -> (sch_check::Design, SchematicPlaceProblem) {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let input: sch_check::PlacePartsInput = serde_json::from_str(CHAIN).unwrap();
-    let (design, diagnostics) = sch_check::into_design(&input, &provider);
+    let (design, diagnostics, _) = sch_check::into_design(&input, &provider, &Default::default());
     assert!(!diagnostics.has_errors(), "{:#?}", diagnostics);
     let problem = SchematicPlaceProblem::from_design(env, &design).unwrap();
     (design, problem)

@@ -8,6 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use indexmap::IndexMap;
 use sch_place::ir::{Band, Cell, Flow, LayoutIr, Relation, Side};
 use serde::{Deserialize, Serialize};
@@ -67,6 +69,33 @@ pub struct PartSpec {
     pub decouple: IndexMap<String, u32>,
 }
 
+/// Existing named nets and the number of live sheet pins already on each one.
+pub type ExistingNetPins = BTreeMap<String, usize>;
+
+/// A new pin whose named net would have no other pin after placement.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DanglingPin {
+    #[serde(rename = "ref")]
+    pub refdes: RefDes,
+    pub pin: String,
+    pub net: NetName,
+}
+
+/// Findings that make a bulk-create payload electrically incomplete.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct PayloadAudit {
+    pub dangling: Vec<DanglingPin>,
+    pub did_you_mean: BTreeMap<NetName, NetName>,
+    pub unknown_pins: Vec<String>,
+}
+
+impl PayloadAudit {
+    /// Whether the payload may proceed to placement.
+    pub fn is_valid(&self) -> bool {
+        self.dangling.is_empty() && self.unknown_pins.is_empty()
+    }
+}
+
 /// The layout hints an LLM may state — the input-facing subset of the engine's
 /// [`LayoutIr`]. What the engine derives for itself (recognized idioms, frozen
 /// clusters, zone biases) is absent rather than silently accepted.
@@ -116,10 +145,14 @@ pub const DEFAULT_BLOCK: &str = "main";
 /// against the symbol table, `decouple` expanded into [`Origin::Synthesized`]
 /// caps, unconnected signal pins marked no-connect, net attributes derived.
 ///
-/// Diagnostics carry what makes the
-/// input un-buildable — an unknown part or pin, a duplicate refdes; the caller
-/// decides whether to apply a design that carries them.
-pub fn into_design(input: &PlacePartsInput, provider: &SymbolTable) -> (Design, Diagnostics) {
+/// Diagnostics carry what makes the input un-buildable — an unknown part or
+/// pin, a duplicate refdes. The payload audit separately reports new pins whose
+/// nets would have no other pin across the payload and existing sheet.
+pub fn into_design(
+    input: &PlacePartsInput,
+    provider: &SymbolTable,
+    existing: &ExistingNetPins,
+) -> (Design, Diagnostics, PayloadAudit) {
     let mut diags = Diagnostics::default();
     let mut design = Design {
         name: input.name.clone(),
@@ -138,7 +171,9 @@ pub fn into_design(input: &PlacePartsInput, provider: &SymbolTable) -> (Design, 
         }
     }
     if design.blocks.is_empty() {
-        design.blocks.insert(default_block.to_string(), Block::default());
+        design
+            .blocks
+            .insert(default_block.to_string(), Block::default());
     }
     for (name, grid) in &input.layout {
         match design.blocks.get_mut(name) {
@@ -153,7 +188,103 @@ pub fn into_design(input: &PlacePartsInput, provider: &SymbolTable) -> (Design, 
     decouple::renumber(&mut design);
     pins::mark_unused_no_connect(&mut design, provider);
     nets::derive_attrs(&mut design);
-    (design, diags)
+    let audit = audit_payload(input, &design, provider, existing, &diags);
+    (design, diags, audit)
+}
+
+fn audit_payload(
+    input: &PlacePartsInput,
+    design: &Design,
+    provider: &SymbolTable,
+    existing: &ExistingNetPins,
+    lowering: &Diagnostics,
+) -> PayloadAudit {
+    let mut pin_counts = existing.clone();
+    for component in design
+        .blocks
+        .values()
+        .flat_map(|block| block.components.values())
+    {
+        for target in component
+            .pins
+            .values()
+            .chain(component.units.values().flatten().map(|(_, target)| target))
+        {
+            if let PinTarget::Net(net) = target {
+                *pin_counts.entry(net.clone()).or_default() += 1;
+            }
+        }
+    }
+
+    let mut audit = PayloadAudit::default();
+    for spec in &input.parts {
+        let Some(meta) = provider.symbol(&spec.part) else {
+            continue;
+        };
+        for (pin, net) in &spec.pins {
+            if net.eq_ignore_ascii_case("nc") || pins::resolve(&meta, pin).is_empty() {
+                continue;
+            }
+            if pin_counts.get(net).copied().unwrap_or_default() < 2 {
+                audit.dangling.push(DanglingPin {
+                    refdes: spec.refdes.clone(),
+                    pin: pin.clone(),
+                    net: net.clone(),
+                });
+                if !existing.contains_key(net)
+                    && let Some(candidate) =
+                        closest_net_name(net, existing.keys().map(String::as_str))
+                {
+                    audit.did_you_mean.insert(net.clone(), candidate);
+                }
+            }
+        }
+    }
+    audit.dangling.sort_by(|left, right| {
+        left.refdes
+            .cmp(&right.refdes)
+            .then_with(|| left.pin.cmp(&right.pin))
+            .then_with(|| left.net.cmp(&right.net))
+    });
+    audit.unknown_pins.extend(
+        lowering
+            .0
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "unknown-pin")
+            .map(ToString::to_string),
+    );
+    audit.unknown_pins.extend(
+        crate::lint::lint(design, provider)
+            .0
+            .into_iter()
+            .filter(|diagnostic| diagnostic.code == "library-no-connect-wired")
+            .map(|diagnostic| diagnostic.to_string()),
+    );
+    audit.unknown_pins.sort();
+    audit.unknown_pins.dedup();
+    audit
+}
+
+/// The best subsequence match for a net name, when any candidate is related.
+pub fn closest_net_name<'a>(
+    net: &str,
+    candidates: impl Iterator<Item = &'a str>,
+) -> Option<String> {
+    let matcher = SkimMatcherV2::default().ignore_case();
+    candidates
+        .filter(|candidate| *candidate != net)
+        .filter_map(|candidate| {
+            let score = matcher
+                .fuzzy_match(candidate, net)
+                .into_iter()
+                .chain(matcher.fuzzy_match(net, candidate))
+                .max()?;
+            Some((score, candidate))
+        })
+        .max_by(|(left_score, left), (right_score, right)| {
+            left_score.cmp(right_score).then_with(|| right.cmp(left))
+        })
+        .map(|(_, candidate)| candidate.to_string())
 }
 
 fn component(spec: &PartSpec, provider: &SymbolTable, diags: &mut Diagnostics) -> Component {
@@ -267,7 +398,8 @@ pub fn place_parts_input_schema() -> Value {
                             "description":
                                 "Pin name or number -> net name, or \"nc\" for an explicit no-connect. \
                                  A name shared by several physical pins connects all of them; every \
-                                 signal pin left out becomes a no-connect.",
+                                 signal pin left out becomes a no-connect. Every named net must land \
+                                 on at least two pins across these parts and the existing sheet.",
                             "additionalProperties": {"type": "string"}
                         },
                         "decouple": {

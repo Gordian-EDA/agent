@@ -24,7 +24,9 @@ async fn the_loop_reads_swaps_and_checks_a_live_schematic() {
             "place_parts",
             json!({"parts": [
                 {"ref": "R1", "part": "Device:R", "value": "10k", "pins": {"1": "VCC", "2": "MID"}},
-                {"ref": "R2", "part": "Device:R", "value": "10k", "pins": {"1": "MID", "2": "GND"}}
+                {"ref": "R2", "part": "Device:R", "value": "10k", "pins": {"1": "MID", "2": "GND"}},
+                {"ref": "#PWR1", "part": "power:VCC", "pins": {"1": "VCC"}},
+                {"ref": "#PWR2", "part": "power:GND", "pins": {"1": "GND"}}
             ]}),
         ),
         tool_call("t2", "read_schematic", json!({})),
@@ -70,7 +72,9 @@ async fn moving_a_symbol_preserves_connectivity() {
             "place_parts",
             json!({"parts": [
                 {"ref": "R1", "part": "Device:R", "pins": {"1": "VCC", "2": "MID"}},
-                {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "GND"}}
+                {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "GND"}},
+                {"ref": "#PWR1", "part": "power:VCC", "pins": {"1": "VCC"}},
+                {"ref": "#PWR2", "part": "power:GND", "pins": {"1": "GND"}}
             ]}),
         ),
         tool_call(
