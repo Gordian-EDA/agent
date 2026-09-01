@@ -6,10 +6,6 @@ license.workspace = true
 repository.workspace = true
 description = "CLI and TUI for the Gordian LLM agent that designs KiCAD schematics and PCBs."
 
-[features]
-default = []
-chafa = ["ratatui-image/chafa-dyn"]
-
 [dependencies]
 gordian-core = { path = "../gordian-core" }
 gordian-runtime = { path = "../gordian-runtime" }
@@ -26,8 +22,7 @@ tempfile.workspace = true
 libc.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
-ratatui-image = { version = "9.0.0", default-features = false, features = ["crossterm", "image-defaults"] }
-image = "0.25"
+open = "5.4.2"
 futures.workspace = true
 async-trait.workspace = true
 pulldown-cmark.workspace = true

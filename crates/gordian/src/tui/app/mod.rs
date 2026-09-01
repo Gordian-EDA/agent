@@ -22,9 +22,9 @@ mod state;
 mod transcript;
 mod update;
 
-pub use image_cell::{ImageCell, ImageState};
+pub use image_cell::ImageCell;
 pub use input::*;
-pub use state::{App, Status};
+pub use state::{App, PreviewZone, Status};
 pub use transcript::{Entry, LiveAssistant, NoticeLevel, Speaker, UnwindPicker};
 pub use update::{Action, Msg, TurnEndReason};
 

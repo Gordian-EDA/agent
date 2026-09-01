@@ -35,7 +35,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    EventStream, KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
@@ -50,7 +50,6 @@ use gordian_core::prompts::system_prompt;
 use gordian_core::{Agent, AgentEvent, Provider as _, StopReason};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui_image::picker::Picker;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
@@ -472,16 +471,7 @@ async fn event_loop(
     };
     let mut tick = tokio::time::interval(TICK);
 
-    // One image picker for the whole session: it carries the terminal's graphics
-    // capability and cell font size. `None` (a dumb/piped terminal or tmux/Zellij)
-    // means inline renders fall back to a text label rather than corrupting
-    // scrollback with graphics escapes.
-    let picker = build_picker();
-    let mut ctx = ui::RenderCtx {
-        picker: picker.as_ref(),
-    };
-
-    terminal.draw(|f| ui::draw_with(f, app, &mut ctx))?;
+    terminal.draw(|f| ui::draw(f, app))?;
 
     loop {
         tokio::select! {
@@ -512,6 +502,9 @@ async fn event_loop(
                         match m.kind {
                             MouseEventKind::ScrollUp => { app.update(Msg::ScrollUp); }
                             MouseEventKind::ScrollDown => { app.update(Msg::ScrollDown); }
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                open_preview_at(app, m.column, m.row);
+                            }
                             _ => {}
                         }
                     }
@@ -544,27 +537,24 @@ async fn event_loop(
             shell.shutdown();
             break;
         }
-        terminal.draw(|f| ui::draw_with(f, app, &mut ctx))?;
+        terminal.draw(|f| ui::draw(f, app))?;
     }
     Ok(())
 }
 
-/// Build the session's image [`Picker`]: query the real terminal for its graphics
-/// protocol + cell size, falling back to half-block rendering on a dumb/piped
-/// terminal. Under tmux or Zellij we force half-blocks unconditionally — passthrough
-/// graphics escapes corrupt those multiplexers' scrollback — so a preview still
-/// shows, just as blocks. `None` is reserved for "no inline image at all" (none of
-/// these paths hit it today, but the renderer treats `None` as text-label mode).
-fn build_picker() -> Option<Picker> {
-    let multiplexed = std::env::var_os("TMUX").is_some()
-        || std::env::var("TERM")
-            .map(|t| t.starts_with("screen") || t.contains("tmux"))
-            .unwrap_or(false)
-        || std::env::var_os("ZELLIJ").is_some();
-    if multiplexed {
-        return Some(Picker::halfblocks());
+/// A left click on a preview link row opens its PNG in the system viewer
+/// (cross-platform via the `open` crate; xdg-open on Linux). Failures surface
+/// as an error notice rather than silently doing nothing.
+fn open_preview_at(app: &mut App, x: u16, y: u16) {
+    let Some(path) = app.preview_at(x, y).map(|i| app.images[i].path.clone()) else {
+        return;
+    };
+    if let Err(e) = open::that_detached(&path) {
+        app.transcript.push(app::Entry::notice(
+            app::NoticeLevel::Error,
+            format!("couldn't open {path}: {e}"),
+        ));
     }
-    Some(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()))
 }
 
 /// Enter raw mode + the alternate screen and build the ratatui terminal.
@@ -573,9 +563,10 @@ fn build_picker() -> Option<Picker> {
 /// `Event::Mouse`, distinct from an arrow-key press — without it, most
 /// terminals translate wheel motion into synthetic Up/Down key events when in
 /// the alternate screen, which is indistinguishable from the user's own key
-/// presses and forces Up/Down to guess which one happened. The trade is
-/// native click-drag text selection in the terminal, which most terminals
-/// still offer behind a modifier (e.g. Shift-drag).
+/// presses and forces Up/Down to guess which one happened. Capture also lets a
+/// left click on a preview link row open its render. The trade is native
+/// click-drag text selection in the terminal, which most terminals still offer
+/// behind a modifier (e.g. Shift-drag).
 ///
 /// On terminals that speak the Kitty keyboard protocol we push
 /// `DISAMBIGUATE_ESCAPE_CODES` so chords like Shift+Enter arrive distinct from a

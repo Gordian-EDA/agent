@@ -419,9 +419,8 @@ fn tui_screenshots() {
     app.turn_tool_calls = 1;
     shoot("09_streaming", 96, 32, &mut app);
 
-    // 10. An inline board render preview (the lead's ask). Under the screenshot
-    //     harness there is no image picker, so the cell renders its stable
-    //     text-label placeholder; the live terminal shows real graphics here.
+    // 10. A board render preview: a clickable link row that opens the PNG in
+    //     the system viewer (no inline terminal graphics).
     let mut app = App::new(status());
     push(
         &mut app,

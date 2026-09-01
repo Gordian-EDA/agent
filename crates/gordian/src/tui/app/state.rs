@@ -12,8 +12,18 @@ pub(super) struct StashedPaste {
     pub text: String,
 }
 
-/// Static-ish status shown in the status bar.
-#[derive(Clone, Debug)]
+/// The screen rect of one render-preview link row from the last draw, plus the
+/// index into [`App::images`] it opens when clicked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreviewZone {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub idx: usize,
+}
+
+/// Static-ish status shown in the status bar.#[derive(Clone, Debug)]
 pub struct Status {
     /// Provider label, e.g. `bedrock`.
     pub provider: String,
@@ -56,10 +66,14 @@ impl Status {
 pub struct App {
     /// The chat transcript (top pane), oldest first.
     pub transcript: Vec<Entry>,
-    /// Inline image previews, each pinned after a transcript entry (see
-    /// [`super::ImageCell`]). Kept parallel to `transcript` so the text model and
-    /// its tests stay free of the non-`PartialEq` image protocol state.
+    /// Render-preview links, each pinned after a transcript entry (see
+    /// [`super::ImageCell`]). Kept parallel to `transcript` so the text model
+    /// stays a plain `Vec<Entry>`.
     pub images: Vec<super::ImageCell>,
+    /// Screen rects where the last draw painted a preview link, with the index
+    /// of the [`super::ImageCell`] each opens. Written by the renderer (like
+    /// `scroll_max` / `viewport_h`); the shell hit-tests mouse clicks against it.
+    pub preview_zones: Vec<PreviewZone>,
     /// The assistant entry being built from an in-progress streamed run, or
     /// `None` between runs. Dropping it is the only teardown a run needs — the
     /// buffered tail goes with it, so no reset path can leave text stranded.
@@ -137,6 +151,7 @@ impl App {
         Self {
             transcript: Vec::new(),
             images: Vec::new(),
+            preview_zones: Vec::new(),
             live_assistant: None,
             input: String::new(),
             cursor: 0,
@@ -232,6 +247,17 @@ impl App {
         if let Some(entry) = entry {
             self.transcript.push(entry);
         }
+    }
+
+    /// The [`App::images`] index whose link row contains screen position
+    /// `(x, y)` in the last draw, if any — what a left click there opens.
+    pub fn preview_at(&self, x: u16, y: u16) -> Option<usize> {
+        self.preview_zones
+            .iter()
+            .find(|z| {
+                y >= z.y && y < z.y + z.height && x >= z.x && x < z.x + z.width
+            })
+            .map(|z| z.idx)
     }
 
     /// Seconds the in-flight turn has been running, if a turn is in flight.
