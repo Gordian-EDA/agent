@@ -116,16 +116,38 @@ struct Segment {
 /// global and power names.
 pub fn extract(doc: &SchDoc) -> Netlist {
     let warnings = survey(doc);
-
     let placed: Vec<PlacedPin> = doc.symbols().flat_map(|s| pins_of(doc, s)).collect();
-    let power_names = power_symbol_names(doc);
+    let (nodes, segments) = intern(doc, &placed);
 
+    let mut sets = UnionFind::new(nodes.points.len());
+    for seg in &segments {
+        sets.union(seg.a, seg.b);
+    }
+    join_interiors(&nodes, &segments, &mut sets);
+
+    let named = names(doc, &nodes, &placed);
+    for (_, members) in named.values() {
+        for pair in members.windows(2) {
+            sets.union(pair[0], pair[1]);
+        }
+    }
+
+    let anchors = Anchors::new(doc, &nodes, &segments, &named, &mut sets);
+    let (nets, unconnected) = emit(&placed, &nodes, &mut sets, &anchors);
+    Netlist {
+        nets,
+        unconnected,
+        warnings,
+    }
+}
+
+/// Intern every connection point on the sheet and the wire segments over them.
+fn intern(doc: &SchDoc, placed: &[PlacedPin]) -> (Nodes, Vec<Segment>) {
     let mut nodes = Nodes::default();
     let mut segments = Vec::new();
     for wire in doc.wires() {
         for pair in wire.points.windows(2) {
-            let a = nodes.intern(pair[0]);
-            let b = nodes.intern(pair[1]);
+            let (a, b) = (nodes.intern(pair[0]), nodes.intern(pair[1]));
             segments.push(Segment {
                 a,
                 b,
@@ -134,19 +156,19 @@ pub fn extract(doc: &SchDoc) -> Netlist {
             });
         }
     }
-    for pin in &placed {
+    for pin in placed {
         nodes.intern(pin.at);
     }
     for item in doc.items() {
         match item {
-            Item::Junction(j) => {
-                nodes.intern(j.at);
+            Item::Junction(junction) => {
+                nodes.intern(junction.at);
             }
-            Item::NoConnect(n) => {
-                nodes.intern(n.at);
+            Item::NoConnect(no_connect) => {
+                nodes.intern(no_connect.at);
             }
-            Item::Label(l) => {
-                nodes.intern(l.at.point());
+            Item::Label(label) => {
+                nodes.intern(label.at.point());
             }
             Item::Sheet(sheet) => {
                 // A sheet pin's `at` is already in sheet coordinates.
@@ -157,13 +179,18 @@ pub fn extract(doc: &SchDoc) -> Netlist {
             _ => {}
         }
     }
+    (nodes, segments)
+}
 
-    let mut sets = UnionFind::new(nodes.points.len());
-    for seg in &segments {
-        sets.union(seg.a, seg.b);
-    }
-    join_interiors(&nodes, &segments, &mut sets);
-
+/// Every name claimed on the sheet, with the strongest source that claimed it
+/// and the nodes carrying it. Labels name by their text; rail symbols name by
+/// their `Value`; a legacy part's hidden power input names by its pin name.
+fn names(
+    doc: &SchDoc,
+    nodes: &Nodes,
+    placed: &[PlacedPin],
+) -> HashMap<String, (NetSource, Vec<usize>)> {
+    let power = power_symbol_names(doc);
     let mut named: HashMap<String, (NetSource, Vec<usize>)> = HashMap::new();
     let mut note = |name: String, source: NetSource, node: usize| {
         let entry = named.entry(name).or_insert((source, Vec::new()));
@@ -180,65 +207,89 @@ pub fn extract(doc: &SchDoc) -> Netlist {
             note(label.text.clone(), source, node);
         }
     }
-    for pin in &placed {
+    for pin in placed {
         let Some(node) = nodes.get(pin.at) else {
             continue;
         };
-        if pin.power_symbol && pin.etype == "power_in" {
-            // Only a power *input* names the net: that is what separates a rail
-            // symbol from a PWR_FLAG, whose power_out pin names nothing.
-            if let Some(name) = power_names.get(&pin.refdes) {
+        if pin.etype != "power_in" {
+            continue;
+        }
+        // Only a power *input* names a net: that is what separates a rail
+        // symbol from a PWR_FLAG, whose power_out pin names nothing.
+        if pin.power_symbol {
+            if let Some(name) = power.get(&pin.refdes) {
                 note(name.clone(), NetSource::Power, node);
             }
-        } else if pin.hidden && pin.etype == "power_in" {
+        } else if pin.hidden {
             note(pin.name.clone(), NetSource::Power, node);
         }
     }
-    for (_, (_, members)) in named.iter() {
-        for pair in members.windows(2) {
-            sets.union(pair[0], pair[1]);
-        }
-    }
+    named
+}
 
-    let mut name_of_root: HashMap<usize, (NetSource, String)> = HashMap::new();
-    for (name, (source, members)) in &named {
-        let Some(&first) = members.first() else {
-            continue;
-        };
-        let root = sets.find(first);
-        let candidate = (*source, name.clone());
-        match name_of_root.get(&root) {
-            Some(existing) if *existing >= candidate => {}
-            _ => {
-                name_of_root.insert(root, candidate);
+/// Per-partition facts the emitter needs, resolved once the sets are final.
+struct Anchors {
+    /// The winning name and its source, for partitions that have one.
+    name: HashMap<usize, (NetSource, String)>,
+    /// Partitions holding a wire or a name, so a lone pin on one is still a net.
+    held: Vec<bool>,
+    /// Partitions a no-connect marker settles.
+    settled: Vec<usize>,
+}
+
+impl Anchors {
+    fn new(
+        doc: &SchDoc,
+        nodes: &Nodes,
+        segments: &[Segment],
+        named: &HashMap<String, (NetSource, Vec<usize>)>,
+        sets: &mut UnionFind,
+    ) -> Anchors {
+        let mut name: HashMap<usize, (NetSource, String)> = HashMap::new();
+        let mut held = vec![false; nodes.points.len()];
+        for (text, (source, members)) in named {
+            for &member in members {
+                held[sets.find(member)] = true;
+            }
+            let Some(&first) = members.first() else {
+                continue;
+            };
+            let root = sets.find(first);
+            let candidate = (*source, text.clone());
+            if name.get(&root).is_none_or(|held| *held < candidate) {
+                name.insert(root, candidate);
             }
         }
-    }
-
-    let no_connects: Vec<usize> = doc
-        .items()
-        .iter()
-        .filter_map(|item| match item {
-            Item::NoConnect(n) => nodes.get(n.at),
-            _ => None,
-        })
-        .map(|n| sets.find(n))
-        .collect();
-
-    let mut wired: Vec<bool> = vec![false; nodes.points.len()];
-    for seg in &segments {
-        wired[sets.find(seg.a)] = true;
-    }
-    for (_, (_, members)) in named.iter() {
-        for &m in members {
-            let root = sets.find(m);
-            wired[root] = true;
+        for seg in segments {
+            held[sets.find(seg.a)] = true;
+        }
+        let settled = doc
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                Item::NoConnect(no_connect) => nodes.get(no_connect.at),
+                _ => None,
+            })
+            .map(|node| sets.find(node))
+            .collect();
+        Anchors {
+            name,
+            held,
+            settled,
         }
     }
+}
 
+/// Group the pins by partition into nets, and report the loose ends.
+fn emit(
+    placed: &[PlacedPin],
+    nodes: &Nodes,
+    sets: &mut UnionFind,
+    anchors: &Anchors,
+) -> (Vec<Net>, Vec<PinRef>) {
     let mut groups: HashMap<usize, Vec<PinRef>> = HashMap::new();
     let mut unconnected = Vec::new();
-    for pin in &placed {
+    for pin in placed {
         let reference = PinRef {
             refdes: pin.refdes.clone(),
             unit: pin.unit,
@@ -252,29 +303,26 @@ pub fn extract(doc: &SchDoc) -> Netlist {
     }
 
     let mut nets = Vec::new();
-    for (root, pins) in groups {
-        if pins.len() < 2 && !wired[root] {
-            if !no_connects.contains(&root) {
+    for (root, mut pins) in groups {
+        // A pin alone at a point with no wire and no name is not a net: it is
+        // either an intentional dead end or an oversight.
+        if pins.len() < 2 && !anchors.held[root] {
+            if !anchors.settled.contains(&root) {
                 unconnected.extend(pins);
             }
             continue;
         }
-        let (source, name) = name_of_root
+        let (source, name) = anchors
+            .name
             .get(&root)
             .cloned()
             .unwrap_or_else(|| (NetSource::Auto, auto_name(&pins)));
-        let mut pins = pins;
         pins.sort_by(|a, b| a.key().cmp(&b.key()));
         nets.push(Net { name, source, pins });
     }
     nets.sort_by(|a, b| (&a.name, a.pins.len()).cmp(&(&b.name, b.pins.len())));
     unconnected.sort_by(|a, b| a.key().cmp(&b.key()));
-
-    Netlist {
-        nets,
-        unconnected,
-        warnings,
-    }
+    (nets, unconnected)
 }
 
 /// What the extraction cannot vouch for on this sheet.
