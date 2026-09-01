@@ -2953,6 +2953,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sch-doc"
+version = "0.1.0"
+dependencies = [
+ "geom",
+ "indexmap 2.14.0",
+ "kicad",
+ "kicad-symbol",
+ "kiutils_sexpr",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "sch-floorplan"
 version = "0.1.0"
 dependencies = [
