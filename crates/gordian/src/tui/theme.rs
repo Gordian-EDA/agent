@@ -97,9 +97,5 @@ pub const SUCCESS: Style = fg(OK);
 pub const DANGER: Style = fg(ERR);
 pub const WARNING: Style = fg(WARN);
 
-pub const ADDED: Style = fg(OK);
-pub const REMOVED: Style = fg(ERR);
-pub const CHANGED: Style = fg(WARN);
-
 pub const SPINNER: Style = bold(fg(ACC));
 pub const LOGO: Style = bold(fg(ACC));

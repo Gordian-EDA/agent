@@ -2,7 +2,7 @@
 //!
 //! [`App::update`] is the single entry point — it maps a keypress, an agent
 //! event, or an async arrival into a state transition and returns the [`Action`]
-//! the shell performs. The submit / command-dispatch / apply-gate transitions it
+//! the shell performs. The submit / command-dispatch / mutation-approval transitions it
 //! delegates to live here too ([`App::submit`], [`App::run_command`],
 //! [`App::cancel`], [`App::resolve_pending`]).
 
@@ -108,7 +108,7 @@ pub enum Action {
     None,
     /// Spawn an agent turn with this prompt.
     SpawnTurn(String),
-    /// Resolve the pending apply-gate with this decision.
+    /// Resolve the pending mutation approval with this decision.
     ResolveApproval(bool),
     /// Abort the in-flight agent turn.
     CancelTurn,
@@ -477,7 +477,7 @@ impl App {
                 self.auto = !self.auto;
                 let state = if self.auto { "ON (yolo)" } else { "OFF" };
                 self.transcript
-                    .push(Entry::system(format!("apply-gate auto-approve: {state}")));
+                    .push(Entry::system(format!("mutation auto-approve: {state}")));
                 Action::None
             }
             "/clear" => {
@@ -524,7 +524,7 @@ impl App {
         }
     }
 
-    /// Resolve a pending apply-gate decision. No-op (returns `None`) if nothing
+    /// Resolve a pending mutation-approval decision. No-op (returns `None`) if nothing
     /// is pending.
     fn resolve_pending(&mut self, approve: bool) -> Action {
         if self.pending.take().is_none() {

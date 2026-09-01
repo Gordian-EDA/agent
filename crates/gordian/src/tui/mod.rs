@@ -10,13 +10,13 @@
 //! ```text
 //!   crossterm EventStream ─┐
 //!   agent AgentEvent mpsc ─┼─ tokio::select! ─► App::update ─► Action ─► Shell
-//!   apply-gate mpsc       ─┤                                   (spawn turn,
+//!   approval mpsc         ─┤                                   (spawn turn,
 //!   animation tick        ─┘                                    resolve gate,
 //!                                                               cancel,
 //!                                                               quit)
 //! ```
 //!
-//! ### The apply-gate across tasks
+//! ### Mutation approval across tasks
 //!
 //! The agent runs in a spawned task holding a [`TuiApprovals`]. When it reaches
 //! an approval gate, `TuiApprovals::approve` sends the proposal **plus a
@@ -226,7 +226,7 @@ struct Shell {
     done_tx: UnboundedSender<TaskDone>,
     post_commit_review: bool,
     review_fix_rounds: u8,
-    /// The oneshot answering the currently open apply-gate, if any.
+    /// The oneshot answering the currently open mutation approval, if any.
     pending_gate: Option<oneshot::Sender<bool>>,
     /// The in-flight turn task (aborted by [`Action::CancelTurn`]).
     turn_task: Option<JoinHandle<()>>,
@@ -627,7 +627,7 @@ async fn event_loop(
             Some((task_id, ev)) = events_rx.recv() => {
                 shell.receive_agent_event(app, task_id, ev);
             }
-            // ── apply-gate requests from the agent task ───────────────
+            // ── mutation approval requests from the agent task ───────
             Some((task_id, proposal, reply)) = gate_rx.recv() => {
                 shell.receive_gate(app, task_id, proposal, reply);
             }

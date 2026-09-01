@@ -12,7 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::app::{App, Msg};
 
-/// The apply-gate keys, defined once here — the single source of truth shared by
+/// The mutation-approval keys, defined once here — the single source of truth shared by
 /// the key mapping below and the gate card's hint text ([`super::ui`]), so a key
 /// and its on-screen label can never drift apart.
 pub const APPROVE_KEY: char = 'a';
@@ -89,13 +89,13 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
         // Up/Down edit history while the input line is live — always, so the
         // split with the mouse wheel (which now arrives as a real `Event::
         // Mouse`, distinct from a key press) stays simple to reason about.
-        // Outside an editable input (e.g. the apply-gate holds focus) they
+        // Outside an editable input (e.g. mutation approval holds focus) they
         // still scroll, since there's no history to recall into.
         KeyCode::Up if app.input_active() => Some(Msg::HistoryPrev),
         KeyCode::Down if app.input_active() => Some(Msg::HistoryNext),
         KeyCode::Up => Some(Msg::ScrollUp),
         KeyCode::Down => Some(Msg::ScrollDown),
-        // While the apply-gate is open, the gate keys are decisions, not text.
+        // While mutation approval is open, the gate keys are decisions, not text.
         KeyCode::Char(APPROVE_KEY) if gate_open => Some(Msg::Approve),
         KeyCode::Char(REJECT_KEY) if gate_open => Some(Msg::Reject),
         KeyCode::Char(c) => Some(Msg::Char(c)),
@@ -284,7 +284,9 @@ mod tests {
     fn up_scrolls_when_the_gate_is_open() {
         let mut a = app();
         a.update(Msg::PendingApproval(json!({
-            "diff": { "added": ["U1"], "removed": [], "changed": [] }
+            "approval_kind": "operation",
+            "operation": "place_parts",
+            "arguments": {"parts": [{"ref": "U1"}]}
         })));
         assert!(matches!(map_key(&a, key(KeyCode::Up)), Some(Msg::ScrollUp)));
     }
@@ -330,7 +332,9 @@ mod tests {
     fn a_key_resolves_gate_when_pending() {
         let mut a = app();
         a.update(Msg::PendingApproval(json!({
-            "diff": { "added": ["U1"], "removed": [], "changed": [] }
+            "approval_kind": "operation",
+            "operation": "place_parts",
+            "arguments": {"parts": [{"ref": "U1"}]}
         })));
         // With the gate open, 'a' maps to Approve and resolves it.
         let msg = map_key(&a, key(KeyCode::Char('a'))).unwrap();

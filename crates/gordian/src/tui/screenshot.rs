@@ -51,7 +51,6 @@ fn swatch(c: Color) -> String {
     hex(c, false).expect("theme colours are truecolour")
 }
 
-
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -257,8 +256,8 @@ fn seed_conversation(app: &mut App) {
             .into(),
     )));
     tool(app, "search_symbols", "\"buck converter\" → 12 hits");
-    tool(app, "create_design", "8 parts → ok");
-    tool(app, "run_erc", "0 errors, 2 warnings");
+    tool(app, "place_parts", "8 parts → placed");
+    tool(app, "check_schematic", "0 errors, 0 ERC violations");
     // Drive real usage so the footer's TOKEN / COST / CONTEXT / cached HUD shows:
     // a cold first call (cache write) then a warm one (cache read) — the cached
     // prefix is exactly the prompt-caching win the HUD is meant to surface.
@@ -298,17 +297,14 @@ fn tui_screenshots() {
     app.cursor = app.input.chars().count();
     shoot("01_chat", 96, 32, &mut app);
 
-    // 2. The apply-gate: a change awaiting approval.
+    // 2. The mutation gate: a change awaiting approval.
     let mut app = App::new(status());
     seed_conversation(&mut app);
-    app.pending = Some(PendingApproval::Schematic {
-        added: vec!["C7 (100nF)".into(), "R5 (10k)".into()],
-        removed: vec![],
-        changed: vec!["U1 footprint".into()],
-        nets_before: 14,
-        nets_after: 15,
+    app.pending = Some(PendingApproval {
+        operation: "place_parts".into(),
+        arguments: serde_json::json!({"parts": ["C7", "R5"]}),
     });
-    shoot("02_apply_gate", 96, 32, &mut app);
+    shoot("02_mutation_gate", 96, 32, &mut app);
 
     // 3. A turn in flight (running indicator + spinner) with the live tool-detail
     //    row naming the call now executing.
@@ -395,7 +391,7 @@ fn tui_screenshots() {
          I picked the nearest E96 value, `52.3k`."
             .into(),
     )));
-    tool(&mut app, "run_erc", "0 errors, 1 warning");
+    tool(&mut app, "check_schematic", "0 errors, 0 ERC violations");
     push(
         &mut app,
         Speaker::System,

@@ -57,7 +57,7 @@ cargo build --release
 # Run one headless design turn:
 cargo run --release -p gordian -- agent --project ./my_board "a 3.3V buck converter from 12V, 2A"
 
-# Or the interactive copilot (chat + apply-gate cockpit):
+# Or the interactive copilot (chat + per-mutation approval):
 cargo run --release -p gordian -- tui --project ./my_board
 ```
 
@@ -76,13 +76,16 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | Crate | Role |
 |-------|------|
 | `gordian` | CLI + ratatui copilot TUI — the entry point |
-| `gordian-core` | The KiCAD agent: the turn loop + apply-gate, the schematic/PCB tools, prompts, review, and render — over the `Provider` seam with one provider-agnostic, genai-backed `GenaiProvider` (BYOK any provider) |
+| `gordian-core` / `gordian-llm` / `gordian-runtime` | Agent loop and prompts, provider abstraction, configuration, project context, and per-mutation approval contracts |
+| `gordian-tools-sch` | Live `.kicad_sch` queries, guarded mutators, bulk placement, rewiring, and authoritative checks |
 | `pcb-workflow` | Application workflows that coordinate PCB creation, placement, routing, validation, rendering, and fabrication export |
 | `kicad-board` | KiCad PCB persistence boundary: live IPC snapshots, domain conversion, and atomic offline board edits |
 | `sch-check` | The kernel circuit model (`Design`), its semantic lints and deterministic ERC, and the `place_parts` tool input |
-| `circuit-lang` | Parser and canonical emitter for the circuit markup language |
 | `circuit-graph` | Attributed circuit graph + a declarative idiom matcher |
-| `sch-floorplan` / `sch-io` / `sch-place` | Deterministic schematic floorplan core (`Design` → `.kicad_sch` and back), over the anneal/constraint placement engines, with the shared model + I/O layers |
+| `sch-doc` | Lossless editable `.kicad_sch` document and pure-Rust connectivity extractor |
+| `sch-floorplan` / `sch-place` | Deterministic live schematic placement, arrangement, rewiring, and shared placement model |
+| `anneal-place` / `cluster-place` / `spine-place` | Interchangeable schematic placement engines |
+| `kicad-symbol` / `kicad-footprint` | KiCAD library discovery, metadata, and geometry |
 | `pcb-model` | Unified `PcbProblem -> PcbSolution` framework contract |
 | `pcb-engine` | Gordian's single tuned place-then-route PCB engine |
 | `pcb-place` | Placement views and the engine's tuned placement phase |
@@ -90,6 +93,7 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | `pcb-route-mesh` | Tuned routing pipeline and lower-level mesh diagnostics |
 | `pcb-drc` | Extensible PCB geometry and connectivity DRC |
 | `kicad` / `kicad-ipc` | KiCAD discovery and CLI driver, plus the live pcbnew IPC session |
+| `geom` | Shared geometry primitives |
 
 ## Testing
 

@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Breaking
+- **The live `.kicad_sch` file is now the sole schematic source of truth.** The
+  YAML authoring language, draft workspace, whole-sheet apply workflow,
+  multisheet composer, and netlist-lift crate were removed. New designs and
+  multi-part additions use one connectivity-only `place_parts` call; focused
+  edits use guarded live mutators, with every write individually approved.
+- **Schematic completion is deterministic.** A clean `check_schematic` after a
+  successful mutation satisfies the turn contract immediately, and reviewed
+  turns use those facts instead of a visual or semantic LLM critic.
+
 ### Fixed
 - **Queued prompts could interleave out of order.** `AgentEvent`s (a turn's
   final reply, `TurnDone`) and its completion signal (which drains the queue
@@ -69,14 +79,11 @@ Initial public version of **Gordian** — an LLM agent that designs KiCAD schema
 natural-language prompts, orchestrating deterministic, oracle-gated layout and routing engines.
 
 ### Highlights
-- **Schematic generation** (`sch-layout` + `circuit-lang`): natural-language prompt →
-  deterministic `.kicad_sch`, with multi-sheet floorplanning, shelf-pack + locality-aware annealed
-  placement, idiom recognition (decoupling, crystal, LED indicators, …), and an authoritative netlist
-  oracle.
-- **PCB place & route** (`pcb-engine` + `forceplace` + `kicad-bridge`): force-directed placement and
-  a deterministic copper autorouter (slice-1 grid ∨ capacity-mesh detailed), GND/VCC plane synthesis,
-  HDI micro-via in-pad escape, and per-net trace widths — every board gated to **0 copper-error DRC
-  faults** by an in-house lint plus `kicad-cli` DRC.
-- **Agent** (`agent` + `gordian`): provider-agnostic LLM client (OpenAI / AWS Bedrock), a tool
-  surface over the engines, pattern-aware failure triage, and a `resize_board` lever for the
-  placement-convergence path. The model never emits coordinates.
+- **Live schematic authoring** (`sch-doc` + `gordian-tools-sch` + `sch-floorplan`):
+  lossless `.kicad_sch` edits, connectivity-delta guards, solver-owned placement
+  and wiring, idiom recognition, and authoritative lint/ERC checks.
+- **PCB place and route** (`pcb-workflow` + `pcb-engine`): deterministic placement,
+  routing, DRC, rendering, and fabrication export over the live schematic netlist.
+- **Agent application** (`gordian-core` + `gordian-llm` + `gordian-runtime` +
+  `gordian`): provider-agnostic orchestration, per-mutation approval, a headless
+  CLI, and an interactive ratatui copilot. The model never emits coordinates.

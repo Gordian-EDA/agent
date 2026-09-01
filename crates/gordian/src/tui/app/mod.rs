@@ -3,7 +3,7 @@
 //! [`App`] is the whole UI state. [`App::update`] maps a [`Msg`] (a keypress,
 //! an agent event, or a pending-diff arrival) into a state transition and
 //! returns an [`Action`] the shell performs (spawn a turn, resolve the
-//! apply-gate, cancel, undo, quit). Nothing here touches a terminal or the
+//! mutation approval, cancel, undo, quit). Nothing here touches a terminal or the
 //! network, so it is unit-testable in full.
 //!
 //! The shell ([`super::run`]) owns the terminal, the crossterm event stream, and
@@ -26,9 +26,7 @@ mod update;
 pub use image_cell::{ImageCell, ImageState};
 pub use input::*;
 pub use state::{App, Status};
-pub use transcript::{
-    Entry, LiveAssistant, NoticeLevel, PendingApproval, Speaker, UnwindPicker,
-};
+pub use transcript::{Entry, LiveAssistant, NoticeLevel, PendingApproval, Speaker, UnwindPicker};
 pub use update::{Action, Msg, TurnEndReason};
 
 #[cfg(test)]
@@ -55,15 +53,9 @@ mod tests {
 
     fn dry_run_json() -> Value {
         json!({
-            "ok": true,
-            "would_write": true,
-            "diff": {
-                "added": ["U1", "R7"],
-                "removed": [],
-                "changed": ["C2"],
-                "nets_before": 3,
-                "nets_after": 12
-            }
+            "approval_kind": "operation",
+            "operation": "place_parts",
+            "arguments": {"parts": [{"ref": "U1", "part": "Device:R", "pins": {"1": "VCC", "2": "GND"}}]}
         })
     }
 
@@ -779,22 +771,12 @@ mod tests {
     }
 
     #[test]
-    fn pending_diff_arrives_and_approve_resolves_it() {
+    fn pending_operation_arrives_and_approve_resolves_it() {
         let mut a = app();
         a.update(Msg::PendingApproval(dry_run_json()));
-        let pending = a.pending.as_ref().expect("diff is pending");
-        let PendingApproval::Schematic {
-            added,
-            changed,
-            nets_after,
-            ..
-        } = pending
-        else {
-            panic!("expected schematic diff")
-        };
-        assert_eq!(added, &vec!["U1", "R7"]);
-        assert_eq!(changed, &vec!["C2"]);
-        assert_eq!(*nets_after, 12);
+        let pending = a.pending.as_ref().expect("operation is pending");
+        assert_eq!(pending.operation, "place_parts");
+        assert_eq!(pending.arguments["parts"][0]["ref"], "U1");
         assert!(!a.input_active(), "input locked while a gate is open");
 
         // Pressing 'a' resolves approval and clears the pending diff.
