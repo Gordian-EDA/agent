@@ -130,7 +130,10 @@ pub static RC_LOWPASS: Pattern = Pattern {
 /// signal-net join stops the LED from pairing with an unrelated resistor that merely
 /// shares the same supply (a reset pull-up on the same V+).
 static LED_ROLES: &[Role] = &[
-    Role::one("led", NodePred::LibAny(LED_LIBS)),
+    Role::one(
+        "led",
+        NodePred::And(&[NodePred::LibAny(LED_LIBS), NodePred::Pins(2)]),
+    ),
     Role::one(
         "res",
         NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)]),

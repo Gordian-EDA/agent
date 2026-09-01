@@ -27,6 +27,7 @@
 
 use crate::model::*;
 use crate::{SymbolMeta, SymbolTable};
+use circuit_graph::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
 use std::collections::HashMap;
 
 /// Common regulator/converter feedback reference voltages, for divider-ratio checks.
@@ -431,7 +432,7 @@ fn check_led_indicator_polarity(
     out: &mut Vec<String>,
 ) {
     for led in items {
-        if !is_led(led.comp) {
+        if !is_led(led.comp) || led.pins.len() != 2 {
             continue;
         }
         let Some(anode) = pin_net_alias(led, &["2", "A", "+"]) else {
@@ -453,8 +454,7 @@ fn check_led_indicator_polarity(
                     return None;
                 }
                 let rail = far(resistor, cathode);
-                rail_voltage(rail)
-                    .is_some_and(|voltage| voltage > 0.0)
+                is_positive_supply(rail, items, net_items)
                     .then_some((resistor.refdes, rail))
             });
         if let Some((resistor, rail)) = rail_resistor {
@@ -464,6 +464,30 @@ fn check_led_indicator_polarity(
             ));
         }
     }
+}
+
+fn is_positive_supply(
+    net: &str,
+    items: &[Item],
+    net_items: &HashMap<&str, Vec<usize>>,
+) -> bool {
+    if is_power_net(net) && !is_ground(net) && !is_neg_supply(net) {
+        return true;
+    }
+    net_items.get(net).into_iter().flatten().any(|&index| {
+        let source = &items[index];
+        let part = source.comp.part.to_ascii_uppercase();
+        let value = source
+            .comp
+            .value
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        (is_connector_like(&source.comp.part)
+            || part.contains("CONN")
+            || source.refdes.starts_with(['J', 'P']))
+            && (value.contains("POWER") || value.contains("SUPPLY"))
+    })
 }
 
 /// A 2-terminal passive that can't conduct: a pin left unconnected, or both pins on one net.

@@ -245,7 +245,7 @@ fn correct_led_indicator_has_no_polarity_finding() {
 #[test]
 fn reversed_led_indicator_is_a_blocking_error() {
     let d = design(&[
-        ("R1", part("Device:R", &[("1", "+3V3"), ("2", "LED_K")])),
+        ("R1", part("Device:R", &[("1", "VCC"), ("2", "LED_K")])),
         ("D1", part("Device:LED", &[("1", "LED_K"), ("2", "GND")])),
     ]);
 
@@ -256,7 +256,30 @@ fn reversed_led_indicator_is_a_blocking_error() {
         .expect("reversed LED finding");
 
     assert!(polarity.blocking);
-    assert!(polarity.line.contains("swap D1: anode should face +3V3"));
+    assert!(polarity.line.contains("swap D1: anode should face VCC"));
+}
+
+#[test]
+fn reversed_led_on_unnamed_power_connector_net_is_an_error() {
+    let mut connector = part(
+        "Legacy:CONN_2",
+        &[("1", "Net-(P3-P1)"), ("2", "GND")],
+    );
+    connector.value = Some("POWER".into());
+    let d = design(&[
+        ("P3", connector),
+        (
+            "R1",
+            part("Device:R", &[("1", "Net-(P3-P1)"), ("2", "LED_K")]),
+        ),
+        ("D1", part("Device:LED", &[("1", "LED_K"), ("2", "GND")])),
+    ]);
+
+    assert!(
+        erc::defects(&d, &provider()).iter().any(|finding| {
+            finding.blocking && finding.line.contains("swap D1: anode should face Net-(P3-P1)")
+        })
+    );
 }
 
 #[test]
@@ -264,6 +287,26 @@ fn signal_clamp_diode_has_no_led_polarity_finding() {
     let d = design(&[
         ("R1", part("Device:R", &[("1", "+3V3"), ("2", "SIGNAL")])),
         ("D1", part("Device:D", &[("1", "SIGNAL"), ("2", "GND")])),
+    ]);
+
+    assert!(
+        !erc::erc_checks(&d, &provider())
+            .iter()
+            .any(|finding| finding.contains("LED is reversed"))
+    );
+}
+
+#[test]
+fn led_driver_ic_has_no_led_polarity_finding() {
+    let d = design(&[
+        ("R1", part("Device:R", &[("1", "+12V"), ("2", "DRIVE")])),
+        (
+            "U1",
+            part(
+                "Driver_LED:Example",
+                &[("1", "DRIVE"), ("2", "GND"), ("3", "ENABLE")],
+            ),
+        ),
     ]);
 
     assert!(
