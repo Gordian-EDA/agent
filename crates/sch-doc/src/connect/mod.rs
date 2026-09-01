@@ -45,7 +45,8 @@ pub use diff::NetDelta;
 pub enum NetSource {
     /// Generated, e.g. `Net-(R1-Pad1)`.
     Auto,
-    /// A pin on a hierarchical sheet, named `sheet/pin`.
+    /// A pin on a hierarchical sheet, which lends the net its bare pin name.
+    /// It never merges, so two sheets with an `IN` pin leave two nets `IN`.
     SheetPin,
     /// A hierarchical label.
     Hier,

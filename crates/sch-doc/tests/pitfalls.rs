@@ -1069,3 +1069,101 @@ fn the_delta_distinguishes_a_merge_from_a_rename() {
         vec![("A".to_string(), vec!["A".to_string(), "B".to_string()])]
     );
 }
+
+/// Two hierarchical sheets whose pins carry the same name — the one place a
+/// single sheet holds two distinct partitions under one net name, since a sheet
+/// pin never merges by name.
+///
+/// `second_pin` names the lower sheet's pin, `r4` places the fourth resistor,
+/// and `extra` carries whatever the case adds. KiCAD qualifies these names with
+/// the sheet path and this crate does not, so the fixture cannot be put to it.
+fn twin_named_sheets(second_pin: &str, r4: (f64, f64), extra: &str) -> SchDoc {
+    let child = |name: &str, y: f64, uuid: &str, pin: &str| {
+        format!(
+            "(sheet (at 50 {y}) (size 20 20) (uuid \"{uuid}\")\n\
+             (property \"Sheetname\" \"{name}\" (at 50 {y} 0))\n\
+             (property \"Sheetfile\" \"{name}.kicad_sch\" (at 50 {y} 0))\n\
+             (pin \"{pin}\" input (at 50 {y} 180) (uuid \"{uuid}p\")))"
+        )
+    };
+    unverified(
+        &[RESISTOR],
+        &format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{extra}",
+            place("Device:R", "R1", "1k", 20.0, 58.81, 0.0, "(unit 1)"),
+            place("Device:R", "R2", "1k", 35.0, 58.81, 0.0, "(unit 1)"),
+            place("Device:R", "R3", "1k", 20.0, 98.81, 0.0, "(unit 1)"),
+            place("Device:R", "R4", "1k", r4.0, r4.1, 0.0, "(unit 1)"),
+            wire(20.0, 55.0, 35.0, 55.0),
+            wire(35.0, 55.0, 45.0, 55.0),
+            wire(45.0, 55.0, 50.0, 55.0),
+            wire(20.0, 95.0, 35.0, 95.0),
+            wire(35.0, 95.0, 50.0, 95.0),
+            child("upper", 55.0, "s1", "IN"),
+            child("lower", 95.0, "s2", second_pin),
+        ),
+    )
+}
+
+/// The delta is keyed by the pins a partition holds, not by its name: a pin
+/// moving between two partitions that share a name is a real rewiring, and a
+/// name-keyed diff — seeing only the union of the two — called it harmless.
+#[test]
+fn the_delta_separates_two_partitions_that_share_a_name() {
+    let before = twin_named_sheets("IN", (35.0, 98.81), "");
+    // R4 leaves the lower sheet's IN for the upper one's.
+    let after = twin_named_sheets("IN", (45.0, 58.81), "");
+    assert_ne!(nets(&before), nets(&after), "the fixture must rewire R4");
+
+    let delta = connect::Netlist::diff(&connect::extract(&before), &connect::extract(&after));
+    assert_eq!(
+        delta.merged,
+        vec![(vec!["IN".to_string(), "IN".to_string()], "IN".to_string())],
+        "{delta:?}"
+    );
+    assert_eq!(
+        delta.split,
+        vec![("IN".to_string(), vec!["IN".to_string(), "IN".to_string()])],
+        "{delta:?}"
+    );
+}
+
+/// Wiring two same-named partitions together is a merge, not a no-op.
+#[test]
+fn the_delta_reports_a_merge_of_two_same_named_partitions() {
+    let apart = twin_named_sheets("IN", (35.0, 98.81), "");
+    let joined = twin_named_sheets("IN", (35.0, 98.81), &wire(50.0, 55.0, 50.0, 95.0));
+    let delta = connect::Netlist::diff(&connect::extract(&apart), &connect::extract(&joined));
+    assert_eq!(
+        delta.merged,
+        vec![(vec!["IN".to_string(), "IN".to_string()], "IN".to_string())],
+        "{delta:?}"
+    );
+    assert!(
+        delta.split.is_empty() && delta.renamed.is_empty(),
+        "{delta:?}"
+    );
+}
+
+/// Renaming one of two same-named partitions is a rename of that partition —
+/// not the split a name-keyed diff reported after fusing the pair.
+#[test]
+fn renaming_one_of_two_same_named_partitions_is_only_a_rename() {
+    let before = twin_named_sheets("IN", (35.0, 98.81), "");
+    let after = twin_named_sheets("OUT", (35.0, 98.81), "");
+    let delta = connect::Netlist::diff(&connect::extract(&before), &connect::extract(&after));
+    assert_eq!(
+        delta.renamed,
+        vec![("IN".to_string(), "OUT".to_string())],
+        "{delta:?}"
+    );
+    assert!(
+        delta.merged.is_empty()
+            && delta.split.is_empty()
+            && delta.created.is_empty()
+            && delta.removed.is_empty()
+            && delta.pins_now_connected.is_empty()
+            && delta.pins_now_unconnected.is_empty(),
+        "{delta:?}"
+    );
+}

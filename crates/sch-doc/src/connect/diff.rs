@@ -1,10 +1,19 @@
 //! Comparing two extractions: what an edit did to the net partition.
+//!
+//! Partitions are identified by the pins they hold, never by their name: one
+//! sheet can legitimately carry several distinct partitions under the same
+//! name — two local labels with the same text that were never wired together,
+//! hierarchical sheet pins, `#` synthetics — and keying by name would fuse
+//! them and hide a rewiring between them.
 
 use std::collections::HashMap;
 
 use super::{Netlist, PinRef};
 
 /// How the net partition changed across an edit. Every editing tool reports one.
+///
+/// The names in it are labels on the partitions that changed, not keys: the
+/// same name may appear twice when two same-named partitions both moved.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NetDelta {
     /// Nets that exist only after.
@@ -44,65 +53,71 @@ fn key(pin: &PinRef) -> PinKey {
     (pin.refdes.clone(), pin.unit, pin.pin.clone())
 }
 
-fn pin_to_net(netlist: &Netlist) -> HashMap<PinKey, &str> {
+/// Which partition each pin sits in, as an index into `netlist.nets`.
+fn owners(netlist: &Netlist) -> HashMap<PinKey, usize> {
     netlist
         .nets
         .iter()
-        .flat_map(|net| {
-            net.pins
+        .enumerate()
+        .flat_map(|(idx, net)| net.pins.iter().map(move |pin| (key(pin), idx)))
+        .collect()
+}
+
+/// For each partition, the distinct counterpart partitions its pins landed in.
+fn images(netlist: &Netlist, other: &HashMap<PinKey, usize>) -> Vec<Vec<usize>> {
+    netlist
+        .nets
+        .iter()
+        .map(|net| {
+            let mut hit: Vec<usize> = net
+                .pins
                 .iter()
-                .map(move |p| ((p.refdes.clone(), p.unit, p.pin.clone()), net.name.as_str()))
+                .filter_map(|p| other.get(&key(p)))
+                .copied()
+                .collect();
+            hit.sort_unstable();
+            hit.dedup();
+            hit
         })
         .collect()
 }
 
-/// Distinct counterpart net names each net's pins landed in, in sorted order.
-fn images<'a>(
-    netlist: &'a Netlist,
-    other: &HashMap<PinKey, &'a str>,
-) -> HashMap<&'a str, Vec<String>> {
-    let mut out: HashMap<&str, Vec<String>> = HashMap::new();
-    for net in &netlist.nets {
-        let entry = out.entry(net.name.as_str()).or_default();
-        for pin in &net.pins {
-            if let Some(name) = other.get(&key(pin))
-                && !entry.iter().any(|n| n == name)
-            {
-                entry.push((*name).to_string());
-            }
-        }
-        entry.sort();
-    }
+fn names(netlist: &Netlist, idx: &[usize]) -> Vec<String> {
+    let mut out: Vec<String> = idx.iter().map(|&i| netlist.nets[i].name.clone()).collect();
+    out.sort();
     out
 }
 
 impl Netlist {
     /// Compare two extractions of the same sheet.
     pub fn diff(before: &Netlist, after: &Netlist) -> NetDelta {
-        let before_of = pin_to_net(before);
-        let after_of = pin_to_net(after);
+        let before_of = owners(before);
+        let after_of = owners(after);
         let forward = images(before, &after_of);
         let backward = images(after, &before_of);
 
         let mut delta = NetDelta::default();
-        for (name, targets) in &forward {
-            match targets.len() {
-                0 => delta.removed.push((*name).to_string()),
-                1 => {
-                    let target = &targets[0];
-                    let sources = backward.get(target.as_str()).cloned().unwrap_or_default();
-                    if sources.len() == 1 && target != name {
-                        delta.renamed.push(((*name).to_string(), target.clone()));
+        for (idx, targets) in forward.iter().enumerate() {
+            let name = &before.nets[idx].name;
+            match targets.as_slice() {
+                [] => delta.removed.push(name.clone()),
+                [target] => {
+                    let renamed = backward[*target].len() == 1 && &after.nets[*target].name != name;
+                    if renamed {
+                        delta
+                            .renamed
+                            .push((name.clone(), after.nets[*target].name.clone()));
                     }
                 }
-                _ => delta.split.push(((*name).to_string(), targets.clone())),
+                _ => delta.split.push((name.clone(), names(after, targets))),
             }
         }
-        for (name, sources) in &backward {
-            match sources.len() {
-                0 => delta.created.push((*name).to_string()),
-                1 => {}
-                _ => delta.merged.push((sources.clone(), (*name).to_string())),
+        for (idx, sources) in backward.iter().enumerate() {
+            let name = &after.nets[idx].name;
+            match sources.as_slice() {
+                [] => delta.created.push(name.clone()),
+                [_] => {}
+                _ => delta.merged.push((names(before, sources), name.clone())),
             }
         }
         for net in &before.nets {
