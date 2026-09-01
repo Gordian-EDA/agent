@@ -158,11 +158,11 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let from = match refs::target(&edit.doc, from) {
         Ok(target) => target,
-        Err(error) => return Ok(json!({ "error": error })),
+        Err(error) => return Ok(reference_error(&edit.doc, &input, error)),
     };
     let to = match refs::target(&edit.doc, to) {
         Ok(target) => target,
-        Err(error) => return Ok(json!({ "error": error })),
+        Err(error) => return Ok(reference_error(&edit.doc, &input, error)),
     };
     let existing = |target: &Target| match target {
         Target::Pin(pin) => {
@@ -304,7 +304,7 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut edit = Edit::open(ctx)?;
     let pin = match refs::pin(&edit.doc, spec) {
         Ok(pin) => pin,
-        Err(error) => return Ok(json!({ "error": error })),
+        Err(error) => return Ok(reference_error(&edit.doc, &input, error)),
     };
     let was = refs::net_of(edit.before(), &pin.refdes, &pin.number).map(str::to_string);
     edit.doc.add_label(kind, net, pose(pin.at));
@@ -316,6 +316,24 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .part(&pin.refdes)
             .creating(),
     )
+}
+
+fn reference_error(doc: &SchDoc, input: &Value, error: String) -> Value {
+    let mut response = json!({ "error": error });
+    let Some(net) = input.get("net").and_then(Value::as_str) else {
+        return response;
+    };
+    let live = connect::extract(doc);
+    if live.nets.iter().any(|candidate| candidate.name == net) {
+        return response;
+    }
+    if let Some(candidate) = sch_check::place_parts::closest_net_name(
+        net,
+        live.nets.iter().map(|candidate| candidate.name.as_str()),
+    ) {
+        response["did_you_mean"] = json!({ net: candidate });
+    }
+    response
 }
 
 /// Mark a pin deliberately unconnected.
