@@ -46,6 +46,9 @@ pub struct PlacedPin {
     /// Whether the owning symbol's definition carries the `(power)` marker.
     pub power_symbol: bool,
     pub at: Point2,
+    /// Unit vector along which a wire leaves this pin, in sheet coordinates
+    /// (y grows downward) — the direction pointing away from the symbol body.
+    pub out: Point2,
 }
 
 /// Sub-symbol names inside a definition end in `_<unit>_<style>`.
@@ -134,13 +137,27 @@ pub(crate) fn is_power_definition(def: &Node) -> bool {
 /// on a rotated symbol is not the same as negating a local coordinate. `x`
 /// reflects across the sheet's x axis, `y` across its y axis.
 pub(crate) fn to_sheet(local: Point2, at: Pose, mirror: Mirror) -> Point2 {
+    let d = to_sheet_dir(local, at, mirror);
+    Point2::new(at.x + d.x, at.y + d.y)
+}
+
+/// The sheet-space image of a symbol-space *offset* — [`to_sheet`] without the
+/// instance's translation, which is what a direction needs.
+pub(crate) fn to_sheet_dir(local: Point2, at: Pose, mirror: Mirror) -> Point2 {
     let offset = local.transform_offset(at.rot, false);
     let (dx, dy) = match mirror {
         Mirror::None => (offset.x, offset.y),
         Mirror::X => (offset.x, -offset.y),
         Mirror::Y => (-offset.x, offset.y),
     };
-    Point2::new(at.x + dx, at.y + dy)
+    Point2::new(dx, dy)
+}
+
+/// A pin's outward unit vector in sheet space. A library pin's angle points
+/// *into* the body, so a wire leaves along its opposite.
+fn out_dir(pin: &LibPin, at: Pose, mirror: Mirror) -> Point2 {
+    let (s, c) = (pin.at.rot + 180.0).to_radians().sin_cos();
+    to_sheet_dir(Point2::new(c, s), at, mirror)
 }
 
 /// The instance's body style; KiCAD defaults to the first. KiCAD 7 and earlier
@@ -187,7 +204,9 @@ pub(crate) fn pins_of(doc: &SchDoc, inst: &SymbolInst) -> Vec<PlacedPin> {
     lib_pins(def)
         .into_iter()
         .filter(|p| belongs(p, inst.unit, style))
-        .map(|p| PlacedPin {
+        .map(|p| {
+            let out = out_dir(&p, inst.at, inst.mirror);
+            PlacedPin {
             owner: inst.uuid.clone(),
             refdes: inst.refdes().to_string(),
             unit: inst.unit,
@@ -199,6 +218,8 @@ pub(crate) fn pins_of(doc: &SchDoc, inst: &SymbolInst) -> Vec<PlacedPin> {
             dnp: inst.dnp,
             power_symbol,
             at: to_sheet(p.at.point(), inst.at, inst.mirror),
+            out,
+            }
         })
         .collect()
 }

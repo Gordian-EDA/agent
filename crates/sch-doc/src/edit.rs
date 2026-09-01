@@ -96,6 +96,21 @@ impl SchDoc {
         Ok(())
     }
 
+    /// Set a symbol's build attributes, leaving alone the ones not given.
+    pub fn set_flags(&mut self, id: &str, dnp: Option<bool>, in_bom: Option<bool>) -> Result<()> {
+        let uuid = self.uuid_of(id)?;
+        let mut symbol = self.symbol_mut(&uuid)?;
+        if let Some(dnp) = dnp {
+            symbol.dnp = dnp;
+        }
+        if let Some(in_bom) = in_bom {
+            symbol.in_bom = in_bom;
+        }
+        drop(symbol);
+        self.mark_edited();
+        Ok(())
+    }
+
     /// Set a symbol property, creating it hidden at the symbol's origin if it is
     /// not there yet.
     ///
@@ -200,6 +215,97 @@ impl SchDoc {
             .retain(|item| !matches!(item, Item::Symbol(s) if s.uuid == uuid));
         self.mark_edited();
         Ok(())
+    }
+
+    /// Remove the wires, junctions, labels and no-connects carrying these
+    /// UUIDs, returning how many went. Symbols are not removable this way —
+    /// they carry annotation state, so they go through [`Self::remove_symbol`].
+    pub fn remove_drawing(&mut self, uuids: &[String]) -> usize {
+        let matches = |uuid: &str| uuids.iter().any(|u| u == uuid);
+        let before = self.items().len();
+        self.items_mut().retain(|item| match item {
+            Item::Wire(w) => !matches(&w.uuid),
+            Item::Junction(j) => !matches(&j.uuid),
+            Item::Label(l) => !matches(&l.uuid),
+            Item::NoConnect(n) => !matches(&n.uuid),
+            _ => true,
+        });
+        let removed = before - self.items().len();
+        if removed > 0 {
+            self.mark_edited();
+        }
+        removed
+    }
+
+    /// Retarget a placed symbol at a different library part, keeping its
+    /// position, orientation and properties.
+    ///
+    /// The new definition is embedded first, and the instance's `(pin …)` UUID
+    /// table is rebuilt for the new pin set — a stale table would leave KiCAD
+    /// with pins it cannot address. Returns the pin numbers the old part had
+    /// and the new one does not, which is exactly what a caller has to re-map.
+    pub fn set_lib_id(
+        &mut self,
+        id: &str,
+        lib_id: &str,
+        source: &SymbolSource,
+    ) -> Result<Vec<String>> {
+        let uuid = self.uuid_of(id)?;
+        self.ensure_lib_symbol(lib_id, source)?;
+        let unit = self.symbol(&uuid).map_or(1, |s| s.unit);
+        let numbers: Vec<String> = self
+            .lib_symbols()
+            .and_then(|libs| crate::pins::resolve(libs, lib_id))
+            .map(|def| crate::pins::pin_numbers(def, unit, 1))
+            .unwrap_or_default();
+        let fresh: Vec<(String, String)> = numbers
+            .iter()
+            .map(|n| {
+                (
+                    n.clone(),
+                    self.derive_uuid("pin", &format!("{uuid}|{lib_id}|{n}")),
+                )
+            })
+            .collect();
+
+        let mut symbol = self.symbol_mut(&uuid)?;
+        let dropped = symbol
+            .pin_uuids
+            .keys()
+            .filter(|n| !numbers.contains(n))
+            .cloned()
+            .collect();
+        let old = std::mem::take(&mut symbol.pin_uuids);
+        symbol.lib_id = lib_id.to_string();
+        symbol.pin_uuids = fresh
+            .into_iter()
+            .map(|(number, pin_uuid)| {
+                let existing = old.get(&number).cloned();
+                (number, existing.unwrap_or(pin_uuid))
+            })
+            .collect();
+        let pin_nodes: Vec<Node> = symbol
+            .pin_uuids
+            .iter()
+            .map(|(number, pin_uuid)| {
+                list(vec![
+                    sym("pin"),
+                    quoted(number.clone()),
+                    tagged("uuid", vec![quoted(pin_uuid.clone())]),
+                ])
+            })
+            .collect();
+        crate::sexpr::remove_children(&mut symbol.raw.node, "pin");
+        if let Some(children) = crate::sexpr::items_mut(&mut symbol.raw.node) {
+            let at = children
+                .iter()
+                .position(|c| crate::sexpr::head(c) == Some("instances"))
+                .unwrap_or(children.len());
+            children.splice(at..at, pin_nodes);
+        }
+        drop(symbol);
+        self.mark_edited();
+        Ok(dropped)
     }
 
     /// Draw a wire between two points. Returns its UUID.

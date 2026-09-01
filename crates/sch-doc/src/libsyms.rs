@@ -66,6 +66,22 @@ impl SchDoc {
         Ok(())
     }
 
+    /// The designator prefix an embedded definition expects, from its own
+    /// `Reference` default: `Device:R` → `R`, `power:GND` → `#PWR`.
+    pub fn reference_prefix(&self, lib_id: &str) -> Option<String> {
+        let def = crate::pins::resolve(self.lib_symbols()?, lib_id)?;
+        let default = crate::sexpr::items(def).iter().find_map(|child| {
+            let items = crate::sexpr::items(child);
+            if crate::sexpr::head(child) != Some("property")
+                || crate::sexpr::text(items.get(1)?) != Some("Reference")
+            {
+                return None;
+            }
+            crate::sexpr::text(items.get(2)?)
+        })?;
+        Some(default.trim_end_matches(['?', '*']).to_string())
+    }
+
     /// Drop `(lib_symbols)` entries nothing refers to. Called for you on
     /// [`SchDoc::write`] whenever the document has been edited.
     ///

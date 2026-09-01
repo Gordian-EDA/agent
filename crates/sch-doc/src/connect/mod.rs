@@ -185,6 +185,27 @@ struct Segment {
 /// global and power names.
 pub fn extract(doc: &SchDoc) -> Netlist {
     let warnings = survey(doc);
+    let p = partition(doc);
+    let (nets, unconnected, no_connect) = emit(&p.placed, &p.nodes, &p.roots, &p.anchors);
+    Netlist {
+        nets,
+        unconnected,
+        no_connect,
+        warnings,
+    }
+}
+
+/// The sheet's geometry, partitioned and named — everything [`extract`] derives
+/// its answer from, before it is reduced to pins.
+struct Partition {
+    placed: Vec<PlacedPin>,
+    nodes: Nodes,
+    segments: Vec<Segment>,
+    roots: Vec<usize>,
+    anchors: Anchors,
+}
+
+fn partition(doc: &SchDoc) -> Partition {
     let placed: Vec<PlacedPin> = doc.symbols().flat_map(|s| pins_of(doc, s)).collect();
     let (nodes, segments, attachments) = intern(doc, &placed);
 
@@ -203,12 +224,58 @@ pub fn extract(doc: &SchDoc) -> Netlist {
 
     let roots: Vec<usize> = (0..nodes.points.len()).map(|n| sets.find(n)).collect();
     let anchors = Anchors::new(doc, &nodes, &named, &roots);
-    let (nets, unconnected, no_connect) = emit(&placed, &nodes, &roots, &anchors);
-    Netlist {
-        nets,
-        unconnected,
-        no_connect,
-        warnings,
+    Partition {
+        placed,
+        nodes,
+        segments,
+        roots,
+        anchors,
+    }
+}
+
+/// What net every connection point and wire segment on the sheet carries.
+///
+/// [`extract`] answers "which pins share a net"; a router needs the inverse —
+/// "what is already drawn here, and may I touch it". A partition that carries
+/// no pin and no name gets a synthetic `#node<n>`, which is foreign to
+/// everything and so is never merged into by accident.
+#[derive(Debug, Clone, Default)]
+pub struct Scene {
+    /// Connection points: pin tips, wire ends, label anchors, junctions.
+    pub points: Vec<(Point2, String)>,
+    /// Wire segments as drawn, with the net they carry.
+    pub segments: Vec<(Point2, Point2, String)>,
+}
+
+/// Derive the [`Scene`] for a sheet.
+pub fn scene(doc: &SchDoc) -> Scene {
+    let p = partition(doc);
+    let mut pins_by_root: HashMap<usize, Vec<&PlacedPin>> = HashMap::new();
+    for pin in &p.placed {
+        if let Some(node) = p.nodes.get(pin.at) {
+            pins_by_root.entry(p.roots[node]).or_default().push(pin);
+        }
+    }
+    let name_of = |root: usize| match p.anchors.name.get(&root) {
+        Some((_, name)) => name.clone(),
+        None => match pins_by_root.get(&root) {
+            Some(pins) if pins.len() > 1 => auto_name(pins),
+            _ => format!("#node{root}"),
+        },
+    };
+    Scene {
+        points: p
+            .nodes
+            .points
+            .iter()
+            .enumerate()
+            .map(|(index, at)| (*at, name_of(p.roots[index])))
+            .collect(),
+        segments: p
+            .segments
+            .iter()
+            .map(|s| (s.from, s.to, name_of(p.roots[s.a])))
+            .collect(),
     }
 }
 
