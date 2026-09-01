@@ -32,6 +32,12 @@
 //! `kicad-cli` round trip — and [`Netlist::diff`] turns two extractions into the
 //! [`NetDelta`] every editing tool reports back.
 //!
+//! Its scope is one file: a hierarchical sheet's pins are connection points but
+//! do not pull in the child's connectivity. What it cannot model it says so
+//! about, in [`Netlist::warnings`] — buses, a `lib_id` with no embedded
+//! definition, and a sheet placed more than once (whose reference designators
+//! are ambiguous outside the hierarchy). It never guesses.
+//!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use sch_doc::{SchDoc, connect};
