@@ -47,7 +47,7 @@ use gordian_llm::{
 };
 
 use crate::AgentRuntime;
-use crate::tools::{repair_components_tool, run_tool, tool_defs};
+use crate::tools::{run_tool, tool_defs};
 use gordian_runtime::tool::IMAGE_PATH_KEY;
 use gordian_runtime::tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
 
@@ -435,23 +435,21 @@ fn tool_defs_for_phase(
 }
 
 fn is_schematic_phase_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "search_symbols"
-            | "get_symbol_info"
-            | "validate_design"
-            | "apply_design"
-            | "review_design"
-            | "run_erc"
-            | "project_info"
-            | "read_schematic"
-            | "render_schematic"
-            | "create_design"
-            | "edit_design"
-            | "search_footprints"
-            | "get_footprint_info"
-            | "assign_footprints"
-    )
+    gordian_tools_sch::handles(name)
+        || matches!(
+            name,
+            "search_symbols"
+                | "get_symbol_info"
+                | "apply_design"
+                | "review_design"
+                | "run_erc"
+                | "project_info"
+                | "render_schematic"
+                | "create_design"
+                | "search_footprints"
+                | "get_footprint_info"
+                | "assign_footprints"
+        )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -463,39 +461,29 @@ fn constrain_schematic_tools_for_draft_state(
     draft_known_clean: bool,
     draft_known_invalid: bool,
     review_has_defects: bool,
-    review_needs_full_edit: bool,
     pcb_footprints_missing: bool,
 ) {
     if !draft_exists && !schematic_exists {
+        // Nothing to read, edit or check yet: only creation makes sense.
         defs.retain(|tool| {
-            !matches!(
-                tool.name.as_str(),
-                "validate_design"
-                    | "apply_design"
-                    | "review_design"
-                    | "project_info"
-                    | "edit_design"
-                    | "read_schematic"
-                    | "render_schematic"
-                    | "get_footprint_info"
-                    | "assign_footprints"
-            )
+            !gordian_tools_sch::handles(tool.name.as_str())
+                && !matches!(
+                    tool.name.as_str(),
+                    "apply_design"
+                        | "review_design"
+                        | "project_info"
+                        | "render_schematic"
+                        | "get_footprint_info"
+                        | "assign_footprints"
+                )
         });
     }
-    if review_has_defects {
+    if review_has_defects || draft_known_invalid {
+        // Repair only: the live-schematic tools plus discovery and footprints.
         defs.retain(|tool| {
             is_discovery_tool(tool.name.as_str())
+                || gordian_tools_sch::handles(tool.name.as_str())
                 || tool.name.as_str() == "assign_footprints"
-                || (review_needs_full_edit && tool.name.as_str() == "edit_design")
-                || (!review_needs_full_edit && tool.name.as_str() == "repair_components")
-        });
-    } else if draft_known_invalid {
-        defs.retain(|tool| {
-            is_discovery_tool(tool.name.as_str())
-                || matches!(
-                    tool.name.as_str(),
-                    "edit_design" | "repair_components" | "assign_footprints"
-                )
         });
     } else if draft_exists && draft_dirty && draft_known_clean {
         defs.retain(|tool| {
@@ -506,16 +494,6 @@ fn constrain_schematic_tools_for_draft_state(
                         "search_footprints" | "get_footprint_info" | "assign_footprints"
                     ))
         });
-    }
-}
-
-fn offer_component_repair(defs: &mut Vec<Tool>, should_offer: bool) {
-    if should_offer
-        && !defs
-            .iter()
-            .any(|tool| tool.name.as_str() == "repair_components")
-    {
-        defs.push(repair_components_tool());
     }
 }
 
@@ -639,7 +617,7 @@ fn coalesced_discovery_call(call: &ToolCall, calls: &[ToolCall]) -> Option<ToolC
 fn is_revision_scoped_read(name: &str) -> bool {
     matches!(
         name,
-        "read_schematic" | "project_info" | "run_erc" | "validate_design" | "render_schematic"
+        "project_info" | "run_erc" | "render_schematic"
     )
 }
 
@@ -1082,9 +1060,6 @@ impl<P: Provider> Agent<P> {
             let review_has_defects = schematic_review_current
                 .as_ref()
                 .is_some_and(|review| !review_result_is_clean(review));
-            let review_needs_full_edit = schematic_review_current
-                .as_ref()
-                .is_some_and(review_requires_full_design_edit);
             let draft_known_invalid = latest_authoring_diagnostics
                 .as_ref()
                 .and_then(|state| state.errors)
@@ -1095,11 +1070,6 @@ impl<P: Provider> Agent<P> {
             } else {
                 Vec::new()
             };
-            offer_component_repair(
-                &mut defs,
-                (draft_known_invalid && draft_component_repairable)
-                    || (review_has_defects && !review_needs_full_edit),
-            );
             if pcb_only_stage {
                 defs.retain(|def| is_pcb_stage_tool(def.name.as_str()));
             } else if !pcb_tools_authorized {
@@ -1123,7 +1093,6 @@ impl<P: Provider> Agent<P> {
                     == Some(0),
                 draft_known_invalid,
                 review_has_defects,
-                review_needs_full_edit,
                 !pcb_missing_footprints.is_empty(),
             );
             if let Some(focus) = &component_shortfall_focus {
@@ -3762,7 +3731,9 @@ fn tool_effect(name: &str) -> ToolEffect {
         | "set_net_width"
         | "update_board_outline"
         | "export_fab" => ToolEffect::ApprovalRequired,
-        // Everything else reads only.
+        // Everything else reads only — except the live-schematic mutators,
+        // which write the project file the same way the board ones do.
+        name if gordian_tools_sch::MUTATORS.contains(&name) => ToolEffect::ApprovalRequired,
         _ => ToolEffect::ReadOnly,
     }
 }
@@ -8109,42 +8080,46 @@ blocks:
 
     #[test]
     fn draft_state_hides_tools_that_can_only_fail_or_repeat_defects() {
-        let names_after =
-            |draft_exists, schematic_exists, dirty, clean, invalid, defects, full_edit: bool| {
-                let mut defs = tool_defs_for_phase(
-                    ToolPhase::Schematic,
-                    &HashMap::new(),
-                    MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
-                    draft_exists,
-                    &HashSet::new(),
-                    schematic_exists,
-                );
-                offer_component_repair(&mut defs, invalid || (defects && !full_edit));
-                constrain_schematic_tools_for_draft_state(
-                    &mut defs,
-                    draft_exists,
-                    schematic_exists,
-                    dirty,
-                    clean,
-                    invalid,
-                    defects,
-                    full_edit,
-                    false,
-                );
-                defs.into_iter()
-                    .map(|tool| tool.name.as_str().to_owned())
-                    .collect::<std::collections::BTreeSet<_>>()
-            };
+        let names_after = |draft_exists,
+                           schematic_exists,
+                           dirty,
+                           clean,
+                           invalid,
+                           defects,
+                           footprints_missing: bool| {
+            let mut defs = tool_defs_for_phase(
+                ToolPhase::Schematic,
+                &HashMap::new(),
+                MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
+                draft_exists,
+                &HashSet::new(),
+                schematic_exists,
+            );
+            constrain_schematic_tools_for_draft_state(
+                &mut defs,
+                draft_exists,
+                schematic_exists,
+                dirty,
+                clean,
+                invalid,
+                defects,
+                footprints_missing,
+            );
+            defs.into_iter()
+                .map(|tool| tool.name.as_str().to_owned())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
 
+        // An empty project can only be created into.
         let fresh = names_after(false, false, false, false, false, false, false);
         assert!(fresh.contains("create_design"));
         for absent in [
-            "validate_design",
             "apply_design",
             "review_design",
             "project_info",
-            "edit_design",
             "read_schematic",
+            "check_schematic",
+            "set_fields",
             "render_schematic",
             "get_footprint_info",
             "assign_footprints",
@@ -8152,57 +8127,30 @@ blocks:
             assert!(!fresh.contains(absent), "{absent}");
         }
 
-        let invalid = names_after(true, false, true, false, true, false, false);
-        assert!(invalid.contains("edit_design"));
-        assert!(invalid.contains("repair_components"));
-        assert!(invalid.contains("assign_footprints"));
-        assert!(!invalid.contains("apply_design"));
-        assert!(!invalid.contains("project_info"));
+        // A committed schematic is edited in place, never re-created.
+        let committed = names_after(false, true, false, false, false, false, false);
+        assert!(committed.contains("read_schematic"));
+        assert!(committed.contains("set_fields"));
+        assert!(committed.contains("connect"));
+        assert!(committed.contains("check_schematic"));
 
-        let clean = names_after(true, false, true, true, false, false, false);
-        assert_eq!(clean.len(), 1);
-        assert!(clean.contains("apply_design"));
-
-        let mut pcb_defs = tool_defs_for_phase(
-            ToolPhase::Schematic,
-            &HashMap::new(),
-            MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
-            true,
-            &HashSet::new(),
-            false,
-        );
-        constrain_schematic_tools_for_draft_state(
-            &mut pcb_defs,
-            true,
-            false,
-            true,
-            true,
-            false,
-            false,
-            false,
-            true,
-        );
-        let pcb_names = pcb_defs
-            .into_iter()
-            .map(|tool| tool.name.as_str().to_owned())
-            .collect::<std::collections::BTreeSet<_>>();
-        assert!(pcb_names.contains("assign_footprints"));
-        assert!(pcb_names.contains("search_footprints"));
-        assert!(pcb_names.contains("apply_design"));
-
-        let defects = names_after(true, false, true, true, false, true, false);
-        assert!(defects.contains("repair_components"));
-        assert!(!defects.contains("edit_design"));
+        // Defects narrow the surface to repair: discovery, the live-schematic
+        // tools, and footprint assignment.
+        let defects = names_after(true, true, true, true, false, true, false);
+        assert!(defects.contains("swap_symbol"));
         assert!(defects.contains("assign_footprints"));
         assert!(!defects.contains("project_info"));
         assert!(!defects.contains("apply_design"));
 
-        let full_edit = names_after(true, false, true, true, false, true, true);
-        assert!(full_edit.contains("edit_design"));
-        assert!(!full_edit.contains("repair_components"));
+        // A clean, dirty draft has exactly one next move.
+        let clean = names_after(true, false, true, true, false, false, false);
+        assert_eq!(clean.len(), 1);
+        assert!(clean.contains("apply_design"));
 
-        let ordinary = names_after(true, false, true, false, false, false, false);
-        assert!(!ordinary.contains("repair_components"));
+        let pcb = names_after(true, false, true, true, false, false, true);
+        assert!(pcb.contains("assign_footprints"));
+        assert!(pcb.contains("search_footprints"));
+        assert!(pcb.contains("apply_design"));
     }
 
     #[test]

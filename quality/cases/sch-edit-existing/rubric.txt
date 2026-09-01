@@ -1,0 +1,5 @@
+One new 100nF capacitor must appear, in series between P1 pin 2 and U1 pin 2. After the edit, P1.2 and U1.2 must NOT share a net: the old input net must split into a connector-side net (P1.2, R4.1, one capacitor pin) and a grid-side net (U1.2, the other capacitor pin). Any bypass leaving P1.2 still directly tied to U1.2 is a failure.
+
+R4 must remain on the connector side. Everything else must be untouched: symbols_moved and symbols_removed must be empty, symbols_added must hold exactly the one capacitor, and no unrelated net may change. ERC errors must not increase.
+
+Score 0 for a bypass, for a dangling capacitor pin, or if any existing part moved. Score 10 for a clean series insertion with the rest of the sheet unchanged.

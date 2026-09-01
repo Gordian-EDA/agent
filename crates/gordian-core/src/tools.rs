@@ -11,10 +11,12 @@
 //!   diagnostic strings and "did you mean" suggestions rather than just an error
 //!   flag, so the model can correct itself on the next turn.
 //!
-//! The schematic side covers `search_symbols` / `get_symbol_info`
-//! / `validate_design` / `apply_design` / `review_design` / `run_erc` /
-//! `project_info` / `read_schematic` / `render_schematic` / `create_design` /
-//! `edit_design`; `pcb-workflow` covers the footprint
+//! The live schematic surface — the queries and pin-level mutators the model
+//! edits an existing board with — lives in `gordian-tools-sch` and is spliced
+//! in by [`tool_defs`] / [`run_tool`]. This module keeps what is left: symbol
+//! discovery (`search_symbols` / `get_symbol_info`), the bulk-create path
+//! (`create_design` → `apply_design`), `review_design`, `run_erc`,
+//! `project_info` and `render_schematic`; `pcb-workflow` covers the footprint
 //! search/info, `regenerate_board`, and the place/route/export/interactive flow.
 //!
 //! ## `apply_design`: preview vs approved write
@@ -40,7 +42,7 @@ use gordian_runtime::tool::{
     IMAGE_PATH_KEY, compile_report, current_sch_text, footprint_suggestion_clause,
     require_search_query, require_str,
 };
-use std::path::{Path, PathBuf};
+
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
@@ -48,7 +50,7 @@ use serde_json::{Value, json};
 use circuit_lang::compile;
 use kicad::ErcReport;
 use kicad_footprint::FootprintId;
-use sch_check::model::{Block, Component, Design, Origin, PinTarget};
+use sch_check::model::{Component, Design, PinTarget};
 use sch_io::read::lift;
 
 use crate::{AgentRuntime, Tool};
@@ -103,18 +105,10 @@ pub fn tool_defs() -> Vec<Tool> {
             }),
         },
         Def {
-            name: "validate_design".into(),
-            description: "Validate YAML or draft; omit yaml for draft.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "yaml": { "type": "string" }
-                }
-            }),
-        },
-        Def {
             name: "apply_design".into(),
-            description: "Compile, render, write draft, and run ERC; edit first.".into(),
+            description: "Write the drafted new circuit to the schematic and run ERC. Only for a \
+                          design create_design authored; existing schematics are edited in place."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {},
@@ -142,17 +136,6 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         Def {
-            name: "read_schematic".into(),
-            description: "Read circuit YAML from draft or .kicad_sch; draft reads/seeds state."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "source": { "type": "string", "description": "draft (default) or .kicad_sch." }
-                }
-            }),
-        },
-        Def {
             name: "render_schematic".into(),
             description: "Render schematic PNG.".into(),
             input_schema: json!({ "type": "object", "properties": {} }),
@@ -167,23 +150,6 @@ pub fn tool_defs() -> Vec<Tool> {
                     "overwrite": { "type": "boolean" }
                 },
                 "required": ["yaml"]
-            }),
-        },
-        Def {
-            name: "edit_design".into(),
-            description: "Replace full draft via `yaml`, or patch via exact \
-                          old_string/new_string; part loss needs allow_component_removal."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "yaml": { "type": "string" },
-                    "old_string": { "type": "string" },
-                    "new_string": { "type": "string" },
-                    "replace_all": { "type": "boolean" },
-                    "allow_component_removal": { "type": "boolean" }
-                },
-                "additionalProperties": false
             }),
         },
         // ── PCB tools (slice 5) ─────────────────────────────────────────
@@ -526,113 +492,31 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({ "type": "object", "properties": {} }),
         },
     ];
-    defs.into_iter()
-        .map(|d| {
+    gordian_tools_sch::tool_defs()
+        .into_iter()
+        .chain(defs.into_iter().map(|d| {
             Tool::new(d.name)
                 .with_description(d.description)
                 .with_schema(d.input_schema)
-        })
-        .collect()
-}
-
-/// On-demand transactional repair surface. It is intentionally absent from
-/// [`tool_defs`]: the agent advertises it only while repairing a valid draft,
-/// avoiding permanent schema cost on discovery and PCB-only turns.
-pub(crate) fn repair_components_tool() -> Tool {
-    let component_schema = json!({
-        "type": "object",
-        "properties": {
-            "part": { "type": "string" },
-            "value": { "type": "string" },
-            "footprint": { "type": "string" },
-            "dnp": { "type": "boolean" },
-            "props": { "type": "object", "additionalProperties": { "type": "string" } },
-            "pins": { "type": "object", "description": "Pin name/number to net name or nc.", "additionalProperties": { "type": "string" } },
-            "units": {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "object",
-                    "properties": { "pins": { "type": "object", "additionalProperties": { "type": "string" } } },
-                    "required": ["pins"],
-                    "additionalProperties": false
-                }
-            },
-            "between": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 },
-            "positive": { "type": "string" },
-            "negative": { "type": "string" },
-            "decouple": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 1 } }
-        },
-        "required": ["part"],
-        "additionalProperties": false
-    });
-    let component_map_schema = json!({
-        "type": "object",
-        "minProperties": 1,
-        "additionalProperties": component_schema
-    });
-    Tool::new("repair_components")
-        .with_description(
-            "Repair localized defects across a substantive durable draft in one batch. Existing refs are routed to their current blocks automatically. NOT for an incomplete/missing circuit; use edit_design with complete YAML for that. Prefer update for existing refs. Components is only a direct refdes map for additions/replacements.",
-        )
-        .with_schema(json!({
-            "type": "object",
-            "properties": {
-                "block": { "type": "string", "description": "Destination block for new refs; defaults to main. Existing refs are repaired in their current blocks, so one update/remove/components batch may span blocks." },
-                "components": {
-                    "description": "DIRECT refdes-to-component map for additions/replacements; no version/blocks/main/components wrapper. `part` is required. Existing metadata is preserved when omitted. Example: {\"D1\":{\"part\":\"Device:D\",\"pins\":{\"1\":\"VIN\",\"2\":\"VOUT\"}}}.",
-                    "type": component_map_schema["type"].clone(),
-                    "minProperties": component_map_schema["minProperties"].clone(),
-                    "additionalProperties": component_map_schema["additionalProperties"].clone()
-                },
-                "update": {
-                    "type": "object",
-                    "description": "DIRECT refdes-to-update map for existing authored refs; no YAML wrapper. Use this—not components—for pin/value/footprint changes. Omitted fields/pins are preserved. Pin updates must use an exact existing pin key from the draft. Example: {\"D1\":{\"pins\":{\"1\":\"VIN\",\"2\":\"VPROT\"},\"footprint\":\"Diode_SMD:D_SOD-123\"},\"TP1\":{\"pins\":{\"1\":\"VPROT\"}}}.",
-                    "additionalProperties": {
-                        "type": "object",
-                        "properties": {
-                            "pins": { "type": "object", "description": "Merge targets for exact pin keys already present on this component in the draft; values are a net name or nc.", "additionalProperties": { "type": "string" }, "minProperties": 1 },
-                            "value": { "type": "string" },
-                            "footprint": { "type": "string" }
-                        },
-                        "minProperties": 1,
-                        "additionalProperties": false
-                    },
-                    "minProperties": 1
-                },
-                "remove": {
-                    "type": "array",
-                    "description": "One or more explicit authored refs to remove. Example: [\"R7\"].",
-                    "items": { "type": "string" },
-                    "minItems": 1,
-                    "uniqueItems": true
-                },
-                "replace_existing": { "type": "boolean", "description": "Required only when components changes an existing ref's symbol part." }
-            },
-            "additionalProperties": false,
-            "anyOf": [
-                { "required": ["components"], "properties": { "components": { "minProperties": 1 } } },
-                { "required": ["update"], "properties": { "update": { "minProperties": 1 } } },
-                { "required": ["remove"], "properties": { "remove": { "minItems": 1 } } }
-            ]
         }))
+        .collect()
 }
 
 /// Dispatch a tool by name (synchronous). `input` is the model-supplied JSON
 /// arguments; the returned `Value` is fed back to the model. The [`crate::Agent`]
 /// loop off-loads this onto the blocking pool.
 pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    if let Some(result) = gordian_tools_sch::run(name, input.clone(), ctx) {
+        return result;
+    }
     match name {
         "search_symbols" => search_symbols(input, ctx),
         "get_symbol_info" => get_symbol_info(input, ctx),
-        "validate_design" => validate_design(input, ctx),
         "apply_design" => apply_design(input, ctx),
         "run_erc" => run_erc(ctx),
         "project_info" => project_info(ctx),
-        "read_schematic" => read_schematic(input, ctx),
         "render_schematic" => render_schematic(ctx),
         "create_design" => create_design(input, ctx),
-        "edit_design" => edit_design(input, ctx),
-        "repair_components" => repair_components(input, ctx),
         "search_footprints" => pcb_workflow::search_footprints(input, ctx),
         "get_footprint_info" => pcb_workflow::get_footprint_info(input, ctx),
         "regenerate_board" => pcb_workflow::regenerate_board(input, ctx),
@@ -830,68 +714,15 @@ fn pin_type_str(t: sch_check::PinType) -> &'static str {
     }
 }
 
-// ── 3. read_schematic helpers ──────────────────────────────────────────────
-
-struct DraftRead {
-    yaml: String,
-    stale: bool,
-    note: Option<&'static str>,
-}
-
-fn read_draft_or_seed(ctx: &AgentRuntime) -> Result<DraftRead> {
-    if let Some(draft) = ctx.workspace().read_draft()? {
-        let stale = ctx
-            .workspace()
-            .draft_is_stale(current_sch_text(ctx).as_deref());
-        return Ok(DraftRead {
-            yaml: draft,
-            stale,
-            note: stale.then_some(
-                "the .kicad_sch changed since this draft was seeded (user edit \
-                 in KiCAD?) — call read_schematic on the project schematic to \
-                 see the current state, then reconcile your draft deliberately",
-            ),
-        });
-    }
-    if !ctx.sch_path().exists() {
-        return Ok(DraftRead {
-            yaml: String::new(),
-            stale: false,
-            note: Some("no schematic yet"),
-        });
-    }
-    let yaml = lift(ctx.env(), ctx.sch_path())
-        .with_context(|| format!("lifting {}", ctx.sch_path().display()))?;
-    // Seed the draft so edit_design is immediately usable.
-    ctx.workspace()
-        .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
-    Ok(DraftRead {
-        yaml,
-        stale: false,
-        note: Some("draft seeded from the schematic; use edit_design for changes"),
-    })
-}
-
+/// The committed schematic as circuit-YAML, for the reviewer's netlist pass.
 pub(crate) fn current_design_yaml(ctx: &AgentRuntime) -> Result<String> {
-    Ok(read_draft_or_seed(ctx)?.yaml)
+    if !ctx.sch_path().exists() {
+        return Ok(String::new());
+    }
+    lift(ctx.env(), ctx.sch_path())
+        .with_context(|| format!("lifting {}", ctx.sch_path().display()))
 }
 
-// ── 4. validate_design ─────────────────────────────────────────────────────
-
-fn validate_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let yaml = if input.get("yaml").is_some() {
-        require_str(&input, "yaml")?
-    } else {
-        let Some(draft) = ctx.workspace().read_draft()? else {
-            return Ok(json!({
-                "error": "no yaml given and no draft exists — pass yaml, or create a draft with create_design/read_schematic first",
-            }));
-        };
-        draft
-    };
-    let result = compile(&yaml, ctx.provider());
-    compile_authoring_report(&result, ctx)
-}
 
 /// Add physical package compatibility to the normal circuit-language report.
 /// Keeping this beside `compile_report` makes create/edit/validate/apply expose
@@ -993,7 +824,7 @@ fn add_empty_design_error(report: &mut Value, design: &Design) -> bool {
         .push(json!(
             "error[empty_design]: the draft has no components; author the complete requested circuit before applying it"
         ));
-    report["next_tool"] = json!("edit_design");
+    report["next_tool"] = json!("create_design");
     report["next"] = json!(
         "replace the empty draft with the complete circuit; an empty schematic cannot be applied"
     );
@@ -1005,46 +836,6 @@ fn design_is_empty(design: &Design) -> bool {
         .blocks
         .values()
         .all(|block| block.components.is_empty())
-}
-
-fn design_component_count(design: &Design) -> usize {
-    design
-        .blocks
-        .values()
-        .map(|block| block.components.len())
-        .sum()
-}
-
-fn invalid_compile_quality_regressed(
-    prior: &sch_check::Diagnostics,
-    candidate: &sch_check::Diagnostics,
-) -> bool {
-    let prior = compile_diagnostic_quality(prior);
-    let candidate = compile_diagnostic_quality(candidate);
-    prior.0 > 0 && candidate > prior
-}
-
-fn compile_diagnostic_quality(diagnostics: &sch_check::Diagnostics) -> (usize, usize) {
-    use sch_check::Severity;
-
-    let errors = diagnostics
-        .0
-        .iter()
-        .filter(|diagnostic| diagnostic.severity == Severity::Error)
-        .count();
-    let warnings = diagnostics
-        .0
-        .iter()
-        .filter(|diagnostic| diagnostic.severity == Severity::Warning)
-        .count();
-    (errors, warnings)
-}
-
-fn authoring_report_quality(report: &Value) -> (u64, u64) {
-    (
-        report.get("errors").and_then(Value::as_u64).unwrap_or(0),
-        report.get("warnings").and_then(Value::as_u64).unwrap_or(0),
-    )
 }
 
 /// Returns `true` when at least one incompatible assignment was found.
@@ -1136,7 +927,7 @@ fn add_footprint_compatibility(
     report["ok"] = json!(false);
     report["errors"] = json!(errors);
     report["footprint_pin_mismatches"] = serde_json::to_value(mismatches)?;
-    report["next_tool"] = json!("edit_design");
+    report["next_tool"] = json!("create_design");
     report["next"] = json!(
         "choose an existing Library:Footprint whose named electrical pad numbers match the symbol pins and whose capacitor polarity matches the symbol, then apply_design; use search_footprints/get_footprint_info instead of guessing names; unnumbered mechanical pads and repeated pads with a valid shared number are allowed; use Device:C_Polarized (pin 1 positive) with polarized CP/C_Elec footprints, and Device:C with ordinary non-polarized capacitor footprints"
     );
@@ -1155,14 +946,14 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({
             "error": "inline YAML has been removed from apply_design",
             "code": "inline_apply_yaml_removed",
-            "note": "Author the complete durable draft with edit_design({yaml}), then call apply_design({}).",
+            "note": "Author the complete circuit with create_design({yaml}), then call apply_design({}).",
         }));
     }
     let yaml = match ctx.workspace().read_draft()? {
         Some(draft) => draft,
         None => {
             return Ok(json!({
-                "error": "no draft exists — create the complete draft with edit_design({yaml}) before apply_design({})",
+                "error": "no drafted circuit — call create_design({yaml}) before apply_design({})",
             }));
         }
     };
@@ -1294,9 +1085,9 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 );
             } else {
                 out["erc_clean"] = json!(false);
-                out["next_tool"] = json!("edit_design");
+                out["next_tool"] = json!("check_schematic");
                 out["next"] =
-                    json!("inspect the reported ERC findings, fix the draft, and re-apply");
+                    json!("inspect the reported ERC findings, then fix them with the schematic edit tools and re-run check_schematic");
             }
         }
         Err(err) => {
@@ -1438,98 +1229,6 @@ fn project_info(ctx: &AgentRuntime) -> Result<Value> {
 
 // ── 7. read_schematic ──────────────────────────────────────────────────────
 
-fn read_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let raw = input
-        .get("source")
-        .and_then(Value::as_str)
-        .unwrap_or("draft");
-    if raw == "draft" {
-        let draft = read_draft_or_seed(ctx)?;
-        return Ok(Value::String(format_schematic_text(
-            "draft",
-            None,
-            Some(draft.stale),
-            draft.note,
-            &draft.yaml,
-        )));
-    }
-
-    let path = resolve_user_path(raw, ctx.project_dir());
-
-    if !path.is_file() {
-        return Ok(Value::String(format!(
-            "error: no file at `{}`\nnote: the source may be `draft`, absolute, start with ~, or be relative to the project dir",
-            path.display()
-        )));
-    }
-    if path.extension().and_then(|e| e.to_str()) != Some("kicad_sch") {
-        return Ok(Value::String(format!(
-            "error: `{}` is not a .kicad_sch schematic",
-            path.display()
-        )));
-    }
-
-    let yaml = match lift(ctx.env(), &path) {
-        Ok(yaml) => yaml,
-        Err(e) => {
-            return Ok(Value::String(format!(
-                "error: could not lift `{}`: {e}",
-                path.display()
-            )));
-        }
-    };
-
-    Ok(Value::String(format_schematic_text(
-        "path",
-        Some(&path),
-        None,
-        None,
-        &yaml,
-    )))
-}
-
-fn format_schematic_text(
-    source: &str,
-    path: Option<&Path>,
-    stale: Option<bool>,
-    note: Option<&str>,
-    yaml: &str,
-) -> String {
-    let mut out = format!("source: {source}\n");
-    if let Some(path) = path {
-        out.push_str(&format!("path: {}\n", path.display()));
-    }
-    if let Some(stale) = stale {
-        out.push_str(&format!("stale: {stale}\n"));
-    }
-    if let Some(note) = note {
-        out.push_str(&format!("note: {note}\n"));
-    }
-    out.push_str("\n```yaml\n");
-    out.push_str(yaml);
-    if !yaml.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str("```\n");
-    out
-}
-
-/// Resolve a user-supplied path: expand a leading `~`, and anchor relative
-/// paths at the project directory (the agent's natural working root).
-fn resolve_user_path(raw: &str, project_dir: &Path) -> PathBuf {
-    if let Some(rest) = raw.strip_prefix("~/")
-        && let Some(base_dirs) = directories::BaseDirs::new()
-    {
-        return base_dirs.home_dir().join(rest);
-    }
-    let p = PathBuf::from(raw);
-    if p.is_absolute() {
-        p
-    } else {
-        project_dir.join(p)
-    }
-}
-
 // ── 8. run_erc ─────────────────────────────────────────────────────────────
 
 fn run_erc(ctx: &AgentRuntime) -> Result<Value> {
@@ -1601,7 +1300,7 @@ fn erc_hint(kind: &str, description: &str) -> Option<&'static str> {
     }
 }
 
-// ── 9. create_design / edit_design ────────────────────────────────────────
+// ── create_design ─────────────────────────────────────────────────────────
 
 fn symbol_for_misplaced_footprint(footprint: &str, pad_count: usize) -> Option<String> {
     let (library, name) = footprint.split_once(':')?;
@@ -1752,36 +1451,6 @@ fn normalize_common_footprint_aliases(
         }));
     }
     Ok((normalized, report))
-}
-
-fn normalize_common_footprint_aliases_in_component_map(
-    components: &mut serde_json::Map<String, Value>,
-    ctx: &AgentRuntime,
-) -> Result<Vec<Value>> {
-    let catalog = ctx.footprint_catalog()?;
-    let mut report = Vec::new();
-    for (reference, component) in components {
-        let Some(fields) = component.as_object_mut() else {
-            continue;
-        };
-        let Some(original) = fields
-            .get("footprint")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        let Some(canonical) = verified_common_footprint_alias(&original, catalog) else {
-            continue;
-        };
-        fields.insert("footprint".into(), json!(canonical));
-        report.push(json!({
-            "reference": reference,
-            "original_footprint": original,
-            "canonical_footprint": canonical,
-        }));
-    }
-    Ok(report)
 }
 
 fn add_footprint_alias_normalizations(report: &mut Value, normalizations: Vec<Value>) {
@@ -1987,44 +1656,6 @@ fn add_power_reference_normalizations(report: &mut Value, normalizations: Vec<Va
     }
 }
 
-fn normalize_misplaced_footprint_component_map(
-    components: &mut serde_json::Map<String, Value>,
-    ctx: &AgentRuntime,
-) -> Result<Vec<Value>> {
-    let catalog = ctx.footprint_catalog()?;
-    let mut normalizations = Vec::new();
-    for (reference, component) in components {
-        let Some(fields) = component.as_object_mut() else {
-            continue;
-        };
-        let Some(footprint) = fields
-            .get("part")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        let Ok(id) = FootprintId::parse(&footprint) else {
-            continue;
-        };
-        let Ok(metadata) = catalog.footprint(&id) else {
-            continue;
-        };
-        let Some(symbol) = symbol_for_misplaced_footprint(&footprint, metadata.pads.len()) else {
-            continue;
-        };
-        fields.insert("part".into(), json!(symbol));
-        fields.insert("footprint".into(), json!(footprint));
-        normalizations.push(json!({
-            "reference": reference,
-            "original_part": footprint,
-            "inferred_symbol": symbol,
-            "assigned_footprint": footprint,
-        }));
-    }
-    Ok(normalizations)
-}
-
 fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let yaml = require_str(&input, "yaml")?;
     if let Some(rejection) = elided_placeholder_rejection(&yaml) {
@@ -2038,8 +1669,8 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let draft_exists = prior_draft.is_some();
     if draft_exists && !overwrite {
         return Ok(json!({
-            "error": "a draft already exists — pass overwrite=true to replace it, \
-                      or use edit_design to modify it",
+            "error": "a drafted circuit already exists — pass overwrite=true to replace it, \
+                      or edit the schematic in place once it is applied",
             "draft_changed": false,
         }));
     }
@@ -2069,581 +1700,6 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(report)
 }
 
-fn available_authored_refs(ctx: &AgentRuntime) -> Vec<String> {
-    let Some(design) = ctx
-        .workspace()
-        .read_draft()
-        .ok()
-        .flatten()
-        .and_then(|yaml| compile(&yaml, ctx.provider()).design)
-    else {
-        return Vec::new();
-    };
-    let mut refs = design
-        .blocks
-        .values()
-        .flat_map(|block| block.components.iter())
-        .filter_map(|(reference, component)| {
-            matches!(component.origin, Origin::Authored).then_some(reference.clone())
-        })
-        .collect::<Vec<_>>();
-    refs.sort();
-    refs
-}
-
-fn repair_components(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let block_name = input.get("block").and_then(Value::as_str).unwrap_or("main");
-    if block_name.is_empty()
-        || !block_name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-    {
-        return Ok(json!({
-            "error": "block must be a non-empty lower_snake name",
-            "code": "invalid_repair_block",
-            "draft_written": false,
-            "draft_changed": false,
-            "mode": "component_repair",
-        }));
-    }
-    // `components` is the advertised operation. Retain the older `upsert`
-    // spelling for backward compatibility with saved/tool-replay histories.
-    let upsert_input = input.get("upsert").or_else(|| input.get("components"));
-    let mut upsert = match upsert_input {
-        None => serde_json::Map::new(),
-        Some(Value::Object(map)) => map.clone(),
-        Some(_) => {
-            return Ok(json!({
-                "error": "components must be an object mapping refdes to component objects",
-                "code": "invalid_repair_upsert",
-                "draft_written": false,
-                "draft_changed": false,
-                "mode": "component_repair",
-            }));
-        }
-    };
-    if upsert.len() == 1
-        && let Some(Value::Object(components)) = upsert.get("components")
-    {
-        upsert = components.clone();
-    }
-    if upsert.values().any(|component| !component.is_object()) {
-        return Ok(json!({
-            "error": "every components value must be a component object",
-            "code": "invalid_repair_upsert",
-            "draft_written": false,
-            "draft_changed": false,
-            "mode": "component_repair",
-        }));
-    }
-    let footprint_normalizations = normalize_misplaced_footprint_component_map(&mut upsert, ctx)?;
-    let mut footprint_alias_normalizations =
-        normalize_common_footprint_aliases_in_component_map(&mut upsert, ctx)?;
-    let mut update = match input.get("update") {
-        None => serde_json::Map::new(),
-        Some(Value::Object(map)) => map.clone(),
-        Some(_) => {
-            return Ok(json!({
-                "error": "update must be an object mapping existing refdes to partial updates",
-                "code": "invalid_repair_update",
-                "draft_written": false,
-                "draft_changed": false,
-                "mode": "component_repair",
-            }));
-        }
-    };
-    footprint_alias_normalizations.extend(normalize_common_footprint_aliases_in_component_map(
-        &mut update,
-        ctx,
-    )?);
-    for (reference, fields) in &update {
-        let Some(fields) = fields.as_object() else {
-            return Ok(json!({
-                "error": format!("update for {reference} must be an object"),
-                "code": "invalid_repair_update",
-                "draft_written": false,
-                "draft_changed": false,
-                "mode": "component_repair",
-            }));
-        };
-        if fields.is_empty()
-            || fields
-                .keys()
-                .any(|field| !matches!(field.as_str(), "pins" | "value" | "footprint"))
-        {
-            return Ok(json!({
-                "error": format!("update for {reference} needs at least one of pins, value, or footprint and no other fields"),
-                "code": "invalid_repair_update",
-                "draft_written": false,
-                "draft_changed": false,
-                "mode": "component_repair",
-            }));
-        }
-        if fields.get("value").is_some_and(|value| !value.is_string())
-            || fields
-                .get("footprint")
-                .is_some_and(|footprint| !footprint.is_string())
-        {
-            return Ok(json!({
-                "error": format!("value and footprint updates for {reference} must be strings"),
-                "code": "invalid_repair_update",
-                "draft_written": false,
-                "draft_changed": false,
-                "mode": "component_repair",
-            }));
-        }
-        if let Some(pins) = fields.get("pins") {
-            let Some(pins) = pins.as_object() else {
-                return Ok(json!({
-                    "error": format!("pins update for {reference} must be an object"),
-                    "code": "invalid_repair_update",
-                    "draft_written": false,
-                    "draft_changed": false,
-                    "mode": "component_repair",
-                }));
-            };
-            if pins.is_empty() || pins.values().any(|target| !target.is_string()) {
-                return Ok(json!({
-                    "error": format!("pins update for {reference} must map at least one pin to a net string or nc"),
-                    "code": "invalid_repair_update",
-                    "draft_written": false,
-                    "draft_changed": false,
-                    "mode": "component_repair",
-                }));
-            }
-        }
-    }
-    let remove = match input.get("remove") {
-        None => Vec::new(),
-        Some(Value::Array(items)) => {
-            let Some(refs) = items.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
-                return Ok(json!({
-                    "error": "remove must contain only refdes strings",
-                    "code": "invalid_repair_remove",
-                    "draft_written": false,
-                    "draft_changed": false,
-                    "mode": "component_repair",
-                }));
-            };
-            refs.into_iter().map(str::to_string).collect::<Vec<_>>()
-        }
-        Some(_) => {
-            return Ok(json!({
-                "error": "remove must be an array of refdes strings",
-                "code": "invalid_repair_remove",
-                "draft_written": false,
-                "draft_changed": false,
-                "mode": "component_repair",
-            }));
-        }
-    };
-    let remove_set = remove
-        .iter()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    if remove_set.len() != remove.len() {
-        return Ok(json!({
-            "error": "remove contains a duplicate refdes",
-            "code": "duplicate_repair_remove",
-            "draft_written": false,
-            "draft_changed": false,
-            "mode": "component_repair",
-        }));
-    }
-    if upsert
-        .keys()
-        .chain(update.keys())
-        .any(|reference| remove_set.contains(reference))
-        || upsert
-            .keys()
-            .any(|reference| update.contains_key(reference))
-    {
-        return Ok(json!({
-            "error": "the same refdes cannot appear in more than one of components, update, or remove",
-            "code": "conflicting_repair_operation",
-            "draft_written": false,
-            "draft_changed": false,
-            "mode": "component_repair",
-        }));
-    }
-    if upsert.is_empty() && update.is_empty() && remove.is_empty() {
-        let available_authored_refs = available_authored_refs(ctx);
-        return Ok(json!({
-            "error": "repair requires at least one components, update, or remove refdes",
-            "code": "empty_component_repair",
-            "available_authored_refs": available_authored_refs,
-            "example": {"components": {"C1": {"part": "Device:C", "value": "100nF", "pins": {"1": "+5V", "2": "GND"}}}},
-            "draft_written": false,
-            "draft_changed": false,
-            "mode": "component_repair",
-        }));
-    }
-    let replace_existing = input
-        .get("replace_existing")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
-    let Some(prior_yaml) = ctx.workspace().read_draft()? else {
-        return Ok(json!({
-            "error": "no durable draft exists; create a complete valid draft before component repair",
-            "code": "repair_requires_draft",
-            "draft_written": false,
-            "draft_changed": false,
-            "mode": "component_repair",
-        }));
-    };
-    let prior_result = compile(&prior_yaml, ctx.provider());
-    let mut prior_report = compile_authoring_report(&prior_result, ctx)?;
-    let Some(prior_design) = prior_result.design.as_ref() else {
-        prior_report["error"] = json!(
-            "the current draft is invalid; component repair cannot safely preserve malformed content"
-        );
-        prior_report["code"] = json!("repair_requires_valid_draft");
-        prior_report["draft_written"] = json!(false);
-        prior_report["draft_changed"] = json!(false);
-        prior_report["mode"] = json!("component_repair");
-        return Ok(prior_report);
-    };
-    let fragment_yaml = format!(
-        "version: 1\nblocks:\n  patch:\n    components: {}\n",
-        serde_json::to_string(&upsert)?
-    );
-    let patch_result = compile(&fragment_yaml, ctx.provider());
-    let Some(mut patch_design) = patch_result.design else {
-        let mut report = compile_report(&patch_result.diagnostics);
-        add_footprint_part_normalizations(&mut report, footprint_normalizations);
-        add_footprint_alias_normalizations(&mut report, footprint_alias_normalizations);
-        report["error"] = json!("component repair fragment is invalid");
-        report["code"] = json!("invalid_component_repair");
-        report["draft_written"] = json!(false);
-        report["draft_changed"] = json!(false);
-        report["mode"] = json!("component_repair");
-        report["current_design_state"] = design_state_summary(prior_design);
-        report["available_authored_refs"] = json!(available_authored_refs(ctx));
-        report["expected_shape"] = json!({
-            "components": {"NEW_REF": {"part": "Lib:Symbol", "pins": {"pin": "NET"}}},
-            "update": {"EXISTING_REF": {"pins": {"pin": "NET"}}}
-        });
-        return Ok(report);
-    };
-    let patch_block = patch_design
-        .blocks
-        .shift_remove("patch")
-        .expect("repair wrapper always creates patch block");
-    let authored_patch_refs = patch_block
-        .components
-        .iter()
-        .filter_map(|(reference, component)| {
-            matches!(component.origin, Origin::Authored).then_some(reference.as_str())
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    if authored_patch_refs.len() != upsert.len()
-        || upsert
-            .keys()
-            .any(|reference| !authored_patch_refs.contains(reference.as_str()))
-    {
-        return Ok(json!({
-            "error": "components must contain only explicit authored refdes entries",
-            "code": "invalid_component_repair_refs",
-            "draft_written": false,
-            "draft_changed": false,
-            "mode": "component_repair",
-            "current_design_state": design_state_summary(prior_design),
-        }));
-    }
-
-    let existing = prior_design
-        .blocks
-        .iter()
-        .flat_map(|(block, contents)| {
-            contents
-                .components
-                .iter()
-                .map(move |(reference, component)| {
-                    (reference.clone(), (block.clone(), component.origin.clone()))
-                })
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-    for reference in &remove {
-        let Some((_existing_block, origin)) = existing.get(reference) else {
-            return Ok(json!({
-                "error": format!("remove refdes {reference} does not exist"),
-                "code": "unknown_repair_remove",
-                "draft_written": false,
-                "draft_changed": false,
-                "mode": "component_repair",
-                "current_design_state": design_state_summary(prior_design),
-            }));
-        };
-        if !matches!(origin, Origin::Authored) {
-            return Ok(json!({
-                "error": format!("{reference} is synthesized; remove or replace its authored parent instead"),
-                "code": "synthesized_component_repair_forbidden",
-                "draft_written": false,
-                "draft_changed": false,
-                "mode": "component_repair",
-                "current_design_state": design_state_summary(prior_design),
-            }));
-        }
-    }
-
-    let mut added = Vec::new();
-    let mut replaced = Vec::new();
-    for reference in upsert.keys() {
-        match existing.get(reference) {
-            None => added.push(reference.clone()),
-            Some((existing_block, origin)) => {
-                if !matches!(origin, Origin::Authored) {
-                    return Ok(json!({
-                        "error": format!("{reference} is synthesized; replace its authored parent instead"),
-                        "code": "synthesized_component_repair_forbidden",
-                        "draft_written": false,
-                        "draft_changed": false,
-                        "mode": "component_repair",
-                        "current_design_state": design_state_summary(prior_design),
-                    }));
-                }
-                let previous = &prior_design.blocks[existing_block].components[reference];
-                let replacement = &patch_block.components[reference];
-                if !replace_existing && previous.part != replacement.part {
-                    return Ok(json!({
-                        "error": format!("components changes {reference} from {} to {}; pass replace_existing=true to confirm the symbol change", previous.part, replacement.part),
-                        "code": "component_replacement_requires_confirmation",
-                        "draft_written": false,
-                        "draft_changed": false,
-                        "mode": "component_repair",
-                        "current_design_state": design_state_summary(prior_design),
-                    }));
-                }
-                replaced.push(reference.clone());
-            }
-        }
-    }
-    let mut updated = Vec::new();
-    for reference in update.keys() {
-        let Some((existing_block, origin)) = existing.get(reference) else {
-            return Ok(json!({
-                "error": format!("update refdes {reference} does not exist; use components with a complete component object to add it"),
-                "code": "unknown_repair_update",
-                "draft_written": false,
-                "draft_changed": false,
-                "mode": "component_repair",
-                "current_design_state": design_state_summary(prior_design),
-            }));
-        };
-        if !matches!(origin, Origin::Authored) {
-            return Ok(json!({
-                "error": format!("{reference} is synthesized; update its authored parent instead"),
-                "code": "synthesized_component_repair_forbidden",
-                "draft_written": false,
-                "draft_changed": false,
-                "mode": "component_repair",
-                "current_design_state": design_state_summary(prior_design),
-            }));
-        }
-        let component = &prior_design.blocks[existing_block].components[reference];
-        if let Some(pins) = update[reference].get("pins").and_then(Value::as_object) {
-            let unknown = pins
-                .keys()
-                .filter(|pin| !component.pins.contains_key(*pin))
-                .cloned()
-                .collect::<Vec<_>>();
-            if !unknown.is_empty() {
-                let mut valid = component.pins.keys().cloned().collect::<Vec<_>>();
-                valid.sort();
-                return Ok(json!({
-                    "error": format!("update for {reference} uses pin key(s) not present in the current draft: {}", unknown.join(", ")),
-                    "code": "unknown_repair_pin_key",
-                    "reference": reference,
-                    "unknown_pin_keys": unknown,
-                    "valid_pin_keys": valid,
-                    "draft_written": false,
-                    "draft_changed": false,
-                    "mode": "component_repair",
-                    "current_design_state": design_state_summary(prior_design),
-                }));
-            }
-        }
-        updated.push(reference.clone());
-    }
-
-    let mut candidate = prior_design.clone();
-    for reference in remove.iter().chain(replaced.iter()) {
-        let owning_block = &existing
-            .get(reference)
-            .expect("removed and replaced refs were preflighted")
-            .0;
-        let target = candidate
-            .blocks
-            .get_mut(owning_block)
-            .expect("owning block exists in candidate");
-        target.components.shift_remove(reference);
-        target.components.retain(|_, component| {
-            !matches!(
-                &component.origin,
-                Origin::Synthesized { parent, .. } if parent == reference
-            )
-        });
-    }
-    for reference in &remove {
-        let owning_block = &existing
-            .get(reference)
-            .expect("removed refs were preflighted")
-            .0;
-        if let Some(target) = candidate.blocks.get_mut(owning_block) {
-            for row in &mut target.layout {
-                for cell in row {
-                    if cell.as_ref() == Some(reference) {
-                        *cell = None;
-                    }
-                }
-            }
-        }
-    }
-    let mut synth_index = 0usize;
-    for (reference, mut component) in patch_block.components {
-        let parent_reference = match &component.origin {
-            Origin::Authored => reference.as_str(),
-            Origin::Synthesized { parent, .. } => parent.as_str(),
-        };
-        let destination_block = existing
-            .get(parent_reference)
-            .map(|(block, _)| block.as_str())
-            .unwrap_or(block_name);
-        match &component.origin {
-            Origin::Authored => {
-                if let Some(previous) = prior_design
-                    .blocks
-                    .get(destination_block)
-                    .and_then(|block| block.components.get(&reference))
-                {
-                    let fields = upsert[&reference]
-                        .as_object()
-                        .expect("upsert values were validated as objects");
-                    if !fields.contains_key("value") {
-                        component.value.clone_from(&previous.value);
-                    }
-                    if !fields.contains_key("footprint") {
-                        component.footprint.clone_from(&previous.footprint);
-                    }
-                    if !fields.contains_key("dnp") {
-                        component.dnp = previous.dnp;
-                    }
-                    if !fields.contains_key("props") {
-                        component.props.clone_from(&previous.props);
-                    }
-                    let supplies_topology = [
-                        "pins", "units", "between", "positive", "negative", "decouple",
-                    ]
-                    .iter()
-                    .any(|field| fields.contains_key(*field));
-                    if !supplies_topology {
-                        component.pins.clone_from(&previous.pins);
-                        component.units.clone_from(&previous.units);
-                    }
-                }
-                let target = candidate
-                    .blocks
-                    .entry(destination_block.to_string())
-                    .or_insert_with(Block::default);
-                target.components.insert(reference, component);
-            }
-            Origin::Synthesized { .. } => {
-                let target = candidate
-                    .blocks
-                    .entry(destination_block.to_string())
-                    .or_insert_with(Block::default);
-                let key = loop {
-                    let key = format!("__repair_synth_{synth_index}");
-                    synth_index += 1;
-                    if !target.components.contains_key(&key) {
-                        break key;
-                    }
-                };
-                target.components.insert(key, component);
-            }
-        }
-    }
-    for (reference, fields) in &update {
-        let owning_block = &existing
-            .get(reference)
-            .expect("update refs were preflighted")
-            .0;
-        let component = candidate
-            .blocks
-            .get_mut(owning_block)
-            .expect("owning block exists in candidate")
-            .components
-            .get_mut(reference)
-            .expect("update refs were preflighted in the target block");
-        let fields = fields
-            .as_object()
-            .expect("update values were validated as objects");
-        if let Some(value) = fields.get("value").and_then(Value::as_str) {
-            component.value = Some(value.to_string());
-        }
-        if let Some(footprint) = fields.get("footprint").and_then(Value::as_str) {
-            component.footprint = Some(footprint.to_string());
-        }
-        if let Some(pins) = fields.get("pins").and_then(Value::as_object) {
-            for (pin, target) in pins {
-                let target = target
-                    .as_str()
-                    .expect("pin targets were validated as strings");
-                let target = if target.eq_ignore_ascii_case("nc") {
-                    PinTarget::NoConnect
-                } else {
-                    PinTarget::Net(target.to_string())
-                };
-                component.pins.insert(pin.clone(), target);
-            }
-        }
-    }
-
-    let candidate_yaml = circuit_lang::canon::to_canonical_yaml(&candidate);
-    let candidate_result = compile(&candidate_yaml, ctx.provider());
-    let mut report = compile_authoring_report(&candidate_result, ctx)?;
-    add_footprint_part_normalizations(&mut report, footprint_normalizations);
-    add_footprint_alias_normalizations(&mut report, footprint_alias_normalizations);
-    let candidate_is_clean = report.get("ok").and_then(Value::as_bool) == Some(true);
-    let prior_is_invalid = prior_report.get("ok").and_then(Value::as_bool) != Some(true);
-    let candidate_strictly_improves = prior_is_invalid
-        && authoring_report_quality(&report) < authoring_report_quality(&prior_report);
-    if !candidate_is_clean && !candidate_strictly_improves {
-        let current_validation = prior_report.clone();
-        let candidate_validation = report.clone();
-        report["error"] = json!(
-            "component repair did not improve the complete draft's validation; the existing draft was preserved"
-        );
-        report["code"] = json!("invalid_component_repair_preserved_draft");
-        report["current_validation"] = current_validation;
-        report["candidate_validation"] = candidate_validation;
-        report["draft_written"] = json!(false);
-        report["draft_changed"] = json!(false);
-        report["electrical_design_changed"] = json!(false);
-        report["mode"] = json!("component_repair");
-        report["current_design_state"] = design_state_summary(prior_design);
-        return Ok(report);
-    }
-
-    ctx.workspace()
-        .write_draft(&candidate_yaml, current_sch_text(ctx).as_deref())?;
-    report["mode"] = json!("component_repair");
-    report["added"] = json!(added);
-    report["replaced"] = json!(replaced);
-    report["updated"] = json!(updated);
-    report["removed"] = json!(remove);
-    report["draft_written"] = json!(true);
-    report["draft_changed"] = json!(candidate_yaml != prior_yaml);
-    report["electrical_design_changed"] = json!(electrical_yaml_changed(
-        Some(&prior_yaml),
-        &candidate_yaml,
-        ctx.provider()
-    ));
-    add_draft_next_step(&mut report);
-    Ok(report)
-}
-
 /// A model can echo the history-elision placeholder back as its document; that
 /// text must never become the draft.
 fn elided_placeholder_rejection(text: &str) -> Option<Value> {
@@ -2652,236 +1708,15 @@ fn elided_placeholder_rejection(text: &str) -> Option<Value> {
             "ok": false,
             "error": "this text is the history-elision placeholder, not design content; \
                       the full draft is preserved on disk — recover it with \
-                      read_schematic({source:\"draft\"}) or apply a small \
+                      read_schematic() or apply a small \
                       old_string/new_string patch instead of resending the document",
             "code": "elided_placeholder_rejected",
             "draft_written": false,
             "draft_changed": false,
             "electrical_design_changed": false,
-            "next_tool": "edit_design",
+            "next_tool": "create_design",
         })
     })
-}
-
-fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    for key in ["yaml", "new_string"] {
-        if let Some(text) = input.get(key).and_then(Value::as_str)
-            && let Some(rejection) = elided_placeholder_rejection(text)
-        {
-            return Ok(rejection);
-        }
-    }
-    let full_yaml = input.get("yaml").and_then(Value::as_str);
-    if let Some(yaml) = full_yaml {
-        let prior_draft = ctx.workspace().read_draft()?;
-        let draft_exists = prior_draft.is_some();
-        let (yaml, power_reference_normalizations) = normalize_invalid_power_references(yaml);
-        let (yaml, normalizations) = normalize_misplaced_footprint_parts(&yaml, ctx)?;
-        let (yaml, footprint_alias_normalizations) =
-            normalize_common_footprint_aliases(&yaml, ctx)?;
-        let (yaml, default_footprint_normalizations) =
-            normalize_dense_default_footprints(&yaml, ctx)?;
-        let result = compile(&yaml, ctx.provider());
-        let mut report = compile_authoring_report(&result, ctx)?;
-        add_power_reference_normalizations(&mut report, power_reference_normalizations);
-        add_footprint_part_normalizations(&mut report, normalizations);
-        add_footprint_alias_normalizations(&mut report, footprint_alias_normalizations);
-        add_default_footprint_normalizations(&mut report, default_footprint_normalizations);
-        if reject_empty_draft_candidate(&mut report, &result, draft_exists, yaml.trim().is_empty())
-        {
-            report["mode"] = json!(if draft_exists {
-                "full_replace"
-            } else {
-                "full_create"
-            });
-            return Ok(report);
-        }
-        let prior_result = prior_draft
-            .as_deref()
-            .map(|draft| compile(draft, ctx.provider()));
-        if let Some(prior) = prior_result.as_ref()
-            && invalid_compile_quality_regressed(&prior.diagnostics, &result.diagnostics)
-        {
-            let current_validation = compile_report(&prior.diagnostics);
-            let candidate_validation = compile_report(&result.diagnostics);
-            report["ok"] = json!(false);
-            report["error"] = json!(
-                "full replacement regressed an invalid draft; the better repair anchor was preserved. Top-level diagnostic examples describe the rejected candidate; preserved-draft diagnostics are in current_validation"
-            );
-            report["code"] = json!("invalid_replacement_regressed_draft");
-            report["diagnostics_scope"] = json!("rejected_candidate");
-            report["current_validation"] = current_validation;
-            report["candidate_validation"] = candidate_validation;
-            report["draft_written"] = json!(false);
-            report["draft_changed"] = json!(false);
-            report["electrical_design_changed"] = json!(false);
-            report["mode"] = json!("full_replace");
-            report["next_tool"] = json!("edit_design");
-            report["next"] = json!(
-                "fix the rejected candidate diagnostics and resend the complete yaml; replacements with fewer errors, or equal errors and no more warnings, remain accepted"
-            );
-            return Ok(report);
-        }
-        if let Some(prior) = prior_result
-            .as_ref()
-            .and_then(|compiled| compiled.design.as_ref())
-            && result.design.is_none()
-        {
-            report["ok"] = json!(false);
-            report["error"] = json!(
-                "invalid full replacement would discard a valid draft; the existing draft was preserved"
-            );
-            report["code"] = json!("invalid_replacement_preserved_draft");
-            report["current_design_state"] = design_state_summary(prior);
-            report["current_diagnostics"] = json!(
-                compile_report(&prior_result.as_ref().expect("checked above").diagnostics)["diagnostics"]
-            );
-            report["draft_written"] = json!(false);
-            report["draft_changed"] = json!(false);
-            report["mode"] = json!("full_replace");
-            report["next_tool"] = json!("edit_design");
-            report["next"] = json!(
-                "fix the candidate diagnostics and resend the complete yaml, or use a precise patch against the preserved draft"
-            );
-            return Ok(report);
-        }
-        let allow_component_removal = input
-            .get("allow_component_removal")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if !allow_component_removal
-            && let (Some(prior), Some(candidate)) = (
-                prior_result
-                    .as_ref()
-                    .and_then(|compiled| compiled.design.as_ref()),
-                result.design.as_ref(),
-            )
-        {
-            let current_count = design_component_count(prior);
-            let candidate_count = design_component_count(candidate);
-            if candidate_count < current_count {
-                report["ok"] = json!(false);
-                report["error"] = json!(format!(
-                    "full replacement would remove {} component(s)",
-                    current_count - candidate_count
-                ));
-                report["code"] = json!("component_removal_requires_confirmation");
-                report["current_component_count"] = json!(current_count);
-                report["candidate_component_count"] = json!(candidate_count);
-                report["current_design_state"] = design_state_summary(prior);
-                report["current_diagnostics"] = json!(
-                    compile_report(&prior_result.as_ref().expect("checked above").diagnostics)["diagnostics"]
-                );
-                report["draft_written"] = json!(false);
-                report["draft_changed"] = json!(false);
-                report["mode"] = json!("full_replace");
-                report["next_tool"] = json!("edit_design");
-                report["next"] = json!(
-                    "the existing draft was preserved; use a precise patch to delete components, or resend the complete yaml with allow_component_removal=true"
-                );
-                return Ok(report);
-            }
-        }
-        ctx.workspace()
-            .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
-        report["draft_written"] = json!(true);
-        report["draft_changed"] = json!(prior_draft.as_deref() != Some(yaml.as_str()));
-        report["electrical_design_changed"] = json!(electrical_yaml_changed(
-            prior_draft.as_deref(),
-            &yaml,
-            ctx.provider()
-        ));
-        report["mode"] = json!(if draft_exists {
-            "full_replace"
-        } else {
-            "full_create"
-        });
-        add_draft_next_step(&mut report);
-        return Ok(report);
-    }
-
-    let Some(draft) = ctx.workspace().read_draft()? else {
-        return Ok(json!({
-            "error": "no draft exists — patch mode requires one; pass a complete yaml to edit_design \
-                      to create it, or call read_schematic({source:\"draft\"}) to seed from the current schematic",
-            "draft_changed": false,
-        }));
-    };
-
-    let (Some(old), Some(new)) = (
-        input.get("old_string").and_then(Value::as_str),
-        input.get("new_string").and_then(Value::as_str),
-    ) else {
-        return Ok(json!({
-            "ok": false,
-            "error": "edit_design requires one complete corrected YAML document in `yaml`; an incomplete old_string/new_string patch cannot be applied safely",
-            "code": "edit_design_full_yaml_required",
-            "draft_changed": false,
-            "electrical_design_changed": false,
-            "next_tool": "edit_design",
-            "next": "resend the complete current draft with the correction applied as edit_design({yaml: ...})",
-        }));
-    };
-    let replace_all = input
-        .get("replace_all")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
-    let count = draft.matches(old).count();
-    if count == 0 {
-        return Ok(json!({
-            "error": "old_string not found in the current draft",
-            "old_string": old,
-            "hint": "Use read_schematic({source:\"draft\"}) once to copy an exact current snippet, or call edit_design with a full corrected `yaml` for broad/formatting-heavy changes.",
-            "draft_chars": draft.len(),
-        }));
-    }
-    if count > 1 && !replace_all {
-        return Ok(json!({
-            "error": format!("old_string matches {count} times — make it more \
-                              specific or pass replace_all=true"),
-        }));
-    }
-    let edited = if replace_all {
-        draft.replace(old, new)
-    } else {
-        draft.replacen(old, new, 1)
-    };
-    let result = compile(&edited, ctx.provider());
-    let prior_result = compile(&draft, ctx.provider());
-    if let Some(prior) = prior_result.design.as_ref()
-        && result.design.is_none()
-    {
-        let mut report = compile_authoring_report(&result, ctx)?;
-        report["ok"] = json!(false);
-        report["error"] =
-            json!("invalid patch would corrupt a valid draft; the existing draft was preserved");
-        report["code"] = json!("invalid_patch_preserved_draft");
-        report["current_design_state"] = design_state_summary(prior);
-        report["current_diagnostics"] =
-            json!(compile_report(&prior_result.diagnostics)["diagnostics"]);
-        report["replacements"] = json!(if replace_all { count } else { 1 });
-        report["draft_changed"] = json!(false);
-        report["electrical_design_changed"] = json!(false);
-        report["next_tool"] = json!("edit_design");
-        report["next"] = json!(
-            "send one complete valid corrected yaml document, or use a smaller patch that keeps the draft valid"
-        );
-        return Ok(report);
-    }
-    ctx.workspace()
-        .write_draft(&edited, current_sch_text(ctx).as_deref())?;
-
-    let mut report = compile_authoring_report(&result, ctx)?;
-    report["replacements"] = json!(if replace_all { count } else { 1 });
-    report["draft_changed"] = json!(edited != draft);
-    report["electrical_design_changed"] = json!(electrical_yaml_changed(
-        Some(&draft),
-        &edited,
-        ctx.provider()
-    ));
-    add_draft_next_step(&mut report);
-    Ok(report)
 }
 
 /// Formatting, comments, quoting, and mapping order do not invalidate an
@@ -2932,11 +1767,11 @@ fn reject_empty_draft_candidate(
     }
     report["draft_written"] = json!(false);
     report["draft_changed"] = json!(false);
-    report["next_tool"] = json!("edit_design");
+    report["next_tool"] = json!("create_design");
     report["next"] = json!(if draft_exists {
-        "the empty candidate was rejected and the existing draft was preserved; send one complete non-empty replacement with edit_design({yaml: ...})"
+        "the empty candidate was rejected and the existing draft was preserved; send one complete non-empty replacement with create_design({yaml: ..., overwrite: true})"
     } else {
-        "the empty candidate was rejected and no draft was written; send the complete non-empty circuit with edit_design({yaml: ...})"
+        "the empty candidate was rejected and no draft was written; send the complete non-empty circuit with create_design({yaml: ...})"
     });
     true
 }
@@ -2954,7 +1789,7 @@ fn add_draft_next_step(report: &mut Value) {
             "draft already compiled cleanly; call apply_design() next and do not revalidate it unchanged"
         );
     } else {
-        report["next_tool"] = json!("edit_design");
+        report["next_tool"] = json!("create_design");
         report["next"] = json!("fix the reported diagnostics in one batched edit");
     }
 }
@@ -2990,11 +1825,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        common_default_footprint, common_footprint_alias, compile, compile_report, create_design,
-        edit_design, footprint_suggestion_clause, invalid_compile_quality_regressed,
-        normalize_common_footprint_aliases, normalize_dense_default_footprints,
-        normalize_invalid_power_references, normalize_misplaced_footprint_parts, repair_components,
-        repair_components_tool, require_search_query, symbol_for_misplaced_footprint, tool_defs,
+        common_default_footprint, common_footprint_alias, compile_report,
+        footprint_suggestion_clause, normalize_common_footprint_aliases,
+        normalize_dense_default_footprints, normalize_invalid_power_references,
+        normalize_misplaced_footprint_parts, require_search_query,
+        symbol_for_misplaced_footprint, tool_defs,
     };
 
     #[test]
@@ -3095,59 +1930,6 @@ blocks:
     }
 
     #[test]
-    fn footprint_aliases_persist_canonically_across_authoring_paths() {
-        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../kicad-footprint/tests/fixtures/footprints/R_0603_1608Metric.kicad_mod");
-        let footprints = tempfile::tempdir().unwrap();
-        let pretty = footprints.path().join("Resistor_SMD.pretty");
-        std::fs::create_dir_all(&pretty).unwrap();
-        std::fs::copy(source, pretty.join("R_0603_1608Metric.kicad_mod")).unwrap();
-        let runtime =
-            AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf()).unwrap();
-        let yaml = r#"
-version: 1
-blocks:
-  main:
-    components:
-      R1: {part: Device:R, footprint: "Resistor_SMD:R_0603", between: [A, B]}
-"#;
-
-        let created = create_design(json!({"yaml": yaml}), &runtime).unwrap();
-        assert_eq!(created["normalized_footprint_aliases"]["count"], 1);
-        assert!(
-            runtime
-                .workspace()
-                .read_draft()
-                .unwrap()
-                .unwrap()
-                .contains("Resistor_SMD:R_0603_1608Metric")
-        );
-
-        let edited = edit_design(json!({"yaml": yaml}), &runtime).unwrap();
-        assert_eq!(edited["normalized_footprint_aliases"]["count"], 1);
-
-        let repaired = repair_components(
-            json!({
-                "update": {"R1": {"footprint": "Resistor_SMD:R_0603"}},
-                "components": {
-                    "R2": {
-                        "part": "Device:R",
-                        "footprint": "Resistor_SMD:R_0603",
-                        "pins": {"1": "A", "2": "B"}
-                    }
-                }
-            }),
-            &runtime,
-        )
-        .unwrap();
-        assert_eq!(repaired["normalized_footprint_aliases"]["count"], 2);
-        assert_eq!(repaired["draft_written"], true);
-        let draft = runtime.workspace().read_draft().unwrap().unwrap();
-        assert_eq!(draft.matches("Resistor_SMD:R_0603_1608Metric").count(), 2);
-        assert!(!draft.contains("footprint: Resistor_SMD:R_0603\n"));
-    }
-
-    #[test]
     fn dense_defaulting_fills_missing_footprints_but_preserves_explicit_choices() {
         let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../kicad-footprint/tests/fixtures/footprints/R_0603_1608Metric.kicad_mod");
@@ -3225,49 +2007,6 @@ blocks:
     }
 
     #[test]
-    fn malformed_legacy_edit_returns_a_structured_full_yaml_retry() {
-        let footprints = tempfile::tempdir().unwrap();
-        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
-            .expect("test runtime");
-        let draft =
-            "version: 1\nblocks: {main: {components: {R1: {part: Device:R, between: [A, B]}}}}\n";
-        runtime.workspace().write_draft(draft, None).unwrap();
-
-        let report = edit_design(json!({"new_string": "4.7k"}), &runtime).unwrap();
-
-        assert_eq!(report["code"], "edit_design_full_yaml_required");
-        assert_eq!(report["draft_changed"], false);
-        assert_eq!(report["next_tool"], "edit_design");
-        assert_eq!(runtime.workspace().read_draft().unwrap().unwrap(), draft);
-    }
-
-    #[test]
-    fn full_edit_persists_candidate_after_power_reference_recovery() {
-        let footprints = tempfile::tempdir().unwrap();
-        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
-            .expect("test runtime");
-        let prior =
-            "version: 1\nblocks: {main: {components: {R1: {part: Device:R, between: [A, B]}}}}\n";
-        runtime.workspace().write_draft(prior, None).unwrap();
-        let candidate = r#"
-version: 1
-blocks:
-  main:
-    components:
-      R1: {part: Device:R, between: [A, B]}
-      V3V31: {part: power:+3V3, pins: {1: V3V3}}
-"#;
-
-        let report = edit_design(json!({"yaml": candidate}), &runtime).unwrap();
-
-        assert_eq!(report["draft_written"], true, "{report}");
-        assert_eq!(report["normalized_power_references"]["count"], 1);
-        let draft = runtime.workspace().read_draft().unwrap().unwrap();
-        assert!(draft.contains("PWR1: {part: power:+3V3"), "{draft}");
-        assert!(!draft.contains("V3V31:"), "{draft}");
-    }
-
-    #[test]
     fn misplaced_footprint_inference_is_limited_to_safe_families() {
         for (footprint, pads, symbol) in [
             ("Resistor_SMD:R_0603", 2, "Device:R"),
@@ -3305,92 +2044,6 @@ blocks:
             symbol_for_misplaced_footprint("Connector_PinHeader_2.54mm:PinHeader_2x04_Vertical", 8),
             None
         );
-    }
-
-    #[test]
-    fn create_and_edit_persist_misplaced_footprint_recovery() {
-        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../kicad-footprint/tests/fixtures/footprints/R_0603_1608Metric.kicad_mod");
-        let footprints = tempfile::tempdir().unwrap();
-        let pretty = footprints.path().join("Resistor_SMD.pretty");
-        std::fs::create_dir_all(&pretty).unwrap();
-        std::fs::copy(&source, pretty.join("R_0603_1608Metric.kicad_mod")).unwrap();
-        let runtime =
-            AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf()).unwrap();
-        let misplaced = "Resistor_SMD:R_0603_1608Metric";
-        let components = (1..=10)
-            .map(|index| {
-                format!(
-                    "      R{index}:\n        part: {misplaced}\n        between: [A{index}, B{index}]"
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let multiline = format!("version: 1\nblocks:\n  main:\n    components:\n{components}\n");
-
-        let created = create_design(json!({"yaml": multiline}), &runtime).unwrap();
-        assert_eq!(created["normalized_misplaced_footprints"]["count"], 10);
-        assert_eq!(
-            created["normalized_misplaced_footprints"]["examples"]
-                .as_array()
-                .unwrap()
-                .len(),
-            8
-        );
-        assert_eq!(
-            created["normalized_misplaced_footprints"]["examples"][0]["reference"],
-            "R1"
-        );
-        assert_eq!(created["normalized_misplaced_footprints"]["omitted"], 2);
-        assert_eq!(created["draft_written"], true);
-        let draft = runtime.workspace().read_draft().unwrap().unwrap();
-        assert!(draft.contains("part: \"Device:R\""));
-        assert!(draft.contains(&format!("footprint: \"{misplaced}\"")));
-
-        let inline_components = (1..=10)
-            .map(|index| format!("R{index}: {{part: {misplaced}, between: [A{index}, C{index}]}}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let inline =
-            format!("version: 1\nblocks: {{main: {{components: {{{inline_components}}}}}}}\n");
-        let edited = edit_design(json!({"yaml": inline}), &runtime).unwrap();
-        assert_eq!(edited["normalized_misplaced_footprints"]["count"], 10);
-        assert_eq!(
-            edited["normalized_misplaced_footprints"]["examples"]
-                .as_array()
-                .unwrap()
-                .len(),
-            8
-        );
-        assert_eq!(
-            edited["normalized_misplaced_footprints"]["examples"][0]["reference"],
-            "R1"
-        );
-        assert_eq!(edited["normalized_misplaced_footprints"]["omitted"], 2);
-        assert_eq!(edited["draft_written"], true);
-        let draft = runtime.workspace().read_draft().unwrap().unwrap();
-        assert!(draft.contains("part: \"Device:R\""));
-        assert!(draft.contains(&format!("footprint: \"{misplaced}\"")));
-
-        let repaired = repair_components(
-            json!({
-                "block": "main",
-                "components": {
-                    "R2": {"part": misplaced, "between": ["C", "D"]}
-                }
-            }),
-            &runtime,
-        )
-        .unwrap();
-        assert_eq!(repaired["normalized_misplaced_footprints"]["count"], 1);
-        assert_eq!(repaired["draft_written"], true, "{repaired}");
-        let draft = runtime.workspace().read_draft().unwrap().unwrap();
-        assert!(draft.contains("R2:"));
-        assert_eq!(
-            draft.matches("part: Device:R").count() + draft.matches("part: \"Device:R\"").count(),
-            10
-        );
-        assert_eq!(draft.matches(misplaced).count(), 10);
     }
 
     #[test]
@@ -3436,194 +2089,6 @@ blocks:
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0]["reference"], "R1");
         assert_eq!(changes[1]["reference"], "J1");
-    }
-
-    fn invalid_refdes_draft(count: usize) -> String {
-        let components = (1..=count)
-            .map(|index| format!("R_BAD{index}: {{part: Device:R, between: [A, B]}}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("version: 1\nblocks: {{main: {{components: {{{components}}}}}}}\n")
-    }
-
-    #[test]
-    fn worse_invalid_full_replacement_preserves_the_better_draft() {
-        let footprints = tempfile::tempdir().unwrap();
-        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
-            .expect("test runtime");
-        let prior = invalid_refdes_draft(2);
-        let worse = invalid_refdes_draft(3);
-        runtime.workspace().write_draft(&prior, None).unwrap();
-
-        let report = edit_design(json!({"yaml": worse}), &runtime).unwrap();
-
-        assert_eq!(report["code"], "invalid_replacement_regressed_draft");
-        assert_eq!(report["current_validation"]["errors"], 2);
-        assert_eq!(report["candidate_validation"]["errors"], 3);
-        assert_eq!(report["diagnostics_scope"], "rejected_candidate");
-        assert!(
-            report["error"]
-                .as_str()
-                .unwrap()
-                .contains("current_validation")
-        );
-        assert_eq!(report["draft_written"], false);
-        assert_eq!(report["draft_changed"], false);
-        assert_eq!(runtime.workspace().read_draft().unwrap().unwrap(), prior);
-    }
-
-    #[test]
-    fn improved_invalid_full_replacement_is_written() {
-        let footprints = tempfile::tempdir().unwrap();
-        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
-            .expect("test runtime");
-        let prior = invalid_refdes_draft(3);
-        let better = invalid_refdes_draft(2);
-        runtime.workspace().write_draft(&prior, None).unwrap();
-
-        let report = edit_design(
-            json!({"yaml": better, "allow_component_removal": true}),
-            &runtime,
-        )
-        .unwrap();
-
-        assert_ne!(
-            report.get("code"),
-            Some(&json!("invalid_replacement_regressed_draft"))
-        );
-        assert_eq!(report["errors"], 2);
-        assert_eq!(report["draft_written"], true);
-        assert_eq!(runtime.workspace().read_draft().unwrap().unwrap(), better);
-    }
-
-    #[test]
-    fn improving_footprint_repair_of_parseable_invalid_draft_is_written() {
-        let footprints = tempfile::tempdir().unwrap();
-        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
-            .expect("test runtime");
-        let prior = "version: 1\nblocks: {main: {components: {R1: {part: Device:R, footprint: Missing:One, between: [A, B]}, R2: {part: Device:R, footprint: Missing:Two, between: [A, B]}}}}\n";
-        runtime.workspace().write_draft(prior, None).unwrap();
-
-        let report = repair_components(json!({"remove": ["R1"]}), &runtime).unwrap();
-
-        assert_eq!(report["errors"], 1, "{report}");
-        assert_eq!(report["draft_written"], true, "{report}");
-        let repaired = runtime.workspace().read_draft().unwrap().unwrap();
-        assert!(!repaired.contains("R1:"), "{repaired}");
-        assert!(repaired.contains("R2:"), "{repaired}");
-    }
-
-    #[test]
-    fn repair_routes_existing_refs_across_blocks_in_one_batch() {
-        let footprints = tempfile::tempdir().unwrap();
-        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
-            .expect("test runtime");
-        let prior = r#"version: 1
-blocks:
-  bank_1:
-    components:
-      R1: {part: Device:R, value: old-1, between: [A, B]}
-  bank_2:
-    components:
-      R2: {part: Device:R, value: old-2, between: [A, B]}
-"#;
-        runtime.workspace().write_draft(prior, None).unwrap();
-
-        // A stale destination block must not reject or misroute existing refs.
-        let report = repair_components(
-            json!({
-                "block": "main",
-                "update": {
-                    "R1": {"value": "new-1"},
-                    "R2": {"value": "new-2"}
-                }
-            }),
-            &runtime,
-        )
-        .unwrap();
-
-        assert_eq!(report["draft_written"], true, "{report}");
-        assert_eq!(report["updated"], json!(["R1", "R2"]), "{report}");
-        let repaired = runtime.workspace().read_draft().unwrap().unwrap();
-        let design = compile(&repaired, runtime.provider()).design.unwrap();
-        assert_eq!(
-            design.blocks["bank_1"].components["R1"].value.as_deref(),
-            Some("new-1")
-        );
-        assert_eq!(
-            design.blocks["bank_2"].components["R2"].value.as_deref(),
-            Some("new-2")
-        );
-        assert!(!design.blocks.contains_key("main"));
-    }
-
-    #[test]
-    fn non_improving_or_regressing_invalid_repair_preserves_draft() {
-        let footprints = tempfile::tempdir().unwrap();
-        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
-            .expect("test runtime");
-        let prior = "version: 1\nblocks: {main: {components: {R1: {part: Device:R, footprint: Missing:One, between: [A, B]}}}}\n";
-
-        for input in [
-            json!({"update": {"R1": {"value": "changed"}}}),
-            json!({"components": {"R2": {"part": "Device:R", "footprint": "Missing:Two", "between": ["A", "B"]}}}),
-        ] {
-            runtime.workspace().write_draft(prior, None).unwrap();
-
-            let report = repair_components(input, &runtime).unwrap();
-
-            assert_eq!(
-                report["code"], "invalid_component_repair_preserved_draft",
-                "{report}"
-            );
-            assert_eq!(report["current_validation"]["errors"], 1, "{report}");
-            assert!(report["candidate_validation"]["errors"].is_number());
-            assert_eq!(report["draft_written"], false, "{report}");
-            assert_eq!(runtime.workspace().read_draft().unwrap().unwrap(), prior);
-        }
-    }
-
-    #[test]
-    fn repair_of_malformed_draft_without_design_remains_blocked() {
-        let footprints = tempfile::tempdir().unwrap();
-        let runtime = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
-            .expect("test runtime");
-        let prior = "version: [\n";
-        runtime.workspace().write_draft(prior, None).unwrap();
-
-        let report = repair_components(json!({"remove": ["R1"]}), &runtime).unwrap();
-
-        assert_eq!(report["code"], "repair_requires_valid_draft", "{report}");
-        assert_eq!(report["draft_written"], false, "{report}");
-        assert_eq!(runtime.workspace().read_draft().unwrap().unwrap(), prior);
-    }
-
-    #[test]
-    fn invalid_compile_quality_uses_warnings_only_as_an_error_tiebreak() {
-        use sch_check::{Diagnostic, Diagnostics};
-
-        let diagnostics = |errors, warnings| {
-            let mut diagnostics = Diagnostics::default();
-            for _ in 0..errors {
-                diagnostics.push(Diagnostic::error("error", "error"));
-            }
-            for _ in 0..warnings {
-                diagnostics.push(Diagnostic::warning("warning", "warning"));
-            }
-            diagnostics
-        };
-        assert!(invalid_compile_quality_regressed(
-            &diagnostics(2, 1),
-            &diagnostics(2, 2)
-        ));
-        assert!(!invalid_compile_quality_regressed(
-            &diagnostics(2, 1),
-            &diagnostics(2, 1)
-        ));
-        assert!(!invalid_compile_quality_regressed(
-            &diagnostics(2, 1),
-            &diagnostics(1, 20)
-        ));
     }
 
     #[test]
@@ -3674,48 +2139,6 @@ blocks:
                 "missing representative for {code}: {report}"
             );
         }
-    }
-
-    #[test]
-    fn natural_components_alias_is_advertised_as_a_nonempty_component_map() {
-        let tool = repair_components_tool();
-        assert!(
-            tool.description
-                .as_deref()
-                .unwrap()
-                .contains("NOT for an incomplete/missing circuit")
-        );
-        let schema = tool.schema.expect("repair schema");
-        let components = &schema["properties"]["components"];
-        assert_eq!(components["type"], "object");
-        assert_eq!(components["minProperties"], 1);
-        assert_eq!(
-            components["additionalProperties"]["required"],
-            serde_json::json!(["part"])
-        );
-        assert!(schema["anyOf"].as_array().is_some_and(|branches| {
-            branches
-                .iter()
-                .any(|branch| branch["required"] == serde_json::json!(["components"]))
-        }));
-        assert!(
-            components["description"]
-                .as_str()
-                .unwrap()
-                .contains("DIRECT")
-        );
-        assert!(
-            schema["properties"]["update"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("Use this—not components")
-        );
-        assert!(
-            schema["properties"]["block"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("one update/remove/components batch may span blocks")
-        );
     }
 
     #[test]

@@ -129,7 +129,55 @@ def violations(report):
     return found
 
 
-def deterministic_facts(project, artifacts, agent_result):
+def schematic_snapshot(schematic):
+    """Placement + connectivity of a .kicad_sch, straight from `sch-doc`."""
+    if schematic is None or not Path(schematic).is_file():
+        return None
+    result = command(
+        [
+            "cargo", "run", "--release", "--quiet", "-p", "sch-doc",
+            "--example", "snapshot", "--", str(schematic),
+        ],
+        check=False,
+    )
+    if result.returncode:
+        return None
+    return json.loads(result.stdout)
+
+
+def schematic_changes(before, after):
+    """What the agent actually did: which parts moved, and how nets differ."""
+    if not before or not after:
+        return {}
+    names = lambda snap: {key.split("#")[0] for key in snap["symbols"]}
+    moved = sorted(
+        key.split("#")[0]
+        for key, value in before["symbols"].items()
+        if key in after["symbols"] and after["symbols"][key][:3] != value[:3]
+    )
+    retyped = sorted(
+        key.split("#")[0]
+        for key, value in before["symbols"].items()
+        if key in after["symbols"] and after["symbols"][key][3:] != value[3:]
+    )
+    shared = set(before["nets"]) & set(after["nets"])
+    return {
+        "symbols_added": sorted(names(after) - names(before)),
+        "symbols_removed": sorted(names(before) - names(after)),
+        "symbols_moved": moved,
+        "symbols_untouched": len(before["symbols"]) - len(moved),
+        "symbols_retyped": retyped,
+        "nets_added": sorted(set(after["nets"]) - set(before["nets"])),
+        "nets_removed": sorted(set(before["nets"]) - set(after["nets"])),
+        "nets_changed": {
+            name: {"before": before["nets"][name], "after": after["nets"][name]}
+            for name in sorted(shared)
+            if before["nets"][name] != after["nets"][name]
+        },
+    }
+
+
+def deterministic_facts(project, artifacts, agent_result, before_sch=None):
     schematic = next(project.glob("*.kicad_sch"), None)
     board = next(project.glob("*.kicad_pcb"), None)
     erc = run_check("sch", schematic, artifacts / "erc.json")
@@ -139,6 +187,7 @@ def deterministic_facts(project, artifacts, agent_result):
     unconnected = drc.get("unconnected_items", []) if isinstance(drc, dict) else []
     fab = sorted(path.name for path in (project / "fab").glob("*")) if (project / "fab").is_dir() else []
     return {
+        "schematic_changes": schematic_changes(before_sch, schematic_snapshot(schematic)),
         "agent_exit": agent_result.returncode,
         "schematic_created": schematic is not None,
         "pcb_created": board is not None,
@@ -266,6 +315,7 @@ def run_case(case, output_root):
     project.mkdir()
 
     prepare_project(case, project)
+    before_sch = schematic_snapshot(next(project.glob("*.kicad_sch"), None))
     renders = {"before": render_project(project, artifacts, "before")}
     result = command(
         agent_command(project, prompt),
@@ -276,7 +326,7 @@ def run_case(case, output_root):
     (artifacts / "agent.stdout.txt").write_text(result.stdout, encoding="utf-8")
     (artifacts / "agent.stderr.txt").write_text(result.stderr, encoding="utf-8")
     renders["after"] = render_project(project, artifacts, "after")
-    facts = deterministic_facts(project, artifacts, result)
+    facts = deterministic_facts(project, artifacts, result, before_sch)
     verdict = judge(prompt, rubric, facts, renders)
     report = {"case": case.name, **facts, "judge": verdict}
     (run_dir / "result.json").write_text(

@@ -1,0 +1,21 @@
+[package]
+name = "gordian-tools-sch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The agent's schematic tool surface: pin-level mutators, queries and checks over the live .kicad_sch."
+
+[dependencies]
+geom = { path = "../geom" }
+gordian-llm = { path = "../gordian-llm" }
+gordian-runtime = { path = "../gordian-runtime" }
+kicad-symbol = { path = "../kicad-symbol" }
+kicad = { path = "../kicad" }
+sch-check = { path = "../sch-check" }
+sch-doc = { path = "../sch-doc" }
+sch-io = { path = "../sch-io" }
+
+anyhow.workspace = true
+indexmap.workspace = true
+serde_json.workspace = true

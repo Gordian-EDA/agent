@@ -1,0 +1,1 @@
+In this existing ECC83 preamp schematic, add a power-on indicator: an LED with a series current-limiting resistor across the heater supply that arrives on connector P4, near P4. Wire it properly, leave every existing part exactly where it is, and check the schematic when you are done.
