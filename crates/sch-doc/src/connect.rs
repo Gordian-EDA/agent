@@ -115,14 +115,7 @@ struct Segment {
 /// pull in the child sheet's connectivity. Callers merging sheets merge only
 /// global and power names.
 pub fn extract(doc: &SchDoc) -> Netlist {
-    let mut warnings = Vec::new();
-    if doc
-        .items()
-        .iter()
-        .any(|i| matches!(i.head(), "bus" | "bus_entry" | "bus_alias"))
-    {
-        warnings.push("unmodeled connectivity: buses are not extracted".to_string());
-    }
+    let warnings = survey(doc);
 
     let placed: Vec<PlacedPin> = doc.symbols().flat_map(|s| pins_of(doc, s)).collect();
     let power_names = power_symbol_names(doc);
@@ -190,7 +183,9 @@ pub fn extract(doc: &SchDoc) -> Netlist {
         let Some(node) = nodes.get(pin.at) else {
             continue;
         };
-        if pin.power_symbol {
+        if pin.power_symbol && pin.etype == "power_in" {
+            // Only a power *input* names the net: that is what separates a rail
+            // symbol from a PWR_FLAG, whose power_out pin names nothing.
             if let Some(name) = power_names.get(&pin.refdes) {
                 note(name.clone(), NetSource::Power, node);
             }
@@ -279,6 +274,58 @@ pub fn extract(doc: &SchDoc) -> Netlist {
         unconnected,
         warnings,
     }
+}
+
+/// What the extraction cannot vouch for on this sheet.
+fn survey(doc: &SchDoc) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if doc
+        .items()
+        .iter()
+        .any(|i| matches!(i.head(), "bus" | "bus_entry" | "bus_alias"))
+    {
+        warnings.push("unmodeled connectivity: buses are not extracted".to_string());
+    }
+    let mut missing: Vec<&str> = doc
+        .symbols()
+        .map(|s| s.lib_id.as_str())
+        .filter(|lib_id| {
+            doc.lib_symbols()
+                .and_then(|libs| crate::pins::resolve(libs, lib_id))
+                .is_none()
+        })
+        .collect();
+    missing.sort_unstable();
+    missing.dedup();
+    for lib_id in missing {
+        warnings.push(format!(
+            "no embedded lib_symbols definition for {lib_id}: its pins are not placed"
+        ));
+    }
+    if doc.symbols().any(|s| instance_paths(s) > 1) {
+        warnings.push(
+            "sheet is instantiated more than once; reference designators are ambiguous \
+             outside the hierarchy"
+                .to_string(),
+        );
+    }
+    warnings
+}
+
+/// How many `(instances … (path …))` entries a symbol carries.
+fn instance_paths(symbol: &crate::model::SymbolInst) -> usize {
+    let Some(instances) = crate::sexpr::child(symbol.retained().node(), "instances") else {
+        return 0;
+    };
+    crate::sexpr::items(instances)
+        .iter()
+        .map(|project| {
+            crate::sexpr::items(project)
+                .iter()
+                .filter(|c| crate::sexpr::head(c) == Some("path"))
+                .count()
+        })
+        .sum()
 }
 
 /// Power symbols name their net with their `Value` field, not their pin name.

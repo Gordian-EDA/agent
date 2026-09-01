@@ -7,7 +7,7 @@
 
 mod corpus;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sch_doc::{Item, SchDoc, connect};
 
@@ -64,15 +64,27 @@ fn extraction_matches_the_kicad_netlist_partition() {
         return;
     };
     let mut compared = 0;
-    let mut with_buses = 0;
+    let mut shape_only = 0;
+    let mut skipped: BTreeMap<&str, usize> = BTreeMap::new();
     let mut hierarchical = 0;
     let mut failures = Vec::new();
 
     for path in corpus::files() {
         let doc = SchDoc::read(&path).expect("parse");
         let netlist = connect::extract(&doc);
-        if !netlist.warnings.is_empty() {
-            with_buses += 1;
+        let reason = netlist.warnings.iter().find_map(|w| {
+            ["buses", "no embedded", "instantiated more than once"]
+                .into_iter()
+                .find(|kind| w.contains(kind))
+        });
+        // A sheet placed several times in a hierarchy has no unambiguous
+        // reference designators on its own, but its net *shape* is still
+        // checkable: same number of nets, same sizes.
+        let shape_check = reason == Some("instantiated more than once");
+        if let Some(reason) = reason
+            && !shape_check
+        {
+            *skipped.entry(reason).or_default() += 1;
             continue;
         }
         if doc.items().iter().any(|i| matches!(i, Item::Sheet(_))) {
@@ -82,8 +94,25 @@ fn extraction_matches_the_kicad_netlist_partition() {
         let Ok(oracle) = kicad.netlist(&path) else {
             continue;
         };
-        compared += 1;
         let (mine, reference) = (ours(&netlist), theirs(&oracle));
+        if shape_check {
+            shape_only += 1;
+            let sizes = |p: &Partition| {
+                let mut v: Vec<usize> = p.iter().map(Vec::len).collect();
+                v.sort_unstable();
+                v
+            };
+            if sizes(&mine) != sizes(&reference) {
+                failures.push(format!(
+                    "{}: net shape {:?} vs {:?}",
+                    corpus::label(&path),
+                    sizes(&mine),
+                    sizes(&reference)
+                ));
+            }
+            continue;
+        }
+        compared += 1;
         if mine != reference {
             let missing: Vec<_> = reference.difference(&mine).take(2).cloned().collect();
             let extra: Vec<_> = mine.difference(&reference).take(2).cloned().collect();
@@ -97,8 +126,9 @@ fn extraction_matches_the_kicad_netlist_partition() {
     }
 
     eprintln!(
-        "extractor: {compared} compared, {with_buses} skipped for buses, \
-         {hierarchical} skipped as hierarchical roots"
+        "extractor: {compared} matched exactly, {shape_only} matched by net shape \
+         (re-instantiated sheets), {hierarchical} skipped as hierarchical roots, \
+         skipped after a warning: {skipped:?}"
     );
     assert!(compared > 20, "only {compared} sheets were comparable");
     assert!(
@@ -119,8 +149,13 @@ fn bussed_sheets_are_reported_not_guessed() {
             .items()
             .iter()
             .any(|i| matches!(i.head(), "bus" | "bus_entry" | "bus_alias"));
-        let warned = !connect::extract(&doc).warnings.is_empty();
-        assert_eq!(has_bus, warned, "{}", corpus::label(&path));
+        let warnings = connect::extract(&doc).warnings;
+        assert_eq!(
+            has_bus,
+            warnings.iter().any(|w| w.contains("buses")),
+            "{}",
+            corpus::label(&path)
+        );
         bussed += usize::from(has_bus);
     }
     assert!(bussed > 0, "corpus has no bussed sheet to check");

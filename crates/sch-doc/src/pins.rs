@@ -106,16 +106,18 @@ pub(crate) fn is_power_definition(def: &Node) -> bool {
 
 /// Map a symbol-space point onto the sheet through an instance's pose.
 ///
-/// KiCAD applies the mirror first and the rotation second (the parser sets the
-/// orientation from `(at … angle)` and then right-multiplies the mirror), then
-/// flips y because symbol space grows upward and the sheet grows downward.
+/// Rotation happens in symbol space (with the y flip into sheet space); the
+/// mirror is then a reflection of the *sheet* offset, which is why `(mirror x)`
+/// on a rotated symbol is not the same as negating a local coordinate. `x`
+/// reflects across the sheet's x axis, `y` across its y axis.
 pub(crate) fn to_sheet(local: Point2, at: Pose, mirror: Mirror) -> Point2 {
-    let local = match mirror {
-        Mirror::X => Point2::new(local.x, -local.y),
-        Mirror::None | Mirror::Y => local,
+    let offset = local.transform_offset(at.rot, false);
+    let (dx, dy) = match mirror {
+        Mirror::None => (offset.x, offset.y),
+        Mirror::X => (offset.x, -offset.y),
+        Mirror::Y => (-offset.x, offset.y),
     };
-    let offset = local.transform_offset(at.rot, mirror == Mirror::Y);
-    Point2::new(at.x + offset.x, at.y + offset.y)
+    Point2::new(at.x + dx, at.y + dy)
 }
 
 /// The instance's body style; KiCAD defaults to the first.
@@ -187,13 +189,23 @@ mod tests {
         let at = Pose::new(100.0, 50.0, 0.0);
         let p = Point2::new(0.0, 3.81);
         assert_eq!(to_sheet(p, at, Mirror::None), Point2::new(100.0, 46.19));
-        // Mirror y flips left-to-right: local x negates, y is untouched.
         assert_eq!(
             to_sheet(Point2::new(2.54, 0.0), at, Mirror::Y),
             Point2::new(97.46, 50.0)
         );
-        // Mirror x flips top-to-bottom: local y negates before the sheet flip.
         assert_eq!(to_sheet(p, at, Mirror::X), Point2::new(100.0, 53.81));
+    }
+
+    /// The mirror reflects the sheet offset, so on a symbol rotated 90 degrees
+    /// `(mirror x)` moves a pin the opposite way from mirroring its local
+    /// coordinate would.
+    #[test]
+    fn mirror_applies_after_rotation() {
+        let at = Pose::new(0.0, 0.0, 90.0);
+        let p = Point2::new(0.0, 3.81);
+        assert_eq!(to_sheet(p, at, Mirror::None), Point2::new(-3.81, 0.0));
+        assert_eq!(to_sheet(p, at, Mirror::X), Point2::new(-3.81, 0.0));
+        assert_eq!(to_sheet(p, at, Mirror::Y), Point2::new(3.81, 0.0));
     }
 
     #[test]

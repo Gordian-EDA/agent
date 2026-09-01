@@ -201,6 +201,12 @@ impl SymbolInst {
         self.fields.get("Reference").map_or("", |f| f.value.as_str())
     }
 
+    /// The node this symbol was decoded from, with every child the typed model
+    /// does not cover.
+    pub fn retained(&self) -> &Retained {
+        &self.raw
+    }
+
     /// Value, from the `Value` property.
     pub fn value(&self) -> &str {
         self.fields.get("Value").map_or("", |f| f.value.as_str())
