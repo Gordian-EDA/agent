@@ -136,7 +136,7 @@ def schematic_snapshot(schematic):
     result = command(
         [
             "cargo", "run", "--release", "--quiet", "-p", "sch-doc",
-            "--example", "snapshot", "--", str(schematic),
+            "--example", "sch_snapshot", "--", str(schematic),
         ],
         check=False,
     )
@@ -149,16 +149,17 @@ def schematic_changes(before, after):
     """What the agent actually did: which parts moved, and how nets differ."""
     if not before or not after:
         return {}
-    names = lambda snap: {key.split("#")[0] for key in snap["symbols"]}
+    # Symbols are keyed by uuid; [ref, x, y, rot, lib_id, value].
+    names = lambda snap: {value[0] for value in snap["symbols"].values()}
     moved = sorted(
-        key.split("#")[0]
+        value[0]
         for key, value in before["symbols"].items()
-        if key in after["symbols"] and after["symbols"][key][:3] != value[:3]
+        if key in after["symbols"] and after["symbols"][key][1:4] != value[1:4]
     )
     retyped = sorted(
-        key.split("#")[0]
+        value[0]
         for key, value in before["symbols"].items()
-        if key in after["symbols"] and after["symbols"][key][3:] != value[3:]
+        if key in after["symbols"] and after["symbols"][key][4:] != value[4:]
     )
     shared = set(before["nets"]) & set(after["nets"])
     return {

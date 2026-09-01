@@ -279,6 +279,12 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Err(error) => return Ok(json!({ "error": error })),
     };
     let was = refs::net_of(edit.before(), &pin.refdes, &pin.number).map(str::to_string);
+    if was.as_deref() == Some(net) {
+        return Ok(json!({
+            "changed": format!("{spec} is already on `{net}`; nothing to add"),
+            "net_delta": "connectivity unchanged",
+        }));
+    }
     let source = symbol_source(ctx);
     let candidates: Vec<String> = match input.get("lib_id").and_then(Value::as_str) {
         Some(lib_id) => vec![lib_id.to_string()],

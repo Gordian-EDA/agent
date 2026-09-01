@@ -411,9 +411,8 @@ fn tool_defs_for_phase(
                     < discovery_rounds_allowed
         })
         // `create_design` is a one-shot initializer. Once a durable draft
-        // exists, `edit_design` is the only safe authoring surface: advertising
-        // overwrite encourages the model to restart from a partial reconstruction
-        // and discard already-correct work.
+        // exists, advertising it again encourages the model to restart from a
+        // partial reconstruction and discard already-correct work.
         .filter(|tool| !draft_exists || tool.name.as_str() != "create_design")
         // Unchanged-state reads are single-use at a project revision. Removing
         // exhausted schemas prevents another provider round from being spent on
@@ -1064,7 +1063,6 @@ impl<P: Provider> Agent<P> {
                 .as_ref()
                 .and_then(|state| state.errors)
                 .is_some_and(|errors| errors > 0);
-            let draft_component_repairable = draft_supports_component_repair(&self.runtime);
             let pcb_missing_footprints = if pcb_work_requested {
                 draft_missing_footprints(&self.runtime)
             } else {
@@ -1438,26 +1436,12 @@ impl<P: Provider> Agent<P> {
                                 call,
                                 current_draft.as_deref(),
                             )
-                        })
-                        .or_else(|| {
-                            undersized_component_repair_result(
-                                authoritative_intent,
-                                call,
-                                current_draft.as_deref(),
-                            )
                         });
                 let component_shortfall_tool_blocked = component_shortfall_focus
                     .as_ref()
                     .is_some_and(|focus| !focus.permits(&call.fn_name));
                 let unsolicited_pcb_tool_blocked =
                     !pcb_tools_authorized && is_pcb_stage_tool(&call.fn_name);
-                let full_design_repair_blocked = call.fn_name == "repair_components"
-                    && schematic_review_current
-                        .as_ref()
-                        .is_some_and(review_requires_full_design_edit);
-                let malformed_draft_repair_blocked = call.fn_name == "repair_components"
-                    && draft_known_invalid
-                    && !draft_component_repairable;
                 let schematic_review_clean = schematic_review_current
                     .as_ref()
                     .is_some_and(review_result_is_clean);
@@ -1505,8 +1489,6 @@ impl<P: Provider> Agent<P> {
                     && !post_apply_authoring_blocked
                     && !authoring_batch_dependency_blocked
                     && !create_on_existing_draft_blocked
-                    && !full_design_repair_blocked
-                    && !malformed_draft_repair_blocked
                     && !component_shortfall_tool_blocked
                     && !unsolicited_pcb_tool_blocked
                     && minimum_component_guard.is_none();
@@ -1575,7 +1557,7 @@ impl<P: Provider> Agent<P> {
                             "code": "known_invalid_draft",
                             "errors": latest_authoring_diagnostics.as_ref().and_then(|state| state.errors),
                             "warnings": latest_authoring_diagnostics.as_ref().and_then(|state| state.warnings),
-                            "note": "Fix the exact latest diagnostics with one complete edit_design call. Do not spend a semantic review or apply attempt on a draft already known to be invalid.",
+                            "note": "Fix the exact latest diagnostics with one complete create_design call. Do not spend a semantic review or apply attempt on a draft already known to be invalid.",
                         })
                         .to_string(),
                         Vec::new(),
@@ -1612,38 +1594,10 @@ impl<P: Provider> Agent<P> {
                         object.insert("code".into(), json!("precommit_review_defects"));
                         object.insert(
                             "note".into(),
-                            json!("The unchanged draft still has the cached semantic defects above. For localized component defects use repair_components; if review says the circuit/topology is incomplete or largely missing, use edit_design with one COMPLETE corrected YAML document. apply_design cannot proceed until the changed draft passes review."),
+                            json!("The unchanged draft still has the cached semantic defects above. Re-author it with one COMPLETE corrected create_design document; apply_design cannot proceed until the changed draft passes review."),
                         );
                     }
                     (cached.to_string(), Vec::new(), None)
-                } else if full_design_repair_blocked {
-                    (
-                        json!({
-                            "ok": false,
-                            "error": "repair_components cannot repair a circuit that semantic review classified as incomplete or largely missing",
-                            "code": "full_design_edit_required",
-                            "repair_scope": "full_design",
-                            "defects": schematic_review_current.as_ref().and_then(|review| review.get("defects")).cloned().unwrap_or_else(|| json!([])),
-                            "next_tool": "edit_design",
-                            "note": "Send one COMPLETE corrected top-level YAML document with edit_design. Preserve valid existing work, but implement the missing circuit/topology in that single full replacement.",
-                        })
-                        .to_string(),
-                        Vec::new(),
-                        None,
-                    )
-                } else if malformed_draft_repair_blocked {
-                    (
-                        json!({
-                            "ok": false,
-                            "error": "repair_components cannot repair a structurally invalid circuit document",
-                            "code": "full_design_edit_required",
-                            "next_tool": "edit_design",
-                            "note": "Send one COMPLETE corrected top-level YAML document with edit_design. Fix document/block syntax and component pin errors together.",
-                        })
-                        .to_string(),
-                        Vec::new(),
-                        None,
-                    )
                 } else if unchanged_apply_blocked {
                     (
                         json!({
@@ -1684,7 +1638,7 @@ impl<P: Provider> Agent<P> {
                         json!({
                             "error": "create_design cannot replace an existing draft in an agent turn",
                             "code": "existing_draft_requires_edit",
-                            "note": "Preserve the current work: use edit_design with one full corrected YAML document. Do not restart from a partial reconstruction.",
+                            "note": "Preserve the current work: re-send one full corrected YAML document. Do not restart from a partial reconstruction.",
                         })
                         .to_string(),
                         Vec::new(),
@@ -1697,7 +1651,7 @@ impl<P: Provider> Agent<P> {
                         json!({
                             "error": "run_erc requires a committed schematic",
                             "code": "committed_schematic_required",
-                            "note": "Validate the draft through create_design/edit_design, then call apply_design. The successful apply runs ERC automatically.",
+                            "note": "Author the draft with create_design, then call apply_design. The successful apply runs ERC automatically.",
                         })
                         .to_string(),
                         Vec::new(),
@@ -1847,7 +1801,7 @@ impl<P: Provider> Agent<P> {
                             object.insert("code".into(), json!("precommit_review_defects"));
                             object.insert(
                                 "note".into(),
-                                json!("apply_design was deferred. For localized component defects use repair_components; if review says the circuit/topology is incomplete or largely missing, use edit_design with one COMPLETE corrected YAML document. Then apply again; the changed draft will be reviewed automatically."),
+                                json!("apply_design was deferred. Re-author the draft with one COMPLETE corrected create_design document, then apply again; the changed draft will be reviewed automatically."),
                             );
                         }
                         (guided.to_string(), Vec::new(), None)
@@ -1887,7 +1841,7 @@ impl<P: Provider> Agent<P> {
                 if let Some(focus) = ComponentShortfallFocus::from_result(&parsed) {
                     component_shortfall_focus = Some(focus);
                 } else if dispatched
-                    && matches!(call.fn_name.as_str(), "create_design" | "edit_design")
+                    && call.fn_name == "create_design"
                     && component_shortfall_focus
                         .as_ref()
                         .is_some_and(|focus| focus.permits(&call.fn_name))
@@ -3193,23 +3147,6 @@ fn defects_require_full_design_edit(defects: &[String]) -> bool {
     })
 }
 
-fn review_requires_full_design_edit(review: &Value) -> bool {
-    if review.get("repair_scope").and_then(Value::as_str) == Some("full_design")
-        || review.get("requires_full_edit").and_then(Value::as_bool) == Some(true)
-    {
-        return true;
-    }
-    let defects = review
-        .get("defects")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    defects_require_full_design_edit(&defects)
-}
-
 /// A timed-out `spawn_blocking` task may continue after its join handle is
 /// dropped. Once a mutation times out, no later mutation is safe in this
 /// subturn. Reads retain the narrower exact-call, same-revision guard.
@@ -3283,10 +3220,8 @@ fn authoring_diagnostics_state(name: &str, value: &Value) -> Option<AuthoringDia
     if !matches!(
         name,
         "create_design"
-            | "edit_design"
-            | "repair_components"
+
             | "assign_footprints"
-            | "validate_design"
             | "run_erc"
             | "apply_design"
     ) {
@@ -3297,7 +3232,7 @@ fn authoring_diagnostics_state(name: &str, value: &Value) -> Option<AuthoringDia
     // apply guard for a draft that the tool explicitly left unchanged.
     if matches!(
         name,
-        "create_design" | "edit_design" | "repair_components" | "assign_footprints"
+        "create_design" | "assign_footprints"
     ) && value.get("draft_written").and_then(Value::as_bool) == Some(false)
     {
         return None;
@@ -3362,15 +3297,6 @@ fn semantic_draft_hash(runtime: &AgentRuntime) -> Option<u64> {
         .map(|design| circuit_lang::canon::to_canonical_yaml(&design).into_bytes())
         .unwrap_or_else(|| text.into_bytes());
     Some(geom::fnv1a(&bytes))
-}
-
-fn draft_supports_component_repair(runtime: &AgentRuntime) -> bool {
-    let Ok(Some(text)) = runtime.workspace().read_draft() else {
-        return false;
-    };
-    circuit_lang::compile(&text, runtime.provider())
-        .design
-        .is_some()
 }
 
 fn draft_missing_footprints(runtime: &AgentRuntime) -> Vec<String> {
@@ -3601,7 +3527,7 @@ fn prune_large_tool_arguments(history: &mut [ChatMessage]) {
         }
         message.content.iter().rev().find_map(|part| match part {
             ContentPart::ToolCall(call)
-                if matches!(call.fn_name.as_str(), "create_design" | "edit_design")
+                if call.fn_name == "create_design"
                     && call
                         .fn_arguments
                         .get("yaml")
@@ -3667,7 +3593,7 @@ fn prune_stale_tool_results(history: &mut [ChatMessage]) {
 fn tool_args_can_be_pruned(name: &str) -> bool {
     matches!(
         name,
-        "create_design" | "edit_design" | "validate_design" | "apply_design"
+        "create_design" | "apply_design"
     )
 }
 
@@ -3716,7 +3642,7 @@ fn tool_effect(name: &str) -> ToolEffect {
         "apply_design" => ToolEffect::Gated,
         // Project-local draft mutations are intentionally ungated: only
         // apply_design can commit them to the schematic.
-        "create_design" | "edit_design" | "repair_components" | "assign_footprints" => {
+        "create_design" | "assign_footprints" => {
             ToolEffect::Authoring
         }
         // Immediate project/PCB mutations lack a safe dry-run, so approve the
@@ -3750,7 +3676,7 @@ fn wants_apply(call: &ToolCall) -> bool {
 fn is_authoring_for_commit(name: &str) -> bool {
     matches!(
         name,
-        "create_design" | "edit_design" | "repair_components" | "assign_footprints"
+        "create_design" | "assign_footprints"
     )
 }
 
@@ -3792,8 +3718,8 @@ impl ComponentShortfallFocus {
             authoring_tool: result
                 .get("next_tool")
                 .and_then(Value::as_str)
-                .filter(|tool| matches!(*tool, "create_design" | "edit_design"))
-                .unwrap_or("edit_design")
+                .filter(|tool| *tool == "create_design")
+                .unwrap_or("create_design")
                 .to_owned(),
             nudge_pending: true,
         })
@@ -4053,7 +3979,7 @@ fn padded_full_draft_result(
 }
 
 fn undersized_full_draft_result(authoritative_intent: &str, call: &ToolCall) -> Option<Value> {
-    if !matches!(call.fn_name.as_str(), "create_design" | "edit_design") {
+    if call.fn_name != "create_design" {
         return None;
     }
     let required = explicit_minimum_physical_components(authoritative_intent)?;
@@ -4088,7 +4014,7 @@ fn undersized_existing_draft_result(
     call: &ToolCall,
     current_yaml: Option<&str>,
 ) -> Option<Value> {
-    if matches!(call.fn_name.as_str(), "create_design" | "edit_design") {
+    if call.fn_name == "create_design" {
         return None;
     }
     let required = explicit_minimum_physical_components(authoritative_intent)?;
@@ -4110,112 +4036,8 @@ fn undersized_existing_draft_result(
         "shortfall": required - actual,
         "draft_written": false,
         "draft_changed": false,
-        "next_tool": "edit_design",
-        "note": format!("The existing draft was preserved. Submit one complete edit_design YAML document with at least {required} authored physical component entries before footprint assignment, review, apply, or PCB work."),
-    }))
-}
-
-fn surface_component_is_physical(component: &circuit_lang::surface::SurfaceComponent) -> bool {
-    !component.dnp && !component.part.starts_with("power:") && !component.part.starts_with("label:")
-}
-
-/// `repair_components` is transactional, but it can remove authored entries.
-/// Predict the physical-count delta before dispatch so a clean qualifying draft
-/// cannot be durably reduced below the request's explicit floor.
-fn undersized_component_repair_result(
-    authoritative_intent: &str,
-    call: &ToolCall,
-    current_yaml: Option<&str>,
-) -> Option<Value> {
-    if call.fn_name != "repair_components" {
-        return None;
-    }
-    let required = explicit_minimum_physical_components(authoritative_intent)?;
-    let current_yaml = current_yaml?;
-    let surface = circuit_lang::parse::parse_str(current_yaml).0?;
-    let current = draft_physical_count(current_yaml)?;
-    if current.total() < required {
-        // The broader existing-draft guard reports this case.
-        return None;
-    }
-
-    let block_name = call
-        .fn_arguments
-        .get("block")
-        .and_then(Value::as_str)
-        .unwrap_or("main");
-    let block = surface.blocks.get(block_name)?;
-    let mut projected = current.total();
-
-    let remove = match call.fn_arguments.get("remove") {
-        None => Vec::new(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .map(Value::as_str)
-            .collect::<Option<Vec<_>>>()?,
-        Some(_) => return None,
-    };
-    for reference in &remove {
-        let component = block.components.get(*reference)?;
-        if surface_component_is_physical(component) {
-            projected = projected.saturating_sub(1);
-        }
-    }
-
-    let mut upsert = call
-        .fn_arguments
-        .get("upsert")
-        .or_else(|| call.fn_arguments.get("components"))
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    if upsert.len() == 1
-        && let Some(Value::Object(components)) = upsert.get("components")
-    {
-        upsert = components.clone();
-    }
-    for (reference, replacement) in upsert {
-        let replacement = replacement.as_object()?;
-        if remove.contains(&reference.as_str()) {
-            // Let the repair tool return its more specific conflict diagnostic.
-            return None;
-        }
-        let previous = block.components.get(&reference);
-        if previous.is_none()
-            && surface.blocks.iter().any(|(name, other)| {
-                name != block_name && other.components.contains_key(&reference)
-            })
-        {
-            return None;
-        }
-        let was_physical = previous.is_some_and(surface_component_is_physical);
-        let part = replacement.get("part").and_then(Value::as_str)?;
-        let dnp = replacement
-            .get("dnp")
-            .and_then(Value::as_bool)
-            .or_else(|| previous.map(|component| component.dnp))
-            .unwrap_or(false);
-        let is_physical = !dnp && !part.starts_with("power:") && !part.starts_with("label:");
-        projected = projected
-            .saturating_sub(usize::from(was_physical))
-            .saturating_add(usize::from(is_physical));
-    }
-
-    if projected >= required {
-        return None;
-    }
-    Some(json!({
-        "ok": false,
-        "error": format!("component repair would reduce the draft to {projected} physical components, below the explicit minimum of {required}"),
-        "code": "minimum_physical_component_count_not_met",
-        "required_minimum": required,
-        "candidate_physical_components": projected,
-        "authored_physical_candidates": projected,
-        "shortfall": required - projected,
-        "draft_written": false,
-        "draft_changed": false,
-        "next_tool": "edit_design",
-        "note": format!("The existing draft was preserved. Use edit_design with one complete YAML document retaining at least {required} functional physical entries."),
+        "next_tool": "create_design",
+        "note": format!("The existing draft was preserved. Submit one complete create_design YAML document with at least {required} authored physical component entries before footprint assignment, review, apply, or PCB work."),
     }))
 }
 
@@ -4248,31 +4070,28 @@ fn authoring_result_changed_draft(value: &Value) -> bool {
 }
 
 /// The re-prompt sent when the current draft has not been committed.
-const COMMIT_NUDGE: &str = "Your latest draft changes are not committed. Finish the complete \
-     schematic with `edit_design` if needed, then call `apply_design` to submit \
-     this exact current draft for approval before ending your turn.";
+const COMMIT_NUDGE: &str = "Your latest draft changes are not committed. Call `apply_design` \
+     to submit this exact current draft for approval before ending your turn.";
 
 const AUTHORING_TRANSITION_NUDGE: &str = "Catalog discovery is complete and there is still no \
-     draft. Your next action must be `edit_design` with one COMPLETE, non-empty full `yaml` \
+     draft. Your next action must be `create_design` with one COMPLETE, non-empty full `yaml` \
      document implementing the requested circuit from the verified parts. Do not inspect the \
      empty project, render, apply, or resume broad searches before authoring.";
 
 const INVALID_DRAFT_REPAIR_NUDGE: &str = "The current draft is substantive but still invalid. \
-     Fix the exact latest diagnostics now: use one `repair_components` batch for localized \
-     component/refdes/pin/footprint defects, or one COMPLETE `edit_design` only when the broad \
-     document structure is wrong. Do not read, render, validate, apply, or search first; \
-     authoring already returns fresh validation.";
+     Fix the exact latest diagnostics now with one COMPLETE corrected `create_design` document. \
+     Do not read, render, apply, or search first; authoring already returns fresh validation.";
 
 /// The re-prompt sent when a clean draft sits behind a semantic-review
 /// deferral and the model keeps issuing no-op repairs instead of re-applying.
 const REVIEW_REAPPLY_NUDGE: &str = "The draft is authoring-clean and your repairs are recorded. \
      Call `apply_design` now: the semantic review runs again on the updated draft. If defects \
-     remain, fix exactly those with `repair_components`, then apply again.";
+     remain, fix exactly those and apply again.";
 
 /// The re-prompt sent after a commit whose ERC report contains actionable
 /// findings. The result immediately before this message contains the exact
 /// violation details, so no redundant `run_erc` call is needed.
-const ERC_CLEANUP_NUDGE: &str = "The design was written, but the latest `apply_design` ERC report still contains actionable violations. Inspect those exact violations, batch-fix them with `edit_design`, and re-run `apply_design` before ending. Do not claim ERC is clean unless the new apply result says `erc_clean: true`; if a finding is genuinely unavoidable, explain it precisely.";
+const ERC_CLEANUP_NUDGE: &str = "The schematic was written, but the latest ERC report still contains actionable violations. Inspect those exact violations, fix them with the schematic edit tools, and re-run `check_schematic` before ending. Do not claim ERC is clean unless the new check says `erc_clean: true`; if a finding is genuinely unavoidable, explain it precisely.";
 
 const OUTPUT_TRUNCATION_NUDGE: &str = "Your previous response hit the output-token limit before completing a usable tool call. Retry now with exactly one tool call and no prose or private reasoning. Use compact YAML flow syntax, `between`, `positive`/`negative`, and short block/net names; omit optional fields and comments. The YAML must still be one complete functional design meeting the requested physical-component minimum.";
 
@@ -4524,7 +4343,7 @@ async fn review_design(
     let netlist = crate::tools::current_design_yaml(ctx)?;
     if netlist.trim().is_empty() {
         return Ok(json!({
-            "error": "no design to review yet — build one with create_design/edit_design (or apply_design) first",
+            "error": "no design to review yet — build one with create_design and apply_design first",
         }));
     }
     let (score, defects) = review_netlist_with_erc(ctx, reviewer, intent, &netlist).await?;
@@ -4537,7 +4356,7 @@ async fn review_design(
         "no high-confidence functional defects — the design looks electrically sound"
     } else {
         "high-confidence functional defects found (they pass ERC but are electrically wrong); \
-         fix each with edit_design and re-check"
+         fix each with the schematic edit tools and re-check"
     };
     Ok(json!({
         "score": score,
@@ -4837,40 +4656,30 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             let n = result.get("pad_count").and_then(Value::as_u64).unwrap_or(0);
             format!("{lib} → {n} pads")
         }
-        "read_schematic" => "read schematic YAML".to_string(),
+        "read_schematic" => "read the schematic".to_string(),
         "export_fab" => {
             let files = result.get("file_count").and_then(Value::as_u64).unwrap_or(0);
             let dir = result.get("fab_dir").and_then(Value::as_str).unwrap_or("");
             format!("{files} file(s) in {dir}")
         }
-        "validate_design" => {
+        "check_schematic" => {
             let errors = result.get("errors").and_then(Value::as_u64).unwrap_or(0);
             let warnings = result.get("warnings").and_then(Value::as_u64).unwrap_or(0);
-            let omitted = result
-                .get("diagnostics_omitted")
+            let erc = result
+                .get("erc")
+                .and_then(|erc| erc.get("errors"))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            if omitted > 0 {
-                format!("{errors} errors, {warnings} warnings ({omitted} omitted)")
-            } else {
-                format!("{errors} errors, {warnings} warnings")
-            }
+            format!("{errors} errors, {warnings} warnings, {erc} ERC errors")
         }
-        "create_design" | "edit_design" | "repair_components" => {
+        "create_design" => {
             let errors = result.get("errors").and_then(Value::as_u64).unwrap_or(0);
             let warnings = result.get("warnings").and_then(Value::as_u64).unwrap_or(0);
             let omitted = result
                 .get("diagnostics_omitted")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            let mode = result
-                .get("mode")
-                .and_then(Value::as_str)
-                .unwrap_or(match name {
-                    "create_design" => "created",
-                    "repair_components" => "component_repair",
-                    _ => "patched",
-                });
+            let mode = result.get("mode").and_then(Value::as_str).unwrap_or("created");
             if omitted > 0 {
                 format!("{mode}: {errors} errors, {warnings} warnings ({omitted} omitted)")
             } else {
@@ -6317,21 +6126,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn incomplete_semantic_reviews_require_a_full_design_edit() {
-        assert!(review_requires_full_design_edit(&json!({
-            "repair_scope": "full_design",
-            "defects": ["an unfamiliar reviewer phrase"]
-        })));
-        assert!(review_requires_full_design_edit(&json!({
-            "defects": ["- J1: incomplete design / missing essential support components"]
-        })));
-        assert!(!review_requires_full_design_edit(&json!({
-            "repair_scope": "localized",
-            "defects": ["- R7: wrong resistor value"]
-        })));
-    }
-
     #[tokio::test]
     async fn incomplete_review_blocks_component_repair_before_dispatch() {
         let runtime = test_runtime();
@@ -6903,38 +6697,6 @@ mod tests {
     }
 
     #[test]
-    fn component_repair_is_only_offered_for_a_parseable_draft() {
-        let runtime = test_runtime();
-        runtime
-            .workspace()
-            .write_draft(
-                "version: 1\nblocks:\n  BAD NAME:\n    components: {}\n",
-                None,
-            )
-            .unwrap();
-        assert!(!draft_supports_component_repair(&runtime));
-
-        runtime
-            .workspace()
-            .write_draft(
-                "version: 1\nblocks:\n  main:\n    components:\n      R1: {part: Device:R, between: [A, GND]}\n",
-                None,
-            )
-            .unwrap();
-        assert!(draft_supports_component_repair(&runtime));
-
-        assert_eq!(draft_missing_footprints(&runtime), vec!["R1"]);
-        runtime
-            .workspace()
-            .write_draft(
-                "version: 1\nblocks:\n  main:\n    components:\n      R1: {part: Device:R, footprint: Resistor_SMD:R_0603_1608Metric, between: [A, GND]}\n      GND1: {part: power:GND, pins: {1: GND}}\n",
-                None,
-            )
-            .unwrap();
-        assert!(draft_missing_footprints(&runtime).is_empty());
-    }
-
-    #[test]
     fn invalid_draft_bytes_are_not_progress_without_new_diagnostics() {
         let invalid = |draft_hash, errors, fingerprint| DurableAuthoringState {
             draft_hash: Some(draft_hash),
@@ -7177,68 +6939,6 @@ blocks:
             undersized_full_draft_result("Build at least 45 physical parts", &complete_unassigned)
                 .is_none(),
             "a complete schematic may assign its footprints in the next authoring step"
-        );
-    }
-
-    #[test]
-    fn explicit_floor_blocks_preserving_or_reducing_an_undersized_draft() {
-        let small = "version: 1\nblocks: {main: {components: {R1: {part: R, between: [A, B]}}}}\n";
-        let assign = ToolCall {
-            call_id: "assign".into(),
-            fn_name: "assign_footprints".into(),
-            fn_arguments: json!({"assignments": [{
-                "reference": "R1",
-                "footprint": "Resistor_SMD:R_0603_1608Metric"
-            }]}),
-            thought_signatures: None,
-        };
-        let blocked = undersized_existing_draft_result(
-            "Author at least 48 distinct physical component entries",
-            &assign,
-            Some(small),
-        )
-        .expect("scalar footprint assignment must not advance an undersized draft");
-        assert_eq!(blocked["required_minimum"], 48);
-        assert_eq!(blocked["candidate_physical_components"], 1);
-        assert_eq!(blocked["next_tool"], "edit_design");
-
-        let entries = (1..=48)
-            .map(|index| format!("R{index}: {{part: R, between: [N{index}, GND]}}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let qualifying = format!("version: 1\nblocks: {{main: {{components: {{{entries}}}}}}}\n");
-        let remove = ToolCall {
-            call_id: "remove".into(),
-            fn_name: "repair_components".into(),
-            fn_arguments: json!({"remove": ["R48"]}),
-            thought_signatures: None,
-        };
-        let blocked = undersized_component_repair_result(
-            "Author at least 48 distinct physical component entries",
-            &remove,
-            Some(&qualifying),
-        )
-        .expect("component repair must preserve the explicit floor");
-        assert_eq!(blocked["candidate_physical_components"], 47);
-        assert_eq!(blocked["shortfall"], 1);
-        assert_eq!(blocked["draft_changed"], false);
-
-        let replace_one_for_one = ToolCall {
-            call_id: "replace".into(),
-            fn_name: "repair_components".into(),
-            fn_arguments: json!({
-                "components": {"R48": {"part": "Device:C", "between": ["N48", "GND"]}},
-                "replace_existing": true
-            }),
-            thought_signatures: None,
-        };
-        assert!(
-            undersized_component_repair_result(
-                "Author at least 48 distinct physical component entries",
-                &replace_one_for_one,
-                Some(&qualifying),
-            )
-            .is_none()
         );
     }
 

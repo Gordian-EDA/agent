@@ -24,13 +24,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args().nth(1).ok_or("usage: snapshot <file>")?;
     let doc = SchDoc::read(&path)?;
 
+    // Keyed by UUID, which survives a rename; the reference is the first field.
     let mut symbols: BTreeMap<String, String> = BTreeMap::new();
     for symbol in doc.symbols() {
-        let key = format!("{}#{}", symbol.refdes(), symbol.uuid);
         symbols.insert(
-            key,
+            symbol.uuid.clone(),
             format!(
-                "[{:.4},{:.4},{:.1},{},{}]",
+                "[{},{:.4},{:.4},{:.1},{},{}]",
+                quote(symbol.refdes()),
                 symbol.at.x,
                 symbol.at.y,
                 symbol.at.rot,
