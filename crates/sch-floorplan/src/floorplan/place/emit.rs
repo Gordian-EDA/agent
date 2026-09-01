@@ -1,7 +1,7 @@
 //! `place::emit` — IR → millimetre orchestration: `gather` the parts, seed the
 //! coarse grid into mm (`assign_cells`/`apply_cells`), drive the placement engine
 //! (`emit_strategy`/`prepare_writer`), and assemble the routed `SchematicWriter`
-//! (`build_writer`, `compose_writers`).
+//! (`build_writer`).
 
 #![allow(clippy::items_after_test_module)]
 
@@ -289,7 +289,7 @@ pub(crate) fn prepare_writer(
     let ir = placement.ir;
 
     let detected_idioms = ir.idioms.clone();
-    let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir, problem.options);
+    let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
     let evaluator = RoutedEvaluator::new(&realizer);
     let mut w = realizer.realize_writer(
         design.name.as_deref(),
@@ -315,235 +315,6 @@ pub(crate) fn prepare_writer(
     ))
 }
 
-/// Lay out one block group and return its finalized writer plus readability metadata.
-pub fn emit_group(
-    env: &KicadInstallation,
-    design: &Design,
-    engine: Box<dyn PlacementEngine>,
-) -> io::Result<(SchematicWriter, EmitOutput)> {
-    prepare_writer(env, design, None, engine)
-}
-
-/// Lay out one block GROUP and return its FINALIZED-but-unrendered writer (see
-/// [`prepare_writer`]), for the multi-block single-sheet composer. Each group is
-/// laid out INDEPENDENTLY in its own coordinate space (min corner at the page
-/// margin), exactly as a standalone `emit_anneal`; the composer then translates
-/// each writer to its tile and folds them into one. Forces the premium anneal so
-/// composed groups match the agent's single-block quality.
-pub fn emit_writer(
-    env: &KicadInstallation,
-    design: &Design,
-    engine: Box<dyn PlacementEngine>,
-) -> io::Result<SchematicWriter> {
-    Ok(prepare_writer(env, design, None, engine)?.0)
-}
-
-/// Bin-pack tile sizes into the column count whose packed sheet aspect is closest to
-/// `target_aspect`. For each candidate column count `1..=n` the blocks are placed
-/// first-fit-decreasing by height (tallest first, into the currently-shortest column),
-/// the resulting sheet width/height is measured, and the column count minimising
-/// `|width/height - target_aspect|` wins. Returns the per-input tile origin `(x, y)`,
-/// in original input order. A single block (or empty) trivially packs to one column.
-/// First-fit-decreasing column pack at a fixed column count: tallest tile
-/// first into the currently-shortest column. Returns per-input origins and the
-/// packed sheet's width/height aspect. Row packing is this on transposed axes.
-fn pack_ffd(sizes: &[[f64; 2]], margin: f64, ncol: usize) -> (Vec<[f64; 2]>, f64) {
-    let n = sizes.len();
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| sizes[b][1].total_cmp(&sizes[a][1]).then(a.cmp(&b)));
-    let mut col_y = vec![0.0_f64; ncol];
-    let mut col_w = vec![0.0_f64; ncol];
-    let mut col_of = vec![0usize; n];
-    let mut yof = vec![0.0_f64; n];
-    for &i in &order {
-        let c = (0..ncol)
-            .min_by(|&a, &b| col_y[a].total_cmp(&col_y[b]))
-            .unwrap();
-        yof[i] = col_y[c];
-        col_of[i] = c;
-        col_y[c] += sizes[i][1] + margin;
-        col_w[c] = col_w[c].max(sizes[i][0]);
-    }
-    let mut col_x = vec![0.0_f64; ncol];
-    let mut acc = 0.0_f64;
-    for c in 0..ncol {
-        col_x[c] = acc;
-        acc += col_w[c] + margin;
-    }
-    let width = col_x[ncol - 1] + col_w[ncol - 1];
-    let height = col_y.iter().cloned().fold(0.0_f64, f64::max);
-    let tiles: Vec<[f64; 2]> = (0..n).map(|i| [col_x[col_of[i]], yof[i]]).collect();
-    (tiles, if height > 0.0 { width / height } else { 1.0 })
-}
-
-pub(crate) fn pack_columns(sizes: &[[f64; 2]], margin: f64, target_aspect: f64) -> Vec<[f64; 2]> {
-    let n = sizes.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let pack = |ncol: usize| -> (Vec<[f64; 2]>, f64) { pack_ffd(sizes, margin, ncol) };
-
-    // ROW packing is the exact transpose of column packing: swap the axes of
-    // every size, column-pack, swap the resulting origins back. A BANNER tile
-    // (one very wide block among small ones) forces column packing into a
-    // portrait strip; rows lay the smalls in a band under it.
-    let transposed: Vec<[f64; 2]> = sizes.iter().map(|s| [s[1], s[0]]).collect();
-    let pack_rows = |nrow: usize| -> (Vec<[f64; 2]>, f64) {
-        let (tiles, aspect) = pack_ffd(&transposed, margin, nrow);
-        (
-            tiles.into_iter().map(|t| [t[1], t[0]]).collect(),
-            if aspect > 0.0 { 1.0 / aspect } else { 1.0 },
-        )
-    };
-
-    (1..=n)
-        .map(|ncol| {
-            let (tiles, aspect) = pack(ncol);
-            (tiles, (aspect - target_aspect).abs())
-        })
-        .chain((1..=n).map(|nrow| {
-            let (tiles, aspect) = pack_rows(nrow);
-            (tiles, (aspect - target_aspect).abs())
-        }))
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(tiles, _)| tiles)
-        .unwrap()
-}
-
-fn composition_group_ids<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut used = std::collections::HashSet::new();
-    names
-        .into_iter()
-        .map(|name| {
-            let mut base: String = name
-                .chars()
-                .map(|ch| {
-                    if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-') {
-                        ch
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            if base.is_empty() || base.chars().all(|ch| ch == '_') {
-                base = "group".to_owned();
-            }
-            let mut candidate = base.clone();
-            let mut suffix = 2usize;
-            while !used.insert(candidate.clone()) {
-                candidate = format!("{base}_{suffix}");
-                suffix += 1;
-            }
-            candidate
-        })
-        .collect()
-}
-
-/// Compose independently-laid-out block-GROUP writers into ONE `.kicad_sch`. Each
-/// group writer arrives finalized in its own coordinate space (min corner at the
-/// page margin); this column bin-packs the groups (via `pack_columns`) toward a
-/// landscape sheet aspect, translates each to its tile (typed mm math — no string
-/// geometry), frames it
-/// with a dashed rectangle + a bold name label, dedups cross-group `PWR_FLAG`s,
-/// folds every group into one writer, and renders it via a single `finish`.
-/// Cross-group nets are already global labels (same name ⇒ KiCAD joins them on the
-/// one sheet), so no wire crosses a tile border and enlarging the page is free.
-/// Authored group names remain visible as frame titles; a separate sanitized,
-/// collision-free identity seeds graphic UUIDs and generated hidden references.
-pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&str>) -> String {
-    /// Clear space around each group's content so two frames never touch.
-    const TILE_MARGIN: f64 = 22.0;
-    /// The page margin each group writer is reframed to (its min corner sits here).
-    const M: f64 = 12.7;
-
-    // ── PWR_FLAG dedup across groups (KiCAD ERCs "power output ↔ power output" when
-    // the same rail is flagged twice). DRIVEN = a group references the net but flags
-    // no flag for it (a regulator drives it) ⇒ drop ALL its flags; UNDRIVEN raw rail
-    // ⇒ keep exactly one flag globally.
-    let ids = composition_group_ids(groups.iter().map(|(name, _)| name.as_str()));
-    let mut groups: Vec<(String, String, SchematicWriter)> = groups
-        .into_iter()
-        .zip(ids)
-        .map(|((display_name, writer), id)| (display_name, id, writer))
-        .collect();
-    let flag_nets: std::collections::HashSet<String> = groups
-        .iter()
-        .flat_map(|(_, _, w)| w.pwr_flag_nets())
-        .map(|(n, _)| n)
-        .collect();
-    // A flagged net is driven iff some group references it WITHOUT flagging it.
-    let driven: std::collections::HashSet<String> = flag_nets
-        .into_iter()
-        .filter(|net| {
-            groups.iter().any(|(_, _, w)| {
-                w.referenced_nets().contains(net)
-                    && !w.pwr_flag_nets().iter().any(|(n, _)| n == net)
-            })
-        })
-        .collect();
-    let mut kept: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (_, _, w) in &mut groups {
-        let drop: Vec<usize> = w
-            .pwr_flag_nets()
-            .into_iter()
-            .filter(|(net, _)| driven.contains(net) || !kept.insert(net.clone()))
-            .map(|(_, i)| i)
-            .collect();
-        if !drop.is_empty() {
-            w.remove_instances(drop);
-        }
-    }
-    for (_, id, w) in &mut groups {
-        w.namespace_hidden_references(id);
-    }
-
-    // ── Column bin-pack onto a roughly-square sheet. A width-only shelf target degenerates
-    // into a tall ribbon when blocks vary in height (one wide-but-short block forces a narrow
-    // row width, stacking the rest). Instead pick the column count in 1..=n whose packed sheet
-    // is closest to TARGET_ASPECT — first-fit-decreasing by height, each block dropped into the
-    // currently-shortest column — and keep the column assignment that minimises |aspect - 1.4|.
-    const TARGET_ASPECT: f64 = 1.4; // landscape sheets read better than square or portrait
-    let sizes: Vec<[f64; 2]> = groups
-        .iter()
-        .map(|(_, _, w)| w.content_size().unwrap_or([1.0, 1.0]))
-        .collect();
-    let tiles = pack_columns(&sizes, TILE_MARGIN, TARGET_ASPECT);
-
-    // ── Translate each group to its tile, frame it, and fold into one writer. The
-    // group's content min corner sits at M; map it to (tile + TILE_MARGIN).
-    let mut out = SchematicWriter::new();
-    if let Some(t) = title {
-        out.set_title(t);
-    }
-    for (i, (display_name, id, mut w)) in groups.into_iter().enumerate() {
-        let [tx, ty] = tiles[i];
-        let [tw, th] = sizes[i];
-        let (dx, dy) = (
-            geom::GRID_50_MIL.snap(tx + TILE_MARGIN - M),
-            geom::GRID_50_MIL.snap(ty + TILE_MARGIN - M),
-        );
-        w.translate(dx, dy);
-        // Frame: a dashed box hugging the tile's content + a bold name in its
-        // reserved top gutter. Keeping the title inside the frame prevents
-        // top-row groups from colliding with the page border after composition.
-        let (rx0, ry0) = (tx + TILE_MARGIN - 6.0, ty + TILE_MARGIN - 8.0);
-        let (rx1, ry1) = (tx + TILE_MARGIN + tw + 1.0, ty + TILE_MARGIN + th + 1.0);
-        out.add_rect([rx0, ry0], [rx1, ry1], &format!("frame:{id}"));
-        out.add_text(
-            &display_name,
-            [rx0 + 1.0, ry0 + 5.0],
-            3.0,
-            true,
-            &format!("label:{id}"),
-        );
-        out.absorb(w);
-    }
-    out.promote_local_labels_for_global_nets();
-    // Already laid out per group + tiled here; a global reframe would only re-snap.
-    out.set_frame(false);
-    out.finish()
-}
-
 /// Build the complete schematic writer for a placed `items`: symbols (+mirror),
 /// no-connects on unconnected pins, all wiring (rails + routed signals), and ERC
 /// flags. Shared by the final emission and the refinement scorer so both judge
@@ -560,7 +331,6 @@ pub fn build_writer(
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
     fan_risers: bool,
-    multisheet_refine: bool,
 ) -> io::Result<SchematicWriter> {
     let mut w = SchematicWriter::new();
     if let Some(name) = title {
@@ -605,7 +375,6 @@ pub fn build_writer(
         needs_flag,
         &mut flag_points,
         fan_risers,
-        multisheet_refine,
     )?;
     for net in needs_flag {
         if let Some((at, angle)) = flag_points.get(net) {

@@ -16,12 +16,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-/// The floorplan engine reads `MULTISHEET_REFINE` from the PROCESS environment deep
-/// in the emit path, so a test that toggles it must not run concurrently with one
-/// that reads it. Every env-sensitive test in this file takes this lock for its whole
-/// body; the multisheet variant additionally sets+restores the var inside the locked
-/// region, so the two single-sheet-mode tests never observe it mid-flight. (Tests
-/// serialize, but each is the same ~8 min either way — correctness over parallelism.)
+/// The KiCAD CLI and fixture environment are process-global, so this suite
+/// serializes its long-running fixture checks.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 use kicad::KicadInstallation;
@@ -66,7 +62,7 @@ fn validation_corpus_available() -> bool {
         .is_dir()
 }
 
-/// The YAML keys pins by NAME; the KiCAD netlist reports pins by NUMBER. Resolve
+/// The place input keys pins by name; the KiCAD netlist reports pins by number. Resolve
 /// the authored token (number-first then name, `find_pin` order) and compare.
 fn nl_pin_matches(provider: &SymbolTable, lib_id: &str, authored: &str, nl_pin: &str) -> bool {
     if authored == nl_pin {

@@ -363,7 +363,7 @@ impl SchematicWriter {
         });
     }
 
-    /// Add a graphic rectangle (no fill, dashed) to the sheet.
+    /// Add a graphic rectangle annotation.
     pub fn add_rect(&mut self, start: impl Into<Point2>, end: impl Into<Point2>, key: &str) {
         self.rects.push(SheetRect {
             start: GRID_50_MIL.snap_point(start.into()),
@@ -718,7 +718,6 @@ impl SchematicWriter {
         self.junctions.extend(other.junctions);
         self.texts.extend(other.texts);
         self.rects.extend(other.rects);
-        self.fields_above.extend(other.fields_above);
     }
 
     /// Namespace generated hidden references before composing independent
@@ -793,16 +792,6 @@ impl SchematicWriter {
                 nc.uuid_key = format!("{new}:{}", &nc.uuid_key[old.len() + 1..]);
             }
         }
-        self.fields_above = self
-            .fields_above
-            .iter()
-            .flat_map(|refdes| {
-                renamed.get(refdes).map_or_else(
-                    || vec![refdes.clone()],
-                    |instances| instances.iter().map(|(new, _)| new.clone()).collect(),
-                )
-            })
-            .collect();
     }
 
     /// The PWR_FLAG instances in this writer, as `(net, index)` pairs. The
@@ -1149,7 +1138,6 @@ mod tests {
             at: [38.1, 12.7].into(),
             uuid_key: "#SHARED:1:0".to_owned(),
         });
-        w.prefer_fields_above(&std::collections::BTreeSet::from(["#SHARED".to_owned()]));
 
         assert_eq!(
             w.pwr_flag_nets()
@@ -1174,13 +1162,6 @@ mod tests {
         );
         assert!(w.no_connects[0].uuid_key.starts_with("#a_b_SHARED:"));
         assert!(w.no_connects[1].uuid_key.starts_with("#a_b_SHARED_2:"));
-        assert_eq!(
-            w.fields_above,
-            std::collections::BTreeSet::from([
-                "#a_b_SHARED".to_owned(),
-                "#a_b_SHARED_2".to_owned(),
-            ])
-        );
     }
 
     #[test]

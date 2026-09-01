@@ -211,7 +211,6 @@ pub fn place_parts(
         crate::realize::Draw {
             title: design.name.as_deref(),
             frame: fresh,
-            ..Default::default()
         },
     )?;
     let warnings = writer.layout_warnings();

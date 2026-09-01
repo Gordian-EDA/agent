@@ -49,9 +49,7 @@ impl PlacementEngine for SpinePlace {
         // Authored cells and grids are input to this engine, not a reason to
         // silently substitute a sibling engine. Engine selection remains a
         // caller-owned decision.
-        let ir = ir.unwrap_or_else(|| {
-            sch_floorplan::floorplan::infer_ir_with_options(env, design, problem.options)
-        });
+        let ir = ir.unwrap_or_else(|| sch_floorplan::floorplan::infer_ir(env, design));
         // An item already frozen on arrival carries a LIVE pose its caller owns (the
         // region adapter's fixed neighbours); the IR's idiom clusters are pinned on top.
         let preseeded: Vec<Option<(Point2, f64)>> = problem
@@ -258,7 +256,7 @@ impl SpinePlace {
         // One full placement variant: arrange (folded or not), commit, orphan
         // sweep, safety passes, truthfulness self-check with collinearity
         // stagger. Returns the metrics the fold A/B decides on.
-        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir, problem.options);
+        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
         let eval = RoutedEvaluator::new(&realizer);
         // Bundle-freed nodes: every wired chain of the node rides a BUNDLE (>=4
         // parallel nets between one item pair — always realized as labels), so

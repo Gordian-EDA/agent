@@ -1,7 +1,7 @@
 //! sch-check: the kernel circuit model plus everything that judges it.
 //!
 //! The model ([`Design`]) is authoring-agnostic — it is what a `.kicad_sch`
-//! extractor, a bulk-create tool call, or the YAML front end all reduce to — and
+//! extractor or a bulk-create tool call reduces to — and
 //! the checkers ([`lint`], [`erc`]) run over it without ever seeing source text.
 //! Pure: no I/O.
 

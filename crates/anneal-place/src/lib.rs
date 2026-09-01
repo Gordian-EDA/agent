@@ -55,9 +55,7 @@ impl PlacementEngine for Anneal {
         problem: &mut SchematicPlaceProblem,
         ir: Option<LayoutIr>,
     ) -> PlacementOutput {
-        let ir = ir.unwrap_or_else(|| {
-            sch_floorplan::floorplan::infer_ir_with_options(env, design, problem.options)
-        });
+        let ir = ir.unwrap_or_else(|| sch_floorplan::floorplan::infer_ir(env, design));
         for it in &mut problem.items {
             it.mirror = ir.mirror.contains(&it.refdes);
         }
@@ -97,7 +95,7 @@ impl PlacementEngine for Anneal {
             decongest(&mut problem.items);
         }
 
-        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir, problem.options);
+        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
         let eval = RoutedEvaluator::new(&realizer);
         PlacementOutput {
             result: report(self.name(), problem, &eval),
@@ -583,8 +581,7 @@ pub fn anneal_place(
     engine: &'static str,
 ) -> PlaceResult {
     let inc = &problem.inc;
-    let realizer =
-        RoutedSheetRealizer::new(env, inc, ir, sch_place::place::PlaceOptions::default());
+    let realizer = RoutedSheetRealizer::new(env, inc, ir);
     let eval = RoutedEvaluator::new(&realizer);
     let seed = problem.seed;
     use rayon::prelude::*;
@@ -630,7 +627,7 @@ pub fn anneal_place(
             .count()
     };
     let port_heavy = signal_ports >= 6;
-    let force_fast = port_heavy || problem.options.force_fast;
+    let use_fast_lane = port_heavy;
 
     // A tiny pair of two-pin passives with at most two shared nets has no third
     // body and only a single direct path per net, so it has no routing topology for
@@ -643,7 +640,7 @@ pub fn anneal_place(
         && problem.items.iter().all(|item| item.geom.pins.len() <= 2)
         && shared_nets <= 2
         && signal_ports <= 2
-        && !force_fast;
+        && !use_fast_lane;
     if trivial_chain {
         let seed_items = problem.items.clone();
         decongest(&mut problem.items);
@@ -654,7 +651,7 @@ pub fn anneal_place(
         problem.items = seed_items;
     }
 
-    if pins > FAST_PINS || force_fast {
+    if pins > FAST_PINS || use_fast_lane {
         let raw: Vec<Item> = problem.items.to_vec();
         // Diverse proxy-anneal starts; fewer for very large boards (each candidate
         // costs two real routes at selection, ~1 s each on a 671-pin BGA).
@@ -772,13 +769,13 @@ pub fn anneal_place(
         // few crossings): such boards can't meaningfully improve, so the routed budget
         // would be pure wasted wall-time. Every refinement win this far had a best with
         // ≥7 crossings or a warning, so a ≤6/0-warning gate keeps all wins.
-        // NEVER skip the refinement on a forced-fast (multi-sheet) sub-sheet: even at 0-1
+        // Never skip the refinement on a small port-heavy sheet: even at 0-1
         // crossings it often has CAP-SCATTER / long satellite runs (a 3V3 bulk cap marooned
         // far from the regulator output) — an HPWL/straightness defect the crossing-based skip
         // misses but the refinement's true routed-cost objective fixes (it's kept only if the
         // amplified score improves). Cheap on a small sheet. A big board still skips when clean.
-        let small_forced = force_fast && pins <= FAST_PINS;
-        if !small_forced && bb == 0 && bw == 0 && bx <= 6 {
+        let small_port_heavy = use_fast_lane && pins <= FAST_PINS;
+        if !small_port_heavy && bb == 0 && bw == 0 && bx <= 6 {
             problem.items.clone_from_slice(&candidates[best]);
             return report(engine, problem, &eval);
         }
@@ -848,12 +845,12 @@ pub fn anneal_place(
                 }
             }
         }
-        // force_fast SMALL sub-sheets: the fast lane's locality proxy can be crossing-worse
-        // than the small-board path on SIMPLE sheets (split-supply power: 4 here vs 2). Run the
+        // Small port-heavy sheets can be crossing-worse through the locality proxy
+        // than through the small-board path. Run the
         // small path too and keep whichever has fewer (breaks, warnings, crossings) via the same
         // `score` — so a congested sheet still gets the fast lane's refinement (io 16→13) while a
-        // simple sheet gets the small path's cleaner routing. Cheap: only for force_fast smalls.
-        if small_forced {
+        // simple sheet gets the small path's cleaner routing.
+        if small_port_heavy {
             let sp = small_path_search(
                 problem, &realizer, &eval, &bases[0], inc, ir, seed, timed_top,
             );
@@ -871,7 +868,7 @@ pub fn anneal_place(
     }
 
     // Small board: greedy + four parallel anneals, pick the polished winner.
-    // Extracted to small_path_search so the force_fast fast lane can run it as a
+    // Extracted so the small port-heavy fast lane can run it as a
     // rival candidate; this call reproduces the old inline behaviour exactly.
     let placed = small_path_search(
         problem,
@@ -910,7 +907,7 @@ fn report(engine: &str, problem: &SchematicPlaceProblem, eval: &RoutedEvaluator)
     }
 }
 /// The small-board placement search, extracted so the fast lane can run it as a RIVAL
-/// candidate for force_fast SMALL sub-sheets (the fast lane's locality proxy is
+/// candidate for small port-heavy sheets (the fast lane's locality proxy is
 /// crossing-worse than this on simple sheets — a split-supply power sheet sat at 4
 /// crossings via the fast lane vs 2 here). Greedy refine + four parallel anneals (A
 /// seeded, B broad, C amplified, D locality), then pick the polished winner by

@@ -17,7 +17,6 @@ use sch_check::Design;
 use sch_doc::SchDoc;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
-use sch_place::place::PlaceOptions;
 
 use crate::contract::{RouteRealization, RoutedSheetRealizer};
 use crate::floorplan::place::add_orphan_label_columns;
@@ -32,7 +31,6 @@ pub struct Draw<'a> {
     /// whole sheet, wrong when the caller placed them beside content that is already
     /// there — so live editing leaves it off.
     pub frame: bool,
-    pub options: PlaceOptions,
 }
 
 /// Draw `items` at the poses they carry: route, label, no-connect, text-solve.
@@ -44,7 +42,7 @@ pub fn realize_block(
     ir: &LayoutIr,
     draw: Draw<'_>,
 ) -> std::io::Result<SchematicWriter> {
-    let realizer = RoutedSheetRealizer::new(env, inc, ir, draw.options);
+    let realizer = RoutedSheetRealizer::new(env, inc, ir);
     let mut writer = realizer.realize_writer(draw.title, items, RouteRealization::ShippedSheet)?;
     add_orphan_label_columns(&mut writer, design, inc);
     writer.set_frame(draw.frame);

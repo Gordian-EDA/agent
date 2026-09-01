@@ -22,7 +22,6 @@ use circuit_graph::netclass::is_ground;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
 use sch_place::place::Crossings;
-use sch_place::place::PlaceOptions;
 
 use sch_place::place::PlaceResult;
 
@@ -89,22 +88,11 @@ pub struct RoutedSheetRealizer<'a> {
     env: &'a KicadInstallation,
     inc: &'a Incidence,
     ir: &'a LayoutIr,
-    options: PlaceOptions,
 }
 
 impl<'a> RoutedSheetRealizer<'a> {
-    pub fn new(
-        env: &'a KicadInstallation,
-        inc: &'a Incidence,
-        ir: &'a LayoutIr,
-        options: PlaceOptions,
-    ) -> Self {
-        Self {
-            env,
-            inc,
-            ir,
-            options,
-        }
+    pub fn new(env: &'a KicadInstallation, inc: &'a Incidence, ir: &'a LayoutIr) -> Self {
+        Self { env, inc, ir }
     }
 
     pub fn env(&self) -> &'a KicadInstallation {
@@ -126,7 +114,6 @@ impl<'a> RoutedSheetRealizer<'a> {
             self.ir,
             &needs_flag,
             mode.fan_risers(),
-            self.options.force_fast,
         )
     }
 }

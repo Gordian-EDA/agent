@@ -88,7 +88,7 @@ impl PlacementEngine for ClusterPlace {
         if problem.items.is_empty() || problem.items.len() > 70 {
             return out;
         }
-        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir, problem.options);
+        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir);
         let eval = RoutedEvaluator::new(&realizer);
         // The SA's RENDERED sprawl (post text-solve + orphan label-columns), captured BEFORE
         // pose, is the baseline the de-sprawl floorplanner must beat outright — measured the
@@ -173,7 +173,7 @@ impl PlacementEngine for ClusterPlace {
             if let Some(rail) = compact::rail_relayout(&mut problem.items, &problem.inc, &out.ir) {
                 let mut ir_rail = out.ir.clone();
                 ir_rail.rail_force.insert(rail);
-                let rz = RoutedSheetRealizer::new(env, &problem.inc, &ir_rail, problem.options);
+                let rz = RoutedSheetRealizer::new(env, &problem.inc, &ir_rail);
                 let ev = RoutedEvaluator::new(&rz);
                 let got = ev
                     .shipped(design, &problem.items)
@@ -195,7 +195,7 @@ impl PlacementEngine for ClusterPlace {
                 crate::eval::restore(&mut problem.items, &pre);
             }
         }
-        let final_realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir, problem.options);
+        let final_realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir);
         let final_eval = RoutedEvaluator::new(&final_realizer);
         out.result = report(self.name(), &problem.items, &final_eval);
         out

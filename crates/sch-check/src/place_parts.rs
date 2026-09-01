@@ -104,8 +104,7 @@ pub const DEFAULT_BLOCK: &str = "main";
 /// against the symbol table, `decouple` expanded into [`Origin::Synthesized`]
 /// caps, unconnected signal pins marked no-connect, net attributes derived.
 ///
-/// The same lowering the YAML front end performs, so a circuit stated either way
-/// reaches the checkers as the same design. Diagnostics carry what makes the
+/// Diagnostics carry what makes the
 /// input un-buildable — an unknown part or pin, a duplicate refdes; the caller
 /// decides whether to apply a design that carries them.
 pub fn into_design(input: &PlacePartsInput, provider: &SymbolTable) -> (Design, Diagnostics) {

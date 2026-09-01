@@ -15,16 +15,15 @@ pub fn refdes_key(r: &str) -> (&str, u64) {
 /// The kernel design: parts, their pin→net map, and net attributes.
 ///
 /// The one thing the checkers, the placement engines, and the writer operate
-/// on — whatever built it (a live `.kicad_sch`, a tool call, or the YAML front
-/// end). It holds connectivity and intent, never geometry.
+/// on — whether built from a live `.kicad_sch` or a tool call. It holds
+/// connectivity and intent, never geometry.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Design {
     pub name: Option<String>,
     pub description: Option<String>,
     pub blocks: IndexMap<BlockName, Block>,
     pub nets: IndexMap<NetName, NetAttrs>,
-    /// Lint codes this design suppresses — a deliberate exception the author
-    /// recorded (the YAML front end reads them from `lint: {allow: [...]}`).
+    /// Lint codes this design suppresses as deliberate exceptions.
     pub lint_allow: std::collections::BTreeSet<String>,
 }
 
