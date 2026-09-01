@@ -79,6 +79,17 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .map(|part| part.refdes.clone())
         .collect::<Vec<_>>();
+    let derived: Vec<String> = payload
+        .parts
+        .iter()
+        .flat_map(|part| part.pins.values())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|net| crate::refs::derived_name_refusal(edit.before(), net))
+        .collect();
+    if !derived.is_empty() {
+        return Ok(json!({ "ok": false, "code": "derived_net_name", "nets": derived }));
+    }
     let report = match sch_floorplan::live::place_parts(
         ctx.env(),
         &mut edit.doc,
@@ -93,6 +104,11 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "dangling": audit.dangling,
                 "did_you_mean": audit.did_you_mean,
                 "unknown_pins": audit.unknown_pins,
+                "note": "each dangling pin names a net that would carry no second pin. \
+                         `on_sheet: false` means the sheet has no such net — name a net the \
+                         payload or the sheet already carries, or declare the pin that joins it \
+                         in this same call. Re-read the schematic before retrying if an earlier \
+                         edit emptied the net.",
             }));
         }
         Err(error) => return Err(error.into()),

@@ -79,6 +79,12 @@ pub struct DanglingPin {
     pub refdes: RefDes,
     pub pin: String,
     pub net: NetName,
+    /// Pins the net would carry in total — payload and live sheet together.
+    /// One is the dangling pin itself; a caller reading `1` knows the net is
+    /// new or has been emptied, not that it mistyped a busy net's name.
+    pub pins_on_net: usize,
+    /// Whether the live sheet already carries this net at all.
+    pub on_sheet: bool,
 }
 
 /// Findings that make a bulk-create payload electrically incomplete.
@@ -225,11 +231,14 @@ fn audit_payload(
             if net.eq_ignore_ascii_case("nc") || pins::resolve(&meta, pin).is_empty() {
                 continue;
             }
-            if pin_counts.get(net).copied().unwrap_or_default() < 2 {
+            let pins_on_net = pin_counts.get(net).copied().unwrap_or_default();
+            if pins_on_net < 2 {
                 audit.dangling.push(DanglingPin {
                     refdes: spec.refdes.clone(),
                     pin: pin.clone(),
                     net: net.clone(),
+                    pins_on_net,
+                    on_sheet: existing.contains_key(net),
                 });
                 if !existing.contains_key(net)
                     && let Some(candidate) =

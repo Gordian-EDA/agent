@@ -302,6 +302,9 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         other => return Ok(json!({ "error": format!("unknown label kind `{other}`") })),
     };
     let mut edit = Edit::open(ctx)?;
+    if let Some(error) = refs::derived_name_refusal(edit.before(), net) {
+        return Ok(json!({ "error": error }));
+    }
     let pin = match refs::pin(&edit.doc, spec) {
         Ok(pin) => pin,
         Err(error) => return Ok(reference_error(&edit.doc, &input, error)),

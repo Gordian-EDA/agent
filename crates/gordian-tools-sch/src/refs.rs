@@ -169,3 +169,31 @@ pub(crate) fn ends(wire: &sch_doc::Wire) -> Option<(Point2, Point2)> {
 pub(crate) fn label(pin: &PinRef) -> String {
     format!("{}.{}", pin.refdes, pin.pin)
 }
+
+/// Why a name KiCAD generated for an unnamed net cannot be reused as a label.
+///
+/// `read_schematic` shows those names — `Net-(U1B-G)` — and they read like an
+/// identity anything may join. They are not: they are derived from the net's
+/// own pins each time connectivity is extracted. Writing a label with that text
+/// creates a *second* net, and KiCAD silently disambiguates the original to
+/// `…_1`, severing a signal path that every guard still calls unchanged.
+pub(crate) fn derived_name_refusal(netlist: &Netlist, net: &str) -> Option<String> {
+    let auto = netlist
+        .nets
+        .iter()
+        .find(|candidate| candidate.name == net && candidate.source == sch_doc::NetSource::Auto)?;
+    let pins = auto
+        .pins
+        .iter()
+        .take(4)
+        .map(label)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "refused: `{net}` is the name KiCAD generates for an unnamed net ({pins}), not a label \
+         anything can join — naming a new node `{net}` forks it and renames the original to \
+         `{net}_1`. Name that net first with `label({{pin: \"{first}\", net: \"…\"}})` and use the \
+         name you gave it, or connect straight to one of its pins.",
+        first = auto.pins.first().map(label).unwrap_or_default()
+    ))
+}

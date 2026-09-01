@@ -268,3 +268,73 @@ fn adding_a_multi_unit_part_places_every_unit() {
         "LM358 is a multi-unit part; only {units} unit reached the sheet:\n{after}"
     );
 }
+
+/// A swap that keeps every pin number but turns one into a supply pin passes the
+/// connectivity guard untouched — the net partition is identical — while KiCAD
+/// gains a `power_pin_not_driven` error the sheet has no way to answer. Swapping
+/// a plain 2-pin part for a power symbol is the smallest form of that change.
+#[test]
+fn a_swap_that_makes_a_mapped_pin_a_supply_pin_is_refused() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "Connector_Generic:Conn_01x01", "ref": "J1"}]}),
+    );
+    assert!(placed.get("error").is_none(), "fixture failed: {placed}");
+    let before = std::fs::read(ctx.sch_path()).unwrap();
+
+    let result = call(&ctx, "swap_symbol", json!({"ref": "J1", "lib_id": "power:GND"}));
+    let error = result["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("supply pin"),
+        "the swap must name the newly undriven supply pin: {result}"
+    );
+    assert_eq!(
+        std::fs::read(ctx.sch_path()).unwrap(),
+        before,
+        "a refused swap must not write the schematic"
+    );
+}
+
+/// `read_schematic` prints the names KiCAD generates for unnamed nets, and they
+/// read like identities. Labelling another node with one forks the net instead
+/// of joining it — KiCAD renames the original to `…_1` — and no connectivity
+/// guard sees a break, because on paper both nets still exist.
+#[test]
+fn labelling_a_node_with_a_generated_net_name_is_refused() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [
+            {"lib_id": "Device:R", "ref": "R1"},
+            {"lib_id": "Device:R", "ref": "R2"},
+            {"lib_id": "Device:R", "ref": "R3"},
+        ]}),
+    );
+    assert!(placed.get("error").is_none(), "fixture failed: {placed}");
+    let joined = call(&ctx, "connect", json!({"from": "R1.2", "to": "R2.1"}));
+    assert!(joined.get("error").is_none(), "fixture failed: {joined}");
+
+    let text = listing(&ctx);
+    let start = text.find("Net-(").expect("an unnamed net gets a generated name");
+    let generated = &text[start..start + text[start..].find(')').unwrap() + 1];
+
+    let result = call(&ctx, "label", json!({"pin": "R3.1", "net": generated}));
+    let error = result["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("generates for an unnamed net"),
+        "labelling `{generated}` must be refused: {result}"
+    );
+    assert!(
+        !listing(&ctx).contains(&format!("{generated}_1")),
+        "the original net was forked anyway"
+    );
+}

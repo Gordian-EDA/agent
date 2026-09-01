@@ -51,6 +51,22 @@ const UNCHANGED_SCHEMATIC_NUDGE: &str = "the schematic is unchanged since the tu
 /// explicit component floor in the request raises it via [`TurnBudgets`].
 const MAX_PROVIDER_REQUESTS_PER_TURN: usize = 32;
 
+/// How many provider requests are left when the model is told to wrap up.
+/// A turn that runs into [`MAX_PROVIDER_REQUESTS_PER_TURN`] aborts with the
+/// schematic in whatever state the last edit left it, which is the worst
+/// outcome available; the model cannot see the budget, so it is told once,
+/// while there is still room to land a correction and a final check.
+const PROVIDER_REQUEST_WRAP_UP_RESERVE: usize = 6;
+
+fn wrap_up_nudge(remaining: usize) -> String {
+    format!(
+        "Budget warning: {remaining} model requests remain in this turn, after which it aborts \
+         and the work is reported incomplete. Stop exploring. Land at most one more corrective \
+         edit, run check_schematic, and then answer with your final summary. Do not repeat a call \
+         that has already failed with the same arguments."
+    )
+}
+
 /// A provider request has no project-side effects, so transient transport
 /// failures are safe to retry. Keep this small so bad credentials and other
 /// persistent configuration errors still fail promptly.
@@ -711,6 +727,7 @@ impl<P: Provider> Agent<P> {
         let mut check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
         let mut provider_requests = 0usize;
+        let mut wrap_up_sent = false;
         let mut provider_error_retries_left = MAX_PROVIDER_ERROR_RETRIES;
         let mut stream_transport_available = true;
         let mut tool_calls_made = 0usize;
@@ -739,6 +756,11 @@ impl<P: Provider> Agent<P> {
                         requests: provider_requests,
                     },
                 });
+            }
+            let remaining = budgets.provider_requests - provider_requests;
+            if !wrap_up_sent && remaining <= PROVIDER_REQUEST_WRAP_UP_RESERVE {
+                wrap_up_sent = true;
+                self.history.push(ChatMessage::user(wrap_up_nudge(remaining)));
             }
             provider_requests += 1;
 
@@ -2295,7 +2317,9 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             },
         );
     }
-    if result.get("ok").and_then(Value::as_bool) == Some(false) {
+    // `check_schematic` reports `ok: false` as a verdict on the sheet, not as a
+    // refusal to act; its own arm below says what the verdict was.
+    if name != "check_schematic" && result.get("ok").and_then(Value::as_bool) == Some(false) {
         let code = result
             .get("code")
             .and_then(Value::as_str)
@@ -2305,19 +2329,26 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             .and_then(Value::as_array)
             .and_then(|items| items.first())
             .and_then(|item| {
+                let net = item.get("net")?.as_str()?;
+                let whereabouts = if item.get("on_sheet")?.as_bool()? {
+                    format!("{net} is on the sheet but has no other pin")
+                } else {
+                    format!("no net {net} on the sheet")
+                };
                 Some(format!(
-                    "{}.{} on {} is dangling",
+                    "{}.{} on {net} is dangling ({whereabouts})",
                     item.get("ref")?.as_str()?,
                     item.get("pin")?.as_str()?,
-                    item.get("net")?.as_str()?
                 ))
             })
             .or_else(|| {
-                result
-                    .get("unknown_pins")
-                    .and_then(Value::as_array)
-                    .and_then(|items| items.iter().find_map(Value::as_str))
-                    .map(str::to_string)
+                ["unknown_pins", "nets"].iter().find_map(|key| {
+                    result
+                        .get(key)
+                        .and_then(Value::as_array)
+                        .and_then(|items| items.iter().find_map(Value::as_str))
+                        .map(str::to_string)
+                })
             });
         return detail.map_or_else(
             || format!("refused: {code}"),
@@ -2661,14 +2692,35 @@ mod tests {
         let result = json!({
             "ok": false,
             "code": "invalid_payload",
-            "dangling": [{"ref": "D1", "pin": "K", "net": "LED_K"}],
+            "dangling": [
+                {"ref": "D1", "pin": "K", "net": "LED_K", "pins_on_net": 1, "on_sheet": false}
+            ],
             "did_you_mean": {},
             "unknown_pins": []
         });
 
         assert_eq!(
             tool_summary("place_parts", &json!({}), &result),
-            "refused: invalid_payload — D1.K on LED_K is dangling"
+            "refused: invalid_payload — D1.K on LED_K is dangling (no net LED_K on the sheet)"
+        );
+    }
+
+    /// `check_schematic` answers `ok: false` about the sheet it inspected; a
+    /// summary reading "refused" makes a report look like a tool that declined
+    /// to run, and hides the counts that say what to fix.
+    #[test]
+    fn a_failing_check_reports_its_counts_rather_than_a_refusal() {
+        let result = json!({
+            "ok": false,
+            "errors": 1,
+            "warnings": 9,
+            "erc": {"errors": 3},
+            "completeness": {"warnings": 2}
+        });
+
+        assert_eq!(
+            tool_summary("check_schematic", &json!({}), &result),
+            "1 errors, 9 warnings, 3 ERC errors, 2 completeness gaps"
         );
     }
 }

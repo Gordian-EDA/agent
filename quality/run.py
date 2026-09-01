@@ -121,7 +121,10 @@ def sch_facts(*args):
 
 def kicad_partition(schematic, out_path):
     """KiCAD's own net partition: sorted `REF.PIN` groups, power symbols and
-    single-pin nets dropped so it is comparable to the extractor's."""
+    single-pin nets dropped so it is comparable to the extractor's, plus the
+    named nets exactly as KiCAD sees them. The named form is what settles a
+    connectivity question for the judge, which otherwise has only a render —
+    where a wire passing behind a symbol reads as a short that is not there."""
     result = command(
         [
             "kicad-cli", "sch", "export", "netlist",
@@ -130,16 +133,18 @@ def kicad_partition(schematic, out_path):
         check=False,
     )
     if not out_path.exists():
-        return None, (result.stderr or result.stdout).strip()
+        return None, None, (result.stderr or result.stdout).strip()
     try:
         nets = ET.parse(out_path).getroot().find("nets")
     except ET.ParseError as error:
-        return None, f"malformed netlist export: {error}"
-    groups = [
-        [f"{n.get('ref')}.{n.get('pin')}" for n in net.findall("node")]
+        return None, None, f"malformed netlist export: {error}"
+    named = {
+        net.get("name"): sorted(
+            f"{n.get('ref')}.{n.get('pin')}" for n in net.findall("node")
+        )
         for net in (nets if nets is not None else [])
-    ]
-    return normalize_partition(groups), None
+    }
+    return normalize_partition(named.values()), named, None
 
 
 def normalize_partition(groups):
@@ -196,6 +201,48 @@ def flat_net_delta(delta):
     return {f"net_delta_{key}": value for key, value in delta.items()}
 
 
+def paths_broken(before_partition, kicad_nets, added_refs):
+    """Pins that shared a net before and no longer reach each other.
+
+    Inserting a series part splits a net in two, and that split is what the
+    edit was asked for — `net_delta_split` cannot tell it from a severed signal
+    path. Reachability can: every added part bridges its own pins, so a correct
+    insertion leaves the old net's pins in one component of the after-netlist
+    once those bridges are laid in. A pair still apart was cut.
+    """
+    if kicad_nets is None:
+        return []
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    on_net = {}
+    for net, nodes in kicad_nets.items():
+        for node in nodes:
+            union(node, net)
+            on_net.setdefault(node.split(".")[0], set()).add(net)
+    for ref in added_refs:
+        nets = sorted(on_net.get(ref, ()))
+        for net in nets[1:]:
+            union(nets[0], net)
+
+    broken = []
+    for group in before_partition:
+        live = [pin for pin in group if pin in parent]
+        for pin in live[1:]:
+            if find(pin) != find(live[0]):
+                broken.append([live[0], pin])
+    return sorted(broken)
+
+
 def schematic_facts(project, before_project, artifacts):
     """Everything measurable about the schematic, before against after.
 
@@ -215,10 +262,11 @@ def schematic_facts(project, before_project, artifacts):
     if "error" in after:
         return facts, detail
 
-    kicad, kicad_error = kicad_partition(schematic, artifacts / "netlist.xml")
+    kicad, kicad_nets, kicad_error = kicad_partition(schematic, artifacts / "netlist.xml")
     extracted = normalize_partition(after["partition"])
     facts.update(
         {
+            "kicad_nets": kicad_nets,
             "sch_errors": after["errors"],
             "symbol_count": after["symbol_count"],
             "part_count": after["part_count"],
@@ -238,6 +286,11 @@ def schematic_facts(project, before_project, artifacts):
             set(after["unconnected_pins"]) - set(before["unconnected_pins"])
         )
         facts.update(flat_net_delta(sch_facts("--diff", before_project, project)))
+        facts["paths_broken"] = paths_broken(
+            normalize_partition(before["partition"]),
+            kicad_nets,
+            {key.split("/")[0] for key in facts["symbols_added"]},
+        )
         detail["sch_before"] = before
     return facts, detail
 
@@ -440,6 +493,13 @@ MACHINE CHECKS ALREADY EVALUATED:
 position or rotation changed; on an edit case that is a regression even when the
 result looks fine. `fields_lost` lists properties dropped from a surviving part.
 `net_delta_*` is the change to the net partition.
+
+`kicad_nets` is KiCAD's own netlist of the delivered schematic: every net and
+every pin on it. It, not the render, decides what is connected to what. Never
+claim a short, a missing connection, an isolated node or a wrong topology that
+`kicad_nets` contradicts — two wires crossing, a label sitting over a symbol, or
+a part drawn far from its net all look wrong and are not. Judge the render for
+what only it can show: readability, overlap, clipping, layout and orientation.
 
 The images are labeled by filename as before/after schematic or PCB renders.
 Return only JSON with this exact shape:
