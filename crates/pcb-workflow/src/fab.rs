@@ -16,8 +16,7 @@ use gordian_runtime::AgentRuntime;
 /// and report the produced files.
 ///
 /// Precondition: the board must already exist and should have passed
-/// `check_board`. Optional `out_dir` overrides the output directory
-/// (default `<project>/fab/`).
+/// `check_board`. The bundle always lands in `<project>/fab/`.
 ///
 /// Produces, all keyed off the board: Gerbers (one `*.gbr` per layer), a
 /// separate-PTH/NPTH Excellon drill set with drill maps, and a CSV
@@ -25,7 +24,7 @@ use gordian_runtime::AgentRuntime;
 /// added; otherwise BOM is skipped with a note (the PCB carries no part values).
 /// Returns the bundle directory and the full produced-file list. Individual
 /// exporter failures are surfaced as a recoverable `{error}` value, not `Err`.
-pub fn export_fab(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+pub fn export_fab(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let board = ctx.pcb_path();
     if super::interactive::save_session_if_open(ctx).is_err() {
         // Export the on-disk board — the offline write paths keep it current.
@@ -75,10 +74,7 @@ pub fn export_fab(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     }
 
-    let out_dir = match input.get("out_dir").and_then(Value::as_str) {
-        Some(d) => PathBuf::from(d),
-        None => ctx.project_dir().join("fab"),
-    };
+    let out_dir = ctx.project_dir().join("fab");
     if let Err(e) = std::fs::create_dir_all(&out_dir) {
         return Ok(json!({
             "error": format!("could not create fab dir {}: {e}", out_dir.display()),

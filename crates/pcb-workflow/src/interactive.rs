@@ -432,21 +432,31 @@ fn resolve_move_parts(
     })
 }
 
+/// A millimetre point, written either as `[x, y]` or as the `{x, y}` object the
+/// board queries report positions in.
 fn parse_point(input: &Value, key: &str, ctx: &str) -> std::result::Result<Point2, String> {
-    let values = input
-        .get(key)
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("{ctx}: `{key}` must be [x, y] in mm"))?;
-    if values.len() != 2 {
-        return Err(format!("{ctx}: `{key}` must be exactly [x, y] in mm"));
+    let malformed = || format!("{ctx}: `{key}` must be [x, y] or {{x, y}} in mm");
+    match input.get(key) {
+        Some(Value::Array(values)) => {
+            let [x, y] = values.as_slice() else {
+                return Err(malformed());
+            };
+            match (x.as_f64(), y.as_f64()) {
+                (Some(x), Some(y)) => Ok(Point2::new(x, y)),
+                _ => Err(malformed()),
+            }
+        }
+        Some(Value::Object(fields)) => {
+            match (
+                fields.get("x").and_then(Value::as_f64),
+                fields.get("y").and_then(Value::as_f64),
+            ) {
+                (Some(x), Some(y)) => Ok(Point2::new(x, y)),
+                _ => Err(malformed()),
+            }
+        }
+        _ => Err(malformed()),
     }
-    let x = values[0]
-        .as_f64()
-        .ok_or_else(|| format!("{ctx}: `{key}[0]` must be numeric"))?;
-    let y = values[1]
-        .as_f64()
-        .ok_or_else(|| format!("{ctx}: `{key}[1]` must be numeric"))?;
-    Ok(Point2::new(x, y))
 }
 
 fn optional_num(input: &Value, key: &str, ctx: &str) -> std::result::Result<Option<f64>, String> {

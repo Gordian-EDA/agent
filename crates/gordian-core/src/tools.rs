@@ -522,13 +522,8 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "export_fab".into(),
-            description: "Export fabrication files after clean check_board.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "out_dir": { "type": "string", "description": "Default fab/." }
-                }
-            }),
+            description: "Export fabrication files to <project>/fab after clean check_board.".into(),
+            input_schema: json!({ "type": "object", "properties": {} }),
         },
     ];
     defs.into_iter()
