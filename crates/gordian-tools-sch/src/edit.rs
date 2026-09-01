@@ -370,8 +370,7 @@ fn carry_glued_symbols(
         .symbols()
         .filter(|s| s.uuid != moved)
         .filter(|s| {
-            let own: Vec<&sch_doc::PlacedPin> =
-                pins.iter().filter(|p| p.owner == s.uuid).collect();
+            let own: Vec<&sch_doc::PlacedPin> = pins.iter().filter(|p| p.owner == s.uuid).collect();
             !own.is_empty() && own.iter().all(|p| p.at.near_eq(from, EPS))
         })
         .map(|s| s.uuid.clone())
@@ -397,9 +396,9 @@ fn orient(doc: &mut SchDoc, uuid: &str, step: &Value) -> Result<Option<f64>> {
     if rot.is_none() && mirror.is_none() {
         return Ok(None);
     }
-    let current = doc.symbol(uuid).map_or((0.0, sch_doc::Mirror::None), |s| {
-        (s.at.rot, s.mirror)
-    });
+    let current = doc
+        .symbol(uuid)
+        .map_or((0.0, sch_doc::Mirror::None), |s| (s.at.rot, s.mirror));
     let mirror = match mirror {
         Some("x") => sch_doc::Mirror::X,
         Some("y") => sch_doc::Mirror::Y,
@@ -708,7 +707,7 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // that still cannot reach its net gets named in place.
     let pin_map = input.get("pin_map").and_then(Value::as_object);
     let mut unmapped = Vec::new();
-    let mut restored = Vec::new();
+    let mut mapped = Vec::new();
     // One new pin can stand in for at most one old pin: letting two old nets
     // land on the same pin would short them together.
     let mut taken: Vec<String> = Vec::new();
@@ -734,16 +733,23 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         };
         taken.push(pin.number.clone());
         let landed = pin.at;
-        edit.doc.move_attached(*was_at, landed);
-        // Re-extract: dragging this pin's wires, or a label written for an
-        // earlier pin, changes what this one is already connected to.
+        mapped.push((pin.number.clone(), net.clone(), *was_at, landed));
+    }
+    let moves: Vec<(Point2, Point2)> = mapped
+        .iter()
+        .map(|(_, _, was_at, landed)| (*was_at, *landed))
+        .collect();
+    edit.doc.move_attached_many(&moves);
+
+    let mut restored = Vec::new();
+    for (number, net, _, landed) in mapped {
         let after = sch_doc::connect::extract(&edit.doc);
-        if refs::net_of(&after, refdes, &pin.number) == Some(net.as_str()) {
+        if refs::net_of(&after, refdes, &number) == Some(net.as_str()) {
             continue;
         }
         edit.doc
-            .add_label(LabelKind::Local, net, Pose::new(landed.x, landed.y, 0.0));
-        restored.push(format!("{refdes}.{}={net}", pin.number));
+            .add_label(LabelKind::Local, &net, Pose::new(landed.x, landed.y, 0.0));
+        restored.push(format!("{refdes}.{number}={net}"));
     }
     if !restored.is_empty() {
         edit.warn(format!(

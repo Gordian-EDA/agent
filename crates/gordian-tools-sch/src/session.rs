@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Allow {
     nets: BTreeSet<String>,
+    joined_nets: BTreeSet<String>,
     refs: BTreeSet<String>,
     /// The call may bring nets into existence it could not name in advance —
     /// a new part's hidden power pin, or a wire that names its own net.
@@ -30,13 +31,16 @@ impl Allow {
         Allow::default()
     }
 
-    pub fn net(mut self, name: impl Into<String>) -> Allow {
-        self.nets.insert(name.into());
+    pub fn nets<I: Into<String>>(mut self, names: impl IntoIterator<Item = I>) -> Allow {
+        self.nets.extend(names.into_iter().map(Into::into));
         self
     }
 
-    pub fn nets<I: Into<String>>(mut self, names: impl IntoIterator<Item = I>) -> Allow {
-        self.nets.extend(names.into_iter().map(Into::into));
+    /// Permit these existing nets to be deliberately joined by this call.
+    pub fn joining_nets<I: Into<String>>(mut self, names: impl IntoIterator<Item = I>) -> Allow {
+        let names: Vec<String> = names.into_iter().map(Into::into).collect();
+        self.nets.extend(names.iter().cloned());
+        self.joined_nets.extend(names);
         self
     }
 
@@ -82,6 +86,12 @@ impl Allow {
         let unauthored = |name: &String| unnamed(name) && !is_auto(name);
         for (sources, target) in &delta.merged {
             offenders.extend(sources.iter().filter(|n| unnamed(n)).cloned());
+            offenders.extend(
+                sources
+                    .iter()
+                    .filter(|name| !self.joined_nets.contains(*name))
+                    .cloned(),
+            );
             offenders.extend([target].into_iter().filter(|n| unauthored(n)).cloned());
         }
         for (source, targets) in &delta.split {
@@ -315,7 +325,7 @@ mod tests {
         assert!(offenders.contains("GND"), "{offenders}");
     }
 
-    /// A call that named both nets it merged is doing exactly what it said.
+    /// A call that explicitly joined both nets may merge them.
     #[test]
     fn a_named_merge_is_permitted() {
         let delta = NetDelta {
@@ -324,11 +334,27 @@ mod tests {
         };
         assert!(
             Allow::nothing()
-                .nets(["VCC".to_string(), "N1".to_string()])
+                .joining_nets(["VCC".to_string(), "N1".to_string()])
                 .part("R5")
                 .violation(&delta, &[moved("R5", "2", Some("VCC"))])
                 .is_none()
         );
+    }
+
+    /// Merely touching two nets does not authorize joining them.
+    #[test]
+    fn touched_nets_may_not_merge() {
+        let delta = NetDelta {
+            merged: vec![(vec!["VCC".into(), "N1".into()], "VCC".into())],
+            ..NetDelta::default()
+        };
+        let offenders = Allow::nothing()
+            .nets(["VCC".to_string(), "N1".to_string()])
+            .part("R5")
+            .violation(&delta, &[moved("R5", "2", Some("VCC"))])
+            .expect("an incidental merge must be refused");
+        assert!(offenders.contains("VCC"), "{offenders}");
+        assert!(offenders.contains("N1"), "{offenders}");
     }
 
     /// KiCAD names an unnamed net after its strongest pin, so joining a pin to
@@ -373,7 +399,7 @@ mod tests {
         ];
         assert!(
             Allow::nothing()
-                .net("Net-(U1B-K)")
+                .nets(["Net-(U1B-K)".to_string()])
                 .part("R2")
                 .violation(&delta, &loosened)
                 .is_none()

@@ -187,9 +187,9 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
 
     let allow = Allow::nothing()
-        .nets(net.clone())
-        .nets(from_net.clone())
-        .nets(to_net.clone())
+        .joining_nets(net.clone())
+        .joining_nets(from_net.clone())
+        .joining_nets(to_net.clone())
         .parts(from.owner().map(str::to_string))
         .parts(to.owner().map(str::to_string))
         .creating();
@@ -311,8 +311,8 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     edit.commit(
         json!(format!("named {spec} `{net}`")),
         Allow::nothing()
-            .net(net)
-            .nets(was)
+            .joining_nets([net.to_string()])
+            .joining_nets(was)
             .part(&pin.refdes)
             .creating(),
     )
@@ -423,8 +423,8 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             if stub { " through a short wire" } else { "" }
         )),
         Allow::nothing()
-            .net(net)
-            .nets(was)
+            .joining_nets([net.to_string()])
+            .joining_nets(was)
             .part(&refdes)
             .part(&pin.refdes)
             .creating(),
@@ -520,9 +520,10 @@ pub(crate) fn straighten(doc: &mut SchDoc, moved: &[Point2]) -> usize {
     for (uuid, a, b) in slanted {
         let (a, b) = if touches(a) { (a, b) } else { (b, a) };
         let pin = sch_doc::placed_pins(doc).into_iter().find(|p| p.at == a);
-        let dir = pin
-            .as_ref()
-            .map_or_else(|| dir_of(Point2::new(b.x - a.x, b.y - a.y)), |p| dir_of(p.out));
+        let dir = pin.as_ref().map_or_else(
+            || dir_of(Point2::new(b.x - a.x, b.y - a.y)),
+            |p| dir_of(p.out),
+        );
         let own: Vec<String> = pin.iter().map(|p| p.refdes.clone()).collect();
         doc.remove_drawing(&[uuid]);
         let scene = scene(doc, a, b, &own);

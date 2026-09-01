@@ -223,16 +223,28 @@ impl SchDoc {
     /// This is what keeps a symbol's connections when the symbol moves —
     /// leaving its wires where they were would quietly unwire the board.
     pub fn move_attached(&mut self, from: Point2, to: Point2) -> usize {
-        if from.near_eq(to, geom::EPS) {
-            return 0;
-        }
+        self.move_attached_many(&[(from, to)])
+    }
+
+    /// Relocate drawing attached at several old points in one pass.
+    ///
+    /// Every item is matched against its original position, so transposing two
+    /// pin positions cannot carry the first pin's drawing a second time when
+    /// the destination is also another source position.
+    pub fn move_attached_many(&mut self, moves: &[(Point2, Point2)]) -> usize {
+        let destination = |at: Point2| {
+            moves
+                .iter()
+                .find(|(from, to)| !from.near_eq(*to, geom::EPS) && at.near_eq(*from, geom::EPS))
+                .map(|(_, to)| *to)
+        };
         let mut moved = 0;
         for item in self.items_mut() {
             let hit = match item {
                 Item::Wire(wire) => {
                     let mut hit = false;
                     for point in wire.points.iter_mut() {
-                        if point.near_eq(from, geom::EPS) {
+                        if let Some(to) = destination(*point) {
                             *point = to;
                             hit = true;
                         }
@@ -242,17 +254,20 @@ impl SchDoc {
                     }
                     hit
                 }
-                Item::Junction(j) if j.at.near_eq(from, geom::EPS) => {
+                Item::Junction(j) if destination(j.at).is_some() => {
+                    let to = destination(j.at).expect("matched destination");
                     j.at = to;
                     j.raw.touch();
                     true
                 }
-                Item::NoConnect(n) if n.at.near_eq(from, geom::EPS) => {
+                Item::NoConnect(n) if destination(n.at).is_some() => {
+                    let to = destination(n.at).expect("matched destination");
                     n.at = to;
                     n.raw.touch();
                     true
                 }
-                Item::Label(l) if l.at.point().near_eq(from, geom::EPS) => {
+                Item::Label(l) if destination(l.at.point()).is_some() => {
+                    let to = destination(l.at.point()).expect("matched destination");
                     l.at.x = to.x;
                     l.at.y = to.y;
                     l.raw.touch();
