@@ -428,6 +428,18 @@ pub(crate) fn route_signal(
         .iter()
         .map(|tp| tp.as_ref().is_none_or(|(it, num)| label_clear(*it, num)))
         .collect();
+    // Whether the label EMITTER could actually seat a label on each terminal's pin —
+    // the same ladder walk `label_stub` does below. `term_label_clear` only asks about
+    // the default landing; a pin it rejects may still be seatable one notch further out,
+    // and a pin it accepts may not be. The bridge must pick on what the emitter can do,
+    // or it hands the writer a pin whose label lands on a neighbour's body.
+    let term_label_seatable: Vec<bool> = term_pin
+        .iter()
+        .map(|tp| {
+            tp.as_ref()
+                .is_none_or(|(it, num)| label_stub(w, env, &items[*it].refdes, num, net).1)
+        })
+        .collect();
 
     let pts: Vec<::geom::Point2> = terms.iter().map(|t| t.0.into()).collect();
     // Union-find over terminals: a successful edge merges its endpoints; a failed
@@ -620,14 +632,19 @@ pub(crate) fn route_signal(
     // the chip body). Falls back to fewest-pins when no candidate is body-clear. Ties
     // keep the earlier terminal (deterministic).
     let pin_count = |i: usize| items[i].geom.pins.len();
-    // Per-component: the chosen labelling pin and its score `(body_clear, -pin_count)`.
+    // Per-component: the chosen labelling pin and its score
+    // `(emitter_can_seat_it, body_clear, -pin_count)`.
     let mut roots: BTreeMap<usize, Option<(usize, String)>> = BTreeMap::new();
-    let mut score: BTreeMap<usize, (bool, std::cmp::Reverse<usize>)> = BTreeMap::new();
+    let mut score: BTreeMap<usize, (bool, bool, std::cmp::Reverse<usize>)> = BTreeMap::new();
     for k in 0..terms.len() {
         let r = uf.find(k);
         let slot = roots.entry(r).or_insert(None);
         let Some(pin) = &term_pin[k] else { continue };
-        let cand = (term_label_clear[k], std::cmp::Reverse(pin_count(pin.0)));
+        let cand = (
+            term_label_seatable[k],
+            term_label_clear[k],
+            std::cmp::Reverse(pin_count(pin.0)),
+        );
         if slot.is_none() || cand > score[&r] {
             *slot = Some(pin.clone());
             score.insert(r, cand);
@@ -640,28 +657,7 @@ pub(crate) fn route_signal(
                 continue; // named by the port label below
             }
             if let Some((i, num)) = pin {
-                // Clear-stub search under the LINT'S OWN geometry: keep the
-                // default 3.81 when that landing reads clear (references stay
-                // byte-identical); otherwise extend outward until the writer
-                // itself says the label box collides with nothing.
-                let stub = w
-                    .pin_dirs(env, &items[*i].refdes, num)
-                    .ok()
-                    .and_then(|ds| ds.first().copied())
-                    .map(|(ep, dir)| {
-                        let v = dir.vec();
-                        let landing = |s: f64| {
-                            geom::GRID_50_MIL
-                                .snap_point(::geom::Point2::new(ep[0] + v.x * s, ep[1] + v.y * s))
-                        };
-                        [3.81, 6.35, 8.89, 11.43, 13.97]
-                            .into_iter()
-                            .find(|&s| {
-                                w.label_landing_clear(landing(s), dir, net, &items[*i].refdes)
-                            })
-                            .unwrap_or(3.81)
-                    })
-                    .unwrap_or(3.81);
+                let (stub, _) = label_stub(w, env, &items[*i].refdes, num, net);
                 w.add_signal_label_stub(env, &items[*i].refdes, num, net, stub)?;
                 if let Ok(ds) = w.pin_dirs(env, &items[*i].refdes, num) {
                     for (p, _) in ds {
@@ -698,6 +694,47 @@ pub(crate) fn route_signal(
     Ok(())
 }
 
+/// Where the label bridge seats `net`'s label on `refdes`.`num` — the stub length outward
+/// from the pin — and whether that landing actually reads clear.
+///
+/// One ladder, walked under the WRITER's own geometry (the same the readability lint uses),
+/// serving both the choice of which pin in a component carries the net's label and the
+/// emission of it. A predictor that disagreed with the emitter picked pins whose label the
+/// writer then had to drop on a neighbouring body (the 555 `N_TR`-over-R1 warning). The
+/// default 3.81 is tried first, so a pin whose usual landing is clear keeps it. When the
+/// outward path is walled in — a neighbouring body sits in every landing further out — the
+/// label tucks onto the pin endpoint itself, which is where the writer's stub retraction
+/// would put it anyway and which the lint exempts against the pin's own body. Only when
+/// even that collides does it give up and report the landing as not clear.
+fn label_stub(
+    w: &SchematicWriter,
+    env: &KicadInstallation,
+    refdes: &str,
+    num: &str,
+    net: &str,
+) -> (f64, bool) {
+    const LADDER: [f64; 5] = [3.81, 6.35, 8.89, 11.43, 13.97];
+    let Some((ep, dir)) = w
+        .pin_dirs(env, refdes, num)
+        .ok()
+        .and_then(|ds| ds.first().copied())
+    else {
+        return (LADDER[0], true);
+    };
+    let v = dir.vec();
+    let landing = |s: f64| {
+        geom::GRID_50_MIL.snap_point(::geom::Point2::new(ep[0] + v.x * s, ep[1] + v.y * s))
+    };
+    match LADDER
+        .into_iter()
+        .chain([0.0])
+        .find(|&s| w.label_landing_clear(landing(s), dir, net, refdes))
+    {
+        Some(s) => (s, true),
+        None => (LADDER[0], false),
+    }
+}
+
 pub(crate) fn safe_forced_single_port_stub(
     pin: ::geom::Point2,
     exit: ::geom::Point2,
@@ -720,9 +757,9 @@ pub(crate) fn safe_forced_single_port_stub(
 /// "Clear" is the FULL [`crate::wire::path_ok`] test, not just a body check: a trunk
 /// drawn down an IC's pin column passes over the neighbouring pins, and KiCAD welds a
 /// wire to every pin it crosses — the `mixed-signal-adc-frontend` `SDA`/`SCL` short,
-/// where SCL's trunk ran from pin 10 straight down through pin 9 to its pull-up. The
-/// tee is a shortcut PAST the obstacle-aware router, so it has to clear everything the
-/// router would have.
+/// where SCL's trunk ran from pin 10 straight down through pin 9 to its pull-up. The tee
+/// is a shortcut PAST the obstacle-aware router, so it owes everything the router's own
+/// edges owe.
 pub(crate) fn route_local_tee(
     w: &mut SchematicWriter,
     net: &str,
@@ -777,9 +814,8 @@ pub(crate) fn route_local_tee(
     } else {
         [[trunk_line, min_y], [trunk_line, max_y]]
     };
-    let clear = |path: [[f64; 2]; 2]| {
-        crate::wire::path_ok(&[path[0].into(), path[1].into()], net, scene)
-    };
+    let clear =
+        |path: [[f64; 2]; 2]| crate::wire::path_ok(&[path[0].into(), path[1].into()], net, scene);
     if !clear(trunk) || terms.iter().any(|(p, _)| !clear([*p, foot(p)])) {
         return false;
     }
