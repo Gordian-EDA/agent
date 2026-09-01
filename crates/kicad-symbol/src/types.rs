@@ -5,14 +5,13 @@ pub enum PinType {
     PowerInput,
     PowerOutput,
     Passive,
+    NoConnect,
     Other,
 }
 
 /// Signal DIRECTION of a pin, preserved from KiCAD's electrical type (which
-/// [`PinType`] collapses): a net flows from its `Out` pin to its `In` pins, which lets
-/// a dataflow-aware placer order parts left->right by signal flow. Orthogonal to
-/// [`PinType`] -- kept as a separate field so existing `PinType` matches are
-/// untouched.
+/// [`PinType`] otherwise collapses): a net flows from its `Out` pin to its `In`
+/// pins, which lets a dataflow-aware placer order parts left-to-right.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PinDir {
     In,

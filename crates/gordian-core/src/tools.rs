@@ -632,6 +632,7 @@ fn pin_type_str(t: sch_check::PinType) -> &'static str {
         PowerInput => "power_input",
         PowerOutput => "power_output",
         Passive => "passive",
+        NoConnect => "no_connect",
         Other => "other",
     }
 }

@@ -131,9 +131,10 @@ fn pin_meta(pin: &SymPin, unit: u8) -> Option<PinMeta> {
         Some("power_in") => PinType::PowerInput,
         Some("power_out") => PinType::PowerOutput,
         Some("passive") => PinType::Passive,
+        Some("no_connect") => PinType::NoConnect,
         _ => PinType::Other,
     };
-    // Preserve the full signal DIRECTION (PinType collapses input/output → Other).
+    // Preserve the full signal direction for the types PinType collapses to Other.
     let dir = match pin.electrical_type.as_deref() {
         Some("input") => PinDir::In,
         Some("output") => PinDir::Out,

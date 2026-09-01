@@ -17,6 +17,7 @@ fn provider() -> SymbolTable {
             ("3", "VSS", PowerInput, 1),
             ("4", "PB6", Other, 1),
             ("5", "NRST", Other, 1),
+            ("6", "NC/PA9", NoConnect, 1),
         ],
     );
     p.mock_add(
@@ -84,6 +85,20 @@ fn unconnected_power_pin_is_an_error() {
     let diags = lint::lint(&d, &provider());
     // Physical pin 2 (the second VDD) is on no net.
     assert!(codes(&diags).contains(&"power-pin-unconnected"));
+}
+
+#[test]
+fn a_connected_library_no_connect_pin_is_an_error() {
+    let d = design(&[("U1", part("M:CPU", &[("6", "XTAL2")]))]);
+    let diags = lint::lint(&d, &provider());
+    let diagnostic = diags
+        .0
+        .iter()
+        .find(|diagnostic| diagnostic.code == "library-no-connect-wired")
+        .expect("connected no-connect pin must be rejected");
+    assert!(diagnostic.message.contains("U1"), "{diagnostic:?}");
+    assert!(diagnostic.message.contains("NC/PA9"), "{diagnostic:?}");
+    assert!(diagnostic.message.contains("XTAL2"), "{diagnostic:?}");
 }
 
 #[test]
