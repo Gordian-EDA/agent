@@ -130,7 +130,7 @@ mod tests {
         assert!(dir.path().join(".gordian/renders").is_dir());
         assert_eq!(
             std::fs::read_to_string(dir.path().join(".gordian/.gitignore")).unwrap(),
-            "*\\n"
+            "*\n"
         );
     }
 
