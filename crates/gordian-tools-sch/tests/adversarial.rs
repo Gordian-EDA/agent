@@ -130,6 +130,110 @@ fn swapping_a_reversed_pinout_must_not_short_the_two_nets_together() {
     );
 }
 
+/// Connector families often spell the same logical pins with package-specific
+/// pad numbers. A swap maps those names without making the caller transcribe a
+/// pin map.
+#[test]
+fn swap_symbol_maps_differently_numbered_connector_pins_by_name() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "Connector:USB_B", "ref": "J1"}]}),
+    );
+    assert!(placed.get("error").is_none(), "fixture failed: {placed}");
+    for (pin, net) in [
+        ("1", "VBUS_NET"),
+        ("2", "DM_NET"),
+        ("3", "DP_NET"),
+        ("4", "GND_NET"),
+        ("5", "SHIELD_NET"),
+    ] {
+        let labeled = call(
+            &ctx,
+            "label",
+            json!({"pin": format!("J1.{pin}"), "net": net}),
+        );
+        assert!(labeled.get("error").is_none(), "fixture failed: {labeled}");
+    }
+
+    let result = call(
+        &ctx,
+        "swap_symbol",
+        json!({"ref": "J1", "lib_id": "Connector:USB_C_Plug_USB2.0"}),
+    );
+    assert!(result.get("error").is_none(), "swap failed: {result}");
+    assert_eq!(
+        result["changed"]["mapped_by_name"],
+        json!({"1": "A4", "2": "A7", "3": "A6", "4": "A1", "5": "S1"}),
+        "the response must expose every automatic name mapping: {result}"
+    );
+    let after = listing(&ctx);
+    for net in ["VBUS_NET", "DM_NET", "DP_NET", "GND_NET", "SHIELD_NET"] {
+        assert!(after.contains(net), "{net} was lost:\n{after}");
+    }
+    assert!(
+        after.contains("Connector:USB_C_Plug_USB2.0"),
+        "the new connector must be committed:\n{after}"
+    );
+}
+
+/// A partial name match is not permission to discard the remaining old pin.
+/// The refusal returns all of the information needed to construct a retry.
+#[test]
+fn swap_symbol_refusal_suggests_pin_map_and_unmatched_pins() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "Connector:USB_B_Micro", "ref": "J1"}]}),
+    );
+    assert!(placed.get("error").is_none(), "fixture failed: {placed}");
+    let before = std::fs::read(ctx.sch_path()).unwrap();
+
+    let result = call(
+        &ctx,
+        "swap_symbol",
+        json!({"ref": "J1", "lib_id": "Connector:USB_C_Plug_USB2.0"}),
+    );
+    assert!(result.get("error").is_some(), "swap must refuse: {result}");
+    assert_eq!(
+        result["suggestion"]["pin_map"],
+        json!({"1": "A4", "2": "A7", "3": "A6", "5": "A1", "6": "S1"}),
+        "the inferred mappings must be copyable into the next call: {result}"
+    );
+    assert_eq!(
+        result["suggestion"]["old_pins_without_counterpart"],
+        json!([{"number": "4", "name": "ID", "type": "passive"}]),
+        "the unmatched old pin needs structured details: {result}"
+    );
+    let unassigned = result["suggestion"]["new_symbol_unassigned_pins"]
+        .as_array()
+        .expect("new unassigned pins array");
+    for (number, name, pin_type) in [
+        ("A5", "CC", "bidirectional"),
+        ("B5", "VCONN", "bidirectional"),
+    ] {
+        assert!(
+            unassigned.iter().any(|pin| {
+                pin["number"] == number && pin["name"] == name && pin["type"] == pin_type
+            }),
+            "missing unassigned pin {number} ({name}, {pin_type}): {result}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(ctx.sch_path()).unwrap(),
+        before,
+        "a refused swap must not write the schematic"
+    );
+}
+
 /// A part placed by `lib_id` must arrive whole. A dual op-amp is three units —
 /// two amplifiers and a power unit — and only unit 1 is ever written, so the
 /// second amplifier and the supply pins never reach the sheet: ERC cannot see

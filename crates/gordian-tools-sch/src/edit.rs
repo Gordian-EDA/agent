@@ -1,5 +1,7 @@
 //! The symbol mutators: place, remove, move, retag and swap parts.
 
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use geom::{EPS, Point2, Rect};
 use gordian_runtime::AgentRuntime;
@@ -24,10 +26,17 @@ pub(crate) fn next_refdes(doc: &SchDoc, prefix: &str) -> String {
     format!("{prefix}{n}")
 }
 
-/// Whether a pin answers to `key` by name. `~` and the empty string are what
-/// KiCAD writes for a pin with no name, so they name nothing and match nothing.
-fn named_as(pin: &sch_doc::PlacedPin, key: &str) -> bool {
-    !matches!(pin.name.as_str(), "" | "~") && pin.name.eq_ignore_ascii_case(key)
+fn normalized_pin_name(name: &str) -> String {
+    name.chars()
+        .filter(|ch| !matches!(ch, '~' | '_' | '-'))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Whether two non-empty pin names match without presentation punctuation.
+fn pin_names_match(left: &str, right: &str) -> bool {
+    let left = normalized_pin_name(left);
+    !left.is_empty() && left == normalized_pin_name(right)
 }
 
 fn valid_refdes(refdes: &str) -> bool {
@@ -37,6 +46,209 @@ fn valid_refdes(refdes: &str) -> bool {
         && letters < refdes.len()
         && refdes[..letters].chars().all(|ch| ch.is_ascii_alphabetic())
         && refdes[letters..].chars().all(|ch| ch.is_ascii_digit())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PinMatchKind {
+    Explicit,
+    Number,
+    Name,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PinAssignment {
+    old: usize,
+    new: usize,
+    kind: PinMatchKind,
+}
+
+#[derive(Debug)]
+struct PinMappingPlan {
+    assignments: Vec<PinAssignment>,
+    old_without_counterpart: Vec<usize>,
+    new_unassigned: Vec<usize>,
+}
+
+fn assign_pin(
+    assignments: &mut Vec<PinAssignment>,
+    claimed_old: &mut [bool],
+    taken_new: &mut [bool],
+    old: usize,
+    new: usize,
+    kind: PinMatchKind,
+) {
+    claimed_old[old] = true;
+    taken_new[new] = true;
+    assignments.push(PinAssignment { old, new, kind });
+}
+
+impl PinMappingPlan {
+    fn new_pin_number<'a>(
+        &self,
+        old_number: &str,
+        old_pins: &[sch_doc::PlacedPin],
+        new_pins: &'a [sch_doc::PlacedPin],
+    ) -> Option<&'a str> {
+        self.assignments
+            .iter()
+            .find(|assignment| old_pins[assignment.old].number == old_number)
+            .map(|assignment| new_pins[assignment.new].number.as_str())
+    }
+
+    fn mapped_by_name(
+        &self,
+        old_pins: &[sch_doc::PlacedPin],
+        new_pins: &[sch_doc::PlacedPin],
+    ) -> BTreeMap<String, String> {
+        self.assignments
+            .iter()
+            .filter(|assignment| assignment.kind == PinMatchKind::Name)
+            .map(|assignment| {
+                (
+                    old_pins[assignment.old].number.clone(),
+                    new_pins[assignment.new].number.clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn suggested_pin_map(
+        &self,
+        old_pins: &[sch_doc::PlacedPin],
+        new_pins: &[sch_doc::PlacedPin],
+    ) -> BTreeMap<String, String> {
+        self.assignments
+            .iter()
+            .filter(|assignment| assignment.kind != PinMatchKind::Number)
+            .filter(|assignment| old_pins[assignment.old].number != new_pins[assignment.new].number)
+            .map(|assignment| {
+                (
+                    old_pins[assignment.old].number.clone(),
+                    new_pins[assignment.new].number.clone(),
+                )
+            })
+            .collect()
+    }
+}
+
+fn pin_mapping_plan(
+    old_pins: &[sch_doc::PlacedPin],
+    new_pins: &[sch_doc::PlacedPin],
+    requested: Option<&serde_json::Map<String, Value>>,
+) -> PinMappingPlan {
+    let mut assignments = Vec::new();
+    let mut claimed_old = vec![false; old_pins.len()];
+    let mut taken_new = vec![false; new_pins.len()];
+
+    for (old_index, old) in old_pins.iter().enumerate() {
+        let wanted = requested
+            .and_then(|map| map.get(&old.number).or_else(|| map.get(&old.name)))
+            .and_then(Value::as_str);
+        let Some(wanted) = wanted else {
+            continue;
+        };
+        claimed_old[old_index] = true;
+        let target = new_pins
+            .iter()
+            .enumerate()
+            .find(|(index, pin)| !taken_new[*index] && pin.number == wanted)
+            .or_else(|| {
+                new_pins
+                    .iter()
+                    .enumerate()
+                    .find(|(index, pin)| !taken_new[*index] && pin_names_match(&pin.name, wanted))
+            });
+        if let Some((new_index, _)) = target {
+            assign_pin(
+                &mut assignments,
+                &mut claimed_old,
+                &mut taken_new,
+                old_index,
+                new_index,
+                PinMatchKind::Explicit,
+            );
+        }
+    }
+
+    for (old_index, old) in old_pins.iter().enumerate() {
+        if claimed_old[old_index] {
+            continue;
+        }
+        if let Some((new_index, _)) = new_pins
+            .iter()
+            .enumerate()
+            .find(|(index, pin)| !taken_new[*index] && pin.number == old.number)
+        {
+            assign_pin(
+                &mut assignments,
+                &mut claimed_old,
+                &mut taken_new,
+                old_index,
+                new_index,
+                PinMatchKind::Number,
+            );
+        }
+    }
+
+    for (old_index, old) in old_pins.iter().enumerate() {
+        if claimed_old[old_index] {
+            continue;
+        }
+        if let Some((new_index, _)) = new_pins
+            .iter()
+            .enumerate()
+            .find(|(index, pin)| !taken_new[*index] && pin_names_match(&pin.name, &old.name))
+        {
+            assign_pin(
+                &mut assignments,
+                &mut claimed_old,
+                &mut taken_new,
+                old_index,
+                new_index,
+                PinMatchKind::Name,
+            );
+        }
+    }
+
+    let assigned_old = assignments
+        .iter()
+        .map(|assignment| assignment.old)
+        .collect::<Vec<_>>();
+    PinMappingPlan {
+        old_without_counterpart: old_pins
+            .iter()
+            .enumerate()
+            .filter_map(|(index, _)| (!assigned_old.contains(&index)).then_some(index))
+            .collect(),
+        new_unassigned: taken_new
+            .iter()
+            .enumerate()
+            .filter_map(|(index, taken)| (!taken).then_some(index))
+            .collect(),
+        assignments,
+    }
+}
+
+fn pin_detail(pin: &sch_doc::PlacedPin) -> Value {
+    json!({
+        "number": pin.number,
+        "name": pin.name,
+        "type": pin.etype,
+    })
+}
+
+fn swap_suggestion(
+    plan: &PinMappingPlan,
+    old_pins: &[sch_doc::PlacedPin],
+    new_pins: &[sch_doc::PlacedPin],
+) -> Value {
+    json!({
+        "pin_map": plan.suggested_pin_map(old_pins, new_pins),
+        "old_pins_without_counterpart": plan.old_without_counterpart
+            .iter().map(|index| pin_detail(&old_pins[*index])).collect::<Vec<_>>(),
+        "new_symbol_unassigned_pins": plan.new_unassigned
+            .iter().map(|index| pin_detail(&new_pins[*index])).collect::<Vec<_>>(),
+    })
 }
 
 fn combined_extent(doc: &SchDoc, uuids: &[String]) -> Option<Rect> {
@@ -834,19 +1046,16 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if units.is_empty() {
         return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
     }
-    // Every pin the part has today, so a pin the new definition adds is recognisable.
-    let had: Vec<String> = placed_pins(&edit.doc)
+    let old_pins: Vec<sch_doc::PlacedPin> = placed_pins(&edit.doc)
         .into_iter()
         .filter(|p| p.refdes == refdes)
-        .map(|p| p.number)
         .collect();
     // Where each connected pin sat, so whatever met it can follow it across.
-    let before: Vec<(String, String, String, Point2)> = placed_pins(&edit.doc)
-        .into_iter()
-        .filter(|p| p.refdes == refdes)
+    let before: Vec<(String, String, Point2)> = old_pins
+        .iter()
         .filter_map(|p| {
             let net = refs::net_of(edit.before(), refdes, &p.number)?;
-            Some((p.number.clone(), p.name.clone(), net.to_string(), p.at))
+            Some((p.number.clone(), net.to_string(), p.at))
         })
         .collect();
     let was = refs::nets_touching(edit.before(), &[refdes.to_string()]);
@@ -884,12 +1093,42 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             ),
         }));
     }
+    let new_pins: Vec<sch_doc::PlacedPin> = now
+        .iter()
+        .filter(|pin| pin.refdes == refdes)
+        .cloned()
+        .collect();
+    let plan = pin_mapping_plan(
+        &old_pins,
+        &new_pins,
+        input.get("pin_map").and_then(Value::as_object),
+    );
+    let suggestion = swap_suggestion(&plan, &old_pins, &new_pins);
+    if !plan.old_without_counterpart.is_empty() {
+        let unmatched = plan
+            .old_without_counterpart
+            .iter()
+            .map(|index| match old_pins[*index].name.as_str() {
+                "" | "~" => old_pins[*index].number.clone(),
+                name => format!("{} ({name})", old_pins[*index].number),
+            })
+            .collect::<Vec<_>>();
+        return Ok(json!({
+            "error": format!(
+                "refused: {lib_id} has no counterpart for {refdes} pin(s) {}; nothing was written",
+                unmatched.join(", ")
+            ),
+            "suggestion": suggestion,
+        }));
+    }
     // A definition that brings supply pins the old part did not have is not the
     // pin-compatible replacement a swap claims to be: nothing on the sheet drives them
     // and KiCAD calls every one of them an error.
-    let added_supplies: Vec<String> = now
+    let added_supplies: Vec<String> = plan
+        .new_unassigned
         .iter()
-        .filter(|p| p.refdes == refdes && p.etype == "power_in" && !had.contains(&p.number))
+        .map(|index| &new_pins[*index])
+        .filter(|pin| pin.etype == "power_in")
         .map(|p| match p.name.as_str() {
             "" | "~" => p.number.clone(),
             name => format!("{} ({name})", p.number),
@@ -904,6 +1143,7 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                  or pick a symbol with the same supply pins.",
                 added_supplies.join(", ")
             ),
+            "suggestion": suggestion,
         }));
     }
     for (key, field) in [("value", "Value"), ("footprint", "Footprint")] {
@@ -917,33 +1157,15 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // The new part's pins sit where its own body puts them, which need not be
     // where the old ones were. Drag each pin's wires across to it; only a pin
     // that still cannot reach its net gets named in place.
-    let pin_map = input.get("pin_map").and_then(Value::as_object);
-    let mut unmapped = Vec::new();
     let mut mapped = Vec::new();
-    // One new pin can stand in for at most one old pin: letting two old nets
-    // land on the same pin would short them together.
-    let mut taken: Vec<String> = Vec::new();
-    for (number, name, net, was_at) in &before {
-        let wanted = pin_map
-            .and_then(|m| m.get(number).or_else(|| m.get(name)))
-            .and_then(Value::as_str);
-        let matches = |p: &&sch_doc::PlacedPin, key: Option<&str>| {
-            p.refdes == refdes
-                && !taken.contains(&p.number)
-                && match key {
-                    Some(key) => p.number == key || named_as(p, key),
-                    // A pin's number identifies it; `~` is not a name.
-                    None => p.number == *number || named_as(p, name),
-                }
-        };
-        let Some(pin) = now.iter().find(|p| matches(p, wanted)) else {
-            unmapped.push(match name.as_str() {
-                "" | "~" => number.clone(),
-                name => format!("{number} ({name})"),
-            });
-            continue;
-        };
-        taken.push(pin.number.clone());
+    for (number, net, was_at) in &before {
+        let pin_number = plan
+            .new_pin_number(number, &old_pins, &new_pins)
+            .expect("every old pin has an assignment");
+        let pin = new_pins
+            .iter()
+            .find(|pin| pin.number == pin_number)
+            .expect("assigned new pin exists");
         let landed = pin.at;
         mapped.push((pin.number.clone(), net.clone(), *was_at, landed));
     }
@@ -970,26 +1192,25 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             restored.join(" ")
         ));
     }
-    if !unmapped.is_empty() {
-        edit.warn(format!(
-            "{lib_id} has no counterpart for {refdes} pin(s) {}; their nets were dropped",
-            unmapped.join(", ")
-        ));
-    }
-    edit.commit(
+    let mapped_by_name = plan.mapped_by_name(&old_pins, &new_pins);
+    let mut result = edit.commit(
         json!({
             "ref": refdes,
             "lib_id": lib_id,
             "dropped_pins": dropped,
-            "unmapped_pins": unmapped,
+            "mapped_by_name": mapped_by_name,
         }),
         Allow::nothing().nets(was.clone()).part(refdes).creating(),
-    )
+    )?;
+    if result.get("error").is_some() {
+        result["suggestion"] = suggestion;
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::valid_refdes;
+    use super::{pin_names_match, valid_refdes};
 
     /// Tool-created references use KiCad's letter-prefix and numeric-suffix form.
     #[test]
@@ -1000,5 +1221,14 @@ mod tests {
         for invalid in ["D_NEW2", "R", "12", ""] {
             assert!(!valid_refdes(invalid), "{invalid}");
         }
+    }
+
+    #[test]
+    fn pin_name_matching_ignores_case_and_presentation_punctuation() {
+        assert!(pin_names_match("~RESET", "r_e-s-e_t"));
+        assert!(pin_names_match("CC-1", "cc_1"));
+        assert!(!pin_names_match("~", "~"));
+        assert!(!pin_names_match("", ""));
+        assert!(!pin_names_match("CC1", "CC2"));
     }
 }

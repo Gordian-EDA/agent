@@ -261,12 +261,14 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "swap_symbol",
-            "Retarget a part at a different library symbol, keeping every pin's net by number then \
-             by name. `ref` names the whole part, so every unit of a dual or quad swaps at once. \
-             Use `pin_map` {old_pin: new_pin} when the pinout differs; unmapped pins are reported. \
-             For a value/footprint change alone, or when no real match exists anywhere, use \
-             set_fields instead — a same-named part in an unrelated library is not proven \
-             pin-compatible.",
+            "Retarget a part at a different library symbol, keeping every pin's net by number. \
+             When a number has no counterpart, names map automatically case-insensitively while \
+             ignoring `~`, `_`, and `-`; the result reports `mapped_by_name`. `ref` names the whole \
+             part, so every unit of a dual or quad swaps at once. Use `pin_map` {old_pin: new_pin} \
+             when the pinout differs. A refusal returns `suggestion.pin_map`, old pins with no \
+             counterpart, and the new symbol's unassigned pins with number, name, and type. For a \
+             value/footprint change alone, or when no real match exists anywhere, use set_fields \
+             instead — a same-named part in an unrelated library is not proven pin-compatible.",
             json!({
                 "type": "object",
                 "properties": {
