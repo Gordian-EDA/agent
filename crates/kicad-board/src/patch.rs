@@ -15,14 +15,14 @@ use kicad_ipc::FootprintMove;
 use pcb_model::{LayerRef, RouteSolution, ViaSpan};
 
 /// One balanced s-expression node: byte range in the source text.
-struct Node {
-    start: usize,
-    end: usize,
+pub(crate) struct Node {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
 }
 
 /// Iterate the top-level (depth-1) nodes of a `(kicad_pcb …)` document, or the
 /// depth-1 children of any node body handed in.
-fn child_nodes(text: &str, body_start: usize, body_end: usize) -> Vec<Node> {
+pub(crate) fn child_nodes(text: &str, body_start: usize, body_end: usize) -> Vec<Node> {
     let bytes = text.as_bytes();
     let mut nodes = Vec::new();
     let mut depth = 0usize;
@@ -58,7 +58,7 @@ fn child_nodes(text: &str, body_start: usize, body_end: usize) -> Vec<Node> {
 }
 
 /// The head atom of a node: `(footprint "x" …)` → `footprint`.
-fn node_head<'a>(text: &'a str, node: &Node) -> &'a str {
+pub(crate) fn node_head<'a>(text: &'a str, node: &Node) -> &'a str {
     let inner = &text[node.start + 1..node.end];
     inner
         .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
@@ -68,7 +68,7 @@ fn node_head<'a>(text: &'a str, node: &Node) -> &'a str {
 
 /// The body span of the document root `(kicad_pcb …)`: byte range strictly
 /// inside its parens.
-fn root_body(text: &str) -> Result<(usize, usize), String> {
+pub(crate) fn root_body(text: &str) -> Result<(usize, usize), String> {
     let start = text.find("(kicad_pcb").ok_or("not a kicad_pcb document")?;
     let root = child_nodes(text, start, text.len())
         .into_iter()
@@ -765,15 +765,19 @@ pub fn append_copper_file(
     Ok(())
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("board path has no parent: {}", path.display()),
         )
     })?;
+    let permissions = std::fs::metadata(path).ok().map(|meta| meta.permissions());
     let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
     replacement.write_all(contents)?;
+    if let Some(permissions) = permissions {
+        std::fs::set_permissions(replacement.path(), permissions)?;
+    }
     replacement.as_file().sync_all()?;
     replacement.persist(path).map_err(|error| error.error)?;
     std::fs::File::open(parent)?.sync_all()
