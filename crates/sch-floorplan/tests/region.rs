@@ -36,7 +36,7 @@ blocks:
 /// Five neighbours seated on a live sheet, three parts still to place.
 const FIXED: &[&str] = &["R1", "R2", "R3", "C1", "C2"];
 
-fn gathered(env: &KicadInstallation) -> (circuit_lang::model::Design, Vec<Item>) {
+fn gathered(env: &KicadInstallation) -> (sch_check::Design, Vec<Item>) {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let compiled = circuit_lang::compile(SHEET, &provider);
     assert!(

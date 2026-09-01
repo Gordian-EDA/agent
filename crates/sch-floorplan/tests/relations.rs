@@ -336,7 +336,7 @@ blocks:
       R3: {part: Device:R, value: 3k, between: [N2, GND]}
 "#;
 
-fn chain_problem(env: &KicadInstallation) -> (circuit_lang::model::Design, SchematicPlaceProblem) {
+fn chain_problem(env: &KicadInstallation) -> (sch_check::Design, SchematicPlaceProblem) {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let compiled = circuit_lang::compile(CHAIN, &provider);
     assert!(!compiled.diagnostics.has_errors(), "{:#?}", compiled.diagnostics);

@@ -19,7 +19,7 @@
 
 use geom::{EPS, Point2, Rect};
 
-use circuit_lang::model::Design;
+use sch_check::Design;
 use kicad::KicadInstallation;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
