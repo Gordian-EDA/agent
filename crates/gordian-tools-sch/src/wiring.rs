@@ -416,9 +416,12 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             ),
         }));
     };
-    align_onto_pin(&mut edit.doc, &refdes, pin.at, pin.out);
+    let stub = stand_off(&mut edit.doc, &refdes, &pin);
     edit.commit(
-        json!(format!("attached {lib_id} `{net}` to {spec}")),
+        json!(format!(
+            "attached {lib_id} `{net}` to {spec}{}",
+            if stub { " through a short wire" } else { "" }
+        )),
         Allow::nothing()
             .net(net)
             .nets(was)
@@ -426,6 +429,38 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .part(&pin.refdes)
             .creating(),
     )
+}
+
+/// Seat a rail symbol on its pin, backing it off along the pin until its body
+/// clears the part it feeds and drawing a stub to bridge the gap.
+///
+/// A rail dropped straight onto the pin of a diode lands inside the diode's
+/// own outline — the pin tip is inside that body — and the two print on top of
+/// each other. Returns whether a stub wire was needed.
+fn stand_off(doc: &mut SchDoc, refdes: &str, pin: &sch_doc::PlacedPin) -> bool {
+    let owner = doc
+        .symbol(&pin.owner)
+        .and_then(|inst| crate::place::extent(doc, inst));
+    let mut at = pin.at;
+    for _ in 0..6 {
+        align_onto_pin(doc, refdes, at, pin.out);
+        let rail = doc
+            .symbol_by_ref(refdes)
+            .and_then(|inst| crate::place::extent(doc, inst));
+        let clashes = match (owner, rail) {
+            (Some(owner), Some(rail)) => owner.overlaps(&rail),
+            _ => false,
+        };
+        if !clashes {
+            break;
+        }
+        at = Point2::new(at.x + pin.out.x * 1.27, at.y + pin.out.y * 1.27);
+    }
+    if at.near_eq(pin.at, EPS) {
+        return false;
+    }
+    doc.add_wire(pin.at, at);
+    true
 }
 
 /// Rotate and shift a just-placed one-pin symbol so its pin sits exactly on
