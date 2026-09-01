@@ -486,6 +486,7 @@ pub(crate) fn gather(env: &KicadInstallation, design: &Design) -> io::Result<Vec
                     unit: u,
                     mirror: false,
                     frozen: false,
+                    preseeded: false,
                 });
             }
         }
@@ -562,9 +563,9 @@ pub(crate) fn incidence(items: &[Item]) -> Incidence {
 /// parts flow into spare columns on the right); the refinement loop perturbs
 /// these; then [`apply_cells`] turns them into mm.
 ///
-/// An [`Item`] that arrives with `frozen` already set carries a LIVE pose the caller
-/// owns and [`apply_cells`] leaves it alone. `gather` never sets it, so the whole-sheet
-/// paths are unaffected; the engines set their own idiom `frozen` flags AFTER seeding.
+/// An [`Item`] marked `preseeded` carries a LIVE pose the caller owns and
+/// [`apply_cells`] leaves it alone. `frozen` is NOT that signal — it only forbids the
+/// search from moving an item, and a frozen item still gets its seed here.
 pub fn assign_cells(items: &[Item], ir: &LayoutIr) -> Vec<Cell> {
     let max_col = ir.place.values().map(|c| c.col).max().unwrap_or(-1);
     let mut spare = max_col + 1;
@@ -654,9 +655,9 @@ pub fn apply_cells_with_gaps(items: &mut [Item], cells: &[Cell], column_gap: f64
     let row_y = track_centres(&row_h, row_gap);
 
     for (((it, c), &angle), p) in items.iter_mut().zip(cells).zip(&angles).zip(&pads) {
-        // An item that arrives ALREADY frozen holds a live pose the caller owns (the
-        // region adapter's fixed neighbours). Seeding is for parts the engine is placing.
-        if it.frozen {
+        // A preseeded item holds a live pose its caller owns (the region adapter's fixed
+        // neighbours). Everything else — frozen idiom members included — is seeded here.
+        if it.preseeded {
             continue;
         }
         it.at = [
@@ -680,4 +681,81 @@ pub(crate) fn track_centres(sizes: &BTreeMap<i32, f64>, gap: f64) -> BTreeMap<i3
         edge += size + gap;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kicad_symbol::geometry::PinGeom;
+
+    fn resistor(refdes: &str) -> Item {
+        let pin = |number: &str, y: f64| PinGeom {
+            number: number.to_string(),
+            name: "~".to_string(),
+            at: geom::Point2::new(0.0, y),
+            angle: 0.0,
+            length: 2.54,
+            unit: 1,
+        };
+        Item {
+            refdes: refdes.to_string(),
+            part: "Device:R".to_string(),
+            value: "1k".to_string(),
+            footprint: None,
+            geom: SymbolGeometry {
+                lib_id: "Device:R".to_string(),
+                pins: vec![pin("1", 3.81), pin("2", -3.81)],
+                raw_definition: String::new(),
+            },
+            pins: vec![
+                ("1".into(), "~".into(), None),
+                ("2".into(), "~".into(), None),
+            ],
+            at: [0.0, 0.0].into(),
+            angle: 0.0,
+            unit: 1,
+            mirror: false,
+            frozen: false,
+            preseeded: false,
+        }
+    }
+
+    /// `frozen` forbids the search from moving an item; it never means the item already
+    /// has a pose. Only a `preseeded` item (the region adapter's live neighbours) keeps
+    /// the pose it arrived with.
+    #[test]
+    fn seeding_skips_preseeded_not_frozen() {
+        let cell = |col, row| Cell {
+            col,
+            row,
+            orient: Orient::Down,
+        };
+        let mut items = vec![resistor("R1"), resistor("R2"), resistor("R3")];
+        items[0].frozen = true;
+        items[1].preseeded = true;
+        items[1].at = [80.0, 40.0].into();
+        let ir = LayoutIr {
+            place: [
+                ("R1".to_string(), cell(2, 1)),
+                ("R2".to_string(), cell(1, 0)),
+                ("R3".to_string(), cell(0, 0)),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let cells = assign_cells(&items, &ir);
+        apply_cells(&mut items, &cells);
+
+        assert!(
+            items[0].at[0] > 0.0 && items[0].at[1] > 0.0,
+            "a frozen item on an empty sheet must still be seeded: {:?}",
+            items[0].at
+        );
+        assert_eq!(items[1].at, [80.0, 40.0].into(), "preseeded pose was moved");
+        assert!(
+            items[2].at[0] < items[0].at[0],
+            "cell columns must still order"
+        );
+    }
 }

@@ -45,6 +45,7 @@ fn passive(refdes: &str, at: [f64; 2]) -> Item {
         unit: 1,
         mirror: false,
         frozen: false,
+        preseeded: false,
     }
 }
 

@@ -50,12 +50,13 @@ impl PlacementEngine for SpinePlace {
         // silently substitute a sibling engine. Engine selection remains a
         // caller-owned decision.
         let ir = ir.unwrap_or_else(|| sch_floorplan::floorplan::infer_ir(env, design));
-        // An item already frozen on arrival carries a LIVE pose its caller owns (the
-        // region adapter's fixed neighbours); the IR's idiom clusters are pinned on top.
+        // A PRESEEDED item carries a LIVE pose its caller owns (the region adapter's fixed
+        // neighbours) and keeps it; the IR's idiom clusters are only pinned, and are still
+        // seeded from their cells below.
         let preseeded: Vec<Option<(Point2, f64)>> = problem
             .items
             .iter()
-            .map(|it| it.frozen.then_some((it.at, it.angle)))
+            .map(|it| it.preseeded.then_some((it.at, it.angle)))
             .collect();
         for item in &mut problem.items {
             item.frozen |= ir.frozen.contains(&item.refdes);
