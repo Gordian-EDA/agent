@@ -2,6 +2,7 @@ use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_check::model::Design;
 use sch_floorplan::contract::{PlacementEngine, SchematicPlaceProblem};
+use sch_floorplan::engine_support::{apply_cells, assign_cells};
 use spine_place::SpinePlace;
 
 fn compile_source(provider: &SymbolTable, yaml: &str) -> Design {
@@ -69,16 +70,27 @@ blocks:
         item("U1").at,
         item("U2").at
     );
-    for refs in [
-        ["R1", "U1", "R9", "R17", "D1"],
-        ["R2", "U2", "R10", "R18", "D2"],
-    ] {
-        let xs = refs.map(|reference| item(reference).at.x);
-        let ys = refs.map(|reference| item(reference).at.y);
-        let span = xs.into_iter().fold(f64::MIN, f64::max)
-            - xs.into_iter().fold(f64::MAX, f64::min)
-            + ys.into_iter().fold(f64::MIN, f64::max)
-            - ys.into_iter().fold(f64::MAX, f64::min);
-        assert!(span <= 100.0, "scattered channel {refs:?}: {span:.2} mm");
+    // The contract of a frozen idiom: its members ship at the canonical cell poses
+    // `apply_cells` gives them, up to the one rigid translation `normalize` applies to
+    // the sheet. A collapse (everything on the margin origin) or a scatter both break it.
+    let mut canonical = SchematicPlaceProblem::from_design(&env, &design).unwrap();
+    let cells = assign_cells(&canonical.items, &output.ir);
+    apply_cells(&mut canonical.items, &cells);
+    let offset = [
+        problem.items[0].at.x - canonical.items[0].at.x,
+        problem.items[0].at.y - canonical.items[0].at.y,
+    ];
+    for (placed, seed) in problem.items.iter().zip(&canonical.items) {
+        let d = [
+            placed.at.x - seed.at.x - offset[0],
+            placed.at.y - seed.at.y - offset[1],
+        ];
+        assert!(
+            d[0].abs() < 1e-6 && d[1].abs() < 1e-6,
+            "{} left its cell: {:?} vs canonical {:?} + {offset:?}",
+            placed.refdes,
+            placed.at,
+            seed.at,
+        );
     }
 }

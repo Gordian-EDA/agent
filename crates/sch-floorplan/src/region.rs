@@ -8,8 +8,9 @@
 //! calls with an empty fixed set.
 //!
 //! Two invariants the adapter owns, because the engine contract does not:
-//! - **Fixed neighbours do not move.** An [`Item`] that arrives `frozen` keeps its live
-//!   pose through seeding, search, and the overlap relaxers. The engines still `normalize`
+//! - **Fixed neighbours do not move.** The adapter marks them `frozen` (the search may not
+//!   move them) AND `preseeded` (they already hold the pose the caller owns), so they keep
+//!   that pose through seeding, search, and the overlap relaxers. The engines still `normalize`
 //!   the sheet — a rigid translation — so the adapter measures that offset off the fixed
 //!   set and takes it back out, returning poses in the caller's own frame.
 //! - **Nothing lands on an obstacle.** Engines have no obstacle vocabulary (their only
@@ -40,7 +41,8 @@ pub struct RegionProblem<'a> {
     pub design: &'a Design,
     /// The movable set — the parts to place.
     pub items: Vec<Item>,
-    /// Neighbours at their LIVE positions. Forced `frozen`; they are never moved.
+    /// Neighbours at their LIVE positions. Forced `frozen` + `preseeded`; they are never
+    /// moved nor re-seeded.
     pub fixed: Vec<Item>,
     /// Everything else on the sheet the placement must avoid: label boxes, wires'
     /// keepouts, other sheets' furniture — anything with no [`Item`] to speak for it.
@@ -178,8 +180,13 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
     let movable = items.len();
     let mut all = items;
     all.extend(fixed.iter().cloned());
+    for it in all.iter_mut().take(movable) {
+        it.frozen = false;
+        it.preseeded = false;
+    }
     for it in all.iter_mut().skip(movable) {
         it.frozen = true;
+        it.preseeded = true;
     }
 
     let mut place = SchematicPlaceProblem {

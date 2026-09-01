@@ -62,9 +62,9 @@ impl PlacementEngine for Anneal {
             it.mirror = ir.mirror.contains(&it.refdes);
         }
         let cells = assign_cells(&problem.items, &ir);
-        // Seed FIRST: an item already frozen on arrival keeps its live pose (the region
-        // adapter's fixed neighbours), while the IR's idiom clusters are seeded here and
-        // only then pinned.
+        // Every item is seeded from its cell; only a PRESEEDED item (the region adapter's
+        // fixed neighbours) keeps the live pose it arrived with. `frozen` then just forbids
+        // the search from moving it.
         apply_cells(&mut problem.items, &cells);
         for it in &mut problem.items {
             it.frozen |= ir.frozen.contains(&it.refdes);
