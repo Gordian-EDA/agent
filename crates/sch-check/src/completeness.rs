@@ -569,9 +569,60 @@ fn has_signal_protection(
     components: &[&Component],
     symbols: &SymbolTable,
 ) -> bool {
-    has_series_resistor(net, components)
+    has_series_signal_protection(net, components)
         || has_transient_shunt(net, components, symbols)
         || has_shunt_rc(net, components)
+}
+
+fn has_series_signal_protection(net: &str, components: &[&Component]) -> bool {
+    components
+        .iter()
+        .copied()
+        .filter(|component| is_resistor(component))
+        .any(|resistor| {
+            far_net(resistor, net).is_some_and(|far| {
+                !is_power_net(&far)
+                    && far != net
+                    && !reaches_can_peer_through_termination(net, &far, resistor, components)
+            })
+        })
+}
+
+fn reaches_can_peer_through_termination(
+    signal_net: &str,
+    start: &str,
+    excluded: &Component,
+    components: &[&Component],
+) -> bool {
+    let Some((family, high)) = can_kind(signal_net) else {
+        return false;
+    };
+    let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for component in components.iter().copied() {
+        if std::ptr::eq(component, excluded)
+            || !is_resistor(component) && !is_switch(component)
+        {
+            continue;
+        }
+        let nets: Vec<String> = component_nets(component).into_iter().collect();
+        if let [a, b] = nets.as_slice() {
+            edges.entry(a.clone()).or_default().push(b.clone());
+            edges.entry(b.clone()).or_default().push(a.clone());
+        }
+    }
+    let mut seen = BTreeSet::new();
+    let mut queue = VecDeque::from([start.to_string()]);
+    while let Some(net) = queue.pop_front() {
+        if can_kind(&net).is_some_and(|(candidate_family, candidate_high)| {
+            candidate_family == family && candidate_high != high
+        }) {
+            return true;
+        }
+        if seen.insert(net.clone()) {
+            queue.extend(edges.get(&net).into_iter().flatten().cloned());
+        }
+    }
+    false
 }
 
 fn has_transient_shunt(net: &str, components: &[&Component], symbols: &SymbolTable) -> bool {
@@ -876,6 +927,13 @@ mod tests {
             "Connector_Generic:Conn_01x01",
             vec![("1", "Pin_1", PinType::Passive, 1)],
         );
+        symbols.mock_add(
+            "Connector_Generic:Conn_01x02",
+            vec![
+                ("1", "Pin_1", PinType::Passive, 1),
+                ("2", "Pin_2", PinType::Passive, 1),
+            ],
+        );
         symbols
     }
 
@@ -1011,6 +1069,48 @@ mod tests {
         assert_eq!(gaps.len(), 1);
         assert_eq!(gaps[0].refdes.as_deref(), Some("J1"));
         assert_eq!(gaps[0].net.as_deref(), Some("TXD"));
+    }
+
+    #[test]
+    fn can_termination_resistor_is_not_series_protection() {
+        let design = design(&[
+            (
+                "J1",
+                component(
+                    "Connector_Generic:Conn_01x02",
+                    &[("1", "CAN_H"), ("2", "CAN_L")],
+                ),
+            ),
+            (
+                "R1",
+                component("Device:R", &[("1", "CAN_H"), ("2", "CAN_L")]),
+            ),
+        ]);
+
+        assert_eq!(connector_protection_gaps(&design).len(), 2);
+    }
+
+    #[test]
+    fn split_can_termination_is_not_series_protection() {
+        let design = design(&[
+            (
+                "J1",
+                component(
+                    "Connector_Generic:Conn_01x02",
+                    &[("1", "CAN_H"), ("2", "CAN_L")],
+                ),
+            ),
+            (
+                "R1",
+                component("Device:R", &[("1", "CAN_H"), ("2", "TERM")]),
+            ),
+            (
+                "R2",
+                component("Device:R", &[("1", "TERM"), ("2", "CAN_L")]),
+            ),
+        ]);
+
+        assert_eq!(connector_protection_gaps(&design).len(), 2);
     }
 
     #[test]
