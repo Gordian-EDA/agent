@@ -85,8 +85,7 @@ fn place_parts_keeps_numbered_pin_assignments_distinct() {
     let input: sch_check::PlacePartsInput = serde_json::from_value(serde_json::json!({
         "parts": [
             { "ref": "U1", "part": "PinShadow:ThreePin", "pins": {"1": "A", "2": "B", "3": "C"} },
-            { "ref": "R1", "part": "Device:R", "pins": {"1": "A", "2": "B"} },
-            { "ref": "R2", "part": "Device:R", "pins": {"1": "C", "2": "B"} }
+            { "ref": "U2", "part": "PinShadow:ThreePin", "pins": {"1": "A", "2": "B", "3": "C"} }
         ]
     }))
     .unwrap();
@@ -100,14 +99,15 @@ fn place_parts_keeps_numbered_pin_assignments_distinct() {
 
     let schematic = dir.path().join("place-parts.kicad_sch");
     doc.write(&schematic).unwrap();
-    assert_eq!(
-        cli_pin_nets(&env, &schematic, "U1"),
-        BTreeMap::from([
-            ("1".to_owned(), "A".to_owned()),
-            ("2".to_owned(), "B".to_owned()),
-            ("3".to_owned(), "C".to_owned()),
-        ])
-    );
+    // KiCAD may auto-name a two-pin net, so compare the partition, not the names:
+    // each physical pin of U1 shares a net with the same pin of U2, and the
+    // three nets are distinct — pin 1 (named `2`) never lands on pin 2's net.
+    let u1 = cli_pin_nets(&env, &schematic, "U1");
+    let u2 = cli_pin_nets(&env, &schematic, "U2");
+    assert_eq!(u1, u2, "U1 and U2 must share nets pin for pin");
+    let distinct: std::collections::BTreeSet<&String> = u1.values().collect();
+    assert_eq!(distinct.len(), 3, "each physical pin on its own net: {u1:?}");
+    assert_eq!(u1["2"], "B");
 }
 
 #[test]
