@@ -302,11 +302,25 @@ fn led_driver_ic_has_no_led_polarity_finding() {
         ("R1", part("Device:R", &[("1", "+12V"), ("2", "DRIVE")])),
         (
             "U1",
-            part(
-                "Driver_LED:Example",
-                &[("1", "DRIVE"), ("2", "GND"), ("3", "ENABLE")],
-            ),
+            part("Driver_LED:CL220N5-G", &[("1", "DRIVE"), ("2", "GND")]),
         ),
+    ]);
+
+    assert!(
+        !erc::erc_checks(&d, &provider())
+            .iter()
+            .any(|finding| finding.contains("LED is reversed"))
+    );
+}
+
+#[test]
+fn negative_rail_indicator_on_power_connector_has_no_polarity_finding() {
+    let mut connector = part("Legacy:CONN_2", &[("1", "-12V"), ("2", "GND")]);
+    connector.value = Some("POWER".into());
+    let d = design(&[
+        ("P3", connector),
+        ("R1", part("Device:R", &[("1", "-12V"), ("2", "LED_K")])),
+        ("D1", part("Device:LED", &[("1", "LED_K"), ("2", "GND")])),
     ]);
 
     assert!(

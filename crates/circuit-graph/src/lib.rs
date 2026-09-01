@@ -263,9 +263,9 @@ mod tests {
         let nodes = vec![
             node(
                 "U1",
-                "Driver_LED:Example",
+                "Driver_LED:CL220N5-G",
                 "",
-                &[("1", "DRIVE"), ("2", "GND"), ("3", "ENABLE")],
+                &[("1", "DRIVE"), ("2", "GND")],
             ),
             node("R1", "Device:R", "1k", &[("1", "+12V"), ("2", "DRIVE")]),
         ];

@@ -187,7 +187,8 @@ fn is_resistor(c: &Component) -> bool {
     c.part.contains(":R") || c.part.ends_with("Device:R") || c.part == "R"
 }
 fn is_led(c: &Component) -> bool {
-    c.part.to_uppercase().contains("LED")
+    let (library, symbol) = c.part.split_once(':').unwrap_or(("", &c.part));
+    library.eq_ignore_ascii_case("LED") || symbol.to_ascii_uppercase().starts_with("LED")
 }
 fn is_cap(c: &Component) -> bool {
     c.part.contains(":C") || c.part == "C"
@@ -471,7 +472,10 @@ fn is_positive_supply(
     items: &[Item],
     net_items: &HashMap<&str, Vec<usize>>,
 ) -> bool {
-    if is_power_net(net) && !is_ground(net) && !is_neg_supply(net) {
+    if is_ground(net) || is_neg_supply(net) {
+        return false;
+    }
+    if is_power_net(net) {
         return true;
     }
     net_items.get(net).into_iter().flatten().any(|&index| {
@@ -483,10 +487,17 @@ fn is_positive_supply(
             .as_deref()
             .unwrap_or_default()
             .to_ascii_uppercase();
+        let supply_pin = source.pins.iter().any(|pin| {
+            pin.net == net
+                && matches!(pin.key.to_ascii_uppercase().as_str(), "1" | "P1" | "PIN1")
+        });
         (is_connector_like(&source.comp.part)
             || part.contains("CONN")
-            || source.refdes.starts_with(['J', 'P']))
+            || source.refdes.starts_with('J')
+            || source.refdes.starts_with('P'))
             && (value.contains("POWER") || value.contains("SUPPLY"))
+            && supply_pin
+            && source.nets.iter().any(|candidate| is_ground(candidate))
     })
 }
 
