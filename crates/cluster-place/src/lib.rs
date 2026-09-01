@@ -223,6 +223,18 @@ fn spine_fast_path_pin_profile<'a>(pin_profiles: impl Iterator<Item = (&'a str, 
     let dense_interactive = (5..=24).contains(&counts.len())
         && (24..=FAST_PINS).contains(&pins)
         && counts.iter().filter(|&&pins| pins >= 3).count() <= 2;
+    // A complete protected CAN interface has several legitimate small hubs at
+    // once: the transceiver, two connectors, termination switch, and dual TVS
+    // devices. That makes the generic anchor-count rule above miss it even
+    // though its topology is still a bounded bus with passive satellites. Full
+    // routed annealing of the reproduced 18-part block exceeded the interactive
+    // tool timeout; Spine consumes the inferred bus/protection idioms directly.
+    let can_interface = (8..=24).contains(&profiles.len())
+        && pins <= 80
+        && profiles.iter().any(|(part, _)| {
+            let part = part.to_ascii_uppercase();
+            part.contains("INTERFACE_CAN_LIN:") || part.contains("CAN_TRANSCEIVER")
+        });
     // A dual-op-amp symbol expands into three unit items that all inherit the
     // package's full pin table. Small bias/filter blocks therefore look like
     // three hubs even though they have one logical IC, and hit the same costly
@@ -308,6 +320,7 @@ fn spine_fast_path_pin_profile<'a>(pin_profiles: impl Iterator<Item = (&'a str, 
     }
     single_anchor
         || dense_interactive
+        || can_interface
         || compact_multi_unit
         || wide_connector_block
         || passive_bus_bank
@@ -400,6 +413,31 @@ mod tests {
         assert!(profile([8, 2, 2, 2, 2]));
         assert!(!profile([16, 8, 8, 2, 2, 2, 2, 2, 2, 2]));
         assert!(!profile([8, 5, 3, 2, 2, 2, 2, 2, 2, 2]));
+    }
+
+    #[test]
+    fn complete_can_interface_uses_bounded_fast_path() {
+        let parts = [
+            ("Interface_CAN_LIN:MCP2562-E-P", 8),
+            ("Connector:Conn_01x02_Pin", 2),
+            ("Connector:Conn_01x02_Pin", 2),
+            ("Switch:SW_SPST", 2),
+            ("Device:D_TVS_Dual_ACA", 3),
+            ("Device:D_TVS_Dual_ACA", 3),
+            ("Device:R", 2),
+            ("Device:C", 2),
+            ("Device:R", 2),
+            ("Device:R", 2),
+            ("Device:R", 2),
+            ("Device:R", 2),
+            ("Device:C", 2),
+            ("Device:C", 2),
+            ("Device:C", 2),
+            ("Device:C", 2),
+            ("Device:LED", 2),
+            ("Device:R", 2),
+        ];
+        assert!(spine_fast_path_pin_profile(parts.into_iter()));
     }
 
     #[test]

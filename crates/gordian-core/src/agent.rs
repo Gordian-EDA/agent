@@ -154,7 +154,7 @@ impl<P: Provider> Provider for MeteredProvider<P> {
 /// its authoring diagnostics. This is intentionally much lower than the global
 /// request ceiling: three unchanged completions are enough evidence that the
 /// current repair strategy is stuck.
-const MAX_CONSECUTIVE_NO_PROGRESS_COMPLETIONS: usize = 3;
+const MAX_CONSECUTIVE_NO_PROGRESS_COMPLETIONS: usize = 4;
 
 /// Base cap on each kind of catalog exploration before the model must reuse
 /// its best prior hits. One assistant completion may batch several same-kind
@@ -800,7 +800,7 @@ impl<P: Provider> Agent<P> {
             if provider_requests >= budgets.provider_requests {
                 let final_text = provider_limit_final_text(
                     None,
-                    schematic_checked_clean || !schematic_mutated,
+                    applied,
                     tool_calls_made,
                     last_tool_status.as_deref(),
                 );
@@ -855,7 +855,7 @@ impl<P: Provider> Agent<P> {
                         if provider_requests >= budgets.provider_requests {
                             let final_text = provider_limit_final_text(
                                 (!text.trim().is_empty()).then_some(text.as_str()),
-                                schematic_checked_clean || !schematic_mutated,
+                                applied,
                                 tool_calls_made,
                                 last_tool_status.as_deref(),
                             );
@@ -1167,7 +1167,7 @@ impl<P: Provider> Agent<P> {
             if let Some(tool) = timed_out_mutation_name(&timed_out_tool_calls) {
                 let final_text = mutation_timeout_final_text(
                     tool,
-                    schematic_checked_clean || !schematic_mutated,
+                    applied,
                     tool_calls_made,
                     last_tool_status.as_deref(),
                 );
@@ -1188,7 +1188,7 @@ impl<P: Provider> Agent<P> {
                 if consecutive_no_progress_completions >= MAX_CONSECUTIVE_NO_PROGRESS_COMPLETIONS {
                     let final_text = no_progress_final_text(
                         consecutive_no_progress_completions,
-                        schematic_checked_clean || !schematic_mutated,
+                        schematic_checked_clean,
                         tool_calls_made,
                         last_tool_status.as_deref(),
                     );

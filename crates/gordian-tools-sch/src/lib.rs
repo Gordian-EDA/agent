@@ -82,7 +82,7 @@ pub fn tool_defs() -> Vec<Tool> {
     let defs: Vec<(&str, &str, Value)> = vec![
         (
             "place_parts",
-            "The ONLY way to create a new design or add a multi-part block. Submit the COMPLETE electrically finished block in one call, including every requested support, protection, decoupling, bias, termination, indicator, and connector part; never submit a minimal or partial first pass. State connectivity only: real KiCAD parts and pin-to-net mappings, never coordinates or wires. One call lays out the whole new sheet, or places the block as a region while freezing existing symbols. Use `intent.relations` for left_of/right_of/group/side_of placement.",
+            "The ONLY way to create a new design or add a multi-part block. Submit the COMPLETE electrically finished block in one call, including every requested support, protection, decoupling, bias, termination, indicator, and connector part; every powered design needs local supply bypass/decoupling even when the request leaves it implicit. Never submit a minimal or partial first pass. State connectivity only: real KiCAD parts and pin-to-net mappings, never coordinates or wires. One call lays out the whole new sheet, or places the block as a region while freezing existing symbols. Use `intent.relations` for left_of/right_of/group/side_of placement. If rejected, correct every reported diagnostic before retrying; unknown-pin errors list valid physical pins.",
             sch_check::place_parts_input_schema(),
         ),
         (
