@@ -77,7 +77,6 @@ impl SchDoc {
                 at.x += dx;
                 at.y += dy;
             }
-            field.raw.touch();
         }
         symbol.raw.touch();
         self.mark_edited();
@@ -101,10 +100,7 @@ impl SchDoc {
         let symbol = self.symbol_mut(&uuid)?;
         let origin = symbol.at;
         match symbol.fields.get_mut(name) {
-            Some(field) => {
-                field.value = value.to_string();
-                field.raw.touch();
-            }
+            Some(field) => field.value = value.to_string(),
             None => {
                 let mut field = new_field(name, value, Pose::new(origin.x, origin.y, 0.0));
                 field.hidden = true;
@@ -170,9 +166,7 @@ impl SchDoc {
         children.extend(pin_nodes);
         children.push(self.instances_node(refdes));
 
-        let mut inst = SymbolInst::decode(&list(children));
-        inst.raw = Retained::owned(inst.raw.node.clone());
-        self.insert_item(Item::Symbol(inst));
+        self.insert_item(Item::Symbol(SymbolInst::decode(&list(children))));
         Ok(uuid)
     }
 

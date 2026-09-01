@@ -24,9 +24,14 @@ impl Retained {
 
     pub(crate) fn parsed(node: Node) -> Self {
         let span = match &node {
-            Node::List { span, .. } | Node::Atom { span, .. } => Some(*span),
+            Node::List { span, .. } | Node::Atom { span, .. } => *span,
         };
-        Self { node, span }
+        // A node built in memory carries an empty span; that is not a slice of
+        // any source and must never be mistaken for one.
+        Self {
+            span: (span.end > span.start).then_some(span),
+            node,
+        }
     }
 
     pub(crate) fn owned(node: Node) -> Self {
@@ -91,7 +96,9 @@ pub struct Field {
     pub value: String,
     pub at: Option<Pose>,
     pub hidden: bool,
-    pub(crate) raw: Retained,
+    /// The `(property …)` node this was decoded from, so effects, fonts and
+    /// justification survive a value change.
+    node: Node,
 }
 
 impl Field {
@@ -107,7 +114,7 @@ impl Field {
                 value,
                 at,
                 hidden,
-                raw: Retained::parsed(node.clone()),
+                node: node.clone(),
             },
         ))
     }
@@ -117,20 +124,16 @@ impl Field {
             value: value.to_string(),
             at: Some(at),
             hidden: false,
-            raw: Retained::owned(tagged(
+            node: tagged(
                 "property",
                 vec![quoted(name), quoted(value), encode_pose(at)],
-            )),
+            ),
         }
     }
 
     fn encode(&self) -> Node {
-        let mut node = self.raw.node.clone();
-        if let Some(children) = sexpr::items_mut(&mut node)
-            && let Some(slot) = children.get_mut(2)
-        {
-            *slot = quoted(self.value.clone());
-        }
+        let mut node = self.node.clone();
+        set_positional(&mut node, 2, quoted(self.value.clone()));
         if let Some(at) = self.at {
             sexpr::set_child(&mut node, encode_pose(at));
         }
@@ -358,12 +361,8 @@ impl Label {
 
     pub(crate) fn encode(&self) -> Node {
         let mut node = self.raw.node.clone();
-        if let Some(children) = sexpr::items_mut(&mut node) {
-            children[0] = sym(self.kind.head());
-            if let Some(slot) = children.get_mut(1) {
-                *slot = quoted(self.text.clone());
-            }
-        }
+        set_positional(&mut node, 0, sym(self.kind.head()));
+        set_positional(&mut node, 1, quoted(self.text.clone()));
         sexpr::set_child(&mut node, encode_pose(self.at));
         sexpr::set_child(&mut node, tagged("uuid", vec![quoted(self.uuid.clone())]));
         node
@@ -395,11 +394,7 @@ impl Text {
 
     pub(crate) fn encode(&self) -> Node {
         let mut node = self.raw.node.clone();
-        if let Some(children) = sexpr::items_mut(&mut node)
-            && let Some(slot) = children.get_mut(1)
-        {
-            *slot = quoted(self.text.clone());
-        }
+        set_positional(&mut node, 1, quoted(self.text.clone()));
         sexpr::set_child(&mut node, encode_pose(self.at));
         sexpr::set_child(&mut node, tagged("uuid", vec![quoted(self.uuid.clone())]));
         node
@@ -600,6 +595,18 @@ impl Item {
             Item::Other(raw) => raw.node.clone(),
         }
     }
+}
+
+/// Overwrite a fixed-position child, padding with empty strings if the node is
+/// short — a truncated node is malformed, but losing the value would be worse.
+fn set_positional(node: &mut Node, index: usize, value: Node) {
+    let Some(children) = sexpr::items_mut(node) else {
+        return;
+    };
+    while children.len() <= index {
+        children.push(quoted(""));
+    }
+    children[index] = value;
 }
 
 fn decode_pose(node: &Node) -> Pose {
