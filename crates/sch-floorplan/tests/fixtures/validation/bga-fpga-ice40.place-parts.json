@@ -3,6 +3,7 @@
   "parts": [
     {
       "ref": "PWR1",
+      "block": "supply",
       "part": "power:VCC",
       "pins": {
         "1": "3V3"
@@ -10,6 +11,7 @@
     },
     {
       "ref": "PWR2",
+      "block": "supply",
       "part": "power:VCC",
       "pins": {
         "1": "1V2"
@@ -17,6 +19,7 @@
     },
     {
       "ref": "PWR3",
+      "block": "supply",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -24,6 +27,7 @@
     },
     {
       "ref": "U1",
+      "block": "power",
       "part": "Regulator_Linear:AMS1117-3.3",
       "pins": {
         "VI": "VIN",
@@ -33,6 +37,7 @@
     },
     {
       "ref": "C1",
+      "block": "power",
       "part": "Device:C",
       "value": "10uF",
       "pins": {
@@ -42,6 +47,7 @@
     },
     {
       "ref": "C2",
+      "block": "power",
       "part": "Device:C",
       "value": "22uF",
       "pins": {
@@ -51,6 +57,7 @@
     },
     {
       "ref": "C3",
+      "block": "power",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -60,6 +67,7 @@
     },
     {
       "ref": "U2",
+      "block": "power",
       "part": "Regulator_Linear:AMS1117",
       "pins": {
         "VI": "3V3",
@@ -69,6 +77,7 @@
     },
     {
       "ref": "R4",
+      "block": "power",
       "part": "Device:R",
       "value": "120",
       "pins": {
@@ -78,6 +87,7 @@
     },
     {
       "ref": "R5",
+      "block": "power",
       "part": "Device:R",
       "value": "1.5k",
       "pins": {
@@ -87,6 +97,7 @@
     },
     {
       "ref": "C4",
+      "block": "power",
       "part": "Device:C",
       "value": "10uF",
       "pins": {
@@ -96,6 +107,7 @@
     },
     {
       "ref": "C5",
+      "block": "power",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -105,6 +117,7 @@
     },
     {
       "ref": "U3",
+      "block": "fpga",
       "part": "FPGA_Lattice:ICE40HX8K-BG121",
       "pins": {
         "D4": "1V2",
@@ -232,6 +245,7 @@
     },
     {
       "ref": "R1",
+      "block": "fpga",
       "part": "Device:R",
       "value": "10k",
       "pins": {
@@ -241,6 +255,7 @@
     },
     {
       "ref": "R2",
+      "block": "fpga",
       "part": "Device:R",
       "value": "10k",
       "pins": {
@@ -250,6 +265,7 @@
     },
     {
       "ref": "C6",
+      "block": "fpga",
       "part": "Device:C",
       "value": "10nF",
       "pins": {
@@ -259,6 +275,7 @@
     },
     {
       "ref": "C10",
+      "block": "fpga",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -268,6 +285,7 @@
     },
     {
       "ref": "C11",
+      "block": "fpga",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -277,6 +295,7 @@
     },
     {
       "ref": "C12",
+      "block": "fpga",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -286,6 +305,7 @@
     },
     {
       "ref": "C13",
+      "block": "fpga",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -295,6 +315,7 @@
     },
     {
       "ref": "C14",
+      "block": "fpga",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -304,6 +325,7 @@
     },
     {
       "ref": "C15",
+      "block": "fpga",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -313,6 +335,7 @@
     },
     {
       "ref": "C16",
+      "block": "fpga",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -322,6 +345,7 @@
     },
     {
       "ref": "C17",
+      "block": "fpga",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -331,6 +355,7 @@
     },
     {
       "ref": "C18",
+      "block": "fpga",
       "part": "Device:C",
       "value": "4.7uF",
       "pins": {
@@ -340,6 +365,7 @@
     },
     {
       "ref": "C19",
+      "block": "fpga",
       "part": "Device:C",
       "value": "4.7uF",
       "pins": {
@@ -349,6 +375,7 @@
     },
     {
       "ref": "U4",
+      "block": "config_flash",
       "part": "Memory_Flash:W25Q32JVSS",
       "pins": {
         "1": "SPI_SS",
@@ -363,6 +390,7 @@
     },
     {
       "ref": "C7",
+      "block": "config_flash",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -372,6 +400,7 @@
     },
     {
       "ref": "R6",
+      "block": "config_flash",
       "part": "Device:R",
       "value": "10k",
       "pins": {
@@ -381,6 +410,7 @@
     },
     {
       "ref": "J1",
+      "block": "headers",
       "part": "Connector_Generic:Conn_01x08",
       "pins": {
         "1": "3V3",

@@ -3,6 +3,7 @@
   "parts": [
     {
       "ref": "PWR1",
+      "block": "power_supply",
       "part": "power:+3V3",
       "pins": {
         "1": "+3V3"
@@ -10,6 +11,7 @@
     },
     {
       "ref": "PWR2",
+      "block": "power_supply",
       "part": "power:+9V",
       "pins": {
         "1": "+9V"
@@ -17,6 +19,7 @@
     },
     {
       "ref": "PWR3",
+      "block": "power_supply",
       "part": "power:+9V",
       "pins": {
         "1": "+9V"
@@ -24,6 +27,7 @@
     },
     {
       "ref": "PWR4",
+      "block": "power_supply",
       "part": "power:-9V",
       "pins": {
         "1": "-9V"
@@ -31,6 +35,7 @@
     },
     {
       "ref": "PWR5",
+      "block": "power_supply",
       "part": "power:-9V",
       "pins": {
         "1": "-9V"
@@ -38,6 +43,7 @@
     },
     {
       "ref": "PWR6",
+      "block": "power_supply",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -45,6 +51,7 @@
     },
     {
       "ref": "PWR7",
+      "block": "power_supply",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -52,6 +59,7 @@
     },
     {
       "ref": "J1",
+      "block": "power_supply",
       "part": "Connector:Conn_01x05_Pin",
       "value": "PWR",
       "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical",
@@ -65,6 +73,7 @@
     },
     {
       "ref": "C1",
+      "block": "power_supply",
       "part": "Device:C",
       "value": "10u",
       "footprint": "Capacitor_SMD:C_0805_2012Metric",
@@ -75,6 +84,7 @@
     },
     {
       "ref": "C2",
+      "block": "power_supply",
       "part": "Device:C",
       "value": "0.1u",
       "footprint": "Capacitor_SMD:C_0603_1608Metric",
@@ -85,6 +95,7 @@
     },
     {
       "ref": "C6",
+      "block": "power_supply",
       "part": "Device:C",
       "value": "0.1u",
       "footprint": "Capacitor_SMD:C_0603_1608Metric",
@@ -95,6 +106,7 @@
     },
     {
       "ref": "C7",
+      "block": "power_supply",
       "part": "Device:C",
       "value": "10u",
       "footprint": "Capacitor_SMD:C_0805_2012Metric",
@@ -105,6 +117,7 @@
     },
     {
       "ref": "H1",
+      "block": "power_supply",
       "part": "Mechanical:MountingHole_Pad",
       "footprint": "MountingHole:MountingHole_3.2mm_M3_Pad_Via",
       "pins": {
@@ -113,6 +126,7 @@
     },
     {
       "ref": "H2",
+      "block": "power_supply",
       "part": "Mechanical:MountingHole_Pad",
       "footprint": "MountingHole:MountingHole_3.2mm_M3_Pad_Via",
       "pins": {
@@ -121,6 +135,7 @@
     },
     {
       "ref": "H3",
+      "block": "mechanical",
       "part": "Mechanical:MountingHole_Pad",
       "footprint": "MountingHole:MountingHole_3.2mm_M3_Pad_Via",
       "pins": {
@@ -129,6 +144,7 @@
     },
     {
       "ref": "H4",
+      "block": "mechanical",
       "part": "Mechanical:MountingHole_Pad",
       "footprint": "MountingHole:MountingHole_3.2mm_M3_Pad_Via",
       "pins": {
@@ -137,6 +153,7 @@
     },
     {
       "ref": "PWR8",
+      "block": "inputs",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -144,6 +161,7 @@
     },
     {
       "ref": "J2",
+      "block": "inputs",
       "part": "Connector:Conn_01x03_Pin",
       "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
       "pins": {
@@ -154,6 +172,7 @@
     },
     {
       "ref": "J3",
+      "block": "outputs",
       "part": "Connector:Conn_01x05_Pin",
       "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical",
       "pins": {
@@ -166,6 +185,7 @@
     },
     {
       "ref": "PWR9",
+      "block": "dcoffset",
       "part": "power:+3V3",
       "pins": {
         "1": "+3V3"
@@ -173,6 +193,7 @@
     },
     {
       "ref": "PWR10",
+      "block": "dcoffset",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -180,6 +201,7 @@
     },
     {
       "ref": "C14",
+      "block": "dcoffset",
       "part": "Device:C",
       "value": "0.1u",
       "footprint": "Capacitor_SMD:C_0603_1608Metric",
@@ -190,6 +212,7 @@
     },
     {
       "ref": "R9",
+      "block": "dcoffset",
       "part": "Device:R",
       "value": "10K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -200,6 +223,7 @@
     },
     {
       "ref": "R10",
+      "block": "dcoffset",
       "part": "Device:R",
       "value": "10K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -210,6 +234,7 @@
     },
     {
       "ref": "RV1",
+      "block": "dcoffset",
       "part": "Device:R_Potentiometer",
       "footprint": "Potentiometer_SMD:Potentiometer_Bourns_3314G_Vertical",
       "pins": {
@@ -220,6 +245,7 @@
     },
     {
       "ref": "PWR11",
+      "block": "preamp",
       "part": "power:+9V",
       "pins": {
         "1": "+9V"
@@ -227,6 +253,7 @@
     },
     {
       "ref": "PWR12",
+      "block": "preamp",
       "part": "power:+9V",
       "pins": {
         "1": "+9V"
@@ -234,6 +261,7 @@
     },
     {
       "ref": "PWR13",
+      "block": "preamp",
       "part": "power:-9V",
       "pins": {
         "1": "-9V"
@@ -241,6 +269,7 @@
     },
     {
       "ref": "PWR14",
+      "block": "preamp",
       "part": "power:-9V",
       "pins": {
         "1": "-9V"
@@ -248,6 +277,7 @@
     },
     {
       "ref": "PWR15",
+      "block": "preamp",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -255,6 +285,7 @@
     },
     {
       "ref": "PWR16",
+      "block": "preamp",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -262,6 +293,7 @@
     },
     {
       "ref": "U2",
+      "block": "preamp",
       "part": "Amplifier_Instrumentation:AD620",
       "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
       "pins": {
@@ -277,6 +309,7 @@
     },
     {
       "ref": "R1",
+      "block": "preamp",
       "part": "Device:R",
       "value": "1K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -287,6 +320,7 @@
     },
     {
       "ref": "R2",
+      "block": "preamp",
       "part": "Device:R",
       "value": "1K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -297,6 +331,7 @@
     },
     {
       "ref": "R3",
+      "block": "preamp",
       "part": "Device:R",
       "value": "1K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -307,6 +342,7 @@
     },
     {
       "ref": "C3",
+      "block": "preamp",
       "part": "Device:C",
       "value": "1n",
       "footprint": "Capacitor_SMD:C_0603_1608Metric",
@@ -317,6 +353,7 @@
     },
     {
       "ref": "C4",
+      "block": "preamp",
       "part": "Device:C",
       "value": "10n",
       "footprint": "Capacitor_SMD:C_0603_1608Metric",
@@ -327,6 +364,7 @@
     },
     {
       "ref": "C5",
+      "block": "preamp",
       "part": "Device:C",
       "value": "1n",
       "footprint": "Capacitor_SMD:C_0603_1608Metric",
@@ -337,6 +375,7 @@
     },
     {
       "ref": "C8",
+      "block": "preamp_supply",
       "part": "Device:C",
       "value": "10u",
       "footprint": "Capacitor_SMD:C_0805_2012Metric",
@@ -347,6 +386,7 @@
     },
     {
       "ref": "C9",
+      "block": "preamp_supply",
       "part": "Device:C",
       "value": "10u",
       "footprint": "Capacitor_SMD:C_0805_2012Metric",
@@ -357,6 +397,7 @@
     },
     {
       "ref": "C10",
+      "block": "preamp_supply",
       "part": "Device:C",
       "value": "0.1u",
       "footprint": "Capacitor_SMD:C_0603_1608Metric",
@@ -367,6 +408,7 @@
     },
     {
       "ref": "C11",
+      "block": "preamp_supply",
       "part": "Device:C",
       "value": "0.1u",
       "footprint": "Capacitor_SMD:C_0603_1608Metric",
@@ -377,6 +419,7 @@
     },
     {
       "ref": "PWR17",
+      "block": "hpf_lpf",
       "part": "power:+9V",
       "pins": {
         "1": "+9V"
@@ -384,6 +427,7 @@
     },
     {
       "ref": "PWR18",
+      "block": "hpf_lpf",
       "part": "power:-9V",
       "pins": {
         "1": "-9V"
@@ -391,6 +435,7 @@
     },
     {
       "ref": "PWR19",
+      "block": "hpf_lpf",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -398,6 +443,7 @@
     },
     {
       "ref": "PWR20",
+      "block": "hpf_lpf",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -405,6 +451,7 @@
     },
     {
       "ref": "U1",
+      "block": "hpf_lpf",
       "part": "Amplifier_Operational:LM324",
       "footprint": "Package_SO:SOIC-14_3.9x8.7mm_P1.27mm",
       "pins": {
@@ -426,6 +473,7 @@
     },
     {
       "ref": "C12",
+      "block": "hpf_lpf",
       "part": "Device:C",
       "value": "0.1u",
       "footprint": "Capacitor_SMD:C_0603_1608Metric",
@@ -436,6 +484,7 @@
     },
     {
       "ref": "C13",
+      "block": "hpf_lpf",
       "part": "Device:C",
       "value": "0.1u",
       "footprint": "Capacitor_SMD:C_0603_1608Metric",
@@ -446,6 +495,7 @@
     },
     {
       "ref": "R4",
+      "block": "hpf_lpf",
       "part": "Device:R",
       "value": "56K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -456,6 +506,7 @@
     },
     {
       "ref": "R5",
+      "block": "hpf_lpf",
       "part": "Device:R",
       "value": "10K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -466,6 +517,7 @@
     },
     {
       "ref": "R6",
+      "block": "hpf_lpf",
       "part": "Device:R",
       "value": "56K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -476,6 +528,7 @@
     },
     {
       "ref": "R7",
+      "block": "hpf_lpf",
       "part": "Device:R",
       "value": "6.2K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -486,6 +539,7 @@
     },
     {
       "ref": "R8",
+      "block": "hpf_lpf",
       "part": "Device:R",
       "value": "2.7K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -496,6 +550,7 @@
     },
     {
       "ref": "R11",
+      "block": "hpf_lpf",
       "part": "Device:R",
       "value": "2.7K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -506,6 +561,7 @@
     },
     {
       "ref": "C15",
+      "block": "hpf_lpf",
       "part": "Device:C",
       "value": "0.1u",
       "footprint": "Capacitor_SMD:C_0603_1608Metric",
@@ -516,6 +572,7 @@
     },
     {
       "ref": "C16",
+      "block": "hpf_lpf",
       "part": "Device:C",
       "value": "0.1u",
       "footprint": "Capacitor_SMD:C_0603_1608Metric",
@@ -526,6 +583,7 @@
     },
     {
       "ref": "R12",
+      "block": "hpf_lpf",
       "part": "Device:R",
       "value": "10K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -536,6 +594,7 @@
     },
     {
       "ref": "R13",
+      "block": "hpf_lpf",
       "part": "Device:R",
       "value": "6.2K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -546,6 +605,7 @@
     },
     {
       "ref": "PWR21",
+      "block": "postamp",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -553,6 +613,7 @@
     },
     {
       "ref": "R14",
+      "block": "postamp",
       "part": "Device:R",
       "value": "2K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -563,6 +624,7 @@
     },
     {
       "ref": "RV2",
+      "block": "postamp",
       "part": "Device:R_Potentiometer",
       "footprint": "Potentiometer_SMD:Potentiometer_Bourns_3314G_Vertical",
       "pins": {
@@ -573,6 +635,7 @@
     },
     {
       "ref": "R15",
+      "block": "postamp",
       "part": "Device:R",
       "value": "10K",
       "footprint": "Resistor_SMD:R_0603_1608Metric",
@@ -581,5 +644,103 @@
         "2": "OUT_POT"
       }
     }
-  ]
+  ],
+  "layout": {
+    "dcoffset": [
+      [
+        "R9",
+        "C14"
+      ],
+      [
+        "RV1",
+        "R10"
+      ]
+    ],
+    "hpf_lpf": [
+      [
+        "C12",
+        "C13",
+        "R4",
+        "R6",
+        "U1",
+        "R5",
+        "R7"
+      ],
+      [
+        "R8",
+        "U1",
+        "C16",
+        "R11",
+        "U1",
+        "C15",
+        null
+      ],
+      [
+        "R13",
+        "U1",
+        "R12",
+        null,
+        "U1",
+        null,
+        null
+      ]
+    ],
+    "mechanical": [
+      [
+        "H3",
+        "H4"
+      ]
+    ],
+    "postamp": [
+      [
+        "R15",
+        "RV2",
+        "R14"
+      ]
+    ],
+    "power_supply": [
+      [
+        "J1",
+        "C1",
+        "C2",
+        "H1"
+      ],
+      [
+        null,
+        "C6",
+        "C7",
+        "H2"
+      ]
+    ],
+    "preamp": [
+      [
+        "C3",
+        "R1",
+        null,
+        "U2"
+      ],
+      [
+        null,
+        "C4",
+        "R3",
+        "U2"
+      ],
+      [
+        "C5",
+        "R2",
+        null,
+        "U2"
+      ]
+    ],
+    "preamp_supply": [
+      [
+        "C8",
+        "C10"
+      ],
+      [
+        "C9",
+        "C11"
+      ]
+    ]
+  }
 }

@@ -1,4 +1,5 @@
 {
+  "block": "main",
   "parts": [
     {
       "ref": "C1",
@@ -192,6 +193,5 @@
         "1": "GND"
       }
     }
-  ],
-  "block": "main"
+  ]
 }

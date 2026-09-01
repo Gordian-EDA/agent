@@ -3,6 +3,7 @@
   "parts": [
     {
       "ref": "PWR1",
+      "block": "power",
       "part": "power:VCC",
       "pins": {
         "1": "9V"
@@ -10,6 +11,7 @@
     },
     {
       "ref": "PWR2",
+      "block": "power",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -17,6 +19,7 @@
     },
     {
       "ref": "J1",
+      "block": "input",
       "part": "Connector_Generic:Conn_01x02",
       "pins": {
         "1": "9V",
@@ -25,6 +28,7 @@
     },
     {
       "ref": "C1",
+      "block": "input",
       "part": "Device:C",
       "value": "100u",
       "pins": {
@@ -34,6 +38,7 @@
     },
     {
       "ref": "U1",
+      "block": "blinker",
       "part": "Timer:NE555P",
       "pins": {
         "VCC": "9V",
@@ -48,6 +53,7 @@
     },
     {
       "ref": "R1",
+      "block": "blinker",
       "part": "Device:R",
       "value": "4k7",
       "pins": {
@@ -57,6 +63,7 @@
     },
     {
       "ref": "R2",
+      "block": "blinker",
       "part": "Device:R",
       "value": "10k",
       "pins": {
@@ -66,6 +73,7 @@
     },
     {
       "ref": "C2",
+      "block": "blinker",
       "part": "Device:C",
       "value": "10u",
       "pins": {
@@ -75,6 +83,7 @@
     },
     {
       "ref": "C3",
+      "block": "blinker",
       "part": "Device:C",
       "value": "10n",
       "pins": {
@@ -84,6 +93,7 @@
     },
     {
       "ref": "R3",
+      "block": "output",
       "part": "Device:R",
       "value": "1k",
       "pins": {
@@ -93,6 +103,7 @@
     },
     {
       "ref": "D1",
+      "block": "output",
       "part": "Device:LED",
       "value": "red",
       "pins": {
@@ -102,11 +113,31 @@
     },
     {
       "ref": "J2",
+      "block": "output",
       "part": "Connector_Generic:Conn_01x02",
       "pins": {
         "1": "N_Q",
         "2": "GND"
       }
     }
-  ]
+  ],
+  "layout": {
+    "blinker": [
+      [
+        "C3",
+        "U1",
+        "R1"
+      ],
+      [
+        null,
+        "U1",
+        "R2"
+      ],
+      [
+        null,
+        "U1",
+        "C2"
+      ]
+    ]
+  }
 }

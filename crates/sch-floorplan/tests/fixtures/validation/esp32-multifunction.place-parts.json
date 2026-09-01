@@ -3,6 +3,7 @@
   "parts": [
     {
       "ref": "PWR1",
+      "block": "power_entry",
       "part": "power:+12V",
       "pins": {
         "1": "+12V"
@@ -10,6 +11,7 @@
     },
     {
       "ref": "PWR2",
+      "block": "power_entry",
       "part": "power:+5V",
       "pins": {
         "1": "+5V"
@@ -17,6 +19,7 @@
     },
     {
       "ref": "PWR3",
+      "block": "power_entry",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -24,6 +27,7 @@
     },
     {
       "ref": "PWR4",
+      "block": "power_entry",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -31,6 +35,7 @@
     },
     {
       "ref": "J1",
+      "block": "power_entry",
       "part": "Connector:Conn_01x02_Pin",
       "value": "xt60",
       "pins": {
@@ -40,6 +45,7 @@
     },
     {
       "ref": "SW1",
+      "block": "power_entry",
       "part": "Switch:SW_Wuerth_450301014042",
       "pins": {
         "1": "+12V",
@@ -49,6 +55,7 @@
     },
     {
       "ref": "R1",
+      "block": "power_entry",
       "part": "Device:R",
       "value": "22K",
       "pins": {
@@ -58,6 +65,7 @@
     },
     {
       "ref": "J3",
+      "block": "power_entry",
       "part": "Connector:USB_B_Mini",
       "pins": {
         "1": "USB_VBUS",
@@ -70,6 +78,7 @@
     },
     {
       "ref": "D1",
+      "block": "power_entry",
       "part": "Diode:BAT60A",
       "pins": {
         "1": "+5V",
@@ -78,6 +87,7 @@
     },
     {
       "ref": "PWR5",
+      "block": "regulators",
       "part": "power:+12V",
       "pins": {
         "1": "+12V"
@@ -85,6 +95,7 @@
     },
     {
       "ref": "PWR6",
+      "block": "regulators",
       "part": "power:+12V",
       "pins": {
         "1": "+12V"
@@ -92,6 +103,7 @@
     },
     {
       "ref": "PWR7",
+      "block": "regulators",
       "part": "power:+3V3",
       "pins": {
         "1": "+3V3"
@@ -99,6 +111,7 @@
     },
     {
       "ref": "PWR8",
+      "block": "regulators",
       "part": "power:+3V3",
       "pins": {
         "1": "+3V3"
@@ -106,6 +119,7 @@
     },
     {
       "ref": "PWR9",
+      "block": "regulators",
       "part": "power:+5V",
       "pins": {
         "1": "+5V"
@@ -113,6 +127,7 @@
     },
     {
       "ref": "PWR10",
+      "block": "regulators",
       "part": "power:+5V",
       "pins": {
         "1": "+5V"
@@ -120,6 +135,7 @@
     },
     {
       "ref": "PWR11",
+      "block": "regulators",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -127,6 +143,7 @@
     },
     {
       "ref": "PWR12",
+      "block": "regulators",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -134,6 +151,7 @@
     },
     {
       "ref": "U1",
+      "block": "regulators",
       "part": "Regulator_Linear:AMS1117-3.3",
       "pins": {
         "1": "GND",
@@ -143,6 +161,7 @@
     },
     {
       "ref": "U2",
+      "block": "regulators",
       "part": "Regulator_Linear:AMS1117-5.0",
       "pins": {
         "1": "GND",
@@ -152,6 +171,7 @@
     },
     {
       "ref": "U3",
+      "block": "regulators",
       "part": "Regulator_Linear:AMS1117-3.3",
       "pins": {
         "1": "GND",
@@ -161,6 +181,7 @@
     },
     {
       "ref": "U4",
+      "block": "regulators",
       "part": "Regulator_Linear:LM350_TO220",
       "pins": {
         "1": "U4_ADJ",
@@ -170,6 +191,7 @@
     },
     {
       "ref": "C1",
+      "block": "regulators",
       "part": "Device:C_Polarized",
       "value": "10uF",
       "pins": {
@@ -179,6 +201,7 @@
     },
     {
       "ref": "C2",
+      "block": "regulators",
       "part": "Device:C_Polarized",
       "value": "10uF",
       "pins": {
@@ -188,6 +211,7 @@
     },
     {
       "ref": "C3",
+      "block": "regulators",
       "part": "Device:C_Polarized",
       "value": "10uF",
       "pins": {
@@ -197,6 +221,7 @@
     },
     {
       "ref": "C4",
+      "block": "regulators",
       "part": "Device:C_Polarized",
       "value": "10uF",
       "pins": {
@@ -206,6 +231,7 @@
     },
     {
       "ref": "C5",
+      "block": "regulators",
       "part": "Device:C_Polarized",
       "value": "22uF",
       "pins": {
@@ -215,6 +241,7 @@
     },
     {
       "ref": "C6",
+      "block": "regulators",
       "part": "Device:C_Polarized",
       "value": "22uF",
       "pins": {
@@ -224,6 +251,7 @@
     },
     {
       "ref": "C7",
+      "block": "regulators",
       "part": "Device:C_Polarized",
       "value": "22uF",
       "pins": {
@@ -233,6 +261,7 @@
     },
     {
       "ref": "C8",
+      "block": "regulators",
       "part": "Device:C_Polarized",
       "value": "22uF",
       "pins": {
@@ -242,6 +271,7 @@
     },
     {
       "ref": "R2",
+      "block": "regulators",
       "part": "Device:R",
       "value": "120",
       "pins": {
@@ -251,6 +281,7 @@
     },
     {
       "ref": "RV1",
+      "block": "regulators",
       "part": "Device:R_Potentiometer_Trim",
       "value": "1k trim",
       "pins": {
@@ -261,6 +292,7 @@
     },
     {
       "ref": "PWR13",
+      "block": "audio",
       "part": "power:+12V",
       "pins": {
         "1": "+12V"
@@ -268,6 +300,7 @@
     },
     {
       "ref": "PWR14",
+      "block": "audio",
       "part": "power:+12V",
       "pins": {
         "1": "+12V"
@@ -275,6 +308,7 @@
     },
     {
       "ref": "PWR15",
+      "block": "audio",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -282,6 +316,7 @@
     },
     {
       "ref": "PWR16",
+      "block": "audio",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -289,6 +324,7 @@
     },
     {
       "ref": "U5",
+      "block": "audio",
       "part": "Amplifier_Audio:TDA2050",
       "pins": {
         "1": "AMP_P",
@@ -300,6 +336,7 @@
     },
     {
       "ref": "RV2",
+      "block": "audio",
       "part": "Device:R_Potentiometer",
       "pins": {
         "1": "14_VI",
@@ -309,6 +346,7 @@
     },
     {
       "ref": "C9",
+      "block": "audio",
       "part": "Device:C_Polarized",
       "value": "22u",
       "pins": {
@@ -318,6 +356,7 @@
     },
     {
       "ref": "C10",
+      "block": "audio",
       "part": "Device:C_Polarized",
       "value": "1u",
       "pins": {
@@ -327,6 +366,7 @@
     },
     {
       "ref": "C11",
+      "block": "audio",
       "part": "Device:C_Polarized",
       "value": "22uF",
       "pins": {
@@ -336,6 +376,7 @@
     },
     {
       "ref": "C12",
+      "block": "audio",
       "part": "Device:C",
       "value": "0.1u",
       "pins": {
@@ -345,6 +386,7 @@
     },
     {
       "ref": "C13",
+      "block": "audio",
       "part": "Device:C_Polarized",
       "value": "1000u",
       "pins": {
@@ -354,6 +396,7 @@
     },
     {
       "ref": "C14",
+      "block": "audio",
       "part": "Device:C",
       "value": "0.47u",
       "pins": {
@@ -363,6 +406,7 @@
     },
     {
       "ref": "C15",
+      "block": "audio",
       "part": "Device:C_Polarized",
       "value": "1000u",
       "pins": {
@@ -372,6 +416,7 @@
     },
     {
       "ref": "R3",
+      "block": "audio",
       "part": "Device:R",
       "value": "22K",
       "pins": {
@@ -381,6 +426,7 @@
     },
     {
       "ref": "R5",
+      "block": "audio",
       "part": "Device:R",
       "value": "22K",
       "pins": {
@@ -390,6 +436,7 @@
     },
     {
       "ref": "R7",
+      "block": "audio",
       "part": "Device:R",
       "value": "22K",
       "pins": {
@@ -399,6 +446,7 @@
     },
     {
       "ref": "R8",
+      "block": "audio",
       "part": "Device:R",
       "value": "680R",
       "pins": {
@@ -408,6 +456,7 @@
     },
     {
       "ref": "R10",
+      "block": "audio",
       "part": "Device:R",
       "value": "22K",
       "pins": {
@@ -417,6 +466,7 @@
     },
     {
       "ref": "R12",
+      "block": "audio",
       "part": "Device:R",
       "value": "2.2R",
       "pins": {
@@ -426,6 +476,7 @@
     },
     {
       "ref": "LS1",
+      "block": "audio",
       "part": "Device:Speaker",
       "pins": {
         "1": "SPK_AC",
@@ -434,6 +485,7 @@
     },
     {
       "ref": "PWR17",
+      "block": "peltier_fan",
       "part": "power:+12V",
       "pins": {
         "1": "+12V"
@@ -441,6 +493,7 @@
     },
     {
       "ref": "PWR18",
+      "block": "peltier_fan",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -448,6 +501,7 @@
     },
     {
       "ref": "PWR19",
+      "block": "peltier_fan",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -455,6 +509,7 @@
     },
     {
       "ref": "Q1",
+      "block": "peltier_fan",
       "part": "Transistor_BJT:TIP3055",
       "value": "TIP142",
       "pins": {
@@ -465,6 +520,7 @@
     },
     {
       "ref": "Q2",
+      "block": "peltier_fan",
       "part": "Transistor_BJT:TIP3055",
       "value": "TIP142",
       "pins": {
@@ -475,6 +531,7 @@
     },
     {
       "ref": "R4",
+      "block": "peltier_fan",
       "part": "Device:R",
       "value": "1.2k",
       "pins": {
@@ -484,6 +541,7 @@
     },
     {
       "ref": "R6",
+      "block": "peltier_fan",
       "part": "Device:R",
       "value": "1.2k",
       "pins": {
@@ -493,6 +551,7 @@
     },
     {
       "ref": "R9",
+      "block": "peltier_fan",
       "part": "Device:R",
       "value": "1.2k",
       "pins": {
@@ -502,6 +561,7 @@
     },
     {
       "ref": "R11",
+      "block": "peltier_fan",
       "part": "Device:R",
       "value": "1.2k",
       "pins": {
@@ -511,6 +571,7 @@
     },
     {
       "ref": "SW2",
+      "block": "peltier_fan",
       "part": "Switch:SW_Wuerth_450301014042",
       "pins": {
         "1": "PELT_SW",
@@ -520,6 +581,7 @@
     },
     {
       "ref": "PE1",
+      "block": "peltier_fan",
       "part": "Device:PeltierElement",
       "pins": {
         "1": "PELT_SW",
@@ -528,6 +590,7 @@
     },
     {
       "ref": "M1",
+      "block": "peltier_fan",
       "part": "Motor:Fan",
       "pins": {
         "1": "V_FAN",
@@ -536,6 +599,7 @@
     },
     {
       "ref": "J4",
+      "block": "peltier_fan",
       "part": "Connector:Conn_01x02_Pin",
       "pins": {
         "1": "+5V_BAT",
@@ -544,6 +608,7 @@
     },
     {
       "ref": "PWR20",
+      "block": "connectors",
       "part": "power:+12V",
       "pins": {
         "1": "+12V"
@@ -551,6 +616,7 @@
     },
     {
       "ref": "PWR21",
+      "block": "connectors",
       "part": "power:+3V3",
       "pins": {
         "1": "+3V3"
@@ -558,6 +624,7 @@
     },
     {
       "ref": "PWR22",
+      "block": "connectors",
       "part": "power:+3V3",
       "pins": {
         "1": "+3V3"
@@ -565,6 +632,7 @@
     },
     {
       "ref": "PWR23",
+      "block": "connectors",
       "part": "power:+5V",
       "pins": {
         "1": "+5V"
@@ -572,6 +640,7 @@
     },
     {
       "ref": "PWR24",
+      "block": "connectors",
       "part": "power:+5V",
       "pins": {
         "1": "+5V"
@@ -579,6 +648,7 @@
     },
     {
       "ref": "PWR25",
+      "block": "connectors",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -586,6 +656,7 @@
     },
     {
       "ref": "PWR26",
+      "block": "connectors",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -593,6 +664,7 @@
     },
     {
       "ref": "J5",
+      "block": "connectors",
       "part": "Connector:Conn_01x15_Pin",
       "value": "Esp32_2",
       "pins": {
@@ -615,6 +687,7 @@
     },
     {
       "ref": "J10",
+      "block": "connectors",
       "part": "Connector:Conn_01x15_Pin",
       "value": "Esp32_1",
       "pins": {
@@ -637,6 +710,7 @@
     },
     {
       "ref": "J6",
+      "block": "connectors",
       "part": "Connector:Conn_01x06_Pin",
       "value": "Micro_SD",
       "pins": {
@@ -650,6 +724,7 @@
     },
     {
       "ref": "J7",
+      "block": "connectors",
       "part": "Connector:Conn_01x08_Pin",
       "value": "Gyro",
       "pins": {
@@ -665,6 +740,7 @@
     },
     {
       "ref": "J8",
+      "block": "connectors",
       "part": "Connector:Conn_01x03_Pin",
       "value": "Pulse",
       "pins": {
@@ -675,6 +751,7 @@
     },
     {
       "ref": "J9",
+      "block": "connectors",
       "part": "Connector:Conn_01x04_Pin",
       "value": "TFT LCD",
       "pins": {
@@ -686,6 +763,7 @@
     },
     {
       "ref": "J11",
+      "block": "connectors",
       "part": "Connector:Conn_01x03_Pin",
       "value": "INMP441_2",
       "pins": {
@@ -696,6 +774,7 @@
     },
     {
       "ref": "J12",
+      "block": "connectors",
       "part": "Connector:Conn_01x03_Pin",
       "value": "Ky-015 T-H Sensor",
       "pins": {
@@ -706,6 +785,7 @@
     },
     {
       "ref": "J13",
+      "block": "connectors",
       "part": "Connector:Conn_01x03_Pin",
       "value": "KY-013 Temp",
       "pins": {
@@ -716,6 +796,7 @@
     },
     {
       "ref": "J14",
+      "block": "connectors",
       "part": "Connector:Conn_01x05_Pin",
       "value": "JSTICK1",
       "pins": {
@@ -728,6 +809,7 @@
     },
     {
       "ref": "J15",
+      "block": "connectors",
       "part": "Connector:Conn_01x05_Pin",
       "value": "JSTICK2",
       "pins": {
@@ -740,6 +822,7 @@
     },
     {
       "ref": "J16",
+      "block": "connectors",
       "part": "Connector:Conn_01x03_Pin",
       "value": "INMP441_1",
       "pins": {
@@ -750,6 +833,7 @@
     },
     {
       "ref": "SW3",
+      "block": "connectors",
       "part": "Switch:SW_Push",
       "value": "Reset",
       "pins": {
@@ -759,37 +843,45 @@
     },
     {
       "ref": "FID1",
+      "block": "connectors",
       "part": "Mechanical:Fiducial"
     },
     {
       "ref": "FID2",
+      "block": "connectors",
       "part": "Mechanical:Fiducial"
     },
     {
       "ref": "FID3",
+      "block": "connectors",
       "part": "Mechanical:Fiducial"
     },
     {
       "ref": "FID4",
+      "block": "connectors",
       "part": "Mechanical:Fiducial"
     },
     {
       "ref": "H1",
+      "block": "connectors",
       "part": "Mechanical:MountingHole",
       "value": "TFT LCD Mount"
     },
     {
       "ref": "H2",
+      "block": "connectors",
       "part": "Mechanical:MountingHole",
       "value": "TFT LCD Mount"
     },
     {
       "ref": "H3",
+      "block": "connectors",
       "part": "Mechanical:MountingHole",
       "value": "TFT LCD Mount"
     },
     {
       "ref": "H4",
+      "block": "connectors",
       "part": "Mechanical:MountingHole",
       "value": "TFT LCD Mount"
     }

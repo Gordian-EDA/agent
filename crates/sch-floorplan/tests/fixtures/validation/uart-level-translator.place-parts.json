@@ -3,6 +3,7 @@
   "parts": [
     {
       "ref": "PWR1",
+      "block": "power",
       "part": "power:VCC",
       "pins": {
         "1": "VCC3V3"
@@ -10,6 +11,7 @@
     },
     {
       "ref": "PWR2",
+      "block": "power",
       "part": "power:VCC",
       "pins": {
         "1": "VCCD"
@@ -17,6 +19,7 @@
     },
     {
       "ref": "PWR3",
+      "block": "power",
       "part": "power:GND",
       "pins": {
         "1": "GNDD"
@@ -24,6 +27,7 @@
     },
     {
       "ref": "J1",
+      "block": "uart",
       "part": "Connector_Generic:Conn_01x05",
       "pins": {
         "Pin_1": "TX_RAW",
@@ -35,6 +39,7 @@
     },
     {
       "ref": "R7",
+      "block": "uart",
       "part": "Device:R",
       "value": "62R",
       "pins": {
@@ -44,6 +49,7 @@
     },
     {
       "ref": "R8",
+      "block": "uart",
       "part": "Device:R",
       "value": "62R",
       "pins": {
@@ -53,6 +59,7 @@
     },
     {
       "ref": "R9",
+      "block": "uart",
       "part": "Device:R",
       "value": "10k",
       "pins": {
@@ -62,6 +69,7 @@
     },
     {
       "ref": "R16",
+      "block": "uart",
       "part": "Device:R",
       "value": "10k",
       "pins": {
@@ -71,6 +79,7 @@
     },
     {
       "ref": "U2",
+      "block": "uart",
       "part": "Logic_LevelTranslator:SN74LVC2T45DCUR",
       "pins": {
         "VCCA": "VCCD",
@@ -85,6 +94,7 @@
     },
     {
       "ref": "R15",
+      "block": "uart",
       "part": "Device:R",
       "value": "62R",
       "pins": {
@@ -94,6 +104,7 @@
     },
     {
       "ref": "R13",
+      "block": "uart",
       "part": "Device:R",
       "value": "62R",
       "pins": {
@@ -103,6 +114,7 @@
     },
     {
       "ref": "C14",
+      "block": "uart",
       "part": "Device:C",
       "value": "100n",
       "pins": {
@@ -112,6 +124,7 @@
     },
     {
       "ref": "C16",
+      "block": "uart",
       "part": "Device:C",
       "value": "100n",
       "pins": {
@@ -121,6 +134,7 @@
     },
     {
       "ref": "R20",
+      "block": "mcu",
       "part": "Device:R",
       "value": "0R",
       "pins": {

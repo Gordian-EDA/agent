@@ -3,6 +3,7 @@
   "parts": [
     {
       "ref": "PWR1",
+      "block": "power",
       "part": "power:VCC",
       "pins": {
         "1": "5V"
@@ -10,6 +11,7 @@
     },
     {
       "ref": "PWR2",
+      "block": "power",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -17,6 +19,7 @@
     },
     {
       "ref": "J1",
+      "block": "rf_input",
       "part": "Connector:Conn_Coaxial",
       "pins": {
         "In": "RF_IN",
@@ -25,6 +28,7 @@
     },
     {
       "ref": "C1",
+      "block": "rf_input",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -34,6 +38,7 @@
     },
     {
       "ref": "U1",
+      "block": "amplifier",
       "part": "RF_Amplifier:ADL5542",
       "pins": {
         "1": "RFIN_AMP",
@@ -45,6 +50,7 @@
     },
     {
       "ref": "C5",
+      "block": "amplifier",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -54,6 +60,7 @@
     },
     {
       "ref": "C6",
+      "block": "amplifier",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -63,6 +70,7 @@
     },
     {
       "ref": "C7",
+      "block": "amplifier",
       "part": "Device:C",
       "value": "10nF",
       "pins": {
@@ -72,6 +80,7 @@
     },
     {
       "ref": "C2",
+      "block": "amplifier",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -81,6 +90,7 @@
     },
     {
       "ref": "C3",
+      "block": "amplifier",
       "part": "Device:C",
       "value": "10uF",
       "pins": {
@@ -90,6 +100,7 @@
     },
     {
       "ref": "C4",
+      "block": "rf_output",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -99,6 +110,7 @@
     },
     {
       "ref": "J2",
+      "block": "rf_output",
       "part": "Connector:Conn_Coaxial",
       "pins": {
         "In": "RF_OUT",

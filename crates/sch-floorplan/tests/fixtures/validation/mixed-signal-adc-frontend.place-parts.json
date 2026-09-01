@@ -3,6 +3,7 @@
   "parts": [
     {
       "ref": "PWR1",
+      "block": "power",
       "part": "power:VCC",
       "pins": {
         "1": "3V3"
@@ -10,6 +11,7 @@
     },
     {
       "ref": "PWR2",
+      "block": "power",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -17,6 +19,7 @@
     },
     {
       "ref": "U1",
+      "block": "afe",
       "part": "Amplifier_Operational:MCP6002-xP",
       "pins": {
         "V+": "3V3",
@@ -31,6 +34,7 @@
     },
     {
       "ref": "R3",
+      "block": "afe",
       "part": "Device:R",
       "value": "10k",
       "pins": {
@@ -40,6 +44,7 @@
     },
     {
       "ref": "R4",
+      "block": "afe",
       "part": "Device:R",
       "value": "10k",
       "pins": {
@@ -49,6 +54,7 @@
     },
     {
       "ref": "C1",
+      "block": "afe",
       "part": "Device:C",
       "value": "1uF",
       "pins": {
@@ -58,6 +64,7 @@
     },
     {
       "ref": "C2",
+      "block": "afe",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -67,6 +74,7 @@
     },
     {
       "ref": "R5",
+      "block": "filter",
       "part": "Device:R",
       "value": "1k",
       "pins": {
@@ -76,6 +84,7 @@
     },
     {
       "ref": "C5",
+      "block": "filter",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -85,6 +94,7 @@
     },
     {
       "ref": "R6",
+      "block": "filter",
       "part": "Device:R",
       "value": "1k",
       "pins": {
@@ -94,6 +104,7 @@
     },
     {
       "ref": "C6",
+      "block": "filter",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -103,6 +114,7 @@
     },
     {
       "ref": "U2",
+      "block": "adc",
       "part": "Analog_ADC:ADS1115IDGS",
       "pins": {
         "AIN2": "nc",
@@ -119,6 +131,7 @@
     },
     {
       "ref": "C3",
+      "block": "adc",
       "part": "Device:C",
       "value": "1uF",
       "pins": {
@@ -128,6 +141,7 @@
     },
     {
       "ref": "C4",
+      "block": "adc",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -137,6 +151,7 @@
     },
     {
       "ref": "R1",
+      "block": "adc",
       "part": "Device:R",
       "value": "4.7k",
       "pins": {
@@ -146,6 +161,7 @@
     },
     {
       "ref": "R2",
+      "block": "adc",
       "part": "Device:R",
       "value": "4.7k",
       "pins": {

@@ -3,6 +3,7 @@
   "parts": [
     {
       "ref": "PWR100",
+      "block": "power_circuitry",
       "part": "power:+12V",
       "pins": {
         "1": "+12V"
@@ -10,6 +11,7 @@
     },
     {
       "ref": "PWR1",
+      "block": "power_circuitry",
       "part": "power:+3.3VA",
       "pins": {
         "1": "+3V3A"
@@ -17,6 +19,7 @@
     },
     {
       "ref": "PWR2",
+      "block": "power_circuitry",
       "part": "power:+3.3VA",
       "pins": {
         "1": "+3V3A"
@@ -24,6 +27,7 @@
     },
     {
       "ref": "PWR3",
+      "block": "power_circuitry",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -31,6 +35,7 @@
     },
     {
       "ref": "PWR4",
+      "block": "power_circuitry",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -38,6 +43,7 @@
     },
     {
       "ref": "F1",
+      "block": "power_circuitry",
       "part": "Device:Polyfuse_Small",
       "value": "500mA",
       "pins": {
@@ -47,6 +53,7 @@
     },
     {
       "ref": "Q1",
+      "block": "power_circuitry",
       "part": "Transistor_FET:AO3401A",
       "pins": {
         "1": "GND",
@@ -56,6 +63,7 @@
     },
     {
       "ref": "D1",
+      "block": "power_circuitry",
       "part": "Device:D_Schottky_Small",
       "pins": {
         "1": "BUCK_IN",
@@ -64,6 +72,7 @@
     },
     {
       "ref": "FB1",
+      "block": "power_circuitry",
       "part": "Device:FerriteBead_Small",
       "value": "600 @ 600MHz",
       "pins": {
@@ -73,6 +82,7 @@
     },
     {
       "ref": "R4",
+      "block": "power_circuitry",
       "part": "Device:R_Small",
       "value": "100k",
       "pins": {
@@ -82,6 +92,7 @@
     },
     {
       "ref": "R5",
+      "block": "power_circuitry",
       "part": "Device:R_Small",
       "value": "68k",
       "pins": {
@@ -91,6 +102,7 @@
     },
     {
       "ref": "C13",
+      "block": "power_circuitry",
       "part": "Device:C_Small",
       "value": "4n7",
       "pins": {
@@ -100,6 +112,7 @@
     },
     {
       "ref": "R8",
+      "block": "power_circuitry",
       "part": "Device:R_Small",
       "value": "7k5",
       "pins": {
@@ -109,6 +122,7 @@
     },
     {
       "ref": "C14",
+      "block": "power_circuitry",
       "part": "Device:C_Small",
       "value": "0.1u",
       "pins": {
@@ -118,6 +132,7 @@
     },
     {
       "ref": "U2",
+      "block": "power_circuitry",
       "part": "Regulator_Switching:MP2303ADN",
       "pins": {
         "1": "N_U2_BS",
@@ -132,6 +147,7 @@
     },
     {
       "ref": "C15",
+      "block": "power_circuitry",
       "part": "Device:C_Polarized_Small",
       "value": "10u",
       "pins": {
@@ -141,6 +157,7 @@
     },
     {
       "ref": "C16",
+      "block": "power_circuitry",
       "part": "Device:C_Polarized_Small",
       "value": "10u",
       "pins": {
@@ -150,6 +167,7 @@
     },
     {
       "ref": "C17",
+      "block": "power_circuitry",
       "part": "Device:C_Small",
       "value": "10n",
       "pins": {
@@ -159,6 +177,7 @@
     },
     {
       "ref": "L2",
+      "block": "power_circuitry",
       "part": "Device:L_Small",
       "value": "15u",
       "pins": {
@@ -168,6 +187,7 @@
     },
     {
       "ref": "R13",
+      "block": "power_circuitry",
       "part": "Device:R_Small",
       "value": "31k25",
       "pins": {
@@ -177,6 +197,7 @@
     },
     {
       "ref": "R14",
+      "block": "power_circuitry",
       "part": "Device:R_Small",
       "value": "10k",
       "pins": {
@@ -186,6 +207,7 @@
     },
     {
       "ref": "C18",
+      "block": "power_circuitry",
       "part": "Device:C_Polarized_Small",
       "value": "22u",
       "pins": {
@@ -195,6 +217,7 @@
     },
     {
       "ref": "C20",
+      "block": "power_circuitry",
       "part": "Device:C_Polarized_Small",
       "value": "22u",
       "pins": {
@@ -204,6 +227,7 @@
     },
     {
       "ref": "D3",
+      "block": "power_circuitry",
       "part": "Device:LED_Small",
       "pins": {
         "1": "N_D3_K",
@@ -212,6 +236,7 @@
     },
     {
       "ref": "R19",
+      "block": "power_circuitry",
       "part": "Device:R_Small",
       "value": "1k",
       "pins": {
@@ -221,6 +246,7 @@
     },
     {
       "ref": "PWR5",
+      "block": "stm32",
       "part": "power:+3.3VA",
       "pins": {
         "1": "+3V3A"
@@ -228,6 +254,7 @@
     },
     {
       "ref": "PWR6",
+      "block": "stm32",
       "part": "power:+3.3VA",
       "pins": {
         "1": "+3V3A"
@@ -235,6 +262,7 @@
     },
     {
       "ref": "PWR7",
+      "block": "stm32",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -242,6 +270,7 @@
     },
     {
       "ref": "PWR8",
+      "block": "stm32",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -249,6 +278,7 @@
     },
     {
       "ref": "U1",
+      "block": "stm32",
       "part": "MCU_ST_STM32F4:STM32F405RGTx",
       "value": "STM32F405RGT6",
       "pins": {
@@ -320,6 +350,7 @@
     },
     {
       "ref": "C1",
+      "block": "stm32",
       "part": "Device:C_Small",
       "value": "2u2",
       "pins": {
@@ -329,6 +360,7 @@
     },
     {
       "ref": "C2",
+      "block": "stm32",
       "part": "Device:C_Small",
       "value": "4u7",
       "pins": {
@@ -338,6 +370,7 @@
     },
     {
       "ref": "C3",
+      "block": "stm32",
       "part": "Device:C_Small",
       "value": "2u2",
       "pins": {
@@ -347,6 +380,7 @@
     },
     {
       "ref": "C4",
+      "block": "stm32",
       "part": "Device:C_Small",
       "value": "100n",
       "pins": {
@@ -356,6 +390,7 @@
     },
     {
       "ref": "C5",
+      "block": "stm32",
       "part": "Device:C_Small",
       "value": "100n",
       "pins": {
@@ -365,6 +400,7 @@
     },
     {
       "ref": "C6",
+      "block": "stm32",
       "part": "Device:C_Small",
       "value": "100n",
       "pins": {
@@ -374,6 +410,7 @@
     },
     {
       "ref": "C7",
+      "block": "stm32",
       "part": "Device:C_Small",
       "value": "100n",
       "pins": {
@@ -383,6 +420,7 @@
     },
     {
       "ref": "C8",
+      "block": "stm32",
       "part": "Device:C_Small",
       "value": "100n",
       "pins": {
@@ -392,6 +430,7 @@
     },
     {
       "ref": "C10",
+      "block": "stm32",
       "part": "Device:C_Small",
       "value": "1u",
       "pins": {
@@ -401,6 +440,7 @@
     },
     {
       "ref": "C12",
+      "block": "stm32",
       "part": "Device:C_Small",
       "value": "10n",
       "pins": {
@@ -410,6 +450,7 @@
     },
     {
       "ref": "L1",
+      "block": "stm32",
       "part": "Device:L_Small",
       "value": "39n",
       "pins": {
@@ -419,6 +460,7 @@
     },
     {
       "ref": "R2",
+      "block": "stm32",
       "part": "Device:R_Small",
       "value": "10k",
       "pins": {
@@ -428,6 +470,7 @@
     },
     {
       "ref": "SW1",
+      "block": "stm32",
       "part": "Switch:SW_SPDT",
       "pins": {
         "1": "+3V3A",
@@ -437,6 +480,7 @@
     },
     {
       "ref": "D2",
+      "block": "stm32",
       "part": "Device:LED_Small",
       "value": "BLUE",
       "pins": {
@@ -446,6 +490,7 @@
     },
     {
       "ref": "R1",
+      "block": "stm32",
       "part": "Device:R_Small",
       "value": "1k5",
       "pins": {
@@ -455,6 +500,7 @@
     },
     {
       "ref": "Y1",
+      "block": "stm32",
       "part": "Device:Crystal_GND24_Small",
       "value": "16MHz",
       "pins": {
@@ -466,6 +512,7 @@
     },
     {
       "ref": "C9",
+      "block": "stm32",
       "part": "Device:C_Small",
       "value": "12p",
       "pins": {
@@ -475,6 +522,7 @@
     },
     {
       "ref": "C11",
+      "block": "stm32",
       "part": "Device:C_Small",
       "value": "12p",
       "pins": {
@@ -484,6 +532,7 @@
     },
     {
       "ref": "R6",
+      "block": "stm32",
       "part": "Device:R_Small",
       "value": "47",
       "pins": {
@@ -493,6 +542,7 @@
     },
     {
       "ref": "R3",
+      "block": "stm32",
       "part": "Device:R_Small",
       "value": "4k7",
       "pins": {
@@ -502,6 +552,7 @@
     },
     {
       "ref": "R7",
+      "block": "stm32",
       "part": "Device:R_Small",
       "value": "4k7",
       "pins": {
@@ -511,6 +562,7 @@
     },
     {
       "ref": "PWR101",
+      "block": "usb_connectors",
       "part": "power:+12V",
       "pins": {
         "1": "+12V"
@@ -518,6 +570,7 @@
     },
     {
       "ref": "PWR9",
+      "block": "usb_connectors",
       "part": "power:+3.3VA",
       "pins": {
         "1": "+3V3A"
@@ -525,6 +578,7 @@
     },
     {
       "ref": "PWR10",
+      "block": "usb_connectors",
       "part": "power:+3.3VA",
       "pins": {
         "1": "+3V3A"
@@ -532,6 +586,7 @@
     },
     {
       "ref": "PWR11",
+      "block": "usb_connectors",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -539,6 +594,7 @@
     },
     {
       "ref": "PWR12",
+      "block": "usb_connectors",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -546,6 +602,7 @@
     },
     {
       "ref": "J1",
+      "block": "usb_connectors",
       "part": "Connector:Screw_Terminal_01x02",
       "pins": {
         "1": "+12V",
@@ -554,6 +611,7 @@
     },
     {
       "ref": "J2",
+      "block": "usb_connectors",
       "part": "Connector:USB_B_Micro",
       "pins": {
         "1": "+3V3A",
@@ -566,6 +624,7 @@
     },
     {
       "ref": "J3",
+      "block": "usb_connectors",
       "part": "Connector_Generic:Conn_01x04",
       "pins": {
         "1": "+3V3A",
@@ -576,6 +635,7 @@
     },
     {
       "ref": "J4",
+      "block": "usb_connectors",
       "part": "Connector_Generic:Conn_01x04",
       "pins": {
         "1": "+3V3A",
@@ -586,6 +646,7 @@
     },
     {
       "ref": "J5",
+      "block": "usb_connectors",
       "part": "Connector:Conn_ARM_JTAG_SWD_10",
       "pins": {
         "1": "+3V3A",
@@ -602,6 +663,7 @@
     },
     {
       "ref": "U3",
+      "block": "usb_connectors",
       "part": "Power_Protection:USBLC6-2SC6",
       "pins": {
         "1": "USB_CONN_D_2",
@@ -614,6 +676,7 @@
     },
     {
       "ref": "R9",
+      "block": "usb_connectors",
       "part": "Device:R_Small",
       "value": "22",
       "pins": {
@@ -623,6 +686,7 @@
     },
     {
       "ref": "R10",
+      "block": "usb_connectors",
       "part": "Device:R_Small",
       "value": "22",
       "pins": {
@@ -632,6 +696,7 @@
     },
     {
       "ref": "R11",
+      "block": "usb_connectors",
       "part": "Device:R_Small",
       "value": "22",
       "pins": {
@@ -641,6 +706,7 @@
     },
     {
       "ref": "R12",
+      "block": "usb_connectors",
       "part": "Device:R_Small",
       "value": "22",
       "pins": {
@@ -650,6 +716,7 @@
     },
     {
       "ref": "R15",
+      "block": "usb_connectors",
       "part": "Device:R_Small",
       "value": "22",
       "pins": {
@@ -659,6 +726,7 @@
     },
     {
       "ref": "R16",
+      "block": "usb_connectors",
       "part": "Device:R_Small",
       "value": "22",
       "pins": {
@@ -668,6 +736,7 @@
     },
     {
       "ref": "R17",
+      "block": "usb_connectors",
       "part": "Device:R_Small",
       "value": "22",
       "pins": {
@@ -677,6 +746,7 @@
     },
     {
       "ref": "R18",
+      "block": "usb_connectors",
       "part": "Device:R_Small",
       "value": "22",
       "pins": {
@@ -686,6 +756,7 @@
     },
     {
       "ref": "C19",
+      "block": "usb_connectors",
       "part": "Device:C_Small",
       "value": "5n",
       "pins": {
@@ -695,6 +766,7 @@
     },
     {
       "ref": "H1",
+      "block": "usb_connectors",
       "part": "Mechanical:MountingHole_Pad",
       "pins": {
         "1": "GND"
@@ -702,6 +774,7 @@
     },
     {
       "ref": "H2",
+      "block": "usb_connectors",
       "part": "Mechanical:MountingHole_Pad",
       "pins": {
         "1": "GND"
@@ -709,6 +782,7 @@
     },
     {
       "ref": "H3",
+      "block": "usb_connectors",
       "part": "Mechanical:MountingHole_Pad",
       "pins": {
         "1": "GND"
@@ -716,6 +790,7 @@
     },
     {
       "ref": "H4",
+      "block": "usb_connectors",
       "part": "Mechanical:MountingHole_Pad",
       "pins": {
         "1": "GND"

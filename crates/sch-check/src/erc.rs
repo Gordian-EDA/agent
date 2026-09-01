@@ -275,9 +275,12 @@ pub struct Defect {
 }
 
 /// The checks above, split by what a finding means. A *blocking* defect is one the
-/// symbol itself proves wrong — a part installed backwards, two push-pull outputs on
-/// one node: no placement or value choice makes it work. The rest are judgement calls
-/// (a missing bypass cap, an unusual divider) that a design may legitimately answer for.
+/// netlist itself proves wrong — a 2-pin part that cannot conduct, two push-pull
+/// outputs on one node, a fixed-pinout optocoupler reversed: no placement or value
+/// choice makes it work, so the turn may not end on one. The rest read intent from
+/// topology (a diode that looks reversed, a missing bypass cap, an unusual divider);
+/// a design may legitimately answer for those, and a gate the author cannot clear
+/// costs more than the defect.
 pub fn defects(d: &Design, provider: &SymbolTable) -> Vec<Defect> {
     let mut blocking = Vec::new();
     let mut advisory = Vec::new();
@@ -325,11 +328,11 @@ fn run_checks(
             net_items.entry(n).or_default().push(i);
         }
     }
-    check_polarity(&items, &net_items, blocking);
     check_phototransistor_optocoupler_polarity(&items, blocking);
     check_output_short(&items, &net_items, blocking);
     check_dangling(&items, blocking);
 
+    check_polarity(&items, &net_items, advisory);
     check_led_current(&items, &net_items, advisory);
     check_fb_divider(&items, &net_items, advisory);
     check_555_timing_topology(&items, &net_items, advisory);

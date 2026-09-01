@@ -3,6 +3,7 @@
   "parts": [
     {
       "ref": "PWR1",
+      "block": "supply",
       "part": "power:VCC",
       "pins": {
         "1": "3V3"
@@ -10,6 +11,7 @@
     },
     {
       "ref": "PWR2",
+      "block": "supply",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -17,6 +19,7 @@
     },
     {
       "ref": "PWR3",
+      "block": "supply",
       "part": "power:VCC",
       "pins": {
         "1": "VBUS"
@@ -24,6 +27,7 @@
     },
     {
       "ref": "J1",
+      "block": "power",
       "part": "Connector:USB_C_Receptacle_USB2.0_16P",
       "pins": {
         "SBU1": "nc",
@@ -39,6 +43,7 @@
     },
     {
       "ref": "R1",
+      "block": "power",
       "part": "Device:R",
       "value": "5.1k",
       "pins": {
@@ -48,6 +53,7 @@
     },
     {
       "ref": "R2",
+      "block": "power",
       "part": "Device:R",
       "value": "5.1k",
       "pins": {
@@ -57,6 +63,7 @@
     },
     {
       "ref": "U1",
+      "block": "power",
       "part": "Regulator_Linear:AMS1117-3.3",
       "pins": {
         "VI": "VBUS",
@@ -66,6 +73,7 @@
     },
     {
       "ref": "C1",
+      "block": "power",
       "part": "Device:C",
       "value": "10uF",
       "pins": {
@@ -75,6 +83,7 @@
     },
     {
       "ref": "C2",
+      "block": "power",
       "part": "Device:C",
       "value": "22uF",
       "pins": {
@@ -84,6 +93,7 @@
     },
     {
       "ref": "C3",
+      "block": "power",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -93,6 +103,7 @@
     },
     {
       "ref": "U2",
+      "block": "mcu",
       "part": "MCU_ST_STM32H7:STM32H743VITx",
       "pins": {
         "VDD": "3V3",
@@ -191,6 +202,7 @@
     },
     {
       "ref": "C4",
+      "block": "mcu",
       "part": "Device:C",
       "value": "2.2uF",
       "pins": {
@@ -200,6 +212,7 @@
     },
     {
       "ref": "C5",
+      "block": "mcu",
       "part": "Device:C",
       "value": "2.2uF",
       "pins": {
@@ -209,6 +222,7 @@
     },
     {
       "ref": "C6",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -218,6 +232,7 @@
     },
     {
       "ref": "R3",
+      "block": "mcu",
       "part": "Device:R",
       "value": "10k",
       "pins": {
@@ -227,6 +242,7 @@
     },
     {
       "ref": "R4",
+      "block": "mcu",
       "part": "Device:R",
       "value": "4.7k",
       "pins": {
@@ -236,6 +252,7 @@
     },
     {
       "ref": "R5",
+      "block": "mcu",
       "part": "Device:R",
       "value": "4.7k",
       "pins": {
@@ -245,6 +262,7 @@
     },
     {
       "ref": "C7",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -255,6 +273,7 @@
     },
     {
       "ref": "C8",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -265,6 +284,7 @@
     },
     {
       "ref": "C9",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -275,6 +295,7 @@
     },
     {
       "ref": "C10",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -285,6 +306,7 @@
     },
     {
       "ref": "C11",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -295,6 +317,7 @@
     },
     {
       "ref": "C12",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -305,6 +328,7 @@
     },
     {
       "ref": "C13",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -315,6 +339,7 @@
     },
     {
       "ref": "C14",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -325,6 +350,7 @@
     },
     {
       "ref": "C15",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -335,6 +361,7 @@
     },
     {
       "ref": "C16",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -345,6 +372,7 @@
     },
     {
       "ref": "C17",
+      "block": "mcu",
       "part": "Device:C",
       "value": "4.7uF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -355,6 +383,7 @@
     },
     {
       "ref": "C18",
+      "block": "mcu",
       "part": "Device:C",
       "value": "4.7uF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -365,6 +394,7 @@
     },
     {
       "ref": "J2",
+      "block": "headers",
       "part": "Connector_Generic:Conn_01x10",
       "pins": {
         "1": "3V3",
@@ -381,6 +411,7 @@
     },
     {
       "ref": "J3",
+      "block": "headers",
       "part": "Connector_Generic:Conn_01x10",
       "pins": {
         "1": "PB0",

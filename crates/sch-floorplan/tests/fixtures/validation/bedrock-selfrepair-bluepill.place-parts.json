@@ -3,6 +3,7 @@
   "parts": [
     {
       "ref": "PWR1",
+      "block": "supply",
       "part": "power:VCC",
       "pins": {
         "1": "3V3"
@@ -10,6 +11,7 @@
     },
     {
       "ref": "PWR2",
+      "block": "supply",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -17,6 +19,7 @@
     },
     {
       "ref": "PWR3",
+      "block": "supply",
       "part": "power:VCC",
       "pins": {
         "1": "VBUS"
@@ -24,6 +27,7 @@
     },
     {
       "ref": "J1",
+      "block": "power",
       "part": "Connector_Generic:Conn_01x03",
       "value": "PWR_HDR",
       "pins": {
@@ -34,6 +38,7 @@
     },
     {
       "ref": "U2",
+      "block": "power",
       "part": "Regulator_Linear:AMS1117-3.3",
       "value": "AMS1117-3.3",
       "pins": {
@@ -44,6 +49,7 @@
     },
     {
       "ref": "C1",
+      "block": "power",
       "part": "Device:C",
       "value": "10uF",
       "pins": {
@@ -53,6 +59,7 @@
     },
     {
       "ref": "C2",
+      "block": "power",
       "part": "Device:C",
       "value": "10uF",
       "pins": {
@@ -62,6 +69,7 @@
     },
     {
       "ref": "C3",
+      "block": "power",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -71,6 +79,7 @@
     },
     {
       "ref": "J2",
+      "block": "usb",
       "part": "Connector:USB_C_Receptacle_USB2.0_14P",
       "value": "USB-C",
       "pins": {
@@ -85,6 +94,7 @@
     },
     {
       "ref": "R1",
+      "block": "usb",
       "part": "Device:R",
       "value": "5.1k",
       "pins": {
@@ -94,6 +104,7 @@
     },
     {
       "ref": "R2",
+      "block": "usb",
       "part": "Device:R",
       "value": "5.1k",
       "pins": {
@@ -103,6 +114,7 @@
     },
     {
       "ref": "U1",
+      "block": "mcu",
       "part": "MCU_ST_STM32H7:STM32H743VITx",
       "value": "STM32H743VIT6",
       "pins": {
@@ -201,6 +213,7 @@
     },
     {
       "ref": "C4",
+      "block": "mcu",
       "part": "Device:C",
       "value": "2.2uF",
       "pins": {
@@ -210,6 +223,7 @@
     },
     {
       "ref": "C5",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "pins": {
@@ -219,6 +233,7 @@
     },
     {
       "ref": "R3",
+      "block": "mcu",
       "part": "Device:R",
       "value": "10k",
       "pins": {
@@ -228,6 +243,7 @@
     },
     {
       "ref": "Y1",
+      "block": "mcu",
       "part": "Device:Crystal",
       "value": "25MHz",
       "pins": {
@@ -237,6 +253,7 @@
     },
     {
       "ref": "C6",
+      "block": "mcu",
       "part": "Device:C",
       "value": "20pF",
       "pins": {
@@ -246,6 +263,7 @@
     },
     {
       "ref": "C7",
+      "block": "mcu",
       "part": "Device:C",
       "value": "20pF",
       "pins": {
@@ -255,6 +273,7 @@
     },
     {
       "ref": "Y2",
+      "block": "mcu",
       "part": "Device:Crystal",
       "value": "32.768kHz",
       "pins": {
@@ -264,6 +283,7 @@
     },
     {
       "ref": "C8",
+      "block": "mcu",
       "part": "Device:C",
       "value": "6.8pF",
       "pins": {
@@ -273,6 +293,7 @@
     },
     {
       "ref": "C9",
+      "block": "mcu",
       "part": "Device:C",
       "value": "6.8pF",
       "pins": {
@@ -282,6 +303,7 @@
     },
     {
       "ref": "C10",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -292,6 +314,7 @@
     },
     {
       "ref": "C11",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -302,6 +325,7 @@
     },
     {
       "ref": "C12",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -312,6 +336,7 @@
     },
     {
       "ref": "C13",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -322,6 +347,7 @@
     },
     {
       "ref": "C14",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -332,6 +358,7 @@
     },
     {
       "ref": "C15",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -342,6 +369,7 @@
     },
     {
       "ref": "C16",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -352,6 +380,7 @@
     },
     {
       "ref": "C17",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -362,6 +391,7 @@
     },
     {
       "ref": "C18",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -372,6 +402,7 @@
     },
     {
       "ref": "C19",
+      "block": "mcu",
       "part": "Device:C",
       "value": "100nF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -382,6 +413,7 @@
     },
     {
       "ref": "C20",
+      "block": "mcu",
       "part": "Device:C",
       "value": "4.7uF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -392,6 +424,7 @@
     },
     {
       "ref": "C21",
+      "block": "mcu",
       "part": "Device:C",
       "value": "4.7uF",
       "footprint": "Capacitor_SMD:C_0402_1005Metric",
@@ -402,6 +435,7 @@
     },
     {
       "ref": "R4",
+      "block": "i2c",
       "part": "Device:R",
       "value": "4.7k",
       "pins": {
@@ -411,6 +445,7 @@
     },
     {
       "ref": "R5",
+      "block": "i2c",
       "part": "Device:R",
       "value": "4.7k",
       "pins": {
@@ -420,6 +455,7 @@
     },
     {
       "ref": "J3",
+      "block": "i2c",
       "part": "Connector_Generic:Conn_01x04",
       "value": "I2C_HDR",
       "pins": {
@@ -431,6 +467,7 @@
     },
     {
       "ref": "J4",
+      "block": "headers",
       "part": "Connector_Generic:Conn_02x20_Odd_Even",
       "value": "HDR_LEFT",
       "pins": {
@@ -478,6 +515,7 @@
     },
     {
       "ref": "J5",
+      "block": "headers",
       "part": "Connector_Generic:Conn_02x20_Odd_Even",
       "value": "HDR_RIGHT",
       "pins": {
@@ -525,6 +563,7 @@
     },
     {
       "ref": "J6",
+      "block": "debug",
       "part": "Connector_Generic:Conn_01x04",
       "value": "SWD_HDR",
       "pins": {

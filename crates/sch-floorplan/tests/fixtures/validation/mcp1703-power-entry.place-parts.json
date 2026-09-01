@@ -3,6 +3,7 @@
   "parts": [
     {
       "ref": "PWR1",
+      "block": "power",
       "part": "power:VCC",
       "pins": {
         "1": "5V"
@@ -10,6 +11,7 @@
     },
     {
       "ref": "PWR2",
+      "block": "power",
       "part": "power:VCC",
       "pins": {
         "1": "3V3"
@@ -17,6 +19,7 @@
     },
     {
       "ref": "PWR3",
+      "block": "power",
       "part": "power:GND",
       "pins": {
         "1": "GND"
@@ -24,6 +27,7 @@
     },
     {
       "ref": "F1",
+      "block": "power_entry",
       "part": "Device:Polyfuse",
       "value": "Polyfuse",
       "pins": {
@@ -33,6 +37,7 @@
     },
     {
       "ref": "C1",
+      "block": "power_entry",
       "part": "Device:C",
       "value": "10u",
       "pins": {
@@ -42,6 +47,7 @@
     },
     {
       "ref": "C2",
+      "block": "power_entry",
       "part": "Device:C",
       "value": "1u",
       "pins": {
@@ -51,6 +57,7 @@
     },
     {
       "ref": "U1",
+      "block": "power_entry",
       "part": "Regulator_Linear:MCP1703Ax-330xxTT",
       "pins": {
         "VI": "5V",
@@ -60,6 +67,7 @@
     },
     {
       "ref": "C3",
+      "block": "power_entry",
       "part": "Device:C",
       "value": "1u",
       "pins": {
@@ -69,6 +77,7 @@
     },
     {
       "ref": "C4",
+      "block": "power_entry",
       "part": "Device:C",
       "value": "10u",
       "pins": {
@@ -78,6 +87,7 @@
     },
     {
       "ref": "D1",
+      "block": "power_entry",
       "part": "Device:LED",
       "value": "red",
       "pins": {
@@ -87,6 +97,7 @@
     },
     {
       "ref": "R2",
+      "block": "power_entry",
       "part": "Device:R",
       "value": "330",
       "pins": {
