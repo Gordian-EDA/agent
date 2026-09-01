@@ -1,6 +1,7 @@
-//! Rendering: draw an [`App`] onto a ratatui [`Frame`]. No I/O; the single
-//! mutation is clamping `app.scroll` to the viewport (only the renderer knows
-//! the wrapped line count).
+//! Rendering: draw an [`App`] onto a ratatui [`Frame`]. No I/O; the only state
+//! written back into the `App` is layout-derived: the clamped scroll offset,
+//! the viewport height, and the preview-link click zones (only the renderer
+//! knows the wrapped row geometry).
 //!
 //! Layout (spec §11):
 //!
@@ -28,7 +29,6 @@ mod transcript;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::Block;
-use ratatui_image::picker::Picker;
 
 use super::app::App;
 use super::theme;
@@ -38,35 +38,8 @@ use super::theme;
 /// edge and none of them hugs the terminal edge (the Codex layout discipline).
 pub(super) const MARGIN: u16 = 4;
 
-/// Everything the renderer needs that the testable [`App`] deliberately does not
-/// hold: the image [`Picker`] (terminal graphics capability + cell font size).
-///
-/// When `picker` is `None` — under the screenshot harness or a dumb terminal —
-/// inline images fall back to a stable text label, so SVG snapshots stay
-/// byte-stable and a graphics-less terminal never emits escape garbage.
-pub struct RenderCtx<'a> {
-    pub picker: Option<&'a Picker>,
-}
-
-impl RenderCtx<'_> {
-    /// A text-only context: images render as their label, never as graphics. Used
-    /// by the screenshot harness and the unit tests for byte-stable output.
-    #[cfg(test)]
-    pub fn text_only() -> Self {
-        Self { picker: None }
-    }
-}
-
-/// Draw the whole cockpit with no image-rendering capability (text-label
-/// previews). The screenshot harness and the unit tests use this.
-#[cfg(test)]
+/// Draw the whole cockpit.
 pub fn draw(f: &mut Frame, app: &mut App) {
-    draw_with(f, app, &mut RenderCtx::text_only());
-}
-
-/// Draw the whole cockpit, rendering inline image previews through `ctx`'s
-/// [`Picker`] when one is present.
-pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
     let area = f.area();
     // The app owns its rectangle: lay the page wash down first so the warm
     // surface ramp reads as designed instead of inheriting the terminal profile.
@@ -94,7 +67,7 @@ pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
         ])
         .split(area);
 
-    transcript::draw_transcript(f, chunks[0], app, ctx);
+    transcript::draw_transcript(f, chunks[0], app);
     chrome::draw_scrollbar(f, chunks[0], app);
     if app.running {
         chrome::draw_running(f, chunks[1], app);
@@ -234,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn render_tool_posts_an_inline_image_cell_shown_as_a_label_in_text_mode() {
+    fn render_tool_posts_a_clickable_preview_link_row() {
         let mut a = app();
         for c in "render the board".chars() {
             a.update(Msg::Char(c));
@@ -243,22 +216,35 @@ mod tests {
         a.update(Msg::Agent(AgentEvent::ToolStarted {
             name: "render_board".into(),
         }));
-        // A render tool returns a PNG path: an inline image cell is posted.
+        // A render tool returns a PNG path: a preview link row is posted.
         a.update(Msg::Agent(AgentEvent::ToolFinished {
             name: "render_board".into(),
             summary: "routed view → ok".into(),
             image_path: Some("/tmp/proj/.gordian/renders/000.png".into()),
         }));
-        assert_eq!(a.images.len(), 1, "an image cell was posted");
-        // In text-label mode (no picker, like the screenshot harness) the cell
-        // renders its stable label, never graphics.
+        assert_eq!(a.images.len(), 1, "a preview cell was posted");
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("board preview"), "image label shows:\n{text}");
-        assert!(text.contains("000.png"), "label carries the path:\n{text}");
+        assert!(text.contains("board preview"), "link row shows:\n{text}");
+        assert!(text.contains("000.png"), "link carries the path:\n{text}");
+
+        // The draw published a click zone over the link row, and a click inside
+        // it (only inside it) resolves to the preview.
+        let zone = a
+            .preview_zones
+            .first()
+            .copied()
+            .expect("the link row registered a click zone");
+        assert_eq!(zone.idx, 0);
+        assert_eq!(a.preview_at(zone.x, zone.y), Some(0));
+        assert_eq!(
+            a.preview_at(zone.x, zone.y + zone.height + 1),
+            None,
+            "outside the row is not the link"
+        );
     }
 
     #[test]
-    fn render_schematic_image_cell_is_labeled_as_schematic_preview() {
+    fn render_schematic_preview_is_labeled_as_schematic() {
         let mut a = app();
         for c in "render the schematic".chars() {
             a.update(Msg::Char(c));
