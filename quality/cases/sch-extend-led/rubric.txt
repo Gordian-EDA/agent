@@ -1,0 +1,7 @@
+The LED must have correct polarity, a series resistor sized for the supply it hangs off, and must not disturb any existing net.
+expect: unchanged_symbols_moved == []
+expect: fields_lost == []
+expect: erc_errors == 0
+expect: symbols_removed == []
+expect: len(symbols_added) >= 2
+expect: net_delta_removed == []

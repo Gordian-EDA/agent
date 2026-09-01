@@ -1,0 +1,6 @@
+Every block must be wired to the parts' real pin functions: USB-C CC pulldowns, protection in the correct electrical order, a plausible 3.3 V feedback network, one decoupling capacitor per MCU supply pin, a working crystal network, and a complete SWD header.
+expect: schematic_created == true
+expect: erc_errors == 0
+expect: partition_matches_kicad == true
+expect: part_count >= 35
+expect: extractor_warnings == []

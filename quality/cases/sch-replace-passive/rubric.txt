@@ -1,0 +1,7 @@
+Only R4's value and footprint may differ; the circuit topology must be identical.
+expect: unchanged_symbols_moved == []
+expect: fields_lost == []
+expect: erc_errors == 0
+expect: symbols_added == []
+expect: symbols_removed == []
+expect: net_delta_unchanged == true

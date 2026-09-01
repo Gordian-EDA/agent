@@ -1,0 +1,1 @@
+Create and apply a compact 5 V low-side status LED driver schematic. Use an NPN transistor, a 1 kOhm base resistor from CTRL, a 10 kOhm base pulldown, a red LED with a safe series resistor, a two-pin power connector, and a separate CTRL connector. Render the finished schematic.

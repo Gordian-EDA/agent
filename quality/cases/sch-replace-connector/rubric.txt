@@ -1,0 +1,7 @@
+P1 must become a three-pin part whose first two pins keep their original nets while the third goes to GND, and nothing else in the circuit may change.
+expect: unchanged_symbols_moved == []
+expect: fields_lost == []
+expect: erc_errors == 0
+expect: symbols_removed == []
+expect: net_delta_removed == []
+expect: net_delta_pins_now_unconnected == []

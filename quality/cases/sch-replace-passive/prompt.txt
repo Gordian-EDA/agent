@@ -1,0 +1,1 @@
+In the existing schematic, change R4 to 22K and give it the Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal footprint. Change nothing else: leave every other part's value, footprint and position exactly as it is. Render the schematic.

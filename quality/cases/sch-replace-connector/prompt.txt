@@ -1,0 +1,1 @@
+In the existing schematic, replace the two-pin IN connector P1 with a three-pin header of the same family. Keep the two existing IN connections on pins 1 and 2 exactly as they are and tie the new third pin to GND. Leave every other part untouched, including its position. Render the schematic.

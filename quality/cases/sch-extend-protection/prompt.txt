@@ -1,0 +1,1 @@
+Add input protection to the existing schematic's IN connector: a small series resistor in the signal path and a pair of clamp diodes from the protected node to GND. Keep the original signal path intact through the new series element, add nothing else, and leave every existing part exactly where it is. Render the schematic.

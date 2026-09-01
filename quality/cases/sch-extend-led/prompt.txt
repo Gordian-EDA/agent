@@ -1,0 +1,1 @@
+Add a power-present indicator to the existing schematic: one LED and its current-limiting resistor from the POWER connector's positive pin to GND. Add nothing else, and leave every existing part exactly where it is. Render the schematic.

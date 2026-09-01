@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""Run Gordian quality cases and grade the artifacts with one VLM judge."""
+"""Run Gordian quality cases: deterministic facts first, one VLM judge second.
+
+A case is `cases/<name>/{prompt.txt,rubric.txt,input/}`. The prompt goes to the
+real agent; the artifacts it leaves behind are measured, not guessed at. Every
+schematic case records what actually happened to the file — which symbols moved,
+which fields were dropped, how the net partition changed, what KiCAD's own ERC
+says — and a rubric may assert on any of it:
+
+    expect: erc_errors == 0
+    expect: unchanged_symbols_moved == []
+    expect: len(symbols_added) >= 2
+
+Those checks are evaluated here, not by the model. A failed check caps the score
+at 3 whatever the judge thought.
+"""
 
 import argparse
 import base64
@@ -12,14 +26,15 @@ import shutil
 import subprocess
 import sys
 import time
-import tempfile
 import tomllib
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = Path(__file__).resolve().parent / "cases"
+CAPPED_SCORE = 3
 
 
 def command(args, *, timeout=600, check=True, env=None):
@@ -41,10 +56,7 @@ def tool(project, name, payload=None):
     ]
     if payload is not None:
         args.append(json.dumps(payload, separators=(",", ":")))
-    result = command(
-        args
-    )
-    value = json.loads(result.stdout)
+    value = json.loads(command(args).stdout)
     if value.get("error") or value.get("ok") is False:
         raise RuntimeError(f"{name} failed: {json.dumps(value, indent=2)}")
     return value
@@ -79,29 +91,121 @@ def prepare_project(case, project):
         tool(project, "check_board")
 
 
-def capture_render(project, tool_name, destination):
-    try:
-        value = tool(project, tool_name)
-    except Exception as error:
-        return {"error": str(error)}
-    path = value.get("__image_path") or value.get("png_path")
-    if not path or not Path(path).is_file():
-        return {"error": f"{tool_name} returned no image"}
-    shutil.copy2(path, destination)
-    return {"path": str(destination)}
+# --- deterministic schematic facts -----------------------------------------
 
 
-def render_project(project, artifacts, prefix):
-    rendered = {}
-    if next(project.glob("*.kicad_sch"), None):
-        rendered["schematic"] = capture_render(
-            project, "render_schematic", artifacts / f"{prefix}-schematic.png"
+def sch_facts_binary():
+    """The `sch-doc` facts example, built on first use."""
+    configured = os.environ.get("SCH_FACTS_BIN")
+    if configured:
+        return [configured]
+    built = ROOT / "target" / "release" / "examples" / "sch_facts"
+    if not built.is_file():
+        command(
+            ["cargo", "build", "--release", "-p", "sch-doc", "--example", "sch_facts"],
+            timeout=1800,
         )
-    if next(project.glob("*.kicad_pcb"), None):
-        rendered["pcb"] = capture_render(
-            project, "render_board", artifacts / f"{prefix}-pcb.png"
-        )
-    return rendered
+    return [str(built)]
+
+
+def sch_facts(*args):
+    result = command(sch_facts_binary() + [str(a) for a in args], check=False)
+    if result.returncode:
+        return {"error": (result.stderr or result.stdout).strip()}
+    return json.loads(result.stdout)
+
+
+def kicad_partition(schematic, out_path):
+    """KiCAD's own net partition: sorted `REF.PIN` groups, power symbols and
+    single-pin nets dropped so it is comparable to the extractor's."""
+    result = command(
+        [
+            "kicad-cli", "sch", "export", "netlist",
+            "--format", "kicadxml", "-o", str(out_path), str(schematic),
+        ],
+        check=False,
+    )
+    if not out_path.exists():
+        return None, (result.stderr or result.stdout).strip()
+    nets = ET.parse(out_path).getroot().find("nets")
+    groups = [
+        [f"{n.get('ref')}.{n.get('pin')}" for n in net.findall("node")]
+        for net in (nets if nets is not None else [])
+    ]
+    return normalize_partition(groups), None
+
+
+def normalize_partition(groups):
+    kept = [sorted(p for p in group if not p.startswith("#")) for group in groups]
+    return sorted(group for group in kept if len(group) >= 2)
+
+
+def symbol_table(facts):
+    return {symbol["key"]: symbol for symbol in facts.get("symbols", [])}
+
+
+def pose(symbol):
+    return (symbol["x"], symbol["y"], symbol["rot"], symbol["mirror"])
+
+
+def compare_symbols(before, after):
+    """What the edit did to the symbols that were already there."""
+    old, new = symbol_table(before), symbol_table(after)
+    shared = sorted(set(old) & set(new))
+    return {
+        "symbols_added": sorted(set(new) - set(old)),
+        "symbols_removed": sorted(set(old) - set(new)),
+        "unchanged_symbols_moved": [k for k in shared if pose(old[k]) != pose(new[k])],
+        "fields_lost": [
+            [k, name]
+            for k in shared
+            for name in old[k]["fields"]
+            if name not in new[k]["fields"]
+        ],
+        "fields_changed": [
+            [k, name, value, new[k]["fields"][name]]
+            for k in shared
+            for name, value in old[k]["fields"].items()
+            if name in new[k]["fields"] and new[k]["fields"][name] != value
+        ],
+        "lib_ids_changed": [
+            [k, old[k]["lib_id"], new[k]["lib_id"]]
+            for k in shared
+            if old[k]["lib_id"] != new[k]["lib_id"]
+        ],
+    }
+
+
+def flat_net_delta(delta):
+    return {f"net_delta_{key}": value for key, value in delta.items()}
+
+
+def schematic_facts(project, before_project, artifacts):
+    """Everything measurable about the schematic, before against after."""
+    schematic = next(project.glob("*.kicad_sch"), None)
+    if schematic is None:
+        return {"schematic_created": False}, {}
+
+    after = sch_facts(project)
+    before = sch_facts(before_project) if before_project.is_dir() else {}
+    kicad, kicad_error = kicad_partition(schematic, artifacts / "netlist.xml")
+    extracted = normalize_partition(after.get("partition", []))
+
+    facts = {
+        "schematic_created": True,
+        "symbol_count": after.get("symbol_count", 0),
+        "part_count": after.get("part_count", 0),
+        "extractor_warnings": after.get("extractor_warnings", []),
+        "partition_matches_kicad": kicad is not None and kicad == extracted,
+        "kicad_netlist_error": kicad_error,
+        "net_count": len(extracted),
+    }
+    detail = {"sch_after": after}
+    if before.get("symbols") is not None:
+        facts.update(compare_symbols(before, after))
+        facts.update(flat_net_delta(sch_facts("--diff", before_project, project)))
+        detail["sch_before"] = before
+    return facts, detail
 
 
 def run_check(kind, design, report_path):
@@ -129,7 +233,7 @@ def violations(report):
     return found
 
 
-def deterministic_facts(project, artifacts, agent_result):
+def deterministic_facts(project, before_project, artifacts, agent_result):
     schematic = next(project.glob("*.kicad_sch"), None)
     board = next(project.glob("*.kicad_pcb"), None)
     erc = run_check("sch", schematic, artifacts / "erc.json")
@@ -137,10 +241,14 @@ def deterministic_facts(project, artifacts, agent_result):
     erc_findings = violations(erc)
     drc_findings = violations(drc)
     unconnected = drc.get("unconnected_items", []) if isinstance(drc, dict) else []
-    fab = sorted(path.name for path in (project / "fab").glob("*")) if (project / "fab").is_dir() else []
-    return {
+    fab = (
+        sorted(path.name for path in (project / "fab").glob("*"))
+        if (project / "fab").is_dir()
+        else []
+    )
+    sch, detail = schematic_facts(project, before_project, artifacts)
+    facts = {
         "agent_exit": agent_result.returncode,
-        "schematic_created": schematic is not None,
         "pcb_created": board is not None,
         "erc_errors": sum(v.get("severity") == "error" for v in erc_findings),
         "erc_warnings": sum(v.get("severity") == "warning" for v in erc_findings),
@@ -148,7 +256,75 @@ def deterministic_facts(project, artifacts, agent_result):
         "drc_warnings": sum(v.get("severity") == "warning" for v in drc_findings),
         "unconnected_items": len(unconnected),
         "fab_files": fab,
+        **sch,
     }
+    return facts, detail
+
+
+# --- rubric checks ----------------------------------------------------------
+
+
+CHECK = re.compile(
+    r"^(?P<len>len\()?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\)?"
+    r"\s*(?P<op>==|!=|<=|>=|<|>)\s*(?P<value>.+)$"
+)
+OPS = {
+    "==": lambda a, b: a == b,
+    "!=": lambda a, b: a != b,
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+}
+
+
+def parse_rubric(text):
+    """Split a rubric into the prose the judge reads and the `expect:` lines the
+    runner evaluates itself."""
+    prose, checks = [], []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("expect:"):
+            checks.append(stripped[len("expect:"):].strip())
+        else:
+            prose.append(line)
+    return "\n".join(prose).strip(), checks
+
+
+def evaluate_check(expression, facts):
+    match = CHECK.match(expression)
+    if not match:
+        return False, "unparseable check"
+    name = match.group("name")
+    if name not in facts:
+        return False, f"no such fact: {name}"
+    actual = facts[name]
+    if match.group("len"):
+        if not isinstance(actual, (list, str, dict)):
+            return False, f"len() needs a collection, {name} is {actual!r}"
+        actual = len(actual)
+    try:
+        expected = json.loads(match.group("value"))
+    except json.JSONDecodeError:
+        return False, f"expected value is not JSON: {match.group('value')}"
+    try:
+        ok = OPS[match.group("op")](actual, expected)
+    except TypeError:
+        return False, f"cannot compare {actual!r} with {expected!r}"
+    return ok, "" if ok else f"actual {json.dumps(actual)}"
+
+
+def evaluate_checks(checks, facts):
+    passed, failed = [], []
+    for expression in checks:
+        ok, reason = evaluate_check(expression, facts)
+        (passed if ok else failed).append(
+            expression if ok else f"{expression} — {reason}"
+        )
+    return {"pass": passed, "fail": failed}
+
+
+# --- judge ------------------------------------------------------------------
 
 
 def image_part(path):
@@ -172,21 +348,25 @@ def extract_object(text):
     return objects[-1]
 
 
-def judge(prompt, rubric, facts, renders):
+def llm_config():
     config_root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     config_path = config_root / "gordian" / "config.toml"
     try:
         llm = tomllib.loads(config_path.read_text(encoding="utf-8"))["llm"]
     except (OSError, KeyError, tomllib.TOMLDecodeError) as error:
-        raise RuntimeError(f"cannot read judge configuration from {config_path}: {error}") from error
+        raise RuntimeError(
+            f"cannot read judge configuration from {config_path}: {error}"
+        ) from error
     base = str(llm.get("endpoint", "")).rstrip("/")
     key = str(llm.get("apiKey", ""))
     model = str(llm.get("model", ""))
     if not base or not key or not model:
-        raise RuntimeError(
-            f"set llm.endpoint, llm.apiKey, and llm.model in {config_path}"
-        )
+        raise RuntimeError(f"set llm.endpoint, llm.apiKey, and llm.model in {config_path}")
+    return base, key, model
 
+
+def judge(prompt, rubric, facts, checks, renders):
+    base, key, model = llm_config()
     text = f"""Review Gordian's result for the user request below.
 
 REQUEST:
@@ -195,15 +375,23 @@ REQUEST:
 CASE RUBRIC:
 {rubric}
 
-AUTHORITATIVE CHECKS:
+AUTHORITATIVE FACTS (measured from the files, not opinions):
 {json.dumps(facts, indent=2)}
+
+MACHINE CHECKS ALREADY EVALUATED:
+{json.dumps(checks, indent=2)}
+
+`unchanged_symbols_moved` lists parts that were already in the input and whose
+position or rotation changed; on an edit case that is a regression even when the
+result looks fine. `fields_lost` lists properties dropped from a surviving part.
+`net_delta_*` is the change to the net partition.
 
 The images are labeled by filename as before/after schematic or PCB renders.
 Return only JSON with this exact shape:
 {{"score": 0, "issues": []}}
 
 Score must be an integer from 0 to 10. Issues must be short, concrete, actionable
-strings. Do not repeat an issue already disproved by the authoritative checks.
+strings. Do not repeat an issue already disproved by the authoritative facts.
 An empty issues array means no actionable issue was found."""
     content = [{"type": "text", "text": text}]
     for phase in ("before", "after"):
@@ -239,9 +427,37 @@ An empty issues array means no actionable issue was found."""
     issues = verdict.get("issues")
     if not isinstance(score, int) or not 0 <= score <= 10:
         raise ValueError(f"invalid judge score: {score!r}")
-    if not isinstance(issues, list) or not all(isinstance(issue, str) for issue in issues):
+    if not isinstance(issues, list) or not all(isinstance(i, str) for i in issues):
         raise ValueError(f"invalid judge issues: {issues!r}")
     return {"score": score, "issues": issues}
+
+
+# --- render + run -----------------------------------------------------------
+
+
+def capture_render(project, tool_name, destination):
+    try:
+        value = tool(project, tool_name)
+    except Exception as error:
+        return {"error": str(error)}
+    path = value.get("__image_path") or value.get("png_path")
+    if not path or not Path(path).is_file():
+        return {"error": f"{tool_name} returned no image"}
+    shutil.copy2(path, destination)
+    return {"path": str(destination)}
+
+
+def render_project(project, artifacts, prefix):
+    rendered = {}
+    if next(project.glob("*.kicad_sch"), None):
+        rendered["schematic"] = capture_render(
+            project, "render_schematic", artifacts / f"{prefix}-schematic.png"
+        )
+    if next(project.glob("*.kicad_pcb"), None):
+        rendered["pcb"] = capture_render(
+            project, "render_board", artifacts / f"{prefix}-pcb.png"
+        )
+    return rendered
 
 
 def agent_command(project, prompt):
@@ -255,60 +471,138 @@ def agent_command(project, prompt):
 
 
 def run_case(case, output_root):
+    started = time.time()
     prompt = (case / "prompt.txt").read_text(encoding="utf-8").strip()
-    rubric = (case / "rubric.txt").read_text(encoding="utf-8").strip()
+    rubric, checks = parse_rubric((case / "rubric.txt").read_text(encoding="utf-8"))
     run_dir = output_root / case.name
     if run_dir.exists():
         shutil.rmtree(run_dir)
     artifacts = run_dir / "artifacts"
     project = run_dir / "project"
+    before_project = run_dir / "before-project"
     artifacts.mkdir(parents=True)
     project.mkdir()
 
     prepare_project(case, project)
+    shutil.copytree(project, before_project)
     renders = {"before": render_project(project, artifacts, "before")}
+
+    agent_started = time.time()
     result = command(
         agent_command(project, prompt),
         timeout=int(os.environ.get("QUALITY_TIMEOUT", "900")),
         check=False,
-        env={**os.environ, "GORDIAN_THREAD_ID": f"quality-{case.name}-{int(time.time())}"},
+        env={**os.environ, "GORDIAN_THREAD_ID": f"quality-{case.name}-{int(started)}"},
     )
+    agent_seconds = round(time.time() - agent_started, 1)
     (artifacts / "agent.stdout.txt").write_text(result.stdout, encoding="utf-8")
     (artifacts / "agent.stderr.txt").write_text(result.stderr, encoding="utf-8")
+
     renders["after"] = render_project(project, artifacts, "after")
-    facts = deterministic_facts(project, artifacts, result)
-    verdict = judge(prompt, rubric, facts, renders)
-    report = {"case": case.name, **facts, "judge": verdict}
+    facts, detail = deterministic_facts(project, before_project, artifacts, result)
+    outcome = evaluate_checks(checks, facts)
+    verdict = judge(prompt, rubric, facts, outcome, renders)
+    score = min(verdict["score"], CAPPED_SCORE) if outcome["fail"] else verdict["score"]
+
+    report = {
+        "case": case.name,
+        "score": score,
+        "judge_score": verdict["score"],
+        "checks": outcome,
+        "agent_seconds": agent_seconds,
+        "elapsed_seconds": round(time.time() - started, 1),
+        **facts,
+        "judge": verdict,
+        **detail,
+    }
     (run_dir / "result.json").write_text(
         json.dumps(report, indent=2) + "\n", encoding="utf-8"
     )
-    print(json.dumps(report, indent=2))
     return report
+
+
+# --- scoreboard -------------------------------------------------------------
+
+
+COLUMNS = ["case", "score", "checks", "erc e/w", "moved", "lost", "added", "elapsed"]
+
+
+def row(report):
+    if "error" in report:
+        return [report["case"], "-", "-", "-", "-", "-", "-", report["error"][:40]]
+    checks = report["checks"]
+    total = len(checks["pass"]) + len(checks["fail"])
+    return [
+        report["case"],
+        str(report["score"]),
+        f"{len(checks['pass'])}/{total}" if total else "-",
+        f"{report.get('erc_errors', '-')}/{report.get('erc_warnings', '-')}",
+        str(len(report.get("unchanged_symbols_moved", []))) if "unchanged_symbols_moved" in report else "-",
+        str(len(report.get("fields_lost", []))) if "fields_lost" in report else "-",
+        str(len(report.get("symbols_added", []))) if "symbols_added" in report else "-",
+        f"{report['elapsed_seconds']:.0f}s",
+    ]
+
+
+def scoreboard(reports):
+    rows = [COLUMNS] + [row(report) for report in reports]
+    widths = [max(len(r[i]) for r in rows) for i in range(len(COLUMNS))]
+    lines = ["| " + " | ".join(c.ljust(w) for c, w in zip(rows[0], widths)) + " |"]
+    lines.append("| " + " | ".join("-" * w for w in widths) + " |")
+    for r in rows[1:]:
+        lines.append("| " + " | ".join(c.ljust(w) for c, w in zip(r, widths)) + " |")
+    return "\n".join(lines)
+
+
+def select(available, args):
+    if args.cases:
+        return args.cases
+    if args.suite == "schematic":
+        return sorted(n for n in available if n.startswith("sch-"))
+    if args.suite == "pcb":
+        return sorted(n for n in available if not n.startswith("sch-"))
+    return sorted(available)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("cases", nargs="*", help="case names; defaults to all cases")
+    parser.add_argument("cases", nargs="*", help="case names; defaults to the suite")
     parser.add_argument("--output", type=Path, default=Path("quality/runs"))
+    parser.add_argument(
+        "--suite",
+        choices=["schematic", "pcb", "all"],
+        default="all",
+        help="schematic runs every sch-* case, pcb runs the rest",
+    )
+    parser.add_argument("--scoreboard", type=Path, help="write the scoreboard here too")
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
+
     available = {path.name: path for path in CASES.iterdir() if path.is_dir()}
     if args.list:
-        print("\n".join(sorted(available)))
+        print("\n".join(select(available, args)))
         return
-    selected = args.cases or sorted(available)
+    selected = select(available, args)
     unknown = [name for name in selected if name not in available]
     if unknown:
         parser.error(f"unknown cases: {', '.join(unknown)}")
-    output = (ROOT / args.output).resolve() if not args.output.is_absolute() else args.output
-    failed = False
+    output = args.output if args.output.is_absolute() else (ROOT / args.output).resolve()
+
+    reports = []
     for name in selected:
         try:
-            run_case(available[name], output)
+            report = run_case(available[name], output)
         except Exception as error:
-            failed = True
+            report = {"case": name, "error": str(error)}
             print(f"{name}: {error}", file=sys.stderr)
-    raise SystemExit(1 if failed else 0)
+        reports.append(report)
+        print(json.dumps(report, indent=2)[:4000], flush=True)
+
+    table = scoreboard(reports)
+    print("\n" + table)
+    if args.scoreboard:
+        args.scoreboard.write_text(table + "\n", encoding="utf-8")
+    raise SystemExit(1 if any("error" in r for r in reports) else 0)
 
 
 if __name__ == "__main__":

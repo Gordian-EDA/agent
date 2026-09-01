@@ -1,0 +1,1 @@
+Add three test points to the existing schematic: one on GND, one on the OUT connector's signal pin, and one on the POWER connector's positive pin. Use real test-point symbols, add nothing else, and leave every existing part exactly where it is. Render the schematic.

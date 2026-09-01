@@ -1,0 +1,6 @@
+The transceiver's real pin functions must be respected, termination must be switchable across CANH/CANL, and protection must sit at the bus connector.
+expect: schematic_created == true
+expect: erc_errors == 0
+expect: partition_matches_kicad == true
+expect: part_count >= 18
+expect: extractor_warnings == []
