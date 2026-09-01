@@ -49,6 +49,8 @@ pub enum Msg {
     /// shell passes the live viewport height so the jump tracks the window.
     PageUp(u16),
     PageDown(u16),
+    /// Snap the transcript back to the live tail (End / Ctrl-End).
+    ScrollToBottom,
     /// Shift/Alt+Enter — insert a literal newline into the composer (a
     /// multi-line prompt) rather than submitting.
     Newline,
@@ -322,6 +324,10 @@ impl App {
             }
             Msg::PageDown(h) => {
                 self.scroll = self.scroll.saturating_sub(h.max(1));
+                Action::None
+            }
+            Msg::ScrollToBottom => {
+                self.scroll = 0;
                 Action::None
             }
             Msg::Newline => {

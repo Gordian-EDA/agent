@@ -151,16 +151,7 @@ fn layout_blocks(app: &App, body_w: usize, ctx: &RenderCtx) -> Vec<Block> {
         if gap_above(prev, e) {
             text.push(Line::from(""));
         }
-        // The entry still being streamed gets a trailing cursor so live prose
-        // reads as in-flight; it word-wraps with the text tail and vanishes the
-        // moment the turn finalizes the entry.
-        if app.live_assistant == Some(i) {
-            let mut live = e.clone();
-            live.text.push('▌');
-            text.extend(render_entry(&live, body_w));
-        } else {
-            text.extend(render_entry(e, body_w));
-        }
+        text.extend(render_entry(e, body_w));
         prev = Some(e.speaker);
         i += 1;
     }

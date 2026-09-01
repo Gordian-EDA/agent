@@ -103,7 +103,7 @@ pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
         .split(area);
 
     transcript::draw_transcript(f, chunks[0], app, ctx);
-    chrome::draw_scroll_indicator(f, chunks[0], app);
+    chrome::draw_scrollbar(f, chunks[0], app);
     if app.pending.is_some() {
         composer::draw_approval(f, chunks[1], app);
     }
@@ -331,8 +331,37 @@ mod tests {
         a.scroll = u16::MAX;
         let text = render_to_string(&mut a, 40, 12);
         assert!(a.scroll < u16::MAX, "scroll clamps to the content height");
-        assert!(text.contains("↑"), "scrolled-back indicator:\n{text}");
+        assert!(text.contains("┃"), "scrollbar thumb:\n{text}");
+        assert!(
+            text.contains("jump to latest"),
+            "off-tail jump hint:\n{text}"
+        );
         assert!(text.contains("m0"), "clamped view shows the top:\n{text}");
+    }
+
+    #[test]
+    fn the_tail_has_a_track_but_no_jump_hint() {
+        let mut a = app();
+        for i in 0..20 {
+            a.update(Msg::Agent(AgentEvent::AssistantText(format!("m{i}"))));
+        }
+        let text = render_to_string(&mut a, 40, 12);
+        assert!(text.contains("┃"), "the bar still shows position:\n{text}");
+        assert!(
+            !text.contains("jump to latest"),
+            "nothing to catch up on at the tail:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_short_transcript_draws_no_scrollbar() {
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::AssistantText("just one".into())));
+        let text = render_to_string(&mut a, 40, 12);
+        assert!(
+            !text.contains("┃") && !text.contains("│"),
+            "no bar when everything fits:\n{text}"
+        );
     }
 
     #[test]

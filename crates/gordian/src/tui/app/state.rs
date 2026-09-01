@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::{Entry, NoticeLevel, PendingApproval, TurnEndReason, UnwindPicker};
+use super::{Entry, LiveAssistant, NoticeLevel, PendingApproval, TurnEndReason, UnwindPicker};
 use crate::tui::pricing::Ledger;
 
 #[derive(Clone, Debug)]
@@ -63,11 +63,10 @@ pub struct App {
     /// [`super::ImageCell`]). Kept parallel to `transcript` so the text model and
     /// its tests stay free of the non-`PartialEq` image protocol state.
     pub images: Vec<super::ImageCell>,
-    /// Index into `transcript` of the assistant entry currently being streamed
-    /// token-by-token (an in-progress `AssistantDelta` run), or `None` between
-    /// streamed runs. The final `AssistantText` finalizes it in place; the
-    /// renderer reads it to draw a trailing live cursor.
-    pub live_assistant: Option<usize>,
+    /// The assistant entry being built from an in-progress streamed run, or
+    /// `None` between runs. Dropping it is the only teardown a run needs — the
+    /// buffered tail goes with it, so no reset path can leave text stranded.
+    pub live_assistant: Option<LiveAssistant>,
     /// The current input-line buffer.
     pub input: String,
     /// Cursor position in the input line, in **chars** (0 ..= char count).

@@ -6,7 +6,10 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 
 use super::super::app::App;
 use super::super::theme;
@@ -21,24 +24,77 @@ const SPINNER: [&str; 4] = ["▘", "▝", "▗", "▖"];
 /// models on Bedrock).
 const CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 
-pub(super) fn draw_scroll_indicator(f: &mut Frame, area: Rect, app: &App) {
-    if app.scroll == 0 {
+/// A proportional scrollbar in the transcript's right-hand gutter, plus a
+/// "jump to latest" hint once the view has left the tail.
+///
+/// The bar is drawn only when the document is taller than the viewport, so a
+/// short conversation keeps a clean edge. Its thumb takes the accent while
+/// scrolled back and recedes to [`theme::FAINT`] at the tail, which is the
+/// whole signal: *you are not looking at the newest output*.
+pub(super) fn draw_scrollbar(f: &mut Frame, area: Rect, app: &App) {
+    let (viewport, max_top) = (app.viewport_h, app.scroll_max);
+    if max_top == 0 || viewport == 0 {
         return;
     }
+    let inner = body(area);
+    let at_tail = app.scroll == 0;
 
-    let area = body(area);
-    let ind = format!(" ↑{} ", app.scroll);
-    let iw = (ind.chars().count() as u16).min(area.width);
-    let ind_area = Rect {
-        x: area.x + area.width - iw,
+    // The gutter column between the text and the terminal edge — the bar never
+    // steals a column from the prose.
+    let track = Rect {
+        x: inner.x + inner.width + 1,
         y: area.y,
-        width: iw,
+        width: 1,
+        height: area.height,
+    };
+    let mut state = ScrollbarState::new(usize::from(max_top))
+        .viewport_content_length(usize::from(viewport))
+        .position(usize::from(max_top - app.scroll));
+    f.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            // No rail: at this end of the surface ramp a track reads as either
+            // invisible or as noise, and the thumb alone carries the position.
+            .track_symbol(None)
+            .thumb_symbol("┃")
+            .thumb_style(if at_tail {
+                Style::default().fg(theme::FAINT)
+            } else {
+                Style::default().fg(theme::ACC)
+            }),
+        track,
+        &mut state,
+    );
+
+    if !at_tail {
+        draw_jump_hint(f, inner);
+    }
+}
+
+/// The floating "you're behind" affordance, pinned to the bottom-right of the
+/// transcript so it never displaces a row of content.
+fn draw_jump_hint(f: &mut Frame, inner: Rect) {
+    let spans = vec![
+        Span::styled(" ↓ ", theme::BAND.patch(Style::default().fg(theme::ACC))),
+        Span::styled("End", theme::BAND.patch(theme::POPUP_TITLE)),
+        Span::styled(" jump to latest ", theme::BAND.patch(theme::META)),
+    ];
+    let w: u16 = spans
+        .iter()
+        .map(|s| s.content.chars().count() as u16)
+        .sum();
+    if w > inner.width || inner.height == 0 {
+        return;
+    }
+    let pill = Rect {
+        x: inner.x + inner.width - w,
+        y: inner.y + inner.height - 1,
+        width: w,
         height: 1,
     };
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(ind, theme::META))),
-        ind_area,
-    );
+    f.render_widget(Clear, pill);
+    f.render_widget(Paragraph::new(Line::from(spans)), pill);
 }
 
 /// The running indicator that replaces the old transcript-title spinner: an
@@ -206,6 +262,7 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
         kv("Up / Down", "scroll empty prompt / recall while editing"),
         kv("Shift-Up/Down", "scroll the transcript one line"),
         kv("PgUp / PgDn", "jump the transcript by a screenful"),
+        kv("End", "jump to the latest output"),
         kv("Ctrl-U/W/A/E", "line editing (kill line/word, home/end)"),
         kv("Ctrl-Left/Right", "move by word"),
         kv("Esc", "close help / reject gate / clear input"),

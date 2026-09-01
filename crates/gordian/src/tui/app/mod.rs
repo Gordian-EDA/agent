@@ -26,7 +26,9 @@ mod update;
 pub use image_cell::{ImageCell, ImageState};
 pub use input::*;
 pub use state::{App, Status};
-pub use transcript::{Entry, NoticeLevel, PendingApproval, Speaker, UnwindPicker};
+pub use transcript::{
+    Entry, LiveAssistant, NoticeLevel, PendingApproval, Speaker, UnwindPicker,
+};
 pub use update::{Action, Msg, TurnEndReason};
 
 #[cfg(test)]
@@ -1028,24 +1030,33 @@ mod tests {
     }
 
     #[test]
-    fn assistant_deltas_grow_a_live_entry_then_text_finalizes_it() {
+    fn a_partial_paragraph_stays_off_screen_until_it_is_finished() {
         let mut a = app();
-        // The first delta opens a live assistant entry; subsequent ones grow it.
+        // Mid-sentence deltas buffer; nothing reaches the transcript yet, so the
+        // reader never watches a sentence assemble itself.
         a.update(Msg::Agent(AgentEvent::AssistantDelta("I'll ".into())));
         a.update(Msg::Agent(AgentEvent::AssistantDelta("search".into())));
-        let live = a.live_assistant.expect("a live entry is open mid-stream");
-        assert_eq!(a.transcript[live].text, "I'll search");
+        assert!(
+            a.transcript.iter().all(|e| e.speaker != Speaker::Assistant),
+            "a half-written paragraph does not render"
+        );
+
+        // Closing the paragraph publishes it — and only it.
+        a.update(Msg::Agent(AgentEvent::AssistantDelta(
+            " for the part.\n\nThen I".into(),
+        )));
+        let live = a
+            .live_assistant
+            .as_ref()
+            .expect("the run is still open")
+            .entry
+            .expect("the first paragraph opened an entry");
+        assert_eq!(a.transcript[live].text, "I'll search for the part.");
         assert_eq!(a.transcript[live].speaker, Speaker::Assistant);
-        let count = a
-            .transcript
-            .iter()
-            .filter(|e| e.speaker == Speaker::Assistant)
-            .count();
-        assert_eq!(count, 1, "deltas grow ONE entry, not one per chunk");
 
         // The final text finalizes the same entry in place (no second entry).
         a.update(Msg::Agent(AgentEvent::AssistantText(
-            "I'll search for the part.".into(),
+            "I'll search for the part.\n\nThen I'll wire it up.".into(),
         )));
         assert!(a.live_assistant.is_none(), "finalized: no live entry");
         let assistants: Vec<&Entry> = a
@@ -1058,7 +1069,29 @@ mod tests {
             1,
             "still one assistant entry (finalized in place)"
         );
-        assert_eq!(assistants[0].text, "I'll search for the part.");
+        assert_eq!(
+            assistants[0].text,
+            "I'll search for the part.\n\nThen I'll wire it up."
+        );
+    }
+
+    #[test]
+    fn each_finished_paragraph_lands_in_the_one_live_entry() {
+        let mut a = app();
+        for chunk in ["one.\n\n", "two.\n\n", "three"] {
+            a.update(Msg::Agent(AgentEvent::AssistantDelta(chunk.into())));
+        }
+        let assistants: Vec<&str> = a
+            .transcript
+            .iter()
+            .filter(|e| e.speaker == Speaker::Assistant)
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(
+            assistants,
+            vec!["one.\n\ntwo."],
+            "paragraphs grow ONE entry, and the unfinished tail is withheld"
+        );
     }
 
     #[test]

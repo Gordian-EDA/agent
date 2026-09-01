@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Changed
+- **TUI transcript view**: the `↑n` scrollback badge is replaced by a proportional
+  scrollbar in the right-hand gutter, whose thumb takes the accent while scrolled
+  back and recedes at the tail. `End` (on an empty prompt) and `Ctrl-End` (always)
+  jump to the latest output, and an off-tail hint makes that discoverable.
+- **Assistant prose renders a paragraph at a time** rather than token by token.
+  A partial paragraph stays buffered until it is finished, so a sentence never
+  reflows on screen as it is written; the running indicator carries the in-flight
+  signal instead. The trailing live cursor is gone with it.
 - **TUI colour scheme**: every styled span now names a semantic role from a single
   `tui::theme` module instead of a hardcoded ANSI colour. The palette is a warm dark
   ramp with two accent tiers — copper (`#d98b4a`) for the rare, high-salience surfaces

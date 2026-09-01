@@ -383,8 +383,9 @@ fn tui_screenshots() {
     );
     shoot("08_markdown", 96, 32, &mut app);
 
-    // 9. A turn mid-stream: assistant prose still arriving token-by-token (a
-    //    live entry with its trailing cursor), the running indicator below.
+    // 9. A turn mid-reply: one paragraph has landed, the next is still buffered
+    //    (it renders only once finished), and the running indicator carries the
+    //    in-flight signal below it.
     let mut app = App::new(status());
     push(
         &mut app,
@@ -395,7 +396,7 @@ fn tui_screenshots() {
     tool(&mut app, "search_symbols", "\"LDO 3.3V\" → 9 hits");
     for chunk in [
         "I'll use an **AMS1117-3.3** with a 10µF input cap and a 22µF output ",
-        "cap for stability. Adding a power-on LED on the output and",
+        "cap for stability.\n\nAdding a power-on LED on the output and",
     ] {
         app.update(Msg::Agent(AgentEvent::AssistantDelta(chunk.into())));
     }
@@ -434,4 +435,19 @@ fn tui_screenshots() {
         "Routed cleanly on two layers — preview above.".into(),
     )));
     shoot("10_preview", 96, 32, &mut app);
+
+    // 11. Scrolled back through a long conversation: the gutter bar shows where
+    //     the viewport sits, and the jump hint offers the way back to the tail.
+    let mut app = App::new(status());
+    for i in 0..6 {
+        seed_conversation(&mut app);
+        push(
+            &mut app,
+            Speaker::System,
+            &format!("checkpoint {i}"),
+            NoticeLevel::Success,
+        );
+    }
+    app.scroll = 40;
+    shoot("11_scrollback", 96, 32, &mut app);
 }
