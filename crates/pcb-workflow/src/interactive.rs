@@ -600,46 +600,100 @@ pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 }
 
-/// Set (or update) a net class with a track width + clearance (mm) and assign
-/// nets to it — "wide copper for power". (Note: also achievable per-track via
-/// route_track width.)
+/// Set one board net's track width through a live net-class update or its
+/// atomic on-disk equivalent.
 pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let name = require_str(&input, "name")?;
-    let width = input.get("width").and_then(Value::as_f64).unwrap_or(0.5);
+    let net = require_str(&input, "net")?;
+    if net.is_empty() {
+        return Ok(json!({ "error": "net must not be empty" }));
+    }
+    let width = input
+        .get("width")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| anyhow::anyhow!("width must be a number in mm"))?;
     let clearance = input
         .get("clearance")
         .and_then(Value::as_f64)
         .unwrap_or(0.2);
-    let nets: Vec<String> = input
-        .get("nets")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let net_refs: Vec<&str> = nets.iter().map(String::as_str).collect();
-    match ctx.kicad().with_session(&ctx.pcb_path(), |session| {
+    if !width.is_finite() || width <= 0.0 {
+        return Ok(json!({ "error": format!("width must be greater than zero, got {width}") }));
+    }
+    if !clearance.is_finite() || clearance < 0.0 {
+        return Ok(json!({ "error": format!("clearance must be non-negative, got {clearance}") }));
+    }
+    let name = input
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Width_{}", crate::fmt_num(width).replace('.', "_")));
+    if name.is_empty() || name == "Default" {
+        return Ok(json!({ "error": "name must be non-empty and not Default" }));
+    }
+    let path = ctx.pcb_path();
+    let live = ctx.kicad().with_session(&path, |session| {
         let width_nm = mm_to_nm(width);
         let clearance_nm = mm_to_nm(clearance);
-        let changed =
-            session
-                .kicad()
-                .set_net_class_if_changed(&name, width_nm, clearance_nm, &net_refs)?;
+        let changed = session.kicad().set_net_class_if_changed(
+            &name,
+            width_nm,
+            clearance_nm,
+            &[net.as_str()],
+        )?;
         session.kicad().save()?;
         Ok(changed)
-    }) {
+    });
+    match live {
         Ok(changed) => Ok(json!({
             "ok": true,
+            "write_path": "ipc",
             "changed": changed,
-            "net_class": name,
+            "net_class": name.clone(),
             "width": width,
             "clearance": clearance,
-            "nets": nets,
+            "nets": [net.clone()],
+            "changed_nets": if changed { vec![net] } else { Vec::new() },
+            "changed_classes": if changed { vec![name] } else { Vec::new() },
         })),
-        Err(e) => Ok(json!({ "error": e.to_string() })),
+        Err(live_error) => {
+            ctx.close_kicad_session();
+            let project_path = ctx.sch_path().with_extension("kicad_pro");
+            let update = kicad_board::NetClassUpdate {
+                name: name.clone(),
+                width,
+                clearance,
+                nets: vec![net.clone()],
+            };
+            match write_net_width_offline(&path, &project_path, &update) {
+                Ok(report) => Ok(json!({
+                    "ok": true,
+                    "write_path": "offline",
+                    "fallback_reason": live_error.to_string(),
+                    "changed": report.changed,
+                    "board_changed": report.board_changed,
+                    "project_changed": report.project_changed,
+                    "net_class": name,
+                    "width": width,
+                    "clearance": clearance,
+                    "nets": [net],
+                    "changed_nets": report.nets,
+                    "changed_classes": report.classes,
+                })),
+                Err(offline_error) => Ok(json!({
+                    "error": format!(
+                        "{live_error}; offline net-width fallback failed: {offline_error}"
+                    )
+                })),
+            }
+        }
     }
+}
+
+fn write_net_width_offline(
+    board_path: &std::path::Path,
+    project_path: &std::path::Path,
+    update: &kicad_board::NetClassUpdate,
+) -> std::result::Result<kicad_board::NetClassUpdateReport, String> {
+    kicad_board::write_net_class_update(board_path, project_path, update)
 }
 
 /// Save the live KiCAD board to disk if a session is open. Returns whether it saved.
@@ -1663,5 +1717,37 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("legacy `start`/`end`/`layer`"), "{err}");
+    }
+
+    #[test]
+    fn offline_net_width_write_updates_board_and_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let board_path = dir.path().join("design.kicad_pcb");
+        let project_path = dir.path().join("design.kicad_pro");
+        std::fs::write(
+            &board_path,
+            "(kicad_pcb\n\t(net 0 \"\")\n\t(net 1 \"SIG\")\n\t(net_class \"Default\" \"default\"\n\t\t(clearance 0.2)\n\t\t(trace_width 0.25)\n\t\t(add_net \"SIG\")\n\t)\n)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &project_path,
+            "{\n  \"net_settings\": {\n    \"classes\": [{\"name\": \"Default\", \"priority\": 2147483647, \"clearance\": 0.2, \"track_width\": 0.25}],\n    \"netclass_assignments\": null\n  }\n}\n",
+        )
+        .unwrap();
+        let update = kicad_board::NetClassUpdate {
+            name: "Width_0_5".into(),
+            width: 0.5,
+            clearance: 0.2,
+            nets: vec!["SIG".into()],
+        };
+
+        let report = write_net_width_offline(&board_path, &project_path, &update).unwrap();
+
+        assert_eq!(report.nets, vec!["SIG"]);
+        assert_eq!(report.classes, vec!["Width_0_5"]);
+        let board = std::fs::read_to_string(board_path).unwrap();
+        let project = std::fs::read_to_string(project_path).unwrap();
+        assert_eq!(kicad_board::board_net_widths(&board).unwrap()["SIG"], 0.5);
+        assert_eq!(kicad_board::project_net_widths(&project).unwrap()["SIG"], 0.5);
     }
 }
