@@ -57,7 +57,7 @@ cargo build --release
 # Run one headless design turn:
 cargo run --release -p gordian -- agent --project ./my_board "a 3.3V buck converter from 12V, 2A"
 
-# Or the interactive copilot (chat + per-mutation approval):
+# Or the interactive copilot (chat + live transcript):
 cargo run --release -p gordian -- tui --project ./my_board
 ```
 
