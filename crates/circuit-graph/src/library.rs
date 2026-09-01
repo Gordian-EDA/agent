@@ -11,7 +11,7 @@ use crate::pattern::{Edge, NetMatch, NodePred, Pattern, Role};
 const CRYSTAL_LIBS: &[&str] = &["Crystal", "Resonator", "Oscillator"];
 const CAP_LIBS: &[&str] = &["Device:C"];
 const RES_LIBS: &[&str] = &["Device:R"];
-const LED_LIBS: &[&str] = &["LED", "Device:D"];
+const LED_LIBS: &[&str] = &["LED"];
 
 /// **Crystal oscillator**: an MCU/anchor whose two oscillator pins drive a crystal,
 /// each oscillator net loaded to ground by a small capacitor. The defining shape
