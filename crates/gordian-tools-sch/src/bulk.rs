@@ -64,6 +64,11 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
 
 pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let payload: sch_check::PlacePartsInput = typed(input, "place_parts")?;
+    // The exact payload is what reproduces a placement; nothing else in the log does.
+    tracing::debug!(
+        payload = %serde_json::to_string(&payload).unwrap_or_default(),
+        "place_parts"
+    );
     let mut edit = if ctx.sch_path().is_file() {
         Edit::open(ctx).context("opening the existing schematic")?
     } else {

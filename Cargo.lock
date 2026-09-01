@@ -1093,6 +1093,7 @@ dependencies = [
  "serde_path_to_error",
  "spine-place",
  "strsim",
+ "tracing",
 ]
 
 [[package]]
