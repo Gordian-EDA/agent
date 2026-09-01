@@ -8,6 +8,29 @@ use crate::error::{Error, Result};
 use crate::model::{Item, Label, LibSymbols, SymbolInst, Wire};
 use crate::sexpr::{self, print};
 
+/// A borrow of a symbol that is about to change. See [`SchDoc::symbol_mut`].
+pub(crate) struct SymbolEdit<'a>(&'a mut SymbolInst);
+
+impl std::ops::Deref for SymbolEdit<'_> {
+    type Target = SymbolInst;
+
+    fn deref(&self) -> &SymbolInst {
+        self.0
+    }
+}
+
+impl std::ops::DerefMut for SymbolEdit<'_> {
+    fn deref_mut(&mut self) -> &mut SymbolInst {
+        self.0
+    }
+}
+
+impl Drop for SymbolEdit<'_> {
+    fn drop(&mut self) {
+        self.0.raw.touch();
+    }
+}
+
 /// The header sections KiCAD writes before the sheet content, in order.
 const HEADER: [&str; 7] = [
     "version",
@@ -201,11 +224,14 @@ impl SchDoc {
         self.symbols().find(|s| s.refdes() == refdes)
     }
 
-    pub(crate) fn symbol_mut(&mut self, uuid: &str) -> Result<&mut SymbolInst> {
+    /// Mutable access to a symbol. The guard invalidates the symbol's retained
+    /// bytes when it drops, so an edit can never be made and then written back
+    /// from the source it just contradicted.
+    pub(crate) fn symbol_mut(&mut self, uuid: &str) -> Result<SymbolEdit<'_>> {
         self.items
             .iter_mut()
             .find_map(|item| match item {
-                Item::Symbol(s) if s.uuid == uuid => Some(s),
+                Item::Symbol(s) if s.uuid == uuid => Some(SymbolEdit(s)),
                 _ => None,
             })
             .ok_or_else(|| Error::UnknownSymbol(uuid.to_string()))

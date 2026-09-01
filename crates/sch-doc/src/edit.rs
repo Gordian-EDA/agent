@@ -64,7 +64,7 @@ impl SchDoc {
     /// Move a symbol, carrying its field positions with it.
     pub fn move_symbol(&mut self, refdes: &str, x: f64, y: f64) -> Result<()> {
         let uuid = self.uuid_of(refdes)?;
-        let symbol = self.symbol_mut(&uuid)?;
+        let mut symbol = self.symbol_mut(&uuid)?;
         let (dx, dy) = (x - symbol.at.x, y - symbol.at.y);
         symbol.at.x = x;
         symbol.at.y = y;
@@ -74,7 +74,7 @@ impl SchDoc {
                 at.y += dy;
             }
         }
-        symbol.raw.touch();
+        drop(symbol);
         self.mark_edited();
         Ok(())
     }
@@ -82,10 +82,10 @@ impl SchDoc {
     /// Set a symbol's rotation and mirroring, leaving its position alone.
     pub fn set_symbol_orientation(&mut self, refdes: &str, rot: f64, mirror: Mirror) -> Result<()> {
         let uuid = self.uuid_of(refdes)?;
-        let symbol = self.symbol_mut(&uuid)?;
+        let mut symbol = self.symbol_mut(&uuid)?;
         symbol.at.rot = rot;
         symbol.mirror = mirror;
-        symbol.raw.touch();
+        drop(symbol);
         self.mark_edited();
         Ok(())
     }
@@ -100,7 +100,7 @@ impl SchDoc {
     pub fn set_field(&mut self, refdes: &str, name: &str, value: &str) -> Result<()> {
         let uuid = self.uuid_of(refdes)?;
         let sheet_path = self.sheet_path();
-        let symbol = self.symbol_mut(&uuid)?;
+        let mut symbol = self.symbol_mut(&uuid)?;
         let origin = symbol.at;
         match symbol.fields.get_mut(name) {
             Some(field) => field.value = value.to_string(),
@@ -115,7 +115,7 @@ impl SchDoc {
         {
             return Err(Error::ForeignInstances(refdes.to_string()));
         }
-        symbol.raw.touch();
+        drop(symbol);
         self.mark_edited();
         Ok(())
     }
