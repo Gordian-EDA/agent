@@ -100,6 +100,20 @@ pub(crate) fn wire(
         Vec::new()
     };
 
+    // Every pin on the sheet, tagged with its net, so a rail's lead-out/riser can never
+    // be drawn onto a FOREIGN pin — KiCAD welds a wire that ends on or passes over one,
+    // silently shorting the two nets. Phase B gives signal nets this guard through the
+    // routing scene; rails are drawn before that scene exists, so they carry their own.
+    // Finalize-only (`fan_risers`), like the body jog, so the per-move scorer is untouched.
+    let foreign_pins: Vec<([f64; 2], String)> = if fan_risers {
+        net_eps
+            .iter()
+            .flat_map(|(net, eps)| eps.iter().map(move |(p, _)| (*p, net.clone())))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // Driver-pin position per driven non-ground rail, so a rail's power symbol can be
     // anchored at its regulator/IC OUTPUT (the LDO `VO`) instead of the trunk's left end
     // or a bypass cap — making the regulated rail's exit unambiguous. Multi-sheet only
@@ -159,6 +173,7 @@ pub(crate) fn wire(
                 flag,
                 &riser_offsets,
                 &bodies,
+                &foreign_pins,
                 &power_keepouts,
                 driver,
                 fan_risers,
@@ -698,9 +713,16 @@ pub(crate) fn safe_forced_single_port_stub(
 
 /// Draw a clustered net as a single-trunk tee (one straight trunk + a short
 /// stub from each terminal), returning true if it applied. Used when the
-/// terminals are close together AND no component body sits between them, so a
+/// terminals are close together AND the whole tee is clear of the scene, so a
 /// trunk is safe — far cleaner than an MST of overlapping elbows. Spread or
 /// obstacle-crossing nets return false and fall through to the router.
+///
+/// "Clear" is the FULL [`crate::wire::path_ok`] test, not just a body check: a trunk
+/// drawn down an IC's pin column passes over the neighbouring pins, and KiCAD welds a
+/// wire to every pin it crosses — the `mixed-signal-adc-frontend` `SDA`/`SCL` short,
+/// where SCL's trunk ran from pin 10 straight down through pin 9 to its pull-up. The
+/// tee is a shortcut PAST the obstacle-aware router, so it has to clear everything the
+/// router would have.
 pub(crate) fn route_local_tee(
     w: &mut SchematicWriter,
     net: &str,
@@ -736,8 +758,33 @@ pub(crate) fn route_local_tee(
         v[(v.len() - 1) / 2]
     };
     let horizontal = (max_x - min_x) >= (max_y - min_y);
+    // Every wire the tee would draw, so the whole shape can be cleared against the
+    // scene before any of it is committed.
+    let trunk_line = if horizontal {
+        geom::GRID_50_MIL.snap(median(ys))
+    } else {
+        geom::GRID_50_MIL.snap(median(xs))
+    };
+    let foot = |p: &[f64; 2]| {
+        if horizontal {
+            [p[0], trunk_line]
+        } else {
+            [trunk_line, p[1]]
+        }
+    };
+    let trunk = if horizontal {
+        [[min_x, trunk_line], [max_x, trunk_line]]
+    } else {
+        [[trunk_line, min_y], [trunk_line, max_y]]
+    };
+    let clear = |path: [[f64; 2]; 2]| {
+        crate::wire::path_ok(&[path[0].into(), path[1].into()], net, scene)
+    };
+    if !clear(trunk) || terms.iter().any(|(p, _)| !clear([*p, foot(p)])) {
+        return false;
+    }
     if horizontal {
-        let ty = geom::GRID_50_MIL.snap(median(ys));
+        let ty = trunk_line;
         w.add_wire_on_net([min_x, ty], [max_x, ty], net);
         scene.segments.push(crate::wire::NetSegment::new(
             [min_x, ty].into(),
@@ -753,7 +800,7 @@ pub(crate) fn route_local_tee(
             }
         }
     } else {
-        let tx = geom::GRID_50_MIL.snap(median(xs));
+        let tx = trunk_line;
         w.add_wire_on_net([tx, min_y], [tx, max_y], net);
         scene.segments.push(crate::wire::NetSegment::new(
             [tx, min_y].into(),
@@ -1320,6 +1367,35 @@ pub(crate) fn riser_hits_body(x: f64, ylo: f64, yhi: f64, bodies: &[([f64; 2], [
     false
 }
 
+/// True if the L-shaped run a rail draws for one pin — the horizontal lead-out from
+/// `ep` to column `x`, then the vertical riser from there to `rail_y` — touches a pin
+/// belonging to a DIFFERENT net.
+///
+/// KiCAD's netlister welds a wire to any pin it ends on *or passes over*, so such a run
+/// silently merges the two nets: the sheet renders fine and the netlist is wrong (the
+/// `rf-lna-frontend` `RF_IN`/`GND` short, where a cap's ground riser ran down the column
+/// it shared with J1 and landed on J1's `In` pin). The riser-fan
+/// ([`plan_riser_offsets`]) only separates riser from riser and [`riser_hits_body`] only
+/// sees 2-pin bodies, so neither catches it; this is the pin-level guard, the rail-phase
+/// counterpart of the foreign points Phase B puts in the signal router's scene.
+///
+/// `pins` carries every pin on the sheet with its net; entries on `net` are the run's own
+/// terminals and are skipped.
+pub(crate) fn riser_hits_foreign_pin(
+    net: &str,
+    ep: [f64; 2],
+    x: f64,
+    rail_y: f64,
+    pins: &[([f64; 2], String)],
+) -> bool {
+    let within = |v: f64, a: f64, b: f64| v > a.min(b) - EPS && v < a.max(b) + EPS;
+    pins.iter().any(|(p, pin_net)| {
+        pin_net != net
+            && (((p[1] - ep[1]).abs() < EPS && within(p[0], ep[0], x))
+                || ((p[0] - x).abs() < EPS && within(p[1], ep[1], rail_y)))
+    })
+}
+
 /// A rail: with ≥3 pins, draw a horizontal wire at `rail_y` spanning them, stub
 /// each pin to it, and put one power symbol at the left end. With fewer pins (or
 /// no common band), emit a per-pin power symbol instead (the clustered case,
@@ -1343,6 +1419,7 @@ pub(crate) fn emit_rail(
     flag: Option<&mut BTreeMap<String, ([f64; 2], f64)>>,
     riser_offsets: &BTreeMap<(String, i64), f64>,
     bodies: &[([f64; 2], [f64; 2])],
+    foreign_pins: &[([f64; 2], String)],
     power_keepouts: &[Rect],
     driver: Option<[f64; 2]>,
     fan_risers: bool,
@@ -1487,12 +1564,13 @@ pub(crate) fn emit_rail(
     // sharing a column with a different rail's overlapping riser gets fanned into
     // a separate lane (`riser_offsets`) so the two rails never merge into a short.
     // Final riser x per pin: the base column + any anti-short fan offset, THEN a
-    // finalize JOG one lane at a time off any part body the straight riser would be
-    // drawn through (a stacked same-rail cap column, or a mis-oriented cap whose own
-    // body sits between its pin and the rail). The riser then leads sideways out of
-    // the pin and descends in a clear lane — clearing both its own body and a
-    // neighbour's. `bodies` is empty on the per-move scorer (finalize-only), so the
-    // placement is never churned by this.
+    // finalize JOG one lane at a time until the L-shaped run (lead-out + riser) is
+    // clear of ALL THREE hazards at once — a part body drawn through (a stacked
+    // same-rail cap column, or a mis-oriented cap whose own body sits between its pin
+    // and the rail), a FOREIGN pin the run would weld onto, and a lane another net's
+    // riser already occupies. One predicate, one search: jogging off one hazard can no
+    // longer land on another. `bodies`/`foreign_pins` are empty on the per-move scorer
+    // (finalize-only), so the placement is never churned by this.
     let mut attaches: Vec<f64> = Vec::with_capacity(eps.len());
     for (ep, dir) in eps {
         let base = riser_base_x(ep, *dir);
@@ -1502,35 +1580,24 @@ pub(crate) fn emit_rail(
                 .copied()
                 .unwrap_or(0.0);
         let (rlo, rhi) = (ep[1].min(rail_y), ep[1].max(rail_y));
-        if !bodies.is_empty()
-            && riser_hits_body(ax, rlo, rhi, bodies)
-            && let Some(clear) = (1..=8)
-                .flat_map(|k| [k as f64, -(k as f64)])
-                .map(|m| ax + m * RAIL_LANE)
-                .find(|&c| !riser_hits_body(c, rlo, rhi, bodies))
-        {
-            ax = clear;
-        }
-        // The fan plans against BASE columns and the body-jog moves risers
-        // independently, so two different nets can still land one lane. The
-        // shared registry is the last word: shift until the lane is clean.
-        if fan_risers {
-            let conflict = |x: f64, lanes: &[(f64, f64, f64, String)]| {
-                lanes.iter().any(|(lx, lo, hi, lnet)| {
+        // The fan plans against BASE columns and the jog moves risers independently, so
+        // two different nets can still land one lane; `used_lanes` is the last word.
+        let clear = |x: f64, lanes: &[(f64, f64, f64, String)]| {
+            !riser_hits_body(x, rlo, rhi, bodies)
+                && !riser_hits_foreign_pin(net, *ep, x, rail_y, foreign_pins)
+                && !lanes.iter().any(|(lx, lo, hi, lnet)| {
                     lnet != net && (lx - x).abs() < EPS && rlo < hi - EPS && *lo < rhi - EPS
                 })
-            };
-            if conflict(ax, used_lanes)
-                && let Some(clear) = (1..=8)
-                    .flat_map(|k| [k as f64, -(k as f64)])
-                    .map(|m| ax + m * RAIL_LANE)
-                    .find(|&c| {
-                        !conflict(c, used_lanes)
-                            && (bodies.is_empty() || !riser_hits_body(c, rlo, rhi, bodies))
-                    })
-            {
-                ax = clear;
-            }
+        };
+        if !clear(ax, used_lanes)
+            && let Some(jogged) = (1..=8)
+                .flat_map(|k| [k as f64, -(k as f64)])
+                .map(|m| ax + m * RAIL_LANE)
+                .find(|&c| clear(c, used_lanes))
+        {
+            ax = jogged;
+        }
+        if fan_risers {
             used_lanes.push((ax, rlo, rhi, net.to_string()));
         }
         attaches.push(ax);
@@ -1702,5 +1769,57 @@ pub(crate) fn flag_angle(dir: Dir) -> f64 {
         Dir::West => 90.0,
         Dir::South => 180.0,
         Dir::East => 270.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `rf-lna-frontend` short, constructed directly: a ground riser drawn straight
+    /// up the column it shares with J1 passes over J1's `In` pin, welding `RF_IN` onto
+    /// `GND`. One lane of jog clears it.
+    #[test]
+    fn a_riser_over_a_foreign_pin_is_a_short() {
+        let pins = vec![
+            ([30.48, 45.72], "RF_IN".to_string()),
+            ([30.48, 33.02], "GND".to_string()),
+        ];
+        let (ep, rail_y) = ([30.48, 33.02], 55.88);
+        assert!(riser_hits_foreign_pin("GND", ep, 30.48, rail_y, &pins));
+        assert!(!riser_hits_foreign_pin(
+            "GND",
+            ep,
+            30.48 + RAIL_LANE,
+            rail_y,
+            &pins
+        ));
+    }
+
+    /// The horizontal lead-out is drawn too, so a jog must not sweep the riser column
+    /// across a neighbouring pin sharing the row.
+    #[test]
+    fn a_lead_out_across_a_foreign_pin_is_a_short() {
+        let pins = vec![([35.56, 33.02], "SDA".to_string())];
+        let (ep, rail_y) = ([30.48, 33.02], 55.88);
+        assert!(riser_hits_foreign_pin("GND", ep, 38.1, rail_y, &pins));
+        assert!(!riser_hits_foreign_pin("GND", ep, 33.02, rail_y, &pins));
+    }
+
+    /// A rail's own terminals sit on its lead-out and riser by construction; only
+    /// FOREIGN pins are shorts.
+    #[test]
+    fn a_riser_may_touch_its_own_nets_pins() {
+        let pins = vec![
+            ([30.48, 45.72], "GND".to_string()),
+            ([30.48, 33.02], "GND".to_string()),
+        ];
+        assert!(!riser_hits_foreign_pin(
+            "GND",
+            [30.48, 33.02],
+            30.48,
+            55.88,
+            &pins
+        ));
     }
 }
