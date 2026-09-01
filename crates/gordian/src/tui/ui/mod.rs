@@ -81,9 +81,10 @@ pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
         .map(|d| composer::approval_height(d, area.width))
         .unwrap_or(0);
     // The running indicator takes a row while a turn is in flight, plus a second
-    // detail row when a named unit of work is currently executing.
+    // detail row when a named unit of work is currently executing, plus one row
+    // per queued prompt (capped).
     let running_h = if app.running {
-        1 + u16::from(app.active_work.is_some())
+        chrome::running_rows(app)
     } else {
         0
     };
@@ -934,6 +935,59 @@ mod tests {
     }
 
     #[test]
+    fn the_worked_divider_keeps_a_blank_line_below_when_it_is_the_newest_thing() {
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::AssistantText("done.".into())));
+        a.transcript
+            .push(crate::tui::app::Entry::notice(
+                crate::tui::app::NoticeLevel::Plain,
+                "Worked for 9s",
+            ));
+        let text = render_to_string(&mut a, 96, 24);
+        let rows: Vec<&str> = text.lines().collect();
+        let divider = rows
+            .iter()
+            .position(|r| r.contains("Worked for 9s"))
+            .expect("the divider renders");
+        assert!(
+            rows[divider + 1].trim().is_empty(),
+            "a blank line separates the divider from the composer below it:
+{text}"
+        );
+    }
+
+    #[test]
+    fn the_worked_divider_gets_no_extra_gap_once_a_new_turn_follows() {
+        // The next turn's own leading gap already separates it from the
+        // divider — a second blank line here would be a double gap.
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::AssistantText("done.".into())));
+        a.transcript
+            .push(crate::tui::app::Entry::notice(
+                crate::tui::app::NoticeLevel::Plain,
+                "Worked for 9s",
+            ));
+        a.transcript
+            .push(crate::tui::app::Entry::user("what about routing?"));
+        let text = render_to_string(&mut a, 96, 24);
+        let rows: Vec<&str> = text.lines().collect();
+        let divider = rows
+            .iter()
+            .position(|r| r.contains("Worked for 9s"))
+            .expect("the divider renders");
+        assert!(
+            rows[divider + 1].trim().is_empty(),
+            "exactly one blank line before the next turn:
+{text}"
+        );
+        assert!(
+            !rows[divider + 2].trim().is_empty(),
+            "not two — the next turn starts right after it:
+{text}"
+        );
+    }
+
+    #[test]
     fn help_overlay_renders_when_toggled() {
         let mut a = app();
         a.help = true;
@@ -941,5 +995,40 @@ mod tests {
         assert!(text.contains("help"), "help overlay:\n{text}");
         assert!(text.contains("/clear"), "help lists commands:\n{text}");
         assert!(text.contains("Esc Esc"), "help covers unwind:\n{text}");
+        assert!(
+            !text.contains('╭') && !text.contains('│'),
+            "the overlay is borderless, like the other floating menus:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_help_overlay_spans_the_full_width_over_a_busy_transcript() {
+        // A regression guard: a narrower centred card used to leave the busy
+        // transcript visible down both margins with nothing to separate them,
+        // which read as corruption once the border that used to mark its edge
+        // was removed. Full width leaves nothing beside it to bleed through.
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::AssistantText(
+            "a line of prose long enough to reach past where a narrower card              used to end on both sides of the terminal"
+                .into(),
+        )));
+        a.help = true;
+        let backend = TestBackend::new(96, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut a)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let row_text = |y: u16| -> String {
+            (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+        };
+        let title_row = (0..buf.area.height)
+            .find(|&y| row_text(y).contains("help · keys & commands"))
+            .expect("the help title renders somewhere");
+        for x in 0..buf.area.width {
+            assert_eq!(
+                buf[(x, title_row)].style().bg,
+                Some(theme::BG1),
+                "column {x} of the title row is not on the menu surface —                  the transcript is showing through beside the overlay"
+            );
+        }
     }
 }

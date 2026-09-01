@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **Queued prompts could interleave out of order.** `AgentEvent`s (a turn's
+  final reply, `TurnDone`) and its completion signal (which drains the queue
+  and spawns the next turn) travel on two separate channels; a bare
+  `tokio::select!` doesn't preserve ordering across channels, so an unlucky
+  poll could process the completion signal — and start the next queued turn —
+  before the previous turn's own reply had been added to the transcript.
+  Queuing several prompts back to back made this easy to hit. The event loop
+  now polls `biased`, which (given the task already guarantees it sends all
+  its events before signaling completion) deterministically drains a turn's
+  events before ever touching its completion signal.
+- **A completed turn could show nothing for a real reply.** Paragraph-gated
+  streaming (see below) buffers assistant text until a blank line closes a
+  paragraph or the turn finalizes it. `TurnDone` used to just drop that buffer
+  outright, so a short reply with no blank line in it — the common case — went
+  missing whenever the turn ended without a clean finalizing `AssistantText`
+  (a provider quirk, not something the UI can assume never happens). `TurnDone`
+  now flushes whatever is still buffered instead of discarding it.
+
 ### Changed
 - **The status-bar model label is no longer clipped to three words**: it used
   to cut every model id down to its first three dash-separated segments after
@@ -15,6 +34,11 @@ All notable changes to this project are documented here. The format is based on
 - **Welcome splash names the project**: the tagline now reads "the schematic &
   PCB design copilot · ~/path/to/project" — the schematic's directory, tildified
   under `$HOME` — so it's clear at a glance which project a session is open on.
+- **The help overlay is borderless and full width**, joining the completion
+  and unwind menus in dropping the rounded box and title bar. It used to be a
+  narrower card centred over the transcript; without its border to mark the
+  edge, that left the busy transcript peeking down both margins with nothing
+  separating the two, reading as corruption rather than a deliberate gap.
 - **The floating menus are borderless**: the `/command` completion list and the
   unwind picker drop their rounded box, title, and selection caret. They are now
   full-width lists seated on the composer, with the selected row as a solid

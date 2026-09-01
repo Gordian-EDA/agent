@@ -130,23 +130,6 @@ impl App {
         }
     }
 
-    /// Tab while a turn runs: stash the current draft as the queued prompt (it
-    /// auto-submits when the turn ends) and clear the composer for the next one.
-    pub(super) fn queue_input(&mut self) {
-        // The UI intentionally exposes a one-message queue. Keep the existing
-        // queued instruction and leave a second draft editable instead of
-        // silently overwriting the first one.
-        if self.queued.is_some() {
-            return;
-        }
-        let line = self.expanded_input();
-        let line = line.trim().to_string();
-        if line.is_empty() {
-            return;
-        }
-        self.queued = Some(line);
-        self.clear_input();
-    }
 
     /// The composer text with each intact paste token expanded exactly once.
     /// Scanning only the visible input prevents token-looking text inside one

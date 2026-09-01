@@ -2,10 +2,11 @@
 //!
 //! Kept separate from the shell so the mapping is a pure function and easy to
 //! reason about: the gate keys (`a`/`r`) are only special while a diff is
-//! pending; otherwise everything routes to the input line. Up/Down recall
-//! prompt history while editing, but scroll the transcript from an empty prompt
-//! when scrollback exists; modified arrows, PageUp/PageDown, and the mouse wheel
-//! scroll the transcript.
+//! pending; otherwise everything routes to the input line. Up/Down always
+//! recall prompt history while editing — never the transcript, which is what
+//! makes the split with the mouse wheel legible; the transcript scrolls via
+//! Shift/Ctrl/Alt-Up/Down, PageUp/PageDown, and the (now captured, see
+//! `super::mod`) mouse wheel.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -85,15 +86,11 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
         // A full screenful jump; the height tracks the last-drawn viewport.
         KeyCode::PageUp => Some(Msg::PageUp(app.viewport_h)),
         KeyCode::PageDown => Some(Msg::PageDown(app.viewport_h)),
-        // Up/Down edit history while the input line is live. With an empty
-        // prompt and scrollback available, they move the transcript instead;
-        // this also makes wheel-as-arrow terminals useful without mouse capture.
-        KeyCode::Up if app.input_active() && app.input.is_empty() && app.scroll_max > 0 => {
-            Some(Msg::ScrollUp)
-        }
-        KeyCode::Down if app.input_active() && app.input.is_empty() && app.scroll > 0 => {
-            Some(Msg::ScrollDown)
-        }
+        // Up/Down edit history while the input line is live — always, so the
+        // split with the mouse wheel (which now arrives as a real `Event::
+        // Mouse`, distinct from a key press) stays simple to reason about.
+        // Outside an editable input (e.g. the apply-gate holds focus) they
+        // still scroll, since there's no history to recall into.
         KeyCode::Up if app.input_active() => Some(Msg::HistoryPrev),
         KeyCode::Down if app.input_active() => Some(Msg::HistoryNext),
         KeyCode::Up => Some(Msg::ScrollUp),
@@ -209,15 +206,23 @@ mod tests {
     }
 
     #[test]
-    fn up_down_scroll_from_an_empty_prompt_when_scrollback_exists() {
+    fn up_down_recall_history_from_an_empty_prompt_even_with_scrollback() {
+        // Regression guard: Up/Down must never fall back to scrolling just
+        // because there's scrollback to move through — that ambiguity is
+        // exactly what mouse capture (see `super::super::mod`) exists to
+        // remove. The wheel arrives as its own `Event::Mouse` and is mapped
+        // independently in the shell, not through this function at all.
         let mut a = app();
         a.scroll_max = 10;
-        assert!(matches!(map_key(&a, key(KeyCode::Up)), Some(Msg::ScrollUp)));
+        assert!(matches!(
+            map_key(&a, key(KeyCode::Up)),
+            Some(Msg::HistoryPrev)
+        ));
 
         a.scroll = 3;
         assert!(matches!(
             map_key(&a, key(KeyCode::Down)),
-            Some(Msg::ScrollDown)
+            Some(Msg::HistoryNext)
         ));
     }
 

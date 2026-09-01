@@ -197,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn typing_while_running_drafts_but_cannot_submit() {
+    fn submitting_while_running_queues_instead_of_starting_a_second_turn() {
         let mut a = app();
         type_str(&mut a, "first");
         a.update(Msg::Submit);
@@ -205,9 +205,10 @@ mod tests {
         // Drafting the next prompt while the agent works is allowed…
         type_str(&mut a, "second");
         assert_eq!(a.input, "second");
-        // …but submitting it is not; the draft is kept.
+        // …and Enter queues it rather than starting a second turn or dropping it.
         assert_eq!(a.update(Msg::Submit), Action::None);
-        assert_eq!(a.input, "second");
+        assert!(a.input.is_empty(), "the composer clears once queued");
+        assert_eq!(a.queued, vec!["second".to_string()]);
         assert_eq!(a.status.turn_count, 1);
     }
 
@@ -222,53 +223,74 @@ mod tests {
     }
 
     #[test]
-    fn tab_queues_a_draft_while_running_and_it_auto_submits_on_turn_end() {
+    fn enter_queues_a_draft_while_running_and_it_auto_submits_on_turn_end() {
         let mut a = app();
         type_str(&mut a, "first");
         a.update(Msg::Submit);
         assert!(a.running);
-        // Tab with a plain draft mid-turn queues it (can't submit now) and clears
-        // the composer for the next thought.
+        // Enter with a plain draft mid-turn queues it (can't submit now) and
+        // clears the composer for the next thought.
         type_str(&mut a, "then route it");
-        a.update(Msg::Complete);
-        assert_eq!(a.queued.as_deref(), Some("then route it"));
+        a.update(Msg::Submit);
+        assert_eq!(a.queued, vec!["then route it".to_string()]);
         assert!(a.input.is_empty(), "the composer clears after queueing");
         // When the turn ends, the queued prompt auto-submits as a fresh turn.
         let action = a.update(Msg::TurnEnded(TurnEndReason::Completed));
         assert_eq!(action, Action::SpawnTurn("then route it".into()));
         assert!(a.running, "the queued turn starts");
-        assert!(a.queued.is_none(), "the queue is consumed");
+        assert!(a.queued.is_empty(), "the queue is consumed");
     }
 
     #[test]
-    fn a_second_queue_attempt_preserves_both_the_queue_and_live_draft() {
+    fn further_enters_queue_more_prompts_in_order() {
         let mut a = app();
         type_str(&mut a, "first");
         a.update(Msg::Submit);
-        type_str(&mut a, "queued first");
-        a.update(Msg::Complete);
-        type_str(&mut a, "still editing");
+        type_str(&mut a, "second");
+        a.update(Msg::Submit);
+        type_str(&mut a, "third");
+        a.update(Msg::Submit);
 
-        a.update(Msg::Complete);
+        assert_eq!(
+            a.queued,
+            vec!["second".to_string(), "third".to_string()],
+            "each Enter queues rather than overwriting or dropping the last"
+        );
+        assert!(a.input.is_empty());
 
-        assert_eq!(a.queued.as_deref(), Some("queued first"));
-        assert_eq!(a.input, "still editing");
+        // Turns drain the queue one at a time, oldest first.
+        let action = a.update(Msg::TurnEnded(TurnEndReason::Completed));
+        assert_eq!(action, Action::SpawnTurn("second".into()));
+        assert_eq!(a.queued, vec!["third".to_string()]);
+
+        let action = a.update(Msg::TurnEnded(TurnEndReason::Completed));
+        assert_eq!(action, Action::SpawnTurn("third".into()));
+        assert!(a.queued.is_empty());
     }
 
     #[test]
-    fn interrupting_a_turn_restores_the_queue_without_starting_a_phantom_turn() {
+    fn interrupting_a_turn_restores_the_oldest_queued_prompt_without_starting_a_phantom_turn() {
         let mut a = app();
         type_str(&mut a, "first");
         assert!(matches!(a.update(Msg::Submit), Action::SpawnTurn(_)));
         type_str(&mut a, "do this later");
-        a.update(Msg::Complete);
-        assert_eq!(a.queued.as_deref(), Some("do this later"));
+        a.update(Msg::Submit);
+        type_str(&mut a, "and this after");
+        a.update(Msg::Submit);
+        assert_eq!(
+            a.queued,
+            vec!["do this later".to_string(), "and this after".to_string()]
+        );
 
         let action = a.update(Msg::TurnEnded(TurnEndReason::Interrupted));
 
         assert_eq!(action, Action::None);
         assert!(!a.running, "no task was spawned after cancellation");
-        assert!(a.queued.is_none());
+        assert_eq!(
+            a.queued,
+            vec!["and this after".to_string()],
+            "only the restored prompt leaves the queue"
+        );
         assert_eq!(a.input, "do this later");
         assert_eq!(a.cursor, "do this later".chars().count());
     }
@@ -1116,11 +1138,49 @@ mod tests {
     }
 
     #[test]
-    fn turn_done_closes_an_unfinalized_live_entry() {
+    fn turn_done_flushes_an_unfinalized_live_entry_instead_of_dropping_it() {
+        // A regression guard: a short reply with no blank line in it never
+        // reaches a paragraph break, so if the turn ends without a proper
+        // `AssistantText` finalize (a missing or empty one — a provider quirk,
+        // not something the UI can rely on never happening), TurnDone used to
+        // just drop the buffered text. A completed turn must never show nothing
+        // for a reply the model actually sent.
         let mut a = app();
-        a.update(Msg::Agent(AgentEvent::AssistantDelta("partial".into())));
+        a.update(Msg::Agent(AgentEvent::AssistantDelta(
+            "Hi, I'm Gordian.".into(),
+        )));
         assert!(a.live_assistant.is_some());
         a.update(Msg::Agent(AgentEvent::TurnDone));
         assert!(a.live_assistant.is_none(), "TurnDone closes the live entry");
+        let assistants: Vec<&str> = a
+            .transcript
+            .iter()
+            .filter(|e| e.speaker == Speaker::Assistant)
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(
+            assistants,
+            vec!["Hi, I'm Gordian."],
+            "the streamed reply is not lost just because it never got a paragraph break"
+        );
+    }
+
+    #[test]
+    fn a_normal_finalize_still_wins_over_the_turn_done_fallback() {
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::AssistantDelta("Hi".into())));
+        a.update(Msg::Agent(AgentEvent::AssistantText("Hi there!".into())));
+        a.update(Msg::Agent(AgentEvent::TurnDone));
+        let assistants: Vec<&str> = a
+            .transcript
+            .iter()
+            .filter(|e| e.speaker == Speaker::Assistant)
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(
+            assistants,
+            vec!["Hi there!"],
+            "AssistantText already took live_assistant, so TurnDone has nothing left to flush"
+        );
     }
 }

@@ -296,10 +296,6 @@ impl App {
                 } else if self.completion_view().is_some() {
                     // A `/command` stem: Tab completes / cycles it.
                     self.complete_next();
-                } else if self.running && !self.input.trim().is_empty() {
-                    // A turn is in flight and there is a plain draft: Tab QUEUES it
-                    // (it can't be submitted now) so it isn't dropped.
-                    self.queue_input();
                 }
                 Action::None
             }
@@ -358,10 +354,14 @@ impl App {
             Msg::TurnEnded(reason) => {
                 let interrupted = reason == TurnEndReason::Interrupted;
                 self.end_turn(reason);
-                // A queued message normally runs next. An explicit user
-                // interruption restores it to the composer instead: cancelling
-                // one task must not silently launch another.
-                if let Some(prompt) = self.queued.take() {
+                // The oldest queued message normally runs next — `submit()`
+                // spawns its turn, whose own `TurnEnded` will in turn drain the
+                // next one, so several queued prompts chain through in order.
+                // An explicit user interruption restores it to the composer
+                // instead and leaves the rest queued: cancelling one task must
+                // not silently launch another.
+                if !self.queued.is_empty() {
+                    let prompt = self.queued.remove(0);
                     self.input = prompt;
                     self.cursor = self.char_len();
                     if interrupted {
@@ -453,7 +453,11 @@ impl App {
             return Action::None;
         }
         if self.running {
-            // Don't start a second turn; the draft stays in the input line.
+            // A turn is already in flight: queue this one rather than dropping
+            // it or starting a second turn. Each `TurnEnded` drains the oldest
+            // queued prompt and submits it, so further Enters chain in order.
+            self.queued.push(line);
+            self.clear_input();
             return Action::None;
         }
         self.clear_input();

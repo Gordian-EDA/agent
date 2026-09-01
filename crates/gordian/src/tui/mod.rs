@@ -45,7 +45,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event, EventStream,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream,
     KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
@@ -498,7 +499,7 @@ impl Shell {
     }
 
     /// Finish only the current task and execute any follow-up action returned by
-    /// the reducer (notably the next prompt queued with Tab).
+    /// the reducer (notably the next queued prompt).
     fn finish_task(&mut self, app: &mut App, task_id: TaskId, reason: TurnEndReason) {
         if self.active_task_id != Some(task_id) {
             return;
@@ -570,6 +571,20 @@ async fn event_loop(
 
     loop {
         tokio::select! {
+            // `biased` makes every poll check branches top-to-bottom instead of
+            // tokio's default random order. That matters for exactly one
+            // ordering guarantee: `spawn_turn` fully drains a task's own
+            // `events_rx` (awaiting the forwarder) before ever sending on
+            // `done_rx`, so whenever a `done_rx` item is ready, every event
+            // that task sent — its final `AssistantText`, `TurnDone` — is
+            // already sitting in `events_rx`. Without `biased`, an unlucky
+            // poll could pick `done_rx` first anyway: `finish_task` drains the
+            // queued prompt and spawns the next turn (pushing ITS user entry)
+            // before the previous turn's own trailing events are processed,
+            // interleaving two turns' transcript entries out of order. Listing
+            // `events_rx` above `done_rx` and biasing the poll closes that gap.
+            biased;
+
             // ── keyboard / mouse ──────────────────────────────────────
             maybe_ev = input.next() => {
                 match maybe_ev {
@@ -646,6 +661,14 @@ fn build_picker() -> Option<Picker> {
 
 /// Enter raw mode + the alternate screen and build the ratatui terminal.
 ///
+/// Mouse capture is on so a genuine wheel scroll arrives as a real
+/// `Event::Mouse`, distinct from an arrow-key press — without it, most
+/// terminals translate wheel motion into synthetic Up/Down key events when in
+/// the alternate screen, which is indistinguishable from the user's own key
+/// presses and forces Up/Down to guess which one happened. The trade is
+/// native click-drag text selection in the terminal, which most terminals
+/// still offer behind a modifier (e.g. Shift-drag).
+///
 /// On terminals that speak the Kitty keyboard protocol we push
 /// `DISAMBIGUATE_ESCAPE_CODES` so chords like Shift+Enter arrive distinct from a
 /// bare Enter; terminals without that protocol are left untouched (the composer hint still
@@ -653,7 +676,12 @@ fn build_picker() -> Option<Picker> {
 fn setup_terminal() -> Result<(Terminal<CrosstermBackend<Stdout>>, bool)> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     let keyboard_enhancement = supports_keyboard_enhancement().unwrap_or(false);
     if keyboard_enhancement {
         execute!(
@@ -799,8 +827,65 @@ mod shell_tests {
         assert_eq!(shell.active_task_id, Some(2));
     }
 
+    #[tokio::test]
+    async fn biased_select_drains_agent_events_before_the_tasks_done_signal() {
+        // Regression guard for a real race: `AgentEvent`s (a turn's final
+        // `AssistantText`, `TurnDone`) and its completion signal
+        // (`TurnEndReason`, which drains the queue and spawns the next turn)
+        // travel on two separate channels. `spawn_turn` guarantees it SENDS
+        // to `events_tx` before `done_tx` (it awaits the forwarder first),
+        // but a bare `select!` does not preserve ordering across different
+        // channels — an unlucky poll can process the done signal first,
+        // pushing turn 2's user entry before turn 1's own reply is in the
+        // transcript. This proves `biased` (mirroring the real loop, events
+        // listed above done) closes that gap even when both are ready at the
+        // same instant, which is the actual race window.
+        let (events_tx, mut events_rx) = unbounded_channel::<TaskEvent>();
+        let (done_tx, mut done_rx) = unbounded_channel::<TaskDone>();
+        let mut shell = shell();
+        shell.events_tx = events_tx.clone();
+        shell.done_tx = done_tx.clone();
+        shell.active_task_id = Some(1);
+        shell.next_task_id = 2;
+
+        let mut app = app();
+        app.transcript.push(crate::tui::app::Entry::user("first"));
+        app.queued.push("second".into());
+        app.running = true;
+
+        // Both ready before the loop ever polls — the exact race window.
+        let _ = events_tx.send((1, AgentEvent::AssistantText("the story".into())));
+        let _ = done_tx.send((1, TurnEndReason::Completed));
+
+        for _ in 0..2 {
+            tokio::select! {
+                biased;
+                Some((task_id, ev)) = events_rx.recv() => {
+                    shell.receive_agent_event(&mut app, task_id, ev);
+                }
+                Some((task_id, reason)) = done_rx.recv() => {
+                    shell.finish_task(&mut app, task_id, reason);
+                }
+            }
+        }
+
+        let texts: Vec<&str> = app.transcript.iter().map(|e| e.text.as_str()).collect();
+        let story_at = texts
+            .iter()
+            .position(|t| *t == "the story")
+            .expect("turn 1's reply landed");
+        let second_at = texts
+            .iter()
+            .position(|t| *t == "second")
+            .expect("the queued prompt's user entry landed");
+        assert!(
+            story_at < second_at,
+            "turn 1's reply must land before turn 2's user entry: {texts:?}"
+        );
+    }
+
     #[test]
-    fn completion_dispatches_the_prompt_queued_during_the_turn() {
+    fn turn_completion_dispatches_the_prompt_queued_during_the_turn() {
         let mut shell = shell();
         let mut app = app();
         app.update(Msg::Char('x'));
@@ -808,12 +893,12 @@ mod shell_tests {
         for c in "next".chars() {
             app.update(Msg::Char(c));
         }
-        app.update(Msg::Complete);
+        app.update(Msg::Submit);
         shell.active_task_id = Some(1);
 
         shell.finish_task(&mut app, 1, TurnEndReason::Completed);
 
-        assert!(app.queued.is_none());
+        assert!(app.queued.is_empty());
         assert!(
             app.transcript
                 .iter()

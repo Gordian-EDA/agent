@@ -81,7 +81,6 @@ pub const QUOTE_GUTTER: Style = fg(FAINT);
 pub const RULE: Style = fg(BORDER);
 pub const RULE_FOCUS: Style = fg(ACC);
 
-pub const POPUP_BORDER: Style = fg(BORDER);
 pub const POPUP_TITLE: Style = bold(fg(ACC));
 
 /// The floating menus (`/command` completion, the unwind picker) are borderless
