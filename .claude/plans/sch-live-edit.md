@@ -35,3 +35,13 @@ are never drawn by coordinate.
 ## Gates
 - Extractor must equal kicad-cli netlist partition on every corpus file; kicad-cli stays the oracle in tests and at save.
 - Any placement change passes the truthfulness gate before it is called a win.
+
+## Queued after wave 2 (user, 2026-09-01)
+**Tracing migration** (Sonnet lane): add `tracing` + `tracing-subscriber` as workspace
+deps; replace every non-TUI `println!`/`eprintln!` in library and binary code (~74 sites:
+gordian 27, spine-place 15, sch-floorplan 9, sch-io 6, cluster-place 5, anneal-place 5,
+pcb-workflow 3, gordian-core 3, kicad-ipc 1) with `tracing::{info,debug,warn,error}` and
+spans; the CLI/TUI install a subscriber writing to `<project>/.gordian/logs/` (rolling,
+one file per session, thread id in the filename) plus stderr at `info` for headless
+runs; `RUST_LOG` honoured. Tests/examples may keep `println!`. Stdout must stay clean
+for `tool_once`-style JSON binaries.
