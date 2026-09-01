@@ -93,8 +93,8 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "get_symbol",
-            "One part in full: its fields, then one entry per unit with that unit's position, \
-             body extents and pins with their sides and nets.",
+            "One part in full: its fields, then one entry per unit with position, body extents \
+             and pins with their sides and nets.",
             json!({
                 "type": "object",
                 "properties": { "ref": { "type": "string" } },
@@ -121,7 +121,7 @@ pub fn tool_defs() -> Vec<Tool> {
             "add_symbols",
             "Place parts — one, or a whole block in a single call — and report where each went. \
              `near`+`side` finds a clear, grid-aligned spot beside that part and turns a two-pin \
-             body to face it, so no follow-up move is needed; `at` and `rot` override. `ref` is \
+             body to face it, so no follow-up move is needed; `at`/`rot` override. `ref` is \
              auto-assigned. Nothing is written if any part fails. Wire them with `connect`.",
             json!({
                 "type": "object",
@@ -154,9 +154,9 @@ pub fn tool_defs() -> Vec<Tool> {
         (
             "move_symbols",
             "Move or turn parts, wires and rails following along. `rot`/`mirror` alone turns a \
-             part in place — that is how a diode is reversed. A spot already taken is slid to the \
-             nearest free one and reported as `nudged_to`; refused only if nothing near it fits, \
-             or if the move changed a net.",
+             part in place — how a diode is reversed. A taken spot is slid to the nearest free \
+             one and reported as `nudged_to`; refused only if nothing near it fits, or the move \
+             changed a net.",
             json!({
                 "type": "object",
                 "properties": {
@@ -186,7 +186,7 @@ pub fn tool_defs() -> Vec<Tool> {
         (
             "set_fields",
             "Set properties on one part (Value, Footprint, Reference, user fields), on every unit \
-             of it. This is how you change a resistor's value or footprint — it moves nothing.",
+             of it — how a resistor's value or footprint changes. Moves nothing.",
             json!({
                 "type": "object",
                 "properties": {
@@ -217,7 +217,9 @@ pub fn tool_defs() -> Vec<Tool> {
             "Retarget a part at a different library symbol, keeping every pin's net by number then \
              by name. `ref` names the whole part, so every unit of a dual or quad swaps at once. \
              Use `pin_map` {old_pin: new_pin} when the pinout differs; unmapped pins are reported. \
-             For a value or footprint change alone, use set_fields instead.",
+             For a value/footprint change alone, or when no real match exists anywhere, use \
+             set_fields instead — a same-named part in an unrelated library is not proven \
+             pin-compatible.",
             json!({
                 "type": "object",
                 "properties": {
@@ -236,8 +238,7 @@ pub fn tool_defs() -> Vec<Tool> {
             "Join two ends — a pin like \"R1.1\" / \"U1.VDD\", or a point [x,y] — or every pair in \
              `pairs` at once, which is how to wire a block. The route is solved around the existing \
              drawing and junctions are added for you; if nothing fits, both ends are named with \
-             `net` instead and the result says so. NEVER draw wires by coordinate — this is the \
-             only way to connect.",
+             `net` instead and the result says so. Never draw wires by coordinate.",
             json!({
                 "type": "object",
                 "properties": {
@@ -303,8 +304,8 @@ pub fn tool_defs() -> Vec<Tool> {
             "delete_wires",
             "Remove drawn wires by pin, net, the parts they touch, or uuid, reporting which pins \
              it left loose. To insert a part IN SERIES cut at ONE pin — {pins:[\"P1.2\"]} — then \
-             `connect` the part between that pin and the node it used to reach; the rest of the \
-             net stays wired. `net` cuts the whole net and loosens every pin on it.",
+             `connect` it between that pin and the node it used to reach; the rest stays wired. \
+             `net` cuts the whole net, loosening every pin on it.",
             json!({
                 "type": "object",
                 "properties": {
