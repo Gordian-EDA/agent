@@ -27,7 +27,8 @@ pub fn rails(refdes: &str, comp: &Component, provider: &SymbolTable) -> Result<R
         let Some(meta) = &meta else {
             return key.to_string();
         };
-        crate::find_pin(&meta.pins, key)
+        crate::pins::resolve(meta, key)
+            .first()
             .map(|p| p.name.clone())
             .unwrap_or_else(|| key.to_string())
     };

@@ -17,7 +17,8 @@
 //! check therefore leans conservative (high IC-pin threshold for decoupling, exact `SDA`/`SCL` token
 //! match, name-driven input/output vocabularies, a power-flag gate for undriven rails) and is
 //! calibrated against the known-good `crates/sch-floorplan/tests/fixtures/validation/*` corpus, where
-//! it finds only real defects (two fixtures genuinely lack I2C pull-ups). The per-check rustdoc
+//! it finds only real fixture defects (two lack I2C pull-ups; `stm32f4-buck` shorts L1). The
+//! per-check rustdoc
 //! states the heuristic and its known limits.
 //!
 //! The name-driven rules resolve each pin key through the symbol table, so they read a
@@ -141,7 +142,20 @@ struct Pin<'a> {
 
 impl Pin<'_> {
     fn is(&self, pred: impl Fn(&str) -> bool) -> bool {
-        pred(self.key) || pred(self.name)
+        pred(self.name) || pred(self.key)
+    }
+}
+
+impl<'a> Item<'a> {
+    /// The net on the first pin satisfying `pred`, **by name before key**: a
+    /// numeric key must never win over the pin the symbol actually names, or a
+    /// part whose pin 2 is not its anode would answer the anode question.
+    fn pin_net(&self, pred: impl Fn(&str) -> bool) -> Option<&'a str> {
+        self.pins
+            .iter()
+            .find(|p| pred(p.name))
+            .or_else(|| self.pins.iter().find(|p| pred(p.key)))
+            .map(|p| p.net)
     }
 }
 
@@ -229,10 +243,7 @@ fn pins_of<'a>(c: &'a Component, meta: Option<&'a SymbolMeta>) -> Vec<Pin<'a>> {
 }
 
 fn pin_net_alias<'a>(it: &Item<'a>, aliases: &[&str]) -> Option<&'a str> {
-    it.pins
-        .iter()
-        .find(|p| p.is(|s| aliases.iter().any(|a| s.eq_ignore_ascii_case(a))))
-        .map(|p| p.net)
+    it.pin_net(|s| aliases.iter().any(|a| s.eq_ignore_ascii_case(a)))
 }
 
 /// A 2-pin decoupling/bypass cap bridging `rail` and a ground net — the unit the
@@ -254,14 +265,15 @@ fn has_pullup_to_rail(net: &str, items: &[Item], net_items: &HashMap<&str, Vec<u
 /// Run all deterministic quantitative checks, returning defect lines (same `- REFDES: ...` shape the
 /// LLM review emits, so the agent's run_turn_reviewed can union them).
 pub fn erc_checks(d: &Design, provider: &SymbolTable) -> Vec<String> {
-    let parts: Vec<&Component> = d
+    let lib_ids: std::collections::BTreeSet<&str> = d
         .blocks
         .values()
         .flat_map(|b| b.components.values())
+        .map(|c| c.part.as_str())
         .collect();
-    let symbols: HashMap<&str, SymbolMeta> = parts
-        .iter()
-        .filter_map(|c| provider.symbol(&c.part).map(|m| (c.part.as_str(), m)))
+    let symbols: HashMap<&str, SymbolMeta> = lib_ids
+        .into_iter()
+        .filter_map(|id| provider.symbol(id).map(|m| (id, m)))
         .collect();
     let items: Vec<Item> = d
         .blocks
@@ -388,10 +400,7 @@ const DECOUPLE_MIN_PINS: usize = 16;
 /// FP-averse: each branch needs an unambiguous rail on the relevant pin.
 fn check_polarity(items: &[Item], net_items: &HashMap<&str, Vec<usize>>, out: &mut Vec<String>) {
     let pin_net = |it: &Item, pred: &dyn Fn(&str) -> bool| -> Option<String> {
-        it.pins
-            .iter()
-            .find(|p| p.is(|s| pred(&s.to_uppercase())))
-            .map(|p| p.net.to_string())
+        it.pin_net(|s| pred(&s.to_uppercase())).map(str::to_string)
     };
     for it in items {
         if !is_diode(it.comp) {
@@ -744,7 +753,9 @@ fn check_floating_input(
             continue;
         }
         for pin in &ic.pins {
-            let (key, net) = (pin.key, pin.net);
+            // Report the pin the reader recognizes — its symbol NAME — whichever
+            // way the design keyed it.
+            let (key, net) = (pin.name, pin.net);
             if rail_voltage(net).is_some() || !pin.is(looks_input) {
                 continue;
             }

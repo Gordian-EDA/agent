@@ -366,7 +366,11 @@ fn passive_series_fuse_nets(
             .pins
             .iter()
             .chain(comp.units.values().flatten())
-            .find(|(key, _)| *key == &pin.number || *key == &pin.name)
+            .find(|(key, _)| {
+                crate::pins::resolve(meta, key)
+                    .iter()
+                    .any(|p| p.number == pin.number)
+            })
             .map(|(_, target)| target)?;
         let PinTarget::Net(net) = target else {
             return None;

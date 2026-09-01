@@ -166,17 +166,12 @@ fn erc_reads_a_feedback_divider_from_the_model() {
     );
 }
 
-/// A number-keyed part: the shape an extractor or `place_parts` produces.
-fn by_number(lib_id: &str, pins: &[(&str, &str)]) -> Component {
-    part(lib_id, pins)
-}
-
 #[test]
 fn name_reading_rules_survive_number_keyed_pins() {
     // EN (pin 3) is on a net nothing else touches — a floating enable.
     let d = design(&[(
         "U5",
-        by_number(
+        part(
             "M:BIG",
             &[
                 ("1", "+3V3"),
@@ -213,4 +208,78 @@ fn a_global_label_marks_its_net_as_a_port() {
         "{:?}",
         diags.0
     );
+}
+
+#[test]
+fn diode_polarity_is_read_from_the_symbol_not_the_key() {
+    // Device:LED is 1=K, 2=A. Number-keyed, and backwards: the anode sits on
+    // ground while the cathode is on the rail.
+    let d = design(&[("D1", part("Device:LED", &[("1", "+3V3"), ("2", "GND")]))]);
+    let defects = erc::erc_checks(&d, &provider());
+    assert!(
+        defects.iter().any(|s| s.contains("D1")),
+        "expected a polarity defect, got {defects:?}"
+    );
+
+    let right_way = design(&[("D2", part("Device:LED", &[("1", "LED_K"), ("2", "+3V3")]))]);
+    assert!(
+        !erc::erc_checks(&right_way, &provider())
+            .iter()
+            .any(|s| s.contains("backwards") || s.contains("BACKWARDS")),
+        "a correctly wired LED must stay silent"
+    );
+}
+
+/// The same design with every pin key rewritten to its physical pin number —
+/// what an extractor or `place_parts` hands the checkers.
+fn rekeyed_by_number(d: &Design, provider: &SymbolTable) -> Design {
+    let mut out = d.clone();
+    for block in out.blocks.values_mut() {
+        for comp in block.components.values_mut() {
+            let Some(meta) = provider.symbol(&comp.part) else {
+                continue;
+            };
+            let mut renamed = indexmap::IndexMap::new();
+            for (key, target) in &comp.pins {
+                for pin in pins::resolve(&meta, key) {
+                    renamed.insert(pin.number.clone(), target.clone());
+                }
+            }
+            comp.pins = renamed;
+        }
+    }
+    out
+}
+
+/// The invariant behind the whole extraction: how a design spells its pin keys
+/// must not change what the checkers say about it.
+#[test]
+fn erc_reads_both_spellings_identically() {
+    let provider = provider();
+    let cases = [
+        design(&[
+            ("U1", part("M:CPU", &[("VDD", "+3V3"), ("VSS", "GND")])),
+            ("D1", part("Device:LED", &[("A", "+3V3"), ("K", "LED_K")])),
+            ("R1", part("Device:R", &[("1", "LED_K"), ("2", "GND")])),
+        ]),
+        design(&[(
+            "U5",
+            part(
+                "M:BIG",
+                &[
+                    ("VDD", "+3V3"),
+                    ("VSS", "GND"),
+                    ("EN", "EN_FLOAT"),
+                    ("OUT", "SIG"),
+                    ("IN", "SIG"),
+                ],
+            ),
+        )]),
+        design(&[("D2", part("Device:LED", &[("A", "GND"), ("K", "+3V3")]))]),
+    ];
+    for (i, d) in cases.iter().enumerate() {
+        let by_name = erc::erc_checks(d, &provider);
+        let by_number = erc::erc_checks(&rekeyed_by_number(d, &provider), &provider);
+        assert_eq!(by_name, by_number, "case {i}");
+    }
 }

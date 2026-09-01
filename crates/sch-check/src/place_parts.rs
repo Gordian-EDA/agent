@@ -121,9 +121,6 @@ pub fn into_design(input: &PlacePartsInput, provider: &SymbolTable) -> (Design, 
     expand_decouple(input, name, &mut design, provider, &mut diags);
     decouple::renumber(&mut design);
     pins::mark_unused_no_connect(&mut design, provider);
-    for net in referenced_nets(&design) {
-        design.nets.entry(net).or_default();
-    }
     nets::derive_attrs(&mut design);
     (design, diags)
 }
@@ -202,23 +199,6 @@ fn expand_decouple(
     }
 }
 
-fn referenced_nets(design: &Design) -> Vec<NetName> {
-    design
-        .blocks
-        .values()
-        .flat_map(|b| b.components.values())
-        .flat_map(|c| {
-            c.pins
-                .values()
-                .chain(c.units.values().flatten().map(|(_, t)| t))
-        })
-        .filter_map(|t| match t {
-            PinTarget::Net(n) => Some(n.clone()),
-            PinTarget::NoConnect => None,
-        })
-        .collect()
-}
-
 /// JSON Schema for the tool's `input_schema`. Deliberately terse: the LLM needs
 /// the shape and the rules that are not obvious (`"nc"`, that a pin key may be a
 /// name or a number, and that anything left out is a no-connect).
@@ -290,7 +270,6 @@ pub fn place_parts_input_schema() -> Value {
                         "additionalProperties": {
                             "type": "object",
                             "required": ["col", "row"],
-                            "additionalProperties": false,
                             "properties": {
                                 "col": {"type": "integer"},
                                 "row": {"type": "integer"},

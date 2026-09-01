@@ -125,10 +125,20 @@ fn decouple_expands_into_synthesized_caps() {
 }
 
 #[test]
-fn power_symbol_free_rails_are_still_named_nets() {
+fn only_attributed_nets_get_an_entry() {
     let (design, _) = into_design(&parse(), &provider());
-    assert!(design.nets.contains_key("+3V3"));
-    assert!(design.nets.contains_key("GND"));
+    // No power symbol in the fixture, so no net earns an attribute — the same
+    // design the YAML front end produces for the same circuit.
+    assert!(design.nets.is_empty(), "{:?}", design.nets);
+
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "PWR1", "part": "power:+3V3", "pins": {"1": "+3V3"}},
+             {"ref": "R1", "part": "Device:R", "pins": {"1": "+3V3", "2": "SIG"}}]}"#,
+    )
+    .unwrap();
+    let (design, _) = into_design(&input, &provider());
+    assert!(design.nets["+3V3"].power);
+    assert!(!design.nets.contains_key("SIG"));
 }
 
 #[test]
@@ -184,16 +194,6 @@ fn schema_describes_the_accepted_shape() {
 
 #[test]
 fn unmentioned_signal_pins_become_no_connects() {
-    let (design, _) = into_design(&parse(), &provider());
-    // PA10 is wired; the MCU has no other free signal pin in this fixture, so
-    // check the regulator-free connector instead: every pin is used there too.
-    // The LED is the case that matters: Device:LED has exactly A and K wired.
-    let mcu = &design.blocks[DEFAULT_BLOCK].components["U2"];
-    assert!(
-        mcu.pins.values().all(|t| matches!(t, PinTarget::Net(_))),
-        "every listed MCU pin is wired"
-    );
-
     let input: PlacePartsInput = serde_json::from_str(
         r#"{"parts": [{"ref": "U2", "part": "MCU:STM32F103C8T",
              "pins": {"VDD": "+3V3", "VSS": "GND", "PA9": "TX"}}]}"#,
@@ -204,6 +204,8 @@ fn unmentioned_signal_pins_become_no_connects() {
     // NRST (4) and PA10 (6) were left out: explicit no-connects, not silence.
     assert_eq!(mcu.pins["4"], PinTarget::NoConnect);
     assert_eq!(mcu.pins["6"], PinTarget::NoConnect);
+    // A power input is never auto-NC'd — an unconnected one is a lint error.
+    assert_eq!(mcu.pins["1"], PinTarget::Net("+3V3".into()));
 }
 
 #[test]
@@ -212,8 +214,13 @@ fn a_duplicate_refdes_is_an_error() {
         r#"{"parts": [{"ref": "R1", "part": "Device:R"}, {"ref": "R1", "part": "Device:C"}]}"#,
     )
     .unwrap();
-    let (_, diags) = into_design(&input, &provider());
+    let (design, diags) = into_design(&input, &provider());
     assert!(diags.0.iter().any(|d| d.code == "duplicate-ref"));
+    // The last declaration wins; the diagnostic says the other one is lost.
+    assert_eq!(
+        design.blocks[DEFAULT_BLOCK].components["R1"].part,
+        "Device:C"
+    );
 }
 
 #[test]

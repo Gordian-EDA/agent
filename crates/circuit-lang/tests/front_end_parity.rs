@@ -68,10 +68,12 @@ blocks:
       PWR2: {part: power:GND, pins: {1: GND}}
 ";
 
+/// The same circuit stated the other way round: pins by NUMBER where the YAML
+/// names them, and by NAME where the YAML numbers them.
 const JSON: &str = r#"{
   "parts": [
     {"ref": "U1", "part": "M:CPU", "decouple": {"100nF": 2},
-     "pins": {"VDD": "+3V3", "VSS": "GND", "PB6": "SCL", "PB7": "SDA"}},
+     "pins": {"1": "+3V3", "2": "+3V3", "3": "GND", "4": "SCL", "5": "SDA"}},
     {"ref": "R1", "part": "Device:R", "value": "4.7k", "pins": {"1": "+3V3", "2": "SCL"}},
     {"ref": "R2", "part": "Device:R", "value": "4.7k", "pins": {"1": "+3V3", "2": "SDA"}},
     {"ref": "PWR1", "part": "power:+3V3", "pins": {"1": "+3V3"}},
@@ -118,11 +120,8 @@ fn both_front_ends_derive_the_same_net_attributes() {
     let from_yaml = circuit_lang::compile(YAML, &provider).design.unwrap();
     let input: PlacePartsInput = serde_json::from_str(JSON).unwrap();
     let (from_json, _) = into_design(&input, &provider);
-    for net in ["+3V3", "GND"] {
-        assert!(
-            from_yaml.nets[net].power && from_json.nets[net].power,
-            "{net}"
-        );
-    }
-    assert!(!from_json.nets["SCL"].power);
+    assert_eq!(from_yaml.nets, from_json.nets);
+    assert!(from_json.nets["+3V3"].power && from_json.nets["GND"].power);
+    // A plain signal net earns no attributes, on either path.
+    assert!(!from_json.nets.contains_key("SCL"));
 }
