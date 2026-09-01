@@ -3,7 +3,7 @@
 use circuit_lang::desugar::desugar;
 use circuit_lang::parse::parse_str;
 use sch_check::lint::lint;
-use sch_check::{Diagnostics, PinType, SymbolTable};
+use sch_check::{PinType, SymbolTable};
 
 fn provider() -> SymbolTable {
     use PinType::*;
