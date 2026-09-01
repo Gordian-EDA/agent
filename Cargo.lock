@@ -1100,7 +1100,7 @@ dependencies = [
  "kicad-symbol",
  "sch-check",
  "sch-doc",
- "sch-io",
+ "sch-floorplan",
  "serde_json",
  "strsim",
 ]

@@ -6,7 +6,7 @@ use anyhow::Result;
 use geom::{Dir, EPS, Point2, Segment};
 use gordian_runtime::AgentRuntime;
 use sch_doc::{LabelKind, SchDoc, body_rects, connect};
-use sch_io::wire::{NetSegment, RouteScene, route_edge};
+use sch_floorplan::wire::{NetSegment, RouteScene, route_edge};
 use serde_json::{Value, json};
 
 use crate::place::{Occupancy, snap_point};

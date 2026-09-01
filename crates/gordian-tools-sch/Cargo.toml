@@ -14,7 +14,7 @@ kicad-symbol = { path = "../kicad-symbol" }
 kicad = { path = "../kicad" }
 sch-check = { path = "../sch-check" }
 sch-doc = { path = "../sch-doc" }
-sch-io = { path = "../sch-io" }
+sch-floorplan = { path = "../sch-floorplan" }
 
 anyhow.workspace = true
 indexmap.workspace = true

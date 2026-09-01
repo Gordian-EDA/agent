@@ -45,3 +45,10 @@ spans; the CLI/TUI install a subscriber writing to `<project>/.gordian/logs/` (r
 one file per session, thread id in the filename) plus stderr at `info` for headless
 runs; `RUST_LOG` honoured. Tests/examples may keep `println!`. Stdout must stay clean
 for `tool_once`-style JSON binaries.
+
+## Open engine bug (found by W2b's `live::verify`, 2026-09-01)
+`stm32f4-buck` and `openmyo-emg` are untruthful on BOTH the old and live paths: 2-pin
+parts come back with pins swapped (`R5.1`↔`R5.2`, `C11.1`↔`C11.2`, `C17`/`U2` on
+`N_U2_BS`) — `between: [A, B]` pin order is not honoured somewhere in the engine/realiser.
+Neither fixture is in `floorplan_netlist`'s lists, so nothing checked them. Add both to
+the netlist gate and fix the ordering (engine-owned; after the truthfulness-fix lane merges).
