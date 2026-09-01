@@ -970,25 +970,17 @@ pub fn pin_end0(env: &KicadInstallation, lib_id: &str, pin: &str) -> io::Result<
 ///
 /// `pin_angle` is the pin's local `(at … angle)` in the symbol — it points from
 /// the connection tip INTO the body, so outward (away from the body) is
-/// `pin_angle + 180`. That outward vector is transformed by the instance
-/// orientation (mirror → rotate → sheet Y-flip) exactly like the endpoint, then
-/// snapped to the dominant axis. Shared by [`SchematicWriter::pin_dirs`] (stub
-/// directions) and anchor-pin slotting (cluster join sides).
+/// `pin_angle + 180`. That outward vector goes through [`Point2::transform_offset`]
+/// — the SAME pose transform as the endpoint, so a direction can never point back
+/// through the body its endpoint sits on — and is then snapped to the dominant axis.
+/// Shared by [`SchematicWriter::pin_dirs`] (stub directions) and anchor-pin slotting
+/// (cluster join sides).
 pub fn quantize_dir(pin_angle: f64, inst_angle: f64, mirror: bool) -> Dir {
     let theta = (pin_angle + 180.0).to_radians();
-    let (mut dx, dy) = (theta.cos(), theta.sin());
-    if mirror {
-        dx = -dx;
-    }
-    let phi = inst_angle.to_radians();
-    let (s, c) = phi.sin_cos();
-    let rx = dx * c - dy * s;
-    let ry = dx * s + dy * c;
-    // Sheet flip: sheet-space y component is -ry (symbol Y up, sheet Y down).
-    let sy = -ry;
-    if rx.abs() >= sy.abs() {
-        if rx >= 0.0 { Dir::East } else { Dir::West }
-    } else if sy >= 0.0 {
+    let out = Point2::new(theta.cos(), theta.sin()).transform_offset(inst_angle, mirror);
+    if out.x.abs() >= out.y.abs() {
+        if out.x >= 0.0 { Dir::East } else { Dir::West }
+    } else if out.y >= 0.0 {
         Dir::South
     } else {
         Dir::North
@@ -1009,14 +1001,18 @@ pub fn quantize_dir(pin_angle: f64, inst_angle: f64, mirror: bool) -> Dir {
 /// ## The transform (symbol space → sheet space)
 ///
 /// KiCAD symbol Y grows **upward**; the schematic sheet Y grows **downward**. A
-/// placed instance applies, in order: an optional X-mirror, a rotation by the
-/// instance `angle`, then the Y-flip into sheet space, then a translation to the
+/// placed instance applies, in order: a rotation by the instance `angle`, the
+/// Y-flip into sheet space, the optional `(mirror y)`, then a translation to the
 /// instance position. Concretely, for a local point `(lx, ly)`:
 ///
-/// 1. **Mirror** (`(mirror x)`): negate `lx` → `(-lx, ly)`.
-/// 2. **Rotate** by the instance angle θ (KiCAD rotates counter-clockwise in
+/// 1. **Rotate** by the instance angle θ (KiCAD rotates counter-clockwise in
 ///    symbol space): `(lx·cosθ − ly·sinθ, lx·sinθ + ly·cosθ)`.
-/// 3. **Y-flip + translate**: `sheet = (inst_x + rx, inst_y − ry)`.
+/// 2. **Y-flip**: `(rx, −ry)` — the sheet-space offset.
+/// 3. **Mirror** (`(mirror y)`): negate the SHEET x. It comes after the rotation,
+///    not before it: negating the local x instead agrees at 0°/180° but is the
+///    point-reflection of the truth at 90°/270°, which transposes a 2-pin part's
+///    two pins and wires each to the other's net.
+/// 4. **Translate**: `sheet = (inst_x + ox, inst_y + oy)`.
 ///
 /// At θ = 0 with no mirror this reduces to `(inst_x + lx, inst_y − ly)`, the
 /// spike's proven form. Angles are restricted to 0/90/180/270 in practice, so
@@ -1099,13 +1095,20 @@ mod tests {
     }
 
     #[test]
-    fn pin_endpoint_mirror_negates_local_x() {
-        // A pin offset in X: mirror negates local x before rotation. At angle 0,
-        // local (2.54, 0) mirrors to (-2.54, 0) -> sheet (124.46, 63.5).
+    fn pin_endpoint_mirror_negates_sheet_x() {
+        // A pin offset in X. At angle 0 reflecting the sheet x is the same as
+        // reflecting the local x: local (2.54, 0) -> sheet (124.46, 63.5).
         let p = pin_at(2.54, 0.0);
         let inst = [127.0, 63.5];
         pt_close(pin_endpoint(&p, inst, 0.0, false), [129.54, 63.5]);
         pt_close(pin_endpoint(&p, inst, 0.0, true), [124.46, 63.5]);
+
+        // At 90 deg it is NOT: Device:R pin 1, local (0, 3.81), lands unmirrored at
+        // (123.19, 63.5) and mirrored at (130.81, 63.5) — pin 2's unmirrored place,
+        // which is exactly the transposition that mis-wired a mirrored 2-pin part.
+        let p1 = pin_at(0.0, 3.81);
+        pt_close(pin_endpoint(&p1, inst, 90.0, false), [123.19, 63.5]);
+        pt_close(pin_endpoint(&p1, inst, 90.0, true), [130.81, 63.5]);
     }
 
     #[test]
