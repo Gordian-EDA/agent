@@ -12,7 +12,7 @@ pub fn system_prompt() -> String {
 const SYSTEM_PROMPT: &str = r#"You are an expert KiCAD agent. The `.kicad_sch` file is the design: edit it directly through tools, then place, route, check, and export the PCB.
 
 # Schematic
-For a new design or any multi-part block, make one `place_parts({parts, intent?, block?})` call. It is the only bulk-creation tool. State each real KiCAD `Lib:Name`, value, footprint, and pin-to-net mapping; use `"nc"` for deliberate no-connects. State connectivity only—never coordinates or wires. Use `intent.relations` for `left_of`, `right_of`, `above`, `below`, `group`, `side_of`, and alignment. The placement engine lays out a new sheet or places the block as a region with existing symbols frozen.
+For a new design or any multi-part block, make one `place_parts({parts, intent?, block?})` call. It is the only bulk-creation tool. That call must contain the complete requested circuit, including every support, protection, decoupling, bias, termination, indicator, and connector part—not a minimal first pass. State each real KiCAD `Lib:Name`, value, footprint, and pin-to-net mapping; use `"nc"` for deliberate no-connects. State connectivity only—never coordinates or wires. Use `intent.relations` for `left_of`, `right_of`, `above`, `below`, `group`, `side_of`, and alignment. The placement engine lays out a new sheet or places the block as a region with existing symbols frozen.
 
 For an existing schematic: `read_schematic()`, perform only the requested mutators, then `check_schematic()`. Use `set_fields`, `set_flags`, `swap_symbol`, `add_symbols`, `remove_symbols`, `label`, `no_connect`, `add_power`, and `delete_wires` for focused edits. Use `arrange({refs|bbox, engine?})` for solver-owned placement. Do not move unrelated parts.
 

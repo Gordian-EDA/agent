@@ -352,6 +352,7 @@ fn tool_defs_for_phase(
     discovery_rounds_used: &HashMap<String, usize>,
     discovery_rounds_allowed: usize,
     revision_reads_used: &HashSet<String>,
+    schematic_checked_clean: bool,
 ) -> Vec<Tool> {
     tool_defs()
         .into_iter()
@@ -362,7 +363,7 @@ fn tool_defs_for_phase(
         // dispatch-side check below as defense against providers that return a
         // stale/unadvertised tool call.
         .filter(|tool| {
-            !is_discovery_tool(tool.name.as_str())
+            !is_batchable_discovery_tool(tool.name.as_str())
                 || discovery_rounds_used
                     .get(tool.name.as_str())
                     .copied()
@@ -374,6 +375,14 @@ fn tool_defs_for_phase(
         // a result already present in history; dispatch retains the same guard
         // for stale calls returned by a provider.
         .filter(|tool| !revision_reads_used.contains(tool.name.as_str()))
+        // A clean explicit check is the schematic completion boundary. Rendering
+        // may still be required by the request, but no schematic writer remains
+        // available for a speculative tidy pass after the verified result.
+        .filter(|tool| {
+            !schematic_checked_clean
+                || (!is_schematic_mutator(tool.name.as_str())
+                    && tool.name.as_str() != "check_schematic")
+        })
         .filter(|tool| match phase {
             ToolPhase::BoardActive => true,
             ToolPhase::BoardSeed => {
@@ -423,6 +432,10 @@ fn is_discovery_tool(name: &str) -> bool {
         name,
         "search_symbols" | "get_symbol_info" | "search_footprints" | "get_footprint_info"
     )
+}
+
+fn is_schematic_mutator(name: &str) -> bool {
+    gordian_tools_sch::MUTATORS.contains(&name)
 }
 
 /// Tools that only look: catalog discovery and reading the live schematic.
@@ -814,6 +827,7 @@ impl<P: Provider> Agent<P> {
                 &discovery_rounds_used,
                 budgets.discovery_rounds_per_subturn,
                 &revision_reads_used,
+                schematic_checked_clean,
             );
             if request_supplies_multiple_library_ids(authoritative_intent)
                 && !self.runtime.sch_path().exists()
@@ -952,9 +966,10 @@ impl<P: Provider> Agent<P> {
                         name: call.fn_name.clone(),
                     },
                 );
-                let discovery_duplicate = is_discovery_tool(&call.fn_name)
-                    && !discovery_seen.insert(call.fn_name.clone());
-                let discovery_exhausted = is_discovery_tool(&call.fn_name)
+                let budgeted_discovery = is_batchable_discovery_tool(&call.fn_name);
+                let discovery_duplicate =
+                    budgeted_discovery && !discovery_seen.insert(call.fn_name.clone());
+                let discovery_exhausted = budgeted_discovery
                     && discovery_rounds_used
                         .get(&call.fn_name)
                         .copied()
@@ -962,6 +977,8 @@ impl<P: Provider> Agent<P> {
                         >= budgets.discovery_rounds_per_subturn;
                 let repeated_read = is_revision_scoped_read(&call.fn_name)
                     && revision_read_uses.get(&call.fn_name) == Some(&tool_state_revision);
+                let mutation_after_clean =
+                    schematic_checked_clean && is_schematic_mutator(&call.fn_name);
                 let mutation_blocked = timed_out_mutation_name(&timed_out_tool_calls).is_some()
                     && effect == ToolEffect::ApprovalRequired;
 
@@ -998,6 +1015,17 @@ impl<P: Provider> Agent<P> {
                         None,
                         false,
                     )
+                } else if mutation_after_clean {
+                    (
+                        json!({
+                            "error": "schematic already passed its completion check",
+                            "note": "finish the request; do not revise a clean schematic speculatively"
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                        false,
+                    )
                 } else if mutation_blocked {
                     (
                         json!({
@@ -1010,7 +1038,7 @@ impl<P: Provider> Agent<P> {
                         false,
                     )
                 } else {
-                    if is_discovery_tool(&call.fn_name) {
+                    if budgeted_discovery {
                         *discovery_rounds_used
                             .entry(call.fn_name.clone())
                             .or_default() += 1;
@@ -2317,6 +2345,7 @@ fn is_kicad_session_tool(name: &str) -> bool {
 
 fn tool_timeout(name: &str) -> Duration {
     match name {
+        "place_parts" | "arrange" => Duration::from_secs(180),
         // KiCAD IPC/CLI paths can legitimately take longer on first launch.
         "regenerate_board" | "place_board" | "route_board" | "check_board" | "export_fab"
         | "open_board" => Duration::from_secs(180),
