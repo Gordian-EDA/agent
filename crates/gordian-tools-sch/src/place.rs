@@ -6,7 +6,7 @@
 //! pin off the grid is a pin no wire can reach.
 
 use geom::{Point2, Rect};
-use sch_doc::{SchDoc, SymbolInst, body_rect, placed_pins};
+use sch_doc::{Pose, SchDoc, SymbolInst, body_rect, placed_pins};
 
 /// The schematic grid: 50 mil.
 const GRID: f64 = 1.27;
@@ -50,9 +50,44 @@ impl Side {
             Side::Below => Point2::new(0.0, GRID),
         }
     }
+
+    /// The unit vector pointing from a part on this side back at its anchor.
+    pub fn toward_anchor(self) -> Point2 {
+        match self {
+            Side::Left => Point2::new(1.0, 0.0),
+            Side::Right => Point2::new(-1.0, 0.0),
+            Side::Above => Point2::new(0.0, 1.0),
+            Side::Below => Point2::new(0.0, -1.0),
+        }
+    }
 }
 
-/// The space a placed symbol really claims: its drawn body *plus* its pin tips.
+/// KiCAD's default field text: 1.27 mm tall, roughly as wide per character.
+fn text_rect(text: &str, at: Pose) -> Option<Rect> {
+    let len = text.chars().count();
+    if len == 0 {
+        return None;
+    }
+    let half = Point2::new(0.55 * len as f64, 0.8).rotated_half_extents(at.rot);
+    Some(Rect::from_center_half(at.point(), (half.x, half.y)))
+}
+
+/// The boxes a symbol's *visible* properties print into.
+///
+/// Reference and value sit right against the body, and a sheet that shows its
+/// footprint fields prints a 60-character string down the side of every part.
+/// A placement that ignores them reads as a collision even when no two bodies
+/// touch.
+fn field_rects(inst: &SymbolInst) -> Vec<Rect> {
+    inst.fields
+        .values()
+        .filter(|f| !f.hidden)
+        .filter_map(|f| text_rect(&f.value, f.at?))
+        .collect()
+}
+
+/// The space a placed symbol really claims: its drawn body, its pin tips, and
+/// the text it prints.
 ///
 /// A part's pins reach well past its outline — an LED's do by 3.8 mm — and two
 /// parts spaced only by their bodies end up with pins in each other's laps,
@@ -63,11 +98,53 @@ pub(crate) fn extent(doc: &SchDoc, inst: &SymbolInst) -> Option<Rect> {
         .filter(|p| p.owner == inst.uuid)
         .map(|p| p.at)
         .collect();
-    if let Some(body) = body_rect(doc, inst) {
-        corners.push(Point2::new(body.min_x, body.min_y));
-        corners.push(Point2::new(body.max_x, body.max_y));
+    let boxes = body_rect(doc, inst).into_iter().chain(field_rects(inst));
+    for r in boxes {
+        corners.push(Point2::new(r.min_x, r.min_y));
+        corners.push(Point2::new(r.max_x, r.max_y));
     }
     Rect::bounding(&corners)
+}
+
+/// The rotation that best points a part's first pin back at its anchor.
+///
+/// A two-pin part dropped beside something should lie along the line to it,
+/// entering at pin 1 — a series resistor left of a connector is horizontal
+/// with pin 1 facing the connector, not vertical beside it. Parts with more
+/// pins have no such axis, so they keep the orientation the library drew.
+pub(crate) fn facing_rotation(doc: &mut SchDoc, refdes: &str, side: Side) -> f64 {
+    let pin_span = |doc: &SchDoc| {
+        let pins: Vec<sch_doc::PlacedPin> = placed_pins(doc)
+            .into_iter()
+            .filter(|p| p.refdes == refdes)
+            .collect();
+        match pins.as_slice() {
+            [a, b] => Some((a.at, b.at)),
+            _ => None,
+        }
+    };
+    if pin_span(doc).is_none() {
+        return doc.symbol_by_ref(refdes).map_or(0.0, |s| s.at.rot);
+    }
+    let want = side.toward_anchor();
+    let mut best = (f64::MIN, 0.0);
+    for rot in [0.0, 90.0, 180.0, 270.0] {
+        if doc
+            .set_symbol_orientation(refdes, rot, sch_doc::Mirror::None)
+            .is_err()
+        {
+            continue;
+        }
+        let Some((first, second)) = pin_span(doc) else {
+            continue;
+        };
+        let score = (first.x - second.x) * want.x + (first.y - second.y) * want.y;
+        if score > best.0 {
+            best = (score, rot);
+        }
+    }
+    let _ = doc.set_symbol_orientation(refdes, best.1, sch_doc::Mirror::None);
+    best.1
 }
 
 fn extents(doc: &SchDoc) -> Vec<(String, Rect)> {
@@ -83,13 +160,10 @@ pub(crate) struct Occupancy {
 }
 
 impl Occupancy {
-    pub fn of(doc: &SchDoc) -> Occupancy {
-        Occupancy::skipping(doc, &[])
-    }
-
-    /// The same, minus `skip`'s bodies *and the wires attached to them* — what
-    /// a move of those parts sees. A part's own copper follows it, so treating
-    /// it as an obstacle would forbid every nudge.
+    /// Everything drawn except `skip`'s bodies *and the wires attached to
+    /// them* — what a move or a placement of those parts sees. A part's own
+    /// copper follows it, so treating it as an obstacle would forbid every
+    /// nudge.
     pub fn skipping(doc: &SchDoc, skip: &[String]) -> Occupancy {
         let mut blocks: Vec<Rect> = extents(doc)
             .into_iter()
@@ -138,11 +212,17 @@ impl Occupancy {
     /// The nearest free centre for a `w`×`h` body, searching outward from
     /// `from` in a grid spiral. `None` when the sheet is that full.
     pub fn nearest_free(&self, from: Point2, w: f64, h: f64) -> Option<Point2> {
+        self.nearest_free_within(from, w, h, 160)
+    }
+
+    /// The same, giving up after `rings` grid steps — how far a *nudge* is
+    /// still the move that was asked for rather than a different one.
+    pub fn nearest_free_within(&self, from: Point2, w: f64, h: f64, rings: i32) -> Option<Point2> {
         let start = snap_point(from);
         if self.free(start, w, h) {
             return Some(start);
         }
-        for ring in 1..160 {
+        for ring in 1..rings {
             let span = ring as f64 * GRID;
             let mut best: Option<(f64, Point2)> = None;
             for step in -ring..=ring {

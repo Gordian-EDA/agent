@@ -32,9 +32,10 @@ use serde_json::{Value, json};
 
 /// The tools that write the schematic. The turn loop approves these before
 /// they run — they mutate the project and have no dry-run.
-pub const MUTATORS: [&str; 12] = [
+pub const MUTATORS: [&str; 13] = [
     "undo",
     "add_symbol",
+    "add_symbols",
     "remove_symbols",
     "move_symbols",
     "set_fields",
@@ -53,13 +54,7 @@ pub fn handles(name: &str) -> bool {
 }
 
 fn tool_names() -> Vec<&'static str> {
-    let mut names = vec![
-        "read_schematic",
-        "get_symbol",
-        "get_net",
-        "free_space",
-        "check_schematic",
-    ];
+    let mut names = vec!["read_schematic", "get_symbol", "get_net", "check_schematic"];
     names.extend(MUTATORS);
     names
 }
@@ -71,6 +66,16 @@ pub fn tool_defs() -> Vec<Tool> {
     let side = json!({ "type": "string", "enum": ["left", "right", "above", "below"] });
     let point =
         json!({ "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 });
+    let part = json!({
+        "lib_id": { "type": "string", "description": "KiCAD Lib:Name, e.g. Device:R." },
+        "ref": { "type": "string" },
+        "value": { "type": "string" },
+        "footprint": { "type": "string" },
+        "near": { "type": "string", "description": "Reference to sit beside." },
+        "side": side.clone(),
+        "at": point.clone(),
+        "rot": { "type": "number", "enum": [0, 90, 180, 270] }
+    });
     let defs: Vec<(&str, &str, Value)> = vec![
         (
             "read_schematic",
@@ -89,7 +94,8 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "get_symbol",
-            "One part in full: position, fields, body extents, and every pin with its side and net.",
+            "One part in full: its fields, then one entry per unit with that unit's position, \
+             body extents and pins with their sides and nets.",
             json!({
                 "type": "object",
                 "properties": { "ref": { "type": "string" } },
@@ -108,40 +114,40 @@ pub fn tool_defs() -> Vec<Tool> {
             }),
         ),
         (
-            "free_space",
-            "A free [x,y] with room for a w×h block, optionally near a part.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "w": { "type": "number" }, "h": { "type": "number" },
-                    "near": { "type": "string", "description": "Reference to stay close to." }
-                },
-                "required": ["w", "h"],
-                "additionalProperties": false
-            }),
-        ),
-        (
             "check_schematic",
             "Lint + electrical rules + KiCAD ERC over the live file. Run this before you finish.",
             json!({ "type": "object", "properties": {}, "additionalProperties": false }),
         ),
         (
             "add_symbol",
-            "Place a part. Position it with `near`+`side` (preferred) or `at`; with neither it \
-             lands in free space. `ref` is auto-assigned when omitted. The part starts unconnected \
-             — wire it with `connect`.",
+            "Place one part and report where it went. `near`+`side` finds a clear, grid-aligned \
+             spot beside that part and turns a two-pin body to face it, so no follow-up move is \
+             needed; `at` and `rot` override. `ref` is auto-assigned. Wire it with `connect`.",
+            json!({
+                "type": "object",
+                "properties": part.clone(),
+                "required": ["lib_id"],
+                "additionalProperties": false
+            }),
+        ),
+        (
+            "add_symbols",
+            "Place a whole block — an LED and its resistor, a clamp pair — in one call, each part \
+             clear of the ones before it. Nothing is written if any part fails.",
             json!({
                 "type": "object",
                 "properties": {
-                    "lib_id": { "type": "string", "description": "KiCAD Lib:Name, e.g. Device:R." },
-                    "ref": { "type": "string" },
-                    "value": { "type": "string" },
-                    "footprint": { "type": "string" },
-                    "near": { "type": "string", "description": "Reference to sit beside." },
-                    "side": side.clone(),
-                    "at": point.clone()
+                    "parts": {
+                        "type": "array", "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": part.clone(),
+                            "required": ["lib_id"],
+                            "additionalProperties": false
+                        }
+                    }
                 },
-                "required": ["lib_id"],
+                "required": ["parts"],
                 "additionalProperties": false
             }),
         ),
@@ -158,7 +164,8 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "move_symbols",
-            "Move parts. Refused if a part would overlap another or if the move changed any net.",
+            "Move parts. A spot already taken is slid to the nearest free one and reported as \
+             `nudged_to`; the move is refused only if nothing near it fits, or if it changed a net.",
             json!({
                 "type": "object",
                 "properties": {
@@ -168,6 +175,7 @@ pub fn tool_defs() -> Vec<Tool> {
                             "type": "object",
                             "properties": {
                                 "ref": { "type": "string" },
+                                "unit": { "type": "integer", "minimum": 1 },
                                 "to": point.clone(),
                                 "by": point.clone(),
                                 "near": { "type": "string" },
@@ -184,8 +192,8 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "set_fields",
-            "Set properties on one part (Value, Footprint, Reference, user fields). This is how you \
-             change a resistor's value or footprint — it moves nothing.",
+            "Set properties on one part (Value, Footprint, Reference, user fields), on every unit \
+             of it. This is how you change a resistor's value or footprint — it moves nothing.",
             json!({
                 "type": "object",
                 "properties": {
@@ -214,8 +222,9 @@ pub fn tool_defs() -> Vec<Tool> {
         (
             "swap_symbol",
             "Retarget a part at a different library symbol, keeping every pin's net by number then \
-             by name. Use `pin_map` {old_pin: new_pin} when the pinout differs; unmapped pins are \
-             reported. For a value or footprint change alone, use set_fields instead.",
+             by name. `ref` names the whole part, so every unit of a dual or quad swaps at once. \
+             Use `pin_map` {old_pin: new_pin} when the pinout differs; unmapped pins are reported. \
+             For a value or footprint change alone, use set_fields instead.",
             json!({
                 "type": "object",
                 "properties": {
@@ -336,9 +345,9 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "read_schematic" => query::read_schematic(input, ctx),
         "get_symbol" => query::get_symbol(input, ctx),
         "get_net" => query::get_net(input, ctx),
-        "free_space" => query::free_space(input, ctx),
         "check_schematic" => check::check_schematic(input, ctx),
         "add_symbol" => edit::add_symbol(input, ctx),
+        "add_symbols" => edit::add_symbols(input, ctx),
         "remove_symbols" => edit::remove_symbols(input, ctx),
         "move_symbols" => edit::move_symbols(input, ctx),
         "set_fields" => edit::set_fields(input, ctx),

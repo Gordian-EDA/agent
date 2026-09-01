@@ -546,7 +546,7 @@ fn is_discovery_tool(name: &str) -> bool {
 /// anything is the stuck pattern the no-progress watchdog exists to catch.
 fn is_inspection_tool(name: &str) -> bool {
     is_discovery_tool(name)
-        || matches!(name, "read_schematic" | "get_symbol" | "get_net" | "free_space")
+        || matches!(name, "read_schematic" | "get_symbol" | "get_net")
 }
 
 fn request_supplies_multiple_library_ids(intent: &str) -> bool {
@@ -6056,7 +6056,6 @@ mod tests {
             "read_schematic",
             "get_symbol",
             "get_net",
-            "free_space",
             "search_symbols",
         ] {
             assert!(is_inspection_tool(name), "{name}");

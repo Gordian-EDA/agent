@@ -99,6 +99,21 @@ fn summarize(pins: &[&PlacedPin]) -> String {
         .join(" ")
 }
 
+/// Every placed unit of a part, in unit order, as `(unit, uuid)`.
+///
+/// A reference designator names a *part*, and the halves of a dual op-amp or a
+/// dual triode are one part: `U1` is both. Tools address them through this so
+/// a value or a library swap lands on all of them at once, the way KiCAD does.
+pub(crate) fn units(doc: &SchDoc, refdes: &str) -> Vec<(u32, String)> {
+    let mut units: Vec<(u32, String)> = doc
+        .symbols()
+        .filter(|s| s.refdes() == refdes)
+        .map(|s| (s.unit, s.uuid.clone()))
+        .collect();
+    units.sort_by_key(|(unit, _)| *unit);
+    units
+}
+
 /// The net a pin currently sits on, if it is on one.
 pub(crate) fn net_of<'a>(netlist: &'a Netlist, refdes: &str, number: &str) -> Option<&'a str> {
     netlist

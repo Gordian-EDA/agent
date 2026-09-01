@@ -43,7 +43,6 @@ use gordian_runtime::tool::{
     require_search_query, require_str,
 };
 
-
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
@@ -142,7 +141,9 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "create_design".into(),
-            description: "Create complete requested circuit; no examples or fragments.".into(),
+            description: "Author a complete circuit for an EMPTY project; no fragments. Refused \
+                          once a schematic exists — edit that in place."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -488,7 +489,8 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "export_fab".into(),
-            description: "Export fabrication files to <project>/fab after clean check_board.".into(),
+            description: "Export fabrication files to <project>/fab after clean check_board."
+                .into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
     ];
@@ -719,10 +721,8 @@ pub(crate) fn current_design_yaml(ctx: &AgentRuntime) -> Result<String> {
     if !ctx.sch_path().exists() {
         return Ok(String::new());
     }
-    lift(ctx.env(), ctx.sch_path())
-        .with_context(|| format!("lifting {}", ctx.sch_path().display()))
+    lift(ctx.env(), ctx.sch_path()).with_context(|| format!("lifting {}", ctx.sch_path().display()))
 }
-
 
 /// Add physical package compatibility to the normal circuit-language report.
 /// Keeping this beside `compile_report` makes create/edit/validate/apply expose
@@ -1097,8 +1097,9 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             } else {
                 out["erc_clean"] = json!(false);
                 out["next_tool"] = json!("check_schematic");
-                out["next"] =
-                    json!("inspect the reported ERC findings, then fix them with the schematic edit tools and re-run check_schematic");
+                out["next"] = json!(
+                    "inspect the reported ERC findings, then fix them with the schematic edit tools and re-run check_schematic"
+                );
             }
         }
         Err(err) => {
@@ -1678,6 +1679,19 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .unwrap_or(false);
     let prior_draft = ctx.workspace().read_draft()?;
     let draft_exists = prior_draft.is_some();
+    // A schematic this agent never authored is somebody's drawing; authoring
+    // over it would replace the whole sheet rather than change what was asked.
+    if ctx.sch_path().is_file() && !draft_exists {
+        return Ok(json!({
+            "error": format!(
+                "{} already holds a schematic — create_design is for empty projects only. \
+                 Edit it in place: read_schematic, then add_symbol/add_symbols, connect, \
+                 set_fields, swap_symbol.",
+                ctx.sch_path().display()
+            ),
+            "draft_changed": false,
+        }));
+    }
     if draft_exists && !overwrite {
         return Ok(json!({
             "error": "a drafted circuit already exists — pass overwrite=true to replace it, \
@@ -1839,8 +1853,8 @@ mod tests {
         common_default_footprint, common_footprint_alias, compile_report,
         footprint_suggestion_clause, normalize_common_footprint_aliases,
         normalize_dense_default_footprints, normalize_invalid_power_references,
-        normalize_misplaced_footprint_parts, require_search_query,
-        symbol_for_misplaced_footprint, tool_defs,
+        normalize_misplaced_footprint_parts, require_search_query, symbol_for_misplaced_footprint,
+        tool_defs,
     };
 
     #[test]
@@ -2162,7 +2176,7 @@ blocks:
             tool.description
                 .as_deref()
                 .unwrap()
-                .contains("complete requested circuit")
+                .contains("EMPTY project")
         );
         assert!(
             tool.schema.unwrap()["properties"]["yaml"]["description"]
