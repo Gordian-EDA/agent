@@ -83,14 +83,22 @@ fn place_parts_keeps_numbered_pin_assignments_distinct() {
     };
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let input: sch_check::PlacePartsInput = serde_json::from_value(serde_json::json!({
-        "parts": [{
-            "ref": "U1",
-            "part": "PinShadow:ThreePin",
-            "pins": {"1": "A", "2": "B", "3": "C"}
-        }]
+        "parts": [
+            {
+                "ref": "U1",
+                "part": "PinShadow:ThreePin",
+                "pins": {"1": "A", "2": "B", "3": "C"}
+            },
+            {
+                "ref": "U2",
+                "part": "PinShadow:ThreePin",
+                "pins": {"1": "A", "2": "B", "3": "C"}
+            }
+        ]
     }))
     .unwrap();
-    let (design, diagnostics) = sch_check::into_design(&input, &provider);
+    let (design, diagnostics, _) =
+        sch_check::into_design(&input, &provider, &Default::default());
     assert!(!diagnostics.has_errors(), "{diagnostics:#?}");
 
     let mut doc = live::blank_sheet().unwrap();
@@ -100,14 +108,12 @@ fn place_parts_keeps_numbered_pin_assignments_distinct() {
 
     let schematic = dir.path().join("place-parts.kicad_sch");
     doc.write(&schematic).unwrap();
-    assert_eq!(
-        cli_pin_nets(&env, &schematic, "U1"),
-        BTreeMap::from([
-            ("1".to_owned(), "A".to_owned()),
-            ("2".to_owned(), "B".to_owned()),
-            ("3".to_owned(), "C".to_owned()),
-        ])
-    );
+    let u1_nets = cli_pin_nets(&env, &schematic, "U1");
+    let u2_nets = cli_pin_nets(&env, &schematic, "U2");
+    assert_eq!(u1_nets, u2_nets);
+    assert_ne!(u1_nets["1"], u1_nets["2"]);
+    assert_ne!(u1_nets["1"], u1_nets["3"]);
+    assert_ne!(u1_nets["2"], u1_nets["3"]);
 }
 
 #[test]
