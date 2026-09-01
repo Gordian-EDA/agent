@@ -989,12 +989,10 @@ impl<P: Provider> Agent<P> {
                     if call.fn_name == "place_parts" {
                         successful_place_parts += 1;
                     }
-                    schematic_check_complete = call.fn_name == "place_parts"
-                        && place_parts_is_complete(
-                            &call.fn_arguments,
-                            &parsed,
-                            successful_place_parts,
-                        );
+                    schematic_check_complete = successful_place_parts > 1
+                        && parsed
+                            .get("check_schematic")
+                            .is_some_and(check_schematic_is_complete);
                 }
                 if dispatched && call.fn_name == "check_schematic" {
                     let complete = check_schematic_is_complete(&parsed);
@@ -1429,13 +1427,6 @@ fn check_schematic_is_complete(value: &Value) -> bool {
             .pointer("/completeness/gaps")
             .and_then(Value::as_array)
             .is_none_or(Vec::is_empty)
-}
-
-fn place_parts_is_complete(input: &Value, value: &Value, successful_calls: usize) -> bool {
-    (successful_calls > 1 || input.get("name").is_some())
-        && value
-            .get("check_schematic")
-            .is_some_and(check_schematic_is_complete)
 }
 
 /// Parse a tool result back into JSON (Null on a malformed result), for the UI
@@ -2679,23 +2670,5 @@ mod tests {
             tool_summary("place_parts", &json!({}), &result),
             "refused: invalid_payload — D1.K on LED_K is dangling"
         );
-    }
-
-    #[test]
-    fn named_complete_design_is_a_completion_boundary() {
-        let result = json!({
-            "check_schematic": {
-                "ok": true,
-                "erc_clean": true,
-                "completeness": {"gaps": []}
-            }
-        });
-
-        assert!(place_parts_is_complete(
-            &json!({"name": "finished sheet"}),
-            &result,
-            1
-        ));
-        assert!(!place_parts_is_complete(&json!({}), &result, 1));
     }
 }
