@@ -378,7 +378,7 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
     let caret = Style::default().fg(theme::ACC);
     let example = |s: &'static str| {
         Line::from(vec![
-            Span::styled("    › ", caret),
+            Span::styled("    ❯ ", caret),
             Span::styled(s, theme::PROSE),
         ])
     };
@@ -465,7 +465,7 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
     let (first, cont, marker_style, body_style, markdown) = match e.speaker {
         // The user's turn: a cyan caret and bold text — the one thing the eye
         // should land on when scanning back through the transcript.
-        Speaker::User => ("› ", "  ", theme::USER_CARET, theme::USER, false),
+        Speaker::User => ("❯ ", "  ", theme::USER_CARET, theme::USER, false),
         // Assistant prose: plain markdown at a blank 2-col gutter, aligned under
         // the user's text. No bullet — the user's caret alone marks the turns, so
         // the transcript stays lean (the Codex idiom).

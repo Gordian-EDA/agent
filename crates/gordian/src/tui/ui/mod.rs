@@ -500,7 +500,7 @@ mod tests {
             "input text and footer should share a left edge:\n{text}"
         );
         assert_eq!(
-            col_of(prompt_row, "›"),
+            col_of(prompt_row, "❯"),
             Some(0),
             "chevron stays at edge:\n{text}"
         );
@@ -652,7 +652,7 @@ mod tests {
         }
         a.update(Msg::Submit);
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("›"), "user accent caret:\n{text}");
+        assert!(text.contains("❯"), "user accent caret:\n{text}");
         assert!(text.contains("hello there"), "user text:\n{text}");
         assert!(!text.contains("you  "), "no `you` gutter label:\n{text}");
         assert!(!text.contains("ai   "), "no `ai` gutter label:\n{text}");

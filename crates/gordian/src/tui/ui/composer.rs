@@ -33,7 +33,7 @@ pub(super) fn draw_completions(f: &mut Frame, input_area: Rect, app: &App) {
                 (theme::BAND, theme::TOOL_NAME, theme::META)
             };
             Line::from(vec![
-                Span::styled(if sel { "› " } else { "  " }, caret),
+                Span::styled(if sel { "❯ " } else { "  " }, caret),
                 Span::styled(format!("{:<name_w$}  ", c.name), name_style),
                 Span::styled(c.desc.to_string(), desc_style),
             ])
@@ -312,7 +312,7 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let avail = inner.width.max(1) as usize;
-    let caret = || Span::styled("›", Style::default().fg(theme::ACC));
+    let caret = || Span::styled("❯", Style::default().fg(theme::ACC));
     f.render_widget(Paragraph::new(Line::from(caret())), marker);
 
     if app.pending.is_some() {
@@ -461,7 +461,7 @@ pub(super) fn draw_unwind(f: &mut Frame, input_area: Rect, app: &App) {
                 (theme::BAND, theme::META, theme::SUBTLE)
             };
             Line::from(vec![
-                Span::styled(if sel { "› " } else { "  " }, caret),
+                Span::styled(if sel { "❯ " } else { "  " }, caret),
                 Span::styled(format!("↶{:<idx_w$}  ", i + 1), idx_style),
                 Span::styled(prompt.clone(), text_style),
             ])
