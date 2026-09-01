@@ -295,13 +295,14 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "delete_wires",
-            "Remove drawn wires by net, by the parts they touch, or by uuid. This is how you break \
-             a net: to insert a part IN SERIES on an existing net, delete_wires({net}) first, then \
-             `connect` each side of the new part to its own half. Adding a part without breaking \
-             the net leaves it shunted across, not in series.",
+            "Remove drawn wires by pin, net, the parts they touch, or uuid, reporting which pins \
+             it left loose. To insert a part IN SERIES cut at ONE pin — {pins:[\"P1.2\"]} — then \
+             `connect` the part between that pin and the node it used to reach; the rest of the \
+             net stays wired. `net` cuts the whole net and loosens every pin on it.",
             json!({
                 "type": "object",
                 "properties": {
+                    "pins": { "type": "array", "items": { "type": "string" } },
                     "net": { "type": "string" },
                     "refs": { "type": "array", "items": { "type": "string" } },
                     "uuids": { "type": "array", "items": { "type": "string" } }

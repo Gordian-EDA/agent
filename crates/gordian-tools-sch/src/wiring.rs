@@ -441,7 +441,7 @@ fn align_onto_pin(doc: &mut SchDoc, refdes: &str, at: Point2, out: Point2) {
     );
 }
 
-/// Remove drawn wires by net, by the parts they touch, or by UUID.
+/// Remove drawn wires by pin, by net, by the parts they touch, or by UUID.
 pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut edit = Edit::open(ctx)?;
     let live = connect::scene(&edit.doc);
@@ -466,10 +466,38 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 .collect()
         })
         .unwrap_or_default();
-    if wanted_net.is_none() && wanted_refs.is_empty() && wanted_uuids.is_empty() {
-        return Ok(json!({ "error": "delete_wires needs one of `net`, `refs` or `uuids`" }));
+    let mut wanted_pins: Vec<Point2> = Vec::new();
+    let mut pin_owners: Vec<String> = Vec::new();
+    for spec in input
+        .get("pins")
+        .and_then(Value::as_array)
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(Value::as_str)
+    {
+        match refs::pin(&edit.doc, spec) {
+            Ok(pin) => {
+                wanted_pins.push(pin.at);
+                pin_owners.push(pin.refdes);
+            }
+            Err(error) => return Ok(json!({ "error": error })),
+        }
+    }
+    if wanted_net.is_none()
+        && wanted_refs.is_empty()
+        && wanted_uuids.is_empty()
+        && wanted_pins.is_empty()
+    {
+        return Ok(json!({
+            "error": "delete_wires needs one of `pins`, `net`, `refs` or `uuids`",
+        }));
     }
     let pins = sch_doc::placed_pins(&edit.doc);
+    let touches_pin = |a: Point2, b: Point2| {
+        wanted_pins
+            .iter()
+            .any(|p| p.near_eq(a, EPS) || p.near_eq(b, EPS))
+    };
     let touches_ref = |a: Point2, b: Point2| {
         pins.iter().any(|p| {
             wanted_refs.contains(&p.refdes) && (p.at.near_eq(a, EPS) || p.at.near_eq(b, EPS))
@@ -489,6 +517,7 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 return false;
             };
             wanted_uuids.contains(&wire.uuid)
+                || touches_pin(a, b)
                 || touches_ref(a, b)
                 || wanted_net.is_some_and(|net| net_of_segment(a, b).as_deref() == Some(net))
         })
@@ -498,18 +527,22 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "changed": "no wire matched", "net_delta": "connectivity unchanged" }));
     }
     let removed = edit.doc.remove_drawing(&doomed);
-    // Deleting a net's wires loosens its pins, which is the whole point.
+    // Deleting copper loosens the pins that shared it, which is the point of
+    // the call: every net the request named, and every pin on one, is fair game.
+    let mut named: Vec<String> = wanted_refs.clone();
+    named.extend(pin_owners);
+    let mut nets = refs::nets_touching(edit.before(), &named);
+    nets.extend(wanted_net.map(str::to_string));
     let loosened: Vec<String> = edit
         .before()
         .nets
         .iter()
-        .filter(|net| wanted_net == Some(net.name.as_str()))
+        .filter(|net| nets.contains(&net.name))
         .flat_map(|net| net.pins.iter().map(|p| p.refdes.clone()))
         .collect();
     let allow = Allow::nothing()
-        .nets(wanted_net.map(str::to_string))
-        .nets(refs::nets_touching(edit.before(), &wanted_refs))
-        .parts(wanted_refs.clone())
+        .nets(nets)
+        .parts(named)
         .parts(loosened)
         .creating();
     let loose = refs::newly_loose(edit.before(), &connect::extract(&edit.doc));
