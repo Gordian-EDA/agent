@@ -48,14 +48,29 @@ pub enum NetSource {
     Global,
 }
 
-/// One pin on a net. Ordered by reference, unit and pin number.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// One pin on a net.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PinRef {
     pub refdes: String,
     pub unit: u32,
     pub pin: String,
     /// The owning symbol is marked do-not-populate. DNP symbols still connect.
     pub dnp: bool,
+}
+
+/// Ordered by what identifies the pin. `dnp` is a build attribute of the
+/// symbol, not part of which pin this is, so it stays out of the key that sorts
+/// nets and picks a lead.
+impl Ord for PinRef {
+    fn cmp(&self, other: &PinRef) -> std::cmp::Ordering {
+        (&self.refdes, self.unit, &self.pin).cmp(&(&other.refdes, other.unit, &other.pin))
+    }
+}
+
+impl PartialOrd for PinRef {
+    fn partial_cmp(&self, other: &PinRef) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl PinRef {
@@ -92,9 +107,12 @@ pub struct Netlist {
 }
 
 impl Netlist {
-    /// The partition alone: each net as a sorted list of `refdes.pin`.
-    /// Comparing these ignores generated net names, which is what an oracle
-    /// check against `kicad-cli` needs.
+    /// The partition alone: each net as a sorted list of `refdes.pin`, sorted.
+    ///
+    /// Two extractions can be compared with `==` on this without net names or
+    /// pin order getting in the way. It keeps every pin, `#`-prefixed power
+    /// symbols included, so it is not directly comparable to a `kicad-cli`
+    /// netlist, which leaves those out.
     pub fn partition(&self) -> Vec<Vec<String>> {
         let mut out: Vec<Vec<String>> = self
             .nets

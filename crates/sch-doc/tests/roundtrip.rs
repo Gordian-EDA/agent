@@ -68,11 +68,7 @@ fn rewriting_is_a_fixed_point_of_the_model() {
 fn reprinted_items_survive_a_reparse() {
     for path in corpus::files() {
         let doc = SchDoc::read(&path).expect("parse");
-        let mut text = String::from("(kicad_sch\n");
-        for item in doc.items() {
-            sch_doc::print_item(item, &mut text);
-        }
-        text.push_str(")\n");
+        let text = reprint(&doc);
         let reparsed = SchDoc::parse(&text).expect("reparse of printed form");
         assert_eq!(
             reparsed.items().len(),
@@ -80,13 +76,8 @@ fn reprinted_items_survive_a_reparse() {
             "{} lost items when printed",
             corpus::label(&path)
         );
-        let mut again = String::from("(kicad_sch\n");
-        for item in reparsed.items() {
-            sch_doc::print_item(item, &mut again);
-        }
-        again.push_str(")\n");
         assert_eq!(
-            again,
+            reprint(&reparsed),
             text,
             "{} printer is not a fixed point",
             corpus::label(&path)
@@ -94,6 +85,13 @@ fn reprinted_items_survive_a_reparse() {
     }
 }
 
+/// KiCAD reads a file in which *every* item went through the pretty-printer
+/// the same way it reads the original.
+///
+/// Printing every item is what makes this worth the wall clock: `to_text` on an
+/// unedited document reproduces its input byte for byte, so feeding that to
+/// KiCAD would be asking it to compare a file with itself. The printer is the
+/// path each edited item takes, and it is the one that needs an oracle.
 #[test]
 fn kicad_sees_the_same_netlist_and_erc_after_a_rewrite() {
     let Some(kicad) = corpus::kicad10() else {
@@ -101,13 +99,16 @@ fn kicad_sees_the_same_netlist_and_erc_after_a_rewrite() {
         return;
     };
     let mut checked = 0;
+    let mut reprinted = 0;
     for path in corpus::files() {
         let doc = SchDoc::read(&path).expect("parse");
         // Compare two copies of the same project so only the rewrite differs:
         // sibling sheets and the project file drive ERC severities as well.
         let (original_dir, original) = stage(&path);
         let (rewritten_dir, rewritten) = stage(&path);
-        std::fs::write(&rewritten, doc.to_text()).expect("write");
+        let text = reprint(&doc);
+        reprinted += usize::from(text != doc.to_text());
+        std::fs::write(&rewritten, text).expect("write");
 
         let Ok(before) = kicad.netlist(&original) else {
             continue;
@@ -131,6 +132,20 @@ fn kicad_sees_the_same_netlist_and_erc_after_a_rewrite() {
         checked += 1;
     }
     assert!(checked > 50, "only {checked} files reached the oracle");
+    assert!(
+        reprinted > 50,
+        "only {reprinted} files actually differed under the printer"
+    );
+}
+
+/// Every item forced through the pretty-printer, bypassing its retained bytes.
+fn reprint(doc: &SchDoc) -> String {
+    let mut text = String::from("(kicad_sch\n");
+    for item in doc.items() {
+        sch_doc::print_item(item, &mut text);
+    }
+    text.push_str(")\n");
+    text
 }
 
 /// Copy the whole project directory into a scratch dir and hand back the copy

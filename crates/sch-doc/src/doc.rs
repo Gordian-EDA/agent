@@ -73,7 +73,8 @@ pub struct SchDoc {
 impl SchDoc {
     /// Parse schematic text.
     pub fn parse(text: &str) -> Result<SchDoc> {
-        let cst = parse_one(text)?;
+        let mut cst = parse_one(text)?;
+        sexpr::repair_quotes(&mut cst.nodes[0], text);
         let root = &cst.nodes[0];
         match sexpr::head(root) {
             Some("kicad_sch") => {}
@@ -239,6 +240,10 @@ impl SchDoc {
     }
 
     /// Capture the current state so [`Self::restore`] can come back to it.
+    ///
+    /// Each snapshot is a full copy of the document's items and is kept for the
+    /// life of the `SchDoc`, so a loop that snapshots every trial holds them
+    /// all. The retained source is shared, not copied.
     pub fn snapshot(&mut self) -> SnapshotId {
         self.snapshots.push((self.items.clone(), self.edited));
         SnapshotId(self.snapshots.len() - 1)

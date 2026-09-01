@@ -328,6 +328,80 @@ fn references(text: &str) -> Vec<&str> {
         .collect()
 }
 
+/// The units of one part share a reference, so a reference does not name a
+/// symbol there. Editing one unit and leaving its siblings behind would make a
+/// part whose halves disagree; the mutators take a UUID for that case.
+#[test]
+fn a_reference_shared_by_several_units_is_refused() {
+    let Some(path) = corpus::files()
+        .into_iter()
+        .find(|p| p.ends_with("ecc83/ecc83-pp.kicad_sch"))
+    else {
+        eprintln!("SKIP: corpus not found");
+        return;
+    };
+    let mut doc = SchDoc::parse(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+    let shared = doc
+        .symbols()
+        .find(|s| doc.symbols().filter(|o| o.refdes() == s.refdes()).count() > 1)
+        .map(|s| (s.refdes().to_string(), s.uuid.clone()))
+        .expect("a multi-unit part");
+    let units = doc.symbols().filter(|s| s.refdes() == shared.0).count();
+
+    assert!(matches!(
+        doc.move_symbol(&shared.0, 10.0, 10.0),
+        Err(sch_doc::Error::AmbiguousReference(_))
+    ));
+    assert!(matches!(
+        doc.remove_symbol(&shared.0),
+        Err(sch_doc::Error::AmbiguousReference(_))
+    ));
+
+    // The same edit by UUID names one unit and goes through.
+    doc.move_symbol(&shared.1, 10.0, 10.0)
+        .expect("move by uuid");
+    let moved = doc.symbol(&shared.1).expect("unit");
+    assert_eq!((moved.at.x, moved.at.y), (10.0, 10.0));
+    assert_eq!(
+        doc.symbols().filter(|s| s.refdes() == shared.0).count(),
+        units,
+        "a sibling unit went missing"
+    );
+}
+
+/// The parent of a derived symbol is referenced by nothing placed, but every
+/// derived symbol in the file draws its body. Collecting it would leave them
+/// with no pins.
+#[test]
+fn write_keeps_the_parent_a_derived_symbol_extends() {
+    let text = r#"(kicad_sch (version 20250114) (generator "t")
+        (uuid "00000000-0000-4000-8000-000000000001") (paper "A4")
+        (lib_symbols
+          (symbol "Device:R"
+            (symbol "R_1_1"
+              (pin passive line (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+              (pin passive line (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))))
+          (symbol "Device:R_Small" (extends "R")))
+        (symbol (lib_id "Device:R_Small") (at 100 100 0) (unit 1) (uuid "r1")
+          (property "Reference" "R1" (at 100 100 0))
+          (property "Value" "1k" (at 100 100 0))))
+    "#;
+    let mut doc = SchDoc::parse(text).expect("parse");
+    let before = sch_doc::placed_pins(&doc).len();
+    assert_eq!(before, 2, "the fixture never resolved the parent");
+
+    doc.set_field("R1", "Value", "2k").expect("set_field");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("out.kicad_sch");
+    doc.write(&out).expect("write");
+
+    let written = SchDoc::read(&out).expect("reparse");
+    let libs = written.lib_symbols().expect("libs");
+    assert!(libs.contains("Device:R"), "the parent body was collected");
+    assert!(libs.contains("Device:R_Small"));
+    assert_eq!(sch_doc::placed_pins(&written).len(), before);
+}
+
 #[test]
 fn snapshots_restore_the_document_exactly() {
     let (_, source) = fixture();

@@ -23,6 +23,10 @@ const FLAG: &str = r#"(symbol "power:PWR_FLAG" (power)
     (symbol "PWR_FLAG_1_1"
       (pin power_out line (at 0 0 90) (length 0) (hide yes) (name "pwr_flag") (number "1"))))"#;
 
+/// A derived symbol: no body of its own, only a pointer at the parent that has
+/// one. No corpus file uses this, so it is only ever covered here.
+const DERIVED: &str = r#"(symbol "Device:R_Small" (extends "R"))"#;
+
 /// A pre-modern part that expects its supply pins to connect invisibly by name.
 const LEGACY: &str = r#"(symbol "Legacy:U"
     (symbol "U_1_1"
@@ -620,6 +624,41 @@ fn a_label_outranks_the_sheet_pin_it_shares_a_net_with() {
     let netlist = connect::extract(&doc);
     assert_eq!(net_named(&netlist, "SIG").source, NetSource::Local);
     assert!(!netlist.nets.iter().any(|n| n.name == "child/IN"));
+}
+
+/// A derived symbol draws the parent's pins, so it connects like the parent.
+#[test]
+fn a_derived_symbol_borrows_its_parents_pins() {
+    let doc = sheet(
+        &[RESISTOR, DERIVED],
+        &format!(
+            "{}\n{}\n{}",
+            place("Device:R_Small", "R1", "1k", 100.0, 100.0, 0.0, "(unit 1)"),
+            place("Device:R_Small", "R2", "1k", 120.0, 100.0, 0.0, "(unit 1)"),
+            wire(100.0, 96.19, 120.0, 96.19),
+        ),
+    );
+    let netlist = connect::extract(&doc);
+    assert!(netlist.warnings.is_empty(), "{:?}", netlist.warnings);
+    assert_eq!(
+        nets(&doc),
+        vec![vec!["R1.1".to_string(), "R2.1".to_string()]]
+    );
+}
+
+/// A chain that never reaches a body is a miss, not a definition: reporting the
+/// `extends` node as the symbol would silently give it no pins.
+#[test]
+fn an_unresolvable_extends_chain_is_reported() {
+    let doc = sheet(
+        &[DERIVED],
+        &place("Device:R_Small", "R1", "1k", 100.0, 100.0, 0.0, "(unit 1)"),
+    );
+    let warnings = connect::extract(&doc).warnings;
+    assert!(
+        warnings.iter().any(|w| w.contains("Device:R_Small")),
+        "{warnings:?}"
+    );
 }
 
 #[test]

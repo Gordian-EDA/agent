@@ -128,7 +128,8 @@ pub(crate) fn to_sheet(local: Point2, at: Pose, mirror: Mirror) -> Point2 {
     Point2::new(at.x + dx, at.y + dy)
 }
 
-/// The instance's body style; KiCAD defaults to the first.
+/// The instance's body style; KiCAD defaults to the first. KiCAD 7 and earlier
+/// spelled the field `convert`, and the corpus still holds pre-8 files.
 fn body_style(inst: &SymbolInst) -> u32 {
     let node = inst.retained().node();
     sexpr::child_text(node, "body_style")

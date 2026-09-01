@@ -154,16 +154,81 @@ pub fn fmt_number(value: f64) -> String {
     s
 }
 
+/// The characters KiCAD writes as a two-character escape inside a quoted
+/// string.
+const STRING_ESCAPES: [(char, char); 5] = [
+    ('\\', '\\'),
+    ('"', '"'),
+    ('n', '\n'),
+    ('r', '\r'),
+    ('t', '\t'),
+];
+
 fn escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
     for ch in value.chars() {
-        if ch == '"' || ch == '\\' {
-            out.push('\\');
+        match STRING_ESCAPES.iter().find(|(_, plain)| *plain == ch) {
+            Some((token, _)) => {
+                out.push('\\');
+                out.push(*token);
+            }
+            None => out.push(ch),
         }
-        out.push(ch);
     }
     out.push('"');
+    out
+}
+
+/// Re-decode every quoted atom from the bytes it was parsed from.
+///
+/// `kiutils_sexpr` unescapes `\X` to a bare `X` for every `X`, so a KiCAD
+/// string holding a newline — written `"line\n"` — arrives as `line` + `n`,
+/// with no way to tell it from a literal `n`. Re-emitting that would silently
+/// drop the newline. The spans still point at the original text, so the escapes
+/// can simply be read again, properly.
+pub fn repair_quotes(node: &mut Node, source: &str) {
+    match node {
+        Node::List { items, .. } => {
+            for child in items {
+                repair_quotes(child, source);
+            }
+        }
+        Node::Atom {
+            atom: atom @ Atom::Quoted(_),
+            span,
+        } => {
+            let Some(raw) = source
+                .get(span.start..span.end)
+                .and_then(|q| q.strip_prefix('"'))
+                .and_then(|q| q.strip_suffix('"'))
+            else {
+                return;
+            };
+            *atom = Atom::Quoted(unescape_string(raw));
+        }
+        Node::Atom { .. } => {}
+    }
+}
+
+fn unescape_string(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some(token) => out.push(
+                STRING_ESCAPES
+                    .iter()
+                    .find(|(name, _)| *name == token)
+                    .map_or(token, |(_, plain)| *plain),
+            ),
+            None => out.push('\\'),
+        }
+    }
     out
 }
 
@@ -314,5 +379,17 @@ mod tests {
     fn quotes_and_backslashes_round_trip() {
         let src = r#"(x "a\"b\\c")"#;
         assert_eq!(render(src), "(x \"a\\\"b\\\\c\")\n");
+    }
+
+    /// A KiCAD string holding a newline must survive the parser's own lossy
+    /// unescaping and come back out as `\n`.
+    #[test]
+    fn escaped_control_characters_survive() {
+        let src = "(text \"Display Port 1\\n\")";
+        let mut doc = parse_one(src).expect("parse");
+        repair_quotes(&mut doc.nodes[0], src);
+        let mut out = String::new();
+        print(&doc.nodes[0], 0, &mut out);
+        assert_eq!(out, "(text \"Display Port 1\\n\")\n");
     }
 }

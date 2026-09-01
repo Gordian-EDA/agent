@@ -33,15 +33,17 @@ impl SchDoc {
         }
     }
 
+    /// Every UUID already in the document, pins and sheet pins included — a
+    /// collision check that missed those would not be one.
     fn uuid_taken(&self, uuid: &str) -> bool {
         self.items().iter().any(|item| match item {
-            Item::Symbol(s) => s.uuid == uuid,
+            Item::Symbol(s) => s.uuid == uuid || s.pin_uuids.values().any(|u| u == uuid),
             Item::Wire(w) => w.uuid == uuid,
             Item::Junction(j) => j.uuid == uuid,
             Item::NoConnect(n) => n.uuid == uuid,
             Item::Label(l) => l.uuid == uuid,
             Item::Text(t) => t.uuid == uuid,
-            Item::Sheet(s) => s.uuid == uuid,
+            Item::Sheet(s) => s.uuid == uuid || s.pins.iter().any(|p| p.uuid == uuid),
             _ => false,
         })
     }
@@ -62,8 +64,11 @@ impl SchDoc {
     }
 
     /// Move a symbol, carrying its field positions with it.
-    pub fn move_symbol(&mut self, refdes: &str, x: f64, y: f64) -> Result<()> {
-        let uuid = self.uuid_of(refdes)?;
+    ///
+    /// `id` is a reference designator, or a UUID when several units share a
+    /// reference — as it is on every mutator here.
+    pub fn move_symbol(&mut self, id: &str, x: f64, y: f64) -> Result<()> {
+        let uuid = self.uuid_of(id)?;
         let mut symbol = self.symbol_mut(&uuid)?;
         let (dx, dy) = (x - symbol.at.x, y - symbol.at.y);
         symbol.at.x = x;
@@ -80,8 +85,8 @@ impl SchDoc {
     }
 
     /// Set a symbol's rotation and mirroring, leaving its position alone.
-    pub fn set_symbol_orientation(&mut self, refdes: &str, rot: f64, mirror: Mirror) -> Result<()> {
-        let uuid = self.uuid_of(refdes)?;
+    pub fn set_symbol_orientation(&mut self, id: &str, rot: f64, mirror: Mirror) -> Result<()> {
+        let uuid = self.uuid_of(id)?;
         let mut symbol = self.symbol_mut(&uuid)?;
         symbol.at.rot = rot;
         symbol.mirror = mirror;
@@ -97,8 +102,8 @@ impl SchDoc {
     /// A sheet placed several times in a hierarchy has no such entry — its
     /// references belong to the parent paths — so renaming one is refused
     /// rather than flattening the table.
-    pub fn set_field(&mut self, refdes: &str, name: &str, value: &str) -> Result<()> {
-        let uuid = self.uuid_of(refdes)?;
+    pub fn set_field(&mut self, id: &str, name: &str, value: &str) -> Result<()> {
+        let uuid = self.uuid_of(id)?;
         let sheet_path = self.sheet_path();
         let mut symbol = self.symbol_mut(&uuid)?;
         let origin = symbol.at;
@@ -113,7 +118,7 @@ impl SchDoc {
             && has_instances(&symbol.raw.node)
             && !set_instance_reference(&mut symbol.raw.node, &sheet_path, value)
         {
-            return Err(Error::ForeignInstances(refdes.to_string()));
+            return Err(Error::ForeignInstances(id.to_string()));
         }
         drop(symbol);
         self.mark_edited();
@@ -180,8 +185,8 @@ impl SchDoc {
     }
 
     /// Remove a symbol and every field it owned.
-    pub fn remove_symbol(&mut self, refdes: &str) -> Result<()> {
-        let uuid = self.uuid_of(refdes)?;
+    pub fn remove_symbol(&mut self, id: &str) -> Result<()> {
+        let uuid = self.uuid_of(id)?;
         self.items_mut()
             .retain(|item| !matches!(item, Item::Symbol(s) if s.uuid == uuid));
         self.mark_edited();
@@ -279,10 +284,24 @@ impl SchDoc {
         uuid
     }
 
-    fn uuid_of(&self, refdes: &str) -> Result<String> {
-        self.symbol_by_ref(refdes)
-            .map(|s| s.uuid.clone())
-            .ok_or_else(|| Error::UnknownReference(refdes.to_string()))
+    /// Resolve a symbol identifier — a UUID, or a reference designator.
+    ///
+    /// The units of a multi-unit part share a reference, so a reference alone
+    /// does not name a symbol there; editing one unit and leaving its siblings
+    /// behind would make a part whose halves disagree. Those are addressed by
+    /// UUID instead.
+    fn uuid_of(&self, id: &str) -> Result<String> {
+        if self.symbol(id).is_some() {
+            return Ok(id.to_string());
+        }
+        let mut matching = self.symbols().filter(|s| s.refdes() == id);
+        let first = matching
+            .next()
+            .ok_or_else(|| Error::UnknownReference(id.to_string()))?;
+        match matching.next() {
+            None => Ok(first.uuid.clone()),
+            Some(_) => Err(Error::AmbiguousReference(id.to_string())),
+        }
     }
 
     /// Clone the project/path shape an existing symbol uses, so a new symbol

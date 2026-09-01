@@ -699,6 +699,7 @@ fn sync_properties(node: &mut Node, fields: &IndexMap<String, Field>) {
         .map(|(name, field)| (name.as_str(), field.encode()))
         .collect();
     let mut insert_at = children.len();
+    let mut written: Vec<String> = Vec::new();
     let mut cursor = 0;
     while cursor < children.len() {
         if sexpr::head(&children[cursor]) != Some("property") {
@@ -716,10 +717,14 @@ fn sync_properties(node: &mut Node, fields: &IndexMap<String, Field>) {
                 insert_at = cursor + 1;
                 cursor += 1;
             }
+            // A name already written is a duplicate the typed model cannot
+            // represent; leave it exactly as it was rather than drop it.
+            None if written.contains(&name) => cursor += 1,
             None => {
                 children.remove(cursor);
             }
         }
+        written.push(name);
     }
     for (offset, (_, added)) in encoded.into_iter().enumerate() {
         children.insert((insert_at + offset).min(children.len()), added);
