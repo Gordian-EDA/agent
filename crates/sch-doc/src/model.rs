@@ -778,6 +778,41 @@ pub(crate) fn set_instance_reference(node: &mut Node, sheet_path: &str, refdes: 
     }
 }
 
+/// Rewrite every `(instances … (path …))` entry onto `sheet_path`, so a symbol
+/// drawn on one sheet is annotated by the sheet it is grafted into.
+pub(crate) fn retarget_instances(node: &mut Node, sheet_path: &str) {
+    let Some(instances) = sexpr::child_mut(node, "instances") else {
+        return;
+    };
+    let Some(projects) = sexpr::items_mut(instances) else {
+        return;
+    };
+    for project in projects.iter_mut() {
+        let Some(paths) = sexpr::items_mut(project) else {
+            continue;
+        };
+        for path in paths.iter_mut() {
+            if sexpr::head(path) == Some("path") {
+                set_positional(path, 1, quoted(sheet_path));
+            }
+        }
+    }
+}
+
+/// Set the UUID KiCAD assigned to one `(pin …)` of a placed symbol.
+pub(crate) fn set_pin_uuid(node: &mut Node, number: &str, uuid: &str) {
+    let Some(children) = sexpr::items_mut(node) else {
+        return;
+    };
+    for child in children.iter_mut() {
+        if sexpr::head(child) == Some("pin")
+            && items(child).get(1).and_then(sexpr::text) == Some(number)
+        {
+            sexpr::set_child(child, tagged("uuid", vec![quoted(uuid)]));
+        }
+    }
+}
+
 /// How many `(instances … (path …))` entries a symbol carries — one per
 /// placement of the sheet it lives on.
 pub(crate) fn instance_paths(node: &Node) -> usize {

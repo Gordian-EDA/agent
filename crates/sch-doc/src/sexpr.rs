@@ -233,7 +233,6 @@ fn unescape_string(raw: &str) -> String {
 }
 
 /// One-line rendering of a node.
-#[cfg(test)]
 pub fn flat(node: &Node) -> String {
     let mut out = String::new();
     flat_into(node, &mut out);

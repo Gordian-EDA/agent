@@ -2,7 +2,7 @@
 //! loads. SKIP-graceful when no KiCAD is detected; runs against KiCAD 10 here.
 
 use kicad::KicadInstallation;
-use sch_io::write::SchematicWriter;
+use sch_floorplan::write::SchematicWriter;
 
 #[test]
 fn emits_single_symbol_that_kicad_loads() {

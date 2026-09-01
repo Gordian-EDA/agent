@@ -19,8 +19,8 @@
 
 use geom::{EPS, Point2, Rect};
 
-use sch_check::Design;
 use kicad::KicadInstallation;
+use sch_check::Design;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
 use sch_place::place::{PlaceOptions, PlaceResult};
@@ -65,6 +65,9 @@ pub struct Pose {
 /// New poses for the movable set, in input order, plus what the engine measured.
 pub struct RegionOutput {
     pub poses: Vec<Pose>,
+    /// The IR the engine finished with — its recognized idioms and rail decisions, which
+    /// the realiser needs to draw the same sheet the engine scored.
+    pub ir: LayoutIr,
     pub result: PlaceResult,
 }
 
@@ -204,16 +207,19 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
     let (moved, held) = place.items.split_at_mut(movable);
     legalize(moved, held, &obstacles);
 
-    let realizer = RoutedSheetRealizer::new(env, &place.inc, &out.ir, options);
-    let eval = RoutedEvaluator::new(&realizer);
-    let result = PlaceResult {
-        engine: out.result.engine,
-        truthfulness_breaks: eval.truthfulness_breaks(&place.items),
-        warnings: eval.warnings(&place.items),
-        crossings: eval.crossings(&place.items),
-        cost: out.result.cost,
+    let result = {
+        let realizer = RoutedSheetRealizer::new(env, &place.inc, &out.ir, options);
+        let eval = RoutedEvaluator::new(&realizer);
+        PlaceResult {
+            engine: out.result.engine,
+            truthfulness_breaks: eval.truthfulness_breaks(&place.items),
+            warnings: eval.warnings(&place.items),
+            crossings: eval.crossings(&place.items),
+            cost: out.result.cost,
+        }
     };
     RegionOutput {
+        ir: out.ir,
         poses: place.items[..movable]
             .iter()
             .map(|it| Pose {

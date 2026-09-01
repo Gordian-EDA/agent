@@ -13,3 +13,12 @@ mod reports;
 pub use installation::KicadInstallation;
 pub use netlist::{Net, NetComp, Netlist};
 pub use reports::{DrcReport, ErcReport, Violation, ViolationItem};
+
+/// Escape a string for embedding in a quoted KiCAD S-expression atom.
+pub fn sexpr_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}

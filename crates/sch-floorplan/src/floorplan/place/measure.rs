@@ -28,12 +28,12 @@ use sch_place::place::PlaceResult;
 
 use super::emit::{build_writer, compute_needs_flag};
 use super::problem::SchematicPlaceProblem;
+use super::relation::{relation_group_spread, relation_viol};
 use super::score::{
     count_body_crossings, count_close_wires, count_collinear_body_crossings, count_congestion,
     count_corners, count_crossings, count_foreign_taps, count_ic_body_crossings, count_merges,
     count_parallel_body_crossings, count_shorts, count_stray, grid_order_viol, item_rect,
 };
-use super::relation::{relation_group_spread, relation_viol};
 use super::*;
 
 /// A schematic placement+routing ENGINE: searches over a neutral

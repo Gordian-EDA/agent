@@ -2970,19 +2970,25 @@ name = "sch-floorplan"
 version = "0.1.0"
 dependencies = [
  "anneal-place",
+ "anyhow",
  "circuit-graph",
  "circuit-lang",
  "geom",
  "indexmap 2.14.0",
  "kicad",
  "kicad-symbol",
+ "kiutils_kicad",
  "rayon",
  "sch-check",
+ "sch-doc",
  "sch-io",
  "sch-place",
+ "serde",
  "serde_json",
  "spine-place",
  "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -2990,14 +2996,9 @@ name = "sch-io"
 version = "0.1.0"
 dependencies = [
  "circuit-lang",
- "geom",
  "kicad",
- "kicad-symbol",
- "kiutils_kicad",
  "sch-check",
  "sch-place",
- "tempfile",
- "uuid",
 ]
 
 [[package]]

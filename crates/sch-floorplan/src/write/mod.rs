@@ -50,7 +50,7 @@ mod build;
 mod emit;
 mod textsolve;
 
-// Re-export the public surface VERBATIM so external `sch_io::write::…` paths
+// Re-export the public surface VERBATIM so external `crate::write::…` paths
 // resolve unchanged across the split.
 pub use build::{pin_end0, pin_endpoint, quantize_dir};
 pub use emit::{escape_sexpr_string, fmt_coord};

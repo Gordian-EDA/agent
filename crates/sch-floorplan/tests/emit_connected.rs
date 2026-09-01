@@ -5,7 +5,7 @@
 //! detected; runs against KiCAD 10 here.
 
 use kicad::KicadInstallation;
-use sch_io::write::SchematicWriter;
+use sch_floorplan::write::SchematicWriter;
 
 #[test]
 fn two_pins_same_net_name_are_electrically_connected() {

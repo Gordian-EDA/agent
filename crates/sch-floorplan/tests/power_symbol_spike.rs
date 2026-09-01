@@ -2,7 +2,7 @@
 //! If this fails, STOP and re-design Phase 2's power-symbol approach.
 
 use kicad::KicadInstallation;
-use sch_io::write::SchematicWriter;
+use sch_floorplan::write::SchematicWriter;
 
 #[test]
 fn power_symbol_value_names_the_net() {

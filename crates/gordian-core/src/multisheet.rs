@@ -90,7 +90,7 @@ pub fn compose_design_with_engine(
     }
 
     let cross_sheet = cross_sheet_nets(&groups);
-    let mut groups_w: Vec<(String, sch_io::write::SchematicWriter)> = Vec::new();
+    let mut groups_w: Vec<(String, sch_floorplan::write::SchematicWriter)> = Vec::new();
     let mut layout_warnings = Vec::new();
     let mut crossings = sch_place::place::Crossings::default();
     let mut detected_idioms = Vec::new();
