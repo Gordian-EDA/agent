@@ -42,6 +42,8 @@ const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 
 const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. If it reports ok and erc_clean, finish immediately without further edits; otherwise fix only the reported defects and check once more.";
 
+const UNCHANGED_SCHEMATIC_NUDGE: &str = "the schematic is unchanged since the turn began (your edits were undone or refused); the request is not satisfied — either complete it (e.g. `set_fields` when no compatible symbol exists) or state plainly that it cannot be done and why";
+
 /// Base hard ceiling on provider invocations within one agent subturn. This is
 /// a last-resort guard against a model that keeps requesting tools forever: the
 /// narrower commit-nudge and routing retry budgets handle known stalls, while
@@ -693,13 +695,18 @@ impl<P: Provider> Agent<P> {
         self.turn_starts.push(current_turn_start);
         self.history.push(ChatMessage::user(instruction));
 
+        let schematic_hash_at_turn_start =
+            gordian_tools_sch::schematic_content_hash(&self.runtime)?;
+
         let budgets = TurnBudgets::for_intent(authoritative_intent);
         let pcb_work_requested = request_requires_pcb_work(authoritative_intent);
         let pcb_tools_authorized = request_authorizes_pcb_tools(authoritative_intent);
         let fabrication_required = request_requires_fabrication(authoritative_intent);
         let mut applied = false;
+        let mut schematic_mutator_issued = false;
         let mut schematic_mutated = false;
         let mut schematic_checked_clean = false;
+        let mut unchanged_schematic_feedback_sent = false;
         let mut check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
         let mut provider_requests = 0usize;
@@ -832,6 +839,18 @@ impl<P: Provider> Agent<P> {
                         .push(ChatMessage::user(OUTPUT_TRUNCATION_NUDGE));
                     continue;
                 }
+                if schematic_mutator_issued
+                    && !unchanged_schematic_feedback_sent
+                    && gordian_tools_sch::schematic_content_hash(&self.runtime)?
+                        == schematic_hash_at_turn_start
+                {
+                    unchanged_schematic_feedback_sent = true;
+                    schematic_mutated = false;
+                    schematic_checked_clean = false;
+                    self.history
+                        .push(ChatMessage::user(UNCHANGED_SCHEMATIC_NUDGE));
+                    continue;
+                }
                 if schematic_mutated && !schematic_checked_clean && check_nudges_left > 0 {
                     check_nudges_left -= 1;
                     self.history.push(ChatMessage::user(CHECK_SCHEMATIC_NUDGE));
@@ -860,6 +879,7 @@ impl<P: Provider> Agent<P> {
             let mut discovery_seen = HashSet::new();
             for call in &tool_calls {
                 tool_calls_made += 1;
+                schematic_mutator_issued |= is_schematic_mutator(&call.fn_name);
                 let effect = tool_effect(&call.fn_name);
                 emit(
                     events,

@@ -31,6 +31,15 @@ use gordian_llm::Tool;
 use gordian_runtime::AgentRuntime;
 use serde_json::{Value, json};
 
+/// Hash the live schematic bytes, distinguishing a missing file from an empty one.
+pub fn schematic_content_hash(ctx: &AgentRuntime) -> Result<Option<u64>> {
+    match std::fs::read(ctx.sch_path()) {
+        Ok(bytes) => Ok(Some(geom::fnv1a(&bytes))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// The tools that write the schematic.
 pub const MUTATORS: [&str; 16] = [
     "undo",

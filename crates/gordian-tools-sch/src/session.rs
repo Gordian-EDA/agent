@@ -290,7 +290,7 @@ pub fn undo(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let after = Edit::open(ctx).map(|e| e.before).unwrap_or_default();
     Ok(json!({
-        "changed": format!("restored the schematic to snapshot {id}"),
+        "changed": format!("the schematic is now back to {id}; the request is still open"),
         "net_delta": delta_json(&Netlist::diff(&before, &after)),
     }))
 }
