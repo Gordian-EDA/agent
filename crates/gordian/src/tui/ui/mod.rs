@@ -29,9 +29,11 @@ mod transcript;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::widgets::Block;
 use ratatui_image::picker::Picker;
 
 use super::app::App;
+use super::theme;
 
 /// Symmetric horizontal margin (in columns) applied to every pane via [`body`],
 /// so the header, transcript, composer, diff card, and footer all share one left
@@ -68,6 +70,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 /// [`Picker`] when one is present.
 pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
     let area = f.area();
+    // The app owns its rectangle: lay the page wash down first so the warm
+    // surface ramp reads as designed instead of inheriting the terminal profile.
+    f.render_widget(Block::default().style(theme::PAGE), area);
 
     // Size the diff pane to its content (0 when nothing is pending).
     let diff_h = app
@@ -98,7 +103,7 @@ pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
         .split(area);
 
     transcript::draw_transcript(f, chunks[0], app, ctx);
-    chrome::draw_scroll_indicator(f, chunks[0], app);
+    chrome::draw_scrollbar(f, chunks[0], app);
     if app.pending.is_some() {
         composer::draw_approval(f, chunks[1], app);
     }
@@ -142,7 +147,7 @@ mod tests {
     use gordian_core::AgentEvent;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::style::{Color, Modifier};
+    use ratatui::style::Modifier;
     use serde_json::json;
 
     /// Render an app to a TestBackend and return the buffer's text as one string.
@@ -326,8 +331,37 @@ mod tests {
         a.scroll = u16::MAX;
         let text = render_to_string(&mut a, 40, 12);
         assert!(a.scroll < u16::MAX, "scroll clamps to the content height");
-        assert!(text.contains("↑"), "scrolled-back indicator:\n{text}");
+        assert!(text.contains("┃"), "scrollbar thumb:\n{text}");
+        assert!(
+            text.contains("jump to latest"),
+            "off-tail jump hint:\n{text}"
+        );
         assert!(text.contains("m0"), "clamped view shows the top:\n{text}");
+    }
+
+    #[test]
+    fn the_tail_has_a_track_but_no_jump_hint() {
+        let mut a = app();
+        for i in 0..20 {
+            a.update(Msg::Agent(AgentEvent::AssistantText(format!("m{i}"))));
+        }
+        let text = render_to_string(&mut a, 40, 12);
+        assert!(text.contains("┃"), "the bar still shows position:\n{text}");
+        assert!(
+            !text.contains("jump to latest"),
+            "nothing to catch up on at the tail:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_short_transcript_draws_no_scrollbar() {
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::AssistantText("just one".into())));
+        let text = render_to_string(&mut a, 40, 12);
+        assert!(
+            !text.contains("┃") && !text.contains("│"),
+            "no bar when everything fits:\n{text}"
+        );
     }
 
     #[test]
@@ -477,7 +511,7 @@ mod tests {
     fn placeholder_shows_when_input_is_empty() {
         let mut a = app();
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("type a prompt"), "placeholder:\n{text}");
+        assert!(text.contains("Ask Gordian"), "placeholder:\n{text}");
     }
 
     #[test]
@@ -490,12 +524,12 @@ mod tests {
         let bottom_rule = rows[rows.len() - 2];
         let status_row = rows[rows.len() - 1];
         assert_eq!(
-            col_of(prompt_row, "type a prompt"),
+            col_of(prompt_row, "Ask Gordian"),
             col_of(status_row, "bedrock"),
             "input text and footer should share a left edge:\n{text}"
         );
         assert_eq!(
-            col_of(prompt_row, "›"),
+            col_of(prompt_row, "❯"),
             Some(0),
             "chevron stays at edge:\n{text}"
         );
@@ -546,11 +580,37 @@ mod tests {
         let text = render_to_string(&mut a, 80, 24);
         assert!(text.contains("/clear"), "popup lists /clear:\n{text}");
         assert!(text.contains("/compact"), "popup lists /compact:\n{text}");
-        assert!(text.contains("commands"), "popup title:\n{text}");
+        assert!(
+            !text.contains("commands · Tab"),
+            "the list is borderless and untitled — the rows are the widget:\n{text}"
+        );
 
         a.update(Msg::Complete);
         let text = render_to_string(&mut a, 80, 24);
         assert!(text.contains("/clear"), "first match filled:\n{text}");
+    }
+
+    #[test]
+    fn the_selected_completion_is_a_full_width_bar() {
+        let mut a = app();
+        for c in "/c".chars() {
+            a.update(Msg::Char(c));
+        }
+        a.update(Msg::Complete); // select the first match
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut a)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let bar = (0..buf.area.height)
+            .find(|&y| (0..buf.area.width).all(|x| buf[(x, y)].style().bg == Some(theme::ACC)))
+            .expect("the selected row is an unbroken accent bar across the full width");
+        // The first match is selected, so the unselected siblings sit below it.
+        assert!(
+            (0..buf.area.width).all(|x| buf[(x, bar + 1)].style().bg == Some(theme::SEL)),
+            "unselected rows sit on the menu surface"
+        );
     }
 
     #[test]
@@ -647,7 +707,7 @@ mod tests {
         }
         a.update(Msg::Submit);
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("›"), "user accent caret:\n{text}");
+        assert!(text.contains("❯"), "user accent caret:\n{text}");
         assert!(text.contains("hello there"), "user text:\n{text}");
         assert!(!text.contains("you  "), "no `you` gutter label:\n{text}");
         assert!(!text.contains("ai   "), "no `ai` gutter label:\n{text}");
@@ -658,7 +718,10 @@ mod tests {
         let mut a = app();
         a.open_unwind(vec!["swap the regulator".into(), "add usb-c".into()]);
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("unwind to"), "picker title:\n{text}");
+        assert!(
+            !text.contains("unwind to"),
+            "the picker is borderless and untitled, like the completion list:\n{text}"
+        );
         assert!(
             text.contains("swap the regulator"),
             "newest prompt:\n{text}"
@@ -693,14 +756,14 @@ mod tests {
         assert!(text.contains(":++;++:"), "logo art appears:\n{text}");
         assert!(text.contains("Gordian"), "brand text appears:\n{text}");
 
-        let logo_color = Some(Color::Rgb(181, 113, 58));
+        let logo_color = Some(theme::ACC);
         let colored_logo_cells = buf
             .content()
             .iter()
             .filter(|cell| cell.symbol() != " " && cell.style().fg == logo_color);
         assert!(
             colored_logo_cells.count() > 20,
-            "logo cells carry the bronze foreground color"
+            "logo cells carry the brand accent"
         );
     }
 
@@ -728,7 +791,7 @@ mod tests {
             .find(|x| buf[(*x, y)].symbol() == "C")
             .expect("hint starts with C");
         let style = buf[(first_hint_cell, y)].style();
-        assert_eq!(style.fg, Some(Color::Yellow));
+        assert_eq!(style.fg, Some(theme::WARN));
         assert!(style.add_modifier.contains(Modifier::BOLD));
         assert!(!style.add_modifier.contains(Modifier::REVERSED));
     }

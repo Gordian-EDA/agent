@@ -61,6 +61,8 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
             KeyCode::Char('e') => Some(Msg::End),
             KeyCode::Left => Some(Msg::WordLeft),
             KeyCode::Right => Some(Msg::WordRight),
+            // Ctrl-End snaps to the live tail from anywhere, even mid-edit.
+            KeyCode::End => Some(Msg::ScrollToBottom),
             _ => None,
         };
     }
@@ -75,6 +77,9 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Left => Some(Msg::CursorLeft),
         KeyCode::Right => Some(Msg::CursorRight),
         KeyCode::Home => Some(Msg::Home),
+        // With nothing to move a cursor through, bare End means "catch me up" —
+        // the same empty-prompt rule the arrows already follow.
+        KeyCode::End if app.input.is_empty() && app.scroll > 0 => Some(Msg::ScrollToBottom),
         KeyCode::End => Some(Msg::End),
         KeyCode::Esc => Some(Msg::Cancel),
         // A full screenful jump; the height tracks the last-drawn viewport.
@@ -214,6 +219,33 @@ mod tests {
             map_key(&a, key(KeyCode::Down)),
             Some(Msg::ScrollDown)
         ));
+    }
+
+    #[test]
+    fn end_catches_up_from_an_empty_prompt_but_still_edits_a_draft() {
+        let mut a = app();
+        a.scroll = 5;
+        assert!(matches!(
+            map_key(&a, key(KeyCode::End)),
+            Some(Msg::ScrollToBottom)
+        ));
+
+        // With a draft in hand End is line editing again — the cursor has
+        // somewhere to go, so it wins over the scroll shortcut.
+        a.input = "draft".to_string();
+        assert!(matches!(map_key(&a, key(KeyCode::End)), Some(Msg::End)));
+
+        // ...and Ctrl-End catches up regardless.
+        assert!(matches!(
+            map_key(&a, KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL)),
+            Some(Msg::ScrollToBottom)
+        ));
+    }
+
+    #[test]
+    fn end_is_line_editing_when_already_at_the_tail() {
+        let a = app();
+        assert!(matches!(map_key(&a, key(KeyCode::End)), Some(Msg::End)));
     }
 
     #[test]

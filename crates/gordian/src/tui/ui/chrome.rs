@@ -4,11 +4,15 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 
 use super::super::app::App;
+use super::super::theme;
 use super::{MARGIN, body, fmt_tokens};
 
 /// The running-indicator spinner. Quadrant blocks (U+2596…U+259F) are far more
@@ -20,27 +24,77 @@ const SPINNER: [&str; 4] = ["▘", "▝", "▗", "▖"];
 /// models on Bedrock).
 const CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 
-pub(super) fn draw_scroll_indicator(f: &mut Frame, area: Rect, app: &App) {
-    if app.scroll == 0 {
+/// A proportional scrollbar in the transcript's right-hand gutter, plus a
+/// "jump to latest" hint once the view has left the tail.
+///
+/// The bar is drawn only when the document is taller than the viewport, so a
+/// short conversation keeps a clean edge. Its thumb takes the accent while
+/// scrolled back and recedes to [`theme::FAINT`] at the tail, which is the
+/// whole signal: *you are not looking at the newest output*.
+pub(super) fn draw_scrollbar(f: &mut Frame, area: Rect, app: &App) {
+    let (viewport, max_top) = (app.viewport_h, app.scroll_max);
+    if max_top == 0 || viewport == 0 {
         return;
     }
+    let inner = body(area);
+    let at_tail = app.scroll == 0;
 
-    let area = body(area);
-    let ind = format!(" ↑{} ", app.scroll);
-    let iw = (ind.chars().count() as u16).min(area.width);
-    let ind_area = Rect {
-        x: area.x + area.width - iw,
+    // The gutter column between the text and the terminal edge — the bar never
+    // steals a column from the prose.
+    let track = Rect {
+        x: inner.x + inner.width + 1,
         y: area.y,
-        width: iw,
+        width: 1,
+        height: area.height,
+    };
+    let mut state = ScrollbarState::new(usize::from(max_top))
+        .viewport_content_length(usize::from(viewport))
+        .position(usize::from(max_top - app.scroll));
+    f.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            // No rail: at this end of the surface ramp a track reads as either
+            // invisible or as noise, and the thumb alone carries the position.
+            .track_symbol(None)
+            .thumb_symbol("┃")
+            .thumb_style(if at_tail {
+                Style::default().fg(theme::FAINT)
+            } else {
+                Style::default().fg(theme::ACC)
+            }),
+        track,
+        &mut state,
+    );
+
+    if !at_tail {
+        draw_jump_hint(f, inner);
+    }
+}
+
+/// The floating "you're behind" affordance, pinned to the bottom-right of the
+/// transcript so it never displaces a row of content.
+fn draw_jump_hint(f: &mut Frame, inner: Rect) {
+    let spans = vec![
+        Span::styled(" ↓ ", theme::BAND.patch(Style::default().fg(theme::ACC))),
+        Span::styled("End", theme::BAND.patch(theme::POPUP_TITLE)),
+        Span::styled(" jump to latest ", theme::BAND.patch(theme::META)),
+    ];
+    let w: u16 = spans
+        .iter()
+        .map(|s| s.content.chars().count() as u16)
+        .sum();
+    if w > inner.width || inner.height == 0 {
+        return;
+    }
+    let pill = Rect {
+        x: inner.x + inner.width - w,
+        y: inner.y + inner.height - 1,
+        width: w,
         height: 1,
     };
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            ind,
-            Style::default().fg(Color::DarkGray),
-        ))),
-        ind_area,
-    );
+    f.render_widget(Clear, pill);
+    f.render_widget(Paragraph::new(Line::from(spans)), pill);
 }
 
 /// The running indicator that replaces the old transcript-title spinner: an
@@ -50,7 +104,7 @@ pub(super) fn draw_scroll_indicator(f: &mut Frame, area: Rect, app: &App) {
 pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
     let frame = SPINNER[app.spinner % SPINNER.len()];
     let secs = app.turn_elapsed_secs().unwrap_or(0);
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = theme::META;
     // While an approval gate holds the turn the verb says so, and the elapsed
     // clock is already frozen (see `App::turn_elapsed_secs`); else it's "working".
     let gated = app.pending.is_some();
@@ -60,13 +114,8 @@ pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
         "working"
     };
     let mut spans = vec![
-        Span::styled(
-            format!("{frame} "),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(verb, Style::default().fg(Color::Yellow)),
+        Span::styled(format!("{frame} "), theme::SPINNER),
+        Span::styled(verb, Style::default().fg(theme::ACC)),
         Span::styled(format!(" · {secs}s"), dim),
     ];
     if !gated {
@@ -81,9 +130,7 @@ pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("  ↳ ", dim),
             Span::styled(
                 format!("{work}…"),
-                Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::ITALIC),
+                theme::SUBTLE.add_modifier(Modifier::ITALIC),
             ),
         ]));
     }
@@ -92,10 +139,8 @@ pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
 
 pub(super) fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let area = body(area);
-    let dim = Style::default().fg(Color::DarkGray);
-    let armed_quit = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
+    let dim = theme::META;
+    let armed_quit = theme::WARNING.add_modifier(Modifier::BOLD);
     // The right side only carries a hint that isn't already on screen. A pending
     // change shows its actions on the card, so the footer stays quiet there.
     let right = if app.ctrl_c_armed {
@@ -192,15 +237,13 @@ fn status_left(app: &App, avail: usize) -> String {
 }
 
 pub(super) fn draw_help(f: &mut Frame, area: Rect) {
-    let accent = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(Color::DarkGray);
+    let accent = theme::POPUP_TITLE;
+    let dim = theme::META;
     // A key/description row: the key in accent, the description in soft gray.
     let kv = |k: &str, d: &str| {
         Line::from(vec![
-            Span::styled(format!("{k:<15} "), Style::default().fg(Color::Cyan)),
-            Span::styled(d.to_string(), Style::default().fg(Color::Gray)),
+            Span::styled(format!("{k:<15} "), Style::default().fg(theme::INFO)),
+            Span::styled(d.to_string(), theme::SUBTLE),
         ])
     };
     let section = |t: &str| {
@@ -219,6 +262,7 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
         kv("Up / Down", "scroll empty prompt / recall while editing"),
         kv("Shift-Up/Down", "scroll the transcript one line"),
         kv("PgUp / PgDn", "jump the transcript by a screenful"),
+        kv("End", "jump to the latest output"),
         kv("Ctrl-U/W/A/E", "line editing (kill line/word, home/end)"),
         kv("Ctrl-Left/Right", "move by word"),
         kv("Esc", "close help / reject gate / clear input"),
@@ -251,7 +295,8 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(dim)
+                    .style(theme::BAND)
+                    .border_style(theme::POPUP_BORDER)
                     .padding(Padding::horizontal(2))
                     .title(Span::styled(" help · keys & commands ", accent)),
             )

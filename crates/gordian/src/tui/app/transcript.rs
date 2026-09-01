@@ -148,26 +148,70 @@ pub struct UnwindPicker {
     pub selected: usize,
 }
 
+/// An assistant reply arriving as a stream of deltas.
+///
+/// Prose reaches the transcript a paragraph at a time, never token by token:
+/// `buffer` holds everything received so far, and `entry` renders only its
+/// *complete* paragraphs. A half-written sentence stays buffered rather than
+/// reflowing on screen as each word lands — the running indicator already says
+/// work is in flight, so the churn bought nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveAssistant {
+    /// Index into `transcript`, once at least one paragraph has been committed.
+    pub entry: Option<usize>,
+    /// Everything received so far, complete paragraphs included.
+    pub buffer: String,
+}
+
 impl App {
+    /// Publish the buffered prose up to its last paragraph break, opening the
+    /// live entry on the first one. The trailing partial paragraph stays held
+    /// back until it, too, is finished.
+    fn commit_finished_paragraphs(&mut self) {
+        let Some(live) = self.live_assistant.as_ref() else {
+            return;
+        };
+        let Some(end) = live.buffer.rfind("\n\n") else {
+            return;
+        };
+        let text = live.buffer[..end].trim_end().to_string();
+        if text.is_empty() {
+            return;
+        }
+        match live.entry {
+            Some(i) => self.transcript[i].text = text,
+            None => {
+                let i = self.transcript.len();
+                self.transcript.push(Entry::assistant(text));
+                if let Some(live) = self.live_assistant.as_mut() {
+                    live.entry = Some(i);
+                }
+            }
+        }
+    }
+
     /// Fold an agent event into the transcript / status.
     pub(super) fn on_agent_event(&mut self, ev: AgentEvent) {
         match ev {
-            // A streamed chunk: grow the live in-progress assistant entry (created
-            // on the first delta of a streamed run) so prose renders token-by-token.
-            AgentEvent::AssistantDelta(t) => match self.live_assistant {
-                Some(i) => self.transcript[i].text.push_str(&t),
-                None => {
-                    self.live_assistant = Some(self.transcript.len());
-                    self.transcript.push(Entry::assistant(t));
-                }
-            },
+            // A streamed chunk: buffer it, then release whatever whole paragraphs
+            // that completed. Nothing renders until the first one does.
+            AgentEvent::AssistantDelta(t) => {
+                self.live_assistant
+                    .get_or_insert_with(LiveAssistant::default)
+                    .buffer
+                    .push_str(&t);
+                self.commit_finished_paragraphs();
+            }
             // The turn's final text: finalize the streamed entry in place (no
-            // double-render). With no live entry — a non-streamed path — push it.
+            // double-render), which is also what publishes the last paragraph.
+            // With no live entry — a non-streamed path — push it.
             AgentEvent::AssistantText(t) => {
-                if let Some(i) = self.live_assistant.take() {
-                    self.transcript[i].text = t;
-                } else if !t.trim().is_empty() {
-                    self.transcript.push(Entry::assistant(t));
+                match self.live_assistant.take().and_then(|live| live.entry) {
+                    Some(i) => self.transcript[i].text = t,
+                    None if !t.trim().is_empty() => {
+                        self.transcript.push(Entry::assistant(t));
+                    }
+                    None => {}
                 }
             }
             AgentEvent::ToolStarted { name } => {

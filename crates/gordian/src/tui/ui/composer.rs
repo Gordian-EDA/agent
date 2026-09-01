@@ -5,78 +5,68 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::super::app::{App, PendingApproval};
+use super::super::theme;
 use super::{MARGIN, body};
 
-/// The `/command` completion popup, floated just above the input pane.
+/// The `/command` completion list, seated directly on top of the composer.
+///
+/// No border, no title, no caret: the rows *are* the widget, so the list reads
+/// as the composer growing upward rather than as a dialog opening over it.
 pub(super) fn draw_completions(f: &mut Frame, input_area: Rect, app: &App) {
     let Some((matches, selected)) = app.completion_view() else {
         return;
     };
-    let name_w = matches.iter().map(|c| c.name.len()).max().unwrap_or(0);
-    let lines: Vec<Line> = matches
+    let label_w = matches.iter().map(|c| c.name.chars().count()).max().unwrap_or(0);
+    let rows: Vec<Line> = matches
         .iter()
         .enumerate()
-        .map(|(i, c)| {
-            // Selected row: an accent caret + bold name. Others: a blank gutter,
-            // plain name, dim description — the soft Codex selection, not an
-            // inverted bar.
-            let sel = selected == Some(i);
-            let accent = Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD);
-            let name_style = if sel {
-                accent
-            } else {
-                Style::default().fg(Color::Cyan)
-            };
-            Line::from(vec![
-                Span::styled(if sel { "› " } else { "  " }, accent),
-                Span::styled(format!("{:<name_w$}  ", c.name), name_style),
-                Span::styled(c.desc.to_string(), Style::default().fg(Color::DarkGray)),
-            ])
-        })
+        .map(|(i, c)| menu_row(c.name, c.desc, label_w, input_area.width, selected == Some(i)))
         .collect();
+    draw_menu(f, input_area, rows);
+}
 
-    let content_w = lines
-        .iter()
-        .map(|l| {
-            l.spans
-                .iter()
-                .map(|s| s.content.chars().count())
-                .sum::<usize>()
-        })
-        .max()
-        .unwrap_or(0) as u16;
-    let maxw = input_area.width.saturating_sub(2 * MARGIN);
-    let w = (content_w + 2).max(24).min(maxw);
-    let h = (matches.len() as u16 + 2).min(input_area.y); // never above the screen top
+/// One full-width menu row: the composer's own left indent, a padded label, then
+/// the detail column. Every cell is painted out to the right edge so a selected
+/// row reads as one unbroken bar instead of a highlight that stops at the text.
+fn menu_row(label: &str, detail: &str, label_w: usize, width: u16, selected: bool) -> Line<'static> {
+    let (label_style, detail_style) = if selected {
+        (theme::MENU_SEL_LABEL, theme::MENU_SEL)
+    } else {
+        (theme::MENU_LABEL, theme::MENU_DETAIL)
+    };
+    let indent = MARGIN as usize;
+    let label = format!("{label:<label_w$}");
+    // Trim the detail (never the label) when the terminal is too narrow, then pad
+    // the row out to the full width so the bar spans it.
+    let room = (width as usize).saturating_sub(indent + label.chars().count() + 2);
+    let detail: String = detail.chars().take(room).collect();
+    let pad = room - detail.chars().count();
+    Line::from(vec![
+        Span::styled(" ".repeat(indent), detail_style),
+        Span::styled(label, label_style),
+        Span::styled(format!("  {detail}{}", " ".repeat(pad)), detail_style),
+    ])
+}
+
+/// Float a borderless menu on top of the composer, growing upward from it.
+fn draw_menu(f: &mut Frame, input_area: Rect, rows: Vec<Line<'static>>) {
+    let h = (rows.len() as u16).min(input_area.y);
+    if h == 0 {
+        return;
+    }
     let popup = Rect {
-        x: input_area.x + MARGIN, // align the popup's left edge with the composer
-        y: input_area.y.saturating_sub(h),
-        width: w,
+        x: input_area.x,
+        y: input_area.y - h,
+        width: input_area.width,
         height: h,
     };
     f.render_widget(Clear, popup);
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(Span::styled(
-                    " commands · Tab ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )),
-        ),
-        popup,
-    );
+    f.render_widget(Paragraph::new(rows).style(theme::MENU), popup);
 }
 
 /// Rows the approval pane needs at this terminal width: action row, summary row,
@@ -99,9 +89,9 @@ pub(super) fn draw_approval(f: &mut Frame, area: Rect, app: &App) {
     // The key letters are sourced from the keybinding definitions, not hardcoded,
     // so the labels can never drift from what `event::map_key` actually accepts.
     let accent = Style::default()
-        .fg(Color::Cyan)
+        .fg(theme::ACC)
         .add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = theme::META;
     let pending_label = match pending {
         PendingApproval::Schematic { .. } => "schematic change pending",
         PendingApproval::Operation { .. } => "operation pending",
@@ -111,14 +101,12 @@ pub(super) fn draw_approval(f: &mut Frame, area: Rect, app: &App) {
         Span::styled("   ", dim),
         Span::styled(
             format!("[{}] approve", super::super::event::APPROVE_KEY),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            theme::SUCCESS.add_modifier(Modifier::BOLD),
         ),
         Span::styled("   ", dim),
         Span::styled(
             format!("[{}] reject", super::super::event::REJECT_KEY),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            theme::DANGER.add_modifier(Modifier::BOLD),
         ),
         Span::styled("   Esc cancel", dim),
     ]);
@@ -133,22 +121,22 @@ pub(super) fn draw_approval(f: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled(
                     format!("+{} added", added.len()),
-                    Style::default().fg(Color::Green),
+                    theme::ADDED,
                 ),
                 Span::styled("   ", dim),
                 Span::styled(
                     format!("-{} removed", removed.len()),
-                    Style::default().fg(Color::Red),
+                    theme::REMOVED,
                 ),
                 Span::styled("   ", dim),
                 Span::styled(
                     format!("~{} changed", changed.len()),
-                    Style::default().fg(Color::Yellow),
+                    theme::CHANGED,
                 ),
                 Span::styled("   ", dim),
                 Span::styled(
                     format!("nets {nets_before} -> {nets_after}"),
-                    Style::default().fg(Color::Gray),
+                    theme::SUBTLE,
                 ),
             ]),
             Line::from(diff_preview_spans(added, removed, changed, 8)),
@@ -161,9 +149,7 @@ pub(super) fn draw_approval(f: &mut Frame, area: Rect, app: &App) {
                 Span::styled("run  ", dim),
                 Span::styled(
                     operation.clone(),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
+                    theme::WARNING.add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("  (mutates project/board)", dim),
             ]),
@@ -171,7 +157,7 @@ pub(super) fn draw_approval(f: &mut Frame, area: Rect, app: &App) {
                 Span::styled("args  ", dim),
                 Span::styled(
                     operation_args_text(arguments),
-                    Style::default().fg(Color::Gray),
+                    theme::SUBTLE,
                 ),
             ]),
         ),
@@ -228,39 +214,30 @@ fn diff_preview_spans(
     changed: &[String],
     limit: usize,
 ) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::styled("refs  ", Style::default().fg(Color::DarkGray))];
+    let mut spans = vec![Span::styled("refs  ", theme::META)];
     let mut shown = 0usize;
     let mut total = 0usize;
-    for (prefix, refs, color) in [
-        ("+", added, Color::Green),
-        ("-", removed, Color::Red),
-        ("~", changed, Color::Yellow),
+    for (prefix, refs, style) in [
+        ("+", added, theme::ADDED),
+        ("-", removed, theme::REMOVED),
+        ("~", changed, theme::CHANGED),
     ] {
         for r in refs {
             total += 1;
             if shown < limit {
                 if shown > 0 {
-                    spans.push(Span::styled("  ", Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::styled("  ", theme::META));
                 }
-                spans.push(Span::styled(
-                    format!("{prefix}{r}"),
-                    Style::default().fg(color),
-                ));
+                spans.push(Span::styled(format!("{prefix}{r}"), style));
                 shown += 1;
             }
         }
     }
     if total == 0 {
-        spans.push(Span::styled(
-            "no component changes",
-            Style::default().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled("no component changes", theme::META));
     } else if total > shown {
-        spans.push(Span::styled("  ", Style::default().fg(Color::DarkGray)));
-        spans.push(Span::styled(
-            format!("+{} more", total - shown),
-            Style::default().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled("  ", theme::META));
+        spans.push(Span::styled(format!("+{} more", total - shown), theme::META));
     }
     spans
 }
@@ -297,18 +274,16 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     // chrome margin.
     let focused = app.input_active() && app.pending.is_none();
     let rule = if focused {
-        Color::Cyan
+        theme::RULE_FOCUS
     } else {
-        Color::DarkGray
+        theme::RULE
     };
     let outer = area;
+    // The composer is seated one surface step above the page, so the input band
+    // reads as a distinct place to type rather than a gap in the transcript.
+    f.render_widget(Block::default().style(theme::BAND), outer);
     let rule_text = "─".repeat(outer.width as usize);
-    let rule_line = || {
-        Paragraph::new(Line::from(Span::styled(
-            rule_text.clone(),
-            Style::default().fg(rule),
-        )))
-    };
+    let rule_line = || Paragraph::new(Line::from(Span::styled(rule_text.clone(), rule)));
     f.render_widget(rule_line(), Rect { height: 1, ..outer });
     if outer.height > 1 {
         f.render_widget(
@@ -333,14 +308,14 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let avail = inner.width.max(1) as usize;
-    let caret = || Span::styled("›", Style::default().fg(Color::Cyan));
+    let caret = || Span::styled("❯", Style::default().fg(theme::ACC));
     f.render_widget(Paragraph::new(Line::from(caret())), marker);
 
     if app.pending.is_some() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "approve or reject the change above",
-                Style::default().fg(Color::DarkGray),
+                theme::META,
             ))),
             inner,
         );
@@ -350,7 +325,7 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "Esc again: open the unwind picker (context only) — any key cancels",
-                Style::default().fg(Color::Yellow),
+                theme::WARNING,
             ))),
             inner,
         );
@@ -362,14 +337,12 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         } else if app.running {
             "agent is working… · Tab queues your next message"
         } else {
-            "type a prompt — /help for commands, ⏎ sends · ⇧⏎ newline"
+            "Ask Gordian anything..."
         };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 placeholder,
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
+                theme::META,
             ))),
             inner,
         );
@@ -387,7 +360,7 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     let first = cursor_row.saturating_add(1).saturating_sub(rows);
     let mut lines: Vec<Line> = Vec::new();
     for row in wrapped.iter().skip(first).take(rows) {
-        lines.push(Line::from(Span::raw(row.text.clone())));
+        lines.push(Line::from(Span::styled(row.text.clone(), theme::PROSE)));
     }
     f.render_widget(Paragraph::new(lines), inner);
 
@@ -463,78 +436,29 @@ fn cursor_line_col(input: &str, cursor: usize) -> (usize, usize) {
     (line, col)
 }
 
-/// The double-Esc unwind picker, floated just above the input pane. Lists the
-/// agent's recent prompts newest-first; the selected row (and everything below
-/// it in time) is what an Enter would unwind.
+/// The double-Esc unwind picker, in the same borderless menu idiom as the
+/// completion list. Prompts are newest-first; the selected row (and everything
+/// below it in time) is what an Enter would unwind.
 pub(super) fn draw_unwind(f: &mut Frame, input_area: Rect, app: &App) {
     let Some(p) = app.unwind.as_ref() else {
         return;
     };
-    let idx_w = p.prompts.len().to_string().len();
-    let lines: Vec<Line> = p
+    let idx_w = p.prompts.len().to_string().len() + 1; // the ↶ rides the index
+    let rows: Vec<Line> = p
         .prompts
         .iter()
         .enumerate()
         .map(|(i, prompt)| {
-            // Soft selection: accent caret + bold on the chosen row; others dim.
-            let sel = i == p.selected;
-            let accent = Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD);
-            let text_style = if sel {
-                accent
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            Line::from(vec![
-                Span::styled(if sel { "› " } else { "  " }, accent),
-                Span::styled(
-                    format!("↶{:<idx_w$}  ", i + 1),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(prompt.clone(), text_style),
-            ])
+            menu_row(
+                &format!("↶{}", i + 1),
+                prompt,
+                idx_w,
+                input_area.width,
+                i == p.selected,
+            )
         })
         .collect();
-
-    let content_w = lines
-        .iter()
-        .map(|l| {
-            l.spans
-                .iter()
-                .map(|s| s.content.chars().count())
-                .sum::<usize>()
-        })
-        .max()
-        .unwrap_or(0) as u16;
-    // `.max().min()` not `clamp()`: a terminal narrower than the floor would
-    // make clamp(lo, hi) panic with lo > hi.
-    let w = (content_w + 2)
-        .max(24)
-        .min(input_area.width.saturating_sub(2 * MARGIN));
-    let h = (p.prompts.len() as u16 + 2).min(input_area.y); // never above the screen top
-    let popup = Rect {
-        x: input_area.x + MARGIN, // align with the composer
-        y: input_area.y.saturating_sub(h),
-        width: w,
-        height: h,
-    };
-    f.render_widget(Clear, popup);
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(Span::styled(
-                    " unwind to… · ↑↓ Enter · Esc ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )),
-        ),
-        popup,
-    );
+    draw_menu(f, input_area, rows);
 }
 
 #[cfg(test)]
