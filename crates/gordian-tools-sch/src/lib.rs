@@ -133,7 +133,7 @@ pub fn tool_defs() -> Vec<Tool> {
         (
             "add_symbols",
             "Place a whole block — an LED and its resistor, a clamp pair — in one call, each part \
-             clear of the ones before it. Nothing is written if any part fails.",
+             clear of the ones before it, footprints and all. Nothing is written if any fails.",
             json!({
                 "type": "object",
                 "properties": {
@@ -240,18 +240,31 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "connect",
-            "Join two ends. Each end is a pin like \"R1.1\" / \"U1.VDD\", or a point [x,y]. The route \
-             is solved around the existing drawing and junctions are added for you; if nothing fits, \
-             both ends are named with `net` instead and the result says so. NEVER draw wires by \
-             coordinate — this is the only way to connect.",
+            "Join two ends — a pin like \"R1.1\" / \"U1.VDD\", or a point [x,y] — or every pair in \
+             `pairs` at once, which is how to wire a block. The route is solved around the existing \
+             drawing and junctions are added for you; if nothing fits, both ends are named with \
+             `net` instead and the result says so. NEVER draw wires by coordinate — this is the \
+             only way to connect.",
             json!({
                 "type": "object",
                 "properties": {
                     "from": { "description": PIN },
                     "to": { "description": PIN },
-                    "net": { "type": "string", "description": "Name for the resulting net." }
+                    "net": { "type": "string", "description": "Name for the resulting net." },
+                    "pairs": {
+                        "type": "array", "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "from": { "description": PIN },
+                                "to": { "description": PIN },
+                                "net": { "type": "string" }
+                            },
+                            "required": ["from", "to"],
+                            "additionalProperties": false
+                        }
+                    }
                 },
-                "required": ["from", "to"],
                 "additionalProperties": false
             }),
         ),

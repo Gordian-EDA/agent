@@ -125,8 +125,29 @@ fn draw(doc: &mut SchDoc, path: &[Point2]) -> Vec<String> {
     uuids
 }
 
-/// Route a connection between two ends of the sheet.
+/// Route one connection, or every connection in `pairs`.
 pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let Some(pairs) = input.get("pairs").and_then(Value::as_array) else {
+        return connect_one(input, ctx);
+    };
+    // Each pair is its own transaction: a route that cannot be drawn falls
+    // back to a label rather than failing, so there is nothing to roll back,
+    // and the caller sees which end did what.
+    let mut done = Vec::new();
+    for pair in pairs {
+        let result = connect_one(pair.clone(), ctx)?;
+        let failed = result.get("error").is_some();
+        done.push(result);
+        if failed {
+            return Ok(json!({ "error": "a connection failed; the rest were skipped",
+                              "connected": done }));
+        }
+    }
+    Ok(json!({ "connected": done }))
+}
+
+/// Route a connection between two ends of the sheet.
+fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut edit = Edit::open(ctx)?;
     let (from, to) = match (input.get("from"), input.get("to")) {
         (Some(from), Some(to)) => (from, to),
