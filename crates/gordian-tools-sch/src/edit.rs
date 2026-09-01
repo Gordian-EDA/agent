@@ -648,7 +648,13 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         placed.push(report);
     }
-    edit.commit(json!({ "moved": placed }), Allow::nothing())
+    edit.commit(
+        json!({
+            "moved": placed,
+            "placement": "final and clean; any nudged_to coordinate is the collision-free final position, so do not move it again",
+        }),
+        Allow::nothing(),
+    )
 }
 
 /// Set or clear a part's properties.

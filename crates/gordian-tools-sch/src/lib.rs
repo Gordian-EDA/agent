@@ -155,8 +155,8 @@ pub fn tool_defs() -> Vec<Tool> {
             "move_symbols",
             "Move or turn parts, wires and rails following along. `rot`/`mirror` alone turns a \
              part in place — how a diode is reversed. A taken spot is slid to the nearest free \
-             one and reported as `nudged_to`; refused only if nothing near it fits, or the move \
-             changed a net.",
+             one and reported as the final `nudged_to`; a success is collision-free and needs no \
+             follow-up adjustment. Refused only if nothing near it fits, or the move changed a net.",
             json!({
                 "type": "object",
                 "properties": {

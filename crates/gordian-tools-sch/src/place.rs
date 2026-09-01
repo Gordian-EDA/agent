@@ -14,6 +14,9 @@ const GRID: f64 = 1.27;
 /// Air kept between a placed body and its neighbours.
 pub(crate) const CLEARANCE: f64 = 2.54;
 
+/// Straight lead the router reserves before the first bend at a pin.
+const WIRE_STUB: f64 = 2.54;
+
 pub(crate) fn snap(value: f64) -> f64 {
     (value / GRID).round() * GRID
 }
@@ -91,17 +94,29 @@ fn field_rects(inst: &SymbolInst) -> Vec<Rect> {
         .collect()
 }
 
-/// The space a placed symbol really claims: its drawn body, its pin tips, and
-/// the text it prints.
+/// The space a placed symbol really claims: its drawn body, printed text, and
+/// the straight wire lead leaving each pin.
 ///
 /// A part's pins reach well past its outline — an LED's do by 3.8 mm — and two
 /// parts spaced only by their bodies end up with pins in each other's laps,
 /// where no wire can be routed between them.
 pub(crate) fn extent(doc: &SchDoc, inst: &SymbolInst) -> Option<Rect> {
-    let mut corners: Vec<Point2> = placed_pins(doc)
+    let pins: Vec<sch_doc::PlacedPin> = placed_pins(doc)
         .iter()
         .filter(|p| p.owner == inst.uuid)
-        .map(|p| p.at)
+        .cloned()
+        .collect();
+    let mut corners: Vec<Point2> = pins
+        .iter()
+        .flat_map(|pin| {
+            [
+                pin.at,
+                Point2::new(
+                    pin.at.x + pin.out.x * WIRE_STUB,
+                    pin.at.y + pin.out.y * WIRE_STUB,
+                ),
+            ]
+        })
         .collect();
     let boxes = body_rect(doc, inst).into_iter().chain(field_rects(inst));
     for r in boxes {
