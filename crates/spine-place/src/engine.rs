@@ -15,7 +15,7 @@ use sch_floorplan::contract::{
     PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
 };
 use sch_floorplan::engine_support::{
-    apply_cells, assign_cells, body_overlap_count, decongest, normalize, relation_viol,
+    apply_cells_with_gaps, assign_cells, body_overlap_count, decongest, normalize, relation_viol,
     repair_relations,
 };
 use sch_place::ir::LayoutIr;
@@ -29,6 +29,7 @@ use crate::scene::build_scene;
 
 const COL_GAP: f64 = 10.16;
 const ROW_GAP: f64 = 7.62;
+const FROZEN_IDIOM_COLUMN_GAP: f64 = 3.81;
 
 /// Deterministic grammar-typesetting engine.
 pub struct SpinePlace;
@@ -133,8 +134,16 @@ impl SpinePlace {
                 .filter(|item| item.frozen)
                 .cloned()
                 .collect::<Vec<_>>();
+            for item in &mut canonical {
+                item.frozen = false;
+            }
             let cells = assign_cells(&canonical, &ir);
-            apply_cells(&mut canonical, &cells);
+            apply_cells_with_gaps(
+                &mut canonical,
+                &cells,
+                FROZEN_IDIOM_COLUMN_GAP,
+                sch_floorplan::engine_support::ROW_GAP,
+            );
             normalize(&mut canonical);
             let poses = canonical
                 .into_iter()

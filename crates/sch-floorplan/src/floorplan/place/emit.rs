@@ -839,6 +839,11 @@ pub fn assign_cells(items: &[Item], ir: &LayoutIr) -> Vec<Cell> {
 }
 
 pub fn apply_cells(items: &mut [Item], cells: &[Cell]) {
+    apply_cells_with_gaps(items, cells, COL_GAP, ROW_GAP);
+}
+
+/// Apply coarse cells with caller-selected track gaps.
+pub fn apply_cells_with_gaps(items: &mut [Item], cells: &[Cell], column_gap: f64, row_gap: f64) {
     let angles: Vec<f64> = items
         .iter()
         .zip(cells)
@@ -876,8 +881,8 @@ pub fn apply_cells(items: &mut [Item], cells: &[Cell]) {
         let e = row_h.entry(c.row).or_insert(0.0);
         *e = e.max(h);
     }
-    let col_x = track_centres(&col_w, COL_GAP);
-    let row_y = track_centres(&row_h, ROW_GAP);
+    let col_x = track_centres(&col_w, column_gap);
+    let row_y = track_centres(&row_h, row_gap);
 
     for (((it, c), &angle), p) in items.iter_mut().zip(cells).zip(&angles).zip(&pads) {
         // An item that arrives ALREADY frozen holds a live pose the caller owns (the

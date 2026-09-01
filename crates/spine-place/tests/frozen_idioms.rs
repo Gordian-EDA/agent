@@ -77,6 +77,10 @@ fn spine_preserves_inferred_pc817_channel_cells() {
             - xs.into_iter().fold(f64::MAX, f64::min)
             + ys.into_iter().fold(f64::MIN, f64::max)
             - ys.into_iter().fold(f64::MAX, f64::min);
-        assert!(span <= 100.0, "scattered channel {refs:?}: {span:.2} mm");
+        assert!(
+            span <= 100.0,
+            "scattered channel {refs:?}: {span:.2} mm, poses={:?}",
+            refs.map(|reference| item(reference).at)
+        );
     }
 }
