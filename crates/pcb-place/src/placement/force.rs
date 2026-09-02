@@ -40,8 +40,8 @@ const EDGE_SEEK_K: f64 = 0.30;
 
 /// Direct pull of a decoupling cap toward its IC ([`decoupling_pairs`]), in the
 /// decoupling placement variant only. Strong enough that the cap hugs the IC
-/// (shortening the supply loop); `place_best` keeps the variant only when it
-/// routes at least as cleanly, so this never regresses a board it does not help.
+/// (shortening the supply loop). Only the tuned variant asks for it, so a board
+/// it does not help never pays for it.
 const DECOUPLE_K: f64 = 0.35;
 
 /// Short-range repulsion gain on margin-inflated courtyard overlap.
@@ -207,7 +207,7 @@ pub(crate) fn force_layout(
         // (d3) Decoupling co-placement (variant-gated): pull each bypass cap
         //      toward its IC so it seats beside it — one-directional (the IC is
         //      not dragged around by its caps). Only active in the decoupling
-        //      variant; place_best keeps it only when it routes at least as clean.
+        //      variant, which is the one `place_tuned` runs.
         for &(cap, ic) in &decoupling {
             force[cap].0 += DECOUPLE_K * (pos[ic].x - pos[cap].x);
             force[cap].1 += DECOUPLE_K * (pos[ic].y - pos[cap].y);

@@ -406,6 +406,14 @@ BOARD_TOOLS = {
     "update_board_outline", "render_board", "open_board",
 }
 
+# The tools that own board geometry. A refusal here is the board contract
+# telling the model no; a refusal from `sync_board` is usually a mis-shaped
+# payload, and one from a review tool is an opinion.
+GEOMETRY_TOOLS = {
+    "place_board", "route_board", "move_parts", "route_track", "delete_copper",
+    "update_board_outline",
+}
+
 
 def transcript_facts(artifacts):
     """What the agent actually did, read from its own event stream.
@@ -417,10 +425,13 @@ def transcript_facts(artifacts):
     path = artifacts / "agent.stderr.txt"
     text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
     calls = re.findall(r"^\s*tool -> (\S+)", text, re.M)
+    refused = re.findall(r"^\s*tool <- (\S+): error", text, re.M)
     return {
         "tool_calls": calls,
         "board_tool_calls": [name for name in calls if name in BOARD_TOOLS],
-        "refused_tools": re.findall(r"^\s*tool <- (\S+): error", text, re.M),
+        "refused_tools": refused,
+        "refused_board_tools": [name for name in refused if name in BOARD_TOOLS],
+        "refused_geometry_tools": [name for name in refused if name in GEOMETRY_TOOLS],
     }
 
 

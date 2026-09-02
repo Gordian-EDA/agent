@@ -396,6 +396,8 @@ pub(crate) struct CostTerms {
     pub(crate) keep_near: Vec<(usize, usize)>,
     /// Authored groups that should cohere around their own centroid.
     pub(crate) cohere: Vec<Vec<usize>>,
+    /// Authored groups that should stay inside a prescribed region.
+    pub(crate) region: Vec<(Vec<usize>, Rect)>,
 }
 
 impl CostTerms {
@@ -428,12 +430,21 @@ impl CostTerms {
                 .filter_map(|[a, b]| Some((index(a)?, index(b)?)))
                 .filter(|(a, b)| a != b)
                 .collect(),
+            // A `surround` group is already locked in a ring around its anchor;
+            // a `region` group is held by its own term below. Everything else
+            // coheres around its own centroid.
             cohere: hints
                 .groups
                 .iter()
-                .filter(|group| group.region.is_none() && group.surround.is_none())
+                .filter(|group| group.surround.is_none())
                 .map(|group| members(&group.members))
                 .filter(|members| members.len() > 1)
+                .collect(),
+            region: hints
+                .groups
+                .iter()
+                .filter_map(|group| Some((members(&group.members), group.region?)))
+                .filter(|(members, _)| !members.is_empty())
                 .collect(),
         }
     }
@@ -541,6 +552,13 @@ pub(crate) fn place_cost(
     }
     for &(a, b) in &terms.keep_near {
         cost += SA_KEEP_NEAR_W * pos[a].dist(pos[b]);
+    }
+    // A region is containment, not attraction: only a member outside it pays.
+    for (members, region) in &terms.region {
+        for &m in members {
+            let (dx, dy) = region.containment_overshoot(&Rect::from_center_half(pos[m], half[m]));
+            cost += SA_GROUP_W * (dx + dy);
+        }
     }
     for members in &terms.cohere {
         let inv = 1.0 / members.len() as f64;

@@ -369,8 +369,6 @@ fn reconcile_file_stackup(
     Ok(())
 }
 
-
-
 /// References still sitting in the board's seed row: a part that was written to
 /// the board but never laid out. They sit unrotated on the 2.54 mm lattice
 /// running right from the top-left inset, which nothing but seeding produces.
@@ -391,7 +389,6 @@ pub fn seed_row_references(board: &ImportedBoard) -> Vec<String> {
     refs.sort();
     refs
 }
-
 
 #[cfg(test)]
 mod tests {

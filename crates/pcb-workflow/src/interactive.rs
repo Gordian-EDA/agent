@@ -235,9 +235,21 @@ impl MoveBoard {
             .parts
             .iter()
             .map(|part| {
-                // Without a resolvable footprint the pads are all we know; their
-                // bounding box is a weaker courtyard, never a wrong one.
+                let rotation = part.rotation as f64;
+                let on_back = back.contains(&part.reference);
+                // Without a resolvable footprint the pads are all we know. They
+                // come in board coordinates, so undo the pose to get the same
+                // footprint-local rectangle a courtyard would have given —
+                // exact, since a board rotation is a quadrant.
                 let local = courtyards.get(&part.reference).copied().unwrap_or_else(|| {
+                    let local_point = |x: f64, y: f64| {
+                        let turned = Point2::new(x - part.at.x, y - part.at.y).rotate(-rotation);
+                        if on_back {
+                            Point2::new(-turned.x, turned.y)
+                        } else {
+                            turned
+                        }
+                    };
                     let points: Vec<Point2> = snapshot
                         .problem
                         .obstacles
@@ -245,28 +257,25 @@ impl MoveBoard {
                         .filter(|ob| ob.kind == format!("pad:{}", part.reference))
                         .flat_map(|ob| {
                             [
-                                Point2::new(
-                                    ob.center.x - ob.width / 2.0 - part.at.x,
-                                    ob.center.y - ob.height / 2.0 - part.at.y,
+                                local_point(
+                                    ob.center.x - ob.width / 2.0,
+                                    ob.center.y - ob.height / 2.0,
                                 ),
-                                Point2::new(
-                                    ob.center.x + ob.width / 2.0 - part.at.x,
-                                    ob.center.y + ob.height / 2.0 - part.at.y,
+                                local_point(
+                                    ob.center.x + ob.width / 2.0,
+                                    ob.center.y + ob.height / 2.0,
                                 ),
                             ]
                         })
                         .collect();
-                    // Pad extents already carry the part's rotation, so this
-                    // fallback is stored pre-rotated and must not be turned again.
                     Rect::bounding(&points).unwrap_or(Rect::new(-0.5, -0.5, 0.5, 0.5))
                 });
-                let rotated = courtyards.contains_key(&part.reference);
                 (
                     part.reference.clone(),
                     MovePart {
                         at: part.at,
-                        rotation: if rotated { part.rotation as f64 } else { 0.0 },
-                        back: back.contains(&part.reference),
+                        rotation,
+                        back: on_back,
                         local,
                     },
                 )
@@ -573,7 +582,8 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             if let Err(err) =
                 super::route::write_route_offline(ctx, &problem, &solution, &layer_names)
             {
-                let error = json!({ "error": format!("route_track could not write copper: {err}") });
+                let error =
+                    json!({ "error": format!("route_track could not write copper: {err}") });
                 return Ok(gate.rollback(ctx, error));
             }
             Ok(gate.commit(ctx, route_track_output(&problem, &solution, &request)))
@@ -665,17 +675,20 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(changed)
     });
     match live {
-        Ok(changed) => Ok(gate.commit(ctx, json!({
-            "ok": true,
-            "write_path": "ipc",
-            "changed": changed,
-            "net_class": name.clone(),
-            "width": width,
-            "clearance": clearance,
-            "nets": [net.clone()],
-            "changed_nets": if changed { vec![net] } else { Vec::new() },
-            "changed_classes": if changed { vec![name] } else { Vec::new() },
-        }))),
+        Ok(changed) => Ok(gate.commit(
+            ctx,
+            json!({
+                "ok": true,
+                "write_path": "ipc",
+                "changed": changed,
+                "net_class": name.clone(),
+                "width": width,
+                "clearance": clearance,
+                "nets": [net.clone()],
+                "changed_nets": if changed { vec![net] } else { Vec::new() },
+                "changed_classes": if changed { vec![name] } else { Vec::new() },
+            }),
+        )),
         Err(live_error) => {
             ctx.close_kicad_session();
             let update = kicad_board::NetClassUpdate {
@@ -685,25 +698,31 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 nets: vec![net.clone()],
             };
             match write_net_width_offline(&path, &project_path, &update) {
-                Ok(report) => Ok(gate.commit(ctx, json!({
-                    "ok": true,
-                    "write_path": "offline",
-                    "fallback_reason": live_error.to_string(),
-                    "changed": report.changed,
-                    "board_changed": report.board_changed,
-                    "project_changed": report.project_changed,
-                    "net_class": name,
-                    "width": width,
-                    "clearance": clearance,
-                    "nets": [net],
-                    "changed_nets": report.nets,
-                    "changed_classes": report.classes,
-                }))),
-                Err(offline_error) => Ok(gate.rollback(ctx, json!({
-                    "error": format!(
-                        "{live_error}; offline net-width fallback failed: {offline_error}"
-                    )
-                }))),
+                Ok(report) => Ok(gate.commit(
+                    ctx,
+                    json!({
+                        "ok": true,
+                        "write_path": "offline",
+                        "fallback_reason": live_error.to_string(),
+                        "changed": report.changed,
+                        "board_changed": report.board_changed,
+                        "project_changed": report.project_changed,
+                        "net_class": name,
+                        "width": width,
+                        "clearance": clearance,
+                        "nets": [net],
+                        "changed_nets": report.nets,
+                        "changed_classes": report.classes,
+                    }),
+                )),
+                Err(offline_error) => Ok(gate.rollback(
+                    ctx,
+                    json!({
+                        "error": format!(
+                            "{live_error}; offline net-width fallback failed: {offline_error}"
+                        )
+                    }),
+                )),
             }
         }
     }
@@ -1427,8 +1446,7 @@ mod tests {
         assert!((c1.width() - 2.5).abs() < 1e-6, "pad bbox: {c1:?}");
 
         let courtyards = BTreeMap::from([("C1".to_owned(), Rect::new(-1.55, -0.9, 1.55, 0.9))]);
-        let with_courtyards =
-            MoveBoard::from_snapshot(&snapshot, &courtyards, &BTreeSet::new());
+        let with_courtyards = MoveBoard::from_snapshot(&snapshot, &courtyards, &BTreeSet::new());
         let c1 = with_courtyards.parts["C1"].courtyard();
         assert!((c1.width() - 3.1).abs() < 1e-6, "courtyard: {c1:?}");
         assert!((c1.height() - 1.8).abs() < 1e-6, "courtyard: {c1:?}");

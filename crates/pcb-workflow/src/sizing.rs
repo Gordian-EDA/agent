@@ -78,14 +78,12 @@ fn abs_half(b: &geom::Rect) -> (f64, f64) {
 }
 
 pub(crate) fn pad_bbox(pads: &[kicad_footprint::FootprintPad]) -> Option<geom::Rect> {
-    pads.iter()
-        .map(pad_aabb)
-        .reduce(|acc, pad| geom::Rect {
-            min_x: acc.min_x.min(pad.min_x),
-            min_y: acc.min_y.min(pad.min_y),
-            max_x: acc.max_x.max(pad.max_x),
-            max_y: acc.max_y.max(pad.max_y),
-        })
+    pads.iter().map(pad_aabb).reduce(|acc, pad| geom::Rect {
+        min_x: acc.min_x.min(pad.min_x),
+        min_y: acc.min_y.min(pad.min_y),
+        max_x: acc.max_x.max(pad.max_x),
+        max_y: acc.max_y.max(pad.max_y),
+    })
 }
 
 fn pad_aabb(pad: &kicad_footprint::FootprintPad) -> geom::Rect {
@@ -369,7 +367,10 @@ mod tests {
     fn the_through_hole_555_is_recommended_a_board_it_can_actually_pack() {
         let sizing = size_board(&tht_555_board(), 1.0, demand());
         assert_eq!((sizing.recommended_w, sizing.recommended_h), (41.0, 41.0));
-        assert!((sizing.courtyard_area_mm2 - 741.4).abs() < 0.1, "{sizing:?}");
+        assert!(
+            (sizing.courtyard_area_mm2 - 741.4).abs() < 0.1,
+            "{sizing:?}"
+        );
         assert!(places_legally(&tht_555_board(), 41.0, 41.0));
         // Measured with the raw library courtyards this board used to be sized
         // from: 363.9 mm², a 30 x 30 mm recommendation, and no legal packing.

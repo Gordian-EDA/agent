@@ -141,10 +141,10 @@ fn pairs(value: Option<&Value>) -> std::result::Result<Vec<[String; 2]>, String>
     items
         .iter()
         .map(|item| {
-            let pair = strings(Some(item), "intent.keep_near entry")?;
-            match pair.as_slice() {
+            let rule = "each intent.keep_near entry is exactly two references";
+            match strings(Some(item), rule)?.as_slice() {
                 [a, b] => Ok([a.clone(), b.clone()]),
-                _ => Err("each intent.keep_near entry is exactly two references".to_owned()),
+                _ => Err(rule.to_owned()),
             }
         })
         .collect()

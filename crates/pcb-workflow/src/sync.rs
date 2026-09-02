@@ -231,8 +231,23 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(parts) => parts,
         Err(refusal) => return Ok(refusal),
     };
+    if let Err(error) = crate::intent::parse(&input) {
+        return Ok(json!({ "error": error }));
+    }
     if !ctx.pcb_path().exists() {
         return Ok(create_board(&parts, &input, ctx));
+    }
+    // Intent is the shape of a board being built. On a board that already
+    // exists sync has nothing to apply it to — pours are a `rules` change and
+    // layout is placement's — so say where each half belongs rather than drop
+    // it silently.
+    if input.get("intent").is_some() {
+        return Ok(json!({
+            "error": "sync_board takes `intent` only when it creates the board. On an existing \
+                      board pass the layout half to place_board({intent}) and any zones as \
+                      rules {\"pours\": [{\"net\": …, \"layer\": …}]}.",
+            "code": "intent_after_creation",
+        }));
     }
     Ok(update_board(&parts, &input, ctx))
 }
@@ -580,8 +595,7 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
             "ok": true,
             "delta": delta.to_json(),
             "changed": false,
-            "note": "the board already matches the schematic; nothing was written. Do NOT run \
-                     place_board on a board that is already placed — it would move every part.",
+            "note": "the board already matches the schematic; nothing was written.",
         });
         return result;
     }
@@ -660,8 +674,8 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         "next_tool": "route_board",
         "next": "call route_board({nets: nets_to_reroute}), then check_board",
         "note": "only the delta was applied; every part the delta did not name kept its position \
-                 and its copper, and anything sync added is already placed. Do NOT run \
-                 place_board — it re-places the whole board and would undo that.",
+                 and its copper. place_board() lays out anything still unplaced and leaves the \
+                 rest alone.",
     });
     gate.commit(ctx, result)
 }
@@ -674,16 +688,16 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
 /// So a rules change re-synthesizes the board and restores the placement — the
 /// layout survives, the copper does not, and the model re-routes.
 fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> Value {
-    let revision = match ctx.revisions().capture(
+    let gate = match Guard::open(
+        ctx,
         "sync_board",
         "Rebuild the project board",
         &[ctx.pcb_path()],
     ) {
-        Ok(revision) => revision,
-        Err(error) => {
-            return json!({ "error": format!("could not capture the board before sync: {error}") });
-        }
+        Ok(gate) => gate,
+        Err(refusal) => return refusal,
     };
+    let revision = gate.revision();
     if let Err(e) = ctx.kicad().save_if_open() {
         return json!({
             "error": format!("could not save the open KiCAD board before rebuilding it: {e}"),
@@ -722,16 +736,6 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
             rotation_deg: Some(fp.rotation),
         })
         .collect();
-    let gate = match Guard::open(
-        ctx,
-        "sync_board",
-        "Rebuild the project board",
-        &[ctx.pcb_path()],
-    ) {
-        Ok(gate) => gate,
-        Err(refusal) => return refusal,
-    };
-
     // Keep the outline the board already has unless the caller asked for another.
     let mut seed_input = input.clone();
     if seed_input.get("bounds").is_none()

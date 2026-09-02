@@ -2710,7 +2710,7 @@ fn decoupling_caps_seed_beside_their_anchor_ic() {
     // and the (far) shared-GND centroid, stranding it mid-board. The DECOUPLE
     // variant's seed-snap must pull every cap to within a tight radius of ITS anchor
     // — verified on the final legal placement. (The baseline is UNSNAPPED so
-    // `place_best` can fall back to it when the snap hurts routability; the snap now
+    // the baseline variant stays unsnapped for boards the snap hurts; the snap now
     // lives behind `opts.decouple`.)
     let mut parts = vec![ic_anchor("U1", 8, "VCC1"), ic_anchor("U2", 8, "VCC2")];
     for c in ["Ca0", "Ca1", "Ca2"] {

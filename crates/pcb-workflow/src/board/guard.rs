@@ -110,8 +110,11 @@ fn introduced<'a>(
 /// defects the board already carried.
 pub(crate) struct Guard {
     tool: &'static str,
-    path: PathBuf,
-    original: String,
+    /// Every file the mutator declared, with the bytes it had. A rollback puts
+    /// all of them back: `set_net_width` writes the project's net classes as
+    /// well as the board, and restoring one without the other leaves the two
+    /// disagreeing about the same net.
+    original: Vec<(PathBuf, Option<String>)>,
     revision: RevisionId,
     /// `None` when the board could not be read before the edit — the guard then
     /// has no baseline to compare against and must not refuse on a guess.
@@ -149,12 +152,19 @@ impl Guard {
         })?;
         // What rollback restores: the board as this mutator found it, which is
         // the saved state — the session's own edits are not this tool's to undo.
-        let original = std::fs::read_to_string(&path).map_err(|e| {
-            json!({
-                "error": format!("{tool}: could not read the board: {e}"),
+        let original = files
+            .iter()
+            .map(|file| (file.clone(), std::fs::read_to_string(file).ok()))
+            .collect::<Vec<_>>();
+        if !original
+            .iter()
+            .any(|(file, text)| file == &path && text.is_some())
+        {
+            return Err(json!({
+                "error": format!("{tool}: could not read the board"),
                 "revision": revision,
-            })
-        })?;
+            }));
+        }
         // Read the baseline from a fresh session. The save above put the live
         // board on disk, so the two agree — but a cached pcbnew can still be
         // serving an older document, and a baseline from one board compared
@@ -165,27 +175,51 @@ impl Guard {
             .map(|board| Defects::of(&board).0);
         Ok(Self {
             tool,
-            path,
             original,
             revision,
             before,
         })
     }
 
+    /// The revision this edit can be undone to.
+    pub(crate) fn revision(&self) -> RevisionId {
+        self.revision
+    }
+
     /// Put the board back as it was and return `error` with the revision on it.
     /// For an edit that failed on its own terms, before the guard's check.
     pub(crate) fn rollback(self, ctx: &AgentRuntime, error: Value) -> Value {
         let restored = self.restore(ctx);
-        merge_into(error, json!({ "revision": self.revision, "restored": restored }))
+        merge_into(
+            error,
+            json!({ "revision": self.revision, "restored": restored }),
+        )
     }
 
     /// Check the edited board. Returns `result` stamped with the revision when
     /// the edit kept the board honest, or the refusal after rolling back.
     pub(crate) fn commit(self, ctx: &AgentRuntime, result: Value) -> Value {
-        let stamped =
-            |result: Value, revision: RevisionId| merge_into(result, json!({ "revision": revision }));
-        let (Some(before), Ok(board)) = (self.before.as_ref(), crate::active_board(ctx)) else {
+        let stamped = |result: Value, revision: RevisionId| {
+            merge_into(result, json!({ "revision": revision }))
+        };
+        let Some(before) = self.before.as_ref() else {
             return stamped(result, self.revision);
+        };
+        // A board that cannot be read AFTER the edit is the one case rollback
+        // exists for: the check cannot run, so the edit cannot be trusted.
+        let board = match crate::active_board(ctx) {
+            Ok(board) => board,
+            Err(error) => {
+                let tool = self.tool;
+                let restored = self.restore(ctx);
+                return json!({
+                    "ok": false,
+                    "error": format!("{tool}: the edited board could not be read back: {error}"),
+                    "code": "board_unreadable_after_edit",
+                    "restored": restored,
+                    "revision": self.revision,
+                });
+            }
         };
         let (after, explained) = Defects::of(&board);
         let Introduced {
@@ -226,15 +260,24 @@ impl Guard {
             "unrouted": after.unrouted.iter().collect::<Vec<_>>(),
             "restored": restored,
             "revision": self.revision,
-            "note": "the board is back to its pre-edit state; nothing was written. Fix what the \
-                     violations name — delete the offending copper, move the part, or widen the \
-                     board — then try again.",
+            "note": if restored {
+                "the board is back to its pre-edit state; nothing was written. Fix what the \
+                 violations name — delete the offending copper, move the part, or widen the \
+                 board — then try again."
+            } else {
+                "the board could NOT be put back — undo this revision before editing further."
+            },
         })
     }
 
     fn restore(&self, ctx: &AgentRuntime) -> bool {
         ctx.close_kicad_session();
-        std::fs::write(&self.path, &self.original).is_ok()
+        self.original.iter().all(|(path, text)| match text {
+            Some(text) => std::fs::write(path, text).is_ok(),
+            // The file did not exist before the edit; an edit that created one
+            // is undone by removing it again.
+            None => !path.exists() || std::fs::remove_file(path).is_ok(),
+        })
     }
 }
 
@@ -297,7 +340,11 @@ mod tests {
         let mut moved = fault("clearance (track to track)", &["GND", "SDA"]);
         moved.json = json!({ "rule": "clearance (track to track)", "at_mm": [9.0, 9.0] });
         let after = defects(&[], std::slice::from_ref(&moved));
-        assert!(introduced(&before, &after, std::slice::from_ref(&moved)).faults.is_empty());
+        assert!(
+            introduced(&before, &after, std::slice::from_ref(&moved))
+                .faults
+                .is_empty()
+        );
 
         // A SECOND one of the same fault is one the edit added.
         let two = [moved.clone(), moved.clone()];

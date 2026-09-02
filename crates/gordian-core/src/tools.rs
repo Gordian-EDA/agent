@@ -38,6 +38,39 @@ use serde_json::{Value, json};
 use crate::{AgentRuntime, Tool};
 
 /// The JSON-Schema definitions for every tool, in a stable order. The
+/// The `intent` object both board-building tools take: what the layout should
+/// be, never where a part goes. `zones` is `sync_board`'s half (it seeds the
+/// pours); the rest is `place_board`'s.
+fn intent_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "What the layout should be, not where parts go. Coordinates belong only in move_parts{to}.",
+        "properties": {
+            "edge": {
+                "type": "object",
+                "description": "Reference -> board side its courtyard should touch.",
+                "additionalProperties": { "type": "string", "enum": ["left", "right", "top", "bottom"] }
+            },
+            "keep_near": {
+                "type": "array",
+                "description": "Pairs that must end up close, e.g. [[\"C3\",\"U1\"]].",
+                "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 }
+            },
+            "group": {
+                "type": "array",
+                "description": "Parts that belong together, e.g. [[\"U1\",\"C3\",\"C4\"]].",
+                "items": { "type": "array", "items": { "type": "string" }, "minItems": 2 }
+            },
+            "zones": {
+                "type": "array",
+                "description": "Nets to pour as a copper zone; sync_board applies these when it creates the board.",
+                "items": { "type": "string" }
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 /// [`crate::Agent`] loop hands these to the model as genai [`Tool`]s.
 pub fn tool_defs() -> Vec<Tool> {
     /// One tool definition, mapped to a genai [`Tool`] below. Mirrors the fields
@@ -326,41 +359,7 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "intent": {
-                        "type": "object",
-                        "description": "What the layout should be, not where parts go. Coordinates belong only in move_parts{to}.",
-                        "properties": {
-                            "edge": {
-                                "type": "object",
-                                "description": "Reference -> board side its courtyard should touch.",
-                                "additionalProperties": { "type": "string", "enum": ["left", "right", "top", "bottom"] }
-                            },
-                            "keep_near": {
-                                "type": "array",
-                                "description": "Pairs that must end up close, e.g. [[\"C3\",\"U1\"]].",
-                                "items": {
-                                    "type": "array",
-                                    "items": { "type": "string" },
-                                    "minItems": 2, "maxItems": 2
-                                }
-                            },
-                            "group": {
-                                "type": "array",
-                                "description": "Parts that belong together, e.g. [[\"U1\",\"C3\",\"C4\"]].",
-                                "items": {
-                                    "type": "array",
-                                    "items": { "type": "string" },
-                                    "minItems": 2
-                                }
-                            },
-                            "zones": {
-                                "type": "array",
-                                "description": "Nets to pour as a copper zone; applied by sync_board on creation.",
-                                "items": { "type": "string" }
-                            }
-                        },
-                        "additionalProperties": false
-                    },
+                    "intent": intent_schema(),
                     "bounds": {
                         "description": "Omit (or \"auto\") to size the board from its parts. Bounds smaller than required_bounds are refused before anything is written.",
                         "oneOf": [
@@ -438,41 +437,7 @@ pub fn tool_defs() -> Vec<Tool> {
                         "items": { "type": "string" },
                         "description": "Place only these footprints, with every other part locked where it sits and the existing copper as keep-outs. Omit to place the whole board."
                     },
-                    "intent": {
-                        "type": "object",
-                        "description": "What the layout should be, not where parts go. Coordinates belong only in move_parts{to}.",
-                        "properties": {
-                            "edge": {
-                                "type": "object",
-                                "description": "Reference -> board side its courtyard should touch.",
-                                "additionalProperties": { "type": "string", "enum": ["left", "right", "top", "bottom"] }
-                            },
-                            "keep_near": {
-                                "type": "array",
-                                "description": "Pairs that must end up close, e.g. [[\"C3\",\"U1\"]].",
-                                "items": {
-                                    "type": "array",
-                                    "items": { "type": "string" },
-                                    "minItems": 2, "maxItems": 2
-                                }
-                            },
-                            "group": {
-                                "type": "array",
-                                "description": "Parts that belong together, e.g. [[\"U1\",\"C3\",\"C4\"]].",
-                                "items": {
-                                    "type": "array",
-                                    "items": { "type": "string" },
-                                    "minItems": 2
-                                }
-                            },
-                            "zones": {
-                                "type": "array",
-                                "description": "Nets to pour as a copper zone; applied by sync_board on creation.",
-                                "items": { "type": "string" }
-                            }
-                        },
-                        "additionalProperties": false
-                    },
+                    "intent": intent_schema(),
                     "replace": {
                         "type": "boolean",
                         "description": "Re-place an already-placed board, losing its layout."
