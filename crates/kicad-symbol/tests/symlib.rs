@@ -36,6 +36,20 @@ fn stm32h743vitx_has_100_pins_with_correct_types() {
 }
 
 #[test]
+fn stm32f405rg_exposes_oscillator_alternates() {
+    let Some(table) = installed() else {
+        eprintln!("SKIP");
+        return;
+    };
+    let symbol = table
+        .symbol("MCU_ST_STM32F4:STM32F405RGTx")
+        .unwrap();
+    let ph0 = symbol.pins.iter().find(|pin| pin.number == "5").unwrap();
+    assert_eq!(ph0.name, "PH0");
+    assert!(ph0.alternates.iter().any(|name| name == "RCC_OSC_IN"));
+}
+
+#[test]
 fn library_no_connect_pin_type_is_preserved() {
     let lib_text = r#"(kicad_symbol_lib
 	(version 20231120)

@@ -102,17 +102,31 @@ pub fn ranked_suggestions(meta: &SymbolMeta, key: &str, limit: usize) -> Vec<Str
         .pins
         .iter()
         .flat_map(|pin| {
-            std::iter::once(pin.number.as_str())
-                .chain(std::iter::once(pin.name.as_str()))
-                .chain(pin.alternates.iter().map(String::as_str))
+            std::iter::once((pin.number.as_str(), None))
+                .chain(std::iter::once((pin.name.as_str(), None)))
+                .chain(pin.alternates.iter().map(|alternate| {
+                    let suffix = alternate
+                        .split_once('_')
+                        .map(|(_, suffix)| suffix)
+                        .filter(|suffix| suffix.contains('_'));
+                    (alternate.as_str(), suffix)
+                }))
         })
-        .filter(|candidate| !is_unnamed(candidate))
-        .filter_map(|candidate| {
-            let score = matcher
+        .filter(|(candidate, _)| !is_unnamed(candidate))
+        .filter_map(|(candidate, alias)| {
+            let direct = matcher
                 .fuzzy_match(candidate, key)
                 .into_iter()
                 .chain(matcher.fuzzy_match(key, candidate))
-                .max()?;
+                .max();
+            let alias = alias.and_then(|alias| {
+                matcher
+                    .fuzzy_match(alias, key)
+                    .into_iter()
+                    .chain(matcher.fuzzy_match(key, alias))
+                    .max()
+            });
+            let score = direct.into_iter().chain(alias).max()?;
             Some((score, candidate.to_owned()))
         })
         .collect::<Vec<_>>();
