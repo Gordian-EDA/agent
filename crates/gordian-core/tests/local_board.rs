@@ -54,7 +54,7 @@ fn seed(ctx: &AgentRuntime) {
     tool(ctx, "sync_board", json!({}));
     let placed = tool(ctx, "place_board", json!({}));
     assert_eq!(
-        placed["still_unplaced"],
+        placed["still_staged"],
         Value::Null,
         "a whole-board placement leaves nothing in the seed row"
     );
@@ -81,7 +81,7 @@ fn a_window_places_only_what_is_inside_it() {
     assert_eq!(placed["placed_refs"], json!(["R2"]), "{placed:#}");
     assert_eq!(placed["bbox"]["min_x"], json!(x - 1.0));
     assert_eq!(
-        placed["still_unplaced"],
+        placed["still_staged"],
         Value::Null,
         "every part already has a pose"
     );

@@ -333,7 +333,7 @@ fn stage_mismatched(ctx: &AgentRuntime, design: &SchematicDesign, result: &mut V
     };
     match written {
         Ok(()) => {
-            object.insert("staged".to_owned(), json!(staged));
+            object.insert("staged_footprint_mismatch".to_owned(), json!(staged));
             object.insert(
                 "footprint_pin_mismatches".to_owned(),
                 json!(design.mismatches),
@@ -650,12 +650,12 @@ fn seed_board(
         "rules_from_footprints": seeded.rule_notes,
         "path": ctx.pcb_path().display().to_string(),
         "revision": revision,
-        // Seeded is not placed: every part sits in the board's seed row until
+        // Seeded is staged: every part sits in the board's staging row until
         // place_board lays it out, and naming them is what makes that obvious.
-        "unplaced": parts.iter().map(|part| part.reference.clone()).collect::<Vec<_>>(),
+        "staged": parts.iter().map(|part| part.reference.clone()).collect::<Vec<_>>(),
         "next_tool": "place_board",
-        "note": "board created from the schematic with every part still unplaced — run \
-                 place_board, then route_board, then check_board",
+        "note": "board created from the schematic with every part staged — run place_board, \
+                 then route_board, then check_board",
     });
     merge(&mut out, sizes);
     // The layout half of the intent is placement's to honour, not the seed's.
@@ -1008,7 +1008,7 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
             "reseeded": true,
             // The rebuild restored every part where it sat, so nothing is
             // waiting on placement — only the copper is.
-            "unplaced": Vec::<String>::new(),
+            "staged": Vec::<String>::new(),
             "delta": delta.to_json(),
             "retracted_tracks": original.matches("(segment").count(),
             "nets_to_reroute": delta_nets(parts),

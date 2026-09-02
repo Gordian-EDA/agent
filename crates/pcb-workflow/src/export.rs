@@ -76,10 +76,17 @@ impl ClassifiedViolation<'_> {
     }
 }
 
-/// Re-classify every finding that only names staged parts, so the DRC verdict
-/// is about the board being built and not about the row waiting to join it.
+/// Re-classify every finding that involves a staged part, so the DRC verdict is
+/// about the board being built and not about the row waiting to join it.
+///
+/// Any staged part is enough: a part in the staging row is not on the board, so
+/// neither the copper that does not reach it nor the geometry it sits in is the
+/// board's to answer for. Placing it is what settles the finding.
+///
+/// The list is re-sorted afterwards: what the caller must act on leads, then
+/// what the board arrived with, then the staging row it has not reached yet.
 fn excuse_staged<'a>(
-    findings: &mut [ClassifiedViolation<'a>],
+    findings: &mut Vec<ClassifiedViolation<'a>>,
     staged: &std::collections::BTreeSet<String>,
 ) {
     if staged.is_empty() {
@@ -87,10 +94,15 @@ fn excuse_staged<'a>(
     }
     for finding in findings.iter_mut() {
         let (_, refs, _) = violation_key(finding.violation);
-        if !refs.is_empty() && refs.iter().all(|reference| staged.contains(reference)) {
+        if refs.iter().any(|reference| staged.contains(reference)) {
             finding.classification = "staged";
         }
     }
+    findings.sort_by_key(|finding| match finding.classification {
+        "introduced" => 0,
+        "pre_existing" => 1,
+        _ => 2,
+    });
 }
 
 fn bracketed_names(text: &str) -> impl Iterator<Item = &str> {
