@@ -17,7 +17,9 @@ at 3 whatever the judge thought.
 
 import argparse
 import base64
+from datetime import datetime, timezone
 import json
+import math
 import mimetypes
 import os
 from pathlib import Path
@@ -25,6 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 import urllib.error
@@ -35,6 +38,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 CASES = Path(__file__).resolve().parent / "cases"
 CAPPED_SCORE = 3
+FINDING_TAGS = ("tool-contract", "prompt", "engine", "harness", "judge", "variance")
 
 
 def command(args, *, timeout=600, check=True, env=None):
@@ -68,12 +72,14 @@ def example(package, name):
     return BUILT[name]
 
 
-def tool(project, name, payload=None):
+def tool(project, name, payload=None, *, allow_failed_verdict=False):
     args = [example("gordian-core", "tool_once"), str(project), name]
     if payload is not None:
         args.append(json.dumps(payload, separators=(",", ":")))
     value = json.loads(command(args).stdout)
-    if value.get("error") or value.get("ok") is False:
+    if value.get("error") or (
+        value.get("ok") is False and not allow_failed_verdict
+    ):
         raise RuntimeError(f"{name} failed: {json.dumps(value, indent=2)}")
     return value
 
@@ -154,6 +160,79 @@ def board_facts(project, before_project):
             "board_outline_changed": before["outline"] != after["outline"],
         }
     )
+    return facts
+
+
+def total_track_length(tracks):
+    length = 0.0
+    for track in tracks:
+        if not isinstance(track, dict) or not isinstance(track.get("path"), list):
+            raise ValueError("get_board returned a track without a path")
+        path = track["path"]
+        for start, end in zip(path, path[1:]):
+            if not (
+                isinstance(start, list)
+                and isinstance(end, list)
+                and len(start) >= 2
+                and len(end) >= 2
+                and all(isinstance(value, (int, float)) for value in (*start[:2], *end[:2]))
+            ):
+                raise ValueError("get_board returned a malformed track point")
+            length += math.hypot(end[0] - start[0], end[1] - start[1])
+    return round(length, 3)
+
+
+def board_quality_facts(project):
+    """DRC diagnostics and cheap copper metrics from the public board tools."""
+    facts = {}
+    try:
+        with tempfile.TemporaryDirectory(prefix="gordian-quality-board-") as temporary:
+            check_project = Path(temporary) / "project"
+            shutil.copytree(project, check_project)
+            checked = tool(
+                check_project, "check_board", allow_failed_verdict=True
+            )
+            unconnected = checked.get("unconnected")
+            unconnected_count = checked.get("unconnected_items")
+            if not isinstance(unconnected, list) or not isinstance(
+                unconnected_count, int
+            ):
+                raise ValueError("check_board omitted unconnected diagnostics")
+    except Exception as error:
+        facts["board_check_error"] = str(error)
+    else:
+        facts.update(
+            {
+                "board_check_error": None,
+                "drc_blocking_findings": checked.get("blocking_findings"),
+                "drc_reported_findings": checked.get("reported_findings"),
+                "drc_copper_violations": checked.get("copper_violations"),
+            }
+        )
+        if unconnected_count and not unconnected:
+            unconnected = [
+                f"{unconnected_count} unconnected item(s); pad pairs unavailable"
+            ]
+        facts["unrouted"] = unconnected
+
+    try:
+        board = tool(project, "get_board", {"include_copper": True})
+        copper = board["board"]["copper"]
+        if (
+            not isinstance(copper.get("tracks"), list)
+            or not isinstance(copper.get("via_count"), int)
+        ):
+            raise ValueError("get_board omitted copper metrics")
+    except Exception as error:
+        facts["board_metrics_error"] = str(error)
+    else:
+        facts.update(
+            {
+                "board_metrics_error": None,
+                "via_count": copper["via_count"],
+                "total_track_length": total_track_length(copper["tracks"]),
+            }
+        )
     return facts
 
 
@@ -401,6 +480,7 @@ def severity_counts(report, prefix):
 def deterministic_facts(project, before_project, artifacts, agent_result):
     schematic = first_schematic(project)
     board = next(iter(sorted(project.glob("*.kicad_pcb"))), None)
+    board_quality = board_quality_facts(project) if board is not None else {}
     erc = run_check("sch", schematic, artifacts / "erc.json")
     drc = run_check("pcb", board, artifacts / "drc.json")
     unconnected = drc.get("unconnected_items", []) if isinstance(drc, dict) else []
@@ -415,6 +495,7 @@ def deterministic_facts(project, before_project, artifacts, agent_result):
         "agent_exit": agent_result.returncode,
         "pcb_created": board is not None,
         **pcb,
+        **board_quality,
         **severity_counts(erc, "erc"),
         **severity_counts(drc, "drc"),
         "unconnected_items": len(unconnected),
@@ -422,6 +503,28 @@ def deterministic_facts(project, before_project, artifacts, agent_result):
         **sch,
     }
     return facts, detail
+
+
+VISUAL_FACTS = ("body_overlaps", "text_collisions", "wires_through_bodies")
+
+
+def schematic_visual_facts(renders):
+    rendered = renders.get("after", {}).get("schematic", {})
+    visual = rendered.get("visual")
+    if not isinstance(visual, dict):
+        return {"schematic_visual_error": rendered.get("error", "not measured")}
+    measured = {
+        name: visual[name]
+        for name in VISUAL_FACTS
+        if isinstance(visual.get(name), list)
+    }
+    missing = [name for name in VISUAL_FACTS if name not in measured]
+    return {
+        "schematic_visual_error": (
+            f"render_schematic omitted: {', '.join(missing)}" if missing else None
+        ),
+        **measured,
+    }
 
 
 # --- rubric checks ----------------------------------------------------------
@@ -531,8 +634,8 @@ def llm_config():
     return base, key, model
 
 
-def judge(prompt, rubric, facts, checks, renders):
-    base, key, model = llm_config()
+def judge(prompt, rubric, facts, checks, renders, llm):
+    base, key, model = llm
     text = f"""Review Gordian's result for the user request below.
 
 REQUEST:
@@ -611,6 +714,74 @@ An empty issues array means no actionable issue was found."""
     return {"score": score, "issues": issues}
 
 
+def critic(kind, rendered, prompt, facts, llm):
+    """Run one dedicated visual critic with the judge's gateway credentials."""
+    path = rendered.get("path")
+    if not path:
+        if rendered.get("error"):
+            return {"score": None, "issues": [], "error": rendered["error"]}
+        return {
+            "score": None,
+            "issues": [],
+            "skipped": f"no {kind} render",
+        }
+    base, key, model = llm
+    script = ROOT / "tools" / f"{kind}_critic.py"
+    args = [
+        sys.executable,
+        str(script),
+        path,
+        "--circuit",
+        prompt,
+        "--model",
+        model,
+        "--json-only",
+    ]
+    if (
+        kind == "schematic"
+        and facts.get("wires_through_bodies") == []
+        and facts.get("unconnected_pins") == []
+        and facts.get("kicad_netlist_error") is None
+    ):
+        args.append("--engine-clean")
+    if (
+        kind == "pcb"
+        and facts.get("drc_copper_violations") == 0
+        and facts.get("unrouted") == []
+    ):
+        args.append("--drc-clean")
+    result = command(
+        args,
+        timeout=300,
+        check=False,
+        env={
+            **os.environ,
+            "OPENAI_BASE_URL": base,
+            "OPENAI_API_KEY": key,
+            "CRITIC_MODEL": model,
+        },
+    )
+    try:
+        verdict = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        message = (result.stderr or result.stdout).strip()
+        raise RuntimeError(
+            f"{kind} critic returned no JSON (exit {result.returncode}): {message}"
+        ) from error
+    score = verdict.get("score")
+    issues = verdict.get("defects", [])
+    if (
+        isinstance(score, bool)
+        or not isinstance(score, (int, float))
+        or not math.isfinite(score)
+        or not 0 <= score <= 10
+        or not isinstance(issues, list)
+        or not all(isinstance(issue, dict) for issue in issues)
+    ):
+        raise ValueError(f"invalid {kind} critic verdict: {verdict!r}")
+    return {"score": score, "issues": issues}
+
+
 # --- render + run -----------------------------------------------------------
 
 
@@ -623,7 +794,10 @@ def capture_render(project, tool_name, destination):
     if not path or not Path(path).is_file():
         return {"error": f"{tool_name} returned no image"}
     shutil.copy2(path, destination)
-    return {"path": str(destination)}
+    rendered = {"path": str(destination)}
+    if isinstance(value.get("visual"), dict):
+        rendered["visual"] = value["visual"]
+    return rendered
 
 
 def render_project(project, artifacts, prefix):
@@ -649,6 +823,106 @@ def agent_command(project, prompt):
     ]
 
 
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+TOOL_STARTED = re.compile(r"^tool -> (?P<tool>[A-Za-z0-9_]+)\s*$")
+TOOL_FINISHED = re.compile(
+    r"^tool <- (?P<tool>[A-Za-z0-9_]+):\s?(?P<summary>.*)$"
+)
+USAGE_REQUESTS = re.compile(r"^usage: provider_requests=(\d+)\b")
+TOTAL_REQUESTS = re.compile(r"\bprovider requests:\s*(\d+)\b")
+REQUEST_CAP = re.compile(r"ProviderRequestLimit\s*\{\s*requests:\s*(\d+)\s*\}")
+REFUSAL = re.compile(r"\brefus(?:e|ed|al|ing)\b", re.IGNORECASE)
+
+
+def parse_agent_stderr(stderr):
+    """Turn the headless agent's compact event transcript into durable facts."""
+    text = ANSI.sub("", stderr)
+    calls = []
+    attempted = []
+    usage_counts = []
+    total_counts = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if match := TOOL_STARTED.match(stripped):
+            name = match.group("tool")
+            attempted.append(name)
+            calls.append({"tool": name, "status": None, "summary": ""})
+            continue
+        if match := TOOL_FINISHED.match(stripped):
+            name = match.group("tool")
+            summary = match.group("summary")
+            target = next(
+                (
+                    call
+                    for call in reversed(calls)
+                    if call["tool"] == name and call["status"] is None
+                ),
+                None,
+            )
+            if target is None:
+                attempted.append(name)
+                target = {"tool": name, "status": None, "summary": ""}
+                calls.append(target)
+            target["status"] = (
+                "error"
+                if summary.lower().startswith(("error:", "refused:"))
+                else "ok"
+            )
+            target["summary"] = summary
+            continue
+        if match := USAGE_REQUESTS.match(stripped):
+            usage_counts.append(int(match.group(1)))
+        if match := TOTAL_REQUESTS.search(stripped):
+            total_counts.append(int(match.group(1)))
+
+    for call in calls:
+        if call["status"] is None:
+            call["status"] = "error"
+            call["summary"] = "no completion recorded"
+
+    refusals, errors = [], []
+    for call in calls:
+        if call["status"] != "error":
+            continue
+        signal = {"tool": call["tool"], "message": call["summary"]}
+        (refusals if REFUSAL.search(call["summary"]) else errors).append(signal)
+
+    repeated = []
+    index = 0
+    while index < len(attempted):
+        end = index + 1
+        while end < len(attempted) and attempted[end] == attempted[index]:
+            end += 1
+        if end - index >= 3:
+            repeated.append({"tool": attempted[index], "count": end - index})
+        index = end
+
+    cap = REQUEST_CAP.search(text)
+    return {
+        "tool_calls": calls,
+        "request_count": total_counts[-1] if total_counts else sum(usage_counts),
+        "refusals": refusals,
+        "errors": errors,
+        "repeated_calls": repeated,
+        "request_cap_hit": int(cap.group(1)) if cap else None,
+    }
+
+
+def run_agent(project, prompt, timeout, env):
+    args = agent_command(project, prompt)
+    try:
+        return command(args, timeout=timeout, check=False, env=env)
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout or ""
+        stderr = error.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        stderr += f"\nquality harness: agent timed out after {timeout}s\n"
+        return subprocess.CompletedProcess(args, 124, stdout, stderr)
+
+
 def run_case(case, output_root):
     started = time.time()
     prompt = (case / "prompt.txt").read_text(encoding="utf-8").strip()
@@ -661,27 +935,57 @@ def run_case(case, output_root):
     before_project = run_dir / "before-project"
     artifacts.mkdir(parents=True)
     project.mkdir()
+    result_path = run_dir / "result.json"
+    started_utc = datetime.fromtimestamp(started, timezone.utc).isoformat()
+    result_path.write_text(
+        json.dumps(
+            {"case": case.name, "started_utc": started_utc, "_started_epoch": started},
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     prepare_project(case, project)
     shutil.copytree(project, before_project)
     renders = {"before": render_project(project, artifacts, "before")}
 
     agent_started = time.time()
-    result = command(
-        agent_command(project, prompt),
-        timeout=int(os.environ.get("QUALITY_TIMEOUT", "900")),
-        check=False,
-        env={**os.environ, "GORDIAN_THREAD_ID": f"quality-{case.name}-{int(started)}"},
+    result = run_agent(
+        project,
+        prompt,
+        int(os.environ.get("QUALITY_TIMEOUT", "900")),
+        {**os.environ, "GORDIAN_THREAD_ID": f"quality-{case.name}-{int(started)}"},
     )
     agent_seconds = round(time.time() - agent_started, 1)
     (artifacts / "agent.stdout.txt").write_text(result.stdout, encoding="utf-8")
     (artifacts / "agent.stderr.txt").write_text(result.stderr, encoding="utf-8")
+    transcript_facts = parse_agent_stderr(result.stderr)
+    result_path.write_text(
+        json.dumps(
+            {
+                "case": case.name,
+                "started_utc": started_utc,
+                "_started_epoch": started,
+                "agent_exit": result.returncode,
+                "agent_seconds": agent_seconds,
+                "elapsed_seconds": round(time.time() - started, 1),
+                **transcript_facts,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
-    renders["after"] = render_project(project, artifacts, "after")
     facts, detail = deterministic_facts(project, before_project, artifacts, result)
+    renders["after"] = render_project(project, artifacts, "after")
+    facts.update(schematic_visual_facts(renders) if first_schematic(project) else {})
+    facts.update(transcript_facts)
     outcome = evaluate_checks(checks, facts)
     report = {
         "case": case.name,
+        "started_utc": started_utc,
         "checks": outcome,
         "agent_seconds": agent_seconds,
         "elapsed_seconds": round(time.time() - started, 1),
@@ -690,25 +994,206 @@ def run_case(case, output_root):
     }
     # The measured half is written before the judge is asked, so a gateway
     # failure costs the verdict and not the whole run.
-    result_path = run_dir / "result.json"
     result_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
-    verdict = judge(prompt, rubric, facts, outcome, renders)
-    report["judge"] = verdict
-    report["judge_score"] = verdict["score"]
-    report["score"] = (
-        min(verdict["score"], CAPPED_SCORE) if outcome["fail"] else verdict["score"]
-    )
+    try:
+        llm = llm_config()
+    except Exception as error:
+        llm = None
+        report["judge"] = {"score": None, "issues": [], "error": str(error)}
+    else:
+        try:
+            report["judge"] = judge(prompt, rubric, facts, outcome, renders, llm)
+        except Exception as error:
+            report["judge"] = {"score": None, "issues": [], "error": str(error)}
+
+    for kind in ("schematic", "pcb"):
+        key = f"critic_{kind}"
+        rendered = renders.get("after", {}).get(kind, {})
+        if not rendered.get("path"):
+            report[key] = critic(kind, rendered, prompt, facts, llm)
+        elif llm is None:
+            report[key] = {
+                "score": None,
+                "issues": [],
+                "error": "judge credentials unavailable",
+            }
+        else:
+            try:
+                report[key] = critic(kind, rendered, prompt, facts, llm)
+            except Exception as error:
+                report[key] = {"score": None, "issues": [], "error": str(error)}
+
+    report["judge_score"] = report["judge"]["score"]
+    if report["judge_score"] is not None:
+        report["score"] = (
+            min(report["judge_score"], CAPPED_SCORE)
+            if outcome["fail"]
+            else report["judge_score"]
+        )
     report["elapsed_seconds"] = round(time.time() - started, 1)
     result_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    write_case_findings(run_dir, report)
     return report
+
+
+# --- findings ---------------------------------------------------------------
+
+
+def critic_issue_text(issue):
+    if not isinstance(issue, dict):
+        return str(issue)
+    description = issue.get("description") or json.dumps(issue, sort_keys=True)
+    context = "/".join(
+        str(issue[name])
+        for name in ("severity", "category", "location")
+        if issue.get(name)
+    )
+    return f"{context}: {description}" if context else description
+
+
+def findings_for(report):
+    findings = []
+    if report.get("error"):
+        findings.append(("harness", f"runner error: {report['error']}"))
+    for name in (
+        "sch_facts_error",
+        "kicad_netlist_error",
+        "pcb_facts_error",
+        "board_check_error",
+        "board_metrics_error",
+        "schematic_visual_error",
+        "erc_check_error",
+        "drc_check_error",
+    ):
+        if report.get(name):
+            findings.append(("harness", f"{name}: {report[name]}"))
+    checks = report.get("checks", {})
+    failed = checks.get("fail", [])
+    for failure in failed:
+        tag = "harness" if any(
+            marker in failure for marker in ("unparseable check", "not measured:")
+        ) else "engine"
+        findings.append((tag, f"failed check: {failure}"))
+
+    all_checks_pass = not failed
+    judge = report.get("judge", {})
+    for issue in judge.get("issues", []):
+        findings.append(
+            ("judge" if all_checks_pass else "engine", f"judge: {issue}")
+        )
+    if judge.get("error"):
+        findings.append(("harness", f"judge unavailable: {judge['error']}"))
+
+    for kind in ("schematic", "pcb"):
+        result = report.get(f"critic_{kind}", {})
+        for issue in result.get("issues", []):
+            findings.append(
+                (
+                    "judge" if all_checks_pass else "engine",
+                    f"{kind} critic: {critic_issue_text(issue)}",
+                )
+            )
+        if result.get("error"):
+            findings.append(("harness", f"{kind} critic unavailable: {result['error']}"))
+
+    for signal_name, label in (("errors", "error"), ("refusals", "refusal")):
+        for signal in report.get(signal_name, []):
+            findings.append(
+                (
+                    "tool-contract",
+                    f"tool `{signal['tool']}` {label}: {signal['message']}",
+                )
+            )
+    for smell in report.get("repeated_calls", []):
+        findings.append(
+            (
+                "prompt",
+                f"loop smell: tool `{smell['tool']}` called {smell['count']} times in a row",
+            )
+        )
+
+    cap = report.get("request_cap_hit")
+    cost_tag = "prompt" if cap or report.get("repeated_calls") else "variance"
+    cost = (
+        f"cost: {report.get('elapsed_seconds', 0):.1f}s elapsed, "
+        f"{report.get('agent_seconds', 0):.1f}s agent, "
+        f"{report.get('request_count', 0)} provider requests"
+    )
+    if cap:
+        cost += f"; request cap hit at {cap}"
+    findings.append((cost_tag, cost))
+    return findings
+
+
+def write_case_findings(run_dir, report):
+    lines = [f"# Findings: {report['case']}", ""]
+    lines.extend(f"- [{tag}] {text}" for tag, text in findings_for(report))
+    (run_dir / "findings.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def recover_failed_report(output_root, case, error):
+    """Keep expensive partial evidence when an unexpected harness step fails."""
+    run_dir = output_root / case
+    run_dir.mkdir(parents=True, exist_ok=True)
+    result_path = run_dir / "result.json"
+    try:
+        report = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        report = {"case": case}
+    started = report.pop("_started_epoch", None)
+    if isinstance(started, (int, float)):
+        report["elapsed_seconds"] = round(time.time() - started, 1)
+    report.setdefault("agent_seconds", 0.0)
+    report.setdefault("elapsed_seconds", 0.0)
+    report.setdefault("checks", {"pass": [], "fail": []})
+    stderr_path = run_dir / "artifacts" / "agent.stderr.txt"
+    if stderr_path.is_file():
+        report.update(parse_agent_stderr(stderr_path.read_text(encoding="utf-8")))
+    else:
+        report.setdefault("request_count", 0)
+    report["error"] = str(error)
+    result_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    write_case_findings(run_dir, report)
+    return report
+
+
+def aggregate_findings(reports, output_root, suite, questions):
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    destination = ROOT / "quality" / "findings" / f"{timestamp}-{suite}.md"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"# Quality findings: {suite}",
+        "",
+        f"Generated: {timestamp}",
+        f"Run output: {output_root}",
+        "",
+        "Questions:",
+    ]
+    lines.extend(f"- {question}" for question in questions)
+    if not questions:
+        lines.append("- (none provided)")
+
+    grouped = {tag: [] for tag in FINDING_TAGS}
+    for report in reports:
+        for tag, finding in findings_for(report):
+            grouped[tag].append((report["case"], finding))
+    for tag in FINDING_TAGS:
+        if not grouped[tag]:
+            continue
+        lines.extend(["", f"## [{tag}]", ""])
+        for case, finding in grouped[tag]:
+            lines.append(f"- `{case}`: {finding}")
+    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return destination
 
 
 # --- scoreboard -------------------------------------------------------------
 
 
 COLUMNS = [
-    "case", "score", "checks", "erc e/w", "moved", "lost", "added", "pcb moved", "elapsed",
+    "case", "score", "sch critic", "pcb critic", "checks", "erc e/w", "moved",
+    "lost", "added", "pcb moved", "elapsed",
 ]
 
 
@@ -716,14 +1201,24 @@ def count(report, name):
     return str(len(report[name])) if name in report else "-"
 
 
+def critic_score(report, kind):
+    score = report.get(f"critic_{kind}", {}).get("score")
+    return "-" if score is None else str(score)
+
+
 def row(report):
     if "error" in report:
-        return [report["case"], "-", "-", "-", "-", "-", "-", "-", report["error"][:60]]
+        return [
+            report["case"], "-", "-", "-", "-", "-", "-", "-", "-", "-",
+            report["error"][:60],
+        ]
     checks = report["checks"]
     total = len(checks["pass"]) + len(checks["fail"])
     return [
         report["case"],
         str(report.get("score", "-")),
+        critic_score(report, "schematic"),
+        critic_score(report, "pcb"),
         f"{len(checks['pass'])}/{total}" if total else "-",
         f"{report.get('erc_errors', '?')}/{report.get('erc_warnings', '?')}",
         count(report, "unchanged_symbols_moved"),
@@ -765,6 +1260,12 @@ def main():
         help="schematic runs every sch-* case, pcb runs the rest",
     )
     parser.add_argument("--scoreboard", type=Path, help="write the scoreboard here too")
+    parser.add_argument(
+        "--question",
+        action="append",
+        default=[],
+        help="named question this run is intended to answer; repeatable",
+    )
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
 
@@ -777,13 +1278,18 @@ def main():
     if unknown:
         parser.error(f"unknown cases: {', '.join(unknown)}")
     output = args.output if args.output.is_absolute() else (ROOT / args.output).resolve()
+    if not args.question:
+        print(
+            "warning: no --question supplied; name the reason for the QC run",
+            file=sys.stderr,
+        )
 
     reports = []
     for name in selected:
         try:
             report = run_case(available[name], output)
         except Exception as error:
-            report = {"case": name, "error": str(error)}
+            report = recover_failed_report(output, name, error)
             print(f"{name}: {error}", file=sys.stderr)
         reports.append(report)
         print(" | ".join(row(report)), flush=True)
@@ -794,8 +1300,17 @@ def main():
     print("\n" + table)
     if args.scoreboard:
         args.scoreboard.write_text(table + "\n", encoding="utf-8")
+    suite = args.suite if not args.cases else "-".join(args.cases)
+    suite = re.sub(r"[^A-Za-z0-9_.-]+", "-", suite).strip("-") or "custom"
+    aggregate = aggregate_findings(reports, output, suite, args.question)
+    print(f"\nfindings: {aggregate}")
     broken = any(
-        "error" in report or report.get("checks", {}).get("fail") for report in reports
+        "error" in report
+        or report.get("checks", {}).get("fail")
+        or report.get("judge", {}).get("error")
+        or report.get("critic_schematic", {}).get("error")
+        or report.get("critic_pcb", {}).get("error")
+        for report in reports
     )
     raise SystemExit(1 if broken else 0)
 
