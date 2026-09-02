@@ -6,7 +6,8 @@
 
 use crate::ctx::{CopperGeom, CopperItem};
 use crate::rules::geom::EPS;
-use crate::{DrcCtx, Finding, Rule};
+use crate::{DrcCtx, Rule};
+use pcb_model::Finding;
 use pcb_model::RoutingView;
 
 /// Flags any trace or via whose copper extent (segment fattened by its

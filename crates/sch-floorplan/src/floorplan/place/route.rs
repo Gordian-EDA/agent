@@ -10,11 +10,12 @@ use kicad::KicadInstallation;
 use crate::write::SchematicWriter;
 use geom::{Dir, EPS, ParentForest, Rect};
 
-use super::*;
+use sch_model::refine::FAST_PINS;
+use sch_model::route::SchRouter;
 use circuit_graph::netclass::{is_connector_like, is_ground};
-use sch_place::item::{Incidence, Item};
+use sch_model::item::{Incidence, Item};
 
-use sch_place::ir::{Band, LayoutIr, Side};
+use sch_model::ir::{Band, LayoutIr, Side};
 
 // ---------------------------------------------------------------------------
 // Wiring: rails, signal routing, ports.
@@ -22,6 +23,7 @@ use sch_place::ir::{Band, LayoutIr, Side};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn wire(
+    router: &dyn SchRouter,
     env: &KicadInstallation,
     w: &mut SchematicWriter,
     items: &[Item],
@@ -196,6 +198,7 @@ pub(crate) fn wire(
             continue;
         }
         route_signal(
+            router,
             env,
             w,
             items,
@@ -255,6 +258,7 @@ impl LabelPolicy {
 /// on the named side, then a label there; failure falls back to per-pin labels.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn route_signal(
+    router: &dyn SchRouter,
     env: &KicadInstallation,
     w: &mut SchematicWriter,
     items: &[Item],
@@ -263,7 +267,7 @@ pub(crate) fn route_signal(
     eps: &[([f64; 2], Dir)],
     port: Option<Side>,
     label_policy: Option<LabelPolicy>,
-    scene: &mut crate::wire::RouteScene,
+    scene: &mut sch_model::route::RouteScene,
 ) -> io::Result<()> {
     // A single-pin port follows its pin's real direction (see effective_port_side):
     // a MOSFET gate faces left but the name heuristic would exit it right, onto the
@@ -368,7 +372,7 @@ pub(crate) fn route_signal(
                 );
             }
             for pg in &item.geom.pins {
-                boxes.extend(crate::label::pin_text_boxes(
+                boxes.extend(sch_model::text::pin_text_boxes(
                     pg,
                     item.at,
                     item.angle,
@@ -386,7 +390,7 @@ pub(crate) fn route_signal(
         ds.iter().all(|(ep, dir)| {
             let v = dir.vec();
             let end = [ep[0] + v[0] * STUB_MM, ep[1] + v[1] * STUB_MM];
-            let bx = crate::label::label_box(end, *dir, crate::label::text_width(net));
+            let bx = sch_model::text::label_box(end, *dir, sch_model::text::text_width(net));
             !obstacles.iter().any(|r| bx.intersection(r).is_some())
         })
     };
@@ -418,7 +422,7 @@ pub(crate) fn route_signal(
     let mut parent: Vec<usize> = (0..terms.len()).collect();
     let mut uf = ParentForest::new(&mut parent);
     let mut paths: Vec<Vec<::geom::Point2>> = Vec::new();
-    for (i, j) in crate::wire::mst_edges(&pts) {
+    for (i, j) in router.tree_edges(&pts) {
         let (a, da, b) = match (terms[i].1, terms[j].1) {
             (Some(d), _) => (pts[i], d, pts[j]),
             (None, Some(d)) => (pts[j], d, pts[i]),
@@ -434,7 +438,7 @@ pub(crate) fn route_signal(
         {
             continue;
         }
-        if let Some(p) = crate::wire::route_edge(a, da, b, net, scene) {
+        if let Some(p) = router.route_edge(a, da, b, net, scene) {
             if let Some(pol) = label_policy {
                 // The DIRECT gap may be short while the only obstacle-free ROUTE is a sheet-wide
                 // DETOUR (two ICs whose shared bus pins face opposite ways, so the wire wraps the
@@ -460,7 +464,7 @@ pub(crate) fn route_signal(
                 if direct > pol.cross_len_mm
                     && term_label_clear[i]
                     && term_label_clear[j]
-                    && crate::wire::path_crossings(&p, net, scene) > 0
+                    && sch_model::route::path_crossings(&p, net, scene) > 0
                 {
                     continue;
                 }
@@ -469,7 +473,7 @@ pub(crate) fn route_signal(
                 w.add_wire_on_net(seg[0], seg[1], net);
                 scene
                     .segments
-                    .push(crate::wire::NetSegment::new(seg[0], seg[1], net));
+                    .push(sch_model::route::NetSegment::new(seg[0], seg[1], net));
             }
             paths.push(p);
             uf.union_to(i, j);
@@ -493,7 +497,7 @@ pub(crate) fn route_signal(
         w.add_wire_on_net(pts[0], pts[pi], net);
         scene
             .segments
-            .push(crate::wire::NetSegment::new(pts[0], pts[pi], net));
+            .push(sch_model::route::NetSegment::new(pts[0], pts[pi], net));
         uf.union_to(0, pi);
     }
 
@@ -572,7 +576,7 @@ pub(crate) fn route_signal(
                     sb,
                     pb,
                 ];
-                if crate::wire::path_ok(&path, net, scene) {
+                if sch_model::route::path_ok(&path, net, scene) {
                     for seg in path.windows(2) {
                         if (seg[0][0] - seg[1][0]).abs() > EPS
                             || (seg[0][1] - seg[1][1]).abs() > EPS
@@ -580,7 +584,7 @@ pub(crate) fn route_signal(
                             w.add_wire_on_net(seg[0], seg[1], net);
                             scene
                                 .segments
-                                .push(crate::wire::NetSegment::new(seg[0], seg[1], net));
+                                .push(sch_model::route::NetSegment::new(seg[0], seg[1], net));
                         }
                     }
                     uf.union_to(0, k);
@@ -708,13 +712,13 @@ pub(crate) fn safe_forced_single_port_stub(
     pin: ::geom::Point2,
     exit: ::geom::Point2,
     net: &str,
-    scene: &crate::wire::RouteScene,
+    scene: &sch_model::route::RouteScene,
 ) -> bool {
     let dx = (pin[0] - exit[0]).abs();
     let dy = (pin[1] - exit[1]).abs();
     let short = dx + dy <= 2.54 + EPS;
     let axis_aligned = dx <= EPS || dy <= EPS;
-    short && axis_aligned && crate::wire::path_ok(&[pin, exit], net, scene)
+    short && axis_aligned && sch_model::route::path_ok(&[pin, exit], net, scene)
 }
 
 /// Draw a clustered net as a single-trunk tee (one straight trunk + a short
@@ -723,7 +727,7 @@ pub(crate) fn safe_forced_single_port_stub(
 /// trunk is safe — far cleaner than an MST of overlapping elbows. Spread or
 /// obstacle-crossing nets return false and fall through to the router.
 ///
-/// "Clear" is the FULL [`crate::wire::path_ok`] test, not just a body check: a trunk
+/// "Clear" is the FULL [`sch_model::route::path_ok`] test, not just a body check: a trunk
 /// drawn down an IC's pin column passes over the neighbouring pins, and KiCAD welds a
 /// wire to every pin it crosses — the `mixed-signal-adc-frontend` `SDA`/`SCL` short,
 /// where SCL's trunk ran from pin 10 straight down through pin 9 to its pull-up. The tee
@@ -733,7 +737,7 @@ pub(crate) fn route_local_tee(
     w: &mut SchematicWriter,
     net: &str,
     terms: &[([f64; 2], Option<Dir>)],
-    scene: &mut crate::wire::RouteScene,
+    scene: &mut sch_model::route::RouteScene,
 ) -> bool {
     const LOCAL: f64 = 30.48;
     let xs: Vec<f64> = terms.iter().map(|t| t.0[0]).collect();
@@ -784,14 +788,14 @@ pub(crate) fn route_local_tee(
         [[trunk_line, min_y], [trunk_line, max_y]]
     };
     let clear =
-        |path: [[f64; 2]; 2]| crate::wire::path_ok(&[path[0].into(), path[1].into()], net, scene);
+        |path: [[f64; 2]; 2]| sch_model::route::path_ok(&[path[0].into(), path[1].into()], net, scene);
     if !clear(trunk) || terms.iter().any(|(p, _)| !clear([*p, foot(p)])) {
         return false;
     }
     if horizontal {
         let ty = trunk_line;
         w.add_wire_on_net([min_x, ty], [max_x, ty], net);
-        scene.segments.push(crate::wire::NetSegment::new(
+        scene.segments.push(sch_model::route::NetSegment::new(
             [min_x, ty].into(),
             [max_x, ty].into(),
             net,
@@ -807,7 +811,7 @@ pub(crate) fn route_local_tee(
     } else {
         let tx = trunk_line;
         w.add_wire_on_net([tx, min_y], [tx, max_y], net);
-        scene.segments.push(crate::wire::NetSegment::new(
+        scene.segments.push(sch_model::route::NetSegment::new(
             [tx, min_y].into(),
             [tx, max_y].into(),
             net,
@@ -988,7 +992,7 @@ pub(crate) fn ic_port_exit_override(
         if pg.name == "~" {
             continue;
         }
-        let extent = pg.length + NAME_OFFSET + crate::label::text_width(&pg.name);
+        let extent = pg.length + NAME_OFFSET + sch_model::text::text_width(&pg.name);
         if best.map(|(_, _, e)| extent > e).unwrap_or(true) {
             best = Some((tip, dir, extent));
         }
@@ -1023,7 +1027,7 @@ pub(crate) fn ic_port_exit_override(
 /// land the pennant inside an unrelated neighbour's body. No overlap, no move
 /// — clean sheets stay byte-identical.
 pub(crate) fn nudge_port_exit(
-    scene: &crate::wire::RouteScene,
+    scene: &sch_model::route::RouteScene,
     mut at: [f64; 2],
     side: Side,
     net: &str,
@@ -1062,7 +1066,7 @@ fn solids_hit(solids: &[::geom::Rect], r: &::geom::Rect) -> bool {
 }
 
 pub(crate) fn port_label_obstacle(at: [f64; 2], side: Side, net: &str) -> ::geom::Rect {
-    let w = crate::label::text_width(net) + 2.54;
+    let w = sch_model::text::text_width(net) + 2.54;
     const BACK: f64 = geom::GRID_50_MIL.pitch();
     const HALF: f64 = 2.0;
     match side {

@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, anyhow};
 use gordian_runtime::AgentRuntime;
 use gordian_runtime::config::PlacementEngineKind;
-use sch_floorplan::contract::PlacementEngine;
+use sch_model::engine::PlacementEngine;
 use sch_floorplan::live::{ArrangeReport, PlaceReport, PlacementBudget, Selection};
 use serde::Deserialize;
 use serde_json::{Value, json};

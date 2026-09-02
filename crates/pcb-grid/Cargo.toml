@@ -1,0 +1,11 @@
+[package]
+name = "pcb-grid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Occupancy-grid and A* kernel shared by the PCB routing engines."
+
+[dependencies]
+geom = { path = "../geom" }
+pcb-model = { path = "../pcb-model" }

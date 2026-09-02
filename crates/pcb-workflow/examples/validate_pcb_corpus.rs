@@ -14,9 +14,9 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use kicad::KicadInstallation;
 use kicad_footprint::FootprintCatalog;
-use pcb_drc::lint::lint;
+use pcb_engine::check as lint;
 use pcb_model::{Point2, RouteResult, RoutingView};
-use pcb_route_grid::router::geometry_violations;
+use pcb_engine::geometry_violations;
 use pcb_route_mesh::crossing::{
     AssignedCrossing, AssignmentFailure, CellJob, CrossingAssignment, TerminalKind,
     assign_crossings,
@@ -24,7 +24,7 @@ use pcb_route_mesh::crossing::{
 use pcb_route_mesh::detail::{self, DetailPassDiagnostic};
 use pcb_route_mesh::mesh::CapacityMesh;
 use pcb_route_mesh::pathing::global_route_with_mesh;
-use pcb_route_mesh::pipeline::{TunedRouteRun, route_tuned_with_diagnostics};
+use pcb_route_mesh::pipeline::TunedRouteRun;
 use pcb_workflow::corpus::{load_corpus_board, route_problem_for_placement, run_kicad_drc};
 
 const DEFAULT_BOARDS: &[&str] = &[
@@ -539,7 +539,7 @@ fn dump_detail_job_inspection(
         assignment.failures.len(),
         max_terms
     );
-    let (_, diagnostics) = detail::route_cells_with_diagnostics(problem, mesh, assignment);
+    let (_, diagnostics) = detail::route_cells_with_diagnostics(&pcb_engine::DRC, problem, mesh, assignment);
     dump_detail_pass_diagnostics(board_name, &diagnostics);
 
     let selected_nets = selected_detail_job_nets(problem, assignment, net_names);
@@ -1007,7 +1007,7 @@ fn route_with_mode(problem: &pcb_model::RoutingView, mode: RouterMode) -> TunedR
         | RouterMode::Mesh
         | RouterMode::MeshDetail
         | RouterMode::Sequential
-        | RouterMode::Grid => route_tuned_with_diagnostics(problem),
+        | RouterMode::Grid => pcb_engine::route_prepared(problem),
         RouterMode::MeshGlobal | RouterMode::MeshAssign => {
             unreachable!("mesh diagnostics are handled before copper routing")
         }

@@ -1,16 +1,10 @@
 use indexmap::IndexMap;
 
+pub use sch_model::item::refdes_key;
+
 pub type RefDes = String;
 pub type NetName = String;
 pub type BlockName = String;
-
-/// Natural refdes sort key: alpha prefix + numeric suffix, so `J2` < `J10`.
-/// Malformed suffixes sort last within their prefix.
-pub fn refdes_key(r: &str) -> (&str, u64) {
-    let split = r.find(|c: char| c.is_ascii_digit()).unwrap_or(r.len());
-    let (alpha, num) = r.split_at(split);
-    (alpha, num.parse().unwrap_or(u64::MAX))
-}
 
 /// The kernel design: parts, their pin→net map, and net attributes.
 ///

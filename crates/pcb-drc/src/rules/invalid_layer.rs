@@ -5,7 +5,8 @@
 //! catches it explicitly. Reports the solution traces first (in order), then the
 //! connections' route points (in order), matching the canonical report order.
 
-use crate::{DrcCtx, Finding, Rule};
+use crate::{DrcCtx, Rule};
+use pcb_model::Finding;
 
 /// Flags any solution trace or connection route point whose layer name resolves
 /// to `None` for this board's `layer_count`.

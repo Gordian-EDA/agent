@@ -15,7 +15,7 @@ use std::path::Path;
 use kicad::KicadInstallation;
 use sch_check::PlacePartsInput;
 use sch_doc::SchDoc;
-use sch_floorplan::contract::PlacementEngine;
+use sch_model::engine::PlacementEngine;
 use sch_floorplan::live::{self, Selection};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

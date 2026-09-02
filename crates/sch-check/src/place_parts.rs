@@ -12,7 +12,7 @@ use circuit_graph::netclass::is_power_net;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use indexmap::IndexMap;
-use sch_place::ir::{Band, Cell, Flow, LayoutIr, Relation, Side};
+use sch_model::ir::{Band, Cell, Flow, LayoutIr, Relation, Side};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

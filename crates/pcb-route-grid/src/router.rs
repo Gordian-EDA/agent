@@ -28,12 +28,13 @@
 //! ## Design constants
 //!
 //! The tunables are the [`AStarCosts`] bend/via weights plus the grid pitch and
-//! obstacle-inflation formulas (delegated to [`crate::grid`] so the grid and
+//! obstacle-inflation formulas (delegated to [`pcb_grid::grid`] so the grid and
 //! router agree).
 
-use crate::astar::{self, AStarCosts, DIAG_COST, State};
-use crate::grid::{self, RouteGrid};
+use pcb_grid::astar::{self, AStarCosts, DIAG_COST, State};
+use pcb_grid::grid::RouteGrid;
 use pcb_model::{
+    Budget, Drc, Finding, PcbRouter,
     Connection, FailedNet, LayerRef, Point2, RouteQuality, RouteResult, RouteSolution, RoutingView,
     Trace, Via, ViaSpan,
 };
@@ -42,27 +43,9 @@ use pcb_model::{
 pub const ENGINE: &str = "naive";
 const VIA_POINT_KEY_SCALE: f64 = 1000.0;
 
-/// The inner copper layers that carry a solid GND/VCC plane, CENTRED in the stack:
-/// 4-layer → In1,In2 (`{1,2}`); 6-layer → In2,In3 (`{2,3}`, leaving In1/In4 as signal);
-/// else none. Centring keeps the stack symmetric and, crucially, leaves the other inner
-/// layers as SIGNAL layers — the routing-capacity lever for dense BGA corridors. The
-/// router never routes ON these (a signal would short the plane); a via tunnels through.
-pub fn plane_layers(layer_count: usize) -> Vec<u32> {
-    // Inner copper layers are 1..=(L-2); the symmetric centred pair is the two middle
-    // ones: {L/2-1, L/2}. 4→{1,2}, 6→{2,3}, 8→{3,4}, 10→{4,5}, … — generalizing the
-    // original 4/6 cases so high-end stackups (8/10/12-layer) get proper GND/VCC planes
-    // AND the extra inner SIGNAL layers a dense BGA needs (8-layer → 6 signal layers vs
-    // 4 on a 6-layer board). Odd or <4 counts carry no plane (2-layer, or malformed).
-    if layer_count >= 4 && layer_count.is_multiple_of(2) {
-        vec![layer_count as u32 / 2 - 1, layer_count as u32 / 2]
-    } else {
-        Vec::new()
-    }
-}
-
-/// Bitmask form of [`plane_layers`] for [`crate::astar::AStarCosts::plane_mask`].
+/// Bitmask form of [`pcb_model::plane_layers`] for [`pcb_grid::astar::AStarCosts::plane_mask`].
 pub fn plane_mask_for(layer_count: usize) -> u32 {
-    plane_layers(layer_count)
+    pcb_model::plane_layers(layer_count as u32)
         .iter()
         .fold(0u32, |m, &l| m | (1u32 << l))
 }
@@ -77,7 +60,7 @@ pub fn plane_mask_for(layer_count: usize) -> u32 {
 /// sub-cell placement — no snap-displacement slack is needed; the A* applies the
 /// halo as a EUCLIDEAN disc, so it does not over-block on the diagonal.
 pub fn via_clear_radius_cells(problem: &RoutingView) -> usize {
-    let pitch = grid::grid_pitch(problem);
+    let pitch = problem.grid_pitch();
     // The grid is ALREADY inflated by (clearance + trace_half) around every obstacle,
     // so a trace-free cell already guarantees a *trace's* clearance. A via is wider
     // than a trace by exactly (via_radius - trace_half); only THAT extra radius must be
@@ -96,14 +79,14 @@ pub fn via_clear_radius_cells(problem: &RoutingView) -> usize {
 /// congestion artifacts; the tuned routing pipeline
 /// reconciles connectivity and lints both engines, so a violating or phantom
 /// route never ships when a cleaner one exists.
-pub fn route(problem: &RoutingView) -> RouteResult {
+pub fn route(drc: &dyn Drc, problem: &RoutingView) -> RouteResult {
     let costs = AStarCosts {
         via_clear_radius_cells: via_clear_radius_cells(problem),
         diag: DIAG_COST, // 8-way: octilinear is the default (the per-net swept-body
         // radius is set in `route_with`, keeping diagonals DRC-safe full-board)
         ..AStarCosts::default()
     };
-    route_iterated(problem, costs)
+    route_iterated(drc, problem, costs)
 }
 
 /// The strict ORTHOGONAL (4-way) naive route — `diag = u32::MAX`, so no diagonal is ever
@@ -118,12 +101,12 @@ pub fn route(problem: &RoutingView) -> RouteResult {
 /// routed nets, never regress a via-field board. The placement [`crate::router`] ranker
 /// (`pcb-place`'s `GridAstarRanker`) also routes through this so the layout choice stays
 /// invariant to the routing diagonal default.
-pub fn route_orthogonal(problem: &RoutingView) -> RouteResult {
+pub fn route_orthogonal(drc: &dyn Drc, problem: &RoutingView) -> RouteResult {
     let costs = AStarCosts {
         via_clear_radius_cells: via_clear_radius_cells(problem),
         ..AStarCosts::default() // diag = u32::MAX (orthogonal), diag_body_radius inert
     };
-    route_iterated(problem, costs)
+    route_iterated(drc, problem, costs)
 }
 
 /// One deterministic strict-orthogonal routing pass, with no alternative net
@@ -134,7 +117,7 @@ pub fn route_orthogonal(problem: &RoutingView) -> RouteResult {
 /// candidate multiplies badly on high-terminal boards, while this pass preserves
 /// the same shortest-first order, clearance model, and DRC reconciliation as the
 /// first (and normally winning) strict pass.
-pub fn route_orthogonal_single_pass(problem: &RoutingView) -> RouteResult {
+pub fn route_orthogonal_single_pass(drc: &dyn Drc, problem: &RoutingView) -> RouteResult {
     let costs = AStarCosts {
         via_clear_radius_cells: via_clear_radius_cells(problem),
         ..AStarCosts::default()
@@ -145,7 +128,7 @@ pub fn route_orthogonal_single_pass(problem: &RoutingView) -> RouteResult {
         .next()
         .expect("net_order_portfolio always yields the baseline order");
     let mut result = route_with_order(problem, costs, first);
-    reconcile_with_options(problem, &mut result, false);
+    reconcile_with_options(drc, problem, &mut result, false);
     result
 }
 
@@ -153,8 +136,8 @@ pub fn route_orthogonal_single_pass(problem: &RoutingView) -> RouteResult {
 /// clearance scan (the orthogonal twin of [`route_lenient`]). The other orthogonal
 /// candidate [`GridAStarRouter`]'s arbiter scores against [`route_orthogonal`]; a board
 /// whose orthogonal win needs the no-via-scan variant is not lost to a strict-only one.
-pub fn route_orthogonal_lenient(problem: &RoutingView) -> RouteResult {
-    route_iterated(problem, AStarCosts::default()) // diag = u32::MAX, no via-scan
+pub fn route_orthogonal_lenient(drc: &dyn Drc, problem: &RoutingView) -> RouteResult {
+    route_iterated(drc, problem, AStarCosts::default()) // diag = u32::MAX, no via-scan
 }
 
 /// Route, then RIP-UP RETRY: if any nets failed, re-route from a fresh grid with those
@@ -163,18 +146,18 @@ pub fn route_orthogonal_lenient(problem: &RoutingView) -> RouteResult {
 /// retry may replace the incumbent only when it improves faults/failed-net count, or
 /// ties those and reduces vias/wirelength. This relieves the greedy router's corridor
 /// contention without a full rip-up engine.
-fn route_iterated(problem: &RoutingView, costs: AStarCosts) -> RouteResult {
+fn route_iterated(drc: &dyn Drc, problem: &RoutingView, costs: AStarCosts) -> RouteResult {
     let metrics = net_order_metrics(problem);
     let empty = std::collections::BTreeSet::new();
-    let mut best = route_order_portfolio(problem, costs, &empty, &metrics);
+    let mut best = route_order_portfolio(drc, problem, costs, &empty, &metrics);
     for _ in 0..3 {
         if best.failed.is_empty() {
             break;
         }
         let pri: std::collections::BTreeSet<String> =
             best.failed.iter().map(|f| f.connection.clone()).collect();
-        let cand = route_order_portfolio(problem, costs, &pri, &metrics);
-        if grid_candidate_better(problem, &cand, &best) {
+        let cand = route_order_portfolio(drc, problem, costs, &pri, &metrics);
+        if grid_candidate_better(drc, problem, &cand, &best) {
             best = cand;
         } else {
             break;
@@ -190,6 +173,7 @@ fn route_iterated(problem: &RoutingView, costs: AStarCosts) -> RouteResult {
 /// portfolio" idea used by negotiated routing while preserving the grid router's
 /// greedy semantics and fast clean, via-free board path.
 fn route_order_portfolio(
+    drc: &dyn Drc,
     problem: &RoutingView,
     costs: AStarCosts,
     priority: &std::collections::BTreeSet<String>,
@@ -200,7 +184,7 @@ fn route_order_portfolio(
         .next()
         .expect("net_order_portfolio always yields the baseline order");
     let mut best = route_with_order(problem, costs, first);
-    reconcile_with_options(problem, &mut best, costs.diag != u32::MAX);
+    reconcile_with_options(drc, problem, &mut best, costs.diag != u32::MAX);
 
     if grid_portfolio_can_short_circuit(&best) {
         return best;
@@ -208,8 +192,8 @@ fn route_order_portfolio(
 
     for order in orders {
         let mut cand = route_with_order(problem, costs, order);
-        reconcile_with_options(problem, &mut cand, costs.diag != u32::MAX);
-        if grid_candidate_better(problem, &cand, &best) {
+        reconcile_with_options(drc, problem, &mut cand, costs.diag != u32::MAX);
+        if grid_candidate_better(drc, problem, &cand, &best) {
             best = cand;
             if grid_portfolio_can_short_circuit(&best) {
                 break;
@@ -223,11 +207,11 @@ fn grid_portfolio_can_short_circuit(result: &RouteResult) -> bool {
     result.failed.is_empty() && result.solution.vias.is_empty()
 }
 
-fn grid_quality(problem: &RoutingView, result: &RouteResult) -> RouteQuality {
+fn grid_quality(drc: &dyn Drc, problem: &RoutingView, result: &RouteResult) -> RouteQuality {
     RouteQuality::of(
         problem,
         result,
-        geometry_violations(problem, &result.solution),
+        drc.geometry_violations(problem, &result.solution),
     )
 }
 
@@ -235,12 +219,13 @@ fn grid_quality(problem: &RoutingView, result: &RouteResult) -> RouteQuality {
 /// primary, then failed-net count, then fewer vias, then shorter copper. Exact
 /// ties keep the incumbent so the baseline order remains the deterministic path.
 fn grid_candidate_better(
+    drc: &dyn Drc,
     problem: &RoutingView,
     candidate: &RouteResult,
     incumbent: &RouteResult,
 ) -> bool {
-    let c = grid_quality(problem, candidate);
-    let i = grid_quality(problem, incumbent);
+    let c = grid_quality(drc, problem, candidate);
+    let i = grid_quality(drc, problem, incumbent);
     if c.faults() != i.faults() {
         c.faults() < i.faults()
     } else if c.failed_nets != i.failed_nets {
@@ -259,12 +244,12 @@ fn grid_candidate_better(
 /// strict [`route`] and keeps whichever the lint scores cleanest, and the cross-engine
 /// selector lints both engines. The board picks the strictness it needs. Also 8-way
 /// (diagonals on), kept DRC-safe by the per-net swept-body radius set in `route_with`.
-pub fn route_lenient(problem: &RoutingView) -> RouteResult {
+pub fn route_lenient(drc: &dyn Drc, problem: &RoutingView) -> RouteResult {
     let costs = AStarCosts {
         diag: DIAG_COST,
         ..AStarCosts::default()
     };
-    route_iterated(problem, costs)
+    route_iterated(drc, problem, costs)
 }
 
 /// Make a slice-1 result DRC-honest: the lint is the authority. First drop any
@@ -273,23 +258,24 @@ pub fn route_lenient(problem: &RoutingView) -> RouteResult {
 /// unconnected or shorted. Every dropped net is reported failed, so `failed`
 /// never undercounts and the surviving copper is DRC-clean.
 #[cfg(test)]
-fn reconcile(problem: &RoutingView, result: &mut RouteResult) {
-    reconcile_with_options(problem, result, false);
+fn reconcile(drc: &dyn Drc, problem: &RoutingView, result: &mut RouteResult) {
+    reconcile_with_options(drc, problem, result, false);
 }
 
 fn reconcile_with_options(
+    drc: &dyn Drc,
     problem: &RoutingView,
     result: &mut RouteResult,
     allow_octilinear_shortcuts: bool,
 ) {
     if allow_octilinear_shortcuts {
-        shortcut_octilinear_traces(problem, &mut result.solution);
+        shortcut_octilinear_traces(drc, problem, &mut result.solution);
     }
-    pull_orthogonal_trace_corners(problem, &mut result.solution);
+    pull_orthogonal_trace_corners(drc, problem, &mut result.solution);
     drop_duplicate_vias(&mut result.solution);
-    drop_covered_vias(problem, &mut result.solution);
-    let mut dropped = pcb_drc::lint::drop_violating_copper(problem, &mut result.solution);
-    dropped.extend(pcb_drc::lint::drop_unconnected_copper(
+    drop_covered_vias(drc, problem, &mut result.solution);
+    let mut dropped = drc.drop_violating_copper(problem, &mut result.solution);
+    dropped.extend(drc.drop_unconnected_copper(
         problem,
         &mut result.solution,
     ));
@@ -315,12 +301,12 @@ fn reconcile_with_options(
 /// Pull grid trace corners tight with conservative straight/45-degree shortcuts.
 /// A candidate replaces `p[i]..p[j]` with the direct segment only when it shortens
 /// copper and introduces no new lint finding.
-fn shortcut_octilinear_traces(problem: &RoutingView, solution: &mut RouteSolution) {
+fn shortcut_octilinear_traces(drc: &dyn Drc, problem: &RoutingView, solution: &mut RouteSolution) {
     if !has_octilinear_shortcut_candidate_shape(solution) {
         return;
     }
 
-    let mut baseline = pcb_drc::lint::lint(problem, solution);
+    let mut baseline = drc.check(problem, solution);
     let mut lint_budget = 256usize;
 
     loop {
@@ -350,7 +336,7 @@ fn shortcut_octilinear_traces(problem: &RoutingView, solution: &mut RouteSolutio
 
                     let mut candidate = solution.clone();
                     candidate.traces[ti].path.drain(i + 1..j);
-                    let findings = pcb_drc::lint::lint(problem, &candidate);
+                    let findings = drc.check(problem, &candidate);
                     lint_budget -= 1;
                     if !introduces_new_findings(&baseline, &findings) {
                         *solution = candidate;
@@ -397,12 +383,12 @@ fn has_octilinear_shortcut_candidate_shape(solution: &RouteSolution) -> bool {
 /// one of the two Manhattan L-shapes and is accepted only when it shortens copper
 /// without introducing any new lint finding, so via anchors and existing DRC
 /// semantics remain under the same oracle as reconciliation.
-fn pull_orthogonal_trace_corners(problem: &RoutingView, solution: &mut RouteSolution) {
+fn pull_orthogonal_trace_corners(drc: &dyn Drc, problem: &RoutingView, solution: &mut RouteSolution) {
     if !has_orthogonal_pull_candidate_shape(solution) {
         return;
     }
 
-    let mut baseline = pcb_drc::lint::lint(problem, solution);
+    let mut baseline = drc.check(problem, solution);
     let mut lint_budget = 256usize;
 
     loop {
@@ -437,7 +423,7 @@ fn pull_orthogonal_trace_corners(problem: &RoutingView, solution: &mut RouteSolu
                             geom::Polyline::new(candidate.traces[ti].path.clone())
                                 .simplify()
                                 .into_points();
-                        let findings = pcb_drc::lint::lint(problem, &candidate);
+                        let findings = drc.check(problem, &candidate);
                         lint_budget -= 1;
                         if !introduces_new_findings(&baseline, &findings)
                             && candidate.metrics().wirelength + 1e-9 < solution.metrics().wirelength
@@ -516,8 +502,8 @@ fn via_span_key(span: &ViaSpan) -> (u32, u32, bool, bool) {
     }
 }
 
-fn drop_covered_vias(problem: &RoutingView, solution: &mut RouteSolution) {
-    let mut baseline = pcb_drc::lint::lint(problem, solution);
+fn drop_covered_vias(drc: &dyn Drc, problem: &RoutingView, solution: &mut RouteSolution) {
+    let mut baseline = drc.check(problem, solution);
     let mut idx = 0usize;
     while idx < solution.vias.len() {
         if !via_is_covered_by_another(problem, solution, idx) {
@@ -527,7 +513,7 @@ fn drop_covered_vias(problem: &RoutingView, solution: &mut RouteSolution) {
 
         let mut candidate = solution.clone();
         candidate.vias.remove(idx);
-        let findings = pcb_drc::lint::lint(problem, &candidate);
+        let findings = drc.check(problem, &candidate);
         if !introduces_new_findings(&baseline, &findings)
             && candidate.metrics().via_count < solution.metrics().via_count
         {
@@ -540,8 +526,8 @@ fn drop_covered_vias(problem: &RoutingView, solution: &mut RouteSolution) {
 }
 
 fn introduces_new_findings(
-    baseline: &[pcb_drc::lint::DrcViolation],
-    candidate: &[pcb_drc::lint::DrcViolation],
+    baseline: &[Finding],
+    candidate: &[Finding],
 ) -> bool {
     candidate
         .iter()
@@ -605,7 +591,7 @@ fn route_with_order(problem: &RoutingView, costs: AStarCosts, order: Vec<usize>)
     // power trace is spaced correctly (conservative — with no per-net widths it is the
     // old min_trace_width + clearance). Marked as a Chebyshev radius around each routed
     // cell so later nets keep their distance while the owning net routes freely through.
-    let pitch = grid::grid_pitch(problem);
+    let pitch = problem.grid_pitch();
     let min_w = problem.min_trace_width;
 
     let mut traces: Vec<Trace> = Vec::new();
@@ -1759,28 +1745,28 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
 struct GridAStarRouter;
 
 impl GridAStarRouter {
-    fn route(&self, problem: &RoutingView) -> RouteResult {
-        let strict = route(problem);
-        let lenient = route_lenient(problem);
-        let diag = if grid_candidate_better(problem, &lenient, &strict) {
+    fn route_with_drc(&self, drc: &dyn Drc, problem: &RoutingView) -> RouteResult {
+        let strict = route(drc, problem);
+        let lenient = route_lenient(drc, problem);
+        let diag = if grid_candidate_better(drc, problem, &lenient, &strict) {
             lenient
         } else {
             strict
         };
-        if grid_candidate_can_skip_orthogonal(problem, &diag) {
+        if grid_candidate_can_skip_orthogonal(drc, problem, &diag) {
             return diag; // the 8-way pass aced the board without vias
         }
         // The ORTHOGONAL candidate: the better-scoring of its strict (via-scan) and lenient
         // (no-scan) variants, by the SAME key. Keep it only when STRICTLY better;
         // a genuine tie keeps the neater 45° diagonal.
-        let os = route_orthogonal(problem);
-        let ol = route_orthogonal_lenient(problem);
-        let ortho = if grid_candidate_better(problem, &ol, &os) {
+        let os = route_orthogonal(drc, problem);
+        let ol = route_orthogonal_lenient(drc, problem);
+        let ortho = if grid_candidate_better(drc, problem, &ol, &os) {
             ol
         } else {
             os
         };
-        if grid_candidate_better(problem, &ortho, &diag) {
+        if grid_candidate_better(drc, problem, &ortho, &diag) {
             ortho
         } else {
             diag
@@ -1790,29 +1776,82 @@ impl GridAStarRouter {
 
 /// Run the concrete grid routing primitive used by the Gordian engine's rescue
 /// phase. This is an implementation function, not an engine contract.
-pub fn route_grid(problem: &RoutingView) -> RouteResult {
-    GridAStarRouter.route(problem)
+pub fn route_grid(drc: &dyn Drc, problem: &RoutingView) -> RouteResult {
+    GridAStarRouter.route_with_drc(drc, problem)
 }
 
-fn grid_candidate_can_skip_orthogonal(problem: &RoutingView, result: &RouteResult) -> bool {
-    let q = grid_quality(problem, result);
+/// One deterministic strict-orthogonal grid pass behind the [`PcbRouter`]
+/// contract — no alternative net orders, no rip-up retries.
+///
+/// The cheap seed a composite router starts from, and the pass a placement
+/// probe ranks candidate boards with: same shortest-first order, clearance
+/// model, and DRC reconciliation as the full arbiter's first (and normally
+/// winning) pass, at a fraction of its cost.
+pub struct GridSinglePassRouter<'a> {
+    drc: &'a dyn Drc,
+}
+
+impl<'a> GridSinglePassRouter<'a> {
+    /// A single-pass router that reconciles its copper against `drc`.
+    pub const fn new(drc: &'a dyn Drc) -> Self {
+        GridSinglePassRouter { drc }
+    }
+}
+
+impl PcbRouter for GridSinglePassRouter<'_> {
+    fn name(&self) -> &'static str {
+        ENGINE
+    }
+
+    fn route(&self, view: &RoutingView, budget: &Budget) -> RouteResult {
+        if budget.expired() {
+            return RouteResult::abandoned(view, ENGINE, "routing budget expired before the pass");
+        }
+        route_orthogonal_single_pass(self.drc, view)
+    }
+}
+
+/// The grid-A* routing leaf behind the [`PcbRouter`] contract, with its
+/// design-rule oracle injected.
+pub struct GridRouter<'a> {
+    drc: &'a dyn Drc,
+}
+
+impl<'a> GridRouter<'a> {
+    /// A router that reconciles its copper against `drc`.
+    pub const fn new(drc: &'a dyn Drc) -> Self {
+        GridRouter { drc }
+    }
+}
+
+impl PcbRouter for GridRouter<'_> {
+    fn name(&self) -> &'static str {
+        ENGINE
+    }
+
+    /// The per-board diagonal arbiter ([`route_grid`]). An already-expired budget
+    /// returns immediately with every connection reported failed rather than
+    /// starting a search it cannot finish.
+    fn route(&self, view: &RoutingView, budget: &Budget) -> RouteResult {
+        if budget.expired() {
+            return RouteResult::abandoned(view, ENGINE, "routing budget expired before the pass");
+        }
+        route_grid(self.drc, view)
+    }
+}
+
+fn grid_candidate_can_skip_orthogonal(drc: &dyn Drc, problem: &RoutingView, result: &RouteResult) -> bool {
+    let q = grid_quality(drc, problem, result);
     q.faults() == 0 && q.via_count == 0
-}
-
-/// Count the GEOMETRY DRC violations of a solution (clearance / width / via /
-/// bounds / invalid layer) — excluding connectivity, which already correlates
-/// with the failed-net count. The router's own DRC authority.
-pub fn geometry_violations(problem: &RoutingView, solution: &RouteSolution) -> usize {
-    pcb_drc::lint::lint(problem, solution)
-        .iter()
-        .filter(|v| !matches!(v, pcb_drc::lint::DrcViolation::Connectivity { .. }))
-        .count()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pcb_drc::connectivity;
+    use pcb_drc::{StandardDrc, connectivity};
+
+    /// The production rule set, injected into every routing call under test.
+    static DRC: StandardDrc = StandardDrc;
     use pcb_model::{Connection, Obstacle, Rect, RoutePoint};
     use std::path::Path;
 
@@ -1898,15 +1937,15 @@ mod tests {
         // Without the stub these pins are unroutable (their own cell is BlockedAll);
         // with it, at least one escapes — and the emitted copper is GEOMETRY-clean
         // (reconcile drops any clearance/width/via/short violator before it ships).
-        let result = route(&problem);
+        let result = route(&DRC, &problem);
         let routed = problem.connections.len() - result.failed.len();
         assert!(
             routed >= 1,
             "the escape stub must route at least one enclosed QFP pin"
         );
-        let geom: Vec<_> = pcb_drc::lint::lint(&problem, &result.solution)
+        let geom: Vec<_> = DRC.check(&problem, &result.solution)
             .into_iter()
-            .filter(|v| !matches!(v, pcb_drc::lint::DrcViolation::Connectivity { .. }))
+            .filter(|v| !matches!(v, Finding::Connectivity { .. }))
             .collect();
         assert!(
             geom.is_empty(),
@@ -1972,7 +2011,7 @@ mod tests {
             fixed_copper: Default::default(),
             nets: None,
         };
-        let r = route(&p);
+        let r = route(&DRC, &p);
         assert!(
             r.failed.is_empty(),
             "corner-to-corner net must route: {:?}",
@@ -1990,7 +2029,7 @@ mod tests {
 
         // The orthogonal candidate (the per-board arbiter's via-field fallback) routes the
         // SAME net with no diagonal segment at all.
-        let ro = route_orthogonal(&p);
+        let ro = route_orthogonal(&DRC, &p);
         assert!(
             ro.failed.is_empty(),
             "orthogonal must also route this net: {:?}",
@@ -2008,7 +2047,7 @@ mod tests {
 
         // A clean via-free baseline short-circuits the full strict portfolio, so
         // the explicitly bounded placement-ranking pass is byte-identical here.
-        assert_eq!(route_orthogonal_single_pass(&p), ro);
+        assert_eq!(route_orthogonal_single_pass(&DRC, &p), ro);
     }
 
     /// Two adjacent nets that both want a parallel 45° diagonal corridor must emit
@@ -2063,12 +2102,12 @@ mod tests {
             fixed_copper: Default::default(),
             nets: None,
         };
-        let r = route(&p);
+        let r = route(&DRC, &p);
         // Whatever routes (the body check may force B onto a non-parallel route) must be
         // geometry-clean — never a sub-clearance diagonal short.
-        let geom: Vec<_> = pcb_drc::lint::lint(&p, &r.solution)
+        let geom: Vec<_> = DRC.check(&p, &r.solution)
             .into_iter()
-            .filter(|v| !matches!(v, pcb_drc::lint::DrcViolation::Connectivity { .. }))
+            .filter(|v| !matches!(v, Finding::Connectivity { .. }))
             .collect();
         assert!(
             geom.is_empty(),
@@ -2155,7 +2194,7 @@ mod tests {
             nets: None,
         };
 
-        let result = route(&problem);
+        let result = route(&DRC, &problem);
         assert!(
             result.failed.is_empty(),
             "the enclosed inner ball must escape to its inner layer, failed: {:?}",
@@ -2176,9 +2215,9 @@ mod tests {
             "the escape must route on the assigned inner signal layer"
         );
         // The emitted copper is geometry-clean (the lint is the authority).
-        let geom: Vec<_> = pcb_drc::lint::lint(&problem, &result.solution)
+        let geom: Vec<_> = DRC.check(&problem, &result.solution)
             .into_iter()
-            .filter(|v| !matches!(v, pcb_drc::lint::DrcViolation::Connectivity { .. }))
+            .filter(|v| !matches!(v, Finding::Connectivity { .. }))
             .collect();
         assert!(
             geom.is_empty(),
@@ -2247,7 +2286,7 @@ mod tests {
             fixed_copper: Default::default(),
             nets: None,
         };
-        let result = route(&problem);
+        let result = route(&DRC, &problem);
         assert_eq!(
             result.failed.len(),
             1,
@@ -2259,13 +2298,13 @@ mod tests {
     fn plane_layers_are_the_centred_pair_for_every_even_stackup() {
         // 2-layer carries no plane; even ≥4 gets the two CENTRED inner layers, leaving
         // the rest as signal. Regression guard for the generalized formula.
-        assert_eq!(plane_layers(2), Vec::<u32>::new());
-        assert_eq!(plane_layers(4), vec![1, 2]);
-        assert_eq!(plane_layers(6), vec![2, 3]);
-        assert_eq!(plane_layers(8), vec![3, 4]);
-        assert_eq!(plane_layers(10), vec![4, 5]);
+        assert_eq!(pcb_model::plane_layers(2), Vec::<u32>::new());
+        assert_eq!(pcb_model::plane_layers(4), vec![1, 2]);
+        assert_eq!(pcb_model::plane_layers(6), vec![2, 3]);
+        assert_eq!(pcb_model::plane_layers(8), vec![3, 4]);
+        assert_eq!(pcb_model::plane_layers(10), vec![4, 5]);
         // Odd counts are malformed → no plane (never artificially place one).
-        assert_eq!(plane_layers(5), Vec::<u32>::new());
+        assert_eq!(pcb_model::plane_layers(5), Vec::<u32>::new());
     }
 
     fn load(name: &str) -> RoutingView {
@@ -2280,7 +2319,7 @@ mod tests {
     #[test]
     fn led_r_routes_fully_and_is_connectivity_clean() {
         let p = load("led-r.json");
-        let result = route(&p);
+        let result = route(&DRC, &p);
         assert!(
             result.failed.is_empty(),
             "led-r.json should route fully, failed: {:?}",
@@ -2293,7 +2332,7 @@ mod tests {
     #[test]
     fn quad_routes_fully_with_a_via_and_is_connectivity_clean() {
         let p = load("quad.json");
-        let result = route(&p);
+        let result = route(&DRC, &p);
         assert!(
             result.failed.is_empty(),
             "quad.json should route fully, failed: {:?}",
@@ -2310,8 +2349,8 @@ mod tests {
     #[test]
     fn solution_serialization_is_deterministic() {
         let p = load("quad.json");
-        let a = route(&p);
-        let b = route(&p);
+        let a = route(&DRC, &p);
+        let b = route(&DRC, &p);
         let ja = serde_json::to_string(&a.solution).unwrap();
         let jb = serde_json::to_string(&b.solution).unwrap();
         assert_eq!(ja, jb, "two routes must serialize byte-equal");
@@ -2464,7 +2503,7 @@ mod tests {
             "same-layer leg should take the legal planar detour before considering a cheap via hop: {:?}",
             result.solution.vias
         );
-        let violations = pcb_drc::lint::lint(&problem, &result.solution);
+        let violations = DRC.check(&problem, &result.solution);
         assert!(violations.is_empty(), "{violations:?}");
     }
 
@@ -2513,14 +2552,14 @@ mod tests {
             nets: None,
         };
 
-        let result = GridAStarRouter.route(&problem);
+        let result = GridAStarRouter.route_with_drc(&DRC, &problem);
 
         assert!(result.failed.is_empty(), "{:?}", result.failed);
         assert!(
             !result.solution.vias.is_empty(),
             "foreign residual route copper should keep the via fallback available"
         );
-        let violations = pcb_drc::lint::lint(&problem, &result.solution);
+        let violations = DRC.check(&problem, &result.solution);
         assert!(violations.is_empty(), "{violations:?}");
     }
 
@@ -3490,11 +3529,11 @@ mod tests {
         let via_free_long = result_with(0, 11.0);
         let shorter = result_with(0, 9.0);
 
-        assert!(grid_candidate_better(&p, &via_free_long, &via_heavy_short));
-        assert!(!grid_candidate_better(&p, &via_heavy_short, &via_free_long));
-        assert!(grid_candidate_better(&p, &shorter, &via_free_long));
+        assert!(grid_candidate_better(&DRC, &p, &via_free_long, &via_heavy_short));
+        assert!(!grid_candidate_better(&DRC, &p, &via_heavy_short, &via_free_long));
+        assert!(grid_candidate_better(&DRC, &p, &shorter, &via_free_long));
         assert!(
-            !grid_candidate_better(&p, &via_free_long, &via_free_long),
+            !grid_candidate_better(&DRC, &p, &via_free_long, &via_free_long),
             "exact ties keep the incumbent"
         );
     }
@@ -3643,7 +3682,7 @@ mod tests {
         };
         let before = routed.solution.metrics().wirelength;
 
-        reconcile_with_options(&p, &mut routed, true);
+        reconcile_with_options(&DRC, &p, &mut routed, true);
 
         assert_eq!(
             routed.solution.traces[0].path,
@@ -3651,7 +3690,7 @@ mod tests {
         );
         assert!(routed.solution.metrics().wirelength < before);
         assert!(routed.failed.is_empty(), "{:?}", routed.failed);
-        assert!(pcb_drc::lint::lint(&p, &routed.solution).is_empty());
+        assert!(DRC.check(&p, &routed.solution).is_empty());
     }
 
     #[test]
@@ -3715,23 +3754,23 @@ mod tests {
             failed: vec![],
             engine: ENGINE.to_owned(),
         };
-        let before = pcb_drc::lint::lint(&p, &routed.solution);
+        let before = DRC.check(&p, &routed.solution);
         assert!(
             before.iter().any(|finding| matches!(
                 finding,
-                pcb_drc::lint::DrcViolation::ClearanceTraceObstacle { .. }
+                Finding::ClearanceTraceObstacle { .. }
             )),
             "fixture should start with a trace-obstacle clearance finding: {before:?}"
         );
 
-        reconcile_with_options(&p, &mut routed, true);
+        reconcile_with_options(&DRC, &p, &mut routed, true);
 
         assert_eq!(
             routed.solution.traces[0].path,
             vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 4.0, y: 4.0 }]
         );
         assert!(routed.failed.is_empty(), "{:?}", routed.failed);
-        assert!(pcb_drc::lint::lint(&p, &routed.solution).is_empty());
+        assert!(DRC.check(&p, &routed.solution).is_empty());
     }
 
     #[test]
@@ -3792,7 +3831,7 @@ mod tests {
         };
         let before = routed.solution.metrics().wirelength;
 
-        reconcile(&p, &mut routed);
+        reconcile(&DRC, &p, &mut routed);
 
         assert_eq!(
             routed.solution.traces[0].path,
@@ -3804,7 +3843,7 @@ mod tests {
         );
         assert!(routed.solution.metrics().wirelength < before);
         assert!(routed.failed.is_empty(), "{:?}", routed.failed);
-        assert!(pcb_drc::lint::lint(&p, &routed.solution).is_empty());
+        assert!(DRC.check(&p, &routed.solution).is_empty());
     }
 
     fn layer_change_result_with_vias(vias: Vec<Via>) -> (RoutingView, RouteResult) {
@@ -3918,7 +3957,7 @@ mod tests {
             engine: ENGINE.to_owned(),
         };
         assert!(
-            grid_candidate_can_skip_orthogonal(&top_problem, &via_free),
+            grid_candidate_can_skip_orthogonal(&DRC, &top_problem, &via_free),
             "clean via-free 8-way result should keep the fast top-level path"
         );
 
@@ -3930,9 +3969,9 @@ mod tests {
             span: ViaSpan::Through,
         };
         let (layer_problem, via_heavy) = layer_change_result_with_vias(vec![via]);
-        assert!(pcb_drc::lint::lint(&layer_problem, &via_heavy.solution).is_empty());
+        assert!(DRC.check(&layer_problem, &via_heavy.solution).is_empty());
         assert!(
-            !grid_candidate_can_skip_orthogonal(&layer_problem, &via_heavy),
+            !grid_candidate_can_skip_orthogonal(&DRC, &layer_problem, &via_heavy),
             "clean via-heavy 8-way result should still compete with orthogonal fallback"
         );
 
@@ -3942,7 +3981,7 @@ mod tests {
             reason: "test".to_owned(),
         });
         assert!(
-            !grid_candidate_can_skip_orthogonal(&top_problem, &failed),
+            !grid_candidate_can_skip_orthogonal(&DRC, &top_problem, &failed),
             "failed 8-way result must run the orthogonal fallback"
         );
     }
@@ -3958,12 +3997,12 @@ mod tests {
         };
         let (p, mut routed) = layer_change_result_with_vias(vec![via.clone(), via]);
 
-        reconcile(&p, &mut routed);
+        reconcile(&DRC, &p, &mut routed);
 
         assert!(routed.failed.is_empty(), "{:?}", routed.failed);
         assert_eq!(routed.solution.vias.len(), 1);
         assert!(matches!(routed.solution.vias[0].span, ViaSpan::Through));
-        assert!(pcb_drc::lint::lint(&p, &routed.solution).is_empty());
+        assert!(DRC.check(&p, &routed.solution).is_empty());
     }
 
     #[test]
@@ -3989,12 +4028,12 @@ mod tests {
             },
         ]);
 
-        reconcile(&p, &mut routed);
+        reconcile(&DRC, &p, &mut routed);
 
         assert!(routed.failed.is_empty(), "{:?}", routed.failed);
         assert_eq!(routed.solution.vias.len(), 1);
         assert!(matches!(routed.solution.vias[0].span, ViaSpan::Through));
-        assert!(pcb_drc::lint::lint(&p, &routed.solution).is_empty());
+        assert!(DRC.check(&p, &routed.solution).is_empty());
     }
 
     #[test]
@@ -4026,7 +4065,7 @@ mod tests {
         // Regression: grid layer 1 on a 2-layer board is "bottom", not
         // "inner1" (which LayerRef::index rejects for layer_count = 2).
         let p = load("quad.json");
-        let r = route(&p);
+        let r = route(&DRC, &p);
         assert!(r.failed.is_empty());
         let mut saw_bottom = false;
         for t in &r.solution.traces {

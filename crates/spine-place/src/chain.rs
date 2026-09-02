@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 use circuit_graph::netclass::is_connector_like;
-use sch_place::item::{Incidence, Item};
+use sch_model::item::{Incidence, Item};
 
 use crate::net::NetClass;
 
@@ -301,8 +301,8 @@ mod tests {
     use super::*;
     use crate::net::classify_nets;
     use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
-    use sch_place::ir::LayoutIr;
-    use sch_place::item::Item;
+    use sch_model::ir::LayoutIr;
+    use sch_model::item::Item;
 
     fn geom(lib: &str, npins: usize) -> SymbolGeometry {
         SymbolGeometry {

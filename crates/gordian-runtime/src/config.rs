@@ -7,7 +7,7 @@
 //! the resulting values into core constructors.
 
 pub use gordian_llm::{DEFAULT_MAX_TOKENS, LlmConfig, LlmReasoningEffort};
-pub use sch_place::place::PlacementEngineKind;
+pub use sch_model::place::PlacementEngineKind;
 use std::fmt;
 use std::path::PathBuf;
 

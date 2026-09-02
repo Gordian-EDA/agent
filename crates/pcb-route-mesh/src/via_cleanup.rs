@@ -1,10 +1,10 @@
-use pcb_model::{RouteSolution, RoutingView, ViaSpan};
+use pcb_model::{Drc, RouteSolution, RoutingView, ViaSpan};
 
 const VIA_POINT_KEY_SCALE: f64 = 1e9;
 
-pub(crate) fn normalize_redundant_vias(problem: &RoutingView, solution: &mut RouteSolution) {
+pub(crate) fn normalize_redundant_vias(drc: &dyn Drc, problem: &RoutingView, solution: &mut RouteSolution) {
     drop_duplicate_vias(solution);
-    drop_covered_vias(problem, solution);
+    drop_covered_vias(drc, problem, solution);
 }
 
 fn drop_duplicate_vias(solution: &mut RouteSolution) {
@@ -27,8 +27,8 @@ fn via_span_key(span: &ViaSpan) -> (u32, u32, bool, bool) {
     }
 }
 
-fn drop_covered_vias(problem: &RoutingView, solution: &mut RouteSolution) {
-    let mut baseline = pcb_drc::lint::lint(problem, solution);
+fn drop_covered_vias(drc: &dyn Drc, problem: &RoutingView, solution: &mut RouteSolution) {
+    let mut baseline = drc.check(problem, solution);
     let mut idx = 0usize;
     while idx < solution.vias.len() {
         if !via_is_covered_by_another(problem, solution, idx) {
@@ -38,7 +38,7 @@ fn drop_covered_vias(problem: &RoutingView, solution: &mut RouteSolution) {
 
         let mut candidate = solution.clone();
         candidate.vias.remove(idx);
-        let findings = pcb_drc::lint::lint(problem, &candidate);
+        let findings = drc.check(problem, &candidate);
         if !introduces_new_findings(&baseline, &findings)
             && candidate.metrics().via_count < solution.metrics().via_count
         {
@@ -51,8 +51,8 @@ fn drop_covered_vias(problem: &RoutingView, solution: &mut RouteSolution) {
 }
 
 fn introduces_new_findings(
-    baseline: &[pcb_drc::lint::DrcViolation],
-    candidate: &[pcb_drc::lint::DrcViolation],
+    baseline: &[pcb_model::Finding],
+    candidate: &[pcb_model::Finding],
 ) -> bool {
     candidate
         .iter()
@@ -89,6 +89,10 @@ fn via_layer_span(problem: &RoutingView, span: &ViaSpan) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    use pcb_model::Drc as _;
+
+static DRC: pcb_drc::StandardDrc = pcb_drc::StandardDrc;
+
     use super::*;
     use pcb_model::{Connection, LayerRef, Point2, Rect, RoutePoint, Trace, Via, ViaSpan};
 
@@ -167,11 +171,11 @@ mod tests {
         let via = through_via();
         let (problem, mut solution) = solution_with_vias(vec![via.clone(), via]);
 
-        normalize_redundant_vias(&problem, &mut solution);
+        normalize_redundant_vias(&DRC, &problem, &mut solution);
 
         assert_eq!(solution.vias.len(), 1);
         assert!(matches!(solution.vias[0].span, ViaSpan::Through));
-        assert!(pcb_drc::lint::lint(&problem, &solution).is_empty());
+        assert!(DRC.check(&problem, &solution).is_empty());
     }
 
     #[test]
@@ -191,10 +195,10 @@ mod tests {
             },
         ]);
 
-        normalize_redundant_vias(&problem, &mut solution);
+        normalize_redundant_vias(&DRC, &problem, &mut solution);
 
         assert_eq!(solution.vias.len(), 1);
         assert!(matches!(solution.vias[0].span, ViaSpan::Through));
-        assert!(pcb_drc::lint::lint(&problem, &solution).is_empty());
+        assert!(DRC.check(&problem, &solution).is_empty());
     }
 }

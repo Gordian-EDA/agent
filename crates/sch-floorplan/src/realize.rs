@@ -15,10 +15,10 @@
 use kicad::KicadInstallation;
 use sch_check::Design;
 use sch_doc::SchDoc;
-use sch_place::ir::LayoutIr;
-use sch_place::item::{Incidence, Item};
+use sch_model::ir::LayoutIr;
+use sch_model::item::{Incidence, Item};
 
-use crate::contract::{RouteRealization, RoutedSheetRealizer};
+use crate::floorplan::place::{RouteRealization, RoutedSheetRealizer};
 use crate::floorplan::place::add_orphan_label_columns;
 use crate::write::SchematicWriter;
 

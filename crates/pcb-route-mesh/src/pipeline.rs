@@ -43,11 +43,11 @@ use crate::sequential::SequentialGridRouter;
 use geom::JOIN_EPS;
 #[cfg(test)]
 use pcb_model::RoutingCapabilities;
+use crate::deps::MeshDeps;
 use pcb_model::{
-    Connection, FailedNet, LayerRef, Obstacle, Point2, RouteQuality, RouteResult, RouteSolution,
+    Budget, Connection, FailedNet, LayerRef, Obstacle, Point2, RouteQuality, RouteResult, RouteSolution,
     RoutingView, Trace, Via, ViaSpan,
 };
-use pcb_route_grid::router::{self, route_grid};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
@@ -65,21 +65,22 @@ const ADAPTIVE_RIPUP_MAX_BLOCKERS: usize = 3;
 /// [`RouteResult::failed`] with provenance in the reason, and a net that fails at
 /// *any* stage contributes no copper to the returned solution. The result is
 /// tagged with [`ENGINE`] (`"detailed"`).
-pub fn route_detailed(problem: &RoutingView) -> RouteResult {
-    route_detailed_with_global(problem).0
+pub fn route_detailed(deps: &MeshDeps, problem: &RoutingView) -> RouteResult {
+    route_detailed_with_global(deps, problem).0
 }
 
 /// As [`route_detailed`], but also returns the negotiated global-routing result
 /// that the detailed pipeline already computed. This lets callers surface
 /// congestion diagnostics without rerunning global routing on the failure path.
-pub fn route_detailed_with_global(problem: &RoutingView) -> (RouteResult, GlobalRouteResult) {
+pub fn route_detailed_with_global(deps: &MeshDeps, problem: &RoutingView) -> (RouteResult, GlobalRouteResult) {
     let mesh = crate::mesh::CapacityMesh::build(problem);
     let global: GlobalRouteResult = global_route_with_mesh(problem, &mesh);
-    let route = route_detailed_from_global(problem, &mesh, &global);
+    let route = route_detailed_from_global(deps, problem, &mesh, &global);
     (route, global)
 }
 
 fn route_detailed_from_global(
+    deps: &MeshDeps,
     problem: &RoutingView,
     mesh: &crate::mesh::CapacityMesh,
     global: &GlobalRouteResult,
@@ -146,7 +147,7 @@ fn route_detailed_from_global(
     }
 
     // 3. Per-cell detailed routing.
-    let cells: CellRouteResult = detail::route_cells(problem, mesh, &assignment);
+    let cells: CellRouteResult = detail::route_cells(deps.drc, problem, mesh, &assignment);
     for f in &cells.failed {
         // route_cells already prefixes the reason with "cell N: …"; keep that
         // provenance and mark the net as failed so its copper is dropped.
@@ -232,13 +233,14 @@ pub struct RoutePassReport {
 }
 
 fn consider_candidate_recording(
+    deps: &MeshDeps,
     problem: &RoutingView,
     best: &mut Option<(RouteResult, RouteQuality)>,
     mut result: RouteResult,
     passes: Option<&mut Vec<RoutePassReport>>,
     elapsed_ms: u128,
 ) -> bool {
-    let (q, geometry_violations) = cleaned_route_quality(problem, &mut result);
+    let (q, geometry_violations) = cleaned_route_quality(deps, problem, &mut result);
     if let Some(passes) = passes {
         passes.push(RoutePassReport {
             engine: result.engine.clone(),
@@ -260,9 +262,9 @@ fn consider_candidate_recording(
     stop
 }
 
-fn cleaned_route_quality(problem: &RoutingView, result: &mut RouteResult) -> (RouteQuality, usize) {
-    postroute_cleanup(problem, &mut result.solution);
-    let geometry_violations = router::geometry_violations(problem, &result.solution);
+fn cleaned_route_quality(deps: &MeshDeps, problem: &RoutingView, result: &mut RouteResult) -> (RouteQuality, usize) {
+    postroute_cleanup(deps, problem, &mut result.solution);
+    let geometry_violations = deps.drc.geometry_violations(problem, &result.solution);
     (
         RouteQuality::of(problem, result, geometry_violations),
         geometry_violations,
@@ -303,20 +305,53 @@ fn better(_problem: &RoutingView, incumbent: &RouteQuality, challenger: &RouteQu
 /// It performs one deterministic orthogonal grid pass followed by targeted
 /// adaptive rip-up/rescue for any failed nets.  The rescue is a phase of the
 /// same algorithm, not selection among independent routers.
-pub fn route_tuned(problem: &RoutingView) -> RouteResult {
-    route_tuned_with_diagnostics(problem).result
+pub fn route_tuned(deps: &MeshDeps, problem: &RoutingView) -> RouteResult {
+    route_tuned_with_diagnostics(deps, problem).result
 }
 
-pub fn route_tuned_with_diagnostics(problem: &RoutingView) -> TunedRouteRun {
-    with_plane_fanout(problem, route_tuned_inner)
+/// The premium routing leaf behind the [`pcb_model::PcbRouter`] contract, with
+/// its design-rule oracle and grid sub-routers injected.
+pub struct MeshRouter<'a> {
+    deps: MeshDeps<'a>,
 }
 
-fn route_tuned_inner(problem: &RoutingView) -> TunedRouteRun {
+impl<'a> MeshRouter<'a> {
+    /// A premium router composed from `deps`.
+    pub const fn new(deps: MeshDeps<'a>) -> Self {
+        MeshRouter { deps }
+    }
+}
+
+impl pcb_model::PcbRouter for MeshRouter<'_> {
+    fn name(&self) -> &'static str {
+        ENGINE
+    }
+
+    /// An already-expired budget returns immediately with every connection
+    /// reported failed rather than starting a search it cannot finish; the
+    /// budget is otherwise handed on to the injected sub-routers.
+    fn route(&self, view: &RoutingView, budget: &Budget) -> RouteResult {
+        if budget.expired() {
+            return RouteResult::abandoned(view, ENGINE, "routing budget expired before the pass");
+        }
+        let deps = MeshDeps {
+            budget: *budget,
+            ..self.deps
+        };
+        route_tuned(&deps, view)
+    }
+}
+
+pub fn route_tuned_with_diagnostics(deps: &MeshDeps, problem: &RoutingView) -> TunedRouteRun {
+    with_plane_fanout(deps, problem, route_tuned_inner)
+}
+
+fn route_tuned_inner(deps: &MeshDeps, problem: &RoutingView) -> TunedRouteRun {
     let started = Instant::now();
-    let initial = router::route_orthogonal_single_pass(problem);
+    let initial = deps.grid_seed.route(problem, &deps.budget);
     let mut best = None;
     let mut passes = Vec::new();
-    let _ = consider_candidate_recording(
+    let _ = consider_candidate_recording(deps, 
         problem,
         &mut best,
         initial,
@@ -324,7 +359,7 @@ fn route_tuned_inner(problem: &RoutingView) -> TunedRouteRun {
         started.elapsed().as_millis(),
     );
     if !route_best_is_clean(&best) {
-        try_adaptive_grid_rescue(problem, &mut best, &mut passes);
+        try_adaptive_grid_rescue(deps, problem, &mut best, &mut passes);
     }
     TunedRouteRun {
         result: best.expect("tuned grid pass populated a candidate").0,
@@ -335,12 +370,12 @@ fn route_tuned_inner(problem: &RoutingView) -> TunedRouteRun {
 
 /// Route only the detailed implementation primitive for regression diagnostics.
 #[cfg(test)]
-pub fn route_mesh_with_diagnostics(problem: &RoutingView) -> TunedRouteRun {
-    with_plane_fanout(problem, route_mesh_with_diagnostics_inner)
+pub fn route_mesh_with_diagnostics(deps: &MeshDeps, problem: &RoutingView) -> TunedRouteRun {
+    with_plane_fanout(deps, problem, route_mesh_with_diagnostics_inner)
 }
 
 #[cfg(test)]
-fn route_mesh_with_diagnostics_inner(problem: &RoutingView) -> TunedRouteRun {
+fn route_mesh_with_diagnostics_inner(deps: &MeshDeps, problem: &RoutingView) -> TunedRouteRun {
     if !NegotiatedMeshRouter.can_route(problem) {
         return TunedRouteRun {
             result: RouteResult {
@@ -357,13 +392,13 @@ fn route_mesh_with_diagnostics_inner(problem: &RoutingView) -> TunedRouteRun {
     }
 
     let started = Instant::now();
-    let (mut result, global) = route_detailed_with_global(problem);
-    reconcile_connectivity(problem, &mut result.solution, &mut result.failed);
+    let (mut result, global) = route_detailed_with_global(deps, problem);
+    reconcile_connectivity(deps, problem, &mut result.solution, &mut result.failed);
     let elapsed_ms = started.elapsed().as_millis();
     let mut best = None;
     let mut passes = Vec::new();
-    let _ = consider_candidate_recording(problem, &mut best, result, Some(&mut passes), elapsed_ms);
-    try_adaptive_grid_rescue(problem, &mut best, &mut passes);
+    let _ = consider_candidate_recording(deps, problem, &mut best, result, Some(&mut passes), elapsed_ms);
+    try_adaptive_grid_rescue(deps, problem, &mut best, &mut passes);
     let result = best
         .map(|(result, _)| result)
         .expect("mesh candidate just populated best");
@@ -377,17 +412,17 @@ fn route_mesh_with_diagnostics_inner(problem: &RoutingView) -> TunedRouteRun {
 /// Route only the contextual sequential-grid engine, preserving one-pass attempt
 /// diagnostics for callers that explicitly select this strategy.
 #[cfg(test)]
-pub fn route_sequential_with_diagnostics(problem: &RoutingView) -> TunedRouteRun {
-    with_plane_fanout(problem, route_sequential_with_diagnostics_inner)
+pub fn route_sequential_with_diagnostics(deps: &MeshDeps, problem: &RoutingView) -> TunedRouteRun {
+    with_plane_fanout(deps, problem, route_sequential_with_diagnostics_inner)
 }
 
 #[cfg(test)]
-fn route_sequential_with_diagnostics_inner(problem: &RoutingView) -> TunedRouteRun {
+fn route_sequential_with_diagnostics_inner(deps: &MeshDeps, problem: &RoutingView) -> TunedRouteRun {
     let sequential = SequentialGridRouter;
     let started = Instant::now();
     let result = sequential.route(problem);
     let elapsed_ms = started.elapsed().as_millis();
-    let geometry_violations = router::geometry_violations(problem, &result.solution);
+    let geometry_violations = deps.drc.geometry_violations(problem, &result.solution);
     let quality = RouteQuality::of(problem, &result, geometry_violations);
     let passes = vec![RoutePassReport {
         engine: result.engine.clone(),
@@ -412,7 +447,7 @@ fn route_sequential_with_diagnostics_inner(problem: &RoutingView) -> TunedRouteR
 /// O(pads) instead of a board-wide multi-terminal search. Returns the
 /// engines' subproblem and the fanout copper to merge into its solution, or
 /// None when the problem has no routable plane connections.
-fn plane_fanout(problem: &RoutingView) -> Option<(RoutingView, RouteSolution)> {
+fn plane_fanout(deps: &MeshDeps, problem: &RoutingView) -> Option<(RoutingView, RouteSolution)> {
     if problem.plane_nets.is_empty() {
         return None;
     }
@@ -530,7 +565,7 @@ fn plane_fanout(problem: &RoutingView) -> Option<(RoutingView, RouteSolution)> {
                     drill: problem.via_drill,
                     span: ViaSpan::Through,
                 });
-                router::geometry_violations(problem, &proposed) == 0
+                deps.drc.geometry_violations(problem, &proposed) == 0
             });
             let Some(site) = site else {
                 failed_points.push(pt.clone());
@@ -595,7 +630,7 @@ fn plane_fanout(problem: &RoutingView) -> Option<(RoutingView, RouteSolution)> {
 /// width between adjacent pads.  Escape copper is validated cumulatively and
 /// exposed as obstacles to later routing stages.  A net is transformed only
 /// when every narrow terminal on that net has a legal escape.
-pub fn prepare_wide_terminal_escapes(problem: &RoutingView) -> (RoutingView, RouteSolution) {
+pub fn prepare_wide_terminal_escapes(deps: &MeshDeps, problem: &RoutingView) -> (RoutingView, RouteSolution) {
     const SITE_STEP_MM: f64 = 0.1;
     const SITE_RADIUS_MM: f64 = 1.5;
     const LANDING_MM: f64 = 0.1;
@@ -681,7 +716,7 @@ pub fn prepare_wide_terminal_escapes(problem: &RoutingView) -> (RoutingView, Rou
                     width,
                     path: vec![landing_start, endpoint],
                 });
-                (router::geometry_violations(problem, &proposed) == 0)
+                (deps.drc.geometry_violations(problem, &proposed) == 0)
                     .then_some((landing_start, endpoint))
             });
             let Some((landing_start, endpoint)) = found else {
@@ -721,19 +756,21 @@ pub fn prepare_wide_terminal_escapes(problem: &RoutingView) -> (RoutingView, Rou
 }
 
 fn with_plane_fanout(
+    deps: &MeshDeps,
     problem: &RoutingView,
-    route: impl Fn(&RoutingView) -> TunedRouteRun,
+    route: impl Fn(&MeshDeps, &RoutingView) -> TunedRouteRun,
 ) -> TunedRouteRun {
-    let Some((sub, fanout)) = plane_fanout(problem) else {
-        return route(problem);
+    let Some((sub, fanout)) = plane_fanout(deps, problem) else {
+        return route(deps, problem);
     };
-    let mut run = route(&sub);
+    let mut run = route(deps, &sub);
     run.result.solution.traces.extend(fanout.traces);
     run.result.solution.vias.extend(fanout.vias);
     run
 }
 
 fn try_adaptive_grid_rescue(
+    deps: &MeshDeps,
     problem: &RoutingView,
     best: &mut Option<(RouteResult, RouteQuality)>,
     passes: &mut Vec<RoutePassReport>,
@@ -745,18 +782,18 @@ fn try_adaptive_grid_rescue(
         return;
     }
     let started = Instant::now();
-    let Some(candidate) = adaptive_grid_rescue(problem, result) else {
+    let Some(candidate) = adaptive_grid_rescue(deps, problem, result) else {
         return;
     };
     let elapsed_ms = started.elapsed().as_millis();
-    let _ = consider_candidate_recording(problem, best, candidate, Some(passes), elapsed_ms);
+    let _ = consider_candidate_recording(deps, problem, best, candidate, Some(passes), elapsed_ms);
 }
 
 /// Deterministic work budget for each adaptive-rescue phase. A fixed candidate
 /// count keeps equal inputs byte-reproducible across fast and slow machines.
 const ADAPTIVE_RESCUE_MAX_ORDERS: usize = 16;
 
-fn adaptive_grid_rescue(problem: &RoutingView, selected: &RouteResult) -> Option<RouteResult> {
+fn adaptive_grid_rescue(deps: &MeshDeps, problem: &RoutingView, selected: &RouteResult) -> Option<RouteResult> {
     let failed_names: BTreeSet<String> = selected
         .failed
         .iter()
@@ -773,11 +810,11 @@ fn adaptive_grid_rescue(problem: &RoutingView, selected: &RouteResult) -> Option
         .into_iter()
         .take(ADAPTIVE_RESCUE_MAX_ORDERS)
     {
-        let Some(mut candidate) = adaptive_grid_rescue_order(problem, selected, &base, &order)
+        let Some(mut candidate) = adaptive_grid_rescue_order(deps, problem, selected, &base, &order)
         else {
             continue;
         };
-        let (quality, _) = cleaned_route_quality(problem, &mut candidate);
+        let (quality, _) = cleaned_route_quality(deps, problem, &mut candidate);
         let done = adaptive_rescue_candidate_can_short_circuit(&quality);
         best = match best.take() {
             None => Some((candidate, quality)),
@@ -796,18 +833,18 @@ fn adaptive_grid_rescue(problem: &RoutingView, selected: &RouteResult) -> Option
     let selected_quality = RouteQuality::of(
         problem,
         selected,
-        router::geometry_violations(problem, &selected.solution),
+        deps.drc.geometry_violations(problem, &selected.solution),
     );
     for order in adaptive_ripup_rescue_orders(problem, selected, &failed_names)
         .into_iter()
         .take(ADAPTIVE_RESCUE_MAX_ORDERS)
     {
         let Some(mut candidate) =
-            adaptive_grid_ripup_rescue_order(problem, selected, &failed_names, &order)
+            adaptive_grid_ripup_rescue_order(deps, problem, selected, &failed_names, &order)
         else {
             continue;
         };
-        let (quality, _) = cleaned_route_quality(problem, &mut candidate);
+        let (quality, _) = cleaned_route_quality(deps, problem, &mut candidate);
         if !adaptive_ripup_candidate_reduces_failures(&selected_quality, &quality) {
             continue;
         }
@@ -840,7 +877,7 @@ fn adaptive_grid_rescue(problem: &RoutingView, selected: &RouteResult) -> Option
             .into_iter()
             .take(ADAPTIVE_RESCUE_MAX_ORDERS)
         {
-            let Some(mut candidate) = adaptive_grid_ripup_rescue_order(
+            let Some(mut candidate) = adaptive_grid_ripup_rescue_order(deps, 
                 problem,
                 &residual,
                 &residual_failed_names,
@@ -848,7 +885,7 @@ fn adaptive_grid_rescue(problem: &RoutingView, selected: &RouteResult) -> Option
             ) else {
                 continue;
             };
-            let (quality, _) = cleaned_route_quality(problem, &mut candidate);
+            let (quality, _) = cleaned_route_quality(deps, problem, &mut candidate);
             if !adaptive_ripup_candidate_reduces_failures(&residual_quality, &quality) {
                 continue;
             }
@@ -910,6 +947,7 @@ fn adaptive_rescue_base(
 }
 
 fn adaptive_grid_rescue_order(
+    deps: &MeshDeps,
     problem: &RoutingView,
     selected: &RouteResult,
     base: &AdaptiveRescueBase,
@@ -930,7 +968,7 @@ fn adaptive_grid_rescue_order(
 
         let subproblem =
             problem_with_single_connection_and_obstacles(problem, idx, &residual_obstacles);
-        let routed = route_grid(&subproblem);
+        let routed = deps.grid.route(&subproblem, &deps.budget);
         if !routed.failed.is_empty() {
             continue;
         }
@@ -940,8 +978,8 @@ fn adaptive_grid_rescue_order(
         candidate.traces.extend(routed.solution.traces);
         candidate.vias.extend(routed.solution.vias);
         let validation = problem_with_solution_connections(problem, &candidate);
-        crate::via_cleanup::normalize_redundant_vias(&validation, &mut candidate);
-        if !pcb_drc::lint::lint(&validation, &candidate).is_empty() {
+        crate::via_cleanup::normalize_redundant_vias(deps.drc, &validation, &mut candidate);
+        if !deps.drc.check(&validation, &candidate).is_empty() {
             continue;
         }
 
@@ -963,6 +1001,7 @@ fn adaptive_grid_rescue_order(
 }
 
 fn adaptive_grid_ripup_rescue_order(
+    deps: &MeshDeps,
     problem: &RoutingView,
     selected: &RouteResult,
     failed_names: &BTreeSet<String>,
@@ -997,7 +1036,7 @@ fn adaptive_grid_ripup_rescue_order(
 
         let subproblem =
             problem_with_single_connection_and_obstacles(problem, idx, &residual_obstacles);
-        let routed = route_grid(&subproblem);
+        let routed = deps.grid.route(&subproblem, &deps.budget);
         if !routed.failed.is_empty() {
             if !failed.iter().any(|f| f.connection == conn.name) {
                 failed.push(FailedNet {
@@ -1013,8 +1052,8 @@ fn adaptive_grid_ripup_rescue_order(
         candidate.traces.extend(routed.solution.traces);
         candidate.vias.extend(routed.solution.vias);
         let validation = problem_with_solution_connections(problem, &candidate);
-        crate::via_cleanup::normalize_redundant_vias(&validation, &mut candidate);
-        if !pcb_drc::lint::lint(&validation, &candidate).is_empty() {
+        crate::via_cleanup::normalize_redundant_vias(deps.drc, &validation, &mut candidate);
+        if !deps.drc.check(&validation, &candidate).is_empty() {
             if !failed.iter().any(|f| f.connection == conn.name) {
                 failed.push(FailedNet {
                     connection: conn.name.clone(),
@@ -1643,22 +1682,22 @@ fn adaptive_rescue_order_with_metrics(
 /// Freerouter-style postroute cleanup for selected copper: drop redundant vias,
 /// merge degree-2 same-net trace fragments, then pull local trace corners tight
 /// when the exact DRC/connectivity oracle says the shortcut is equivalent.
-pub fn postroute_cleanup(problem: &RoutingView, solution: &mut RouteSolution) {
+pub fn postroute_cleanup(deps: &MeshDeps, problem: &RoutingView, solution: &mut RouteSolution) {
     drop_redundant_thruhole_vias(problem, solution);
-    crate::via_cleanup::normalize_redundant_vias(problem, solution);
-    drop_dangling_vias(problem, solution);
+    crate::via_cleanup::normalize_redundant_vias(deps.drc, problem, solution);
+    drop_dangling_vias(deps, problem, solution);
     drop_duplicate_traces(solution);
-    simplify_trace_paths(problem, solution);
-    drop_trace_spurs(problem, solution);
+    simplify_trace_paths(deps, problem, solution);
+    drop_trace_spurs(deps, problem, solution);
     drop_duplicate_traces(solution);
-    drop_covered_collinear_traces(problem, solution);
-    merge_touching_traces(problem, solution);
-    shortcut_octilinear_traces(problem, solution);
-    pull_orthogonal_trace_corners(problem, solution);
-    drop_trace_spurs(problem, solution);
-    simplify_trace_paths(problem, solution);
+    drop_covered_collinear_traces(deps, problem, solution);
+    merge_touching_traces(deps, problem, solution);
+    shortcut_octilinear_traces(deps, problem, solution);
+    pull_orthogonal_trace_corners(deps, problem, solution);
+    drop_trace_spurs(deps, problem, solution);
+    simplify_trace_paths(deps, problem, solution);
     drop_duplicate_traces(solution);
-    drop_covered_collinear_traces(problem, solution);
+    drop_covered_collinear_traces(deps, problem, solution);
 }
 
 /// Drop a via that sits inside a SAME-NET through-hole pad: the pad's barrel
@@ -1684,8 +1723,8 @@ fn drop_redundant_thruhole_vias(problem: &RoutingView, solution: &mut RouteSolut
 /// Detailed stitching already suppresses these; this applies the same cleanup to
 /// fast-path and fallback router output. Every removal is lint-guarded so a via
 /// anchor that preserves connectivity or DRC is kept.
-fn drop_dangling_vias(problem: &RoutingView, solution: &mut RouteSolution) {
-    let mut baseline = pcb_drc::lint::lint(problem, solution);
+fn drop_dangling_vias(deps: &MeshDeps, problem: &RoutingView, solution: &mut RouteSolution) {
+    let mut baseline = deps.drc.check(problem, solution);
     let mut idx = 0usize;
     while idx < solution.vias.len() {
         if via_connected_layers(problem, solution, &solution.vias[idx]).len() >= 2 {
@@ -1695,7 +1734,7 @@ fn drop_dangling_vias(problem: &RoutingView, solution: &mut RouteSolution) {
 
         let mut candidate = solution.clone();
         candidate.vias.remove(idx);
-        let findings = pcb_drc::lint::lint(problem, &candidate);
+        let findings = deps.drc.check(problem, &candidate);
         if !introduces_new_findings(&baseline, &findings)
             && candidate.metrics().via_count < solution.metrics().via_count
         {
@@ -1708,8 +1747,8 @@ fn drop_dangling_vias(problem: &RoutingView, solution: &mut RouteSolution) {
 }
 
 fn introduces_new_findings(
-    baseline: &[pcb_drc::lint::DrcViolation],
-    candidate: &[pcb_drc::lint::DrcViolation],
+    baseline: &[pcb_model::Finding],
+    candidate: &[pcb_model::Finding],
 ) -> bool {
     candidate
         .iter()
@@ -1775,8 +1814,8 @@ fn trace_duplicate_key(trace: &Trace) -> (String, String, i64, Vec<(i64, i64)>) 
 /// Remove redundant vertices inside individual traces when the full DRC/connectivity
 /// lint report is unchanged. This catches equal-length collinear simplifications
 /// that the shortcut pass deliberately skips because they do not reduce wirelength.
-fn simplify_trace_paths(problem: &RoutingView, solution: &mut RouteSolution) {
-    let mut baseline = pcb_drc::lint::lint(problem, solution);
+fn simplify_trace_paths(deps: &MeshDeps, problem: &RoutingView, solution: &mut RouteSolution) {
+    let mut baseline = deps.drc.check(problem, solution);
     for ti in 0..solution.traces.len() {
         let simplified = geom::Polyline::new(solution.traces[ti].path.clone())
             .simplify()
@@ -1786,7 +1825,7 @@ fn simplify_trace_paths(problem: &RoutingView, solution: &mut RouteSolution) {
         }
         let mut candidate = solution.clone();
         candidate.traces[ti].path = simplified;
-        let findings = pcb_drc::lint::lint(problem, &candidate);
+        let findings = deps.drc.check(problem, &candidate);
         if findings == baseline {
             *solution = candidate;
             baseline = findings;
@@ -1799,8 +1838,8 @@ fn simplify_trace_paths(problem: &RoutingView, solution: &mut RouteSolution) {
 /// full lint report, so via anchors, terminal reachability, and DRC invariants
 /// remain protected; a loop may also be accepted when deleting it removes an
 /// existing detour-caused lint finding without adding any new one.
-fn drop_trace_spurs(problem: &RoutingView, solution: &mut RouteSolution) {
-    let mut baseline = pcb_drc::lint::lint(problem, solution);
+fn drop_trace_spurs(deps: &MeshDeps, problem: &RoutingView, solution: &mut RouteSolution) {
+    let mut baseline = deps.drc.check(problem, solution);
     let mut lint_budget = 256usize;
 
     loop {
@@ -1833,7 +1872,7 @@ fn drop_trace_spurs(problem: &RoutingView, solution: &mut RouteSolution) {
                     {
                         continue;
                     }
-                    let findings = pcb_drc::lint::lint(problem, &candidate);
+                    let findings = deps.drc.check(problem, &candidate);
                     lint_budget -= 1;
                     if !introduces_new_findings(&baseline, &findings) {
                         *solution = candidate;
@@ -1854,14 +1893,14 @@ fn drop_trace_spurs(problem: &RoutingView, solution: &mut RouteSolution) {
 /// same-net, same-layer, same-width straight segment. This removes redundant
 /// overlapped copper left by pattern/grid retries while preserving every
 /// connectivity and DRC invariant through the lint oracle.
-fn drop_covered_collinear_traces(problem: &RoutingView, solution: &mut RouteSolution) {
-    let mut baseline = pcb_drc::lint::lint(problem, solution);
+fn drop_covered_collinear_traces(deps: &MeshDeps, problem: &RoutingView, solution: &mut RouteSolution) {
+    let mut baseline = deps.drc.check(problem, solution);
     let mut idx = 0usize;
     while idx < solution.traces.len() {
         if trace_is_covered_by_another(solution, idx) {
             let mut candidate = solution.clone();
             candidate.traces.remove(idx);
-            let findings = pcb_drc::lint::lint(problem, &candidate);
+            let findings = deps.drc.check(problem, &candidate);
             if findings == baseline
                 && candidate.metrics().wirelength < solution.metrics().wirelength
             {
@@ -1951,9 +1990,9 @@ fn point_on_segment(p: Point2, a: Point2, b: Point2) -> bool {
 /// endpoints. This is pure cleanup: every proposed rewrite is accepted only if
 /// the full lint report is unchanged, so T-junctions, via anchors, and clearance
 /// constraints remain under the same oracle as the selected route.
-fn merge_touching_traces(problem: &RoutingView, solution: &mut RouteSolution) {
+fn merge_touching_traces(deps: &MeshDeps, problem: &RoutingView, solution: &mut RouteSolution) {
     loop {
-        let baseline = pcb_drc::lint::lint(problem, solution);
+        let baseline = deps.drc.check(problem, solution);
         let mut groups: BTreeMap<(String, String, i64), Vec<usize>> = BTreeMap::new();
         for (idx, trace) in solution.traces.iter().enumerate() {
             groups
@@ -2001,7 +2040,7 @@ fn merge_touching_traces(problem: &RoutingView, solution: &mut RouteSolution) {
             }
 
             if candidate.traces.len() < solution.traces.len()
-                && pcb_drc::lint::lint(problem, &candidate) == baseline
+                && deps.drc.check(problem, &candidate) == baseline
             {
                 *solution = candidate;
                 improved = true;
@@ -2020,12 +2059,12 @@ fn merge_touching_traces(problem: &RoutingView, solution: &mut RouteSolution) {
 /// the trace without introducing new lint findings, which protects via anchors,
 /// T-junctions, clearance, board-edge, and connectivity invariants while allowing
 /// cleanup to remove an existing detour-caused finding.
-fn shortcut_octilinear_traces(problem: &RoutingView, solution: &mut RouteSolution) {
+fn shortcut_octilinear_traces(deps: &MeshDeps, problem: &RoutingView, solution: &mut RouteSolution) {
     if !has_octilinear_shortcut_candidate_shape(solution) {
         return;
     }
 
-    let mut baseline = pcb_drc::lint::lint(problem, solution);
+    let mut baseline = deps.drc.check(problem, solution);
     let mut lint_budget = 256usize;
 
     loop {
@@ -2055,7 +2094,7 @@ fn shortcut_octilinear_traces(problem: &RoutingView, solution: &mut RouteSolutio
 
                     let mut candidate = solution.clone();
                     candidate.traces[ti].path.drain(i + 1..j);
-                    let findings = pcb_drc::lint::lint(problem, &candidate);
+                    let findings = deps.drc.check(problem, &candidate);
                     lint_budget -= 1;
                     if !introduces_new_findings(&baseline, &findings) {
                         *solution = candidate;
@@ -2103,12 +2142,12 @@ fn has_octilinear_shortcut_candidate_shape(solution: &RouteSolution) -> bool {
 /// -> b` and `a -> (b.x,a.y) -> b`) and keep the first one that shortens copper
 /// without introducing new lint findings. This borrows freerouting-style
 /// post-optimization without changing the router's preferred orthogonal output.
-fn pull_orthogonal_trace_corners(problem: &RoutingView, solution: &mut RouteSolution) {
+fn pull_orthogonal_trace_corners(deps: &MeshDeps, problem: &RoutingView, solution: &mut RouteSolution) {
     if !has_orthogonal_pull_candidate_shape(solution) {
         return;
     }
 
-    let mut baseline = pcb_drc::lint::lint(problem, solution);
+    let mut baseline = deps.drc.check(problem, solution);
     let mut lint_budget = 256usize;
 
     loop {
@@ -2143,7 +2182,7 @@ fn pull_orthogonal_trace_corners(problem: &RoutingView, solution: &mut RouteSolu
                             geom::Polyline::new(candidate.traces[ti].path.clone())
                                 .simplify()
                                 .into_points();
-                        let findings = pcb_drc::lint::lint(problem, &candidate);
+                        let findings = deps.drc.check(problem, &candidate);
                         lint_budget -= 1;
                         if !introduces_new_findings(&baseline, &findings) {
                             *solution = candidate;
@@ -2215,12 +2254,13 @@ const NAIVE_DETOUR_TOLERANCE: f64 = 1.15;
 /// fewer nets, and the engine never ships copper that fails DRC.
 #[cfg(test)]
 fn reconcile_connectivity(
+    deps: &MeshDeps,
     problem: &RoutingView,
     solution: &mut RouteSolution,
     failed: &mut Vec<FailedNet>,
 ) {
-    let mut broken = pcb_drc::lint::drop_violating_copper(problem, solution);
-    broken.extend(pcb_drc::lint::drop_unconnected_copper(problem, solution));
+    let mut broken = deps.drc.drop_violating_copper(problem, solution);
+    broken.extend(deps.drc.drop_unconnected_copper(problem, solution));
     let known: std::collections::BTreeSet<&str> =
         failed.iter().map(|f| f.connection.as_str()).collect();
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -2532,8 +2572,23 @@ fn assignment_failure_reason(f: &crate::crossing::AssignmentFailure) -> String {
 
 #[cfg(test)]
 mod tests {
+    use pcb_model::Drc as _;
+    use pcb_drc::StandardDrc;
+    use pcb_route_grid::router::{GridRouter, GridSinglePassRouter};
+
+    /// The production leaves, wired together for the pipeline under test.
+    const DRC: StandardDrc = StandardDrc;
+    const GRID: GridRouter<'static> = GridRouter::new(&DRC);
+    const GRID_SEED: GridSinglePassRouter<'static> = GridSinglePassRouter::new(&DRC);
+    const DEPS: MeshDeps<'static> = MeshDeps {
+        drc: &DRC,
+        grid: &GRID,
+        grid_seed: &GRID_SEED,
+        budget: Budget::unlimited(),
+    };
+
     use super::*;
-    use pcb_drc::lint::lint;
+    
     use std::path::Path;
 
     fn load(name: &str) -> RoutingView {
@@ -2631,7 +2686,7 @@ mod tests {
             },
         ];
 
-        let (sub, fanout) = plane_fanout(&p).expect("plane connection handled");
+        let (sub, fanout) = plane_fanout(&DEPS, &p).expect("plane connection handled");
         assert!(sub.connections.is_empty());
         assert_eq!(fanout.vias.len(), 1);
         assert_eq!(fanout.vias[0].at, Point2 { x: 18.0, y: 5.0 });
@@ -2656,7 +2711,7 @@ mod tests {
             })
             .collect();
 
-        let (sub, fanout) = plane_fanout(&p).expect("outer pour connection handled");
+        let (sub, fanout) = plane_fanout(&DEPS, &p).expect("outer pour connection handled");
 
         assert!(sub.connections.is_empty());
         assert_eq!(fanout.vias.len(), 2);
@@ -2691,13 +2746,13 @@ mod tests {
             connected_to: vec!["FOREIGN".to_owned()],
         });
 
-        let (sub, fanout) = plane_fanout(&p).expect("blocked pad should get a legal neck-down");
+        let (sub, fanout) = plane_fanout(&DEPS, &p).expect("blocked pad should get a legal neck-down");
 
         assert!(sub.connections.is_empty());
         assert_eq!(fanout.vias.len(), 2);
         assert_eq!(fanout.traces.len(), 1);
         assert_eq!(fanout.traces[0].width, p.min_trace_width);
-        assert_eq!(router::geometry_violations(&p, &fanout), 0);
+        assert_eq!(DRC.geometry_violations(&p, &fanout), 0);
         assert!(fanout.traces[0].path[0].dist(fanout.traces[0].path[1]) <= 5.0);
     }
 
@@ -2727,7 +2782,7 @@ mod tests {
             connected_to: vec!["FOREIGN".to_owned()],
         });
 
-        let (sub, fanout) = plane_fanout(&p).expect("the stitchable pad is retained");
+        let (sub, fanout) = plane_fanout(&DEPS, &p).expect("the stitchable pad is retained");
 
         assert_eq!(fanout.vias.len(), 1);
         assert_eq!(fanout.vias[0].at, Point2 { x: 18.0, y: 5.0 });
@@ -2767,7 +2822,7 @@ mod tests {
         ];
         let original = p.connections[0].points_to_connect[0].point();
 
-        let (transformed, escapes) = prepare_wide_terminal_escapes(&p);
+        let (transformed, escapes) = prepare_wide_terminal_escapes(&DEPS, &p);
 
         assert_eq!(escapes.traces.len(), 2);
         assert_eq!(escapes.traces[0].width, p.min_trace_width);
@@ -2776,7 +2831,7 @@ mod tests {
             transformed.connections[0].points_to_connect[0].point(),
             original
         );
-        assert_eq!(router::geometry_violations(&p, &escapes), 0);
+        assert_eq!(DRC.geometry_violations(&p, &escapes), 0);
         assert!(
             transformed
                 .obstacles
@@ -2814,7 +2869,7 @@ mod tests {
             });
         }
 
-        let (transformed, escapes) = prepare_wide_terminal_escapes(&p);
+        let (transformed, escapes) = prepare_wide_terminal_escapes(&DEPS, &p);
 
         assert!(escapes.traces.is_empty());
         assert_eq!(transformed.connections, p.connections);
@@ -3077,14 +3132,14 @@ mod tests {
     #[test]
     fn led_r_detailed_is_clean_and_lints_empty() {
         let p = load("led-r.json");
-        let r = route_detailed(&p);
+        let r = route_detailed(&DEPS, &p);
         assert_eq!(r.engine, ENGINE);
         assert!(
             r.failed.is_empty(),
             "led-r must route cleanly through route_detailed today: {:?}",
             r.failed
         );
-        let vs = lint(&p, &r.solution);
+        let vs = DRC.check(&p, &r.solution);
         assert!(
             vs.is_empty(),
             "led-r detailed solution must lint CLEAN, got {vs:?}"
@@ -3103,14 +3158,14 @@ mod tests {
         // the full-board finisher after the per-cell pass. route_detailed is now
         // clean end-to-end and lints empty.
         let p = load("quad.json");
-        let r = route_detailed(&p);
+        let r = route_detailed(&DEPS, &p);
         assert_eq!(r.engine, ENGINE);
         assert!(
             r.failed.is_empty(),
             "quad must route cleanly through route_detailed after the finisher: {:?}",
             r.failed
         );
-        let vs = lint(&p, &r.solution);
+        let vs = DRC.check(&p, &r.solution);
         assert!(
             vs.is_empty(),
             "quad detailed solution must lint CLEAN, got {vs:?}"
@@ -3131,7 +3186,7 @@ mod tests {
             },
         };
 
-        let r = route_detailed_from_global(&p, &mesh, &global);
+        let r = route_detailed_from_global(&DEPS, &p, &mesh, &global);
 
         assert_eq!(r.engine, ENGINE);
         assert!(
@@ -3154,14 +3209,14 @@ mod tests {
         // and grid fallback. Quad is no longer forced to pay the detailed mesh:
         // the sequential candidate can solve it cleanly and should short-circuit.
         let p = load("quad.json");
-        let r = route_tuned(&p);
-        assert_eq!(r.engine, router::ENGINE);
+        let r = route_tuned(&DEPS, &p);
+        assert_eq!(r.engine, pcb_route_grid::router::ENGINE);
         assert!(
             r.failed.is_empty(),
             "route_tuned routes quad cleanly: {:?}",
             r.failed
         );
-        let vs = lint(&p, &r.solution);
+        let vs = DRC.check(&p, &r.solution);
         assert!(
             vs.is_empty(),
             "quad route_tuned solution must lint CLEAN, got {vs:?}"
@@ -3171,15 +3226,15 @@ mod tests {
     #[test]
     fn tuned_route_reports_one_clean_grid_pass_for_direct_net() {
         let p = simple_two_point_problem();
-        let r = route_tuned_with_diagnostics(&p);
-        assert_eq!(r.result.engine, router::ENGINE);
+        let r = route_tuned_with_diagnostics(&DEPS, &p);
+        assert_eq!(r.result.engine, pcb_route_grid::router::ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         assert!(
             r.global.is_none(),
             "the tuned grid algorithm does not run the diagnostic mesh"
         );
         assert_eq!(r.passes.len(), 1);
-        assert_eq!(r.passes[0].engine, router::ENGINE);
+        assert_eq!(r.passes[0].engine, pcb_route_grid::router::ENGINE);
         assert_eq!(r.passes[0].failed_nets, 0);
         assert_eq!(r.passes[0].geometry_violations, 0);
     }
@@ -3309,7 +3364,7 @@ mod tests {
             engine: "synthetic".to_owned(),
         };
 
-        let rescued = adaptive_grid_rescue(&p, &selected).expect("B should grid-rescue");
+        let rescued = adaptive_grid_rescue(&DEPS, &p, &selected).expect("B should grid-rescue");
 
         assert!(rescued.failed.is_empty(), "{:?}", rescued.failed);
         assert!(
@@ -3332,7 +3387,7 @@ mod tests {
                 .any(|trace| trace.connection == "B")
         );
         assert!(
-            lint(&p, &rescued.solution).is_empty(),
+            DRC.check(&p, &rescued.solution).is_empty(),
             "rescued hybrid must be clean"
         );
     }
@@ -4504,11 +4559,11 @@ mod tests {
     fn tuned_route_handles_layer_change() {
         let p = layer_change_problem();
 
-        let r = route_tuned_with_diagnostics(&p);
+        let r = route_tuned_with_diagnostics(&DEPS, &p);
 
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         assert_eq!(r.result.solution.vias.len(), 1);
-        assert!(lint(&p, &r.result.solution).is_empty());
+        assert!(DRC.check(&p, &r.result.solution).is_empty());
         assert!(r.global.is_none());
     }
 
@@ -4516,11 +4571,11 @@ mod tests {
     fn tuned_route_handles_stacked_layer_change() {
         let p = stacked_layer_change_problem();
 
-        let r = route_tuned_with_diagnostics(&p);
+        let r = route_tuned_with_diagnostics(&DEPS, &p);
 
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         assert_eq!(r.result.solution.vias.len(), 1);
-        assert!(lint(&p, &r.result.solution).is_empty());
+        assert!(DRC.check(&p, &r.result.solution).is_empty());
         assert!(
             r.global.is_none(),
             "the tuned grid algorithm does not run the diagnostic mesh"
@@ -4537,12 +4592,12 @@ mod tests {
                 y: 4.0,
                 layer: LayerRef::bottom(),
             });
-        let r = route_tuned_with_diagnostics(&p);
+        let r = route_tuned_with_diagnostics(&DEPS, &p);
 
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         assert!(!r.result.solution.traces.is_empty());
         assert_eq!(r.result.solution.vias.len(), 1);
-        assert!(lint(&p, &r.result.solution).is_empty());
+        assert!(DRC.check(&p, &r.result.solution).is_empty());
         assert!(
             r.global.is_none(),
             "the tuned grid algorithm does not run the diagnostic mesh"
@@ -4553,11 +4608,11 @@ mod tests {
     fn tuned_route_handles_blocked_top_layer() {
         let p = top_blocked_two_point_problem();
 
-        let r = route_tuned_with_diagnostics(&p);
+        let r = route_tuned_with_diagnostics(&DEPS, &p);
 
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         assert_eq!(r.result.solution.vias.len(), 2);
-        assert!(lint(&p, &r.result.solution).is_empty());
+        assert!(DRC.check(&p, &r.result.solution).is_empty());
         assert!(
             r.global.is_none(),
             "the tuned grid algorithm does not run the diagnostic mesh"
@@ -4568,12 +4623,12 @@ mod tests {
     fn tuned_route_handles_heterogeneous_nets() {
         let p = heterogeneous_pattern_problem();
 
-        let r = route_tuned_with_diagnostics(&p);
+        let r = route_tuned_with_diagnostics(&DEPS, &p);
 
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         assert!(r.result.solution.traces.len() >= 3);
         assert_eq!(r.result.solution.vias.len(), 3);
-        assert!(lint(&p, &r.result.solution).is_empty());
+        assert!(DRC.check(&p, &r.result.solution).is_empty());
         assert!(
             r.global.is_none(),
             "the tuned grid algorithm does not run the diagnostic mesh"
@@ -4584,7 +4639,7 @@ mod tests {
     fn tuned_route_handles_multi_pin_channel() {
         let p = heterogeneous_multi_pin_channel_problem();
 
-        let r = route_tuned_with_diagnostics(&p);
+        let r = route_tuned_with_diagnostics(&DEPS, &p);
 
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         assert!(
@@ -4598,7 +4653,7 @@ mod tests {
             "BUS should be routed as a connected multi-leg tree: {:?}",
             r.result.solution
         );
-        assert!(lint(&p, &r.result.solution).is_empty());
+        assert!(DRC.check(&p, &r.result.solution).is_empty());
         assert!(
             r.global.is_none(),
             "the tuned grid algorithm does not run the diagnostic mesh"
@@ -4651,11 +4706,11 @@ mod tests {
         };
         let before = solution.metrics().wirelength;
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(4.0, 4.0)]);
         assert!(solution.metrics().wirelength < before);
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
@@ -4682,20 +4737,20 @@ mod tests {
             }],
             vias: vec![],
         };
-        let before = lint(&p, &solution);
+        let before = DRC.check(&p, &solution);
         assert!(
             before.iter().any(|finding| matches!(
                 finding,
-                pcb_drc::lint::DrcViolation::ClearanceTraceObstacle { .. }
+                pcb_model::Finding::ClearanceTraceObstacle { .. }
             )),
             "fixture should start with a trace-obstacle clearance finding: {before:?}"
         );
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(4.0, 4.0)]);
         assert!(
-            lint(&p, &solution).is_empty(),
+            DRC.check(&p, &solution).is_empty(),
             "octilinear shortcut should be allowed to remove existing lint findings without adding new ones"
         );
     }
@@ -4724,14 +4779,14 @@ mod tests {
         };
         let before = solution.metrics().wirelength;
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(
             solution.traces[0].path,
             vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(5.0, 4.0)]
         );
         assert!(solution.metrics().wirelength < before);
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
@@ -4764,23 +4819,23 @@ mod tests {
             }],
             vias: vec![],
         };
-        let before = lint(&p, &solution);
+        let before = DRC.check(&p, &solution);
         assert!(
             before.iter().any(|finding| matches!(
                 finding,
-                pcb_drc::lint::DrcViolation::ClearanceTraceObstacle { .. }
+                pcb_model::Finding::ClearanceTraceObstacle { .. }
             )),
             "fixture should start with a trace-obstacle clearance finding: {before:?}"
         );
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(
             solution.traces[0].path,
             vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(5.0, 4.0)]
         );
         assert!(
-            lint(&p, &solution).is_empty(),
+            DRC.check(&p, &solution).is_empty(),
             "line-pull should be allowed to remove existing lint findings without adding new ones"
         );
     }
@@ -4885,13 +4940,13 @@ mod tests {
             ],
             vias: vec![],
         };
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(solution.traces.len(), 1);
         assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(4.0, 1.0)]);
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
@@ -4920,12 +4975,12 @@ mod tests {
         };
         let before = solution.metrics().wirelength;
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(solution.traces.len(), 1);
         assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(4.0, 1.0)]);
         assert!(solution.metrics().wirelength < before);
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
@@ -4945,16 +5000,16 @@ mod tests {
             vias: vec![],
         };
         let before = solution.metrics().wirelength;
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(4.0, 1.0)]);
         assert!(
             (solution.metrics().wirelength - before).abs() < 1e-9,
             "collinear simplification should preserve wirelength"
         );
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
@@ -4981,9 +5036,9 @@ mod tests {
             vias: vec![],
         };
         let before = solution.metrics().wirelength;
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(solution.traces.len(), 1);
         assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(5.0, 1.0)]);
@@ -4991,7 +5046,7 @@ mod tests {
             solution.metrics().wirelength < before,
             "closed spur loop should be removed"
         );
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
@@ -5025,20 +5080,20 @@ mod tests {
             }],
             vias: vec![],
         };
-        let before = lint(&p, &solution);
+        let before = DRC.check(&p, &solution);
         assert!(
             before.iter().any(|finding| matches!(
                 finding,
-                pcb_drc::lint::DrcViolation::ClearanceTraceObstacle { .. }
+                pcb_model::Finding::ClearanceTraceObstacle { .. }
             )),
             "fixture should start with a trace-obstacle clearance finding: {before:?}"
         );
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(5.0, 1.0)]);
         assert!(
-            lint(&p, &solution).is_empty(),
+            DRC.check(&p, &solution).is_empty(),
             "spur removal should be allowed to remove existing lint findings without adding new ones"
         );
     }
@@ -5069,7 +5124,7 @@ mod tests {
         };
         let before = solution.metrics().wirelength;
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(solution.traces.len(), 1);
         assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(4.0, 1.0)]);
@@ -5077,7 +5132,7 @@ mod tests {
             solution.metrics().wirelength < before,
             "simplification-created duplicate should be dropped"
         );
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
@@ -5105,9 +5160,9 @@ mod tests {
             vias: vec![],
         };
         let before = solution.metrics().wirelength;
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(solution.traces.len(), 1);
         assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(5.0, 1.0)]);
@@ -5115,7 +5170,7 @@ mod tests {
             solution.metrics().wirelength < before,
             "covered same-net segment should be dropped"
         );
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
@@ -5143,9 +5198,9 @@ mod tests {
             vias: vec![],
         };
         let before = solution.metrics().wirelength;
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(solution.traces.len(), 1);
         assert_eq!(
@@ -5156,7 +5211,7 @@ mod tests {
             solution.metrics().wirelength < before,
             "segment covered by one leg of a longer trace should be dropped"
         );
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
@@ -5184,9 +5239,9 @@ mod tests {
             vias: vec![],
         };
         let before = solution.metrics().wirelength;
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(solution.traces.len(), 1);
         assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(5.0, 1.0)]);
@@ -5194,7 +5249,7 @@ mod tests {
             solution.metrics().wirelength < before,
             "shortcut-created duplicate should be dropped"
         );
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
@@ -5223,16 +5278,16 @@ mod tests {
                 span: ViaSpan::Through,
             }],
         };
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(
             solution.traces[0].path,
             vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(4.0, 4.0)],
             "shortcut must be rejected because it disconnects the via anchor"
         );
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
@@ -5263,11 +5318,11 @@ mod tests {
             vias: vec![via.clone(), via],
         };
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(solution.vias.len(), 1);
         assert_eq!(solution.vias[0].at, pt(1.0, 4.0));
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
@@ -5317,11 +5372,11 @@ mod tests {
             ],
         };
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert_eq!(solution.vias.len(), 1);
         assert!(matches!(solution.vias[0].span, ViaSpan::Through));
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
@@ -5346,30 +5401,30 @@ mod tests {
                 span: ViaSpan::Through,
             }],
         };
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
 
-        postroute_cleanup(&p, &mut solution);
+        postroute_cleanup(&DEPS, &p, &mut solution);
 
         assert!(
             solution.vias.is_empty(),
             "single-layer dangling via should be dropped"
         );
         assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(5.0, 1.0)]);
-        assert!(lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
     fn tuned_route_diagnostics_report_grid_pass() {
         let p = load("quad.json");
-        let r = route_tuned_with_diagnostics(&p);
-        assert_eq!(r.result.engine, router::ENGINE);
+        let r = route_tuned_with_diagnostics(&DEPS, &p);
+        assert_eq!(r.result.engine, pcb_route_grid::router::ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         let engines: Vec<&str> = r
             .passes
             .iter()
             .map(|attempt| attempt.engine.as_str())
             .collect();
-        assert_eq!(engines, vec![router::ENGINE]);
+        assert_eq!(engines, vec![pcb_route_grid::router::ENGINE]);
         assert!(
             r.global.is_none(),
             "the tuned grid algorithm does not run the diagnostic mesh"
@@ -5379,7 +5434,7 @@ mod tests {
     #[test]
     fn route_mesh_diagnostics_capture_global_report() {
         let p = load("quad.json");
-        let r = route_mesh_with_diagnostics(&p);
+        let r = route_mesh_with_diagnostics(&DEPS, &p);
         assert_eq!(r.result.engine, ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
         assert_eq!(r.passes.len(), 1);
@@ -5403,12 +5458,12 @@ mod tests {
     #[test]
     fn congested_auto_reports_honest_failures() {
         let p = load("congested.json");
-        // route_detailed(congested) is the expensive path — call it ONCE and derive
+        // route_detailed(&DEPS, congested) is the expensive path — call it ONCE and derive
         // route_tuned's outcome from it + naive (route_tuned runs exactly this
         // route_detailed internally, then naive, and returns the fewer-failed result),
         // rather than paying for a second full detailed route.
-        let detailed = route_detailed(&p);
-        let naive = router::route(&p);
+        let detailed = route_detailed(&DEPS, &p);
+        let naive = pcb_route_grid::router::route(&DRC, &p);
         assert!(
             !naive.failed.is_empty() && !detailed.failed.is_empty(),
             "congested still defeats both engines (naive {} / detailed {} failed); \
@@ -5428,7 +5483,7 @@ mod tests {
             "every congested residual must carry finisher provenance: {:?}",
             detailed.failed
         );
-        let geom_violations: Vec<_> = lint(&p, &detailed.solution)
+        let geom_violations: Vec<_> = DRC.check(&p, &detailed.solution)
             .into_iter()
             .filter(|v| !format!("{v:?}").contains("Connectivity"))
             .collect();
@@ -5453,8 +5508,8 @@ mod tests {
     #[test]
     fn route_detailed_is_deterministic() {
         let p = load("quad.json");
-        let a = route_detailed(&p);
-        let b = route_detailed(&p);
+        let a = route_detailed(&DEPS, &p);
+        let b = route_detailed(&DEPS, &p);
         let ja = serde_json::to_string(&a).unwrap();
         let jb = serde_json::to_string(&b).unwrap();
         assert_eq!(ja, jb, "two route_detailed runs must serialize byte-equal");
@@ -5467,7 +5522,7 @@ mod tests {
         // The partial-net rule: a net listed in `failed` must contribute zero
         // copper to the solution (a half-routed net would trip connectivity).
         let p = load("quad.json");
-        let r = route_detailed(&p);
+        let r = route_detailed(&DEPS, &p);
         let failed_names: std::collections::BTreeSet<&str> =
             r.failed.iter().map(|f| f.connection.as_str()).collect();
         for t in &r.solution.traces {

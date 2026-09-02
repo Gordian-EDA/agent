@@ -51,7 +51,7 @@ mod route;
 pub use hints::{
     apply_edge_lock, apply_grid_hints, apply_surround, fan_out_rings, unified_fanout_place,
 };
-pub use route::{place, place_tuned};
+pub use route::{place, place_as_given, place_tuned};
 
 #[cfg(test)]
 mod tests;

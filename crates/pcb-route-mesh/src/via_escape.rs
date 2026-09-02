@@ -20,6 +20,12 @@ use pcb_model::{
 };
 use std::collections::BTreeSet;
 
+/// The production rule set. This module is test-only scaffolding, so it names
+/// the oracle directly instead of taking it injected.
+use pcb_model::Drc as _;
+
+static DRC: pcb_drc::StandardDrc = pcb_drc::StandardDrc;
+
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "via-escape";
 const VIA_ESCAPE_MAX_MULTILAYER_CONNECTIONS: usize = 4;
@@ -654,7 +660,7 @@ fn push_via_once(
 
 fn candidate_layers(problem: &RoutingView, terminal_layer: u32) -> Vec<LayerRef> {
     let layer_count = problem.layer_count.max(1);
-    let plane_layers: BTreeSet<u32> = pcb_route_grid::router::plane_layers(layer_count as usize)
+    let plane_layers: BTreeSet<u32> = pcb_model::plane_layers(layer_count)
         .into_iter()
         .collect();
     let mut layers = Vec::new();
@@ -793,12 +799,12 @@ fn candidate_is_geometry_clean(
     if exhausted {
         return false;
     }
-    for violation in pcb_drc::lint::lint(problem, solution) {
+    for violation in DRC.check(problem, solution) {
         match violation {
-            pcb_drc::lint::DrcViolation::Connectivity {
-                violation: pcb_drc::connectivity::Violation::CrossNetMerge { ref a, ref b },
+            pcb_model::Finding::Connectivity {
+                violation: pcb_model::Violation::CrossNetMerge { ref a, ref b },
             } if a == connection || b == connection => return false,
-            pcb_drc::lint::DrcViolation::Connectivity { .. } => {}
+            pcb_model::Finding::Connectivity { .. } => {}
             _ => return false,
         }
     }
@@ -806,9 +812,9 @@ fn candidate_is_geometry_clean(
 }
 
 fn reconcile(problem: &RoutingView, solution: &mut RouteSolution, failed: &mut Vec<FailedNet>) {
-    crate::via_cleanup::normalize_redundant_vias(problem, solution);
-    let mut dropped = pcb_drc::lint::drop_violating_copper(problem, solution);
-    dropped.extend(pcb_drc::lint::drop_unconnected_copper(problem, solution));
+    crate::via_cleanup::normalize_redundant_vias(&DRC, problem, solution);
+    let mut dropped = DRC.drop_violating_copper(problem, solution);
+    dropped.extend(DRC.drop_unconnected_copper(problem, solution));
 
     let known: BTreeSet<String> = failed.iter().map(|f| f.connection.clone()).collect();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -982,7 +988,7 @@ mod tests {
         assert_eq!(r.solution.traces.len(), 1);
         assert_eq!(r.solution.traces[0].layer, LayerRef::bottom());
         assert_eq!(r.solution.vias.len(), 2);
-        assert!(pcb_drc::lint::lint(&p, &r.solution).is_empty());
+        assert!(DRC.check(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1030,7 +1036,7 @@ mod tests {
             r.solution.traces
         );
         assert_eq!(r.solution.vias.len(), 3);
-        assert!(pcb_drc::lint::lint(&p, &r.solution).is_empty());
+        assert!(DRC.check(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1055,7 +1061,7 @@ mod tests {
             "via-escape tree should avoid the 24mm fixed-root star: {:?}",
             r.solution
         );
-        assert!(pcb_drc::lint::lint(&p, &r.solution).is_empty());
+        assert!(DRC.check(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1091,7 +1097,7 @@ mod tests {
             "expected top-layer detour, got {:?}",
             r.solution
         );
-        assert!(pcb_drc::lint::lint(&p, &r.solution).is_empty());
+        assert!(DRC.check(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1321,7 +1327,7 @@ mod tests {
         );
         solution.traces.push(trace);
         assert_eq!(
-            pcb_route_grid::router::geometry_violations(&p, &solution),
+            DRC.geometry_violations(&p, &solution),
             0
         );
     }

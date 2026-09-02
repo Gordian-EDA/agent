@@ -14,7 +14,7 @@ use geom::{EPS, GRID_50_MIL, Point2, Rect, Segment};
 use super::{Justify, SchematicWriter, TextPos, Wire, field_anchors, field_box};
 
 /// What [`SchematicWriter::solve_text_positions`] mutates once the greedy solver
-/// has picked a candidate for the parallel [`crate::label::Movable`].
+/// has picked a candidate for the parallel [`sch_model::text::Movable`].
 enum Apply {
     /// labels[i]: candidate 1 retracts onto the pin endpoint.
     StubLabel(usize),
@@ -87,7 +87,7 @@ impl SchematicWriter {
              m: &mut BTreeMap<(u64, u64), std::collections::BTreeSet<String>>| {
                 m.entry(bits(p)).or_default().insert(net.to_string());
             };
-        let mut segments: Vec<crate::wire::NetSegment> = Vec::new();
+        let mut segments: Vec<sch_model::route::NetSegment> = Vec::new();
 
         for inst in &self.instances {
             // Power-symbol/flag pin origins (identified by `power:` lib_id) occupy
@@ -109,7 +109,7 @@ impl SchematicWriter {
         // wires carry their real net so same-net stubs may touch them.
         for w in &self.wires {
             let net = w.net.clone().unwrap_or_else(|| PWR.to_string());
-            segments.push(crate::wire::NetSegment::new(w.a, w.b, net.clone()));
+            segments.push(sch_model::route::NetSegment::new(w.a, w.b, net.clone()));
             // Only register endpoints as points for wires with a known net, so
             // that a same-net stub whose end lands exactly on a cluster wire
             // endpoint is recognized as a deliberate join. Power-wire endpoints
@@ -166,7 +166,7 @@ impl SchematicWriter {
                 // second call would retract every survivor onto its pin.
                 self.add_wire_on_net(pin_at, end, &net);
                 add_point(end, &net, &mut points);
-                segments.push(crate::wire::NetSegment::new(pin_at, end, net));
+                segments.push(sch_model::route::NetSegment::new(pin_at, end, net));
             }
         }
     }
@@ -184,7 +184,8 @@ impl SchematicWriter {
     /// obstacle at the same position), so reconcile may run it early to lint
     /// solved geometry and `finish`'s own call is a harmless re-run.
     pub fn solve_text_positions(&mut self) {
-        use crate::label::choose;
+        use crate::label::GreedyText;
+        use sch_model::text::TextSolver;
 
         let obstacles = self.build_obstacles();
         let (mut movables, mut applies) = self.stub_label_movables();
@@ -192,8 +193,8 @@ impl SchematicWriter {
         movables.extend(field_movables);
         applies.extend(field_applies);
 
-        let picks = choose(&obstacles, &movables);
-        for (apply, (pick, fits)) in applies.into_iter().zip(picks) {
+        let picks = GreedyText.solve(&obstacles, &movables);
+        for (apply, sch_model::text::Pick { candidate: pick, fits }) in applies.into_iter().zip(picks) {
             match apply {
                 Apply::StubLabel(i) => {
                     if pick == 1 {
@@ -240,8 +241,8 @@ impl SchematicWriter {
     /// Everything solved text must avoid: symbol bodies (angle-aware, exempt
     /// for their own refdes), pin name/number text, wires, no-connect markers,
     /// and fixed (stub-less) labels.
-    fn build_obstacles(&self) -> Vec<crate::label::Obstacle> {
-        use crate::label::{ObKind, Obstacle, label_box, pin_text_boxes, text_width, wire_box};
+    fn build_obstacles(&self) -> Vec<sch_model::text::Obstacle> {
+        use sch_model::text::{ObKind, Obstacle, label_box, pin_text_boxes, text_width, wire_box};
         let mut obstacles: Vec<Obstacle> = Vec::new();
         for inst in &self.instances {
             let h = inst.half_extents.rotated_half_extents(inst.angle);
@@ -304,8 +305,8 @@ impl SchematicWriter {
     /// uuid_key order. Each has two candidates: stay at the stub end, or retract
     /// onto the always-safe pin endpoint keeping the outward direction (the stub
     /// wire is dropped when retraction wins).
-    fn stub_label_movables(&self) -> (Vec<crate::label::Movable>, Vec<Apply>) {
-        use crate::label::{Movable, label_box, text_width};
+    fn stub_label_movables(&self) -> (Vec<sch_model::text::Movable>, Vec<Apply>) {
+        use sch_model::text::{Movable, label_box, text_width};
         let mut movables: Vec<Movable> = Vec::new();
         let mut applies: Vec<Apply> = Vec::new();
         let mut stub_idx: Vec<usize> = (0..self.labels.len())
@@ -332,7 +333,7 @@ impl SchematicWriter {
     /// refdes order (one shared pass, so greedy solve order is stable). Each
     /// instance dispatches to [`Self::power_value_movable`] (power symbols) or
     /// [`Self::field_pair_movable`] (everything else).
-    fn field_movables(&self) -> (Vec<crate::label::Movable>, Vec<Apply>) {
+    fn field_movables(&self) -> (Vec<sch_model::text::Movable>, Vec<Apply>) {
         let mut movables = Vec::new();
         let mut applies = Vec::new();
         let mut order: Vec<usize> = (0..self.instances.len()).collect();
@@ -355,8 +356,8 @@ impl SchematicWriter {
     /// down-pointing GND-family rails, above otherwise), else right / left — so
     /// adjacent rails never merge their names. `None` for `power:PWR_FLAG`,
     /// whose Value is hidden and has nothing to place.
-    fn power_value_movable(&self, i: usize) -> Option<(crate::label::Movable, Apply)> {
-        use crate::label::{Movable, text_width};
+    fn power_value_movable(&self, i: usize) -> Option<(sch_model::text::Movable, Apply)> {
+        use sch_model::text::{Movable, text_width};
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
         let inst = &self.instances[i];
         if inst.lib_id == "power:PWR_FLAG" {
@@ -415,8 +416,8 @@ impl SchematicWriter {
     /// / below of the body, with corner and far-band fallbacks for crowded
     /// symbols. Wide (rotated passive) bodies prefer above/below; ICs carry the
     /// pair on the horizontal band least overlapping their own pin text.
-    fn field_pair_movable(&self, i: usize) -> (crate::label::Movable, Apply) {
-        use crate::label::{Movable, pin_text_boxes, text_width};
+    fn field_pair_movable(&self, i: usize) -> (sch_model::text::Movable, Apply) {
+        use sch_model::text::{Movable, pin_text_boxes, text_width};
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
         let inst = &self.instances[i];
         let h = inst.half_extents.rotated_half_extents(inst.angle);
@@ -702,7 +703,7 @@ impl SchematicWriter {
     /// coordinate and be clipped off the content-fit page. Run last, after text is
     /// solved, so field positions move with their symbols.
     fn reframe(&mut self) {
-        use crate::label::text_width;
+        use sch_model::text::text_width;
         const M: f64 = 12.7;
         let (mut minx, mut miny) = (f64::MAX, f64::MAX);
         let mut lo = |x: f64, y: f64| {
@@ -761,7 +762,7 @@ impl SchematicWriter {
     /// a placement on its true post-text-solve extent, edge label-columns included). `None`
     /// for an empty sheet.
     pub fn content_bbox(&self) -> Option<geom::Rect> {
-        use crate::label::text_width;
+        use sch_model::text::text_width;
         let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
         let mut acc = |lx: f64, ly: f64, hx: f64, hy: f64| {
             x0 = x0.min(lx);
@@ -881,7 +882,7 @@ impl SchematicWriter {
         net: &str,
         own_refdes: &str,
     ) -> bool {
-        use crate::label::{label_box, pin_text_boxes, text_width};
+        use sch_model::text::{label_box, pin_text_boxes, text_width};
         let b = label_box(at, dir, text_width(net));
         for inst in &self.instances {
             if inst.refdes.starts_with('#') || inst.refdes == own_refdes {
@@ -935,7 +936,7 @@ impl SchematicWriter {
         &self,
         ignore_pairs: &std::collections::BTreeSet<(String, String)>,
     ) -> Vec<String> {
-        use crate::label::{label_box, pin_text_boxes, text_width};
+        use sch_model::text::{label_box, pin_text_boxes, text_width};
 
         /// What an item is, for exemption decisions.
         #[derive(Clone, Copy, PartialEq, Eq)]

@@ -14,10 +14,39 @@
 //!   3. post-pass: corner/edge seating (`seat_corner_seek_parts`).
 //! ```
 //!
-//! This crate does not define an engine trait or select among placers.
+//! The routability oracle a placer ranks candidates against is INJECTED as
+//! [`pcb_model::RouteProbe`], so this crate names no router.
 
 mod api;
 pub mod placement;
 
 pub use api::*;
 pub use placement::place_tuned;
+
+use pcb_model::{Budget, PcbPlacer, RouteProbe};
+
+/// Gordian's tuned placement leaf behind the [`PcbPlacer`] contract.
+pub struct TunedPlacer;
+
+impl PcbPlacer for TunedPlacer {
+    fn name(&self) -> &'static str {
+        "tuned"
+    }
+
+    /// The tuned search is deterministic and purely geometric: it optimises an
+    /// explicit overlap/wirelength/cohesion cost rather than trial routes, so it
+    /// consults neither `probe` nor `budget.seed`. An already-expired budget
+    /// returns the untouched input placement instead of starting the search.
+    fn place(
+        &self,
+        view: &PlacementView,
+        hints: &PlacementHints,
+        _probe: &dyn RouteProbe,
+        budget: &Budget,
+    ) -> PlaceResult {
+        if budget.expired() {
+            return placement::place_as_given(view);
+        }
+        place_tuned(view, hints)
+    }
+}

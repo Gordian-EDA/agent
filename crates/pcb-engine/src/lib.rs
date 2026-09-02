@@ -1,14 +1,45 @@
-//! Production placement and routing policy facade.
+//! The composition root for the PCB phases.
 //!
-//! Workflows invoke placement and routing independently so the saved KiCAD
-//! board can be inspected or edited between phases. Concrete algorithm crates
-//! remain implementation details of this boundary.
+//! Every algorithm crate is a leaf that names only `pcb-model`: the placer takes
+//! its routability oracle as a [`RouteProbe`], the routers take their design-rule
+//! oracle as a [`Drc`] and their sub-routers as [`PcbRouter`]s. This crate is the
+//! one place that knows which concrete leaf fills each hole, so workflows invoke
+//! placement and routing independently without naming an algorithm.
 
-use pcb_model::{PlaceResult, PlacementHints, PlacementView, RoutingView};
+use pcb_drc::StandardDrc;
+use pcb_model::{
+    Budget, Drc, PcbPlacer, PcbRouter, PlaceResult, PlacementHints, PlacementView, RouteProbe,
+    RoutingView,
+};
+use pcb_place::TunedPlacer;
+use pcb_route_grid::probe::GridRouteProbe;
+use pcb_route_grid::router::{GridRouter, GridSinglePassRouter};
+use pcb_route_mesh::deps::MeshDeps;
+
+/// The production design-rule oracle every phase reconciles against.
+pub const DRC: StandardDrc = StandardDrc;
+
+/// The production routability probe: the grid router's cheap orthogonal pass.
+pub fn route_probe() -> impl RouteProbe {
+    GridRouteProbe::new(&DRC)
+}
+
+/// Run `f` against the premium router's collaborators, wired to the production
+/// leaves. The one place the mesh engine's holes are filled.
+fn with_mesh_deps<R>(budget: Budget, f: impl FnOnce(&MeshDeps) -> R) -> R {
+    let grid = GridRouter::new(&DRC);
+    let grid_seed = GridSinglePassRouter::new(&DRC);
+    f(&MeshDeps {
+        drc: &DRC,
+        grid: &grid,
+        grid_seed: &grid_seed,
+        budget,
+    })
+}
 
 /// Run the production placement policy for an imported board.
 pub fn place_tuned(problem: &PlacementView, hints: &PlacementHints) -> PlaceResult {
-    pcb_place::place_tuned(problem, hints)
+    TunedPlacer.place(problem, hints, &route_probe(), &Budget::unlimited())
 }
 
 /// Apply a fully prescribed placement without the tuned search portfolio.
@@ -16,10 +47,64 @@ pub fn place_prescribed(problem: &PlacementView, hints: &PlacementHints) -> Plac
     pcb_place::placement::place(problem, hints)
 }
 
-/// Run the production routing portfolio and retain its per-pass diagnostics.
+/// Run the production routing portfolio and retain its per-pass diagnostics,
+/// after scoping the view to the requested nets and turning its fixed copper
+/// into obstacles.
 pub fn route_tuned(problem: &RoutingView) -> pcb_route_mesh::pipeline::TunedRouteRun {
-    let problem = routing_problem(problem);
-    pcb_route_mesh::pipeline::route_tuned_with_diagnostics(&problem)
+    route_prepared(&routing_problem(problem))
+}
+
+/// [`route_tuned`] on a view the caller has already prepared.
+pub fn route_prepared(problem: &RoutingView) -> pcb_route_mesh::pipeline::TunedRouteRun {
+    with_mesh_deps(Budget::unlimited(), |deps| {
+        pcb_route_mesh::pipeline::route_tuned_with_diagnostics(deps, problem)
+    })
+}
+
+/// Pre-route the wide multi-pin terminals that need a dedicated escape before
+/// the main routing pass sees the board.
+pub fn prepare_wide_terminal_escapes(
+    problem: &RoutingView,
+) -> (RoutingView, pcb_model::RouteSolution) {
+    with_mesh_deps(Budget::unlimited(), |deps| {
+        pcb_route_mesh::pipeline::prepare_wide_terminal_escapes(deps, problem)
+    })
+}
+
+/// Freerouter-style postroute cleanup for selected copper, guarded by the
+/// production DRC oracle.
+pub fn postroute_cleanup(problem: &RoutingView, solution: &mut pcb_model::RouteSolution) {
+    with_mesh_deps(Budget::unlimited(), |deps| {
+        pcb_route_mesh::pipeline::postroute_cleanup(deps, problem, solution)
+    })
+}
+
+/// Route `problem` with the baseline grid router — the rescue primitive, and the
+/// engine an interactive tool re-routes a handful of nets with.
+pub fn route_grid(problem: &RoutingView) -> pcb_model::RouteResult {
+    GridRouter::new(&DRC).route(problem, &Budget::unlimited())
+}
+
+/// The production DRC report for an emitted solution.
+pub fn check(problem: &RoutingView, solution: &pcb_model::RouteSolution) -> pcb_model::Findings {
+    DRC.check(problem, solution)
+}
+
+/// The geometry-only violation count (clearance / width / via / bounds).
+pub fn geometry_violations(
+    problem: &RoutingView,
+    solution: &pcb_model::RouteSolution,
+) -> usize {
+    DRC.geometry_violations(problem, solution)
+}
+
+/// The connectivity oracle's verdict on an emitted solution: what is actually
+/// joined, and what is shorted — independent of any router's own bookkeeping.
+pub fn connectivity(
+    problem: &RoutingView,
+    solution: &pcb_model::RouteSolution,
+) -> Vec<pcb_model::Violation> {
+    pcb_drc::connectivity::check(problem, solution)
 }
 
 fn routing_problem(problem: &RoutingView) -> RoutingView {

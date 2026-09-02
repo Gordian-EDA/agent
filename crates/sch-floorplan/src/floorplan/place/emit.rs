@@ -16,14 +16,19 @@ use sch_check::{PinType, SymbolMeta, find_pin};
 
 use crate::write::SchematicWriter;
 use geom::Dir;
-use sch_place::result::EmitOutput;
+use kicad_symbol::PinDir;
+use sch_model::engine::{PinFlow, PlacementEngine, SchematicPlaceProblem};
+use sch_model::place::PlaceOptions;
+use sch_model::refine::SEARCH_SEED;
+use sch_model::engine::CandidateEvaluator;
+use sch_model::result::EmitOutput;
 
 use super::*;
-use sch_place::item::{Incidence, Item};
+use sch_model::item::{Incidence, Item};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
 // `geom::union_find`, shared with the desugar pin reconciler.
-use sch_place::ir::{Cell, LayoutIr, Orient};
+use sch_model::ir::LayoutIr;
 
 /// Compose every block's per-block `layout:` grid into one global relative seed:
 /// refdes → (grid col, grid row). Each gridded block occupies its own column band
@@ -87,24 +92,10 @@ pub(crate) fn grid_occurrences(design: &Design) -> BTreeMap<String, Vec<(i32, i3
     out
 }
 
-pub(crate) fn unit_place_key(refdes: &str, unit: u8) -> String {
-    format!("{refdes}#unit{unit}")
-}
 
 // ---------------------------------------------------------------------------
 // Compiler internal model.
 // ---------------------------------------------------------------------------
-
-/// Spacing constants (mm). All on the 1.27 grid. Kept tight: the real minimum
-/// spacing is now content-driven by the body+text overlap rect (`item_rect`)
-/// that the refine wall and `decongest` enforce, so these are just the initial
-/// table's slack — small, with the overlap model spreading parts only as far as
-/// their bodies and side-mounted text actually need.
-pub const COL_GAP: f64 = 6.35; // 5 grid — column channel (clears a wide IC's pin text)
-pub const ROW_GAP: f64 = 5.08; // 4 grid — vertical stack; tighter lets the rotation
-// move flip a clean vertical divider leg horizontal (lower wire cost, but
-// unconventional), so keep the conventional spacing here.
-pub(crate) const MARGIN: f64 = 12.7;
 
 /// Resolve a component's pins to (number, name, net) using the canonical
 /// symbol-wide number-first resolver.
@@ -272,6 +263,63 @@ mod resolve_pin_tests {
 // Public entry.
 // ---------------------------------------------------------------------------
 
+/// Build the neutral placement problem: gathered parts, connectivity, the layout intent
+/// to honour (inferred from connectivity when the caller has none), and the pin flow
+/// directions resolved from the symbol library — so no engine ever opens one itself.
+pub fn place_problem(
+    env: &KicadInstallation,
+    design: &Design,
+    ir: Option<LayoutIr>,
+    options: PlaceOptions,
+) -> io::Result<SchematicPlaceProblem> {
+    let items = gather(env, design)?;
+    let inc = incidence(&items);
+    let ir = ir.unwrap_or_else(|| super::super::infer::infer_ir(env, design));
+    let pin_flow = resolve_pin_flow(env, &items);
+    Ok(SchematicPlaceProblem {
+        items,
+        inc,
+        ir,
+        pin_flow,
+        seed: SEARCH_SEED,
+        options,
+        deadline: None,
+    })
+}
+
+/// `(item, pin)` → flow direction, from the symbol library's electrical pin types.
+pub fn resolve_pin_flow(
+    env: &KicadInstallation,
+    items: &[Item],
+) -> BTreeMap<(usize, String), PinFlow> {
+    let table = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
+    let mut meta_cache: BTreeMap<String, Option<SymbolMeta>> = BTreeMap::new();
+    let mut flows = BTreeMap::new();
+    for (i, it) in items.iter().enumerate() {
+        let meta = meta_cache
+            .entry(it.part.clone())
+            .or_insert_with(|| table.symbol(&it.part));
+        let Some(meta) = meta else { continue };
+        for (num, _name, net) in &it.pins {
+            if net.is_none() {
+                continue;
+            }
+            let Some(pm) = find_pin(&meta.pins, num) else {
+                continue;
+            };
+            let flow = match pm.dir {
+                PinDir::Out => Some(PinFlow::Source),
+                PinDir::In => Some(PinFlow::Sink),
+                _ => None,
+            };
+            if let Some(flow) = flow {
+                flows.insert((i, num.clone()), flow);
+            }
+        }
+    }
+    flows
+}
+
 /// Emit a complete `.kicad_sch`. Pass `ir: None` for connectivity inference (production);
 /// `Some(ir)` for a hand-tuned / sidecar frame (validation fixtures).
 pub fn emit_strategy(
@@ -304,16 +352,23 @@ pub(crate) fn prepare_writer(
     ir: Option<LayoutIr>,
     engine: Box<dyn PlacementEngine>,
 ) -> io::Result<(SchematicWriter, EmitOutput)> {
-    let mut problem = SchematicPlaceProblem::from_design(env, design)?;
+    let mut problem = place_problem(env, design, ir, PlaceOptions::default())?;
     if problem.options.debug_timing {
         tracing::debug!("[place] engine = {}", engine.name());
     }
-    let placement = engine.place(env, design, &mut problem, ir);
-    let ir = placement.ir;
+    // The oracle is a SNAPSHOT of the problem's connectivity and intent: the engine mutates
+    // only item poses, so the two never diverge, and the borrow checker stays out of the way.
+    let ir = {
+        let (inc, intent) = (problem.inc.clone(), problem.ir.clone());
+        let realizer = RoutedSheetRealizer::new(env, &inc, &intent);
+        engine
+            .place(&mut problem, &RoutedEvaluator::new(realizer, design))
+            .ir
+    };
 
     let detected_idioms = ir.idioms.clone();
     let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
-    let evaluator = RoutedEvaluator::new(&realizer);
+    let evaluator = RoutedEvaluator::new(realizer, design);
     let mut w = realizer.realize_writer(
         design.name.as_deref(),
         &problem.items,
@@ -390,6 +445,7 @@ pub fn build_writer(
     }
     let mut flag_points: BTreeMap<String, ([f64; 2], f64)> = BTreeMap::new();
     wire(
+        &crate::wire::ElbowRouter,
         env,
         &mut w,
         items,
@@ -588,204 +644,3 @@ pub(crate) fn incidence(items: &[Item]) -> Incidence {
 // ---------------------------------------------------------------------------
 // Placement — the coarse (col,row,orient) grid rendered as a table.
 // ---------------------------------------------------------------------------
-
-/// The coarse cell each item occupies. `assign_cells` reads the IR (unplaced
-/// parts flow into spare columns on the right); the refinement loop perturbs
-/// these; then [`apply_cells`] turns them into mm.
-///
-/// An [`Item`] marked `preseeded` carries a LIVE pose the caller owns and
-/// [`apply_cells`] leaves it alone. `frozen` is NOT that signal — it only forbids the
-/// search from moving an item, and a frozen item still gets its seed here.
-pub fn assign_cells(items: &[Item], ir: &LayoutIr) -> Vec<Cell> {
-    let max_col = ir.place.values().map(|c| c.col).max().unwrap_or(-1);
-    let mut spare = max_col + 1;
-    // `place` is keyed by refdes, so a MULTI-UNIT part's units (op-amp A/B + power unit)
-    // all resolve to ONE cell — they'd seed coincident, then decongest scatters them in
-    // arbitrary directions. Offset each successive same-refdes unit by one ordinal row so
-    // they seed ADJACENT (a vertical stack); the sibling-cohesion term then holds them
-    // clustered. Single-unit parts (one item/refdes) get offset 0 → byte-identical seed.
-    let mut unit_seen: BTreeMap<&str, i32> = BTreeMap::new();
-    items
-        .iter()
-        .map(|it| {
-            let k = {
-                let e = unit_seen.entry(it.refdes.as_str()).or_insert(0);
-                let v = *e;
-                *e += 1;
-                v
-            };
-            if let Some(c) = ir.place.get(&unit_place_key(&it.refdes, it.unit)) {
-                *c
-            } else {
-                match ir.place.get(&it.refdes) {
-                    Some(c) => Cell {
-                        col: c.col,
-                        row: c.row + k,
-                        orient: c.orient,
-                    },
-                    None => {
-                        let c = spare;
-                        spare += 1;
-                        Cell {
-                            col: c,
-                            row: k,
-                            orient: Orient::Down,
-                        }
-                    }
-                }
-            }
-        })
-        .collect()
-}
-
-pub fn apply_cells(items: &mut [Item], cells: &[Cell]) {
-    apply_cells_with_gaps(items, cells, COL_GAP, ROW_GAP);
-}
-
-/// Apply coarse cells with caller-selected track gaps.
-pub fn apply_cells_with_gaps(items: &mut [Item], cells: &[Cell], column_gap: f64, row_gap: f64) {
-    let angles: Vec<f64> = items
-        .iter()
-        .zip(cells)
-        .map(|(it, c)| orient_angle(&it.geom, c.orient))
-        .collect();
-
-    // Rotation-aware footprint (a quarter-turn swaps width and height), grown by the
-    // room the item's emitted Reference/Value text will need. Without the text a
-    // long-MPN IC gets a column exactly as wide as its body and its value smears onto
-    // the neighbouring columns (the `MCP1703Ax-330xxTT` overlap). `pads` is asymmetric —
-    // a tall passive stacks its fields to the RIGHT — so the item is seeded off the
-    // track centre by half the imbalance, leaving the text's side of the track free.
-    let (pads, dims): (Vec<[f64; 4]>, Vec<(f64, f64)>) = items
-        .iter()
-        .zip(&angles)
-        .map(|(it, &angle)| {
-            let s = it.geom.approx_size();
-            let (w, h) = if (angle / 90.0).round() as i64 % 2 == 1 {
-                (s[1], s[0])
-            } else {
-                (s[0], s[1])
-            };
-            let p = field_pad(it, w, h);
-            (p, (w + p[0] + p[1], h + p[2] + p[3]))
-        })
-        .unzip();
-
-    // Track sizes: a column is as wide as its widest part, a row as tall as its
-    // tallest.
-    let mut col_w: BTreeMap<i32, f64> = BTreeMap::new();
-    let mut row_h: BTreeMap<i32, f64> = BTreeMap::new();
-    for (c, &(w, h)) in cells.iter().zip(&dims) {
-        let e = col_w.entry(c.col).or_insert(0.0);
-        *e = e.max(w);
-        let e = row_h.entry(c.row).or_insert(0.0);
-        *e = e.max(h);
-    }
-    let col_x = track_centres(&col_w, column_gap);
-    let row_y = track_centres(&row_h, row_gap);
-
-    for (((it, c), &angle), p) in items.iter_mut().zip(cells).zip(&angles).zip(&pads) {
-        // A preseeded item holds a live pose its caller owns (the region adapter's fixed
-        // neighbours). Everything else — frozen idiom members included — is seeded here.
-        if it.preseeded {
-            continue;
-        }
-        it.at = [
-            geom::GRID_50_MIL.snap(col_x[&c.col] + (p[0] - p[1]) / 2.0),
-            geom::GRID_50_MIL.snap(row_y[&c.row] + (p[2] - p[3]) / 2.0),
-        ]
-        .into();
-        it.angle = angle;
-    }
-}
-
-/// Pack sized tracks (column widths or row heights) in ascending index order
-/// with `gap` between successive tracks, returning each index's centre. The
-/// grid is ordinal: a skipped index reserves no space (the LLM uses col/row for
-/// order and alignment, not metric spacing).
-pub(crate) fn track_centres(sizes: &BTreeMap<i32, f64>, gap: f64) -> BTreeMap<i32, f64> {
-    let mut out = BTreeMap::new();
-    let mut edge = 0.0;
-    for (&idx, &size) in sizes {
-        out.insert(idx, edge + size / 2.0);
-        edge += size + gap;
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use kicad_symbol::geometry::PinGeom;
-
-    fn resistor(refdes: &str) -> Item {
-        let pin = |number: &str, y: f64| PinGeom {
-            number: number.to_string(),
-            name: "~".to_string(),
-            at: geom::Point2::new(0.0, y),
-            angle: 0.0,
-            length: 2.54,
-            unit: 1,
-        };
-        Item {
-            refdes: refdes.to_string(),
-            part: "Device:R".to_string(),
-            value: "1k".to_string(),
-            footprint: None,
-            geom: SymbolGeometry {
-                lib_id: "Device:R".to_string(),
-                pins: vec![pin("1", 3.81), pin("2", -3.81)],
-                raw_definition: String::new(),
-            },
-            pins: vec![
-                ("1".into(), "~".into(), None),
-                ("2".into(), "~".into(), None),
-            ],
-            at: [0.0, 0.0].into(),
-            angle: 0.0,
-            unit: 1,
-            mirror: false,
-            frozen: false,
-            preseeded: false,
-        }
-    }
-
-    /// `frozen` forbids the search from moving an item; it never means the item already
-    /// has a pose. Only a `preseeded` item (the region adapter's live neighbours) keeps
-    /// the pose it arrived with.
-    #[test]
-    fn seeding_skips_preseeded_not_frozen() {
-        let cell = |col, row| Cell {
-            col,
-            row,
-            orient: Orient::Down,
-        };
-        let mut items = vec![resistor("R1"), resistor("R2"), resistor("R3")];
-        items[0].frozen = true;
-        items[1].preseeded = true;
-        items[1].at = [80.0, 40.0].into();
-        let ir = LayoutIr {
-            place: [
-                ("R1".to_string(), cell(2, 1)),
-                ("R2".to_string(), cell(1, 0)),
-                ("R3".to_string(), cell(0, 0)),
-            ]
-            .into_iter()
-            .collect(),
-            ..Default::default()
-        };
-        let cells = assign_cells(&items, &ir);
-        apply_cells(&mut items, &cells);
-
-        assert!(
-            items[0].at[0] > 0.0 && items[0].at[1] > 0.0,
-            "a frozen item on an empty sheet must still be seeded: {:?}",
-            items[0].at
-        );
-        assert_eq!(items[1].at, [80.0, 40.0].into(), "preseeded pose was moved");
-        assert!(
-            items[2].at[0] < items[0].at[0],
-            "cell columns must still order"
-        );
-    }
-}

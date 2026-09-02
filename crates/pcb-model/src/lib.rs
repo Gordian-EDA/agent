@@ -16,15 +16,23 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod drc;
+pub mod phase;
 pub mod place;
 pub mod route;
+pub use drc::{Drc, Finding, Findings, Violation};
 pub use geom::UnionFind;
 pub use geom::{Point2, Polygon, Rect, Segment};
+pub use phase::{Budget, PcbPlacer, PcbRouter, RouteEstimate, RouteProbe};
 pub use place::{
     Edge, EdgeDatum, GroupHint, LockedAt, Part, PartPad, PlaceReport, PlaceResult, Placement,
     PlacementHints, PlacementView,
 };
 pub use route::{RouteMetrics, RouteQuality, RouteResult, RoutingCapabilities, failed_pad_weight};
+
+/// Floor on the routing grid pitch (mm), so loose design rules on a large board
+/// cannot produce a grid too coarse to resolve its channels.
+pub const MIN_PITCH_MM: f64 = 0.1;
 
 // ── defaults for extension fields ────────────────────────────────────────────
 
@@ -200,6 +208,19 @@ impl RoutingView {
             .values()
             .copied()
             .fold(self.min_trace_width, f64::max)
+    }
+
+    /// Routing grid pitch: `max(MIN_PITCH_MM, (min_trace_width + clearance) / 2)`.
+    pub fn grid_pitch(&self) -> f64 {
+        ((self.min_trace_width + self.clearance) / 2.0).max(MIN_PITCH_MM)
+    }
+
+    /// Obstacle inflation: `clearance + min_trace_width/2` — a cell left free by
+    /// this halo guarantees a MIN-width trace centred there clears every obstacle
+    /// by `clearance`. A wider net adds its extra half-width as a per-net scan, so
+    /// it clears exactly without over-spacing every other net.
+    pub fn obstacle_inflation(&self) -> f64 {
+        self.clearance + self.min_trace_width / 2.0
     }
 }
 

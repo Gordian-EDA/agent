@@ -10,11 +10,11 @@ use std::collections::BTreeMap;
 
 use circuit_graph::netclass::is_connector_like;
 use geom::Rect;
-use sch_place::item::Item;
+use sch_model::item::Item;
 
 use crate::scene::Scene;
 use crate::snap;
-use sch_check::model::refdes_key;
+use sch_model::item::refdes_key;
 
 const PITCH_GAP: f64 = 7.62;
 
@@ -119,7 +119,7 @@ fn node_rect(items: &[Item], scene: &Scene, sn: usize) -> Rect {
     scene.nodes[sn]
         .places
         .iter()
-        .map(|p| sch_floorplan::engine_support::item_rect(&items[p.item], items[p.item].at))
+        .map(|p| sch_model::geometry::item_rect(&items[p.item], items[p.item].at))
         .reduce(|acc, r| {
             Rect::new(
                 acc.min_x.min(r.min_x),
@@ -148,7 +148,7 @@ pub fn apply(items: &mut [Item], scene: &Scene, band: &BandPlan) {
         .collect();
     let others: Vec<Rect> = (0..items.len())
         .filter(|i| !member_items.contains(i))
-        .map(|i| sch_floorplan::engine_support::item_rect(&items[i], items[i].at))
+        .map(|i| sch_model::geometry::item_rect(&items[i], items[i].at))
         .collect();
 
     let cols = if band.members.len() >= 5 {

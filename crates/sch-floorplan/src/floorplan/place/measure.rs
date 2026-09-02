@@ -5,11 +5,11 @@
 //! measure a sheet* — not a cost, an objective, or a search. It bakes in no weights and
 //! no `premium` policy: a measuring engine calls it and applies ITS OWN objective.
 //!
-//! Three surfaces:
+//! Two surfaces:
 //! - [`RoutedSheetRealizer`] — build + route a candidate into a [`SchematicWriter`].
-//! - [`RoutedEvaluator`] — read metrics from routed realizations.
-//! - [`RawMetrics`] — the 18 raw count/length terms, weight-free. An engine's objective
-//!   multiplies these by its own weights and sums them.
+//! - [`RoutedEvaluator`] — the [`CandidateEvaluator`] the engine crates ask what a
+//!   candidate placement would cost. It answers in weight-free [`RawMetrics`]; the
+//!   weights and the search are engine-owned.
 
 use std::collections::BTreeMap;
 
@@ -19,54 +19,17 @@ use sch_check::model::Design;
 
 use crate::write::SchematicWriter;
 use circuit_graph::netclass::is_ground;
-use sch_place::ir::LayoutIr;
-use sch_place::item::{Incidence, Item};
-use sch_place::place::Crossings;
+use sch_model::ir::LayoutIr;
+use sch_model::item::{Incidence, Item};
+use sch_model::engine::{CandidateEvaluator, CohesionPlan, RawMetrics};
+use sch_model::place::Crossings;
 
-use sch_place::place::PlaceResult;
 
 use super::emit::{build_writer, compute_needs_flag};
-use super::problem::SchematicPlaceProblem;
-use super::relation::{relation_group_spread, relation_viol};
-use super::score::{
-    count_body_crossings, count_close_wires, count_collinear_body_crossings, count_congestion,
-    count_corners, count_crossings, count_foreign_taps, count_ic_body_crossings, count_merges,
-    count_parallel_body_crossings, count_shorts, count_stray, grid_order_viol, item_rect,
-};
-use super::*;
-
-/// A schematic placement+routing ENGINE: searches over a neutral
-/// [`SchematicPlaceProblem`] plus optional layout intent, and writes the final
-/// placement into `problem.items`.
-///
-/// ## Contract
-/// - **Deterministic given the problem.** No clock; a fixed `seed` reproduces.
-/// - **Never panics.** A unit it cannot place reports through the result's counts, never
-///   by unwinding.
-/// - The returned [`PlaceResult`] describes the FINAL `problem.items` — the placement
-///   the caller will ship.
-pub trait PlacementEngine {
-    /// Open provenance: the engine's stable name (e.g. `"anneal"`, `"constraint"`).
-    fn name(&self) -> &'static str;
-
-    /// Search placement+routing and write the final geometry into `problem.items`.
-    ///
-    /// Engines may use `ir` as hints/constraints, or ignore it entirely.
-    fn place(
-        &self,
-        env: &KicadInstallation,
-        design: &Design,
-        problem: &mut SchematicPlaceProblem,
-        ir: Option<LayoutIr>,
-    ) -> PlacementOutput;
-}
-
-/// Result of engine-owned placement orchestration: final item geometry lives in
-/// `problem.items`; `ir` is the sheet intent the routed realizer should use.
-pub struct PlacementOutput {
-    pub result: PlaceResult,
-    pub ir: LayoutIr,
-}
+use sch_model::geometry::body_overlap_count;
+use sch_model::relation::{relation_group_spread, relation_viol};
+use super::score::{signal_anchor_centroid, supply_pin_target, count_body_crossings, count_close_wires, count_collinear_body_crossings, count_congestion, count_corners, count_crossings, count_foreign_taps, count_ic_body_crossings, count_merges, count_parallel_body_crossings, count_shorts, count_stray};
+use sch_model::geometry::{grid_order_viol, item_rect};
 
 /// Which routed realization to build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +47,7 @@ impl RouteRealization {
 }
 
 /// Builds/routes a candidate placement into a [`SchematicWriter`].
+#[derive(Clone, Copy)]
 pub struct RoutedSheetRealizer<'a> {
     env: &'a KicadInstallation,
     inc: &'a Incidence,
@@ -109,10 +73,6 @@ impl<'a> RoutedSheetRealizer<'a> {
         self
     }
 
-    pub fn env(&self) -> &'a KicadInstallation {
-        self.env
-    }
-
     pub fn realize_writer(
         &self,
         title: Option<&str>,
@@ -133,17 +93,22 @@ impl<'a> RoutedSheetRealizer<'a> {
     }
 }
 
-/// Routed metrics for candidate placements.
+/// The routed [`CandidateEvaluator`]: every engine question answered off a real routed
+/// realization of the candidate. Bound to the design whose orphan label columns and title
+/// the shipped measures include, so the trait itself stays design-free.
 pub struct RoutedEvaluator<'a> {
-    realizer: &'a RoutedSheetRealizer<'a>,
+    realizer: RoutedSheetRealizer<'a>,
+    design: &'a Design,
 }
 
 impl<'a> RoutedEvaluator<'a> {
-    pub fn new(realizer: &'a RoutedSheetRealizer<'a>) -> Self {
-        Self { realizer }
+    pub fn new(realizer: RoutedSheetRealizer<'a>, design: &'a Design) -> Self {
+        Self { realizer, design }
     }
+}
 
-    pub fn measure(&self, items: &[Item]) -> RawMetrics {
+impl CandidateEvaluator for RoutedEvaluator<'_> {
+    fn measure(&self, items: &[Item]) -> RawMetrics {
         match self
             .realizer
             .realize_writer(None, items, RouteRealization::CandidateScore)
@@ -155,30 +120,11 @@ impl<'a> RoutedEvaluator<'a> {
                 self.realizer.inc,
                 self.realizer.ir,
             ),
-            Err(_) => RawMetrics {
-                fallbacks: usize::MAX,
-                junctions: usize::MAX,
-                length: f64::INFINITY,
-                crossings: usize::MAX,
-                corners: usize::MAX,
-                merges: usize::MAX,
-                overlaps: usize::MAX,
-                congestion: usize::MAX,
-                body_cross: usize::MAX,
-                stray: f64::INFINITY,
-                orient_viol: usize::MAX,
-                leg_viol: usize::MAX,
-                spine_viol: usize::MAX,
-                spread: f64::INFINITY,
-                grid_order: usize::MAX,
-                sib_spread: f64::INFINITY,
-                relation: usize::MAX,
-                group_spread: f64::INFINITY,
-            },
+            Err(_) => RawMetrics::unbuildable(),
         }
     }
 
-    pub fn warnings(&self, items: &[Item]) -> usize {
+    fn warnings(&self, items: &[Item]) -> usize {
         match self
             .realizer
             .realize_writer(None, items, RouteRealization::ShippedSheet)
@@ -198,16 +144,16 @@ impl<'a> RoutedEvaluator<'a> {
     /// gate reading the raw pre-emit geometry misses the orphan columns, which both balloon a
     /// dense board's bbox and collide into warnings. One realize pass serves both. `None` if
     /// the route can't be built or the sheet is empty.
-    pub fn rendered(&self, design: &Design, items: &[Item]) -> Option<(usize, Rect)> {
+    fn rendered(&self, items: &[Item]) -> Option<(usize, Rect)> {
         let mut w = self
             .realizer
             .realize_writer(
-                design.name.as_deref(),
+                self.design.name.as_deref(),
                 items,
                 RouteRealization::ShippedSheet,
             )
             .ok()?;
-        super::emit::add_orphan_label_columns(&mut w, design, self.realizer.inc);
+        super::emit::add_orphan_label_columns(&mut w, self.design, self.realizer.inc);
         w.set_frame(true);
         w.prepare();
         let warnings = w.layout_warnings().len();
@@ -218,24 +164,24 @@ impl<'a> RoutedEvaluator<'a> {
     /// whole-placement gate (`lib.rs`) needs all three, and crossings are wire-based (invariant
     /// to the orphan label-columns + text-solve that `rendered` adds), so they share a writer.
     /// Halves the gate's realize cost vs calling `crossings` and `rendered` separately.
-    pub fn shipped(&self, design: &Design, items: &[Item]) -> Option<(Crossings, usize, Rect)> {
+    fn shipped(&self, items: &[Item]) -> Option<(Crossings, usize, Rect)> {
         let mut w = self
             .realizer
             .realize_writer(
-                design.name.as_deref(),
+                self.design.name.as_deref(),
                 items,
                 RouteRealization::ShippedSheet,
             )
             .ok()?;
         let cr = shipped_crossings(self.realizer.env, &w, items);
-        super::emit::add_orphan_label_columns(&mut w, design, self.realizer.inc);
+        super::emit::add_orphan_label_columns(&mut w, self.design, self.realizer.inc);
         w.set_frame(true);
         w.prepare();
         let warnings = w.layout_warnings().len();
         w.content_bbox().map(|r| (cr, warnings, r))
     }
 
-    pub fn crossings(&self, items: &[Item]) -> Crossings {
+    fn crossings(&self, items: &[Item]) -> Crossings {
         match self
             .realizer
             .realize_writer(None, items, RouteRealization::ShippedSheet)
@@ -245,7 +191,7 @@ impl<'a> RoutedEvaluator<'a> {
         }
     }
 
-    pub fn truthfulness_breaks(&self, items: &[Item]) -> usize {
+    fn truthfulness_breaks(&self, items: &[Item]) -> usize {
         match self
             .realizer
             .realize_writer(None, items, RouteRealization::ShippedSheet)
@@ -259,52 +205,63 @@ impl<'a> RoutedEvaluator<'a> {
             Err(_) => usize::MAX,
         }
     }
-}
 
-/// The raw, weight-FREE measurements of a routed candidate placement — the 18 terms an
-/// engine's objective combines under its own weights. Built by [`SchematicPlaceProblem::measure`]
-/// from the `fan_risers=false` routed build (the per-move objective build, which differs
-/// from the shipped `fan_risers=true` sheet `warnings`/`crossings` measure). Splitting
-/// the raw extraction (shared infrastructure) from the weighting (engine-owned method) is
-/// what lets greedy and anneal own genuinely different objectives over one realization.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct RawMetrics {
-    /// Signal-label fallbacks (a wire degraded to a label).
-    pub fallbacks: usize,
-    /// Junction dots.
-    pub junctions: usize,
-    /// Total Manhattan wire length (mm).
-    pub length: f64,
-    /// Visual wire-wire crossings between different nets.
-    pub crossings: usize,
-    /// Wire corners (L-bends).
-    pub corners: usize,
-    /// Net merges + placement shorts + foreign taps (hard truthfulness failures).
-    pub merges: usize,
-    /// Body-overlap pairs + symbol/label-box collisions.
-    pub overlaps: usize,
-    /// Cramped junction/wire/body proximity.
-    pub congestion: usize,
-    /// Wires routed through a part body (2-pin transverse/collinear/parallel + IC).
-    pub body_cross: usize,
-    /// Stray distance: satellites far from the anchor pins they wire to.
-    pub stray: f64,
-    /// 2-pin parts on the unconventional axis (series/decoupling/leg orientation).
-    pub orient_viol: usize,
-    /// 1-rail pull/leg orientation+direction violations (the premium-boosted subset).
-    pub leg_viol: usize,
-    /// Divider/totem spine pairs not drawn in one column.
-    pub spine_viol: usize,
-    /// Bounding-box half-perimeter of all part bodies (compactness).
-    pub spread: f64,
-    /// Authored per-block `layout:` relative-order violations.
-    pub grid_order: usize,
-    /// Same-refdes (multi-unit) bounding-box spread (cohesion).
-    pub sib_spread: f64,
-    /// Unsatisfied [`sch_place::ir::Relation`] statements (the LLM's relational intent).
-    pub relation: usize,
-    /// Bounding-box half-perimeter of every `Relation::Group` (group cohesion).
-    pub group_spread: f64,
+    fn warning_messages(&self, items: &[Item]) -> Vec<String> {
+        match self
+            .realizer
+            .realize_writer(None, items, RouteRealization::ShippedSheet)
+        {
+            Ok(mut w) => {
+                w.set_frame(true);
+                w.prepare();
+                w.layout_warnings()
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn cohesion_plans(&self, items: &[Item]) -> Vec<CohesionPlan> {
+        let (env, inc, ir) = (self.realizer.env, self.realizer.inc, self.realizer.ir);
+        let Ok(w) = self
+            .realizer
+            .realize_writer(None, items, RouteRealization::CandidateScore)
+        else {
+            return Vec::new();
+        };
+        let mut plans = Vec::new();
+        for (item, s) in items.iter().enumerate() {
+            if s.geom.pins.len() != 2 {
+                continue;
+            }
+            let pos = |n: &str| {
+                w.pin_dirs(env, &s.refdes, n)
+                    .ok()
+                    .and_then(|v| v.first().map(|x| x.0))
+            };
+            let (Some(p0), Some(p1)) = (pos(&s.geom.pins[0].number), pos(&s.geom.pins[1].number))
+            else {
+                continue;
+            };
+            let vertical = (p0[1] - p1[1]).abs() >= (p0[0] - p1[0]).abs();
+            if let Some(target) = signal_anchor_centroid(env, &w, items, inc, ir, s, false)
+                .or_else(|| supply_pin_target(env, &w, items, inc, ir, s))
+            {
+                plans.push(CohesionPlan {
+                    item,
+                    vertical,
+                    target,
+                });
+            }
+        }
+        plans
+    }
+
+    fn with_ir<'a>(&'a self, ir: &'a LayoutIr) -> Box<dyn CandidateEvaluator + 'a> {
+        Box::new(RoutedEvaluator {
+            realizer: RoutedSheetRealizer { ir, ..self.realizer },
+            design: self.design,
+        })
+    }
 }
 
 /// Body / IC / wire crossing triple read from a shipped (`fan_risers=true`) writer.

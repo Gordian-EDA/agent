@@ -25,18 +25,18 @@
 //! de-sprawls without regressing the routed metrics — so a dual-IC / huge-bank board where the
 //! single-row bank gets too wide (411be) is safely left to the SA.
 
+use sch_model::engine::CandidateEvaluator;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{Point2, Rect};
-use sch_check::model::Design;
-use sch_place::ir::LayoutIr;
-use sch_place::item::{Incidence, Item};
-use sch_place::place::{Deadline, expired};
+use sch_model::ir::LayoutIr;
+use sch_model::item::{Incidence, Item};
+use sch_model::place::{Deadline, expired};
 
-use sch_floorplan::contract::RoutedEvaluator;
-use sch_floorplan::engine_support::{
-    align_idiom_clusters, align_led_chains, build_anchor_blocks, decongest, item_rect, orient_angle,
-};
+use sch_model::geometry::item_rect;
+use sch_model::idiom::{align_idiom_clusters, align_led_chains, build_anchor_blocks, orient_angle};
+use sch_model::refine::decongest;
 
 use crate::eval::{restore, save, score};
 
@@ -93,7 +93,7 @@ fn repeated_channel_relayout(items: &mut [Item], inc: &Incidence, ir: &LayoutIr)
     }
     let natural_refdes = |i: usize| {
         let rd = items[i].refdes.as_str();
-        let (alpha, num) = sch_check::model::refdes_key(rd);
+        let (alpha, num) = sch_model::item::refdes_key(rd);
         (alpha.to_owned(), num, rd.to_owned())
     };
     hubs.sort_by_key(|&i| natural_refdes(i));
@@ -159,7 +159,7 @@ fn repeated_channel_relayout(items: &mut [Item], inc: &Incidence, ir: &LayoutIr)
                 .filter_map(|(_, _, n)| n.as_deref())
                 .all(&is_rail)
         {
-            items[i].angle = orient_angle(&items[i].geom, sch_place::ir::Orient::Down);
+            items[i].angle = orient_angle(&items[i].geom, sch_model::ir::Orient::Down);
         } else {
             items[i].angle = 0.0;
         }
@@ -232,7 +232,7 @@ fn repeated_channel_relayout(items: &mut [Item], inc: &Incidence, ir: &LayoutIr)
 
 /// A module = a hub + the satellites that tap it, or a lone unclustered part. Frozen items
 /// stay in their own singleton (never moved, but still anchor others' targets).
-fn modules(items: &[Item], inc: &Incidence, ir: &sch_place::ir::LayoutIr) -> Vec<Vec<usize>> {
+fn modules(items: &[Item], inc: &Incidence, ir: &sch_model::ir::LayoutIr) -> Vec<Vec<usize>> {
     let hubs: Vec<usize> = (0..items.len())
         .filter(|&i| items[i].geom.pins.len() >= 3)
         .collect();
@@ -317,7 +317,7 @@ fn module_adjacency(
     mods: &[Vec<usize>],
     inc: &Incidence,
     mod_of: &[usize],
-    ir: &sch_place::ir::LayoutIr,
+    ir: &sch_model::ir::LayoutIr,
 ) -> Vec<BTreeMap<usize, f64>> {
     use circuit_graph::netclass::{is_ground, is_power_net};
     let mut adj: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); mods.len()];
@@ -359,7 +359,7 @@ fn module_adjacency(
 fn holistic_relayout(
     items: &mut [Item],
     inc: &Incidence,
-    ir: &sch_place::ir::LayoutIr,
+    ir: &sch_model::ir::LayoutIr,
     gut: f64,
 ) -> bool {
     use circuit_graph::netclass::{is_ground, is_power_net};
@@ -427,7 +427,7 @@ fn holistic_relayout(
         let mut ang = Vec::with_capacity(m.len());
         let cap_angle = caps
             .first()
-            .map(|&c| orient_angle(&items[c].geom, sch_place::ir::Orient::Down));
+            .map(|&c| orient_angle(&items[c].geom, sch_model::ir::Orient::Down));
         for &i in m {
             if let Some(k) = caps.iter().position(|&c| c == i) {
                 let (col, row) = (k % ncols, k / ncols);
@@ -543,7 +543,7 @@ fn holistic_relayout(
 pub(crate) fn rail_relayout(
     items: &mut [Item],
     inc: &Incidence,
-    ir: &sch_place::ir::LayoutIr,
+    ir: &sch_model::ir::LayoutIr,
 ) -> Option<String> {
     use circuit_graph::netclass::{is_ground, is_power_net};
     let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);
@@ -622,7 +622,7 @@ pub(crate) fn rail_relayout(
     }
     let cap_angle = caps
         .first()
-        .map(|&i| orient_angle(&items[i].geom, sch_place::ir::Orient::Down));
+        .map(|&i| orient_angle(&items[i].geom, sch_model::ir::Orient::Down));
     let per_gap = caps.len().div_ceil(hubs.len().max(1));
     let mut cap_iter = caps.iter();
     let mut cx = MARGIN;
@@ -744,8 +744,7 @@ pub(crate) struct Bar {
 }
 
 pub(crate) fn compact_clusters(
-    eval: &RoutedEvaluator,
-    design: &Design,
+    eval: &dyn CandidateEvaluator,
     items: &mut [Item],
     inc: &Incidence,
     ir: &LayoutIr,
@@ -769,7 +768,7 @@ pub(crate) fn compact_clusters(
     if repeated_channel_relayout(items, inc, ir) {
         let s = score(eval, inc, ir, items);
         let rendered = eval
-            .rendered(design, items)
+            .rendered(items)
             .map(|(w, rect)| (w, rendered_sprawl(&rect, items.len())));
         let ok = rendered.is_some_and(|(w, spr)| {
             (s.0, s.1, s.2) <= (s0.0, s0.1, s0.2)
@@ -826,7 +825,7 @@ pub(crate) fn compact_clusters(
             decongest(items);
         }
         let s = score(eval, inc, ir, items);
-        let (w, spr) = match eval.rendered(design, items) {
+        let (w, spr) = match eval.rendered(items) {
             Some((w, rect)) => (w, rendered_sprawl(&rect, items.len())),
             None => continue,
         };

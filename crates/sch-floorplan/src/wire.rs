@@ -1,4 +1,4 @@
-//! Elbow router: Manhattan wires between net terminals.
+//! The elbow [`SchRouter`] leaf: Manhattan wires between net terminals.
 //!
 //! Pure geometry — no I/O, no KiCAD environment. The approach (adapted from
 //! tscircuit's schematic-trace-solver, per the aesthetics spec §3): start
@@ -10,42 +10,13 @@
 //! call site — never an error.
 
 use geom::Dir;
-use geom::{EPS, Point2, Polyline, Rect, Segment};
+use geom::{EPS, Point2, Polyline};
+use sch_model::route::{RouteScene, SchRouter, path_ok};
 
 /// Minimum lead length out of a pin before the first turn, mm.
 const LEAD_MM: f64 = 2.54;
 
-/// A drawn segment assigned to a concrete net.
-#[derive(Debug, Clone, PartialEq)]
-pub struct NetSegment {
-    pub segment: Segment,
-    pub net: String,
-}
 
-impl NetSegment {
-    pub fn new(a: Point2, b: Point2, net: impl Into<String>) -> Self {
-        Self {
-            segment: Segment::new(a, b),
-            net: net.into(),
-        }
-    }
-}
-
-/// A drawn segment whose net attribution may be unknown.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DrawnSegment {
-    pub segment: Segment,
-    pub net: Option<String>,
-}
-
-impl DrawnSegment {
-    pub fn new(a: Point2, b: Point2, net: Option<String>) -> Self {
-        Self {
-            segment: Segment::new(a, b),
-            net,
-        }
-    }
-}
 
 /// 2–4 point Manhattan elbow from `a` (leaving along `dir_a` for at least
 /// [`LEAD_MM`]) to `b`: straight when the lead axis lines up, else one L or
@@ -83,86 +54,8 @@ pub fn elbow(a: Point2, dir_a: Dir, b: Point2) -> Vec<Point2> {
     Polyline::new(path).simplify().into_points()
 }
 
-/// Routing obstacles, all coordinates sheet mm.
-pub struct RouteScene {
-    /// Solid rects (symbol bodies): a path segment may not pass through one
-    /// (edge-touching is tolerated).
-    pub solids: Vec<Rect>,
-    /// Net-anchor points with their net: a segment may not pass through a
-    /// point of a DIFFERENT net (touching it would merge the nets).
-    pub points: Vec<(Point2, String)>,
-    /// Existing segments with their net (cluster wires, stubs, prior routes).
-    /// Any touch with a different net's segment — shared point, collinear
-    /// overlap, endpoint-on-segment — is forbidden; a strictly-interior
-    /// perpendicular crossing is fine (KiCAD draws no connection there).
-    pub segments: Vec<NetSegment>,
-    /// Port-label (global-tag pennant) boxes with their OWN net. A FOREIGN net's
-    /// wire may not pass through one — that draws a wire straight across someone
-    /// else's edge tag (the inverting-input net bisecting a VIN pennant). The
-    /// label's own net wire DOES reach it (the pennant connects there), so the
-    /// box is net-tagged rather than a solid.
-    pub label_solids: Vec<(Rect, String)>,
-}
 
-/// Whether `path` can be drawn for `net` without entering a body, touching a
-/// foreign net's anchor point, or merging with a foreign net's segment.
-pub fn path_ok(path: &[Point2], net: &str, scene: &RouteScene) -> bool {
-    for w in path.windows(2) {
-        let (a, b) = (w[0], w[1]);
-        let seg = Segment::new(a, b);
-        if scene
-            .solids
-            .iter()
-            .any(|r| seg.axis_aligned_hits_rect_interior(r))
-        {
-            return false;
-        }
-        if scene
-            .points
-            .iter()
-            .any(|(p, n)| n != net && seg.contains_point(*p))
-        {
-            return false;
-        }
-        if scene
-            .segments
-            .iter()
-            .any(|existing| existing.net != net && seg.axis_aligned_connects(existing.segment))
-        {
-            return false;
-        }
-        if scene
-            .label_solids
-            .iter()
-            .any(|(r, n)| n != net && seg.axis_aligned_hits_rect_interior(r))
-        {
-            return false;
-        }
-    }
-    true
-}
 
-/// Number of VISUAL crossings `path` (drawn for `net`) would add against the
-/// scene's already-committed foreign-net segments: a perpendicular pair (one
-/// horizontal, one vertical) meeting at a point INTERIOR to both — the same
-/// over-pass clutter `score::count_crossings` and the corpus oracle count. Used
-/// by the router's wire-vs-label decision: a crossing-heavy hop is better named
-/// (the human idiom) than drawn as a literal wire that reads as spaghetti.
-pub fn path_crossings(path: &[Point2], net: &str, scene: &RouteScene) -> usize {
-    let mut n = 0;
-    for w in path.windows(2) {
-        let seg = Segment::new(w[0], w[1]);
-        for existing in &scene.segments {
-            if existing.net == net {
-                continue; // same net: a deliberate join, not a crossing
-            }
-            if seg.axis_aligned_crosses_interior(existing.segment) {
-                n += 1;
-            }
-        }
-    }
-    n
-}
 
 /// Clearance candidates keep this far off obstacle edges, mm.
 const CLEAR_MM: f64 = 2.54;
@@ -359,9 +252,35 @@ pub fn junction_points(paths: &[Vec<Point2>]) -> Vec<Point2> {
         .collect()
 }
 
+/// Orientation-aware elbows with best-first collision repair.
+pub struct ElbowRouter;
+
+impl SchRouter for ElbowRouter {
+    fn name(&self) -> &'static str {
+        "elbow"
+    }
+
+    fn tree_edges(&self, terminals: &[Point2]) -> Vec<(usize, usize)> {
+        mst_edges(terminals)
+    }
+
+    fn route_edge(
+        &self,
+        a: Point2,
+        dir_a: Dir,
+        b: Point2,
+        net: &str,
+        scene: &RouteScene,
+    ) -> Option<Vec<Point2>> {
+        route_edge(a, dir_a, b, net, scene)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geom::Rect;
+    use sch_model::route::{NetSegment, path_crossings};
 
     fn assert_axis_aligned(path: &[Point2]) {
         for w in path.windows(2) {

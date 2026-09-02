@@ -11,7 +11,8 @@
 
 use crate::ctx::CopperGeom;
 use crate::rules::geom::EPS;
-use crate::{DrcCtx, Finding, Rule};
+use crate::{DrcCtx, Rule};
+use pcb_model::Finding;
 
 /// KiCAD's copper-to-board-edge clearance, mm.
 const EDGE_CLEAR: f64 = 0.5;

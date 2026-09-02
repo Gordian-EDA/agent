@@ -19,7 +19,7 @@ tracing-subscriber.workspace = true
 chrono.workspace = true
 resvg = { workspace = true }
 sch-check = { path = "../sch-check" }
-sch-place = { path = "../sch-place" }
+sch-model = { path = "../sch-model" }
 gordian-llm = { path = "../gordian-llm" }
 kicad = { path = "../kicad" }
 kicad-ipc = { path = "../kicad-ipc" }

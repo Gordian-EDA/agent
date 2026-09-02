@@ -12,7 +12,7 @@ pub fn copper_obstacles(problem: &RoutingView, solution: &RouteSolution) -> Vec<
 }
 
 pub(crate) fn trace_obstacles(problem: &RoutingView, trace: &Trace) -> Vec<Obstacle> {
-    let pitch = pcb_route_grid::grid::grid_pitch(problem);
+    let pitch = problem.grid_pitch();
     trace
         .path
         .windows(2)

@@ -1,0 +1,181 @@
+{
+ "bounds": {
+  "minX": 0.0,
+  "minY": 0.0,
+  "maxX": 30.0,
+  "maxY": 20.0
+ },
+ "clearance": 0.2,
+ "layerCount": 2,
+ "minTraceWidth": 0.25,
+ "parts": [
+  {
+   "reference": "J1",
+   "courtyardW": 3.0,
+   "courtyardH": 6.08,
+   "pads": [
+    {
+     "number": "1",
+     "offset": {
+      "x": 0.0,
+      "y": -1.27
+     },
+     "width": 1.7,
+     "height": 1.7,
+     "layers": [
+      "top",
+      "bottom"
+     ],
+     "net": "PWR0"
+    },
+    {
+     "number": "2",
+     "offset": {
+      "x": 0.0,
+      "y": 1.27
+     },
+     "width": 1.7,
+     "height": 1.7,
+     "layers": [
+      "top",
+      "bottom"
+     ],
+     "net": "PWR1"
+    }
+   ]
+  },
+  {
+   "reference": "R1",
+   "courtyardW": 1.6,
+   "courtyardH": 0.95,
+   "pads": [
+    {
+     "number": "1",
+     "offset": {
+      "x": -0.7375,
+      "y": 0.0
+     },
+     "width": 0.875,
+     "height": 0.95,
+     "layers": [
+      "top"
+     ],
+     "net": "VCC"
+    },
+    {
+     "number": "2",
+     "offset": {
+      "x": 0.7375,
+      "y": 0.0
+     },
+     "width": 0.875,
+     "height": 0.95,
+     "layers": [
+      "top"
+     ],
+     "net": "LED_A"
+    }
+   ]
+  },
+  {
+   "reference": "R2",
+   "courtyardW": 1.6,
+   "courtyardH": 0.95,
+   "pads": [
+    {
+     "number": "1",
+     "offset": {
+      "x": -0.7375,
+      "y": 0.0
+     },
+     "width": 0.875,
+     "height": 0.95,
+     "layers": [
+      "top"
+     ],
+     "net": "VCC"
+    },
+    {
+     "number": "2",
+     "offset": {
+      "x": 0.7375,
+      "y": 0.0
+     },
+     "width": 0.875,
+     "height": 0.95,
+     "layers": [
+      "top"
+     ],
+     "net": "LED_B"
+    }
+   ]
+  },
+  {
+   "reference": "D1",
+   "courtyardW": 1.8,
+   "courtyardH": 1.1,
+   "pads": [
+    {
+     "number": "1",
+     "offset": {
+      "x": -0.8,
+      "y": 0.0
+     },
+     "width": 0.9,
+     "height": 1.0,
+     "layers": [
+      "top"
+     ],
+     "net": "LED_A"
+    },
+    {
+     "number": "2",
+     "offset": {
+      "x": 0.8,
+      "y": 0.0
+     },
+     "width": 0.9,
+     "height": 1.0,
+     "layers": [
+      "top"
+     ],
+     "net": "GND"
+    }
+   ]
+  },
+  {
+   "reference": "D2",
+   "courtyardW": 1.8,
+   "courtyardH": 1.1,
+   "pads": [
+    {
+     "number": "1",
+     "offset": {
+      "x": -0.8,
+      "y": 0.0
+     },
+     "width": 0.9,
+     "height": 1.0,
+     "layers": [
+      "top"
+     ],
+     "net": "LED_B"
+    },
+    {
+     "number": "2",
+     "offset": {
+      "x": 0.8,
+      "y": 0.0
+     },
+     "width": 0.9,
+     "height": 1.0,
+     "layers": [
+      "top"
+     ],
+     "net": "GND"
+    }
+   ]
+  }
+ ],
+ "keepouts": []
+}

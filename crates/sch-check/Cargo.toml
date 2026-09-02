@@ -9,7 +9,7 @@ description = "Kernel circuit model, symbol-aware lints, deterministic ERC, and 
 [dependencies]
 circuit-graph = { path = "../circuit-graph" }
 kicad-symbol = { path = "../kicad-symbol" }
-sch-place = { path = "../sch-place" }
+sch-model = { path = "../sch-model" }
 indexmap = { workspace = true, features = ["serde"] }
 fuzzy-matcher.workspace = true
 strsim.workspace = true

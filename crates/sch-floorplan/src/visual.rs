@@ -4,14 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{EPS, GRID_50_MIL, Point2, Rect};
 use sch_doc::{Item as DocItem, SchDoc, connect, placed_pins};
-use sch_place::item::Item;
+use sch_model::item::Item;
 use serde::Serialize;
 
 use crate::floorplan::place::{
     count_body_crossings, count_collinear_body_crossings, count_ic_body_crossings,
     count_parallel_body_crossings,
 };
-use crate::wire::DrawnSegment;
+use sch_model::route::DrawnSegment;
 
 /// One wire net that passes through a placed symbol body.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -173,7 +173,7 @@ fn text_collisions(
 }
 
 fn text_rect(text: &str, at: Point2, rotation: f64, font_size: [f64; 2]) -> Rect {
-    let width = (crate::label::text_width(text) * font_size[0] / 1.27).max(font_size[0]);
+    let width = (sch_model::text::text_width(text) * font_size[0] / 1.27).max(font_size[0]);
     let height = font_size[1].max(0.1);
     let quarter = ((rotation / 90.0).round() as i64).rem_euclid(2) == 1;
     let (width, height) = if quarter {

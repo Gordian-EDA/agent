@@ -19,6 +19,27 @@ pub struct RouteResult {
     pub engine: String,
 }
 
+impl RouteResult {
+    /// The honest empty result for a view a router declined to solve — an expired
+    /// [`Budget`](crate::Budget), or a problem outside its
+    /// [`RoutingCapabilities`]. No copper, every requested connection reported
+    /// failed with `reason`.
+    pub fn abandoned(view: &RoutingView, engine: &str, reason: &str) -> Self {
+        RouteResult {
+            solution: RouteSolution::default(),
+            failed: view
+                .connections
+                .iter()
+                .map(|c| FailedNet {
+                    connection: c.name.clone(),
+                    reason: reason.to_owned(),
+                })
+                .collect(),
+            engine: engine.to_owned(),
+        }
+    }
+}
+
 // ── metrics ────────────────────────────────────────────────────────────────────
 
 /// Comparable size/quality metrics for a [`RouteSolution`].

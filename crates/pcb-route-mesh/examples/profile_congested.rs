@@ -12,6 +12,17 @@ use pcb_route_mesh::mesh::CapacityMesh;
 use pcb_route_mesh::pathing::global_route;
 use pcb_route_mesh::pipeline::route_detailed;
 
+const DRC: pcb_drc::StandardDrc = pcb_drc::StandardDrc;
+const GRID: pcb_route_grid::router::GridRouter<'static> = pcb_route_grid::router::GridRouter::new(&DRC);
+const GRID_SEED: pcb_route_grid::router::GridSinglePassRouter<'static> =
+    pcb_route_grid::router::GridSinglePassRouter::new(&DRC);
+const DEPS: pcb_route_mesh::deps::MeshDeps<'static> = pcb_route_mesh::deps::MeshDeps {
+    drc: &DRC,
+    grid: &GRID,
+    grid_seed: &GRID_SEED,
+    budget: pcb_model::Budget::unlimited(),
+};
+
 fn main() {
     let name = std::env::args()
         .nth(1)
@@ -45,7 +56,7 @@ fn main() {
     );
 
     let t = Instant::now();
-    let cells = route_cells(&problem, &mesh, &assignment);
+    let cells = route_cells(&DRC, &problem, &mesh, &assignment);
     println!(
         "route_cells        {:>8.1} ms   ({} cell routes, {} failed)",
         t.elapsed().as_secs_f64() * 1e3,
@@ -54,7 +65,7 @@ fn main() {
     );
 
     let t = Instant::now();
-    let r = route_detailed(&problem);
+    let r = route_detailed(&DEPS, &problem);
     println!(
         "route_detailed ALL {:>8.1} ms   ({} failed)",
         t.elapsed().as_secs_f64() * 1e3,

@@ -4,6 +4,9 @@
 //! implementation. It checks route geometry and connectivity, and provides
 //! cleanup helpers that remove copper which cannot be shipped honestly.
 //!
+//! [`StandardDrc`] is the in-house rule set behind the [`Drc`] contract, so a
+//! routing leaf can take it as `&dyn Drc` without depending on this crate.
+//!
 //! ## The engine-SDK shape
 //!
 //! - [`Rule`] — one design rule. `name()` gives open provenance; `check()`
@@ -14,8 +17,9 @@
 //!   every rule's findings.
 //! - [`DrcCtx`] — the context each rule reads: the problem, the solution, and
 //!   the [`collect_copper`] pass shared by the geometry rules.
-//! - [`Finding`] — a single design-rule violation (a self-contained serde
-//!   value).
+//! - [`Finding`](pcb_model::Finding) — a single design-rule violation (a
+//!   self-contained serde value, defined in `pcb-model` so the contract is
+//!   expressible without this crate).
 //!
 //! ## Determinism contract
 //!
@@ -37,123 +41,11 @@
 
 pub mod connectivity;
 mod ctx;
-pub mod lint;
 pub mod rules;
 
-pub use connectivity::Violation;
 pub use ctx::{CopperGeom, CopperItem, DrcCtx, collect_copper};
-pub use lint::DrcViolation;
 
-use pcb_model::{Point2, RouteSolution, RoutingView};
-use serde::Serialize;
-
-/// A single design-rule violation in a [`RouteSolution`] relative to its problem.
-///
-/// Carries enough payload to debug each case: the connection name(s), the layer
-/// where relevant, the measured gap/width against what was required, and a
-/// representative location. This is a self-contained serde value — the report a
-/// [`Rule`] returns.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum Finding {
-    /// Two traces of different connections on the same layer are too close.
-    ClearanceTraceTrace {
-        /// First connection name.
-        a: String,
-        /// Second connection name.
-        b: String,
-        /// Layer the two traces share.
-        layer: String,
-        /// Measured edge-to-edge gap, mm.
-        gap: f64,
-        /// Required clearance, mm.
-        required: f64,
-        /// A point on the offending pair (closest-approach-ish; the first
-        /// segment's nearest endpoint), for debugging.
-        at: Point2,
-    },
-    /// A trace is too close to a foreign or unowned (keepout) obstacle.
-    ClearanceTraceObstacle {
-        /// The trace's connection name.
-        connection: String,
-        /// The obstacle's owners (empty for unowned/keepout copper).
-        obstacle_owners: Vec<String>,
-        /// Shared layer the conflict occurs on.
-        layer: String,
-        /// Measured edge-to-edge gap, mm.
-        gap: f64,
-        /// Required clearance, mm.
-        required: f64,
-        /// The obstacle centre, for debugging.
-        at: Point2,
-    },
-    /// A via is too close to copper that is not its own connection.
-    ClearanceViaAny {
-        /// The via's connection name.
-        connection: String,
-        /// The other copper's owners (empty for unowned/keepout copper).
-        other_owners: Vec<String>,
-        /// Measured edge-to-edge gap, mm.
-        gap: f64,
-        /// Required clearance, mm.
-        required: f64,
-        /// The via position, for debugging.
-        at: Point2,
-    },
-    /// A trace is narrower than the minimum trace width.
-    TraceWidthBelowMin {
-        /// The trace's connection name.
-        connection: String,
-        /// Layer the trace is on.
-        layer: String,
-        /// The trace's width, mm.
-        width: f64,
-        /// Required minimum width, mm.
-        required: f64,
-    },
-    /// Copper (trace half-width or via radius included) leaves the board bounds.
-    OutOfBounds {
-        /// The owning connection name.
-        connection: String,
-        /// How far past the nearest board edge the copper extends, mm.
-        overshoot: f64,
-        /// The offending copper location, for debugging.
-        at: Point2,
-    },
-    /// A trace or route point references a layer name that does not exist on
-    /// this board (i.e. `layer.index(layer_count)` returns `None`). This is the
-    /// slice-1 blind spot: the router silently fell back to layer 0 for unknown
-    /// layer names; the lint catches it explicitly.
-    InvalidLayer {
-        /// The connection name that owns the offending copper.
-        connection: String,
-        /// The layer reference that could not be resolved (e.g. `"inner1"` on a
-        /// 2-layer board, or a typo).
-        layer: String,
-        /// The board's layer count (provided for context when debugging).
-        layer_count: u32,
-    },
-    /// A via's diameter is below KiCAD's minimum for its type. Through/blind/buried vias
-    /// must meet the netclass via diameter (`problem.via_diameter`); only true micro vias
-    /// get the relaxed microvia floor. kicad flags this as `via_diameter`; the in-house
-    /// lint must too, or the engine would ship a fault (it once shipped 56 — an HDI blind
-    /// via emitted below the netclass min before this check existed).
-    ViaDiameterBelowMin {
-        /// The via's connection name.
-        connection: String,
-        /// The via's diameter, mm.
-        diameter: f64,
-        /// Required minimum diameter for this via type, mm.
-        required: f64,
-        /// The via position, for debugging.
-        at: Point2,
-    },
-    /// A connectivity defect from the connectivity oracle, folded in.
-    Connectivity {
-        /// The wrapped connectivity violation.
-        violation: Violation,
-    },
-}
+use pcb_model::{Drc, Finding, Findings, RouteSolution, RoutingView};
 
 /// One design rule: a named check over the shared [`DrcCtx`].
 ///
@@ -184,8 +76,8 @@ impl DrcSuite {
     /// The canonical in-house rule set, in its fixed reporting order:
     /// invalid-layer, trace-width, out-of-bounds, copper-to-board-edge,
     /// pairwise clearance, hole-to-hole/copper, via-diameter, then connectivity
-    /// (folded in last). This is the order the former hardcoded `lint()`
-    /// produced, so the findings are byte-identical.
+    /// (folded in last). This order is part of the contract: a report is
+    /// comparable across runs only because it is fixed.
     pub fn standard() -> Self {
         DrcSuite(rules::standard_rules())
     }
@@ -216,5 +108,24 @@ impl DrcSuite {
 impl Default for DrcSuite {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Gordian's standard PCB design-rule oracle: [`DrcSuite::standard`] behind the
+/// [`Drc`] contract, so routing leaves can take it as `&dyn Drc` without naming
+/// this crate.
+///
+/// Findings come back in the suite's canonical order — geometry rules first (in
+/// copper-collection order), then the connectivity oracle folded in last.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StandardDrc;
+
+impl Drc for StandardDrc {
+    fn name(&self) -> &'static str {
+        "standard"
+    }
+
+    fn check(&self, view: &RoutingView, solution: &RouteSolution) -> Findings {
+        DrcSuite::standard().run(view, solution)
     }
 }

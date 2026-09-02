@@ -6,7 +6,8 @@ use anyhow::Result;
 use geom::{Dir, EPS, Point2, Segment};
 use gordian_runtime::AgentRuntime;
 use sch_doc::{LabelKind, SchDoc, body_rects, connect};
-use sch_floorplan::wire::{NetSegment, RouteScene, route_edge};
+use sch_floorplan::wire::ElbowRouter;
+use sch_model::route::{NetSegment, RouteScene, SchRouter};
 use serde_json::{Value, json};
 
 use crate::place::{Occupancy, snap_point};
@@ -207,7 +208,7 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .map(str::to_string)
         .collect();
     let scene = scene(&edit.doc, a, b, &own);
-    let drawn = route_edge(a, dir_a, b, ROUTING_NET, &scene)
+    let drawn = ElbowRouter.route_edge(a, dir_a, b, ROUTING_NET, &scene)
         .map(|path| draw(&mut edit.doc, &path))
         // Drawing a path is not the same as making a connection: if the two
         // ends did not end up on one partition, the wire is decoration.
@@ -573,7 +574,7 @@ pub(crate) fn straighten(doc: &mut SchDoc, moved: &[Point2]) -> usize {
         let own: Vec<String> = pin.iter().map(|p| p.refdes.clone()).collect();
         doc.remove_drawing(&[uuid]);
         let scene = scene(doc, a, b, &own);
-        match route_edge(a, dir, b, ROUTING_NET, &scene) {
+        match ElbowRouter.route_edge(a, dir, b, ROUTING_NET, &scene) {
             Some(path) if joined_after(doc, &path, a, b) => redrawn += 1,
             _ => {
                 doc.add_wire(a, b);

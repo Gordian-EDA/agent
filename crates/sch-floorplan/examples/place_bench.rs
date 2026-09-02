@@ -10,9 +10,9 @@
 use std::time::{Duration, Instant};
 
 use kicad::KicadInstallation;
-use sch_floorplan::contract::PlacementEngine;
+use sch_model::engine::PlacementEngine;
 use sch_floorplan::live::PlacementBudget;
-use sch_place::place::PlacementEngineKind;
+use sch_model::place::PlacementEngineKind;
 
 fn engines() -> Vec<(PlacementEngineKind, Box<dyn PlacementEngine>)> {
     vec![

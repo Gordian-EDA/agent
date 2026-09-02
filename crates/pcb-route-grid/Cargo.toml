@@ -9,6 +9,9 @@ description = "Sequential grid-A* PCB router: one shortest-net-first A* per net 
 [dependencies]
 geom = { path = "../geom" }
 pcb-model = { path = "../pcb-model" }
-pcb-drc = { path = "../pcb-drc" }
+pcb-grid = { path = "../pcb-grid" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+
+[dev-dependencies]
+pcb-drc = { path = "../pcb-drc" }

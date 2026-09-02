@@ -9,14 +9,16 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use kicad_board::ImportedPart;
-use pcb_drc::connectivity::Violation as ConnViolation;
-use pcb_drc::lint::{DrcViolation, lint};
+use pcb_model::Violation as ConnViolation;
+use pcb_engine::check as lint;
+use pcb_model::Finding as DrcViolation;
 use pcb_model::{
     FailedNet, LayerRef, Point2, RouteResult, RouteSolution, RoutingView, Trace, Via, ViaSpan,
 };
 use pcb_route_mesh::copper::copper_obstacles;
 use pcb_route_mesh::pathing::GlobalRouteResult;
-use pcb_route_mesh::pipeline::{RoutePassReport, postroute_cleanup, prepare_wide_terminal_escapes};
+use pcb_engine::{postroute_cleanup, prepare_wide_terminal_escapes};
+use pcb_route_mesh::pipeline::RoutePassReport;
 
 use gordian_runtime::AgentRuntime;
 
@@ -727,7 +729,7 @@ fn add_terminal_stubs(
     solution: &mut RouteSolution,
     skip_connections: &BTreeSet<String>,
 ) {
-    let pitch = pcb_route_grid::grid::grid_pitch(rp);
+    let pitch = rp.grid_pitch();
     for conn in &rp.connections {
         if skip_connections.contains(&conn.name) {
             continue;
@@ -944,9 +946,9 @@ fn reserve_wide_multi_pin_routes(rp: &RoutingView) -> (RoutingView, RouteSolutio
         isolated
             .obstacles
             .extend(copper_obstacles(rp, &reservation.solution));
-        let candidate = pcb_route_grid::router::route_grid(&isolated);
+        let candidate = pcb_engine::route_grid(&isolated);
         if candidate.failed.is_empty()
-            && pcb_route_grid::router::geometry_violations(&isolated, &candidate.solution) == 0
+            && pcb_engine::geometry_violations(&isolated, &candidate.solution) == 0
             && direct_candidate_is_clean(&isolated, &candidate.solution, &name)
         {
             reservation
@@ -1556,7 +1558,7 @@ fn simplify_candidate_paths(solution: &mut RouteSolution) {
 }
 
 fn direct_candidate_layers(layer_count: u32) -> Vec<LayerRef> {
-    let plane_layers: BTreeSet<u32> = pcb_route_grid::router::plane_layers(layer_count as usize)
+    let plane_layers: BTreeSet<u32> = pcb_model::plane_layers(layer_count)
         .into_iter()
         .collect();
     let mut layers = Vec::new();
@@ -1652,7 +1654,7 @@ fn direct_rescued_connections_are_clean(
                 .cloned()
                 .collect(),
         };
-        if !pcb_drc::connectivity::check(&net_problem, &net_solution).is_empty() {
+        if !pcb_engine::connectivity(&net_problem, &net_solution).is_empty() {
             return false;
         }
     }

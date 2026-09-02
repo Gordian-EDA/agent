@@ -3,12 +3,14 @@
 //! search and the cluster-compaction step judge a candidate identically — on the sheet as it
 //! will ship, never the raw pre-finalize geometry.
 
-use geom::Point2;
-use sch_place::ir::LayoutIr;
-use sch_place::item::{Incidence, Item};
+use sch_model::engine::{CandidateEvaluator, RawMetrics};
 
-use sch_floorplan::contract::{RawMetrics, RoutedEvaluator};
-use sch_floorplan::engine_support::{align_idiom_clusters, align_led_chains, decongest};
+use geom::Point2;
+use sch_model::ir::LayoutIr;
+use sch_model::item::{Incidence, Item};
+
+use sch_model::idiom::{align_idiom_clusters, align_led_chains};
+use sch_model::refine::decongest;
 
 /// Cohesion pull on a multi-unit part's units (same refdes, no shared net).
 const SIB_COHESION: f64 = 3.0;
@@ -39,7 +41,7 @@ pub(crate) fn base_cost(m: &RawMetrics) -> f64 {
 }
 
 /// Score `items` under the base objective by measuring the routed sheet.
-pub(crate) fn cost(eval: &RoutedEvaluator, items: &[Item]) -> f64 {
+pub(crate) fn cost(eval: &dyn CandidateEvaluator, items: &[Item]) -> f64 {
     base_cost(&eval.measure(items))
 }
 
@@ -49,7 +51,7 @@ pub(crate) fn cost(eval: &RoutedEvaluator, items: &[Item]) -> f64 {
 /// compared lexicographically on the first three with straightness as the tiebreak.
 /// Measuring the raw geometry would rank candidates the emit then re-orders.
 pub(crate) fn score(
-    eval: &RoutedEvaluator,
+    eval: &dyn CandidateEvaluator,
     inc: &Incidence,
     ir: &LayoutIr,
     cand: &[Item],

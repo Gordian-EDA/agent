@@ -38,11 +38,8 @@ version = "0.1.0"
 dependencies = [
  "circuit-graph",
  "geom",
- "kicad",
  "rayon",
- "sch-check",
- "sch-floorplan",
- "sch-place",
+ "sch-model",
  "tracing",
 ]
 
@@ -224,11 +221,8 @@ dependencies = [
  "anneal-place",
  "circuit-graph",
  "geom",
- "kicad",
  "rayon",
- "sch-check",
- "sch-floorplan",
- "sch-place",
+ "sch-model",
  "spine-place",
  "tracing",
 ]
@@ -910,7 +904,7 @@ dependencies = [
  "kicad-symbol",
  "resvg",
  "sch-check",
- "sch-place",
+ "sch-model",
  "serde",
  "serde_json",
  "tempfile",
@@ -937,6 +931,7 @@ dependencies = [
  "sch-check",
  "sch-doc",
  "sch-floorplan",
+ "sch-model",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -1468,6 +1463,7 @@ dependencies = [
  "kicad",
  "kiutils_kicad",
  "kiutils_sexpr",
+ "serde",
  "strsim",
  "tempfile",
 ]
@@ -1791,9 +1787,19 @@ dependencies = [
 name = "pcb-engine"
 version = "0.1.0"
 dependencies = [
+ "pcb-drc",
  "pcb-model",
  "pcb-place",
+ "pcb-route-grid",
  "pcb-route-mesh",
+]
+
+[[package]]
+name = "pcb-grid"
+version = "0.1.0"
+dependencies = [
+ "geom",
+ "pcb-model",
 ]
 
 [[package]]
@@ -1811,9 +1817,7 @@ version = "0.1.0"
 dependencies = [
  "circuit-graph",
  "geom",
- "pcb-drc",
  "pcb-model",
- "pcb-route-grid",
  "serde_json",
 ]
 
@@ -1823,6 +1827,7 @@ version = "0.1.0"
 dependencies = [
  "geom",
  "pcb-drc",
+ "pcb-grid",
  "pcb-model",
  "serde",
  "serde_json",
@@ -1834,6 +1839,7 @@ version = "0.1.0"
 dependencies = [
  "geom",
  "pcb-drc",
+ "pcb-grid",
  "pcb-model",
  "pcb-route-grid",
  "rayon",
@@ -1853,11 +1859,9 @@ dependencies = [
  "kicad-board",
  "kicad-footprint",
  "kicad-ipc",
- "pcb-drc",
  "pcb-engine",
  "pcb-model",
  "pcb-place",
- "pcb-route-grid",
  "pcb-route-mesh",
  "prost-types",
  "sch-check",
@@ -2507,7 +2511,7 @@ dependencies = [
  "fuzzy-matcher",
  "indexmap 2.14.0",
  "kicad-symbol",
- "sch-place",
+ "sch-model",
  "serde",
  "serde_json",
  "strsim",
@@ -2542,7 +2546,7 @@ dependencies = [
  "rayon",
  "sch-check",
  "sch-doc",
- "sch-place",
+ "sch-model",
  "serde",
  "serde_json",
  "spine-place",
@@ -2553,9 +2557,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "sch-place"
+name = "sch-model"
 version = "0.1.0"
 dependencies = [
+ "circuit-graph",
  "geom",
  "kicad-symbol",
  "serde",
@@ -2851,11 +2856,8 @@ version = "0.1.0"
 dependencies = [
  "circuit-graph",
  "geom",
- "kicad",
  "kicad-symbol",
- "sch-check",
- "sch-floorplan",
- "sch-place",
+ "sch-model",
  "serde_json",
  "tracing",
 ]
