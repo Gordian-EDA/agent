@@ -6,3 +6,4 @@ expect: erc_errors == 0
 expect: partition_matches_kicad == true
 expect: part_count >= 8
 expect: extractor_warnings == []
+expect: text_collisions == []

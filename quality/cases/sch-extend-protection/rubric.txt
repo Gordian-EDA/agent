@@ -9,3 +9,4 @@ expect: len(symbols_added) >= 3
 expect: len(symbols_added) <= 7
 expect: unconnected_pins_added == []
 expect: paths_broken == []
+expect: text_collisions == []

@@ -3,3 +3,4 @@ One new 100nF capacitor must appear, in series between P1 pin 2 and U1 pin 2. Af
 R4 must remain on the connector side. Everything else must be untouched: symbols_moved and symbols_removed must be empty, symbols_added must hold exactly the one capacitor, and no unrelated net may change. ERC errors must not increase.
 
 Score 0 for a bypass, for a dangling capacitor pin, or if any existing part moved. Score 10 for a clean series insertion with the rest of the sheet unchanged.
+expect: text_collisions == []

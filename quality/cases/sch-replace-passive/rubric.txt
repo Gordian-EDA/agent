@@ -8,3 +8,4 @@ expect: symbols_added == []
 expect: symbols_removed == []
 expect: net_delta_unchanged == true
 expect: len(fields_changed) >= 2
+expect: text_collisions == []

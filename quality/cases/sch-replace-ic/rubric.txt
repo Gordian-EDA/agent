@@ -6,3 +6,4 @@ expect: unchanged_symbols_moved == []
 expect: fields_lost == []
 expect: net_delta_unchanged == true
 expect: len(fields_changed) >= 1
+expect: text_collisions == []
