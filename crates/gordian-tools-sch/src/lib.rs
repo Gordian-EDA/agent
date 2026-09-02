@@ -369,11 +369,14 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "no_connect",
-            "Mark a pin deliberately unconnected, so ERC stops reporting it.",
+            "Mark one or many pins deliberately unconnected, so ERC stops reporting them. A single-pin labelled net is retracted automatically; a net shared with another pin is refused.",
             json!({
                 "type": "object",
-                "properties": { "pin": { "type": "string", "description": PIN } },
-                "required": ["pin"],
+                "properties": {
+                    "pin": { "type": "string", "description": PIN },
+                    "pins": { "type": "array", "items": { "type": "string", "description": PIN }, "minItems": 1 }
+                },
+                "anyOf": [{"required": ["pin"]}, {"required": ["pins"]}],
                 "additionalProperties": false
             }),
         ),

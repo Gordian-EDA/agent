@@ -4,6 +4,7 @@
 //! Skips when no KiCAD is installed: the mutators embed library definitions.
 
 use gordian_runtime::AgentRuntime;
+use sch_doc::{LabelKind, Pose};
 use serde_json::{Value, json};
 
 const EMPTY_SHEET: &str = "(kicad_sch\n\
@@ -38,6 +39,147 @@ fn listing(ctx: &AgentRuntime) -> String {
         Value::String(text) => text,
         other => panic!("read_schematic returned {other}"),
     }
+}
+
+fn labelled_resistor(ctx: &AgentRuntime) {
+    let added = call(
+        ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "Device:R", "ref": "R1", "value": "DNP"}]}),
+    );
+    assert!(added.get("error").is_none(), "fixture failed: {added}");
+}
+
+#[test]
+fn no_connect_retracts_single_pin_nets_in_one_batch() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    labelled_resistor(&ctx);
+    let mut doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let mut pins = sch_doc::placed_pins(&doc);
+    pins.sort_by(|left, right| left.number.cmp(&right.number));
+    let first = pins[0].at;
+    let stub = geom::Point2::new(first.x + 2.54, first.y);
+    doc.add_wire(first, stub);
+    doc.add_junction(stub);
+    doc.add_label(LabelKind::Local, "PC13", Pose::new(stub.x, stub.y, 0.0));
+    let second = pins[1].at;
+    doc.add_label(LabelKind::Local, "PC14", Pose::new(second.x, second.y, 0.0));
+    doc.write(ctx.sch_path()).unwrap();
+    let before = sch_doc::connect::extract(&doc);
+    assert_eq!(
+        before
+            .nets
+            .iter()
+            .find(|net| net.name == "PC13")
+            .unwrap()
+            .pins
+            .len(),
+        1
+    );
+    assert_eq!(
+        before
+            .nets
+            .iter()
+            .find(|net| net.name == "PC14")
+            .unwrap()
+            .pins
+            .len(),
+        1
+    );
+
+    let result = call(&ctx, "no_connect", json!({"pins": ["R1.1", "R1.2"]}));
+
+    assert!(result.get("error").is_none(), "no_connect failed: {result}");
+    assert_eq!(
+        result["changed"]["retracted"],
+        json!({"labels": 2, "wires": 1})
+    );
+    let after_doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let after = sch_doc::connect::extract(&after_doc);
+    assert!(
+        after
+            .nets
+            .iter()
+            .all(|net| net.name != "PC13" && net.name != "PC14")
+    );
+    assert_eq!(after.no_connect.len(), 2);
+    assert_eq!(after_doc.wires().count(), 0);
+    assert_eq!(after_doc.labels().count(), 0);
+    assert!(
+        after_doc
+            .items()
+            .iter()
+            .all(|item| !matches!(item, sch_doc::Item::Junction(_)))
+    );
+}
+
+#[test]
+fn delete_wires_by_net_removes_a_label_directly_on_a_pin() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    labelled_resistor(&ctx);
+    let labelled = call(&ctx, "label", json!({"pin": "R1.1", "net": "PC13"}));
+    assert!(
+        labelled.get("error").is_none(),
+        "fixture failed: {labelled}"
+    );
+    let mut doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let at = sch_doc::placed_pins(&doc)
+        .into_iter()
+        .find(|pin| pin.refdes == "R1" && pin.number == "1")
+        .unwrap()
+        .at;
+    doc.add_junction(at);
+    doc.write(ctx.sch_path()).unwrap();
+    let before = sch_doc::connect::extract(&doc);
+    assert_eq!(
+        before
+            .nets
+            .iter()
+            .find(|net| net.name == "PC13")
+            .unwrap()
+            .pins
+            .len(),
+        1
+    );
+    assert_eq!(doc.wires().count(), 0, "fixture must have no wire to match");
+
+    let result = call(&ctx, "delete_wires", json!({"net": "PC13"}));
+
+    assert!(
+        result.get("error").is_none(),
+        "delete_wires failed: {result}"
+    );
+    let changed = result["changed"].as_str().unwrap();
+    assert!(
+        changed.contains("R1.1"),
+        "loose pin was not reported: {result}"
+    );
+    assert!(
+        !changed.contains("no wire matched"),
+        "net label was invisible: {result}"
+    );
+    let after_doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let after = sch_doc::connect::extract(&after_doc);
+    assert!(after.nets.iter().all(|net| net.name != "PC13"));
+    assert!(
+        after
+            .unconnected
+            .iter()
+            .any(|pin| pin.refdes == "R1" && pin.pin == "1")
+    );
+    assert_eq!(after_doc.labels().count(), 0);
+    assert!(
+        after_doc
+            .items()
+            .iter()
+            .all(|item| !matches!(item, sch_doc::Item::Junction(_)))
+    );
 }
 
 #[test]
