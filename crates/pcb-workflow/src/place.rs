@@ -1780,19 +1780,6 @@ fn placement_size_estimate_with_growth(
     }
 }
 
-fn placement_existing_copper_error(tracks: usize, vias: usize) -> Option<Value> {
-    (tracks > 0 || vias > 0).then(|| {
-        json!({
-            "error": "automatic placement requires a copper-free board",
-            "code": "placement_requires_copper_free_board",
-            "placement_applied": false,
-            "tracks": tracks,
-            "vias": vias,
-            "note": "Footprints were not moved. Preserve the existing route, or explicitly delete all tracks and vias before running place_board.",
-        })
-    })
-}
-
 /// Bounding boxes of the copper on the board, as placement keep-outs.
 pub(crate) fn copper_keepouts(copper: &pcb_model::RouteSolution) -> Vec<Rect> {
     let mut out = Vec::new();
@@ -1928,19 +1915,22 @@ fn check_references<'a>(
     ))
 }
 
-/// Automatic placement moves EVERY unlocked part, so running it on a board that
-/// already has a layout throws that layout away — the exact loss `sync_board`
-/// exists to prevent. A board still at its seed row has no layout to lose, and a
-/// caller who means it says so.
-fn already_placed_error(board: &IpcBoardSnapshot, replace: bool) -> Option<Value> {
-    (!replace && !kicad_board::is_seed_imported_board(&board.imported)).then(|| {
+/// Whole-board placement moves EVERY unlocked part, so running it on a board
+/// that already has a layout throws that layout away — the exact loss
+/// `sync_board` exists to prevent.
+///
+/// It is only a refusal when there is nothing left to do: a board with parts
+/// still in the seed row has work outstanding, and `place_board()` does that
+/// work (as a subset placement) instead of complaining.
+fn already_placed_error(replace: bool) -> Option<Value> {
+    (!replace).then(|| {
         json!({
-            "error": "this board is already placed; automatic placement would move every part",
+            "error": "this board is already placed; every part has a position",
             "code": "board_already_placed",
             "placement_applied": false,
-            "note": "Nothing was moved. Adjust individual parts with move_parts, or pass \
-                     {\"replace\": true} to deliberately re-place the whole board and lose the \
-                     current layout.",
+            "note": "Nothing was moved. Adjust individual parts with move_parts, name the ones \
+                     to re-place with {\"refs\": [...]}, or pass {\"replace\": true} to \
+                     deliberately re-place the whole board and lose the current layout.",
         })
     })
 }
@@ -1971,19 +1961,26 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         object.remove("refs");
         object.remove("intent");
     }
-    // A subset placement keeps everything else exactly where it is, so neither
-    // gate applies: the copper is a keep-out rather than a thing to lose, and
-    // the layout it protects is what makes the subset placement worth doing.
-    if refs.is_none() {
-        if let Some(error) =
-            placement_existing_copper_error(board.copper.traces.len(), board.copper.vias.len())
-        {
-            return Ok(error);
+    // What `place_board()` means with no `refs`: lay out the parts nothing has
+    // laid out yet. A board fresh from `sync_board` has all of them in the seed
+    // row, so that is the whole board; a board that has just gained parts has
+    // only those, and placing them is a subset op that leaves the rest alone.
+    // Only when there is nothing outstanding is re-placing a destructive act
+    // the caller has to ask for.
+    let unplaced = kicad_board::seed_row_references(&board.imported);
+    let whole_board = refs.is_none() && unplaced.len() == board.imported.parts.len();
+    let refs = match refs {
+        Some(refs) => Some(refs),
+        None if whole_board => None,
+        None if unplaced.is_empty() => {
+            if let Some(error) = already_placed_error(replace) {
+                return Ok(error);
+            }
+            None
         }
-        if let Some(error) = already_placed_error(&board, replace) {
-            return Ok(error);
-        }
-    }
+        None if replace => None,
+        None => Some(unplaced.clone()),
+    };
 
     let mut problem = match place_problem_from_snapshot(&board, ctx) {
         Ok(p) => p,
@@ -2143,7 +2140,8 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             // A part that moves leaves its copper behind, and copper that no
             // longer ends on a pad is at best dangling and at worst a short.
             // Retract every net the moved parts touched, exactly as move_parts
-            // does, and name them for the re-route.
+            // does, and name them for the re-route. This is also why placement
+            // never needs to treat that copper as an obstacle: it is going.
             let moved = moves.iter().map(|m| m.reference.as_str());
             let pads = crate::copper::pad_extents(&board.problem, moved);
             let retract =
@@ -2291,15 +2289,15 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !result.legal {
         out["error"] = Value::String(illegal_placement_error(&out));
     }
+    let retract = retracted.unwrap_or_default();
+    out["retracted_tracks"] = json!(retract.count);
+    out["nets_to_reroute"] = json!(retract.nets);
     if let Some(refs) = &refs {
         out["placed_refs"] = json!(refs);
         out["note"] = json!(
             "placed only the named parts; every other footprint kept its pose and its copper. \
              Call route_board({nets: nets_to_reroute}), then check_board."
         );
-        let retract = retracted.unwrap_or_default();
-        out["retracted_tracks"] = json!(retract.count);
-        out["nets_to_reroute"] = json!(retract.nets);
         out["next_tool"] = json!("route_board");
     }
     if !zones.is_empty() {
@@ -2917,17 +2915,6 @@ mod tests {
             "field power support placement should be legal: {:?}",
             placement_overlap_pairs(&problem, &result)
         );
-    }
-
-    #[test]
-    fn placement_refuses_to_move_footprints_under_existing_copper() {
-        let blocked = placement_existing_copper_error(1, 0).unwrap();
-
-        assert_eq!(blocked["code"], "placement_requires_copper_free_board");
-        assert_eq!(blocked["placement_applied"], false);
-        assert_eq!(blocked["tracks"], 1);
-        assert_eq!(blocked["vias"], 0);
-        assert!(placement_existing_copper_error(0, 0).is_none());
     }
 
     #[test]

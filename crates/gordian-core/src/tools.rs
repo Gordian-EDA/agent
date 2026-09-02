@@ -377,7 +377,7 @@ pub fn tool_defs() -> Vec<Tool> {
                     "rules": {
                         "type": "object",
                         "properties": {
-                            "layer_count": { "type": "integer", "enum": [2, 4, 6, 8] },
+                            "layer_count": { "type": "integer", "enum": [2, 4, 6, 8], "description": "Default 2. Ask for 4+ only for a dense/high-speed board; route_board reports layers_used." },
                             "clearance": { "type": "number" },
                             "min_trace_width": { "type": "number" },
                             "via_diameter": { "type": "number" },
@@ -424,10 +424,11 @@ pub fn tool_defs() -> Vec<Tool> {
             name: "place_board".into(),
             description: "Place a PCB from stated intent: `intent` gives edges, \
                  proximities and groups (never coordinates); `groups` steers regions, grids \
-                 and surrounds. `refs` places only those parts and leaves every other pose \
-                 untouched — what to call after sync_board adds parts, or when check_board \
-                 reports unplaced. Without `refs`, refuses an already-placed board unless \
-                 replace:true."
+                 and surrounds. With no arguments it places exactly the parts that are still \
+                 unplaced, leaving every laid-out pose alone; `refs` names a subset instead. \
+                 Copper on the parts it moves is retracted (see nets_to_reroute). It refuses \
+                 only when nothing is unplaced — pass replace:true to re-place a finished \
+                 board and lose its layout."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -509,7 +510,8 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "route_board".into(),
-            description: "Auto-route the board, committing every net whose copper is DRC-clean. \
+            description: "Auto-route the PLACED board, committing every net whose copper is \
+                 DRC-clean; refuses while any part is unplaced. \
                  Reports routed N/M and, per unrouted net, the two pads, the obstacle in the \
                  way and the repair. Pass `nets` to re-route only those nets after a \
                  move_parts, keeping every other net's copper."

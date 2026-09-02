@@ -77,6 +77,12 @@ fn the_board_guard_and_its_subset_placement() {
         "a board straight out of sync has laid out nothing: {checked:#}"
     );
 
+    // Routing a board nothing has laid out is refused before any write, rather
+    // than reported as a row of failed nets.
+    let early = run_tool("route_board", json!({}), &ctx).unwrap();
+    assert_eq!(early["code"], json!("board_not_placed"), "{early:#}");
+    assert_eq!(early["unplaced"], json!(["R1", "R2", "R3"]), "{early:#}");
+
     tool(&ctx, "place_board", json!({}));
     let checked = run_tool("check_board", json!({}), &ctx).unwrap();
     assert_eq!(checked["unplaced"], json!([]), "{checked:#}");
@@ -115,9 +121,9 @@ fn the_board_guard_and_its_subset_placement() {
     );
 
     // ── a subset placement moves only what it was asked to ──────────────────
-    // Without `refs`, a routed board is refused outright.
+    // With nothing unplaced, bare place_board refuses rather than re-place.
     let whole = run_tool("place_board", json!({}), &ctx).unwrap();
-    assert!(whole["placement_applied"] == json!(false), "{whole:#}");
+    assert_eq!(whole["code"], json!("board_already_placed"), "{whole:#}");
     assert_eq!(std::fs::read_to_string(ctx.pcb_path()).unwrap(), before_text);
 
     let placed = tool(&ctx, "place_board", json!({ "refs": ["R3"] }));

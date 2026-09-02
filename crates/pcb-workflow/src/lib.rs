@@ -40,6 +40,7 @@
 //!   `route_track`, `delete_copper`, `set_net_width`).
 
 mod board;
+mod calib;
 mod copper;
 pub mod corpus;
 mod create;

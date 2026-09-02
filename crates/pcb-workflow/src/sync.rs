@@ -473,8 +473,12 @@ fn seed_board(
         "rules_from_footprints": seeded.rule_notes,
         "path": ctx.pcb_path().display().to_string(),
         "revision": revision,
+        // Seeded is not placed: every part sits in the board's seed row until
+        // place_board lays it out, and naming them is what makes that obvious.
+        "unplaced": parts.iter().map(|part| part.reference.clone()).collect::<Vec<_>>(),
         "next_tool": "place_board",
-        "note": "board created from the schematic — run place_board, then route_board, then check_board",
+        "note": "board created from the schematic with every part still unplaced — run \
+                 place_board, then route_board, then check_board",
     });
     merge(&mut out, sizes);
     // The layout half of the intent is placement's to honour, not the seed's.
@@ -773,6 +777,9 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         json!({
             "created": false,
             "reseeded": true,
+            // The rebuild restored every part where it sat, so nothing is
+            // waiting on placement — only the copper is.
+            "unplaced": Vec::<String>::new(),
             "delta": delta.to_json(),
             "retracted_tracks": original.matches("(segment").count(),
             "nets_to_reroute": delta_nets(parts),
