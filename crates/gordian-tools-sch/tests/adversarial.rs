@@ -94,6 +94,67 @@ fn place_parts_reports_an_auto_assigned_reference_as_placed() {
     assert_eq!(result["changed"]["placed"], json!(["R1"]));
 }
 
+#[test]
+fn wrong_footprint_is_refused_and_its_suggestion_closes_the_loop() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let wrong = "Capacitor_SMD:C_1206_3216Metric";
+    let payload = |footprint: &str| {
+        json!({"parts": [{
+            "ref": "C1",
+            "part": "Device:C_Polarized",
+            "value": "10uF",
+            "footprint": footprint,
+            "pins": {"1": "VIN", "2": "GND"}
+        }]})
+    };
+
+    let refused = call(&ctx, "place_parts", payload(wrong));
+    assert_eq!(refused["code"], "invalid_payload");
+    let mismatch = &refused["footprint_mismatch"][0];
+    assert_eq!(mismatch["ref"], "C1");
+    assert_eq!(mismatch["symbol"], "Device:C_Polarized");
+    assert_eq!(mismatch["footprint"], wrong);
+    let suggestion = mismatch["suggestion"]
+        .as_str()
+        .expect("refusal must include a compatible footprint")
+        .to_string();
+    assert!(!listing(&ctx).contains("C1"), "refusal wrote the part");
+
+    let placed = call(&ctx, "place_parts", payload(&suggestion));
+    assert!(placed.get("error").is_none(), "placement failed: {placed}");
+    let reassignment = call(
+        &ctx,
+        "assign_footprints",
+        json!({"assignments": [{"reference": "C1", "footprint": wrong}]}),
+    );
+    assert_eq!(reassignment["code"], "invalid_payload");
+    let repaired = reassignment["footprint_mismatch"][0]["suggestion"]
+        .as_str()
+        .expect("assignment refusal must include a compatible footprint");
+    let assigned = call(
+        &ctx,
+        "assign_footprints",
+        json!({"assignments": [{"reference": "C1", "footprint": repaired}]}),
+    );
+    assert!(
+        assigned.get("error").is_none(),
+        "assignment failed: {assigned}"
+    );
+
+    let checked = call(&ctx, "check_schematic", json!({"detail": true}));
+    assert!(
+        checked["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|finding| finding["code"] != "footprint-pins"),
+        "compatible repair left a footprint-pins finding: {checked}"
+    );
+}
+
 /// Renaming a part onto a reference another part already holds must be refused:
 /// two symbols answering to `R2` is a corrupt sheet — `uuid_of` can no longer
 /// resolve it, so every later tool call on `R2` is ambiguous, and KiCAD's own

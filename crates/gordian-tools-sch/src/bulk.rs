@@ -96,6 +96,33 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(minted) => minted,
         Err(error) => return Ok(error),
     };
+    let existing_netlist = sch_doc::connect::extract(&edit.doc);
+    let existing = sch_check::ExistingSheet {
+        net_pins: existing_netlist
+            .nets
+            .iter()
+            .map(|net| (net.name.clone(), net.pins.len()))
+            .collect(),
+        refs: edit
+            .doc
+            .symbols()
+            .map(|symbol| symbol.refdes().to_string())
+            .collect(),
+    };
+    let (design, _, _) = sch_check::into_design(&payload, ctx.provider(), &existing);
+    let footprint_mismatch =
+        gordian_runtime::footprint_compat::design_pin_mismatches(ctx, &design)?
+            .iter()
+            .map(gordian_runtime::footprint_compat::FootprintPinMismatch::payload)
+            .collect::<Vec<_>>();
+    if !footprint_mismatch.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "code": "invalid_payload",
+            "footprint_mismatch": footprint_mismatch,
+            "note": "symbol/footprint compatibility is checked before placement; use each compatible suggestion directly",
+        }));
+    }
     let derived: Vec<String> = payload
         .parts
         .iter()
@@ -187,6 +214,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     "input_errors": audit.input_errors,
                     "duplicate_refs": audit.duplicate_refs,
                     "unknown_pins": audit.unknown_pins,
+                    "footprint_mismatch": audit.footprint_mismatch,
                     "dangling": audit.dangling,
                     "did_you_mean": audit.did_you_mean,
                     "unreliable_nets": audit.unreliable_nets,
