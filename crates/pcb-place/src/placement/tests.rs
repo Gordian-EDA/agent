@@ -1771,7 +1771,7 @@ fn position_polish_candidates_are_snapped_clamped_and_deduped() {
 }
 
 #[test]
-fn edge_seek_position_candidates_include_all_edge_band_targets() {
+fn edge_seek_position_candidates_include_band_and_flush_targets() {
     let problem = PlacementView {
         bounds: board(30.0, 20.0),
         clearance: 0.2,
@@ -1799,6 +1799,11 @@ fn edge_seek_position_candidates_include_all_edge_band_targets() {
         Vec::new(),
     );
     let candidates = edge_seek_position_candidates(&problem, &half, 0.0, &pos, 0, &seeking);
+    let reach = crate::part_placement_bounds_envelope(
+        &problem.parts[0],
+        half[0],
+        rotated_copper_bbox(&problem.parts[0], 0.0),
+    );
 
     assert_eq!(
         candidates,
@@ -1819,8 +1824,26 @@ fn edge_seek_position_candidates_include_all_edge_band_targets() {
                 x: 30.0 - 0.5 - EDGE_BAND,
                 y: 10.0,
             },
+            // ...and the FLUSH seat on each, where the placement envelope
+            // (courtyard or pad copper plus its edge clearance) reaches the edge.
+            Point2 {
+                x: 15.0,
+                y: -reach.min_y
+            },
+            Point2 {
+                x: 15.0,
+                y: 20.0 - reach.max_y,
+            },
+            Point2 {
+                x: -reach.min_x,
+                y: 10.0,
+            },
+            Point2 {
+                x: 30.0 - reach.max_x,
+                y: 10.0,
+            },
         ],
-        "edge polish should offer direct non-local targets for every board edge"
+        "edge polish should offer the band AND the flush seat on every board edge"
     );
     assert!(
         edge_seek_position_candidates(
@@ -3720,7 +3743,7 @@ fn centering_is_skipped_for_an_absolute_region() {
 }
 
 #[test]
-fn edge_seeker_is_seated_on_an_edge_after_the_cluster_is_centred() {
+fn edge_seeker_is_seated_flush_even_when_it_costs_wirelength() {
     let mut problem = two_resistor_board(board(60.0, 40.0));
     problem.parts.push(r0603("J1", Some("OUT"), Some("GND")));
     let hints = PlacementHints {
@@ -3735,8 +3758,8 @@ fn edge_seeker_is_seated_on_an_edge_after_the_cluster_is_centred() {
     let gap =
         crate::part_edge_distance(&problem.parts[2], j1.rotation, j1.at, &problem.bounds, half);
     assert!(
-        gap <= EDGE_BAND,
-        "an edge seeker must end on a board edge whichever pass moved the cluster, gap {gap}"
+        gap <= PLACE_GRID,
+        "an edge seeker must end FLUSH against an edge, not merely in the band: gap {gap}"
     );
 }
 
@@ -3751,7 +3774,7 @@ fn same_kind_groups_need_a_shared_prefix_and_a_shared_courtyard() {
     problem.parts.push(wide);
 
     assert_eq!(
-        super::cost::same_kind_groups(&problem),
+        super::cost::same_kind_groups(&problem, &Default::default()),
         vec![vec![0, 1]],
         "only the two identical resistors are interchangeable-looking"
     );

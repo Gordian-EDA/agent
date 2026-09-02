@@ -408,7 +408,15 @@ pub(crate) struct CostTerms {
 /// prefix (R with R, C with C) AND the same courtyard, i.e. the same footprint.
 /// Two 0402 resistors scattered at unrelated angles look like an accident; a
 /// resistor and an inductor at different angles do not.
-pub(crate) fn same_kind_groups(problem: &PlacementView) -> Vec<Vec<usize>> {
+///
+/// `steered` parts are left out. A connector steered to a board edge takes its
+/// line from that edge, and two of them on opposite edges are correct however
+/// unaligned they look; without this, a pair of identical headers holds each
+/// other in the middle of the board rather than let one go to its edge.
+pub(crate) fn same_kind_groups(
+    problem: &PlacementView,
+    steered: &std::collections::BTreeSet<usize>,
+) -> Vec<Vec<usize>> {
     let key = |part: &crate::Part| {
         (
             part.reference
@@ -421,7 +429,9 @@ pub(crate) fn same_kind_groups(problem: &PlacementView) -> Vec<Vec<usize>> {
     };
     let mut by_kind: std::collections::BTreeMap<_, Vec<usize>> = Default::default();
     for (i, part) in problem.parts.iter().enumerate() {
-        by_kind.entry(key(part)).or_default().push(i);
+        if !steered.contains(&i) {
+            by_kind.entry(key(part)).or_default().push(i);
+        }
     }
     by_kind
         .into_values()
@@ -463,6 +473,19 @@ impl CostTerms {
                 .position(|part| &part.reference == reference)
         };
         let members = |refs: &[String]| refs.iter().filter_map(index).collect::<Vec<_>>();
+        let steered: std::collections::BTreeSet<usize> = hints
+            .edge_seek
+            .iter()
+            .chain(&hints.corner_seek)
+            .chain(
+                hints
+                    .groups
+                    .iter()
+                    .filter(|group| group.edge.is_some())
+                    .flat_map(|group| &group.members),
+            )
+            .filter_map(index)
+            .collect();
         Self {
             pairs,
             edge_seek: members(&hints.edge_seek),
@@ -494,7 +517,7 @@ impl CostTerms {
                 .filter_map(|group| Some((members(&group.members), group.region?)))
                 .filter(|(members, _)| !members.is_empty())
                 .collect(),
-            kinds: same_kind_groups(problem),
+            kinds: same_kind_groups(problem, &steered),
         }
     }
 }

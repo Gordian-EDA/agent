@@ -740,8 +740,9 @@ pub(crate) fn unique_position_candidates(
 
 /// Candidate seats on a board edge for a part the hints steer there: all four
 /// edges for a nearest-edge seeker, and only the named one for an authored
-/// `edge` intent — plus, for the named edge, the FLUSH seat, since the intent is
-/// that the part's courtyard reach the edge, not merely the edge band.
+/// `edge` intent. Each eligible edge offers TWO seats — the edge band, and the
+/// FLUSH seat where the part's envelope actually reaches the edge, since that is
+/// what "on the edge" means to anyone looking at the board.
 pub(crate) fn edge_seek_position_candidates(
     problem: &PlacementView,
     half: &[(f64, f64)],
@@ -767,7 +768,8 @@ pub(crate) fn edge_seek_position_candidates(
     let current = pos[part_idx];
     let h = half[part_idx];
     let mut out: Vec<Point2> = edges
-        .into_iter()
+        .iter()
+        .copied()
         .filter_map(|edge| {
             if problem.parts[part_idx].edge_datum.is_some()
                 && datum_edge_target(&problem.parts[part_idx], rotation, edge, &problem.bounds)
@@ -812,7 +814,7 @@ pub(crate) fn edge_seek_position_candidates(
             },
         }
     };
-    out.extend(named.into_iter().map(flush));
+    out.extend(edges.into_iter().map(flush));
     out
 }
 

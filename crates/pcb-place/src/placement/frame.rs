@@ -85,9 +85,13 @@ impl Frame {
 /// A rigid translation preserves every relative distance, so courtyard overlap,
 /// silk gaps, wirelength and ratline crossings are all invariant: only bounds
 /// containment and the absolute terms can change. That makes it the one
-/// whole-board move that fixes "the cluster is stranded in a corner" at no cost
-/// to routability. Keep-outs and a custom outline ARE absolute, so the result is
-/// still re-verified by [`is_legal`] and reverted if it does not hold.
+/// whole-board move a finished placement can still afford, and it is what fixes
+/// "the cluster is stranded in a corner". Keep-outs and a custom outline ARE
+/// absolute, so the result is re-verified by [`is_legal`]; when the full shift
+/// does not hold, the placement goes as far towards the centre as does.
+///
+/// [`seat_edge_seek_parts`] runs after this and puts the edge seekers back on
+/// their edges, so translating them along here costs nothing.
 ///
 /// Skipped when a locked part pins the frame (the local-edit case, where the
 /// frame is exactly what must not move) or when a group prescribes an absolute
@@ -118,28 +122,40 @@ pub(crate) fn center_placement(
     };
     let dx = shift(b.min_x, b.max_x, placed.min_x, placed.max_x);
     let dy = shift(b.min_y, b.max_y, placed.min_y, placed.max_y);
-    if dx.abs() < geom::EPS && dy.abs() < geom::EPS {
-        return;
+    let seated = frame.pos.clone();
+    // A keep-out or a concave outline can block the full shift; then go as far
+    // towards the centre as stays legal rather than abandoning the move entirely.
+    for step in grid_fractions(dx.abs().max(dy.abs())) {
+        for (at, &from) in frame.pos.iter_mut().zip(&seated) {
+            *at = Point2 {
+                x: PLACEMENT_GRID.snap(from.x + dx * step),
+                y: PLACEMENT_GRID.snap(from.y + dy * step),
+            };
+        }
+        if frame.legal(problem) {
+            frame.write_back(result);
+            return;
+        }
     }
-    for at in &mut frame.pos {
-        at.x += dx;
-        at.y += dy;
-    }
-    if frame.legal(problem) {
-        frame.write_back(result);
-    }
+}
+
+/// Descending fractions of a shift, stopping once the remaining step is smaller
+/// than the placement grid can express.
+fn grid_fractions(magnitude: f64) -> impl Iterator<Item = f64> {
+    std::iter::successors(Some(1.0_f64), |step| Some(step / 2.0))
+        .take_while(move |step| step * magnitude >= PLACEMENT_GRID.pitch())
 }
 
 /// The bounding box of every part's placement envelope — what actually has to
 /// stay inside the board.
 fn union_envelope(problem: &PlacementView, frame: &Frame) -> Option<Rect> {
-    problem
-        .parts
-        .iter()
-        .enumerate()
-        .map(|(i, part)| {
-            let envelope =
-                part_placement_bounds_envelope(part, frame.half[i], frame.copper_bbox[i]);
+    (0..problem.parts.len())
+        .map(|i| {
+            let envelope = part_placement_bounds_envelope(
+                &problem.parts[i],
+                frame.half[i],
+                frame.copper_bbox[i],
+            );
             placement_envelope_at(frame.pos[i], envelope)
         })
         .reduce(|a, b| {
@@ -156,8 +172,14 @@ fn union_envelope(problem: &PlacementView, frame: &Frame) -> Option<Rect> {
 ///
 /// The candidates are the same edge seats the position polish proposes; the
 /// difference is that this runs LAST, so it also repairs the edge affinity a
-/// preceding whole-board translation gave up. Each move is accepted only when it
-/// is legal and lowers the placement cost, one part at a time.
+/// preceding whole-board translation gave up.
+///
+/// `edge_seek` is an INTENT, not a preference, so the choice here is only WHICH
+/// legal edge seat — the cheapest one — and never whether to take one at all;
+/// this is the same contract [`super::route::seat_corner_seek_parts`] already
+/// holds for mounting holes. Leaving it to the cost is what strands a connector
+/// mid-board: once the cluster is centred, the wirelength of walking back out to
+/// the edge outweighs the edge term, and the intent silently loses.
 pub(crate) fn seat_edge_seek_parts(
     problem: &PlacementView,
     hints: &PlacementHints,
@@ -181,7 +203,6 @@ pub(crate) fn seat_edge_seek_parts(
         return;
     }
 
-    let mut cost = frame.cost(problem);
     for i in seekers {
         let old = frame.pos[i];
         let candidates = edge_seek_position_candidates(
@@ -192,7 +213,8 @@ pub(crate) fn seat_edge_seek_parts(
             i,
             &frame.terms,
         );
-        let mut best = old;
+        let mut best = (frame.cost(problem), old);
+        let mut seated = false;
         for candidate in unique_position_candidates(
             problem,
             i,
@@ -207,12 +229,12 @@ pub(crate) fn seat_edge_seek_parts(
                 continue;
             }
             let next = frame.cost(problem);
-            if next + 1e-9 < cost {
-                cost = next;
-                best = candidate;
+            if !seated || next + 1e-9 < best.0 {
+                best = (next, candidate);
+                seated = true;
             }
         }
-        frame.pos[i] = best;
+        frame.pos[i] = best.1;
     }
     frame.write_back(result);
 }
