@@ -848,6 +848,14 @@ mod tests {
         use gordian_core::testing::{ScriptedClient, final_text, tool_call};
         use serde_json::json;
 
+        let invocation = parse_agent_args(&[
+            "--project".into(),
+            "/tmp/resumable-project".into(),
+            "--input".into(),
+            "-".into(),
+        ])
+        .unwrap();
+        assert_eq!(invocation.input, Some(PathBuf::from("-")));
         let prompts = read_input_prompts(std::io::Cursor::new(
             "create a two-resistor divider\ncontinue\n",
         ))

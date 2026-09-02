@@ -2970,6 +2970,32 @@ fn pop_n(history: &mut Vec<ChatMessage>, turn_starts: &mut Vec<usize>, k: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompts::system_prompt;
+    use crate::testing::ScriptedClient;
+
+    #[tokio::test]
+    async fn expired_wall_clock_returns_structured_handoff() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCAD detected");
+            return;
+        };
+        let mut agent = Agent::new(ScriptedClient::new(Vec::new()), ctx, system_prompt());
+        agent.turn_budget = Some(TurnClock {
+            started: std::time::Instant::now() - TURN_WALL_CLOCK,
+            provider_requests: 0,
+        });
+
+        let outcome = agent
+            .run_agent_subturn("continue", "continue", None)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome.stop_reason, StopReason::TimeLimit { .. }));
+        assert!(outcome.final_text.starts_with("## Partial state\n"));
+        assert!(outcome.final_text.contains("\n## Next steps\n"));
+        assert!(outcome.final_text.contains("Per-turn wall-clock budget"));
+        assert!(!outcome.final_text.contains("cannot be completed"));
+    }
 
     #[test]
     fn wall_clock_stop_yields_structured_handoff() {
