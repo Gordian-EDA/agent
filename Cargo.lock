@@ -2413,6 +2413,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sch-drag"
+version = "0.1.0"
+dependencies = [
+ "fastrand",
+ "geom",
+ "sch-doc",
+]
+
+[[package]]
 name = "sch-floorplan"
 version = "0.1.0"
 dependencies = [

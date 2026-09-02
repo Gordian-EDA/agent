@@ -1,0 +1,16 @@
+[package]
+name = "sch-drag"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Interactive-style schematic tidying: a truthfulness-gated drag primitive that carries a symbol's connections, a sheet-quality evaluator, and a local search over poses."
+
+[dependencies]
+geom = { path = "../geom" }
+sch-doc = { path = "../sch-doc" }
+
+fastrand.workspace = true
+
+[dev-dependencies]
+geom = { path = "../geom" }
