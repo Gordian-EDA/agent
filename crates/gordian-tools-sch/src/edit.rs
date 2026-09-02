@@ -588,6 +588,29 @@ pub fn add_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if specs.is_empty() {
         return Ok(json!({ "error": "add_symbols needs a non-empty `parts` list" }));
     }
+    let mut footprint_mismatch = Vec::new();
+    for spec in &specs {
+        let Some(symbol) = spec.get("lib_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(footprint) = spec.get("footprint").and_then(Value::as_str) else {
+            continue;
+        };
+        let reference = spec.get("ref").and_then(Value::as_str).unwrap_or(symbol);
+        if let Some(mismatch) = gordian_runtime::footprint_compat::assignment_pin_mismatch(
+            ctx, reference, symbol, footprint,
+        )? {
+            footprint_mismatch.push(mismatch.payload());
+        }
+    }
+    if !footprint_mismatch.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "code": "invalid_payload",
+            "footprint_mismatch": footprint_mismatch,
+            "note": "symbol/footprint compatibility is checked before symbols are added; use each compatible suggestion directly",
+        }));
+    }
     let mut edit = Edit::open(ctx)?;
     let source = symbol_source(ctx);
     let mut allow = Allow::nothing().creating();

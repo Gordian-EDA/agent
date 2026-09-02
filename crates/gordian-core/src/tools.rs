@@ -883,12 +883,13 @@ fn get_symbol_info_one(lib_id: &str, ctx: &AgentRuntime) -> Result<Value> {
     {
         Some(meta) => {
             let pins = pin_digest(&meta);
+            let footprint = validated_symbol_footprint(ctx, lib_id, &meta)?;
             Ok(json!({
                 "lib_id": lib_id,
                 "description": meta.description,
                 "keywords": meta.keywords,
                 "datasheet": meta.datasheet,
-                "default_footprint": meta.footprint,
+                "footprint": footprint,
                 "pins": pins,
             }))
         }

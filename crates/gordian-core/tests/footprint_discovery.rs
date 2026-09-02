@@ -73,3 +73,41 @@ fn footprint_tool_schema_requires_a_symbol() {
             .is_some_and(|description| description.contains("Pass the symbol"))
     );
 }
+
+#[test]
+fn footprint_search_rejects_an_unknown_symbol() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let error = run_tool(
+        "search_footprints",
+        json!({"symbol": "Missing:Definitely_Not_A_Symbol"}),
+        &ctx,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown symbol"));
+}
+
+#[test]
+fn symbol_info_exposes_only_a_validated_footprint() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let result = run_tool(
+        "get_symbol_info",
+        json!({"lib_id": "Connector:Barrel_Jack"}),
+        &ctx,
+    )
+    .unwrap();
+    assert!(result.get("default_footprint").is_none());
+    let footprint = result["footprint"].as_str().unwrap();
+    let verdict = gordian_runtime::footprint_compat::footprint_compatibility(
+        &ctx,
+        "Connector:Barrel_Jack",
+        footprint,
+    )
+    .unwrap();
+    assert!(verdict.compatible);
+}

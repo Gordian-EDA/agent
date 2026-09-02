@@ -175,6 +175,57 @@ fn wrong_footprint_is_refused_and_its_suggestion_closes_the_loop() {
     );
 }
 
+#[test]
+fn add_symbols_cannot_bypass_footprint_compatibility() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let result = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{
+            "lib_id": "Connector:Barrel_Jack",
+            "ref": "J1",
+            "footprint": "Connector_BarrelJack:BarrelJack_Horizontal"
+        }]}),
+    );
+
+    assert_eq!(result["code"], "invalid_payload");
+    assert_eq!(result["footprint_mismatch"][0]["ref"], "J1");
+    assert!(result["footprint_mismatch"][0]["suggestion"].is_string());
+    assert!(!listing(&ctx).contains("J1"), "refusal wrote the symbol");
+}
+
+#[test]
+fn place_parts_reports_footprints_with_other_payload_faults() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let seeded = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "Device:R", "ref": "J1"}]}),
+    );
+    assert!(seeded.get("error").is_none(), "fixture failed: {seeded}");
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [{
+            "ref": "J1",
+            "part": "Connector:Barrel_Jack",
+            "footprint": "Connector_BarrelJack:BarrelJack_Horizontal",
+            "pins": {"bad-pin": "SIG"}
+        }]}),
+    );
+
+    assert_eq!(result["code"], "invalid_payload");
+    assert!(!result["duplicate_refs"].as_array().unwrap().is_empty());
+    assert!(!result["unknown_pins"].as_array().unwrap().is_empty());
+    assert!(!result["footprint_mismatch"].as_array().unwrap().is_empty());
+}
+
 /// Renaming a part onto a reference another part already holds must be refused:
 /// two symbols answering to `R2` is a corrupt sheet — `uuid_of` can no longer
 /// resolve it, so every later tool call on `R2` is ambiguous, and KiCAD's own

@@ -150,6 +150,14 @@ pub fn search_compatible_footprints(
     const TEXT_POOL: usize = 64;
     const FAMILY_POOL: usize = 2;
 
+    if ctx
+        .provider()
+        .symbol(symbol_id)
+        .or_else(|| ctx.index().ok()?.symbol(symbol_id))
+        .is_none()
+    {
+        return Err(anyhow!("unknown symbol `{symbol_id}`"));
+    }
     let catalog = ctx.footprint_catalog()?;
     let search_text = query
         .filter(|text| !text.trim().is_empty())
@@ -218,10 +226,30 @@ pub fn best_compatible_footprint(
     symbol_id: &str,
     preferred: Option<&str>,
 ) -> Result<Option<String>> {
-    Ok(search_compatible_footprints(ctx, symbol_id, preferred, 1)?
+    let nearby = search_compatible_footprints(ctx, symbol_id, preferred, 1)?
         .into_iter()
         .find(|hit| hit.compatible)
-        .map(|hit| hit.lib_id))
+        .map(|hit| hit.lib_id);
+    if nearby.is_some() {
+        return Ok(nearby);
+    }
+
+    let search_text = preferred
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| footprint_query_for_symbol(symbol_id));
+    let matcher = SkimMatcherV2::default().ignore_case();
+    let catalog = ctx.footprint_catalog()?;
+    let mut compatible = Vec::new();
+    for entry in catalog.entries() {
+        let id = entry.id().to_string();
+        if footprint_compatibility(ctx, symbol_id, &id).is_ok_and(|verdict| verdict.compatible) {
+            let score = matcher.fuzzy_match(&id, &search_text).unwrap_or(0);
+            compatible.push((score, id));
+        }
+    }
+    compatible.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    Ok(compatible.into_iter().next().map(|(_, id)| id))
 }
 
 /// Best nearby symbol variant whose pins agree with an installed footprint.
@@ -237,7 +265,8 @@ pub fn best_compatible_symbol(
         .map(|hit| hit.lib_id)
         .collect::<Vec<_>>();
     candidates.extend(ctx.provider().suggest(symbol_id));
-    candidates.retain(|candidate| candidate != symbol_id);
+    candidates
+        .retain(|candidate| candidate != symbol_id && same_symbol_family(symbol_id, candidate));
     candidates.dedup();
     for candidate in candidates {
         if footprint_compatibility(ctx, &candidate, footprint_id).is_ok_and(|v| v.compatible) {
@@ -245,6 +274,23 @@ pub fn best_compatible_symbol(
         }
     }
     Ok(None)
+}
+
+/// Whether a suggested replacement is a named variant of the same symbol family.
+fn same_symbol_family(current: &str, candidate: &str) -> bool {
+    let Some((current_library, current_name)) = current.split_once(':') else {
+        return false;
+    };
+    let Some((candidate_library, candidate_name)) = candidate.split_once(':') else {
+        return false;
+    };
+    if current_library != candidate_library {
+        return false;
+    }
+    current_name
+        .strip_prefix(candidate_name)
+        .or_else(|| candidate_name.strip_prefix(current_name))
+        .is_some_and(|suffix| suffix.starts_with('_'))
 }
 
 /// Audit one resolvable assignment and attach its best catalog repair.
@@ -429,9 +475,11 @@ pub fn unresolvable_footprints(
             out.push(UnresolvableFootprint {
                 malformed,
                 message: format!(
-                    "{reference}: {} — search_footprints for a \
-                     real `Library:Name`, then assign_footprints",
+                    "{reference}: {} — use search_footprints{{symbol: \"{}\", query: \
+                     \"{}\"}} for a real `Library:Name`, then assign_footprints",
                     kicad_footprint::unknown_footprint_message(footprint, &problem),
+                    component.part,
+                    footprint,
                 ),
             });
         }
@@ -533,7 +581,7 @@ fn footprint_capacitor_polarity(footprint_id: &FootprintId) -> Option<CapacitorP
 mod tests {
     use super::{
         best_compatible_footprint, capacitor_polarity_mismatch, footprint_compatibility,
-        pad_number_differences, search_compatible_footprints,
+        pad_number_differences, same_symbol_family, search_compatible_footprints,
     };
     use crate::AgentRuntime;
     use kicad_footprint::FootprintId;
@@ -722,5 +770,25 @@ mod tests {
             hits.iter()
                 .all(|hit| hit.lib_id.starts_with("Connector_BarrelJack:"))
         );
+    }
+
+    #[test]
+    fn symbol_repairs_stay_within_a_named_variant_family() {
+        assert!(same_symbol_family(
+            "Connector:Barrel_Jack",
+            "Connector:Barrel_Jack_Switch"
+        ));
+        assert!(same_symbol_family(
+            "Connector_Audio:AudioJack2",
+            "Connector_Audio:AudioJack2_Switch"
+        ));
+        assert!(!same_symbol_family(
+            "Connector:Barrel_Jack",
+            "Connector:Conn_01x02_Pin"
+        ));
+        assert!(!same_symbol_family(
+            "Connector:Barrel_Jack",
+            "Other:Barrel_Jack_Switch"
+        ));
     }
 }
