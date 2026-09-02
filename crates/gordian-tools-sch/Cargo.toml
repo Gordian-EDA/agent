@@ -7,6 +7,7 @@ repository.workspace = true
 description = "The agent's schematic tool surface: pin-level mutators, queries and checks over the live .kicad_sch."
 
 [dependencies]
+circuit-graph = { path = "../circuit-graph" }
 geom = { path = "../geom" }
 gordian-llm = { path = "../gordian-llm" }
 gordian-runtime = { path = "../gordian-runtime" }

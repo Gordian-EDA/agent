@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use circuit_graph::netclass::is_power_net;
 use gordian_runtime::AgentRuntime;
 use indexmap::IndexMap;
 use sch_check::model::{Block, Component, Design, NetAttrs, PinTarget};
@@ -81,6 +82,12 @@ pub(crate) fn design(doc: &SchDoc, netlist: &Netlist) -> Design {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct ToolFix {
+    tool: &'static str,
+    args: Value,
+}
+
 #[derive(Clone, Serialize)]
 struct Finding {
     classification: &'static str,
@@ -92,7 +99,8 @@ struct Finding {
     nets: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     at: Option<[f64; 2]>,
-    fix: String,
+    fix: Option<ToolFix>,
+    why: String,
     #[serde(skip_serializing_if = "is_false")]
     advisory: bool,
 }
@@ -113,11 +121,19 @@ impl Finding {
         } else {
             format!(" ({})", self.nets.join(", "))
         };
+        let fix = self.fix.as_ref().map_or_else(
+            || "null".to_string(),
+            |fix| format!("{}{}", fix.tool, compact_json(&fix.args)),
+        );
         format!(
-            "{}[{}]{}{}: {} — {}",
-            self.severity, self.code, references, nets, self.message, self.fix
+            "{}[{}]{}{}: {} → fix: {fix}",
+            self.severity, self.code, references, nets, self.message
         )
     }
+}
+
+fn compact_json(value: &Value) -> String {
+    serde_json::to_string(value).expect("serializing JSON value cannot fail")
 }
 
 struct FindingLocator<'a> {
@@ -268,29 +284,461 @@ fn strip_subject_prefix(message: String, refs: &[String], nets: &[String]) -> St
         .to_string()
 }
 
-fn message_and_fix(message: &str, suggestion: Option<&str>, code: &str) -> (String, String) {
-    let message = message.trim().trim_start_matches("- ");
-    if let Some((message, fix)) = message.rsplit_once(" — ") {
-        return (message.to_string(), fix.to_string());
-    }
-    let fix = suggestion.map_or_else(|| default_fix(code), str::to_string);
-    (message.to_string(), fix)
+#[derive(Clone)]
+struct FixPin {
+    id: String,
+    refdes: String,
+    name: String,
+    etype: String,
+    at: [f64; 2],
+    net: Option<String>,
+    unconnected: bool,
 }
 
-fn default_fix(code: &str) -> String {
-    match code {
-        "power_pin_not_driven" => "add a PWR_FLAG or a regulator output",
-        "pin_not_connected" | "pin_not_driven" | "wire_dangling" => {
-            "connect the cited pin or mark it no-connect when intentional"
+struct FixPlanner {
+    pins: Vec<FixPin>,
+    baseline_nets: BTreeMap<String, String>,
+    rotations: BTreeMap<String, f64>,
+    parts: BTreeMap<String, String>,
+    default_footprints: BTreeMap<String, String>,
+}
+
+impl FixPlanner {
+    fn new(
+        doc: &SchDoc,
+        netlist: &Netlist,
+        baseline: Option<&Netlist>,
+        ctx: &AgentRuntime,
+    ) -> Self {
+        let pins = placed_pins(doc)
+            .into_iter()
+            .map(|pin| {
+                let id = format!("{}.{}", pin.refdes, pin.number);
+                FixPin {
+                    net: crate::refs::net_of(netlist, &pin.refdes, &pin.number).map(str::to_string),
+                    unconnected: netlist
+                        .unconnected
+                        .iter()
+                        .any(|loose| loose.refdes == pin.refdes && loose.pin == pin.number),
+                    id,
+                    refdes: pin.refdes,
+                    name: pin.name,
+                    etype: pin.etype,
+                    at: round_point(pin.at.x, pin.at.y),
+                }
+            })
+            .collect();
+        let baseline_nets = baseline
+            .into_iter()
+            .flat_map(|netlist| &netlist.nets)
+            .flat_map(|net| {
+                net.pins
+                    .iter()
+                    .map(move |pin| (format!("{}.{}", pin.refdes, pin.pin), net.name.clone()))
+            })
+            .collect();
+        let rotations = doc
+            .symbols()
+            .map(|symbol| (symbol.refdes().to_string(), symbol.at.rot))
+            .collect();
+        let parts = doc
+            .symbols()
+            .map(|symbol| (symbol.refdes().to_string(), symbol.lib_id.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let default_footprints = parts
+            .iter()
+            .filter_map(|(reference, part)| {
+                ctx.provider()
+                    .symbol(part)
+                    .and_then(|symbol| symbol.footprint)
+                    .filter(|footprint| !footprint.is_empty())
+                    .map(|footprint| (reference.clone(), footprint))
+            })
+            .collect();
+        Self {
+            pins,
+            baseline_nets,
+            rotations,
+            parts,
+            default_footprints,
         }
-        "lib_symbol_issues" => "install or remap the named symbol library",
-        "footprint_link_issues" => "install or remap the named footprint library",
-        "near-name" => "verify the two net names and rename the typo",
-        "unreferenced-net" => "connect the declared net or remove the stale declaration",
-        "footprint-unknown" => "assign an installed Library:Footprint",
-        _ => "inspect the cited objects and correct this finding",
     }
-    .to_string()
+
+    fn plan(&self, finding: &mut Finding, ctx: &AgentRuntime) {
+        let code = finding.code.to_ascii_lowercase().replace('_', "-");
+        let message = finding.message.to_ascii_lowercase();
+        let planned =
+            if code == "library-no-connect-wired" || message.contains("library no-connect pin") {
+                self.library_no_connect(finding)
+            } else if is_power_finding(&code, &message) {
+                self.power(finding)
+            } else if is_output_conflict(&code, &message) {
+                self.output_conflict(finding)
+            } else if code.contains("polarity")
+                || (message.contains("reversed") && message.contains("led"))
+            {
+                self.polarity(finding)
+            } else if code.contains("footprint") || message.contains("missing footprint") {
+                self.footprint(finding, ctx)
+            } else if is_connection_finding(&code, &message) {
+                self.connection(finding)
+            } else {
+                None
+            };
+        if let Some((fix, why)) = planned {
+            finding.fix = Some(fix);
+            finding.why = why;
+        } else if finding.why.is_empty() {
+            finding.why = "The finding does not identify a safe one-call repair.".to_string();
+        }
+    }
+
+    fn pin(&self, id: &str) -> Option<&FixPin> {
+        self.pins.iter().find(|pin| pin.id == id)
+    }
+
+    fn affected_pin<'a>(&'a self, finding: &Finding) -> Option<&'a FixPin> {
+        finding
+            .refs
+            .iter()
+            .filter_map(|reference| self.pin(reference))
+            .next()
+            .or_else(|| {
+                finding.refs.iter().find_map(|reference| {
+                    let candidates = self
+                        .pins
+                        .iter()
+                        .filter(|pin| pin.refdes == *reference)
+                        .collect::<Vec<_>>();
+                    candidates
+                        .iter()
+                        .copied()
+                        .find(|pin| {
+                            contains_name(&finding.message, &pin.name)
+                                || pin.id.rsplit_once('.').is_some_and(|(_, number)| {
+                                    contains_name(&finding.message, number)
+                                })
+                        })
+                        .or_else(|| {
+                            let loose = candidates
+                                .iter()
+                                .copied()
+                                .filter(|pin| pin.unconnected)
+                                .collect::<Vec<_>>();
+                            (loose.len() == 1).then(|| loose[0])
+                        })
+                })
+            })
+    }
+
+    fn power(&self, finding: &Finding) -> Option<(ToolFix, String)> {
+        let affected = self.affected_pin(finding);
+        let net = finding
+            .nets
+            .iter()
+            .find(|net| is_power_net(net))
+            .cloned()
+            .or_else(|| {
+                affected
+                    .filter(|pin| is_power_net(&pin.name))
+                    .map(|pin| pin.name.clone())
+            })
+            .or_else(|| affected.and_then(|pin| pin.net.clone()))?;
+        if is_power_net(&net) {
+            let anchor = self
+                .pins
+                .iter()
+                .filter(|pin| pin.net.as_deref() == Some(&net))
+                .filter(|pin| is_power_input(&pin.etype))
+                .min_by(|left, right| left.id.cmp(&right.id))
+                .or(affected)?;
+            return Some((
+                ToolFix {
+                    tool: "add_power",
+                    args: json!({"net": net, "pin": anchor.id}),
+                },
+                format!(
+                    "One rail symbol on {} drives every power-input pin on {net}.",
+                    anchor.id
+                ),
+            ));
+        }
+        let driver = self
+            .pins
+            .iter()
+            .filter(|pin| pin.net.as_deref() == Some(&net))
+            .find(|pin| is_output(&pin.etype) || is_power_output(&pin.etype));
+        if let (Some(load), Some(driver)) = (affected, driver) {
+            return Some((
+                ToolFix {
+                    tool: "connect",
+                    args: json!({"from": load.id, "to": driver.id}),
+                },
+                format!(
+                    "{} is the output pin that should drive {}.",
+                    driver.id, load.id
+                ),
+            ));
+        }
+        Some((
+            ToolFix {
+                tool: "place_parts",
+                args: json!({
+                    "block": "erc_repair",
+                    "parts": [{"part": "power:PWR_FLAG", "pins": {"1": net}}]
+                }),
+            },
+            format!(
+                "No output or power-output pin drives {net}; this flag declares the rail, but the intended regulator or connector output should be used when known."
+            ),
+        ))
+    }
+
+    fn connection(&self, finding: &Finding) -> Option<(ToolFix, String)> {
+        let from = self.affected_pin(finding)?;
+        if is_library_no_connect(&from.etype) || is_unused_output(from, finding) {
+            return Some((
+                ToolFix {
+                    tool: "no_connect",
+                    args: json!({"pin": from.id}),
+                },
+                if is_library_no_connect(&from.etype) {
+                    format!("{} is declared NC by the symbol library.", from.id)
+                } else {
+                    format!(
+                        "{} is an unused output, so it should be explicitly no-connect.",
+                        from.id
+                    )
+                },
+            ));
+        }
+        let desired_net = self
+            .baseline_nets
+            .get(&from.id)
+            .or_else(|| finding.nets.first())
+            .or(from.net.as_ref());
+        let to = desired_net
+            .and_then(|net| {
+                self.pins
+                    .iter()
+                    .filter(|pin| pin.id != from.id)
+                    .filter(|pin| {
+                        pin.net.as_ref() == Some(net)
+                            || self.baseline_nets.get(&pin.id) == Some(net)
+                    })
+                    .min_by(|left, right| left.id.cmp(&right.id))
+            })
+            .or_else(|| self.nearest_loose(from))?;
+        Some((
+            ToolFix {
+                tool: "connect",
+                args: json!({"from": from.id, "to": to.id}),
+            },
+            match desired_net {
+                Some(net) => format!(
+                    "{} restores {} to its matching {net} endpoint.",
+                    to.id, from.id
+                ),
+                None => format!(
+                    "{} is the nearest compatible loose endpoint to {}.",
+                    to.id, from.id
+                ),
+            },
+        ))
+    }
+
+    fn nearest_loose<'a>(&'a self, from: &FixPin) -> Option<&'a FixPin> {
+        self.pins
+            .iter()
+            .filter(|pin| pin.id != from.id && pin.unconnected)
+            .filter(|pin| !is_library_no_connect(&pin.etype))
+            .min_by(|left, right| {
+                squared_distance(from, left)
+                    .total_cmp(&squared_distance(from, right))
+                    .then_with(|| left.id.cmp(&right.id))
+            })
+    }
+
+    fn output_conflict(&self, finding: &Finding) -> Option<(ToolFix, String)> {
+        let net = finding.nets.first()?;
+        let mut drivers = self
+            .pins
+            .iter()
+            .filter(|pin| pin.net.as_deref() == Some(net))
+            .filter(|pin| is_output(&pin.etype) || is_power_output(&pin.etype))
+            .collect::<Vec<_>>();
+        drivers.sort_by(|left, right| left.id.cmp(&right.id));
+        let disconnect = drivers.get(1).or_else(|| drivers.first())?;
+        Some((
+            ToolFix {
+                tool: "delete_wires",
+                args: json!({"pins": [disconnect.id.clone()]}),
+            },
+            format!(
+                "Disconnecting {} leaves a single driver on {net}.",
+                disconnect.id
+            ),
+        ))
+    }
+
+    fn polarity(&self, finding: &Finding) -> Option<(ToolFix, String)> {
+        let reference = finding
+            .refs
+            .iter()
+            .map(|reference| reference.split('.').next().unwrap_or(reference))
+            .find(|reference| self.rotations.contains_key(*reference))?;
+        let rotation = self.rotations[reference];
+        let rotation = ((rotation + 180.0).rem_euclid(360.0) * 1000.0).round() / 1000.0;
+        Some((
+            ToolFix {
+                tool: "move_symbols",
+                args: json!({"moves": [{"ref": reference, "rot": rotation}]}),
+            },
+            format!("Rotating {reference} by 180° reverses its anode and cathode."),
+        ))
+    }
+
+    fn footprint(&self, finding: &Finding, ctx: &AgentRuntime) -> Option<(ToolFix, String)> {
+        let reference = finding
+            .refs
+            .iter()
+            .map(|reference| reference.split('.').next().unwrap_or(reference))
+            .find(|reference| self.parts.contains_key(*reference))?;
+        let footprint = self
+            .default_footprints
+            .get(reference)
+            .cloned()
+            .or_else(|| conventional_footprint(&self.parts[reference]).map(str::to_string))
+            .filter(|footprint| catalog_has(ctx, footprint))
+            .or_else(|| {
+                let query = format!("{} {}", self.parts[reference], finding.message);
+                ctx.footprint_catalog()
+                    .ok()?
+                    .search(query)
+                    .first()
+                    .map(|hit| hit.id.to_string())
+            })?;
+        Some(footprint_assignment(
+            reference,
+            &footprint,
+            &self.parts[reference],
+        ))
+    }
+
+    fn library_no_connect(&self, finding: &Finding) -> Option<(ToolFix, String)> {
+        let pin = self.affected_pin(finding)?;
+        let functional = self
+            .pins
+            .iter()
+            .filter(|candidate| candidate.refdes == pin.refdes)
+            .find(|candidate| !is_library_no_connect(&candidate.etype));
+        Some((
+            ToolFix {
+                tool: "delete_wires",
+                args: json!({"pins": [pin.id.clone()]}),
+            },
+            functional.map_or_else(
+                || format!("{} is a library NC pin and must not be wired.", pin.id),
+                |functional| {
+                    format!(
+                        "{} is a library NC pin; use functional pin {} instead.",
+                        pin.id, functional.id
+                    )
+                },
+            ),
+        ))
+    }
+}
+
+fn is_power_finding(code: &str, message: &str) -> bool {
+    code.contains("power-pin-not-driven")
+        || code == "power-pin-unconnected"
+        || code == "unsourced-power-net"
+        || message.contains("power input") && message.contains("not driven")
+}
+
+fn is_connection_finding(code: &str, message: &str) -> bool {
+    code.contains("dangling")
+        || code == "single-pin-net"
+        || code.contains("pin-not-connected")
+        || code.contains("wire-dangling")
+        || code == "floating-input"
+        || message.contains("unconnected input")
+}
+
+fn is_output_conflict(code: &str, message: &str) -> bool {
+    code == "output-short"
+        || code.contains("output-to-output")
+        || message.contains("conflicting drivers")
+        || message.contains("multiple outputs")
+}
+
+fn is_power_input(etype: &str) -> bool {
+    matches!(etype, "power_in" | "power_input")
+}
+
+fn is_power_output(etype: &str) -> bool {
+    matches!(etype, "power_out" | "power_output")
+}
+
+fn is_output(etype: &str) -> bool {
+    matches!(etype, "output" | "tri_state")
+}
+
+fn is_library_no_connect(etype: &str) -> bool {
+    matches!(etype, "no_connect" | "no-connect")
+}
+
+fn is_unused_output(pin: &FixPin, finding: &Finding) -> bool {
+    is_output(&pin.etype)
+        && (pin.unconnected
+            || finding
+                .message
+                .to_ascii_lowercase()
+                .contains("unused output"))
+}
+
+fn squared_distance(left: &FixPin, right: &FixPin) -> f64 {
+    (left.at[0] - right.at[0]).powi(2) + (left.at[1] - right.at[1]).powi(2)
+}
+
+fn conventional_footprint(part: &str) -> Option<&'static str> {
+    let symbol = part.split_once(':').map_or(part, |(_, symbol)| symbol);
+    if symbol == "R" {
+        Some("Resistor_SMD:R_0805_2012Metric")
+    } else if symbol == "C" {
+        Some("Capacitor_SMD:C_0805_2012Metric")
+    } else if symbol.starts_with("LED") {
+        Some("LED_SMD:LED_0805_2012Metric")
+    } else {
+        None
+    }
+}
+
+fn footprint_assignment(reference: &str, footprint: &str, part: &str) -> (ToolFix, String) {
+    (
+        ToolFix {
+            tool: "assign_footprints",
+            args: json!({"assignments": [{"reference": reference, "footprint": footprint}]}),
+        },
+        format!("{footprint} is the best installed catalog match for {part}."),
+    )
+}
+
+fn catalog_has(ctx: &AgentRuntime, footprint: &str) -> bool {
+    let Ok(id) = kicad_footprint::FootprintId::parse(footprint) else {
+        return false;
+    };
+    ctx.footprint_catalog()
+        .is_ok_and(|catalog| catalog.contains(&id))
+}
+
+fn finding_message(message: &str) -> String {
+    let message = message.trim().trim_start_matches("- ");
+    match message.rsplit_once(" — ") {
+        Some((message, _)) => message.to_string(),
+        None => message.to_string(),
+    }
 }
 
 fn diagnostic_finding(
@@ -302,12 +750,12 @@ fn diagnostic_finding(
         sch_check::Severity::Error => "error",
         sch_check::Severity::Warning => "warning",
     };
-    let (message, fix) = message_and_fix(
-        &diagnostic.message,
-        diagnostic.suggestion.as_deref(),
-        diagnostic.code,
+    let message = finding_message(&diagnostic.message);
+    let (refs, nets, at) = locator.locate(
+        &message,
+        diagnostic.refs.iter().cloned(),
+        diagnostic.nets.iter().cloned(),
     );
-    let (refs, nets, at) = locator.locate(&message, [], []);
     let message = strip_subject_prefix(message, &refs, &nets);
     Finding {
         classification: "introduced",
@@ -318,7 +766,11 @@ fn diagnostic_finding(
         refs,
         nets,
         at,
-        fix,
+        fix: None,
+        why: diagnostic
+            .suggestion
+            .clone()
+            .unwrap_or_else(|| "No safe one-call repair is known for this finding.".to_string()),
         advisory: diagnostic.severity == sch_check::Severity::Warning,
     }
 }
@@ -336,7 +788,7 @@ fn erc_finding(locator: &FindingLocator<'_>, violation: &kicad::Violation) -> Fi
         }
     }
     let searchable = format!("{}{}", violation.description, item_text);
-    let (message, fix) = message_and_fix(&violation.description, None, &violation.kind);
+    let message = finding_message(&violation.description);
     let (refs, nets, inferred_at) = locator.locate(&searchable, explicit_refs, []);
     let reported_at = violation
         .items
@@ -352,7 +804,8 @@ fn erc_finding(locator: &FindingLocator<'_>, violation: &kicad::Violation) -> Fi
         refs,
         nets,
         at: explicit_at.or(inferred_at).or(reported_at),
-        fix,
+        fix: None,
+        why: "No safe one-call repair is known for this finding.".to_string(),
         advisory: violation.severity != "error",
     }
 }
@@ -378,8 +831,11 @@ fn add_rendered_findings(report: &mut Value, findings: &[Finding], detail: bool)
         .filter(|finding| finding.classification == "introduced")
         .count();
     let pre_existing = findings.len() - introduced;
+    let groups = fix_groups(findings);
     let mut lines = vec![format!(
-        "{introduced} introduced, {pre_existing} pre-existing"
+        "{} findings, {} fixes; {introduced} introduced, {pre_existing} pre-existing",
+        findings.len(),
+        groups.len()
     )];
     lines.extend(findings[..shown].iter().map(Finding::line));
     let omitted = findings.len() - shown;
@@ -390,6 +846,8 @@ fn add_rendered_findings(report: &mut Value, findings: &[Finding], detail: bool)
         report["findings_omitted"] = json!(omitted);
     }
     report["findings"] = json!(&findings[..shown]);
+    report["fix_count"] = json!(groups.len());
+    report["fix_groups"] = json!(groups);
     report["diagnostics"] = json!(lines);
     report["text"] = json!(
         report["diagnostics"]
@@ -402,7 +860,37 @@ fn add_rendered_findings(report: &mut Value, findings: &[Finding], detail: bool)
     );
 }
 
+fn fix_groups(findings: &[Finding]) -> Vec<Value> {
+    let mut groups: Vec<(ToolFix, Vec<usize>)> = Vec::new();
+    for (index, finding) in findings.iter().enumerate() {
+        let Some(fix) = &finding.fix else {
+            continue;
+        };
+        if let Some((_, indexes)) = groups.iter_mut().find(|(group, _)| group == fix) {
+            indexes.push(index);
+        } else {
+            groups.push((fix.clone(), vec![index]));
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(fix, finding_indexes)| {
+            let codes = finding_indexes
+                .iter()
+                .map(|&index| findings[index].code.clone())
+                .collect::<BTreeSet<_>>();
+            json!({
+                "fix": fix,
+                "closes": finding_indexes.len(),
+                "finding_indexes": finding_indexes,
+                "finding_codes": codes,
+            })
+        })
+        .collect()
+}
+
 struct Inspection {
+    doc: SchDoc,
     netlist: Netlist,
     gaps: Vec<sch_check::completeness::Gap>,
     findings: Vec<Finding>,
@@ -471,7 +959,7 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
         findings.push(diagnostic_finding(&locator, &diagnostic, "footprint"));
     }
     for warning in &netlist.warnings {
-        let (message, fix) = message_and_fix(warning, None, "extractor");
+        let message = finding_message(warning);
         let (refs, nets, at) = locator.locate(&message, [], []);
         findings.push(Finding {
             classification: "introduced",
@@ -482,7 +970,8 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
             refs,
             nets,
             at,
-            fix,
+            fix: None,
+            why: "The extractor warning does not identify a safe edit.".to_string(),
             advisory: true,
         });
     }
@@ -503,7 +992,8 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
             refs,
             nets,
             at,
-            fix: gap.suggestion.clone(),
+            fix: None,
+            why: gap.suggestion.clone(),
             advisory: true,
         });
     }
@@ -528,6 +1018,7 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
         );
     }
     Ok(Inspection {
+        doc,
         netlist,
         gaps,
         findings,
@@ -575,6 +1066,17 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .transpose()?;
     if let Some(baseline) = &baseline_inspection {
         classify_findings(&mut inspection.findings, &baseline.findings);
+    }
+    let planner = FixPlanner::new(
+        &inspection.doc,
+        &inspection.netlist,
+        baseline_inspection
+            .as_ref()
+            .map(|baseline| &baseline.netlist),
+        ctx,
+    );
+    for finding in &mut inspection.findings {
+        planner.plan(finding, ctx);
     }
     inspection.findings.sort_by_key(|finding| {
         (
@@ -668,6 +1170,44 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 mod tests {
     use super::*;
 
+    fn pin(id: &str, name: &str, etype: &str, net: Option<&str>, x: f64) -> FixPin {
+        FixPin {
+            id: id.to_owned(),
+            refdes: id.split('.').next().unwrap().to_owned(),
+            name: name.to_owned(),
+            etype: etype.to_owned(),
+            at: [x, 0.0],
+            net: net.map(str::to_owned),
+            unconnected: net.is_none(),
+        }
+    }
+
+    fn planner(pins: Vec<FixPin>) -> FixPlanner {
+        FixPlanner {
+            pins,
+            baseline_nets: BTreeMap::new(),
+            rotations: BTreeMap::new(),
+            parts: BTreeMap::new(),
+            default_footprints: BTreeMap::new(),
+        }
+    }
+
+    fn finding(code: &str, refs: &[&str], nets: &[&str], message: &str) -> Finding {
+        Finding {
+            classification: "introduced",
+            severity: "error".to_owned(),
+            source: "test",
+            code: code.to_owned(),
+            message: message.to_owned(),
+            refs: refs.iter().map(|value| (*value).to_owned()).collect(),
+            nets: nets.iter().map(|value| (*value).to_owned()).collect(),
+            at: None,
+            fix: None,
+            why: "No safe one-call repair is known for this finding.".to_owned(),
+            advisory: false,
+        }
+    }
+
     fn warning(code: &str, reference: &str, at: [f64; 2]) -> Finding {
         Finding {
             classification: "introduced",
@@ -678,7 +1218,11 @@ mod tests {
             refs: vec![reference.to_owned()],
             nets: vec!["NET".to_owned()],
             at: Some(at),
-            fix: "fix".to_owned(),
+            fix: Some(ToolFix {
+                tool: "connect",
+                args: json!({"from": reference, "to": "U1.1"}),
+            }),
+            why: "test repair".to_owned(),
             advisory: true,
         }
     }
@@ -747,6 +1291,172 @@ mod tests {
             findings
                 .iter()
                 .all(|finding| finding.classification == "introduced")
+        );
+    }
+
+    #[test]
+    fn power_findings_on_one_rail_share_one_exact_add_power_fix() {
+        let planner = planner(vec![
+            pin("U1.8", "VSS", "power_in", Some("GND"), 10.0),
+            pin("U2.4", "GND", "power_in", Some("GND"), 20.0),
+            pin("U3.1", "GND", "power_in", Some("GND"), 30.0),
+        ]);
+        let expected = ToolFix {
+            tool: "add_power",
+            args: json!({"net": "GND", "pin": "U1.8"}),
+        };
+        let findings = ["U1.8", "U2.4", "U3.1"].map(|reference| {
+            let mut finding = finding(
+                "power_pin_not_driven",
+                &[reference],
+                &["GND"],
+                "power input not driven",
+            );
+            let (fix, why) = planner.power(&finding).unwrap();
+            finding.fix = Some(fix);
+            finding.why = why;
+            finding
+        });
+
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.fix.as_ref() == Some(&expected))
+        );
+        assert_eq!(fix_groups(&findings).len(), 1);
+        assert_eq!(fix_groups(&findings)[0]["closes"], 3);
+    }
+
+    #[test]
+    fn single_pin_net_reconnects_to_the_baseline_endpoint_exactly() {
+        let mut planner = planner(vec![
+            pin("R5.2", "~", "passive", None, 10.0),
+            pin("U1.3", "IN", "input", None, 80.0),
+        ]);
+        planner.baseline_nets = BTreeMap::from([
+            ("R5.2".to_owned(), "AUDIO_IN".to_owned()),
+            ("U1.3".to_owned(), "AUDIO_IN".to_owned()),
+        ]);
+        let finding = finding(
+            "single-pin-net",
+            &["R5.2"],
+            &["AUDIO_IN"],
+            "net reaches only R5.2",
+        );
+
+        assert_eq!(
+            planner.connection(&finding).unwrap().0,
+            ToolFix {
+                tool: "connect",
+                args: json!({"from": "R5.2", "to": "U1.3"}),
+            }
+        );
+    }
+
+    #[test]
+    fn unused_output_gets_an_exact_no_connect_fix() {
+        let planner = planner(vec![pin("U1.7", "OUT2", "output", None, 10.0)]);
+        let finding = finding(
+            "pin_not_connected",
+            &["U1.7"],
+            &[],
+            "unused output is unconnected",
+        );
+
+        assert_eq!(
+            planner.connection(&finding).unwrap().0,
+            ToolFix {
+                tool: "no_connect",
+                args: json!({"pin": "U1.7"}),
+            }
+        );
+    }
+
+    #[test]
+    fn conflicting_outputs_disconnect_the_second_driver_exactly() {
+        let planner = planner(vec![
+            pin("U1.1", "OUT", "output", Some("BUS"), 10.0),
+            pin("U2.1", "OUT", "output", Some("BUS"), 20.0),
+        ]);
+        let finding = finding(
+            "output-short",
+            &["U1", "U2"],
+            &["BUS"],
+            "multiple outputs tie to this net",
+        );
+
+        assert_eq!(
+            planner.output_conflict(&finding).unwrap().0,
+            ToolFix {
+                tool: "delete_wires",
+                args: json!({"pins": ["U2.1"]}),
+            }
+        );
+    }
+
+    #[test]
+    fn reversed_led_rotates_the_symbol_exactly() {
+        let mut planner = planner(Vec::new());
+        planner.rotations.insert("D1".to_owned(), 90.0);
+        let finding = finding("led-polarity", &["D1"], &["GND", "+3V3"], "LED is reversed");
+
+        assert_eq!(
+            planner.polarity(&finding).unwrap().0,
+            ToolFix {
+                tool: "move_symbols",
+                args: json!({"moves": [{"ref": "D1", "rot": 270.0}]}),
+            }
+        );
+    }
+
+    #[test]
+    fn missing_footprint_assigns_the_catalog_match_exactly() {
+        assert_eq!(
+            footprint_assignment("R5", "Resistor_SMD:R_0805_2012Metric", "Device:R").0,
+            ToolFix {
+                tool: "assign_footprints",
+                args: json!({"assignments": [{
+                    "reference": "R5",
+                    "footprint": "Resistor_SMD:R_0805_2012Metric"
+                }]}),
+            }
+        );
+    }
+
+    #[test]
+    fn wired_library_no_connect_pin_is_disconnected_exactly() {
+        let planner = planner(vec![
+            pin("U1.3", "NC", "no_connect", Some("SIG"), 10.0),
+            pin("U1.4", "OUT", "output", None, 20.0),
+        ]);
+        let finding = finding(
+            "library-no-connect-wired",
+            &["U1.3"],
+            &["SIG"],
+            "library no-connect pin is wired",
+        );
+        let (fix, why) = planner.library_no_connect(&finding).unwrap();
+
+        assert_eq!(
+            fix,
+            ToolFix {
+                tool: "delete_wires",
+                args: json!({"pins": ["U1.3"]}),
+            }
+        );
+        assert!(why.contains("functional pin U1.4"));
+    }
+
+    #[test]
+    fn unknown_finding_has_null_fix_and_a_reason() {
+        let finding = finding("unknown-rule", &["U1"], &[], "requires judgment");
+        let serialized = serde_json::to_value(finding).unwrap();
+
+        assert_eq!(serialized["fix"], Value::Null);
+        assert!(
+            serialized["why"]
+                .as_str()
+                .is_some_and(|why| !why.is_empty())
         );
     }
 }

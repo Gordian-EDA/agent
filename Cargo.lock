@@ -922,6 +922,7 @@ version = "0.1.0"
 dependencies = [
  "anneal-place",
  "anyhow",
+ "circuit-graph",
  "cluster-place",
  "geom",
  "gordian-llm",

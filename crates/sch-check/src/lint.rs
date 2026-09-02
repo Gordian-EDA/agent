@@ -67,15 +67,19 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
                     covered.insert(&p.number, key);
                     if let Some(PinTarget::Net(n)) = pin_target_for(comp, key) {
                         if p.etype == PinType::NoConnect {
-                            diags.push(Diagnostic::error(
-                                "library-no-connect-wired",
-                                format!(
-                                    "{refdes}: pin {} ({}) is a library no-connect pin but is \
+                            diags.push(
+                                Diagnostic::error(
+                                    "library-no-connect-wired",
+                                    format!(
+                                        "{refdes}: pin {} ({}) is a library no-connect pin but is \
                                      connected to `{n}`; disconnect it and use a functional pin \
                                      or swap to a compatible symbol",
-                                    p.number, p.name
-                                ),
-                            ));
+                                        p.number, p.name
+                                    ),
+                                )
+                                .with_refs([format!("{refdes}.{}", p.number)])
+                                .with_nets([n.clone()]),
+                            );
                         }
                         match p.etype {
                             PinType::PowerInput => {
@@ -108,13 +112,16 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
                     pin_target_for(comp, key).is_some_and(|t| matches!(t, PinTarget::Net(_)))
                 });
                 if !on_net {
-                    diags.push(Diagnostic::error(
-                        "power-pin-unconnected",
-                        format!(
-                            "{refdes}: power-input pin {} ({}) is not connected to a net",
-                            p.number, p.name
-                        ),
-                    ));
+                    diags.push(
+                        Diagnostic::error(
+                            "power-pin-unconnected",
+                            format!(
+                                "{refdes}: power-input pin {} ({}) is not connected to a net",
+                                p.number, p.name
+                            ),
+                        )
+                        .with_refs([format!("{refdes}.{}", p.number)]),
+                    );
                 }
             }
 
@@ -257,13 +264,17 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
             {
                 continue;
             }
-            diags.push(Diagnostic::warning(
-                "unsourced-power-net",
-                format!(
+            diags.push(
+                Diagnostic::warning(
+                    "unsourced-power-net",
+                    format!(
                     "power net `{net}` feeds power-input pins ({}) but has no power symbol, connector, or power-output pin source",
                     consumers.join(", ")
-                ),
-            ));
+                    ),
+                )
+                .with_refs(consumers.clone())
+                .with_nets([net.clone()]),
+            );
         }
     }
 
@@ -276,14 +287,18 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
             // would already be counted here.
             let attrs = d.nets.get(*net);
             if pins.len() == 1 && !attrs.map(|a| a.power).unwrap_or(false) {
-                diags.push(Diagnostic::error(
-                    "single-pin-net",
-                    format!(
-                        "net `{net}` reaches only {} — connect it to its other end, \
+                diags.push(
+                    Diagnostic::error(
+                        "single-pin-net",
+                        format!(
+                            "net `{net}` reaches only {} — connect it to its other end, \
                          or mark the pin no-connect",
-                        pins[0]
-                    ),
-                ));
+                            pins[0]
+                        ),
+                    )
+                    .with_refs([pins[0].clone()])
+                    .with_nets([net.to_string()]),
+                );
             }
         }
     }
