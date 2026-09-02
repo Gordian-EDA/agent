@@ -7,6 +7,7 @@ pub mod footprint_compat;
 pub mod logging;
 pub mod platform;
 pub mod render;
+pub mod revisions;
 pub mod runtime;
 pub mod tool;
 pub mod workspace;
