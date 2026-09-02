@@ -241,13 +241,15 @@ fn main() -> Result<()> {
         let route_ms = route_started.elapsed().as_millis();
         let findings = lint(&rp, &routed.result.solution);
         let drc_started = Instant::now();
-        let kicad_drc = run_kicad_drc(
-            &board,
-            &placed.placements,
-            &routed.result.solution,
-            &catalog,
-            &env,
-        );
+        let kicad_drc = (!args.no_kicad).then(|| {
+            run_kicad_drc(
+                &board,
+                &placed.placements,
+                &routed.result.solution,
+                &catalog,
+                &env,
+            )
+        });
         let drc_ms = drc_started.elapsed().as_millis();
         let metrics = routed.result.solution.metrics();
         let inspect_nets = inspect_nets_with_optional_failures(
@@ -274,17 +276,18 @@ fn main() -> Result<()> {
             "ROUTE_FAULT"
         } else {
             match &kicad_drc {
-                Ok(drc) if drc.is_ok() => "OK",
-                Ok(_) => "KICAD_DRC_FAULT",
-                Err(_) => "KICAD_DRC_ERROR",
+                None => "LINT_OK",
+                Some(Ok(drc)) if drc.is_ok() => "OK",
+                Some(Ok(_)) => "KICAD_DRC_FAULT",
+                Some(Err(_)) => "KICAD_DRC_ERROR",
             }
         };
-        if status != "OK" {
+        if status != "OK" && status != "LINT_OK" {
             failures += 1;
         }
         let kicad_faults = kicad_drc
             .as_ref()
-            .ok()
+            .and_then(|drc| drc.as_ref().ok())
             .map(|drc| drc.copper_violations + drc.unconnected_items)
             .map(|count| count.to_string())
             .unwrap_or_default();
@@ -339,8 +342,9 @@ fn main() -> Result<()> {
             for finding in findings.iter().take(12) {
                 eprintln!("  {name}: lint={finding:?}");
             }
-            match &kicad_drc {
-                Ok(drc) => {
+            match kicad_drc.as_ref() {
+                None => eprintln!("  {name}: kicad-drc skipped (--no-kicad)"),
+                Some(Ok(drc)) => {
                     eprintln!(
                         "  {name}: kicad-drc copper={} unconnected={} ignored_zone_self={}",
                         drc.copper_violations,
@@ -351,7 +355,7 @@ fn main() -> Result<()> {
                         eprintln!("  {name}: kicad-drc={issue}");
                     }
                 }
-                Err(err) => eprintln!("  {name}: kicad-drc-error={err}"),
+                Some(Err(err)) => eprintln!("  {name}: kicad-drc-error={err}"),
             }
             for attempt in &routed.passes {
                 let failed_names = attempt
@@ -396,6 +400,11 @@ struct Args {
     /// Directory each routed board is written to as `<name>.kicad_pcb`, for
     /// rendering and critic scoring.
     emit_dir: Option<PathBuf>,
+    /// Skip the KiCad DRC oracle. KiCad's IPC session is a machine-wide
+    /// singleton, so two concurrent runs fight over it; a lane iterating on
+    /// route geometry wants the deterministic metrics without that contention.
+    /// The gate itself always runs WITH the oracle.
+    no_kicad: bool,
 }
 
 impl Args {
@@ -411,6 +420,7 @@ impl Args {
             inspect_nets: Vec::new(),
             names: Vec::new(),
             emit_dir: None,
+            no_kicad: false,
         };
         let mut values = values.peekable();
         while let Some(arg) = values.next() {
@@ -418,6 +428,7 @@ impl Args {
                 "--all" => args.all = true,
                 "--required" => args.required = true,
                 "--place-only" => args.place_only = true,
+                "--no-kicad" => args.no_kicad = true,
                 "-v" | "--verbose" => args.verbose = true,
                 "--inspect-detail-jobs" => args.inspect_detail_jobs = true,
                 "--inspect-failed-nets" => args.inspect_failed_nets = true,
@@ -451,7 +462,7 @@ impl Args {
                 }
                 "-h" | "--help" => {
                     println!(
-                        "usage: validate_pcb_corpus [--required|--all] [--place-only] [--router auto|mesh|mesh-detail|mesh-global|mesh-assign|sequential|grid|astar] [--inspect-net NET[,NET...]] [--inspect-failed-nets] [--inspect-detail-jobs] [--emit-dir DIR] [-v] [board ...]"
+                        "usage: validate_pcb_corpus [--required|--all] [--place-only] [--router auto|mesh|mesh-detail|mesh-global|mesh-assign|sequential|grid|astar] [--inspect-net NET[,NET...]] [--inspect-failed-nets] [--inspect-detail-jobs] [--emit-dir DIR] [--no-kicad] [-v] [board ...]"
                     );
                     std::process::exit(0);
                 }
