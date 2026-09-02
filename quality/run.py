@@ -509,15 +509,26 @@ VISUAL_FACTS = ("body_overlaps", "text_collisions", "wires_through_bodies")
 
 
 def schematic_visual_facts(renders):
+    """Measured visual defects after the run, plus the ones the run ADDED.
+
+    An edit case works on a sheet that may already carry collisions (hand-drawn
+    inputs do); `<fact>_added` is what the agent is answerable for there, while
+    the absolute fact is what a created sheet is judged on."""
     rendered = renders.get("after", {}).get("schematic", {})
     visual = rendered.get("visual")
     if not isinstance(visual, dict):
         return {"schematic_visual_error": rendered.get("error", "not measured")}
-    measured = {
-        name: visual[name]
-        for name in VISUAL_FACTS
-        if isinstance(visual.get(name), list)
-    }
+    before = renders.get("before", {}).get("schematic", {}).get("visual")
+    before = before if isinstance(before, dict) else {}
+    measured = {}
+    for name in VISUAL_FACTS:
+        if not isinstance(visual.get(name), list):
+            continue
+        measured[name] = visual[name]
+        seen = {json.dumps(item, sort_keys=True) for item in before.get(name, []) or []}
+        measured[f"{name}_added"] = [
+            item for item in visual[name] if json.dumps(item, sort_keys=True) not in seen
+        ]
     missing = [name for name in VISUAL_FACTS if name not in measured]
     return {
         "schematic_visual_error": (

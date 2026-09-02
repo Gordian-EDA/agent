@@ -10,4 +10,4 @@ expect: net_delta_removed == []
 expect: net_delta_pins_now_unconnected == []
 expect: len(net_delta_pins_now_connected) >= 1
 expect: paths_broken == []
-expect: text_collisions == []
+expect: text_collisions_added == []

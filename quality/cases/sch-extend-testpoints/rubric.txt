@@ -9,4 +9,4 @@ expect: len(symbols_added) >= 3
 expect: len(symbols_added) <= 6
 expect: net_delta_removed == []
 expect: unconnected_pins_added == []
-expect: text_collisions == []
+expect: text_collisions_added == []
