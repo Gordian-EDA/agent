@@ -42,6 +42,7 @@ mod render;
 mod route;
 mod seed;
 mod silk;
+mod sync;
 
 pub(crate) fn fmt_num(v: f64) -> String {
     let v = if v == 0.0 { 0.0 } else { v };
@@ -60,6 +61,7 @@ pub use place::{get_board, place_board};
 pub use render::render_board;
 pub use route::route_board;
 pub use seed::{BoardSeedRules, PourSpec};
+pub use sync::sync_board;
 
 fn active_board(
     ctx: &gordian_runtime::AgentRuntime,

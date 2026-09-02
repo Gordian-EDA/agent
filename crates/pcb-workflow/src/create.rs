@@ -254,7 +254,7 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }))
 }
 
-fn apply_complexity_default_layer_count(
+pub(super) fn apply_complexity_default_layer_count(
     rules: &mut SeedRules,
     input: Option<&Value>,
     part_count: usize,
@@ -355,7 +355,7 @@ fn effective_seed_rules(requested: &SeedRules, parts: &[SeedFootprint]) -> SeedR
     effective
 }
 
-fn add_default_power_pours(rules: &mut SeedRules, parts: &[SeedPart]) {
+pub(super) fn add_default_power_pours(rules: &mut SeedRules, parts: &[SeedPart]) {
     if !rules.pours.is_empty() || rules.layer_count < 6 {
         return;
     }
@@ -775,6 +775,45 @@ impl<'a> SeedBoardWriter<'a> {
     fn emit_footprint(&self, part: &SeedFootprint) -> io::Result<String> {
         emit_seed_footprint(part, &self.net_codes)
     }
+}
+
+/// Synthesize one board `(footprint …)` block for a part at a known pose.
+///
+/// The same emitter the seed writer uses, reachable for an incremental sync:
+/// a part joining an existing board gets byte-identical treatment to one the
+/// board was seeded with.
+pub(super) fn emit_board_footprint(
+    part: &SeedPart,
+    at: Point2,
+    rotation: f64,
+    catalog: &FootprintCatalog,
+    net_codes: &BTreeMap<String, i32>,
+) -> std::result::Result<String, String> {
+    let id = FootprintId::parse(&part.footprint).map_err(|e| {
+        let clause = footprint_suggestion_clause(&catalog.suggest_text(&part.footprint));
+        format!(
+            "part {}: invalid footprint id `{}`: {e}{clause}",
+            part.reference, part.footprint
+        )
+    })?;
+    let source = catalog.source(&id).map_err(|e| {
+        let clause = footprint_suggestion_clause(&catalog.suggest(&id));
+        format!(
+            "part {}: footprint `{}` is not usable: {e}{clause}",
+            part.reference, part.footprint
+        )
+    })?;
+    let seed = SeedFootprint {
+        reference: part.reference.clone(),
+        value: part.value.clone(),
+        lib_id: part.footprint.clone(),
+        source,
+        pad_nets: part.pad_nets.clone(),
+        at,
+        rotation,
+        locked: false,
+    };
+    emit_seed_footprint(&seed, net_codes).map_err(|e| format!("part {}: {e}", part.reference))
 }
 
 fn is_817_family(part: &SeedFootprint) -> bool {
@@ -1324,7 +1363,7 @@ pub(super) fn req_num(obj: &Value, key: &str, ctx: &str) -> std::result::Result<
 /// `{width, height}` (origin 0), a `[min_x, min_y, max_x, max_y]` array,
 /// numbers-as-strings with an optional `mm` suffix — and teach the canonical
 /// shape in the error when nothing matches.
-fn parse_bounds(v: Option<&Value>) -> std::result::Result<Rect, String> {
+pub(super) fn parse_bounds(v: Option<&Value>) -> std::result::Result<Rect, String> {
     const EXPECT: &str = r#"expected {"min_x":0,"min_y":0,"max_x":60,"max_y":40} in mm (or {x,y,width,height}, {width,height}, or [min_x,min_y,max_x,max_y])"#;
     let Some(val) = v else {
         return Err(format!("missing required `bounds`; {EXPECT}"));
@@ -1376,7 +1415,7 @@ fn parse_bounds(v: Option<&Value>) -> std::result::Result<Rect, String> {
 }
 
 /// Parse optional `rules` from snake_case model input.
-fn parse_seed_rules(v: Option<&Value>) -> std::result::Result<SeedRules, String> {
+pub(super) fn parse_seed_rules(v: Option<&Value>) -> std::result::Result<SeedRules, String> {
     parse_rules(v).map(|rules| SeedRules::from(&rules))
 }
 
