@@ -591,7 +591,7 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         Ok(text) => text,
         Err(e) => return json!({ "error": format!("could not read the board: {e}") }),
     };
-    let mut doc = match BoardDoc::parse(original.clone()) {
+    let mut doc = match board_doc_for_sync(original.clone()) {
         Ok(doc) => doc,
         Err(e) => return json!({ "error": format!("could not read the board document: {e}") }),
     };
@@ -695,6 +695,25 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
                  rest alone.",
     });
     gate.commit(ctx, result)
+}
+
+/// Open an existing board for netlist edits, seeding the empty net table that
+/// KiCad omits from empty and direct-named-net serial forms.
+fn board_doc_for_sync(mut text: String) -> std::result::Result<BoardDoc, String> {
+    let doc = BoardDoc::parse(text.clone())?;
+    if !doc.net_codes().is_empty() {
+        return Ok(doc);
+    }
+    let root = text
+        .find("(kicad_pcb")
+        .ok_or_else(|| "not a kicad_pcb document".to_owned())?;
+    let end = kicad_board::sexpr_end(&text, root)
+        .ok_or_else(|| "unbalanced kicad_pcb document".to_owned())?;
+    let close = text[..end - 1]
+        .rfind('\n')
+        .map_or(end - 1, |newline| newline + 1);
+    text.insert_str(close, "\t(net 0 \"\")\n");
+    BoardDoc::parse(text)
 }
 
 /// Rebuild the board under new rules or a new outline, keeping every part where
@@ -1188,5 +1207,24 @@ mod tests {
                 to: None,
             }]
         );
+    }
+
+    #[test]
+    fn local_board_move_seed_gains_its_schematic_net_table_offline() {
+        let board = "(kicad_pcb\n\t(version 20240108)\n\t(layers\n\t\t(0 \"F.Cu\" signal)\n\t\t(31 \"B.Cu\" signal)\n\t\t(44 \"Edge.Cuts\" user)\n\t)\n\t(gr_rect (start 0 0) (end 30 20) (layer \"Edge.Cuts\"))\n)\n";
+        let mut doc = board_doc_for_sync(board.to_owned()).unwrap();
+        let schematic = divider_schematic();
+        let wanted = schematic
+            .iter()
+            .flat_map(|part| part.pad_nets.values().map(String::as_str))
+            .collect::<BTreeSet<_>>();
+
+        let codes = doc.ensure_nets(wanted).unwrap();
+        assert_eq!(
+            codes.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["GND".to_owned(), "SENSE".to_owned(), "VIN".to_owned(),])
+        );
+        assert!(doc.text().contains("\n\t(net 0 \"\")"));
+        assert_eq!(doc.text().matches("\n\t(net ").count(), 4);
     }
 }
