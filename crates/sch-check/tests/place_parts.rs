@@ -32,6 +32,26 @@ fn provider() -> SymbolTable {
         "Connector:USB_B_Micro",
         vec![("1", "VBUS", Passive, 1), ("2", "GND", Passive, 1)],
     );
+    p.mock_add(
+        "Sensor:RailNamed",
+        vec![
+            ("1", "VIN", PowerInput, 1),
+            ("2", "GND", PowerInput, 1),
+            ("3", "SDA", Other, 1),
+        ],
+    );
+    p.mock_add(
+        "Audio:Codec",
+        vec![
+            ("1", "AVDD", PowerInput, 1),
+            ("2", "AGND", PowerInput, 1),
+            ("3", "DVDD", PowerInput, 1),
+        ],
+    );
+    p.mock_add(
+        "Fixture:NoPowerPins",
+        vec![("1", "VIN", Other, 1), ("2", "GND", Passive, 1)],
+    );
     p
 }
 
@@ -265,15 +285,74 @@ fn a_library_no_connect_pin_is_invalid_before_placement() {
 }
 
 #[test]
-fn ambiguous_decouple_rails_are_reported() {
+fn decouple_uses_power_pin_types_for_a_3v3_sensor() {
     let input: PlacePartsInput = serde_json::from_str(
-        r#"{"parts": [{"ref": "U2", "part": "MCU:STM32F103C8T",
-             "pins": {"1": "+3V3", "2": "+1V8", "VSS": "GND"},
+        r#"{"parts": [{"ref": "U3", "part": "Sensor:RailNamed",
+             "pins": {"VIN": "3V3", "GND": "GND", "SDA": "SDA"},
              "decouple": {"100nF": 1}}]}"#,
     )
     .unwrap();
     let (design, diags, _) = into_design(&input, &provider(), &Default::default());
-    assert!(diags.0.iter().any(|d| d.code == "decouple-ambiguous"));
+    assert!(!diags.0.iter().any(|d| d.code == "decouple-ambiguous"));
+    let caps: Vec<_> = design.blocks[DEFAULT_BLOCK]
+        .components
+        .values()
+        .filter(|component| matches!(component.origin, Origin::Synthesized { .. }))
+        .collect();
+    assert_eq!(caps.len(), 1);
+    assert_eq!(caps[0].pins["1"], PinTarget::Net("3V3".into()));
+    assert_eq!(caps[0].pins["2"], PinTarget::Net("GND".into()));
+}
+
+#[test]
+fn decouple_covers_each_codec_supply_net() {
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "U4", "part": "Audio:Codec",
+             "pins": {"AVDD": "AVDD", "AGND": "GND", "DVDD": "DVDD"},
+             "decouple": {"100nF": 1}}]}"#,
+    )
+    .unwrap();
+    let (design, diags, _) = into_design(&input, &provider(), &Default::default());
+    assert!(!diags.0.iter().any(|d| d.code == "decouple-ambiguous"));
+    let caps: Vec<_> = design.blocks[DEFAULT_BLOCK]
+        .components
+        .values()
+        .filter(|component| matches!(component.origin, Origin::Synthesized { .. }))
+        .collect();
+    assert_eq!(caps.len(), 2);
+    let mut supplies: Vec<&str> = caps
+        .iter()
+        .filter_map(|cap| match &cap.pins["1"] {
+            PinTarget::Net(net) => Some(net.as_str()),
+            PinTarget::NoConnect => None,
+        })
+        .collect();
+    supplies.sort();
+    assert_eq!(supplies, ["AVDD", "DVDD"]);
+    assert!(
+        caps.iter()
+            .all(|cap| cap.pins["2"] == PinTarget::Net("GND".into()))
+    );
+}
+
+#[test]
+fn decouple_without_power_pins_names_the_fallback_candidates() {
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "U5", "part": "Fixture:NoPowerPins",
+             "pins": {"VIN": "3V3", "GND": "GND"},
+             "decouple": {"100nF": 1}}]}"#,
+    )
+    .unwrap();
+    let (design, diags, _) = into_design(&input, &provider(), &Default::default());
+    let diag = diags
+        .0
+        .iter()
+        .find(|diag| diag.code == "decouple-ambiguous")
+        .expect("missing decouple diagnostic");
+    assert!(diag.message.contains("no power_in pins"), "{diag}");
+    assert!(diag.message.contains("VDD*/VCC*"), "{diag}");
+    assert!(diag.message.contains("VSS*/GND*"), "{diag}");
+    assert!(diag.message.contains("[] / [\"GND\"]"), "{diag}");
     assert_eq!(design.blocks[DEFAULT_BLOCK].components.len(), 1);
 }
 
