@@ -192,7 +192,7 @@ pub fn run_kicad_drc(
         false,
         false,
     );
-    let materialized = super::export::materialize_zones_for_drc(&path, env, &sessions);
+    let materialized = super::export::materialize_zones_for_drc(&path, env, &sessions, false);
     sessions.close();
     materialized?;
     let report = env

@@ -547,7 +547,7 @@ fn edge_position(part: &MovePart, bounds: Rect, edge: Edge, gap: f64) -> Point2 
     }
 }
 
-/// Route a single live-board connection with grid-A* obstacle avoidance.
+/// Route a single saved-board connection with grid-A* obstacle avoidance.
 pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // KiCad 9.0.2 can apply CreateItems but time out before acknowledging the
     // commit, leaving route_track unable to tell whether retrying would
@@ -587,7 +587,7 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 }
 
-/// Delete live-board track/via copper near a click point.
+/// Delete saved-board track/via copper near a click point.
 pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
     let snapshot = match crate::active_board(ctx) {
