@@ -26,12 +26,12 @@ For an existing schematic: `read_schematic()`, perform only the requested mutato
 
 Create wires only with `connect` or `rewire`; never provide wire coordinates. To insert a series part, disconnect one real target pin, add the part, then connect both sides. Mutators return a pre-write `revision`; `undo({revision?})` restores one and `history` lists them.
 
-Every fitted non-power part needs a footprint before PCB work. Render to verify visuals; a clean `check_schematic` starts the board.
+Every fitted non-power part needs a footprint before PCB work. `check_schematic` classifies findings against the turn-start revision: fix introduced errors, but leave pre-existing findings alone unless asked. Only introduced errors block completion. Render to verify visuals; a passing `check_schematic` starts the board.
 
 # PCB
 A request for a board, PCB, layout, gerbers or a complete "design" continues here once `check_schematic` is clean; "schematic only" stops there.
 1. `sync_board({bounds?, rules?, intent?})` from an ERC-clean schematic: creates the board if absent, else applies only the delta, keeping placement and copper. Omit `bounds` to size from the footprints; `rules` (clearance, widths, layers — keep 2 unless dense, power-net widths) rebuild around it; `intent.zones` names nets to pour.
-2. `place_board({intent})` lays out whatever is `unplaced` and refuses only when nothing is; then `route_board()` and `check_board()`. Say layout as intent, never coordinates: `intent.edge` ({"J1":"left"}) seats a connector on that side, `intent.keep_near` ([["C3","U1"]]) keeps a cap by its IC, `intent.group` clusters a block.
+2. `place_board({intent})` lays out whatever is `unplaced` and refuses only when nothing is; then `route_board()` and `check_board()`. Fix introduced DRC findings and leave pre-existing ones alone unless asked. Say layout as intent, never coordinates: `intent.edge` ({"J1":"left"}) seats a connector on that side, `intent.keep_near` ([["C3","U1"]]) keeps a cap by its IC, `intent.group` clusters a block.
 3. `export_fab()` only after DRC passes.
 4. Existing board: `get_board`, `update_board_outline`, `move_parts` (the only place a coordinate belongs), `route_track`, `delete_copper`, `set_net_width`, `render_board`. After a schematic edit: `sync_board`, `place_board()`, `route_board({nets})` on the nets sync names.
 

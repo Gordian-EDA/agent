@@ -51,7 +51,14 @@ fn check_schematic_matches_kicad_warning_count_and_names_each_finding() {
     );
     for finding in findings {
         for field in [
-            "severity", "source", "code", "message", "refs", "nets", "fix",
+            "classification",
+            "severity",
+            "source",
+            "code",
+            "message",
+            "refs",
+            "nets",
+            "fix",
         ] {
             assert!(
                 finding.get(field).is_some(),
@@ -70,8 +77,8 @@ fn check_schematic_matches_kicad_warning_count_and_names_each_finding() {
     assert_eq!(p1["refs"], json!(["P1"]));
     assert_eq!(
         checked["text"].as_str().unwrap().lines().count(),
-        findings.len(),
-        "detailed output must have one model-facing line per finding"
+        findings.len() + 1,
+        "detailed output must have a header plus one model-facing line per finding"
     );
 
     let compact = gordian_tools_sch::run("check_schematic", json!({}), &ctx)
@@ -79,7 +86,7 @@ fn check_schematic_matches_kicad_warning_count_and_names_each_finding() {
         .expect("compact check_schematic result");
     if findings.len() > 40 {
         assert_eq!(compact["findings"].as_array().unwrap().len(), 39);
-        assert_eq!(compact["text"].as_str().unwrap().lines().count(), 40);
+        assert_eq!(compact["text"].as_str().unwrap().lines().count(), 41);
         assert!(
             compact["text"]
                 .as_str()
@@ -90,4 +97,53 @@ fn check_schematic_matches_kicad_warning_count_and_names_each_finding() {
             "compact result must say how to retrieve omitted findings: {compact}"
         );
     }
+}
+
+#[test]
+fn check_schematic_uses_the_turn_snapshot_and_survives_undo() {
+    let Some(ctx) = passive_fixture() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    ctx.begin_turn().unwrap();
+    let revision = ctx
+        .revisions()
+        .capture(
+            "test_edit",
+            "capture turn baseline",
+            &[ctx.sch_path().to_path_buf()],
+        )
+        .unwrap();
+
+    let unchanged = gordian_tools_sch::run("check_schematic", json!({"detail": true}), &ctx)
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged["baseline_revision"], json!(revision));
+    assert_eq!(unchanged["introduced"], 0);
+    assert_eq!(
+        unchanged["pre_existing"],
+        unchanged["findings"].as_array().unwrap().len()
+    );
+
+    let original = std::fs::read_to_string(ctx.sch_path()).unwrap();
+    let edited = original.replacen(
+        "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal",
+        "Missing:Footprint",
+        1,
+    );
+    assert_ne!(edited, original);
+    std::fs::write(ctx.sch_path(), edited).unwrap();
+    let changed = gordian_tools_sch::run("check_schematic", json!({"detail": true}), &ctx)
+        .unwrap()
+        .unwrap();
+    assert!(
+        changed["introduced"].as_u64().unwrap() > 0,
+        "edited sheet should have introduced findings: {changed}"
+    );
+
+    ctx.revisions().restore(Some(revision)).unwrap();
+    let undone = gordian_tools_sch::run("check_schematic", json!({"detail": true}), &ctx)
+        .unwrap()
+        .unwrap();
+    assert_eq!(undone["introduced"], 0);
 }

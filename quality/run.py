@@ -573,10 +573,15 @@ def schematic_visual_facts(renders):
         if not isinstance(visual.get(name), list):
             continue
         measured[name] = visual[name]
-        seen = {json.dumps(item, sort_keys=True) for item in before.get(name, []) or []}
-        measured[f"{name}_added"] = [
-            item for item in visual[name] if json.dumps(item, sort_keys=True) not in seen
-        ]
+        introduced = visual.get(f"{name}_introduced")
+        has_tool_baseline = isinstance(visual.get("baseline_revision"), int)
+        if isinstance(introduced, list) and (has_tool_baseline or not before):
+            measured[f"{name}_added"] = introduced
+        else:
+            seen = {json.dumps(item, sort_keys=True) for item in before.get(name, []) or []}
+            measured[f"{name}_added"] = [
+                item for item in visual[name] if json.dumps(item, sort_keys=True) not in seen
+            ]
     missing = [name for name in VISUAL_FACTS if name not in measured]
     return {
         "schematic_visual_error": (

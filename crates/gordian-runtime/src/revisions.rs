@@ -1,6 +1,6 @@
 //! Project-wide revisions for schematic and board files.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -83,11 +83,21 @@ pub struct Restored {
     pub files: Vec<PathBuf>,
 }
 
+/// The first pre-write state captured for one project file in the active turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnBaseline {
+    /// Revision containing the file's pre-write state.
+    pub revision: RevisionId,
+    /// Stored snapshot path, or `None` when the file did not exist yet.
+    pub path: Option<PathBuf>,
+}
+
 /// The revision store rooted at `<project>/.gordian/revisions`.
 pub struct Revisions {
     project: PathBuf,
     root: PathBuf,
     lock: Mutex<()>,
+    turn_baselines: Mutex<Option<BTreeMap<PathBuf, TurnBaseline>>>,
     board_sessions: Option<Arc<kicad_ipc::SessionManager>>,
 }
 
@@ -98,6 +108,7 @@ impl Revisions {
             root: project.join(".gordian/revisions"),
             project,
             lock: Mutex::new(()),
+            turn_baselines: Mutex::new(None),
             board_sessions: None,
         }
     }
@@ -111,8 +122,30 @@ impl Revisions {
             root: project.join(".gordian/revisions"),
             project,
             lock: Mutex::new(()),
+            turn_baselines: Mutex::new(None),
             board_sessions: Some(board_sessions),
         }
+    }
+
+    /// Starts baseline tracking for a new user turn.
+    pub fn begin_turn(&self) -> Result<()> {
+        *self
+            .turn_baselines
+            .lock()
+            .map_err(|_| anyhow!("turn baseline lock poisoned"))? = Some(BTreeMap::new());
+        Ok(())
+    }
+
+    /// Returns the first pre-write snapshot captured for `path` this turn.
+    pub fn turn_baseline(&self, path: &Path) -> Result<Option<TurnBaseline>> {
+        let (_, relative) = self.resolve_path(path)?;
+        Ok(self
+            .turn_baselines
+            .lock()
+            .map_err(|_| anyhow!("turn baseline lock poisoned"))?
+            .as_ref()
+            .and_then(|baselines| baselines.get(&relative))
+            .cloned())
     }
 
     /// Captures the exact named files before a mutating tool writes them.
@@ -174,6 +207,23 @@ impl Revisions {
         atomic_write(&staging.path().join("manifest.json"), &manifest_json)?;
         fs::rename(staging.keep(), self.root.join(id.to_string()))
             .with_context(|| format!("committing revision {id}"))?;
+        if let Some(baselines) = self
+            .turn_baselines
+            .lock()
+            .map_err(|_| anyhow!("turn baseline lock poisoned"))?
+            .as_mut()
+        {
+            for entry in &manifest.files {
+                baselines
+                    .entry(entry.path.clone())
+                    .or_insert_with(|| TurnBaseline {
+                        revision: id,
+                        path: entry
+                            .existed
+                            .then(|| self.root.join(id.to_string()).join(&entry.path)),
+                    });
+            }
+        }
         self.prune()?;
         Ok(id)
     }
@@ -329,7 +379,19 @@ impl Revisions {
     fn prune(&self) -> Result<()> {
         let ids = self.revision_ids()?;
         let excess = ids.len().saturating_sub(RETENTION);
-        for id in ids.into_iter().take(excess) {
+        let protected = self
+            .turn_baselines
+            .lock()
+            .map_err(|_| anyhow!("turn baseline lock poisoned"))?
+            .as_ref()
+            .into_iter()
+            .flat_map(|baselines| baselines.values().map(|baseline| baseline.revision))
+            .collect::<BTreeSet<_>>();
+        for id in ids
+            .into_iter()
+            .filter(|id| !protected.contains(id))
+            .take(excess)
+        {
             fs::remove_dir_all(self.root.join(id.to_string()))
                 .with_context(|| format!("pruning revision {id}"))?;
         }
@@ -403,6 +465,36 @@ mod tests {
 
         assert_eq!(revisions.restore(None).unwrap().id, latest);
         assert_eq!(fs::read(path).unwrap(), b"two");
+    }
+
+    #[test]
+    fn turn_baseline_is_first_capture_per_file() {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().join("design.kicad_sch");
+        let revisions = Revisions::for_project(project.path().to_path_buf());
+        fs::write(&path, b"turn start").unwrap();
+        revisions.begin_turn().unwrap();
+
+        let first = revisions
+            .capture("edit", "first", std::slice::from_ref(&path))
+            .unwrap();
+        fs::write(&path, b"after first").unwrap();
+        revisions
+            .capture("edit", "second", std::slice::from_ref(&path))
+            .unwrap();
+
+        let baseline = revisions.turn_baseline(&path).unwrap().unwrap();
+        assert_eq!(baseline.revision, first);
+        assert_eq!(fs::read(baseline.path.unwrap()).unwrap(), b"turn start");
+
+        revisions.begin_turn().unwrap();
+        let next = revisions
+            .capture("edit", "next turn", std::slice::from_ref(&path))
+            .unwrap();
+        assert_eq!(
+            revisions.turn_baseline(&path).unwrap().unwrap().revision,
+            next
+        );
     }
 
     #[test]

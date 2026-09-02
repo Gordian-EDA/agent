@@ -44,7 +44,7 @@ const MAX_FAILED_ROUTE_RETRIES: usize = 3;
 
 const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 
-const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. Fix errors. If completeness.gaps is nonempty and this request calls for a complete powered/interface design, add exactly the listed support circuitry and check again. Those warnings are advisory for deliberately minimal designs and focused edits; do not add unrelated parts. Finish once ERC is clean and every applicable gap is resolved.";
+const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. Fix introduced errors and leave pre-existing findings alone. If completeness.gaps is nonempty and this request calls for a complete powered/interface design, add exactly the listed support circuitry and check again. Those warnings are advisory for deliberately minimal designs and focused edits; do not add unrelated parts. Finish once introduced ERC errors are clean and every applicable gap is resolved.";
 
 const UNCHANGED_SCHEMATIC_NUDGE: &str = "the schematic is unchanged since the turn began (your edits were undone or refused); the request is not satisfied — either complete it (e.g. `set_fields` when no compatible symbol exists) or state plainly that it cannot be done and why";
 
@@ -885,18 +885,20 @@ impl<P: Provider> Agent<P> {
     /// repeat, until the model returns a final text with no pending tool calls.
     #[tracing::instrument(skip_all, fields(history_messages = self.history.len()))]
     pub async fn run_turn(&mut self, user_msg: &str, events: Events<'_>) -> Result<TurnOutcome> {
-        self.begin_turn();
+        self.begin_turn()?;
         let outcome = self.run_agent_subturn(user_msg, user_msg, events).await?;
         emit(events, AgentEvent::TurnDone);
         Ok(outcome)
     }
 
     /// Start a fresh whole-turn clock and request budget.
-    fn begin_turn(&mut self) {
+    fn begin_turn(&mut self) -> Result<()> {
+        self.runtime.begin_turn()?;
         self.turn_budget = Some(TurnClock {
             started: std::time::Instant::now(),
             provider_requests: 0,
         });
+        Ok(())
     }
 
     async fn run_agent_subturn(
@@ -1431,7 +1433,7 @@ impl<P: Provider> Agent<P> {
         events: Events<'_>,
         max_fix: usize,
     ) -> Result<TurnOutcome> {
-        self.begin_turn();
+        self.begin_turn()?;
         let mut outcome = self.run_agent_subturn(user_msg, intent, events).await?;
         if !outcome.applied || outcome.stop_reason != StopReason::Completed {
             emit(events, AgentEvent::TurnDone);
@@ -2113,7 +2115,8 @@ fn check_board_is_clean(value: &Value) -> bool {
             .and_then(Value::as_u64)
             .is_some_and(|count| count == 0)
         && value
-            .get("silk_warnings")
+            .get("introduced_silk_warnings")
+            .or_else(|| value.get("silk_warnings"))
             .and_then(Value::as_u64)
             .is_some_and(|count| count == 0)
 }
@@ -2539,12 +2542,15 @@ async fn check_schematic_review(ctx: &Arc<AgentRuntime>) -> ReviewOutcome {
         };
     }
     let mut defects = value
-        .get("diagnostics")
+        .get("findings")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
+        .filter(|finding| {
+            finding.get("classification").and_then(Value::as_str) == Some("introduced")
+                && finding.get("severity").and_then(Value::as_str) == Some("error")
+        })
+        .map(|finding| finding.to_string())
         .collect::<Vec<_>>();
     defects.extend(
         value
@@ -2791,24 +2797,12 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             format!("{files} file(s) in {dir}")
         }
         "check_schematic" => {
-            let erc_errors = result
-                .pointer("/erc/errors")
+            let introduced = result
+                .get("introduced")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            let erc_warnings = result
-                .pointer("/erc/warnings")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let check_errors = result
-                .pointer("/checks/errors")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let check_warnings = result
-                .pointer("/checks/warnings")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let completeness = result
-                .pointer("/completeness/warnings")
+            let pre_existing = result
+                .get("pre_existing")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             let first = result
@@ -2816,7 +2810,10 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .find(|finding| finding.get("severity").and_then(Value::as_str) == Some("error"))
+                .find(|finding| {
+                    finding.get("classification").and_then(Value::as_str) == Some("introduced")
+                        && finding.get("severity").and_then(Value::as_str) == Some("error")
+                })
                 .and_then(|finding| {
                     let code = finding.get("code")?.as_str()?;
                     let references = finding
@@ -2841,10 +2838,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                     )
                 })
                 .unwrap_or_default();
-            format!(
-                "{erc_errors} ERC errors, {erc_warnings} ERC warnings; {check_errors} other errors, \
-                 {check_warnings} other warnings, {completeness} completeness gaps{first}"
-            )
+            format!("{introduced} introduced, {pre_existing} pre-existing{first}")
         }
         "place_parts" => {
             let gaps = result
@@ -2858,8 +2852,31 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             .and_then(Value::as_str)
             .unwrap_or("project state")
             .to_string(),
-        "render_schematic" => "rendered schematic to PNG".to_string(),
+        "render_schematic" => {
+            let introduced = [
+                "body_overlaps_introduced",
+                "text_collisions_introduced",
+                "wires_through_bodies_introduced",
+            ]
+            .iter()
+            .map(|name| {
+                result
+                    .pointer(&format!("/visual/{name}"))
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len)
+            })
+            .sum::<usize>();
+            format!("rendered schematic; {introduced} introduced visual finding(s)")
+        }
         "check_board" => {
+            let introduced = result
+                .get("introduced")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let pre_existing = result
+                .get("pre_existing")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             let blocking = result
                 .get("blocking_findings")
                 .and_then(Value::as_u64)
@@ -2873,22 +2890,18 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                             .and_then(Value::as_u64)
                             .unwrap_or(0)
                 });
-            let reported = result
-                .get("reported_findings")
-                .and_then(Value::as_u64)
-                .or_else(|| result.get("violations").and_then(Value::as_u64))
-                .unwrap_or(0);
             let silk = result
-                .get("silk_warnings")
+                .get("introduced_silk_warnings")
+                .or_else(|| result.get("silk_warnings"))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             if check_board_is_clean(result) {
                 format!(
-                    "PCB quality clean: 0 blocking findings, 0 silkscreen warnings ({reported} total reported)"
+                    "{introduced} introduced, {pre_existing} pre-existing; PCB quality gate passed"
                 )
             } else if result.get("ok").and_then(Value::as_bool) == Some(true) {
                 format!(
-                    "DRC copper clean, but {silk} silkscreen warning(s) block quality acceptance"
+                    "{introduced} introduced, {pre_existing} pre-existing; {silk} introduced silkscreen warning(s) block quality acceptance"
                 )
             } else {
                 // The reported order, not a ranking: check_board lists findings
@@ -2918,7 +2931,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                     .map(|first| format!(" — first is {first}"))
                     .unwrap_or_default();
                 format!(
-                    "DRC failed: {blocking} blocking findings{first}; fix them, then check_board again"
+                    "{introduced} introduced, {pre_existing} pre-existing; {blocking} introduced blocking findings{first}; fix them, then check_board again"
                 )
             }
         }
@@ -3196,9 +3209,8 @@ mod tests {
         );
     }
 
-    /// `check_schematic` answers `ok: false` about the sheet it inspected; a
-    /// summary reading "refused" makes a report look like a tool that declined
-    /// to run, and hides the counts that say what to fix.
+    /// `check_schematic` reports the turn-relative counts rather than looking
+    /// like a tool that declined to run.
     #[test]
     fn a_failing_check_reports_its_counts_rather_than_a_refusal() {
         let result = json!({
@@ -3208,7 +3220,10 @@ mod tests {
             "erc": {"errors": 3, "warnings": 7},
             "checks": {"errors": 1, "warnings": 2},
             "completeness": {"warnings": 2},
+            "introduced": 1,
+            "pre_existing": 11,
             "findings": [{
+                "classification": "introduced",
                 "severity": "error",
                 "code": "power_pin_not_driven",
                 "message": "no driver on net VCC",
@@ -3218,8 +3233,8 @@ mod tests {
 
         assert_eq!(
             tool_summary("check_schematic", &json!({}), &result),
-            "3 ERC errors, 7 ERC warnings; 1 other errors, 2 other warnings, 2 completeness gaps \
-             — first blocking finding: power_pin_not_driven at U1.8: no driver on net VCC"
+            "1 introduced, 11 pre-existing — first blocking finding: power_pin_not_driven at \
+             U1.8: no driver on net VCC"
         );
     }
 
@@ -3230,6 +3245,8 @@ mod tests {
     fn a_failing_board_check_names_the_finding_it_reported_first() {
         let result = json!({
             "ok": false,
+            "introduced": 3,
+            "pre_existing": 9,
             "blocking_findings": 3,
             "reported_findings": 4,
             "silk_warnings": 1,
@@ -3244,8 +3261,8 @@ mod tests {
 
         assert_eq!(
             tool_summary("check_board", &json!({}), &result),
-            "DRC failed: 3 blocking findings — first is clearance: Pad 3 of U1 ↔ Pad 4 of U1; \
-             fix them, then check_board again"
+            "3 introduced, 9 pre-existing; 3 introduced blocking findings — first is clearance: \
+             Pad 3 of U1 ↔ Pad 4 of U1; fix them, then check_board again"
         );
     }
 }

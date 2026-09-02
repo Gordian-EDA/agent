@@ -508,9 +508,11 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "check_board".into(),
-            description: "Run PCB DRC; stop when ok. On failure lists the blocking violations, \
-                 every unconnected item as the pad pair it is, and `unplaced` — the footprints \
-                 still in the seed row, which place_board({refs}) lays out."
+            description: "Run PCB DRC and classify violations and unrouted pairs against the \
+                 turn-start board. `ok` considers introduced blocking findings only: fix those \
+                 and leave inherited findings alone unless asked. On failure lists every introduced \
+                 unconnected item as the pad pair it is, and `unplaced` — the footprints still in \
+                 the seed row, which place_board({refs}) lays out."
                 .into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
@@ -914,6 +916,18 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
     }
     let doc = sch_doc::SchDoc::read(ctx.sch_path()).context("reading schematic visual facts")?;
     let visual = sch_floorplan::visual::measure(&doc);
+    let baseline = ctx.revisions().turn_baseline(ctx.sch_path())?;
+    let baseline_visual = baseline
+        .as_ref()
+        .and_then(|baseline| baseline.path.as_deref())
+        .map(|path| {
+            sch_doc::SchDoc::read(path)
+                .map(|doc| sch_floorplan::visual::measure(&doc))
+                .context("measuring turn-start schematic visual facts")
+        })
+        .transpose()?;
+    let mut visual_json = visual_with_introduced(&visual, baseline_visual.as_ref())?;
+    visual_json["baseline_revision"] = json!(baseline.as_ref().map(|baseline| baseline.revision));
     let content_bounds = render_bounds(visual.sheet_extent);
     let overview_bounds = padded_bounds(content_bounds, 2.54);
     let part_count = doc
@@ -946,7 +960,7 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
         "png_path": path.display().to_string(),
         "overview_px": plan.overview_px,
         "detail_paths": detail_paths,
-        "visual": visual,
+        "visual": visual_json,
         "note": format!(
             "Schematic rendered from the saved .kicad_sch using KiCad's schematic SVG export and attached. \
              Symbols, fields, labels, and wires are drawn on a light background; X/Y axes and ticks \
@@ -958,6 +972,48 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
     });
     obj[IMAGE_PATH_KEY] = json!(path.display().to_string());
     Ok(obj)
+}
+
+fn visual_with_introduced(
+    visual: &sch_floorplan::visual::VisualFacts,
+    baseline: Option<&sch_floorplan::visual::VisualFacts>,
+) -> Result<Value> {
+    let mut current = serde_json::to_value(visual)?;
+    let baseline = baseline
+        .map(serde_json::to_value)
+        .transpose()?
+        .unwrap_or_else(|| json!({}));
+    for name in [
+        "body_overlaps",
+        "wires_through_bodies",
+        "text_collisions",
+        "off_grid_pins",
+        "dangling_wire_ends",
+    ] {
+        let mut available = baseline
+            .get(name)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let introduced = current
+            .get(name)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|item| {
+                available
+                    .iter()
+                    .position(|baseline| baseline == *item)
+                    .is_none_or(|position| {
+                        available.remove(position);
+                        false
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        current[format!("{name}_introduced")] = json!(introduced);
+    }
+    Ok(current)
 }
 
 fn render_bounds(extent: [f64; 4]) -> gordian_runtime::render::RenderBounds {
