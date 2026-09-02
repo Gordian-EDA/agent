@@ -7,12 +7,14 @@
 //!
 //! Two answers come out of it:
 //!
-//! - **required** — the smallest outline the courtyards can legally pack into.
-//!   Below this, placement cannot succeed.
-//! - **recommended** — required plus the room the routing actually needs, which
-//!   follows from the rules (a channel is one track plus two clearances, and
-//!   extra copper layers carry part of the demand) and from keeping an edge free
-//!   for connectors. This is what an auto-sized board is born with.
+//! - **required** — a hard floor: the courtyards cannot overlap, so no outline
+//!   smaller than their total area (or narrower than the widest part, or than a
+//!   connector row) can hold them. Below this, placement is impossible, which is
+//!   what makes it safe to refuse a board up front.
+//! - **recommended** — what will actually place and route: courtyards pack at
+//!   roughly half density, plus the room the rules imply (a channel is one track
+//!   plus two clearances, and extra copper layers carry part of the demand) and
+//!   a copper-free edge ring. This is what an auto-sized board is born with.
 
 /// One part's placement extent: its courtyard, mm.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,18 +87,20 @@ pub(crate) fn size_board(parts: &[PartExtent], aspect: f64, demand: RoutingDeman
 
     let min_w = (max_w + 2.0 * EDGE_CLEAR_MM).max(connector_span);
     let min_h = max_h + 2.0 * EDGE_CLEAR_MM;
-    let (required_w, required_h) =
-        outline_for(courtyard_area_mm2 * PACKING_FACTOR, aspect, min_w, min_h);
+    // Courtyards may not overlap, so their bare total area is a floor nothing
+    // can beat — which is what makes refusing a smaller board up front honest.
+    let (required_w, required_h) = outline_for(courtyard_area_mm2, aspect, min_w, min_h);
 
+    let packed_area = courtyard_area_mm2 * PACKING_FACTOR;
     // Routing room: each net needs one channel — a track plus a clearance on
     // each side — running a characteristic board-crossing distance, and the
     // signal layers share that demand.
     let channel_pitch = demand.track_width + 2.0 * demand.clearance;
     let signal_layers = f64::from(demand.layer_count.max(2));
-    let span = (required_w * required_h).sqrt();
+    let span = packed_area.sqrt();
     let routing_area = demand.net_count as f64 * channel_pitch * span / signal_layers;
     let (mut recommended_w, mut recommended_h) =
-        outline_for(required_w * required_h + routing_area, aspect, min_w, min_h);
+        outline_for(packed_area + routing_area, aspect, min_w, min_h);
     // An edge ring no copper may enter, on all four sides.
     let ring = 2.0 * (EDGE_CLEAR_MM + demand.clearance);
     recommended_w += ring;
@@ -159,6 +163,21 @@ mod tests {
         );
         assert!(sizing.fits(sizing.required_w, sizing.required_h));
         assert!(sizing.fits(sizing.recommended_w, sizing.recommended_h));
+    }
+
+    /// `required` must be a bound placement cannot beat, not the packing
+    /// estimate — refusing a board up front is only honest if nothing smaller
+    /// could ever have worked.
+    #[test]
+    fn required_is_a_hard_area_floor_the_courtyards_alone_impose() {
+        let sizing = size_board(&nine_part_board(), 1.0, demand());
+        let courtyards: f64 = nine_part_board().iter().map(|p| p.w * p.h).sum();
+        assert!(sizing.required_w * sizing.required_h >= courtyards);
+        assert!(
+            sizing.required_w * sizing.required_h
+                < courtyards * PACKING_FACTOR + sizing.required_w * 2.0,
+            "{sizing:?}"
+        );
     }
 
     #[test]
