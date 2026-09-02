@@ -2,11 +2,20 @@
 //!
 //! SKIPs without a KiCad installation (the adapter runs a real engine over real symbols).
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
 use geom::{Point2, Rect};
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan;
+use sch_floorplan::live::{self, PlacementBudget};
 use sch_floorplan::region::{RegionProblem, arrange};
+use sch_model::engine::{
+    CandidateEvaluator, PlacementEngine, PlacementOutput, SchematicPlaceProblem,
+};
 use sch_model::geometry::item_rect;
 use sch_model::item::Item;
 use sch_model::place::PlaceOptions;
@@ -158,4 +167,111 @@ fn arrange_with_no_neighbours_is_the_bulk_placement_path() {
     ));
     assert_eq!(out.poses.len(), n);
     assert_eq!(out.result.truthfulness_breaks, 0);
+}
+
+struct ObserveSpine(Arc<AtomicUsize>);
+
+impl PlacementEngine for ObserveSpine {
+    fn name(&self) -> &'static str {
+        "observed-spine"
+    }
+
+    fn place(
+        &self,
+        problem: &mut SchematicPlaceProblem,
+        eval: &dyn CandidateEvaluator,
+    ) -> PlacementOutput {
+        self.0.store(
+            problem.items.iter().filter(|item| item.frozen).count(),
+            Ordering::Release,
+        );
+        spine_place::SpinePlace.place(problem, eval)
+    }
+}
+
+fn passive_block(first: usize, last: usize, block: &str) -> sch_check::PlacePartsInput {
+    let parts: Vec<serde_json::Value> = (first..=last)
+        .flat_map(|index| {
+            [
+                serde_json::json!({
+                    "ref": format!("R{index}"),
+                    "part": "Device:R",
+                    "value": "1k",
+                    "pins": {"1": "VCC", "2": format!("FILTER_{index}")}
+                }),
+                serde_json::json!({
+                    "ref": format!("C{index}"),
+                    "part": "Device:C",
+                    "value": "100n",
+                    "pins": {"1": format!("FILTER_{index}"), "2": "GND"}
+                }),
+            ]
+        })
+        .collect();
+    serde_json::from_value(serde_json::json!({"block": block, "parts": parts})).unwrap()
+}
+
+#[test]
+fn thirty_part_named_block_uses_the_region_path_on_a_sixty_part_sheet() {
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no KiCad environment detected");
+        return;
+    };
+    let base = passive_block(1, 30, "filters-a");
+    let added = passive_block(31, 45, "filters-b");
+
+    let mut doc = live::blank_sheet().unwrap();
+    let seeded = live::place_parts(
+        &env,
+        &mut doc,
+        &base,
+        Box::new(spine_place::SpinePlace),
+        Some(PlacementBudget::within(Duration::from_secs(45), 60)),
+    )
+    .unwrap();
+    assert!(seeded.committed, "base refused: {:?}", seeded.mismatch);
+    let before: BTreeMap<(String, u32), (sch_doc::Pose, sch_doc::Mirror)> = doc
+        .symbols()
+        .map(|symbol| {
+            (
+                (symbol.refdes().to_string(), symbol.unit),
+                (symbol.at, symbol.mirror),
+            )
+        })
+        .collect();
+
+    let frozen = Arc::new(AtomicUsize::new(0));
+    let started = Instant::now();
+    let report = live::place_parts(
+        &env,
+        &mut doc,
+        &added,
+        Box::new(ObserveSpine(frozen.clone())),
+        Some(PlacementBudget::within(Duration::from_secs(20), 90)),
+    )
+    .unwrap();
+    let elapsed = started.elapsed();
+    eprintln!("60 existing + 30-part region: {elapsed:.3?}");
+
+    assert!(report.committed, "block refused: {:?}", report.mismatch);
+    assert_eq!(report.placed.len(), 30);
+    assert!(
+        frozen.load(Ordering::Acquire) >= 60,
+        "the engine did not receive the existing sheet as frozen neighbours"
+    );
+    assert!(
+        elapsed <= Duration::from_secs(20),
+        "region took {elapsed:?}"
+    );
+    let after: BTreeMap<(String, u32), (sch_doc::Pose, sch_doc::Mirror)> = doc
+        .symbols()
+        .filter(|symbol| before.contains_key(&(symbol.refdes().to_string(), symbol.unit)))
+        .map(|symbol| {
+            (
+                (symbol.refdes().to_string(), symbol.unit),
+                (symbol.at, symbol.mirror),
+            )
+        })
+        .collect();
+    assert_eq!(after, before, "region placement moved an existing symbol");
 }
