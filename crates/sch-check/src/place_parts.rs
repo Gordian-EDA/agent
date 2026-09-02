@@ -123,6 +123,23 @@ pub struct PayloadAudit {
     /// on their own once the lib_id is fixed.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub unreliable_nets: BTreeSet<NetName>,
+    /// Symbol/footprint assignments rejected before any placement work begins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub footprint_mismatch: Vec<FootprintMismatch>,
+}
+
+/// One symbol/footprint assignment whose electrical pins do not agree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FootprintMismatch {
+    #[serde(rename = "ref")]
+    pub refdes: RefDes,
+    pub symbol: String,
+    pub footprint: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_pads: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_pins: Vec<String>,
+    pub suggestion: Option<String>,
 }
 
 impl PayloadAudit {
@@ -134,7 +151,9 @@ impl PayloadAudit {
     /// is what holds the board back until it is closed. Refusing a whole 50-part
     /// payload for it only forces the caller to resend everything.
     pub fn is_valid(&self) -> bool {
-        self.duplicate_refs.is_empty() && self.unknown_pins.is_empty()
+        self.duplicate_refs.is_empty()
+            && self.unknown_pins.is_empty()
+            && self.footprint_mismatch.is_empty()
     }
 
     /// Whether anything at all is worth telling the caller about.
