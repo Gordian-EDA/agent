@@ -341,7 +341,7 @@ fn catalog_suggest_offers_closest_name_in_library() {
     let (_guard, root) = staged_pretty("Resistor_SMD", &["R_0603_1608Metric"]);
     let catalog = FootprintCatalog::from_root(&root).unwrap();
     let s: Vec<String> = catalog
-        .suggest(&fid("Resistor_SMD:R_0603_1608Metrik"))
+        .suggest("Resistor_SMD:R_0603_1608Metrik")
         .iter()
         .map(|i| i.to_string())
         .collect();

@@ -393,7 +393,7 @@ pub(super) fn plan_seed_board(
     let y = seed_origin.y + 2.0;
     for dp in &spec.parts {
         let id = FootprintId::parse(&dp.footprint).map_err(|e| {
-            let clause = footprint_suggestion_clause(&catalog.suggest_text(&dp.footprint));
+            let clause = footprint_suggestion_clause(&catalog.suggest(&dp.footprint));
             format!(
                 "part {}: invalid footprint id `{}`: {e}{clause}",
                 dp.reference, dp.footprint
@@ -401,7 +401,7 @@ pub(super) fn plan_seed_board(
         })?;
         let source = catalog.source(&id).map_err(|e| {
             if e.is_not_found() {
-                let clause = footprint_suggestion_clause(&catalog.suggest(&id));
+                let clause = footprint_suggestion_clause(&catalog.suggest(&dp.footprint));
                 format!(
                     "part {}: unknown footprint `{}`{clause} — assign a real lib_id via search_footprints",
                     dp.reference, dp.footprint

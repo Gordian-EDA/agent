@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use kicad_footprint::{FootprintId, SearchQuery};
+use kicad_footprint::{FootprintId, SearchQuery, unknown_footprint_message};
 
 use gordian_runtime::AgentRuntime;
 use gordian_runtime::tool::{require_search_query, require_str};
@@ -71,9 +71,10 @@ pub fn get_footprint_info(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Va
     let id = match FootprintId::parse(&lib_id) {
         Ok(id) => id,
         Err(_) => {
+            let suggestions = catalog.suggest(&lib_id);
             return Ok(json!({
-                "error": format!("invalid footprint id `{lib_id}`"),
-                "suggestions": suggestion_strings(catalog.suggest_text(&lib_id)),
+                "error": unknown_footprint_message(&lib_id, &suggestions),
+                "suggestions": suggestion_strings(suggestions),
             }));
         }
     };
@@ -123,10 +124,13 @@ pub fn get_footprint_info(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Va
                 "bbox": bbox_json(&fp.bounds),
             }))
         }
-        Err(e) if e.is_not_found() => Ok(json!({
-            "error": format!("unknown footprint `{lib_id}`"),
-            "suggestions": suggestion_strings(catalog.suggest(&id)),
-        })),
+        Err(e) if e.is_not_found() => {
+            let suggestions = catalog.suggest(&lib_id);
+            Ok(json!({
+                "error": unknown_footprint_message(&lib_id, &suggestions),
+                "suggestions": suggestion_strings(suggestions),
+            }))
+        }
         Err(e) => Ok(json!({
             "error": format!("footprint `{lib_id}` could not be read: {e}"),
         })),

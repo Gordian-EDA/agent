@@ -952,17 +952,24 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         };
         let id = match kicad_footprint::FootprintId::parse(footprint) {
             Ok(id) => id,
-            Err(error) => {
+            Err(_) => {
+                let suggestions = catalog.suggest(footprint);
                 return Ok(json!({
-                    "error": format!("{reference}: invalid footprint `{footprint}`: {error}"),
-                    "suggestions": catalog.suggest_text(footprint),
+                    "error": format!("{reference}: {}", kicad_footprint::unknown_footprint_message(footprint, &suggestions)),
+                    "suggestions": suggestions,
                 }));
             }
         };
         if let Err(error) = catalog.footprint(&id) {
+            if !error.is_not_found() {
+                return Ok(json!({
+                    "error": format!("{reference}: footprint `{footprint}` could not be used: {error}"),
+                }));
+            }
+            let suggestions = catalog.suggest(footprint);
             return Ok(json!({
-                "error": format!("{reference}: footprint `{footprint}` could not be used: {error}"),
-                "suggestions": catalog.suggest(&id),
+                "error": format!("{reference}: {}", kicad_footprint::unknown_footprint_message(footprint, &suggestions)),
+                "suggestions": suggestions,
             }));
         }
         requested.push((reference.to_string(), footprint.to_string()));
