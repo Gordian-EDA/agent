@@ -231,6 +231,32 @@ impl SchematicWriter {
         net: &str,
         stub_mm: f64,
     ) -> io::Result<()> {
+        self.add_signal_label_stub_scoped(env, refdes, pin, net, stub_mm, false)
+    }
+
+    /// Global-port variant of [`Self::add_signal_label_stub`]. The pin is resolved
+    /// before the label is recorded, so a port fallback can never leave a pennant
+    /// floating at a virtual exit the router failed to reach.
+    pub fn add_global_signal_label_stub(
+        &mut self,
+        env: &KicadInstallation,
+        refdes: &str,
+        pin: &str,
+        net: &str,
+        stub_mm: f64,
+    ) -> io::Result<()> {
+        self.add_signal_label_stub_scoped(env, refdes, pin, net, stub_mm, true)
+    }
+
+    fn add_signal_label_stub_scoped(
+        &mut self,
+        env: &KicadInstallation,
+        refdes: &str,
+        pin: &str,
+        net: &str,
+        stub_mm: f64,
+        global: bool,
+    ) -> io::Result<()> {
         for (idx, (ep, dir)) in self.pin_dirs(env, refdes, pin)?.into_iter().enumerate() {
             let ep = GRID_50_MIL.snap_point(ep);
             let v = dir.vec();
@@ -242,7 +268,7 @@ impl SchematicWriter {
                 uuid_key: format!("{refdes}:{pin}:{net}:{idx}"),
                 dir,
                 stub: Some(Stub { pin_at: ep }),
-                global: false,
+                global,
             });
         }
         Ok(())
@@ -1180,6 +1206,34 @@ mod tests {
         pt_close(pin_endpoint(&p, inst, 180.0, false), [127.0, 67.31]);
         // 270 deg: (rx, ry) = (3.81, 0) -> sheet (130.81, 63.5).
         pt_close(pin_endpoint(&p, inst, 270.0, false), [130.81, 63.5]);
+    }
+
+    #[test]
+    fn global_signal_fallback_requires_a_real_pin() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0)
+            .unwrap();
+
+        w.add_global_signal_label_stub(&env, "R1", "1", "PORT", 3.81)
+            .unwrap();
+        assert_eq!(w.labels.len(), 1);
+        assert!(w.labels[0].global);
+        assert!(
+            w.labels[0].stub.is_some(),
+            "the global label must be wired to its pin"
+        );
+
+        let before = w.labels.len();
+        assert!(
+            w.add_global_signal_label_stub(&env, "R1", "missing", "ORPHAN", 3.81)
+                .is_err()
+        );
+        assert_eq!(
+            w.labels.len(),
+            before,
+            "a pin key that resolves to nothing must not emit a global label"
+        );
     }
 
     #[test]

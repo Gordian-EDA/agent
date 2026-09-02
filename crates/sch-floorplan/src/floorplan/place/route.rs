@@ -613,14 +613,35 @@ pub(crate) fn route_signal(
         }
     }
     let port_root = port_idx.map(|pi| uf.find(pi));
+    // Collision avoidance may nudge the virtual port exit beyond any route the
+    // obstacle-aware router can reach. Such an isolated virtual root has no pin or
+    // wire beneath it, so emitting its pennant would be a real ERC `label_dangling`.
+    // Promote one real root's pin-attached fallback label to global instead; the
+    // other real roots keep their same-name local labels and remain connected.
+    let port_attached = port_root
+        .and_then(|root| roots.get(&root))
+        .is_some_and(Option::is_some);
+    let global_fallback_root = if port_root.is_some() && !port_attached {
+        roots
+            .iter()
+            .filter(|(_, pin)| pin.is_some())
+            .max_by_key(|(root, _)| score.get(root).copied())
+            .map(|(root, _)| *root)
+    } else {
+        None
+    };
     if roots.len() > 1 {
         for (root, pin) in &roots {
-            if Some(*root) == port_root {
+            if Some(*root) == port_root && port_attached {
                 continue; // named by the port label below
             }
             if let Some((i, num)) = pin {
                 let (stub, _) = label_stub(w, env, scene, &items[*i].refdes, num, net, finalize);
-                w.add_signal_label_stub(env, &items[*i].refdes, num, net, stub)?;
+                if Some(*root) == global_fallback_root {
+                    w.add_global_signal_label_stub(env, &items[*i].refdes, num, net, stub)?;
+                } else {
+                    w.add_signal_label_stub(env, &items[*i].refdes, num, net, stub)?;
+                }
                 if let Ok(ds) = w.pin_dirs(env, &items[*i].refdes, num) {
                     for (p, _) in ds {
                         scene.points.push((p.into(), net.to_string()));
@@ -650,7 +671,7 @@ pub(crate) fn route_signal(
         }
     }
     // The port label sits at the virtual exit terminal, facing the edge.
-    if let (Some(side), Some(pi)) = (port, port_idx) {
+    if port_attached && let (Some(side), Some(pi)) = (port, port_idx) {
         w.add_cluster_label(net, terms[pi].0, side_dir(side), true);
     }
     Ok(())
