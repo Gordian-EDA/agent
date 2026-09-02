@@ -46,6 +46,8 @@ const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 
 const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. Fix introduced errors and leave pre-existing findings alone. If completeness.gaps is nonempty and this request calls for a complete powered/interface design, add exactly the listed support circuitry and check again. Those warnings are advisory for deliberately minimal designs and focused edits; do not add unrelated parts. Finish once introduced ERC errors are clean and every applicable gap is resolved.";
 
+const DIFF_SCHEMATIC_NUDGE: &str = "Run diff_schematic now against the default turn baseline. Verify only the requested symbols, fields, poses, wiring counts, and net partitions changed. Use the connectivity/unconnected report already returned for new or swapped parts; do not re-read the whole schematic. Then run check_schematic if the latest edit has not passed it.";
+
 const UNCHANGED_SCHEMATIC_NUDGE: &str = "the schematic is unchanged since the turn began (your edits were undone or refused); the request is not satisfied — either complete it (e.g. `set_fields` when no compatible symbol exists) or state plainly that it cannot be done and why";
 
 /// Base hard ceiling on provider invocations within one agent subturn. This is
@@ -606,7 +608,10 @@ fn coalesced_discovery_call(call: &ToolCall, calls: &[ToolCall]) -> Option<ToolC
 }
 
 fn is_revision_scoped_read(name: &str) -> bool {
-    matches!(name, "project_info" | "render_schematic")
+    matches!(
+        name,
+        "project_info" | "read_schematic" | "diff_schematic" | "render_schematic"
+    )
 }
 
 /// Best-effort emit: a closed receiver (UI gone) is ignored.
@@ -914,6 +919,7 @@ impl<P: Provider> Agent<P> {
 
         let schematic_hash_at_turn_start =
             gordian_tools_sch::schematic_content_hash(&self.runtime)?;
+        let diff_required = schematic_hash_at_turn_start.is_some();
 
         let budgets = TurnBudgets::for_intent(authoritative_intent);
         let pcb_work_requested = request_requires_pcb_work(authoritative_intent);
@@ -922,6 +928,8 @@ impl<P: Provider> Agent<P> {
         let mut schematic_mutator_issued = false;
         let mut schematic_mutated = false;
         let mut schematic_check_complete = false;
+        let mut schematic_diff_complete = !diff_required;
+        let mut diff_nudges_left = 2usize;
         let mut unchanged_schematic_feedback_sent = false;
         let mut successful_place_parts = 0usize;
         let mut check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
@@ -1018,7 +1026,9 @@ impl<P: Provider> Agent<P> {
             }
             let revision_reads_used = revision_read_uses
                 .iter()
-                .filter(|(_, revision)| **revision == tool_state_revision)
+                .filter(|(name, revision)| {
+                    name.as_str() == "read_schematic" || **revision == tool_state_revision
+                })
                 .map(|(name, _)| name.clone())
                 .collect::<HashSet<_>>();
             let mut defs = tool_defs_for_phase(
@@ -1139,6 +1149,11 @@ impl<P: Provider> Agent<P> {
                         .push(ChatMessage::user(UNCHANGED_SCHEMATIC_NUDGE));
                     continue;
                 }
+                if schematic_mutated && !schematic_diff_complete && diff_nudges_left > 0 {
+                    diff_nudges_left -= 1;
+                    self.history.push(ChatMessage::user(DIFF_SCHEMATIC_NUDGE));
+                    continue;
+                }
                 if schematic_mutated && !schematic_check_complete && check_nudges_left > 0 {
                     check_nudges_left -= 1;
                     self.history.push(ChatMessage::user(CHECK_SCHEMATIC_NUDGE));
@@ -1197,7 +1212,11 @@ impl<P: Provider> Agent<P> {
                         .unwrap_or(0)
                         >= budgets.discovery_rounds_per_subturn;
                 let repeated_read = is_revision_scoped_read(&call.fn_name)
-                    && revision_read_uses.get(&call.fn_name) == Some(&tool_state_revision);
+                    && revision_read_uses
+                        .get(&call.fn_name)
+                        .is_some_and(|revision| {
+                            call.fn_name == "read_schematic" || *revision == tool_state_revision
+                        });
                 let mutation_after_clean =
                     schematic_check_complete && is_schematic_mutator(&call.fn_name);
                 let mutation_blocked = timed_out_mutation_name(&timed_out_tool_calls).is_some()
@@ -1286,6 +1305,8 @@ impl<P: Provider> Agent<P> {
                 if dispatched && schematic_mutation_succeeded(&call.fn_name, &parsed) {
                     applied = true;
                     schematic_mutated = true;
+                    schematic_diff_complete = !diff_required;
+                    diff_nudges_left = 2;
                     if call.fn_name == "place_parts" {
                         successful_place_parts += 1;
                     }
@@ -1299,6 +1320,9 @@ impl<P: Provider> Agent<P> {
                     if schematic_mutated {
                         schematic_check_complete = complete;
                     }
+                }
+                if dispatched && call.fn_name == "diff_schematic" && parsed.get("error").is_none() {
+                    schematic_diff_complete = true;
                 }
 
                 if dispatched {
@@ -2800,6 +2824,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             format!("{lib} → {n} pads")
         }
         "read_schematic" => "read the schematic".to_string(),
+        "diff_schematic" => "compared the live schematic with its revision baseline".to_string(),
         "export_fab" => {
             let files = result
                 .get("file_count")

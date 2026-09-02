@@ -103,6 +103,8 @@ async fn undone_turn_gets_one_explicit_second_chance() {
             json!({"ref": "R1", "fields": {"Value": "22k"}}),
         ),
         tool_call("final-check", "check_schematic", json!({})),
+        final_text("verified"),
+        tool_call("final-diff", "diff_schematic", json!({})),
         final_text("done for real"),
     ]);
     let mut agent = Agent::new(client, ctx, system_prompt());
@@ -115,7 +117,7 @@ async fn undone_turn_gets_one_explicit_second_chance() {
     let outcome = agent.run_turn("change R1 to 22k", None).await.unwrap();
 
     assert_eq!(outcome.stop_reason, StopReason::Completed);
-    assert_eq!(outcome.tool_calls_made, 5);
+    assert_eq!(outcome.tool_calls_made, 6);
     let seen = seen.lock().unwrap();
     let second_chance = seen.get(7).expect("feedback triggered another request");
     let feedback = second_chance

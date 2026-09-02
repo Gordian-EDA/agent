@@ -19,6 +19,7 @@
 
 mod bulk;
 mod check;
+mod diff;
 mod edit;
 mod place;
 mod query;
@@ -69,7 +70,13 @@ pub fn handles(name: &str) -> bool {
 }
 
 fn tool_names() -> Vec<&'static str> {
-    let mut names = vec!["read_schematic", "get_symbol", "get_net", "check_schematic"];
+    let mut names = vec![
+        "read_schematic",
+        "diff_schematic",
+        "get_symbol",
+        "get_net",
+        "check_schematic",
+    ];
     names.extend(MUTATORS);
     names
 }
@@ -93,7 +100,7 @@ pub fn tool_defs() -> Vec<Tool> {
     let defs: Vec<(&str, &str, Value)> = vec![
         (
             "place_parts",
-            "The ONLY way to create a new design or add a multi-part block. Submit the COMPLETE electrically finished block in one call, including every requested support, protection, decoupling, bias, termination, indicator, and connector part. State connectivity only: real KiCAD parts and pin-to-net mappings, never coordinates or wires. Before placement, the complete payload is validated and writes nothing on failure: explicit refs must be unused, and every new named signal pin must land on a net with at least one other pin across the payload and existing sheet; power rails, declared ports, and `nc` are terminal nets. Omit `ref` to auto-assign the lowest unused designator from the library symbol. One valid call lays out the whole new sheet, or places the block as a region while freezing existing symbols. The result's `gaps` are deterministic missing-support findings; for a complete powered/interface design, add the listed parts in one coherent follow-up place_parts call. They are advisory for deliberately minimal designs and focused edits. Use `intent.relations` for relative placement: kinds `left_of`/`right_of`/`above`/`below` {a, b}, `group` {name, members, side?: [left|right|top|bottom, anchor]}, `align` {members, axis}. If rejected, correct every reported diagnostic before retrying; unknown-pin errors list valid physical pins.",
+            "The ONLY way to create a new design or add a multi-part block. Submit the COMPLETE electrically finished block in one call, including every requested support, protection, decoupling, bias, termination, indicator, and connector part. State connectivity only: real KiCAD parts and pin-to-net mappings, never coordinates or wires. Before placement, the complete payload is validated and writes nothing on failure: explicit refs must be unused, and every new named signal pin must land on a net with at least one other pin across the payload and existing sheet; power rails, declared ports, and `nc` are terminal nets. Omit `ref` to auto-assign the lowest unused designator from the library symbol. One valid call lays out the whole new sheet, or places the block as a region while freezing existing symbols. The result reports extractor-verified `connectivity` and `unconnected` pins; trust it instead of re-reading. Its `gaps` are deterministic missing-support findings; for a complete powered/interface design, add the listed parts in one coherent follow-up place_parts call. They are advisory for deliberately minimal designs and focused edits. Use `intent.relations` for relative placement: kinds `left_of`/`right_of`/`above`/`below` {a, b}, `group` {name, members, side?: [left|right|top|bottom, anchor]}, `align` {members, axis}. If rejected, correct every reported diagnostic before retrying; unknown-pin errors list valid physical pins.",
             sch_check::place_parts_input_schema(),
         ),
         (
@@ -116,6 +123,25 @@ pub fn tool_defs() -> Vec<Tool> {
                                 "description": "Only symbols inside [x1,y1,x2,y2] mm." },
                     "detail": { "type": "string", "enum": ["compact", "full"],
                                 "description": "full adds footprints and uuids." }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        (
+            "diff_schematic",
+            "Compare the live schematic with a captured revision, defaulting to this turn's first pre-write revision. Reports added and removed symbols, moved poses, changed fields, swapped library IDs, partition-aware net delta, and wire/label count changes as compact text; pass detail: true for structured JSON.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "revision": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Captured project revision; defaults to the turn baseline."
+                    },
+                    "detail": {
+                        "type": "boolean",
+                        "description": "Return structured JSON instead of aligned plain text."
+                    }
                 },
                 "additionalProperties": false
             }),
@@ -156,7 +182,8 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "add_symbols",
-            "Place one or many parts at collision-free grid positions and report each final spot. \
+            "Place one or many parts at collision-free grid positions and report each final spot \
+             plus extractor-verified `connectivity` and `unconnected` pins. \
              `near`+`side` puts a series part by its upstream part and faces it; keep the reported \
              spot. `rot` overrides; `ref` is optional. All-or-nothing; wire with `connect`.",
             json!({
@@ -280,7 +307,8 @@ pub fn tool_defs() -> Vec<Tool> {
              when the pinout differs. A refusal returns `suggestion.pin_map`, old pins with no \
              counterpart, and the new symbol's unassigned pins with number, name, and type. For a \
              value/footprint change alone, or when no real match exists anywhere, use set_fields \
-             instead — a same-named part in an unrelated library is not proven pin-compatible.",
+             instead — a same-named part in an unrelated library is not proven pin-compatible. \
+             Success reports extractor-verified `connectivity` and `unconnected` pins.",
             json!({
                 "type": "object",
                 "properties": {
@@ -411,6 +439,7 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "arrange" => bulk::arrange(input, ctx),
         "rewire" => bulk::rewire(input, ctx),
         "read_schematic" => query::read_schematic(input, ctx),
+        "diff_schematic" => diff::diff_schematic(input, ctx),
         "get_symbol" => query::get_symbol(input, ctx),
         "get_net" => query::get_net(input, ctx),
         "check_schematic" => check::check_schematic(input, ctx),

@@ -148,6 +148,23 @@ impl Revisions {
             .cloned())
     }
 
+    /// Returns the captured state of `path` in one revision.
+    pub fn file_at_revision(&self, id: RevisionId, path: &Path) -> Result<TurnBaseline> {
+        let (_, relative) = self.resolve_path(path)?;
+        let manifest = self.manifest(Some(id))?;
+        let file = manifest
+            .files
+            .iter()
+            .find(|file| file.path == relative)
+            .ok_or_else(|| anyhow!("revision {id} did not capture {}", relative.display()))?;
+        Ok(TurnBaseline {
+            revision: id,
+            path: file
+                .existed
+                .then(|| self.root.join(id.to_string()).join(relative)),
+        })
+    }
+
     /// Captures the exact named files before a mutating tool writes them.
     pub fn capture(&self, tool: &str, summary: &str, files: &[PathBuf]) -> Result<RevisionId> {
         let _guard = self
