@@ -61,32 +61,37 @@ budget is intact, but the rescue path is where any future headroom has to come f
 
 ## After
 
-Same command on `lane/local-algos`, RELEASE build, KiCAD DRC included. Critic single sample
-again, so read ±1.
+Same command on `lane/local-algos`, RELEASE build, `--required` **7/7 OK with real KiCAD**,
+`kicad_faults=0` on every board. Critic sampled twice per board (the noise is real; the
+deterministic columns are not).
 
-| board | parts | layers | place ms | route ms | vias | wirelength mm | bends | off-angle | kicad faults | critic before → after |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| rc-divider | 3 | 2 | 1 | 1 | 0 | 24.83 | 3 | 0 | 0 | 6 → 7 |
-| transistor-led-driver | 6 | 2 | 10 | 9 | 0 | 76.98 | 11 | 0 | 0 | 6 → 6 |
-| keepout-route | 2 | 2 | 2 | 4 | 0 | 36.00 | 0 | 0 | 0 | 6 → 5 |
-| rc-lowpass-chain | 8 | 2 | 25 | 5 | 0 | 92.92 | 11 | 0 | 0 | 6 → 8 |
-| power-buck | 8 | 4 | 32 | 537 | 5 | 78.04 | 16 | 0 | 1 | 4 → 7 |
-| led-array | 9 | 2 | 8 | 11 | 0 | 116.75 | 14 | 0 | 0 | 9 → 7 |
-| bga25-route | 2 | 4 | 9 | 999 | 23 | 113.90 | 38 | 0 | 0 | 5 → 5 |
+| board | parts | layers | place ms | route ms | vias | wirelength mm | bends | off-angle | critic before → after (×2) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| rc-divider | 3 | 2 | 0 | 0 | 0 | 28.65 | 3 | 0 | 6 → 8, 7 |
+| transistor-led-driver | 6 | 2 | 5 | 1 | 0 | 85.20 | 11 | 0 | 6 → 6, 8 |
+| keepout-route | 2 | 2 | 1 | 2 | 0 | 36.00 | 0 | 0 | 6 → 4, 5 |
+| rc-lowpass-chain | 8 | 2 | 16 | 2 | 0 | 98.70 | 8 | 0 | 6 → 8, 6 |
+| power-buck | 8 | 4 | 20 | 296 | 5 | 77.98 | 13 | 0 | 4 → 6, 6 |
+| led-array | 9 | 2 | 1 | 5 | 0 | 115.64 | 8 | 0 | 9 → 7, 7 |
+| bga25-route | 2 | 4 | 3 | 733 | 24 | 117.55 | 28 | 0 | 5 → 5, 5 |
 
-Critic total 42 → 45. Deterministic totals: bends 140 → 93 (−34%), vias 36 → 28, and
-`off_angle` is 0 on every board and asserted as an invariant inside both router crates
-rather than merely observed. The whole `--required` set runs in 18 s wall including KiCAD
-DRC; without it, 1.6 s.
+Critic total 42 (before, one sample) → **44** on both after-samples. Deterministic totals:
+**bends 140 → 71 (−49%)**, vias 36 → 29, wirelength 573 → 560, and `off_angle` 0 on every
+board — now asserted as a contract test inside both router crates rather than merely
+observed. The whole `--required` run is 13.9 s wall including KiCAD DRC, down from 37.7 s.
+
+Routing measured on its own (`cargo run --release -p pcb-route-mesh --example corpus`,
+seven frozen `RoutingView` fixtures, so the placer cannot move underneath it): bends
+138 → 71, bends/mm .241 → .124, wirelength 572.52 → 559.72, off-angle 1 → 0.
 
 ### What the corpus can and cannot show
 
 Every remaining major defect on six of seven boards is "the outline is far larger than the
 parts need". The fixtures **prescribe** `bounds`, so no placer change can move it — the
-corpus ceiling is about 7-8 and the routing-specific complaints from the before-run
-("short diagonal stubs into D1/D3", "a wide bottom-layer trace crosses U1 at a diagonal")
-are gone from every summary. Board sizing only bites on the end-to-end path, where
-`sync_board` auto-sizes, and there it is already snug.
+corpus ceiling is about 7-8, and `keepout-route` (two headers on a huge canvas) is mostly
+measuring that. The routing complaints from the before-run ("short diagonal stubs into
+D1/D3", "a wide bottom-layer trace crosses U1 at a diagonal") are gone from every summary.
+Board sizing only bites end-to-end, where `sync_board` auto-sizes, and there it is snug.
 
 `led-array` 9 → 7 is the one score that fell; its baseline sampled both 9 and 7, and its
 only remaining fault is an empty band, so it is inside the critic's own noise.
@@ -97,12 +102,32 @@ only remaining fault is an empty band, so it is inside the critic's own noise.
 | --- | ---: | ---: | ---: |
 | led-array-60 | 61 | 40 | 155 |
 | bga-system50 | 50 | 8 998 | 17 765 |
-| mcu-board | 27 | 1 847 | 62 928 |
+| mcu-board | 27 | 1 847 | 62 928 → **15 800** |
 | soc-system | 69 | 272 573 | — |
 
 A 50-part board is inside the 60 s budget (`led-array-60` 0.2 s, `bga-system50` 27 s).
-Two boards are not, and neither regressed in this lane — `soc-system` places in 289.8 s on
-main against 272.6 s here, and `mcu-board` spends 63 s in `adaptive_grid_rescue` and still
-fails with 7 nets unrouted. Failing fast and honestly would be a better product than
-failing slowly; a wall-clock deadline is the wrong instrument for it, because routing is
-deliberately machine-independent, so the cap has to be a deterministic work budget.
+Two boards are not, and neither regressed here — `soc-system` places in 289.8 s on main
+against 272.6 s on this branch, and `mcu-board` still ends ROUTE_FAULT, now in 15.8 s
+rather than 62.9 s with the same seven nets reported. A wall-clock deadline is the wrong
+instrument for the rest: routing is deliberately machine-independent, so a cap has to be a
+deterministic work budget, not a clock.
+
+### Still open
+
+- **`pcb-drc` has no dangling-end rule.** Every cleanup pass in both routing crates is
+  gated on "introduces no new finding", so an oracle blind to a free trace end means no
+  gate can refuse one — the `power-buck` sliver shipped *through* seven guarded passes, and
+  the morning's `bga25-route` via bug was the same class. Writing the rule needs a decision
+  about what counts as a legitimate free end, and a wrong one would make
+  `drop_violating_copper` delete good copper.
+- **`mcu-board` emits ~10 GND stubs of 0.1 mm under its own 0.15 mm trace width**, from
+  `LANDING_MM` in `prepare_wide_terminal_escapes`. Load-bearing (it is the neck-down), on
+  no `--required` board; the fix is a landing of at least one trace width, measured against
+  the fine-pitch fixtures.
+- **`keepout-route.kicad_pcb` carries no keepout/rule-area object at all** though the
+  fixture declares one, so the board's defining constraint is invisible to DRC and to the
+  render. Emitter side.
+- **Signal-flow direction.** `transistor-led-driver` lost its left-to-right order; the
+  placer has no notion of source→sink anywhere, and the old ordering came from
+  `initial_grid` sorting by refdes. A per-net monotonicity term on a board axis is the next
+  placement lever after board sizing.
