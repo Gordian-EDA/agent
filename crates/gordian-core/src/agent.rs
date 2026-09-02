@@ -65,7 +65,9 @@ const MAX_PROVIDER_REQUESTS_PER_TURN: usize = 56;
 /// Wall time one agent subturn may take. The north-star promise is a finished
 /// schematic and PCB in under five minutes, so that is the bound enforced here —
 /// a turn that has spent it is stopped no matter how many requests remain.
-const TURN_WALL_CLOCK: Duration = Duration::from_secs(300);
+/// 270 s, not 300: the harness measures the whole run and the agent is not the only
+/// thing in it — rendering, ERC and the facts pass cost ~30 s after the last request.
+const TURN_WALL_CLOCK: Duration = Duration::from_secs(270);
 
 /// Fraction of [`TURN_WALL_CLOCK`] after which the model is told to wrap up.
 const WRAP_UP_AT_ELAPSED: f64 = 0.75;
@@ -2704,23 +2706,17 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             .get("code")
             .and_then(Value::as_str)
             .unwrap_or("refused");
-        let detail = result
-            .get("dangling")
-            .and_then(Value::as_array)
-            .and_then(|items| items.first())
-            .and_then(|item| {
-                let net = item.get("net")?.as_str()?;
-                let whereabouts = if item.get("on_sheet")?.as_bool()? {
-                    format!("{net} is on the sheet but has no other pin")
-                } else {
-                    format!("no net {net} on the sheet")
-                };
-                Some(format!(
-                    "{}.{} on {net} is dangling ({whereabouts})",
-                    item.get("ref")?.as_str()?,
-                    item.get("pin")?.as_str()?,
-                ))
-            })
+        // Lead with what actually refused the payload; `dangling` pins are reported
+        // but no longer fatal, so they come last.
+        let first_str = |key: &str| {
+            result
+                .get(key)
+                .and_then(Value::as_array)
+                .and_then(|items| items.iter().find_map(Value::as_str))
+                .map(str::to_string)
+        };
+        let detail = first_str("input_errors")
+            .or_else(|| first_str("unknown_pins"))
             .or_else(|| {
                 result
                     .get("duplicate_refs")
@@ -2734,14 +2730,25 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                         ))
                     })
             })
+            .or_else(|| first_str("nets"))
             .or_else(|| {
-                ["unknown_pins", "nets"].iter().find_map(|key| {
-                    result
-                        .get(key)
-                        .and_then(Value::as_array)
-                        .and_then(|items| items.iter().find_map(Value::as_str))
-                        .map(str::to_string)
-                })
+                result
+                    .get("dangling")
+                    .and_then(Value::as_array)
+                    .and_then(|items| items.first())
+                    .and_then(|item| {
+                        let net = item.get("net")?.as_str()?;
+                        let whereabouts = if item.get("on_sheet")?.as_bool()? {
+                            format!("{net} is on the sheet but has no other pin")
+                        } else {
+                            format!("no net {net} on the sheet")
+                        };
+                        Some(format!(
+                            "{}.{} on {net} is dangling ({whereabouts})",
+                            item.get("ref")?.as_str()?,
+                            item.get("pin")?.as_str()?,
+                        ))
+                    })
             });
         return detail.map_or_else(
             || format!("refused: {code}"),
