@@ -1835,11 +1835,19 @@ pub(crate) fn plan_outline_refit(
         (candidate, candidate_result)
     } else {
         let mut low = (width, height);
-        let mut high = (from.width().ceil(), from.height().ceil());
-        if high.0 < low.0 || high.1 < low.1 {
+        let mut high = (
+            from.width().ceil().max(low.0),
+            from.height().ceil().max(low.1),
+        );
+        compact.bounds = Rect::from_center_half(center, (high.0 / 2.0, high.1 / 2.0));
+        let mut best = if high == (from.width(), from.height()) {
+            result.clone()
+        } else {
+            pcb_engine::place_tuned(&compact, hints)
+        };
+        if !best.legal {
             return None;
         }
-        let mut best = result.clone();
         while high.0 - low.0 > 1.0 || high.1 - low.1 > 1.0 {
             let middle = (
                 (low.0 + (high.0 - low.0) / 2.0).floor(),
