@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use geom::Rect;
+use geom::{Point2, Rect};
 use kicad_footprint::{Footprint, FootprintId, FootprintPad, PadTechnology};
 use kicad_ipc::FootprintMove;
 use pcb_model::{LayerRef, ViaSpan};
@@ -18,6 +18,8 @@ use pcb_place::{
 use gordian_runtime::AgentRuntime;
 
 use kicad_board::{ImportedPad, ImportedPart, IpcBoardSnapshot};
+
+use crate::board::guard::Guard;
 
 pub(super) fn part_from_footprint_layers(
     footprint: &Footprint,
@@ -35,7 +37,7 @@ pub(super) fn part_from_footprint_layers(
         .filter(|pad| has_copper(pad))
         .map(|pad| part_pad(pad, net_map, layer_count))
         .collect();
-    let (courtyard_w, courtyard_h) = enclosing_courtyard(footprint);
+    let (courtyard_w, courtyard_h) = crate::sizing::placement_extent(footprint);
     Part {
         reference: reference.to_owned(),
         courtyard_w,
@@ -96,48 +98,6 @@ fn pad_layers(pad: &FootprintPad, layer_count: u32) -> Vec<LayerRef> {
     }
 }
 
-fn enclosing_courtyard(footprint: &Footprint) -> (f64, f64) {
-    let (mut hw, mut hh) = abs_half(&footprint.courtyard);
-    if let Some(pad_bbox) = pad_bbox(&footprint.pads) {
-        let (pw, ph) = abs_half(&pad_bbox);
-        hw = hw.max(pw);
-        hh = hh.max(ph);
-    }
-    (hw * 2.0, hh * 2.0)
-}
-
-fn abs_half(b: &Rect) -> (f64, f64) {
-    (
-        b.min_x.abs().max(b.max_x.abs()),
-        b.min_y.abs().max(b.max_y.abs()),
-    )
-}
-
-fn pad_bbox(pads: &[FootprintPad]) -> Option<Rect> {
-    let mut it = pads.iter();
-    let first = it.next()?;
-    let mut bbox = pad_aabb(first);
-    for pad in it {
-        let p = pad_aabb(pad);
-        bbox.min_x = bbox.min_x.min(p.min_x);
-        bbox.min_y = bbox.min_y.min(p.min_y);
-        bbox.max_x = bbox.max_x.max(p.max_x);
-        bbox.max_y = bbox.max_y.max(p.max_y);
-    }
-    Some(bbox)
-}
-
-fn pad_aabb(pad: &FootprintPad) -> Rect {
-    let half =
-        geom::Point2::new(pad.size.x / 2.0, pad.size.y / 2.0).rotated_half_extents(pad.rotation);
-    Rect::new(
-        pad.at.x - half.x,
-        pad.at.y - half.y,
-        pad.at.x + half.x,
-        pad.at.y + half.y,
-    )
-}
-
 // ── get_board ────────────────────────────────────────────────────────────────
 
 pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -152,7 +112,10 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .map(|(name, &pins)| json!({ "name": name, "pins": pins }))
         .collect();
 
-    let placed = !kicad_board::is_seed_imported_board(&board.imported);
+    // Placed means every part has been laid out. A board can be half laid out —
+    // sync adds a part and it waits in the seed row — so the list is the fact
+    // and the flag is derived from it.
+    let unplaced = kicad_board::seed_row_references(&board.imported);
     let routed = !board.copper.traces.is_empty() || !board.copper.vias.is_empty();
     let parts: Vec<Value> = board
         .imported
@@ -214,7 +177,8 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "net_count": net_pins.len(),
             "nets": nets,
             "keepout_count": board.imported.keepout_count,
-            "placed": placed,
+            "placed": unplaced.is_empty(),
+            "unplaced": unplaced,
             "routed": routed,
         },
     }))
@@ -404,7 +368,7 @@ fn snapshot_net_pin_counts(board: &IpcBoardSnapshot) -> BTreeMap<String, usize> 
 pub(super) fn courtyard_extents(
     board: &IpcBoardSnapshot,
     ctx: &AgentRuntime,
-) -> std::collections::BTreeMap<String, (f64, f64)> {
+) -> std::collections::BTreeMap<String, Rect> {
     // An unreadable catalog leaves the map empty and the caller falls back to
     // pad extents — a weaker guard, but never a wrong one.
     let Ok(catalog) = ctx.footprint_catalog() else {
@@ -417,14 +381,55 @@ pub(super) fn courtyard_extents(
         .filter_map(|part| {
             let id = FootprintId::parse(&part.lib_id).ok()?;
             let footprint = catalog.footprint(&id).ok()?;
-            let (w, h) = enclosing_courtyard(&footprint);
-            let swapped = part.rotation.rem_euclid(180) == 90;
-            Some((
-                part.reference.clone(),
-                if swapped { (h, w) } else { (w, h) },
-            ))
+            Some((part.reference.clone(), placement_envelope(&footprint)))
         })
         .collect()
+}
+
+/// The footprint's courtyard in FOOTPRINT-LOCAL coordinates, widened to hold
+/// its pads — what KiCAD's `courtyards_overlap` rule checks, as a rectangle
+/// relative to the footprint origin.
+///
+/// The rectangle is deliberately asymmetric. A connector's origin is pin 1, not
+/// its body centre, so the symmetric `origin ± max(|min|, |max|)` box is up to
+/// twice too large on the empty side — phantom courtyard that makes a move
+/// which really does clear its neighbour come back refused.
+pub(super) fn placement_envelope(footprint: &Footprint) -> Rect {
+    let courtyard = footprint.courtyard;
+    match crate::sizing::pad_bbox(&footprint.pads) {
+        None => courtyard,
+        Some(pads) => Rect::new(
+            courtyard.min_x.min(pads.min_x),
+            courtyard.min_y.min(pads.min_y),
+            courtyard.max_x.max(pads.max_x),
+            courtyard.max_y.max(pads.max_y),
+        ),
+    }
+}
+
+/// A footprint-local envelope at a part's pose: rotated by its angle, mirrored
+/// in x when the part sits on the back (KiCAD flips a footprint about the y
+/// axis), and translated to the part's origin.
+pub(super) fn courtyard_at(local: Rect, at: Point2, rotation: f64, back: bool) -> Rect {
+    let mirrored = if back {
+        Rect::new(-local.max_x, local.min_y, -local.min_x, local.max_y)
+    } else {
+        local
+    };
+    let corners = [
+        Point2::new(mirrored.min_x, mirrored.min_y),
+        Point2::new(mirrored.max_x, mirrored.min_y),
+        Point2::new(mirrored.max_x, mirrored.max_y),
+        Point2::new(mirrored.min_x, mirrored.max_y),
+    ]
+    .map(|corner| corner.rotate(rotation));
+    let rotated = Rect::bounding(&corners).unwrap_or(mirrored);
+    Rect::new(
+        at.x + rotated.min_x,
+        at.y + rotated.min_y,
+        at.x + rotated.max_x,
+        at.y + rotated.max_y,
+    )
 }
 
 pub(super) fn place_problem_from_snapshot(
@@ -1778,33 +1783,378 @@ fn placement_size_estimate_with_growth(
     }
 }
 
-fn placement_existing_copper_error(tracks: usize, vias: usize) -> Option<Value> {
-    (tracks > 0 || vias > 0).then(|| {
-        json!({
-            "error": "automatic placement requires a copper-free board",
-            "code": "placement_requires_copper_free_board",
-            "placement_applied": false,
-            "tracks": tracks,
-            "vias": vias,
-            "note": "Footprints were not moved. Preserve the existing route, or explicitly delete all tracks and vias before running place_board.",
-        })
-    })
+/// Bounding boxes of the copper on the board, as placement keep-outs.
+pub(crate) fn copper_keepouts(copper: &pcb_model::RouteSolution) -> Vec<Rect> {
+    let mut out = Vec::new();
+    for trace in &copper.traces {
+        let half = trace.width / 2.0;
+        for pair in trace.path.windows(2) {
+            if let Some(rect) = Rect::bounding(pair) {
+                out.push(Rect::new(
+                    rect.min_x - half,
+                    rect.min_y - half,
+                    rect.max_x + half,
+                    rect.max_y + half,
+                ));
+            }
+        }
+    }
+    for via in &copper.vias {
+        let half = via.diameter / 2.0;
+        out.push(Rect::new(
+            via.at.x - half,
+            via.at.y - half,
+            via.at.x + half,
+            via.at.y + half,
+        ));
+    }
+    out
 }
 
-/// Automatic placement moves EVERY unlocked part, so running it on a board that
-/// already has a layout throws that layout away — the exact loss `sync_board`
-/// exists to prevent. A board still at its seed row has no layout to lose, and a
-/// caller who means it says so.
-fn already_placed_error(board: &IpcBoardSnapshot, replace: bool) -> Option<Value> {
-    (!replace && !kicad_board::is_seed_imported_board(&board.imported)).then(|| {
-        json!({
-            "error": "this board is already placed; automatic placement would move every part",
-            "code": "board_already_placed",
-            "placement_applied": false,
-            "note": "Nothing was moved. Adjust individual parts with move_parts, or pass \
-                     {\"replace\": true} to deliberately re-place the whole board and lose the \
-                     current layout.",
+/// Free only `refs` to move: every other part is locked where the board has it,
+/// and the copper already down becomes a keep-out.
+///
+/// A part the board itself locks stays locked whatever the caller names: a lock
+/// is the one thing on a board that outranks a tool.
+///
+/// The keep-outs cover copper the placement is NOT about to retract. Copper on a
+/// moving part's own nets is going anyway, so treating it as an obstacle only
+/// over-constrains the seat; every other trace is as real an obstacle as a part,
+/// because a footprint dropped on a live one shorts it. This is the machinery
+/// `sync_board` uses for the parts it just added and `place_board{refs}` uses
+/// for the ones the model names — one subset placement, so both behave alike.
+pub(crate) fn restrict_to_refs(
+    problem: &mut PlacementView,
+    board: &IpcBoardSnapshot,
+    free: &std::collections::BTreeSet<&str>,
+) {
+    let existing: BTreeMap<&str, &ImportedPart> = board
+        .imported
+        .parts
+        .iter()
+        .map(|part| (part.reference.as_str(), part))
+        .collect();
+    let mut retracted: std::collections::BTreeSet<&str> = Default::default();
+    for part in &mut problem.parts {
+        let imported = existing.get(part.reference.as_str());
+        let held = imported.is_some_and(|imported| imported.locked);
+        if free.contains(part.reference.as_str()) && !held {
+            part.locked = None;
+            retracted.extend(
+                imported
+                    .into_iter()
+                    .flat_map(|imported| imported.pads.iter().filter_map(|pad| pad.net.as_deref())),
+            );
+        } else if let Some(imported) = imported {
+            part.locked = Some(LockedAt {
+                at: imported.at,
+                rotation: imported.rotation as f64,
+            });
+        }
+    }
+
+    // Copper that touches a part which is not moving is that part's own
+    // connection, not an obstacle — and a keep-out is checked against EVERY
+    // part, so keeping it would declare the board illegal where it already sits.
+    let anchored: Vec<Rect> = problem
+        .parts
+        .iter()
+        .filter_map(|part| {
+            let at = part.locked.as_ref()?.at;
+            Some(Rect::from_center_half(
+                at,
+                (part.courtyard_w / 2.0, part.courtyard_h / 2.0),
+            ))
         })
+        .collect();
+    let staying = pcb_model::RouteSolution {
+        traces: board
+            .copper
+            .traces
+            .iter()
+            .filter(|trace| !retracted.contains(trace.connection.as_str()))
+            .cloned()
+            .collect(),
+        vias: board
+            .copper
+            .vias
+            .iter()
+            .filter(|via| !retracted.contains(via.connection.as_str()))
+            .cloned()
+            .collect(),
+    };
+    problem.keepouts.extend(
+        copper_keepouts(&staying)
+            .into_iter()
+            .filter(|rect| !anchored.iter().any(|part| overlaps(rect, part))),
+    );
+}
+
+fn overlaps(a: &Rect, b: &Rect) -> bool {
+    let (ox, oy) = a.axis_penetration(b);
+    ox > 0.0 && oy > 0.0
+}
+
+/// How the board's size relates to what it was asked to hold.
+///
+/// A failed placement gets a CONCRETE size to retry at — in the vocabulary
+/// `sync_board` uses, grown past the outline that just failed so a retry cannot
+/// propose it again. A legal one gets the tight courtyard envelope, so an
+/// oversized canvas can be resized to fit instead of shipping empty acreage.
+fn sizing_report(
+    problem: &PlacementView,
+    board: &IpcBoardSnapshot,
+    result: &PlaceResult,
+    legal: bool,
+) -> Value {
+    // On a failed placement, give the agent a CONCRETE board size so it can retry
+    // deterministically instead of guessing — in the one vocabulary
+    // `sync_board` also uses, grown past the outline that just failed so a
+    // retry can never propose it again. `suggested_min_bounds_mm` carries the
+    // same recommendation under the name the auto-resize path already reads.
+    let mut extra = json!({});
+    if !legal {
+        let cw = (problem.bounds.max_x - problem.bounds.min_x).max(0.1);
+        let ch = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
+        let sizing =
+            board_sizing(problem, &board.imported.parts, &board.problem).grown_past(cw, ch);
+        extra = json!({
+            "overlap_pairs": placement_overlap_pairs(problem, result),
+            "parts_courtyard_area_mm2": sizing.courtyard_area_mm2,
+            "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
+            "required_bounds": { "width": sizing.required_w, "height": sizing.required_h },
+            "recommended_bounds": { "width": sizing.recommended_w, "height": sizing.recommended_h },
+            "suggested_min_bounds_mm": { "w": sizing.recommended_w, "h": sizing.recommended_h },
+        });
+    } else {
+        // A legal placement on an oversized canvas reads as wasted board: report
+        // the tight courtyard envelope so callers can resize to fit_bounds_mm
+        // and re-place instead of shipping empty acreage.
+        let by_ref: std::collections::BTreeMap<&str, _> = result
+            .placements
+            .iter()
+            .map(|placement| (placement.reference.as_str(), placement))
+            .collect();
+        let mut envelope: Option<Rect> = None;
+        for part in &problem.parts {
+            let Some(placement) = by_ref.get(part.reference.as_str()) else {
+                continue;
+            };
+            let half = pcb_place::rotated_courtyard_half(part, placement.rotation);
+            let rect = Rect::from_center_half(placement.at, half);
+            envelope = Some(match envelope {
+                None => rect,
+                Some(existing) => Rect::new(
+                    existing.min_x.min(rect.min_x),
+                    existing.min_y.min(rect.min_y),
+                    existing.max_x.max(rect.max_x),
+                    existing.max_y.max(rect.max_y),
+                ),
+            });
+        }
+        if let Some(envelope) = envelope {
+            let cw = (problem.bounds.max_x - problem.bounds.min_x).max(0.1);
+            let ch = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
+            // Utilization from courtyard area, not the placed envelope:
+            // edge-seeking connectors span the rim of any canvas, so an
+            // envelope ratio always reads full even on an oversized board.
+            let fresh = placement_size_estimate_with_growth(problem, 0.0, 0.0, false, false);
+            let utilization = (fresh.total_area * 2.0) / (cw * ch);
+            extra = json!({
+                "utilized_bounds_mm": {
+                    "w": (envelope.width() * 10.0).round() / 10.0,
+                    "h": (envelope.height() * 10.0).round() / 10.0,
+                },
+                "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
+                "fit_bounds_mm": { "w": fresh.width.ceil(), "h": fresh.height.ceil() },
+                "canvas_utilization_percent": (utilization * 100.0).round().min(100.0),
+                "connectors_off_edge": connectors_off_edge(problem, &board.imported.parts, result),
+            });
+        }
+    }
+    extra
+}
+
+/// Which parts a `place_board` call may move: the caller's `refs`, or — with no
+/// `refs` — the parts nothing has laid out yet. `None` is the whole board.
+///
+/// A board fresh from `sync_board` has every part in the seed row, so that is
+/// the whole board; a board that has just gained parts has only those, and
+/// placing them is a subset op that leaves the rest alone. Only when nothing is
+/// outstanding is re-placing a destructive act the caller has to ask for. A
+/// locked footprint is the one thing on a board a tool does not overrule.
+fn placement_subset(
+    refs: Option<Vec<String>>,
+    board: &IpcBoardSnapshot,
+    replace: bool,
+) -> std::result::Result<Option<Vec<String>>, Value> {
+    let unplaced = kicad_board::seed_row_references(&board.imported);
+    let whole_board = refs.is_none() && unplaced.len() == board.imported.parts.len();
+    let refs = match refs {
+        Some(refs) => Some(refs),
+        None if whole_board || replace => None,
+        None if unplaced.is_empty() => return Err(already_placed_error()),
+        None => Some(unplaced),
+    };
+    // Placing a set of locked parts would report success and move nothing, and
+    // the caller would be told to call again.
+    if let Some(refs) = &refs {
+        let locked: Vec<&str> = refs
+            .iter()
+            .filter(|reference| {
+                board
+                    .imported
+                    .parts
+                    .iter()
+                    .any(|part| &&part.reference == reference && part.locked)
+            })
+            .map(String::as_str)
+            .collect();
+        if locked.len() == refs.len() {
+            return Err(json!({
+                "error": format!(
+                    "{} is locked on the board, so placement has nothing it may move",
+                    locked.join(", ")
+                ),
+                "code": "parts_locked",
+                "placement_applied": false,
+                "locked": locked,
+                "note": "Unlock them in pcbnew, or move them deliberately with move_parts.",
+            }));
+        }
+    }
+    Ok(refs)
+}
+
+/// Whether the parts this call may move seat cleanly: inside the board, clear
+/// of the keep-outs, and clear of every other courtyard.
+///
+/// A whole-board verdict answers for parts a subset placement never touched, so
+/// a board that arrived with one courtyard overlap would otherwise make every
+/// later `place_board{refs}` illegal — with no way left to place the new part.
+fn subset_is_legal(
+    problem: &PlacementView,
+    result: &PlaceResult,
+    free: &std::collections::BTreeSet<&str>,
+) -> bool {
+    let margin = pcb_place::courtyard_margin(problem.clearance);
+    let placed: BTreeMap<&str, &Placement> = result
+        .placements
+        .iter()
+        .map(|placement| (placement.reference.as_str(), placement))
+        .collect();
+    let courtyard = |part: &Part| {
+        let placement = placed.get(part.reference.as_str())?;
+        let half = pcb_place::rotated_courtyard_half(part, placement.rotation);
+        Some((
+            Rect::from_center_half(placement.at, half),
+            pcb_place::placement_envelope_at(
+                placement.at,
+                pcb_place::part_placement_bounds_envelope(
+                    part,
+                    half,
+                    pcb_place::rotated_copper_bbox(part, placement.rotation),
+                ),
+            ),
+        ))
+    };
+    problem
+        .parts
+        .iter()
+        .filter(|part| free.contains(part.reference.as_str()))
+        .all(|part| {
+            let Some((own, envelope)) = courtyard(part) else {
+                return false;
+            };
+            if !problem.bounds.contains_rect_eps(&envelope, 1e-9) {
+                return false;
+            }
+            if problem
+                .keepouts
+                .iter()
+                .any(|keepout| overlaps(&own, keepout))
+            {
+                return false;
+            }
+            problem
+                .parts
+                .iter()
+                .filter(|other| other.reference != part.reference)
+                .all(|other| {
+                    courtyard(other).is_none_or(|(theirs, _)| {
+                        !overlaps(&own.inflate(margin / 2.0), &theirs.inflate(margin / 2.0))
+                    })
+                })
+        })
+}
+
+/// The `refs` subset a `place_board` call names, checked against the board.
+///
+/// Naming a part that is not there is a mistake worth catching: the placer would
+/// otherwise silently lay out nothing and report a legal placement.
+fn subset_refs(
+    input: &Value,
+    board: &IpcBoardSnapshot,
+) -> std::result::Result<Option<Vec<String>>, String> {
+    let Some(value) = input.get("refs") else {
+        return Ok(None);
+    };
+    let refs: Vec<String> = value
+        .as_array()
+        .ok_or_else(|| "refs must be an array of board references".to_owned())?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "each entry of refs must be a reference string".to_owned())
+        })
+        .collect::<std::result::Result<_, _>>()?;
+    if refs.is_empty() {
+        return Err("refs was empty — omit it to place the whole board".to_owned());
+    }
+    check_references(refs.iter().map(String::as_str), board, "refs")?;
+    Ok(Some(refs))
+}
+
+/// Every named reference must be on this board.
+fn check_references<'a>(
+    named: impl Iterator<Item = &'a str>,
+    board: &IpcBoardSnapshot,
+    what: &str,
+) -> std::result::Result<(), String> {
+    let known: std::collections::BTreeSet<&str> = board
+        .imported
+        .parts
+        .iter()
+        .map(|part| part.reference.as_str())
+        .collect();
+    let unknown: Vec<&str> = named.filter(|name| !known.contains(name)).collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{what} names {} which {} not on this board; the board has {}",
+        unknown.join(", "),
+        if unknown.len() == 1 { "is" } else { "are" },
+        known.into_iter().collect::<Vec<_>>().join(", "),
+    ))
+}
+
+/// Whole-board placement moves EVERY unlocked part, so running it on a board
+/// that already has a layout throws that layout away — the exact loss
+/// `sync_board` exists to prevent.
+///
+/// It is only a refusal when there is nothing left to do: a board with parts
+/// still in the seed row has work outstanding, and `place_board()` does that
+/// work (as a subset placement) instead of complaining.
+fn already_placed_error() -> Value {
+    json!({
+        "error": "this board is already placed; every part has a position",
+        "code": "board_already_placed",
+        "placement_applied": false,
+        "note": "Nothing was moved. Adjust individual parts with move_parts, name the ones to \
+                 re-place with {\"refs\": [...]}, or pass {\"replace\": true} to deliberately \
+                 re-place the whole board and lose the current layout.",
     })
 }
 
@@ -1814,10 +2164,16 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(board) => board,
         Err(live_err) => return Ok(json!({ "error": live_err })),
     };
-    if let Some(error) =
-        placement_existing_copper_error(board.copper.traces.len(), board.copper.vias.len())
-    {
-        return Ok(error);
+    let refs = match subset_refs(&input, &board) {
+        Ok(refs) => refs,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
+    let intent = match crate::intent::parse(&input) {
+        Ok(intent) => intent,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
+    if let Err(error) = check_references(intent.references().into_iter(), &board, "intent") {
+        return Ok(json!({ "error": error }));
     }
     let replace = input
         .get("replace")
@@ -1825,15 +2181,24 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .unwrap_or(false);
     if let Some(object) = input.as_object_mut() {
         object.remove("replace");
+        object.remove("refs");
+        object.remove("intent");
     }
-    if let Some(error) = already_placed_error(&board, replace) {
-        return Ok(error);
-    }
+    let refs = match placement_subset(refs, &board, replace) {
+        Ok(refs) => refs,
+        Err(refusal) => return Ok(refusal),
+    };
 
-    let problem = match place_problem_from_snapshot(&board, ctx) {
+    let mut problem = match place_problem_from_snapshot(&board, ctx) {
         Ok(p) => p,
         Err(msg) => return Ok(json!({ "error": msg })),
     };
+    let free: std::collections::BTreeSet<&str> =
+        refs.iter().flatten().map(String::as_str).collect();
+    if refs.is_some() {
+        restrict_to_refs(&mut problem, &board, &free);
+    }
+    let problem = problem;
 
     // Auto edge-affinity: pull connectors/headers to their nearest board edge so
     // they land at the perimeter (where a cable or the enclosure reaches them),
@@ -1843,6 +2208,8 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(hints) => hints,
         Err(error) => return Ok(json!({ "error": error })),
     };
+    let zones = intent.zones.clone();
+    intent.merge_into(&mut hints);
     let explicitly_edged: std::collections::BTreeSet<&str> = hints
         .groups
         .iter()
@@ -1935,8 +2302,17 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     }
 
-    let mut revision = None;
-    if result.legal {
+    // A subset placement writes ONLY the parts it was asked to place, so every
+    // other footprint's pose stays byte-identical — the placer's own answer for
+    // a locked part is not the same bytes the board already has.
+    let mut gate = None;
+    let mut retracted = None;
+    // A subset placement answers only for the parts it may move.
+    let legal = match &refs {
+        Some(_) => subset_is_legal(&problem, &result, &free),
+        None => result.legal,
+    };
+    if legal {
         let locked_refs: std::collections::BTreeSet<&str> = board
             .imported
             .parts
@@ -1948,6 +2324,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .placements
             .iter()
             .filter(|p| !locked_refs.contains(p.reference.as_str()))
+            .filter(|p| refs.is_none() || free.contains(p.reference.as_str()))
             .map(|p| FootprintMove {
                 reference: p.reference.clone(),
                 x_nm: kicad_ipc::units::mm_to_nm(p.at.x),
@@ -1956,25 +2333,43 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             })
             .collect();
         if !moves.is_empty() {
-            let captured = match ctx.revisions().capture(
+            let opened = match Guard::open(
+                ctx,
                 "place_board",
                 "Place board footprints",
                 &[ctx.pcb_path()],
             ) {
-                Ok(revision) => revision,
-                Err(error) => {
-                    return Ok(
-                        json!({ "error": format!("could not capture the board before placement: {error}") }),
-                    );
-                }
+                Ok(opened) => opened,
+                Err(refusal) => return Ok(refusal),
             };
-            revision = Some(captured);
             if let Err(e) = write_placement(ctx, &moves) {
-                return Ok(json!({
-                    "error": format!("could not write placement: {e}"),
-                    "revision": captured,
-                }));
+                let error = json!({ "error": format!("could not write placement: {e}") });
+                return Ok(opened.rollback(ctx, error));
             }
+            // A part that moves leaves its copper behind, and copper that no
+            // longer ends on a pad is at best dangling and at worst a short.
+            // Retract every net the moved parts touched, exactly as move_parts
+            // does, and name them for the re-route. This is also why placement
+            // never needs to treat that copper as an obstacle: it is going.
+            let moved = moves.iter().map(|m| m.reference.as_str());
+            let pads = crate::copper::pad_extents(&board.problem, moved);
+            let retract =
+                crate::copper::retract(&board.copper, &pads, &std::collections::BTreeSet::new());
+            if retract.count > 0
+                && let Err(e) = crate::copper::write_retained(
+                    ctx,
+                    board.problem.layer_count,
+                    &board.layer_names,
+                    &retract,
+                )
+            {
+                let error = json!({
+                    "error": format!("the parts were placed but their copper was not retracted: {e}"),
+                });
+                return Ok(opened.rollback(ctx, error));
+            }
+            retracted = Some(retract);
+            gate = Some(opened);
         }
     }
     let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
@@ -1983,7 +2378,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // annealer scattered (>=4 bypass caps, none locked/pinned), suggest the `surround`
     // hint so the agent can ring them into a tidy decoupling cluster.
     let mut hint_suggestions: Vec<Value> = Vec::new();
-    if result.legal {
+    if legal {
         let pairs = pcb_place::decoupling_pairs(&problem);
         let mut by_ic: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (cap, ic) in pairs {
@@ -2011,80 +2406,16 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     }
 
-    // On a failed placement, give the agent a CONCRETE board size so it can retry
-    // deterministically instead of guessing — in the one vocabulary
-    // `sync_board` also uses, grown past the outline that just failed so a
-    // retry can never propose it again. `suggested_min_bounds_mm` carries the
-    // same recommendation under the name the auto-resize path already reads.
-    let mut extra = json!({});
-    if !result.legal {
-        let cw = (problem.bounds.max_x - problem.bounds.min_x).max(0.1);
-        let ch = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
-        let sizing =
-            board_sizing(&problem, &board.imported.parts, &board.problem).grown_past(cw, ch);
-        extra = json!({
-            "overlap_pairs": placement_overlap_pairs(&problem, &result),
-            "parts_courtyard_area_mm2": sizing.courtyard_area_mm2,
-            "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
-            "required_bounds": { "width": sizing.required_w, "height": sizing.required_h },
-            "recommended_bounds": { "width": sizing.recommended_w, "height": sizing.recommended_h },
-            "suggested_min_bounds_mm": { "w": sizing.recommended_w, "h": sizing.recommended_h },
-        });
-    } else {
-        // A legal placement on an oversized canvas reads as wasted board: report
-        // the tight courtyard envelope so callers can resize to fit_bounds_mm
-        // and re-place instead of shipping empty acreage.
-        let by_ref: std::collections::BTreeMap<&str, _> = result
-            .placements
-            .iter()
-            .map(|placement| (placement.reference.as_str(), placement))
-            .collect();
-        let mut envelope: Option<Rect> = None;
-        for part in &problem.parts {
-            let Some(placement) = by_ref.get(part.reference.as_str()) else {
-                continue;
-            };
-            let half = pcb_place::rotated_courtyard_half(part, placement.rotation);
-            let rect = Rect::from_center_half(placement.at, half);
-            envelope = Some(match envelope {
-                None => rect,
-                Some(existing) => Rect::new(
-                    existing.min_x.min(rect.min_x),
-                    existing.min_y.min(rect.min_y),
-                    existing.max_x.max(rect.max_x),
-                    existing.max_y.max(rect.max_y),
-                ),
-            });
-        }
-        if let Some(envelope) = envelope {
-            let cw = (problem.bounds.max_x - problem.bounds.min_x).max(0.1);
-            let ch = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
-            // Utilization from courtyard area, not the placed envelope:
-            // edge-seeking connectors span the rim of any canvas, so an
-            // envelope ratio always reads full even on an oversized board.
-            let fresh = placement_size_estimate_with_growth(&problem, 0.0, 0.0, false, false);
-            let utilization = (fresh.total_area * 2.0) / (cw * ch);
-            extra = json!({
-                "utilized_bounds_mm": {
-                    "w": (envelope.width() * 10.0).round() / 10.0,
-                    "h": (envelope.height() * 10.0).round() / 10.0,
-                },
-                "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
-                "fit_bounds_mm": { "w": fresh.width.ceil(), "h": fresh.height.ceil() },
-                "canvas_utilization_percent": (utilization * 100.0).round().min(100.0),
-                "connectors_off_edge": connectors_off_edge(&problem, &board.imported.parts, &result),
-            });
-        }
-    }
+    let extra = sizing_report(&problem, &board, &result, legal);
 
     let mut out = json!({
-        "placement_applied": result.legal,
-        "legal": result.legal,
+        "placement_applied": legal,
+        "legal": legal,
         "hpwl": result.report.hpwl,
         "overlaps_resolved": result.report.overlaps_resolved,
         "out_of_bounds_clamps": result.report.out_of_bounds_clamps,
         "positions": positions,
-        "note": if result.legal {
+        "note": if legal {
             "placement is legal (no courtyard overlap, all parts in bounds). \
              Call route_board next, or render_board to see it."
         } else {
@@ -2100,13 +2431,33 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !hint_suggestions.is_empty() {
         out["hint_suggestions"] = Value::Array(hint_suggestions);
     }
-    if let Some(revision) = revision {
-        out["revision"] = json!(revision);
-    }
-    if !result.legal {
+    if !legal {
         out["error"] = Value::String(illegal_placement_error(&out));
     }
-    Ok(out)
+    let retract = retracted.unwrap_or_default();
+    out["retracted_tracks"] = json!(retract.count);
+    out["nets_to_reroute"] = json!(retract.nets);
+    if let Some(refs) = &refs {
+        out["placed_refs"] = json!(refs);
+        if legal {
+            out["note"] = json!(
+                "placed only the named parts; every other footprint kept its pose and its \
+                 copper. Call route_board({nets: nets_to_reroute}), then check_board."
+            );
+            out["next_tool"] = json!("route_board");
+        }
+    }
+    if !zones.is_empty() {
+        out["ignored_intent_zones"] = json!(zones);
+        out["zones_note"] = json!(
+            "intent.zones are board rules, not placement: pass them to \
+             sync_board({rules:{pours:[…]}})."
+        );
+    }
+    Ok(match gate {
+        Some(gate) => gate.commit(ctx, out),
+        None => out,
+    })
 }
 
 /// The refusal a caller can act on in one move: how much copper area the parts
@@ -2711,17 +3062,6 @@ mod tests {
             "field power support placement should be legal: {:?}",
             placement_overlap_pairs(&problem, &result)
         );
-    }
-
-    #[test]
-    fn placement_refuses_to_move_footprints_under_existing_copper() {
-        let blocked = placement_existing_copper_error(1, 0).unwrap();
-
-        assert_eq!(blocked["code"], "placement_requires_copper_free_board");
-        assert_eq!(blocked["placement_applied"], false);
-        assert_eq!(blocked["tracks"], 1);
-        assert_eq!(blocked["vias"], 0);
-        assert!(placement_existing_copper_error(0, 0).is_none());
     }
 
     #[test]
@@ -3723,5 +4063,30 @@ mod tests {
             pcb_place::courtyard_margin(problem.clearance),
             &auto_positions,
         ));
+    }
+
+    /// A connector's origin is pin 1, not its body centre. The envelope must
+    /// keep that asymmetry: the symmetric form doubled the short side and
+    /// refused moves that really did clear.
+    #[test]
+    fn an_off_centre_courtyard_keeps_its_asymmetry() {
+        let local = Rect::new(-1.8, -1.8, 1.8, 4.4);
+        let at = Point2::new(10.0, 10.0);
+
+        let unrotated = courtyard_at(local, at, 0.0, false);
+        assert_eq!(unrotated, Rect::new(8.2, 8.2, 11.8, 14.4));
+        assert!(
+            (unrotated.height() - 6.2).abs() < 1e-9,
+            "a symmetric box would make this 8.8 mm tall: {unrotated:?}"
+        );
+
+        // A quarter turn moves the long side onto the other axis, origin and all.
+        let turned = courtyard_at(local, at, 90.0, false);
+        assert!((turned.width() - 6.2).abs() < 1e-9, "{turned:?}");
+        assert!((turned.height() - 3.6).abs() < 1e-9, "{turned:?}");
+
+        // A back-side part is mirrored in x about its origin.
+        let flipped = courtyard_at(Rect::new(-1.0, -1.0, 4.0, 1.0), at, 0.0, true);
+        assert_eq!(flipped, Rect::new(6.0, 9.0, 11.0, 11.0));
     }
 }

@@ -38,6 +38,39 @@ use serde_json::{Value, json};
 use crate::{AgentRuntime, Tool};
 
 /// The JSON-Schema definitions for every tool, in a stable order. The
+/// The `intent` object both board-building tools take: what the layout should
+/// be, never where a part goes. `zones` is `sync_board`'s half (it seeds the
+/// pours); the rest is `place_board`'s.
+fn intent_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "What the layout should be, not where parts go. Coordinates belong only in move_parts{to}.",
+        "properties": {
+            "edge": {
+                "type": "object",
+                "description": "Reference -> board side its courtyard should touch.",
+                "additionalProperties": { "type": "string", "enum": ["left", "right", "top", "bottom"] }
+            },
+            "keep_near": {
+                "type": "array",
+                "description": "Pairs that must end up close, e.g. [[\"C3\",\"U1\"]].",
+                "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 }
+            },
+            "group": {
+                "type": "array",
+                "description": "Parts that belong together, e.g. [[\"U1\",\"C3\",\"C4\"]].",
+                "items": { "type": "array", "items": { "type": "string" }, "minItems": 2 }
+            },
+            "zones": {
+                "type": "array",
+                "description": "Nets to pour as a copper zone; sync_board applies these when it creates the board.",
+                "items": { "type": "string" }
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 /// [`crate::Agent`] loop hands these to the model as genai [`Tool`]s.
 pub fn tool_defs() -> Vec<Tool> {
     /// One tool definition, mapped to a genai [`Tool`] below. Mirrors the fields
@@ -326,6 +359,7 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "intent": intent_schema(),
                     "bounds": {
                         "description": "Omit (or \"auto\") to size the board from its parts. Bounds smaller than required_bounds are refused before anything is written.",
                         "oneOf": [
@@ -342,7 +376,7 @@ pub fn tool_defs() -> Vec<Tool> {
                     "rules": {
                         "type": "object",
                         "properties": {
-                            "layer_count": { "type": "integer", "enum": [2, 4, 6, 8] },
+                            "layer_count": { "type": "integer", "enum": [2, 4, 6, 8], "description": "Default 2. Ask for 4+ only for a dense/high-speed board; route_board reports layers_used." },
                             "clearance": { "type": "number" },
                             "min_trace_width": { "type": "number" },
                             "via_diameter": { "type": "number" },
@@ -387,12 +421,23 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "place_board".into(),
-            description: "Auto-place a newly created PCB; groups steer regions, grids, \
-                 surrounds, and edges. Refuses an already-placed board unless replace:true."
+            description: "Place a PCB from stated intent: `intent` gives edges, \
+                 proximities and groups (never coordinates); `groups` steers regions, grids \
+                 and surrounds. With no arguments it places exactly the parts that are still \
+                 unplaced, leaving every laid-out pose alone; `refs` names a subset instead. \
+                 Copper on the parts it moves is retracted (see nets_to_reroute). It refuses \
+                 only when nothing is unplaced — pass replace:true to re-place a finished \
+                 board and lose its layout."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "refs": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Place only these footprints, with every other part locked where it sits and the existing copper as keep-outs. Omit to place the whole board."
+                    },
+                    "intent": intent_schema(),
                     "replace": {
                         "type": "boolean",
                         "description": "Re-place an already-placed board, losing its layout."
@@ -430,7 +475,8 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "route_board".into(),
-            description: "Auto-route the board, committing every net whose copper is DRC-clean. \
+            description: "Auto-route the PLACED board, committing every net whose copper is \
+                 DRC-clean; refuses while any part is unplaced. \
                  Reports routed N/M and, per unrouted net, the two pads, the obstacle in the \
                  way and the repair. Pass `nets` to re-route only those nets after a \
                  move_parts, keeping every other net's copper."
@@ -453,8 +499,9 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "check_board".into(),
-            description: "Run PCB DRC; stop when ok. On failure lists the blocking violations \
-                 and every unconnected item as the pad pair it is."
+            description: "Run PCB DRC; stop when ok. On failure lists the blocking violations, \
+                 every unconnected item as the pad pair it is, and `unplaced` — the footprints \
+                 still in the seed row, which place_board({refs}) lays out."
                 .into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },

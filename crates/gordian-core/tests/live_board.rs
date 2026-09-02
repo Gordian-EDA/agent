@@ -4,6 +4,8 @@
 //! Real `kicad-cli`, a real `.kicad_sch` and a real `.kicad_pcb` on disk — no
 //! network, no mocks. Skips when no KiCAD is installed.
 
+mod common;
+
 use gordian_core::AgentRuntime;
 use gordian_core::tools::run_tool;
 use kicad_board::{BoardDoc, BoardFootprint};
@@ -61,6 +63,7 @@ const R0603: &str = "Resistor_SMD:R_0603_1608Metric";
 
 #[test]
 fn sync_board_creates_then_edits_a_board_without_disturbing_it() {
+    let _kicad = common::KicadLock::acquire();
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;

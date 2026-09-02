@@ -509,6 +509,7 @@ impl RawHints {
                 .collect::<std::result::Result<Vec<_>, _>>()?,
             edge_seek,
             corner_seek: self.corner_seek,
+            keep_near: Vec::new(),
         })
     }
 }

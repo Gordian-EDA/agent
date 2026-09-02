@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use geom::{Point2, Rect};
 use pcb_model::{
-    Connection, LayerRef, Obstacle, Placement, RoutePoint, RouteSolution, RoutingView, Trace, Via,
+    Connection, LayerRef, Obstacle, RoutePoint, RouteSolution, RoutingView, Trace, Via,
     ViaSpan,
 };
 
@@ -369,42 +369,25 @@ fn reconcile_file_stackup(
     Ok(())
 }
 
-fn imported_placements(board: &ImportedBoard) -> Vec<Placement> {
-    board
+/// References still sitting in the board's seed row: a part that was written to
+/// the board but never laid out. They sit unrotated on the 2.54 mm lattice
+/// running right from the top-left inset, which nothing but seeding produces.
+pub fn seed_row_references(board: &ImportedBoard) -> Vec<String> {
+    let row_y = board.bounds.min_y + 2.0;
+    let mut refs: Vec<String> = board
         .parts
         .iter()
-        .map(|p| Placement {
-            reference: p.reference.clone(),
-            at: p.at,
-            rotation: p.rotation as f64,
+        .filter(|part| {
+            let lattice = (part.at.x - board.bounds.min_x - 2.0) / 2.54;
+            (part.at.y - row_y).abs() < geom::EPS
+                && part.rotation == 0
+                && lattice >= -geom::EPS
+                && (lattice - lattice.round()).abs() < geom::EPS
         })
-        .collect()
-}
-
-pub fn is_seed_imported_board(board: &ImportedBoard) -> bool {
-    is_seed_placement(&board.bounds, &imported_placements(board))
-}
-
-fn is_seed_placement(bounds: &pcb_model::Rect, placements: &[Placement]) -> bool {
-    if placements.is_empty() {
-        return false;
-    }
-    let mut coords: Vec<_> = placements
-        .iter()
-        .map(|p| (p.at.x, p.at.y, p.rotation))
+        .map(|part| part.reference.clone())
         .collect();
-    coords.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-    });
-    coords.iter().enumerate().all(|(idx, (x, y, rotation))| {
-        let expected_x = bounds.min_x + 2.0 + 2.54 * idx as f64;
-        let expected_y = bounds.min_y + 2.0;
-        (x - expected_x).abs() < geom::EPS
-            && (y - expected_y).abs() < geom::EPS
-            && rotation.abs() < geom::EPS
-    })
+    refs.sort();
+    refs
 }
 
 #[cfg(test)]
@@ -413,33 +396,50 @@ mod tests {
     use pcb_model::{LayerRef, Point2, Rect, RouteSolution, RoutingView, Trace};
     use std::collections::BTreeMap;
 
-    fn placement(reference: &str, x: f64, y: f64, rotation: f64) -> Placement {
-        Placement {
+    fn part(reference: &str, x: f64, y: f64, rotation: i32) -> ImportedPart {
+        ImportedPart {
             reference: reference.to_owned(),
+            lib_id: "Resistor_SMD:R_0603_1608Metric".to_owned(),
             at: Point2 { x, y },
             rotation,
+            locked: false,
+            pads: vec![],
+        }
+    }
+
+    fn board_of(parts: Vec<ImportedPart>) -> ImportedBoard {
+        ImportedBoard {
+            layer_count: 2,
+            bounds: Rect {
+                min_x: 10.0,
+                max_x: 30.0,
+                min_y: 5.0,
+                max_y: 20.0,
+            },
+            parts,
+            placement_keepouts: vec![],
+            keepout_count: 0,
         }
     }
 
     #[test]
-    fn seed_row_is_not_a_real_placement() {
-        let bounds = Rect {
-            min_x: 10.0,
-            max_x: 30.0,
-            min_y: 5.0,
-            max_y: 20.0,
-        };
-        let seeded = vec![
-            placement("C1", 14.54, 7.0, 0.0),
-            placement("R1", 12.0, 7.0, 0.0),
-        ];
-        let moved = vec![
-            placement("R1", 12.0, 7.0, 0.0),
-            placement("C1", 16.0, 9.0, 90.0),
-        ];
+    fn the_seed_row_is_not_a_placement() {
+        let seeded = board_of(vec![part("C1", 14.54, 7.0, 0), part("R1", 12.0, 7.0, 0)]);
+        assert_eq!(seed_row_references(&seeded), ["C1", "R1"]);
 
-        assert!(is_seed_placement(&bounds, &seeded));
-        assert!(!is_seed_placement(&bounds, &moved));
+        // Off the row, off the lattice, or rotated: all laid out.
+        let laid_out = board_of(vec![
+            part("C1", 16.0, 9.0, 90),
+            part("R1", 13.0, 7.0, 0),
+            part("R2", 12.0, 7.5, 0),
+        ]);
+        assert!(seed_row_references(&laid_out).is_empty());
+    }
+
+    #[test]
+    fn a_half_placed_board_names_only_what_is_still_seeded() {
+        let board = board_of(vec![part("C1", 14.54, 7.0, 0), part("R1", 16.0, 12.0, 0)]);
+        assert_eq!(seed_row_references(&board), ["C1"]);
     }
 
     #[test]

@@ -17,8 +17,32 @@
 //!   roughly half density, plus the room the rules imply (a channel is one track
 //!   plus two clearances, and extra copper layers carry part of the demand) and
 //!   a copper-free edge ring. This is what an auto-sized board is born with.
+//!
+//! ## Calibration
+//!
+//! Measured over 79 of the 82 boards in `examples/pcb_circuits` (1–90 parts,
+//! SMD, BGA and through-hole; the >100-part scale boards were left out for
+//! runtime), each auto-sized at aspect 1.0 and handed to
+//! `pcb_engine::place_tuned`:
+//!
+//! - at `recommended`, **79/79** place legally on the first call;
+//! - at 0.85 × that area only 68 do, so the half-density factor is the smallest
+//!   that keeps the "one step, legal" promise and it stays 2.0;
+//! - 44 of the 79 would still pack at 0.70 × — the promise is generous to the
+//!   median board rather than tight everywhere.
+//!
+//! What used to break the promise was the INPUT, not the factor: `sync_board`
+//! measured each part by its library courtyard box while the placer reserves
+//! [`placement_extent`]'s origin-symmetric box. On pin-1-origin parts (headers,
+//! terminal blocks, most through-hole) that is up to 2× per axis, so such a
+//! board was sized from roughly half its real extent — the 9-part 555 of
+//! `ne555-tht.json` (741 mm² of extent) was quoted 30 × 30 mm and could not pack
+//! there, against the 41 × 41 mm it packs at. Measuring both the same way took
+//! the corpus from 44/78 boards legal at their own recommendation to 78/78, for
+//! a median recommendation 1.31× larger (1.14× over the boards that already
+//! packed).
 
-/// One part's placement extent: its courtyard, mm.
+/// One part's placement extent: the box the placer reserves for it, mm.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PartExtent {
     pub w: f64,
@@ -26,6 +50,51 @@ pub(crate) struct PartExtent {
     /// Connectors want an edge each, so they widen the RECOMMENDED board; the
     /// hard floor stays pure geometry.
     pub edge_seeking: bool,
+}
+
+/// The extent the placer reserves for a footprint, mm.
+///
+/// The placer keeps a part's courtyard CENTRED on its origin, so a footprint
+/// whose origin sits at pin 1 rather than its middle occupies the box that
+/// mirrors it — measuring the raw courtyard instead under-reserves such a part
+/// by up to half. Pads are folded in because a footprint may carry no courtyard
+/// graphics at all.
+pub(crate) fn placement_extent(footprint: &kicad_footprint::Footprint) -> (f64, f64) {
+    let (mut hw, mut hh) = abs_half(&footprint.courtyard);
+    if let Some(pads) = pad_bbox(&footprint.pads) {
+        let (pw, ph) = abs_half(&pads);
+        hw = hw.max(pw);
+        hh = hh.max(ph);
+    }
+    (hw * 2.0, hh * 2.0)
+}
+
+/// Half-extents of a box mirrored about the footprint origin.
+fn abs_half(b: &geom::Rect) -> (f64, f64) {
+    (
+        b.min_x.abs().max(b.max_x.abs()),
+        b.min_y.abs().max(b.max_y.abs()),
+    )
+}
+
+pub(crate) fn pad_bbox(pads: &[kicad_footprint::FootprintPad]) -> Option<geom::Rect> {
+    pads.iter().map(pad_aabb).reduce(|acc, pad| geom::Rect {
+        min_x: acc.min_x.min(pad.min_x),
+        min_y: acc.min_y.min(pad.min_y),
+        max_x: acc.max_x.max(pad.max_x),
+        max_y: acc.max_y.max(pad.max_y),
+    })
+}
+
+fn pad_aabb(pad: &kicad_footprint::FootprintPad) -> geom::Rect {
+    let half =
+        geom::Point2::new(pad.size.x / 2.0, pad.size.y / 2.0).rotated_half_extents(pad.rotation);
+    geom::Rect::new(
+        pad.at.x - half.x,
+        pad.at.y - half.y,
+        pad.at.x + half.x,
+        pad.at.y + half.y,
+    )
 }
 
 /// The routing demand a rule set puts on the outline.
@@ -37,9 +106,10 @@ pub(crate) struct RoutingDemand {
     pub net_count: usize,
 }
 
-/// Courtyards pack at roughly half density once orientation, courtyard margin
-/// and escape room are paid for — the factor `place_board`'s retry estimate has
-/// always used.
+/// Extents pack at roughly half density once orientation, courtyard margin and
+/// escape room are paid for. Calibrated, not assumed: at this factor every
+/// sampled board places on the first call, and at 0.85 × the area eleven of them
+/// stop.
 const PACKING_FACTOR: f64 = 2.0;
 
 /// Copper must keep this far from the board edge, so every part is inset by it.
@@ -269,6 +339,93 @@ mod tests {
         let sizing = size_board(&nine_part_board(), 1.0, demand()).grown_past(80.0, 60.0);
         assert!(sizing.recommended_w > 80.0, "{sizing:?}");
         assert!(sizing.recommended_h > 60.0, "{sizing:?}");
+    }
+
+    /// The through-hole 555 of `examples/pcb_circuits/ne555-tht.json`, measured
+    /// by [`placement_extent`]: a DIP-8, three axial resistors, three
+    /// electrolytics and two headers — all pin-1-origin parts, so all much
+    /// larger to the placer than their library courtyard box.
+    fn tht_555_board() -> Vec<PartExtent> {
+        let part = |w, h, edge_seeking| PartExtent { w, h, edge_seeking };
+        vec![
+            part(17.34, 18.28, false),
+            part(22.42, 3.0, false),
+            part(22.42, 3.0, false),
+            part(22.42, 3.0, false),
+            part(8.0, 5.5, false),
+            part(12.1, 3.0, false),
+            part(9.3, 6.8, false),
+            part(3.54, 8.64, true),
+            part(3.54, 13.7, true),
+        ]
+    }
+
+    /// The calibration, pinned: the board this rule recommends for the 555 is
+    /// one `place_tuned` can pack on the first call, and the library-courtyard
+    /// measure it replaces recommends one that cannot be packed at all.
+    #[test]
+    fn the_through_hole_555_is_recommended_a_board_it_can_actually_pack() {
+        let sizing = size_board(&tht_555_board(), 1.0, demand());
+        assert_eq!((sizing.recommended_w, sizing.recommended_h), (41.0, 41.0));
+        assert!(
+            (sizing.courtyard_area_mm2 - 741.4).abs() < 0.1,
+            "{sizing:?}"
+        );
+        assert!(places_legally(&tht_555_board(), 41.0, 41.0));
+        // Measured with the raw library courtyards this board used to be sized
+        // from: 363.9 mm², a 30 x 30 mm recommendation, and no legal packing.
+        assert!(!places_legally(&tht_555_board(), 30.0, 30.0));
+    }
+
+    /// The placer keeps a courtyard centred on the part origin, so sizing must
+    /// measure a pin-1-origin footprint by the box that mirrors it.
+    #[test]
+    fn a_pin_one_origin_footprint_is_measured_by_the_box_the_placer_reserves() {
+        let source = r#"(footprint "Header"
+          (version 20240108)
+          (generator "test")
+          (layer "F.Cu")
+          (fp_line (start -1.5 -1.5) (end 4 -1.5)
+            (stroke (width 0.05) (type solid)) (layer "F.CrtYd"))
+          (fp_line (start -1.5 1.5) (end 4 1.5)
+            (stroke (width 0.05) (type solid)) (layer "F.CrtYd"))
+          (pad "1" thru_hole rect (at 0 0) (size 1.7 1.7) (layers "*.Cu" "*.Mask"))
+          (pad "2" thru_hole oval (at 2.54 0) (size 1.7 1.7) (layers "*.Cu" "*.Mask")))"#;
+        let footprint =
+            kicad_footprint::Footprint::parse_str("Header", source).expect("parse fixture");
+        assert_eq!(
+            footprint.courtyard.max_x - footprint.courtyard.min_x,
+            5.5,
+            "the library courtyard is 5.5 mm wide"
+        );
+        let (w, h) = placement_extent(&footprint);
+        assert_eq!((w, h), (8.0, 3.0), "mirrored about the origin at pin 1");
+    }
+
+    /// Every part fits inside the board it is offered, with the courtyard margin
+    /// the placer enforces — the promise `recommended` is calibrated against.
+    fn places_legally(parts: &[PartExtent], w: f64, h: f64) -> bool {
+        let problem = pcb_place::PlacementView {
+            bounds: geom::Rect::new(0.0, 0.0, w, h),
+            clearance: 0.15,
+            layer_count: 2,
+            min_trace_width: 0.15,
+            parts: parts
+                .iter()
+                .enumerate()
+                .map(|(index, extent)| pcb_place::Part {
+                    reference: format!("{}{index}", if extent.edge_seeking { "J" } else { "U" }),
+                    courtyard_w: extent.w,
+                    courtyard_h: extent.h,
+                    pads: vec![],
+                    edge_datum: None,
+                    locked: None,
+                })
+                .collect(),
+            keepouts: vec![],
+            outline: None,
+        };
+        pcb_engine::place_tuned(&problem, &pcb_place::PlacementHints::default()).legal
     }
 
     #[test]

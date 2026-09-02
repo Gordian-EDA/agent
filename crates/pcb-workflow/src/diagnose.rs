@@ -109,6 +109,38 @@ fn clearance_suggestion(gap: f64, required: f64, subject: &str) -> String {
     }
 }
 
+/// A violation's identity across an edit: the rule it broke and the nets it
+/// involves. Copper moves, so a coordinate is not identity; the fault is.
+pub(crate) type FaultKey = (&'static str, Vec<String>);
+
+/// One explained violation, keyed so a guard can tell a fault the board already
+/// had from one an edit introduced.
+#[derive(Debug, Clone)]
+pub(crate) struct Fault {
+    pub(crate) key: FaultKey,
+    pub(crate) json: Value,
+}
+
+/// Explain every violation and key it.
+pub(crate) fn faults(
+    violations: &[DrcViolation],
+    problem: &RoutingView,
+    parts: &[ImportedPart],
+) -> Vec<Fault> {
+    violations
+        .iter()
+        .map(|violation| {
+            let explained = explain(violation, problem, parts);
+            let mut nets = explained.nets.clone();
+            nets.sort();
+            Fault {
+                key: (explained.kind, nets),
+                json: explained.to_json(),
+            }
+        })
+        .collect()
+}
+
 fn explain(violation: &DrcViolation, problem: &RoutingView, parts: &[ImportedPart]) -> Explained {
     match violation {
         DrcViolation::ClearanceTraceTrace {

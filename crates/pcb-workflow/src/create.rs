@@ -282,22 +282,19 @@ pub(super) fn emit_seed_plan(plan: SeedPlan) -> std::result::Result<SeededBoard,
     })
 }
 
-/// Each part's courtyard extent, for [`crate::sizing`].
+/// Each part's placement extent, for [`crate::sizing`] — measured exactly as
+/// `place_board` will, so the size this board is born with is one the placer
+/// can pack.
 fn part_extents(parts: &[SeedFootprint]) -> Vec<crate::sizing::PartExtent> {
     parts
         .iter()
         .map(|part| {
-            let courtyard = kicad_footprint::Footprint::parse_str(&part.lib_id, &part.source)
-                .map(|fp| fp.courtyard)
-                .unwrap_or(Rect {
-                    min_x: 0.0,
-                    min_y: 0.0,
-                    max_x: 2.0,
-                    max_y: 2.0,
-                });
+            let (w, h) = kicad_footprint::Footprint::parse_str(&part.lib_id, &part.source)
+                .map(|fp| crate::sizing::placement_extent(&fp))
+                .unwrap_or((2.0, 2.0));
             crate::sizing::PartExtent {
-                w: (courtyard.max_x - courtyard.min_x).max(0.5),
-                h: (courtyard.max_y - courtyard.min_y).max(0.5),
+                w: w.max(0.5),
+                h: h.max(0.5),
                 edge_seeking: crate::place::is_connector(&part.lib_id, &part.reference),
             }
         })

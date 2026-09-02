@@ -7,7 +7,7 @@
 use super::geometry::{
     part_edge_distance, part_placement_bounds_envelope, placement_envelope_at, rotated_copper_bbox,
 };
-use crate::{LogicalNet, Pin, PlacementView};
+use crate::{Edge, LogicalNet, Pin, PlacementHints, PlacementView};
 use pcb_model::{LayerRef, Point2, Rect};
 
 pub(crate) use crate::compute_hpwl_with_rotations;
@@ -29,6 +29,10 @@ pub(crate) const SA_COHERE_W: f64 = 8.0; // decoupling cap → nearest anchor po
 // power-buck). Targeted to detected decoupling PAIRS only, so it does not perturb parts
 // with normal net springs.
 pub(crate) const SA_EDGE_W: f64 = 2.5; // connector → nearest board edge
+pub(crate) const SA_KEEP_NEAR_W: f64 = 4.0; // authored `keep_near` pair → each other.
+// Below SA_COHERE_W: a detected bypass cap is an electrical necessity, an authored
+// proximity is a preference. Above SA_WL_W so it survives ordinary wirelength pull.
+pub(crate) const SA_GROUP_W: f64 = 1.5; // authored group member → the group's centroid
 /// Breathing room (mm) a refdes needs around a part before it crowds a neighbour.
 pub(crate) const SA_SILK_GAP: f64 = 1.0;
 
@@ -375,18 +379,86 @@ fn ratline_layers_overlap(a: &RatlineSegment, b: &RatlineSegment) -> bool {
         .any(|layer| b.layers.iter().any(|other| other == layer))
 }
 
-/// The placement cost the SA minimizes (also the [`crate::placement::place_best`]
-/// selection key, so the variant that genuinely lays out best is the one chosen).
+/// Everything the cost needs from the hints, resolved to part indices once per
+/// placement so the inner loop never searches by reference.
+///
+/// The authored terms are what makes intent survive the search: the force seed
+/// pulls a group together or a connector to its edge, but without a cost term
+/// the annealer is free to undo it again.
+pub(crate) struct CostTerms {
+    /// Detected co-placement pairs (a bypass cap and the IC it decouples).
+    pub(crate) pairs: Vec<(usize, usize)>,
+    /// Parts pulled to their NEAREST board edge.
+    pub(crate) edge_seek: Vec<usize>,
+    /// Parts pulled to ONE named board edge.
+    pub(crate) edge_of: Vec<(usize, Edge)>,
+    /// Authored pairs that should sit close together.
+    pub(crate) keep_near: Vec<(usize, usize)>,
+    /// Authored groups that should cohere around their own centroid.
+    pub(crate) cohere: Vec<Vec<usize>>,
+    /// Authored groups that should stay inside a prescribed region.
+    pub(crate) region: Vec<(Vec<usize>, Rect)>,
+}
+
+impl CostTerms {
+    pub(crate) fn new(
+        problem: &PlacementView,
+        hints: &PlacementHints,
+        pairs: Vec<(usize, usize)>,
+    ) -> Self {
+        let index = |reference: &String| {
+            problem
+                .parts
+                .iter()
+                .position(|part| &part.reference == reference)
+        };
+        let members = |refs: &[String]| refs.iter().filter_map(index).collect::<Vec<_>>();
+        Self {
+            pairs,
+            edge_seek: members(&hints.edge_seek),
+            edge_of: hints
+                .groups
+                .iter()
+                .filter_map(|group| Some((group.edge?, &group.members)))
+                .flat_map(|(edge, refs)| {
+                    members(refs).into_iter().map(move |part| (part, edge))
+                })
+                .collect(),
+            keep_near: hints
+                .keep_near
+                .iter()
+                .filter_map(|[a, b]| Some((index(a)?, index(b)?)))
+                .filter(|(a, b)| a != b)
+                .collect(),
+            // A `surround` group is already locked in a ring around its anchor;
+            // a `region` group is held by its own term below. Everything else
+            // coheres around its own centroid.
+            cohere: hints
+                .groups
+                .iter()
+                .filter(|group| group.surround.is_none())
+                .map(|group| members(&group.members))
+                .filter(|members| members.len() > 1)
+                .collect(),
+            region: hints
+                .groups
+                .iter()
+                .filter_map(|group| Some((members(&group.members), group.region?)))
+                .filter(|(members, _)| !members.is_empty())
+                .collect(),
+        }
+    }
+}
+
+/// The placement cost the SA minimizes, and the key the polish passes improve.
 /// Lower is better.
-#[allow(clippy::too_many_arguments)] // internal SA cost kernel; arg-struct adds indirection without value
 pub(crate) fn place_cost(
     problem: &PlacementView,
     nets: &[LogicalNet],
     half: &[(f64, f64)],
     margin: f64,
     rotations: &[f64],
-    pairs: &[(usize, usize)],
-    edge_idx: &[usize],
+    terms: &CostTerms,
     pos: &[Point2],
 ) -> f64 {
     let n = problem.parts.len();
@@ -467,13 +539,60 @@ pub(crate) fn place_cost(
         SA_LAYER_CHANGE_W * ratline_layer_change_pressure_from_segments(&ratline_segments) as f64;
 
     // Decoupling cohesion + connector edge-seek.
-    for &(cap, ic) in pairs {
+    for &(cap, ic) in &terms.pairs {
         cost += SA_COHERE_W * cap_anchor_dist(problem, pos, rotations, cap, ic);
     }
-    for &i in edge_idx {
+    for &i in &terms.edge_seek {
         cost += SA_EDGE_W * part_edge_distance(&problem.parts[i], rotations[i], pos[i], b, half[i]);
     }
+
+    // Authored intent: a named edge, a proximity, a group.
+    for &(i, edge) in &terms.edge_of {
+        cost += SA_EDGE_W * named_edge_distance(&problem.parts[i], rotations[i], pos[i], b, half[i], edge);
+    }
+    for &(a, b) in &terms.keep_near {
+        cost += SA_KEEP_NEAR_W * pos[a].dist(pos[b]);
+    }
+    // A region is containment, not attraction: only a member outside it pays.
+    for (members, region) in &terms.region {
+        for &m in members {
+            let (dx, dy) = region.containment_overshoot(&Rect::from_center_half(pos[m], half[m]));
+            cost += SA_GROUP_W * (dx + dy);
+        }
+    }
+    for members in &terms.cohere {
+        let inv = 1.0 / members.len() as f64;
+        let cx = members.iter().map(|&m| pos[m].x).sum::<f64>() * inv;
+        let cy = members.iter().map(|&m| pos[m].y).sum::<f64>() * inv;
+        let centroid = Point2 { x: cx, y: cy };
+        cost += SA_GROUP_W * members.iter().map(|&m| pos[m].dist(centroid)).sum::<f64>();
+    }
     cost
+}
+
+/// How far a part sits from ONE named board edge — the gap between its
+/// placement envelope and that edge, zero once it touches.
+///
+/// [`part_edge_distance`] answers the same question for the nearest edge, which
+/// is what an unsteered connector wants; an authored `edge` names the side, and
+/// the near one may be the opposite side of the board.
+fn named_edge_distance(
+    part: &crate::Part,
+    rotation: f64,
+    at: Point2,
+    bounds: &Rect,
+    half: (f64, f64),
+    edge: Edge,
+) -> f64 {
+    let envelope = part_placement_bounds_envelope(part, half, rotated_copper_bbox(part, rotation));
+    let placed = placement_envelope_at(at, envelope);
+    match edge {
+        Edge::N => placed.min_y - bounds.min_y,
+        Edge::S => bounds.max_y - placed.max_y,
+        Edge::W => placed.min_x - bounds.min_x,
+        Edge::E => bounds.max_x - placed.max_x,
+    }
+    .max(0.0)
 }
 
 #[cfg(test)]
@@ -710,8 +829,7 @@ mod tests {
             &half,
             margin,
             &rotations,
-            &[],
-            &[],
+            &CostTerms::new(&same_layer, &PlacementHints::default(), Vec::new()),
             &pos,
         );
         let split_cost = place_cost(
@@ -720,8 +838,7 @@ mod tests {
             &half,
             margin,
             &rotations,
-            &[],
-            &[],
+            &CostTerms::new(&split_layer, &PlacementHints::default(), Vec::new()),
             &pos,
         );
 

@@ -22,6 +22,8 @@ use pcb_route_mesh::pipeline::RoutePassReport;
 
 use gordian_runtime::AgentRuntime;
 
+use crate::board::guard::Guard;
+
 // ── route_board ──────────────────────────────────────────────────────────────
 
 /// A `lint_summary` for a routed solution, split into two buckets.
@@ -199,14 +201,68 @@ pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(nets) => nets,
         Err(message) => return Ok(refusal(message)),
     };
+    if let Some(refusal) = unplaced_refusal(ctx) {
+        return Ok(refusal);
+    }
+    let gate = match Guard::open(
+        ctx,
+        "route_board",
+        "Route the project board",
+        &[ctx.pcb_path()],
+    ) {
+        Ok(gate) => gate,
+        Err(refusal) => return Ok(refusal),
+    };
     match route_live_board(ctx, nets) {
-        Ok(out) | Err(out) => Ok(out),
+        Ok(out) => Ok(gate.commit(ctx, out)),
+        Err(out) => Ok(gate.rollback(ctx, out)),
     }
 }
 
 /// A recoverable routing failure, as the JSON payload the caller receives.
 fn refusal(message: impl Into<String>) -> Value {
     json!({ "error": message.into() })
+}
+
+/// Routing a board whose parts are still in the seed row produces a row of
+/// failed nets and no copper — an expensive way to be told to place the board.
+/// Say so before anything is written.
+fn unplaced_refusal(ctx: &AgentRuntime) -> Option<Value> {
+    let unplaced = kicad_board::seed_row_references(&crate::active_board(ctx).ok()?.imported);
+    (!unplaced.is_empty()).then(|| {
+        json!({
+            "error": format!(
+                "{} part(s) are still unplaced ({}) — run place_board first; nothing was written",
+                unplaced.len(),
+                unplaced.join(", "),
+            ),
+            "code": "board_not_placed",
+            "unplaced": unplaced,
+            "next_tool": "place_board",
+        })
+    })
+}
+
+/// The copper layers the committed route actually carries signal on.
+///
+/// Trace layers only: every via defaults to a through via, so counting the
+/// layers a via passes through would report the whole stack as used on a board
+/// that in fact routes on two. A board routed on two layers does not need four,
+/// and saying so is what lets a caller drop the rest.
+fn layers_used(solution: &RouteSolution, layer_count: u32, layer_names: &[String]) -> Vec<String> {
+    solution
+        .traces
+        .iter()
+        .filter_map(|trace| trace.layer.index(layer_count))
+        .collect::<BTreeSet<u32>>()
+        .into_iter()
+        .map(|index| {
+            layer_names
+                .get(index as usize)
+                .cloned()
+                .unwrap_or_else(|| format!("In{index}.Cu"))
+        })
+        .collect()
 }
 
 /// The nets a `route_board` call is allowed to touch.
@@ -370,22 +426,8 @@ fn route_live_board(
         ));
     }
 
-    let revision = ctx
-        .revisions()
-        .capture("route_board", "Route the project board", &[ctx.pcb_path()])
-        .map_err(|error| {
-            refusal(format!(
-                "could not capture the board before routing: {error}"
-            ))
-        })?;
-    replace_route_atomically(ctx, &rp, &result.solution, &board.layer_names, existing).map_err(
-        |e| {
-            json!({
-                "error": format!("could not write route to the board: {e}"),
-                "revision": revision,
-            })
-        },
-    )?;
+    replace_route_atomically(ctx, &rp, &result.solution, &board.layer_names, existing)
+        .map_err(|e| refusal(format!("could not write route to the board: {e}")))?;
 
     // A connection can acquire more than one failure reason as the route is
     // cleaned up (for example, an initial router miss followed by an honest
@@ -462,7 +504,10 @@ fn route_live_board(
         },
         "congestion": congestion,
         "escape_bottleneck": escape,
-        "revision": revision,
+        // What the route really needed. Four layers on a board that routes on
+        // two is fabrication cost for nothing.
+        "layers_used": layers_used(&result.solution, board.problem.layer_count, &board.layer_names),
+        "layer_count": board.problem.layer_count,
         "note": if result.failed.is_empty() {
             "routed and saved the KiCAD board cleanly".to_owned()
         } else {
@@ -475,7 +520,14 @@ fn route_live_board(
     }))
 }
 
-fn remove_existing_copper_obstacles(problem: &mut RoutingView) {
+/// Drop the board's existing copper from the obstacle list.
+///
+/// KiCAD hands existing tracks and vias over as axis-aligned BOUNDING BOXES, so
+/// a single diagonal trace presents as a rectangle wide enough to swallow a
+/// foreign pad. That is fine as a router keep-out and a lie to anything that
+/// reasons about connectivity — the true geometry is in the solution's own
+/// traces and vias, which is what a caller should lint against.
+pub(crate) fn remove_existing_copper_obstacles(problem: &mut RoutingView) {
     problem
         .obstacles
         .retain(|obstacle| !matches!(obstacle.kind.as_str(), "track" | "via"));

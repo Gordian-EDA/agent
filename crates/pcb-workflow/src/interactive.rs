@@ -23,6 +23,7 @@ use gordian_runtime::tool::require_str;
 
 use kicad_board::{ImportedPart, IpcBoardSnapshot};
 
+use crate::board::guard::Guard;
 use crate::copper::RetractedCopper;
 
 fn ipc_err(e: kicad_ipc::Error) -> anyhow::Error {
@@ -45,33 +46,31 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(snapshot) => snapshot,
         Err(err) => return Ok(json!({ "error": err })),
     };
-    let mut board =
-        MoveBoard::from_snapshot(&snapshot, &crate::place::courtyard_extents(&snapshot, ctx));
+    let mut board = MoveBoard::from_snapshot(
+        &snapshot,
+        &crate::place::courtyard_extents(&snapshot, ctx),
+        &back_side_references(ctx),
+    );
     let plan = match resolve_move_parts(&input, &mut board) {
         Ok(plan) => plan,
         Err(err) => return Ok(json!({ "error": err })),
     };
-    if let Some(err) = overlap_error(&board, &plan, snapshot.problem.clearance) {
-        return Ok(json!({ "error": err }));
+    if let Some(refusal) = overlap_error(&board, &plan, snapshot.problem.clearance) {
+        return Ok(refusal);
     }
     let retract = retracted_copper(&snapshot, &plan);
-    let revision = match ctx.revisions().capture(
+    let gate = match Guard::open(
+        ctx,
         "move_parts",
         "Move board footprints",
         &[ctx.pcb_path()],
     ) {
-        Ok(revision) => revision,
-        Err(error) => {
-            return Ok(
-                json!({ "error": format!("could not capture the board before moving parts: {error}") }),
-            );
-        }
+        Ok(gate) => gate,
+        Err(refusal) => return Ok(refusal),
     };
     if let Err(err) = crate::place::write_placement(ctx, &plan.ipc_moves) {
-        return Ok(json!({
-            "error": format!("move_parts could not write the board: {err}"),
-            "revision": revision,
-        }));
+        let error = json!({ "error": format!("move_parts could not write the board: {err}") });
+        return Ok(gate.rollback(ctx, error));
     }
     if let Err(err) = crate::copper::write_retained(
         ctx,
@@ -79,14 +78,30 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         &snapshot.layer_names,
         &retract,
     ) {
-        return Ok(json!({
+        let error = json!({
             "error": format!("move_parts moved the parts but could not retract their copper: {err}"),
-            "revision": revision,
-        }));
+        });
+        return Ok(gate.rollback(ctx, error));
     }
-    let mut output = plan.output(&retract);
-    output["revision"] = json!(revision);
-    Ok(output)
+    Ok(gate.commit(ctx, plan.output(&retract)))
+}
+
+/// The parts sitting on the back of the board. KiCAD mirrors a flipped
+/// footprint about its y axis, so an asymmetric courtyard is on the other side
+/// of the origin there — and the live snapshot does not carry the side, so the
+/// board document is asked.
+fn back_side_references(ctx: &AgentRuntime) -> BTreeSet<String> {
+    std::fs::read_to_string(ctx.pcb_path())
+        .ok()
+        .and_then(|text| kicad_board::BoardDoc::parse(text).ok())
+        .map(|doc| {
+            doc.footprints()
+                .into_iter()
+                .filter(kicad_board::BoardFootprint::on_back)
+                .map(|footprint| footprint.reference)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Copper the move invalidates: every net with a trace ending on a pad that
@@ -103,59 +118,76 @@ fn retracted_copper(snapshot: &IpcBoardSnapshot, plan: &MovePlan) -> RetractedCo
 /// Reject a move that would land a part on top of another one: the courtyards
 /// plus the board clearance must not overlap. Courtyards are what KiCAD's DRC
 /// checks, so a move this accepts cannot leave the board failing
-/// `courtyards_overlap`.
-fn overlap_error(board: &MoveBoard, plan: &MovePlan, clearance: f64) -> Option<String> {
-    let extent = |reference: &str| {
-        board.parts.get(reference).map(|part| {
-            Rect::new(
-                part.at.x - part.width / 2.0 - clearance / 2.0,
-                part.at.y - part.height / 2.0 - clearance / 2.0,
-                part.at.x + part.width / 2.0 + clearance / 2.0,
-                part.at.y + part.height / 2.0 + clearance / 2.0,
-            )
-        })
-    };
+/// `courtyards_overlap`. The refusal carries both rectangles and the measured
+/// gap, so a wrong one can be seen for what it is.
+fn overlap_error(board: &MoveBoard, plan: &MovePlan, clearance: f64) -> Option<Value> {
+    let rect = |r: &Rect| json!([r.min_x, r.min_y, r.max_x, r.max_y]);
     for position in &plan.positions {
-        // A part whose extent cannot be measured is not evidence of clearance:
-        // refuse rather than wave the move through.
-        let Some(moved) = extent(&position.reference) else {
-            return Some(format!(
-                "move_parts refused: {} has no measurable extent on this board",
-                position.reference
-            ));
+        let Some(moved) = board.parts.get(&position.reference) else {
+            return Some(json!({
+                "error": format!(
+                    "move_parts refused: {} has no measurable extent on this board",
+                    position.reference
+                ),
+            }));
         };
-        for (reference, _) in board.parts.iter() {
+        let moved_courtyard = moved.courtyard();
+        for (reference, other) in board.parts.iter() {
             if reference == &position.reference {
                 continue;
             }
-            let Some(other) = extent(reference) else {
-                continue;
-            };
-            if !moved.overlaps(&other) {
+            let other_courtyard = other.courtyard();
+            let (ox, oy) = moved_courtyard
+                .inflate(clearance / 2.0)
+                .axis_penetration(&other_courtyard.inflate(clearance / 2.0));
+            if ox <= 0.0 || oy <= 0.0 {
                 continue;
             }
-            return Some(format!(
-                "move_parts refused: {} at [{:.3}, {:.3}] would overlap {} — leave at least \
-                 {:.3} mm between their courtyards",
-                position.reference, position.at.x, position.at.y, reference, clearance
-            ));
+            let gap = -ox.min(oy);
+            return Some(json!({
+                "error": format!(
+                    "move_parts refused: {} at [{:.3}, {:.3}] would leave {gap:.3} mm to {} — \
+                     their courtyards need {clearance:.3} mm between them",
+                    position.reference, position.at.x, position.at.y, reference,
+                ),
+                "code": "courtyards_overlap",
+                // Show the work: a false refusal is only visible if the rects it
+                // was computed from are on the transcript.
+                "moved": { "reference": position.reference, "courtyard_mm": rect(&moved_courtyard) },
+                "blocked_by": { "reference": reference, "courtyard_mm": rect(&other_courtyard) },
+                "gap_mm": gap,
+                "required_clearance_mm": clearance,
+            }));
         }
     }
     None
 }
 
-#[derive(Debug, Clone)]
 struct MoveBoard {
     bounds: Rect,
     parts: BTreeMap<String, MovePart>,
 }
 
+/// One board part as a move reasons about it: where its origin is, how it is
+/// turned, which side it is on, and its courtyard RELATIVE TO THAT ORIGIN.
+///
+/// The local courtyard is kept asymmetric and transformed on demand. A
+/// connector's origin is pin 1, not its body centre, so collapsing it to a
+/// width and a height centred on the origin invents courtyard on the empty side
+/// — the false overlap that refuses a move which really does clear.
 #[derive(Debug, Clone)]
 struct MovePart {
     at: Point2,
     rotation: f64,
-    width: f64,
-    height: f64,
+    back: bool,
+    local: Rect,
+}
+
+impl MovePart {
+    /// Where this part's courtyard actually is on the board.
+    fn courtyard(&self) -> Rect {
+        crate::place::courtyard_at(self.local, self.at, self.rotation, self.back)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -195,44 +227,56 @@ impl MoveBoard {
     /// A part missing from the map falls back to its pad bounding box.
     fn from_snapshot(
         snapshot: &IpcBoardSnapshot,
-        courtyards: &BTreeMap<String, (f64, f64)>,
+        courtyards: &BTreeMap<String, Rect>,
+        back: &BTreeSet<String>,
     ) -> Self {
-        let mut sizes = BTreeMap::new();
-        for part in &snapshot.imported.parts {
-            let points: Vec<Point2> = snapshot
-                .problem
-                .obstacles
-                .iter()
-                .filter(|ob| ob.kind == format!("pad:{}", part.reference))
-                .flat_map(|ob| {
-                    [
-                        Point2::new(ob.center.x - ob.width / 2.0, ob.center.y - ob.height / 2.0),
-                        Point2::new(ob.center.x + ob.width / 2.0, ob.center.y + ob.height / 2.0),
-                    ]
-                })
-                .collect();
-            let (width, height) = Rect::bounding(&points)
-                .map(|r| (r.max_x - r.min_x, r.max_y - r.min_y))
-                .unwrap_or((1.0, 1.0));
-            let (width, height) = courtyards
-                .get(&part.reference)
-                .copied()
-                .unwrap_or((width, height));
-            sizes.insert(part.reference.clone(), (width.max(1.0), height.max(1.0)));
-        }
         let parts = snapshot
             .imported
             .parts
             .iter()
             .map(|part| {
-                let (width, height) = sizes.get(&part.reference).copied().unwrap_or((1.0, 1.0));
+                let rotation = part.rotation as f64;
+                let on_back = back.contains(&part.reference);
+                // Without a resolvable footprint the pads are all we know. They
+                // come in board coordinates, so undo the pose to get the same
+                // footprint-local rectangle a courtyard would have given —
+                // exact, since a board rotation is a quadrant.
+                let local = courtyards.get(&part.reference).copied().unwrap_or_else(|| {
+                    let local_point = |x: f64, y: f64| {
+                        let turned = Point2::new(x - part.at.x, y - part.at.y).rotate(-rotation);
+                        if on_back {
+                            Point2::new(-turned.x, turned.y)
+                        } else {
+                            turned
+                        }
+                    };
+                    let points: Vec<Point2> = snapshot
+                        .problem
+                        .obstacles
+                        .iter()
+                        .filter(|ob| ob.kind == format!("pad:{}", part.reference))
+                        .flat_map(|ob| {
+                            [
+                                local_point(
+                                    ob.center.x - ob.width / 2.0,
+                                    ob.center.y - ob.height / 2.0,
+                                ),
+                                local_point(
+                                    ob.center.x + ob.width / 2.0,
+                                    ob.center.y + ob.height / 2.0,
+                                ),
+                            ]
+                        })
+                        .collect();
+                    Rect::bounding(&points).unwrap_or(Rect::new(-0.5, -0.5, 0.5, 0.5))
+                });
                 (
                     part.reference.clone(),
                     MovePart {
                         at: part.at,
-                        rotation: part.rotation as f64,
-                        width,
-                        height,
+                        rotation,
+                        back: on_back,
+                        local,
                     },
                 )
             })
@@ -364,9 +408,6 @@ fn resolve_move_parts(
         let final_rotation = rotation.unwrap_or(current.rotation);
 
         let mut updated = current;
-        if rotation_swaps_extents(updated.rotation, final_rotation) {
-            std::mem::swap(&mut updated.width, &mut updated.height);
-        }
         updated.at = at;
         updated.rotation = final_rotation;
         board.parts.insert(reference.clone(), updated);
@@ -480,55 +521,35 @@ fn parse_edge(input: &Value, key: &str, ctx: &str) -> std::result::Result<Edge, 
     }
 }
 
+/// The origin that seats `part` `gap` mm clear of `target` on the named side.
+///
+/// Solved on the courtyards, not on centres: the answer is the origin that puts
+/// the part's own courtyard edge where it belongs, which is not the same thing
+/// for a footprint whose origin sits off-centre.
 fn near_position(part: &MovePart, target: &MovePart, side: Side, gap: f64) -> Point2 {
+    let (own, theirs) = (part.courtyard(), target.courtyard());
+    let (dx, dy) = (part.at.x - own.min_x, part.at.y - own.min_y);
     match side {
-        Side::Left => Point2::new(
-            target.at.x - target.width / 2.0 - gap - part.width / 2.0,
-            target.at.y,
-        ),
-        Side::Right => Point2::new(
-            target.at.x + target.width / 2.0 + gap + part.width / 2.0,
-            target.at.y,
-        ),
-        Side::Above => Point2::new(
-            target.at.x,
-            target.at.y - target.height / 2.0 - gap - part.height / 2.0,
-        ),
-        Side::Below => Point2::new(
-            target.at.x,
-            target.at.y + target.height / 2.0 + gap + part.height / 2.0,
-        ),
+        Side::Left => Point2::new(theirs.min_x - gap - own.width() + dx, target.at.y),
+        Side::Right => Point2::new(theirs.max_x + gap + dx, target.at.y),
+        Side::Above => Point2::new(target.at.x, theirs.min_y - gap - own.height() + dy),
+        Side::Below => Point2::new(target.at.x, theirs.max_y + gap + dy),
     }
 }
 
+/// The origin that seats `part` `gap` mm inside the named board edge, centred
+/// on the other axis.
 fn edge_position(part: &MovePart, bounds: Rect, edge: Edge, gap: f64) -> Point2 {
+    let own = part.courtyard();
+    let (dx, dy) = (part.at.x - own.min_x, part.at.y - own.min_y);
+    let mid_x = (bounds.min_x + bounds.max_x) / 2.0 - own.width() / 2.0 + dx;
+    let mid_y = (bounds.min_y + bounds.max_y) / 2.0 - own.height() / 2.0 + dy;
     match edge {
-        Edge::Left => Point2::new(
-            bounds.min_x + gap + part.width / 2.0,
-            (bounds.min_y + bounds.max_y) / 2.0,
-        ),
-        Edge::Right => Point2::new(
-            bounds.max_x - gap - part.width / 2.0,
-            (bounds.min_y + bounds.max_y) / 2.0,
-        ),
-        Edge::Top => Point2::new(
-            (bounds.min_x + bounds.max_x) / 2.0,
-            bounds.min_y + gap + part.height / 2.0,
-        ),
-        Edge::Bottom => Point2::new(
-            (bounds.min_x + bounds.max_x) / 2.0,
-            bounds.max_y - gap - part.height / 2.0,
-        ),
+        Edge::Left => Point2::new(bounds.min_x + gap + dx, mid_y),
+        Edge::Right => Point2::new(bounds.max_x - gap - own.width() + dx, mid_y),
+        Edge::Top => Point2::new(mid_x, bounds.min_y + gap + dy),
+        Edge::Bottom => Point2::new(mid_x, bounds.max_y - gap - own.height() + dy),
     }
-}
-
-fn rotation_swaps_extents(from: f64, to: f64) -> bool {
-    let turns = (to - from) / 90.0;
-    let rounded = turns.round();
-    if (turns - rounded).abs() > 1e-6 {
-        return false;
-    }
-    (rounded as i64).rem_euclid(2) == 1
 }
 
 /// Route a single live-board connection with grid-A* obstacle avoidance.
@@ -549,29 +570,23 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     ctx.close_kicad_session();
     match prepared {
         Ok((problem, solution, request, layer_names)) => {
-            let revision = match ctx.revisions().capture(
+            let gate = match Guard::open(
+                ctx,
                 "route_track",
                 "Route one board connection",
                 &[ctx.pcb_path()],
             ) {
-                Ok(revision) => revision,
-                Err(error) => {
-                    return Ok(
-                        json!({ "error": format!("could not capture the board before routing: {error}") }),
-                    );
-                }
+                Ok(gate) => gate,
+                Err(refusal) => return Ok(refusal),
             };
             if let Err(err) =
                 super::route::write_route_offline(ctx, &problem, &solution, &layer_names)
             {
-                return Ok(json!({
-                    "error": format!("route_track could not write copper: {err}"),
-                    "revision": revision,
-                }));
+                let error =
+                    json!({ "error": format!("route_track could not write copper: {err}") });
+                return Ok(gate.rollback(ctx, error));
             }
-            let mut output = route_track_output(&problem, &solution, &request);
-            output["revision"] = json!(revision);
-            Ok(output)
+            Ok(gate.commit(ctx, route_track_output(&problem, &solution, &request)))
         }
         Err(err) => Ok(json!({ "error": err })),
     }
@@ -588,29 +603,22 @@ pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(request) => request,
         Err(error) => return Ok(json!({ "error": error })),
     };
-    let revision = match ctx.revisions().capture(
+    let gate = match Guard::open(
+        ctx,
         "delete_copper",
         "Delete board copper",
         std::slice::from_ref(&path),
     ) {
-        Ok(revision) => revision,
-        Err(error) => {
-            return Ok(
-                json!({ "error": format!("could not capture the board before deleting copper: {error}") }),
-            );
-        }
+        Ok(gate) => gate,
+        Err(refusal) => return Ok(refusal),
     };
     match ctx.kicad().with_session(&path, |session| {
         session
             .kicad()
             .delete_copper_near(&request, &snapshot.layer_names)
     }) {
-        Ok(hits) => {
-            let mut output = delete_copper_output(&request, &hits);
-            output["revision"] = json!(revision);
-            Ok(output)
-        }
-        Err(e) => Ok(json!({ "error": e.to_string(), "revision": revision })),
+        Ok(hits) => Ok(gate.commit(ctx, delete_copper_output(&request, &hits))),
+        Err(e) => Ok(gate.rollback(ctx, json!({ "error": e.to_string() }))),
     }
 }
 
@@ -645,17 +653,14 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let path = ctx.pcb_path();
     let project_path = ctx.sch_path().with_extension("kicad_pro");
-    let revision = match ctx.revisions().capture(
+    let gate = match Guard::open(
+        ctx,
         "set_net_width",
         "Set a board net class",
         &[path.clone(), project_path.clone()],
     ) {
-        Ok(revision) => revision,
-        Err(error) => {
-            return Ok(
-                json!({ "error": format!("could not capture the board rules before editing: {error}") }),
-            );
-        }
+        Ok(gate) => gate,
+        Err(refusal) => return Ok(refusal),
     };
     let live = ctx.kicad().with_session(&path, |session| {
         let width_nm = mm_to_nm(width);
@@ -670,18 +675,20 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(changed)
     });
     match live {
-        Ok(changed) => Ok(json!({
-            "ok": true,
-            "write_path": "ipc",
-            "changed": changed,
-            "net_class": name.clone(),
-            "width": width,
-            "clearance": clearance,
-            "nets": [net.clone()],
-            "changed_nets": if changed { vec![net] } else { Vec::new() },
-            "changed_classes": if changed { vec![name] } else { Vec::new() },
-            "revision": revision,
-        })),
+        Ok(changed) => Ok(gate.commit(
+            ctx,
+            json!({
+                "ok": true,
+                "write_path": "ipc",
+                "changed": changed,
+                "net_class": name.clone(),
+                "width": width,
+                "clearance": clearance,
+                "nets": [net.clone()],
+                "changed_nets": if changed { vec![net] } else { Vec::new() },
+                "changed_classes": if changed { vec![name] } else { Vec::new() },
+            }),
+        )),
         Err(live_error) => {
             ctx.close_kicad_session();
             let update = kicad_board::NetClassUpdate {
@@ -691,27 +698,31 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 nets: vec![net.clone()],
             };
             match write_net_width_offline(&path, &project_path, &update) {
-                Ok(report) => Ok(json!({
-                    "ok": true,
-                    "write_path": "offline",
-                    "fallback_reason": live_error.to_string(),
-                    "changed": report.changed,
-                    "board_changed": report.board_changed,
-                    "project_changed": report.project_changed,
-                    "net_class": name,
-                    "width": width,
-                    "clearance": clearance,
-                    "nets": [net],
-                    "changed_nets": report.nets,
-                    "changed_classes": report.classes,
-                    "revision": revision,
-                })),
-                Err(offline_error) => Ok(json!({
-                    "error": format!(
-                        "{live_error}; offline net-width fallback failed: {offline_error}"
-                    ),
-                    "revision": revision,
-                })),
+                Ok(report) => Ok(gate.commit(
+                    ctx,
+                    json!({
+                        "ok": true,
+                        "write_path": "offline",
+                        "fallback_reason": live_error.to_string(),
+                        "changed": report.changed,
+                        "board_changed": report.board_changed,
+                        "project_changed": report.project_changed,
+                        "net_class": name,
+                        "width": width,
+                        "clearance": clearance,
+                        "nets": [net],
+                        "changed_nets": report.nets,
+                        "changed_classes": report.classes,
+                    }),
+                )),
+                Err(offline_error) => Ok(gate.rollback(
+                    ctx,
+                    json!({
+                        "error": format!(
+                            "{live_error}; offline net-width fallback failed: {offline_error}"
+                        )
+                    }),
+                )),
             }
         }
     }
@@ -1331,6 +1342,72 @@ fn layer_name_from_index(idx: u32, layer_names: &[String]) -> String {
 mod tests {
     use super::*;
 
+    /// The move a real 555 board refused: J1 — a pin header whose origin is
+    /// pin 1, not its body centre — to (10.77, 35.5), with R2 — an axial
+    /// resistor whose origin is its first lead — sitting at (25.25, 35.5).
+    /// There is over 10 mm of clear board between them; only a courtyard box
+    /// centred on each origin, twice too wide on the empty side, overlaps.
+    #[test]
+    fn a_pin_one_origin_header_clears_an_axial_resistor_ten_millimetres_away() {
+        let Some(ctx) = gordian_runtime::AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCAD detected");
+            return;
+        };
+        let Ok(catalog) = ctx.footprint_catalog() else {
+            eprintln!("SKIP: no footprint catalog");
+            return;
+        };
+        let envelope = |id: &str| {
+            let id = kicad_footprint::FootprintId::parse(id).expect("a library id");
+            crate::place::placement_envelope(&catalog.footprint(&id).expect("a footprint"))
+        };
+        let header = envelope("Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical");
+        let resistor = envelope("Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal");
+        assert!(
+            header.min_y.abs() < header.max_y.abs() && resistor.min_x.abs() < resistor.max_x.abs(),
+            "both footprints put their origin off centre: {header:?} {resistor:?}"
+        );
+
+        let part = |at: Point2, local: Rect| MovePart {
+            at,
+            rotation: 0.0,
+            back: false,
+            local,
+        };
+        let mut board = MoveBoard {
+            bounds: Rect::new(0.0, 0.0, 60.0, 60.0),
+            parts: [
+                ("J1".to_owned(), part(Point2::new(2.27, 35.5), header)),
+                ("R2".to_owned(), part(Point2::new(25.25, 35.5), resistor)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let plan = resolve_move_parts(
+            &json!({ "moves": [{ "reference": "J1", "to": [10.77, 35.5] }] }),
+            &mut board,
+        )
+        .expect("the move resolves");
+        assert_eq!(
+            overlap_error(&board, &plan, 0.2),
+            None,
+            "J1 {:?} and R2 {:?} do not touch",
+            board.parts["J1"].courtyard(),
+            board.parts["R2"].courtyard(),
+        );
+
+        // Slid up against the resistor, the same check still refuses — and says
+        // which rectangles it measured.
+        let plan = resolve_move_parts(
+            &json!({ "moves": [{ "reference": "J1", "to": [24.0, 35.5] }] }),
+            &mut board,
+        )
+        .expect("the move resolves");
+        let refused = overlap_error(&board, &plan, 0.2).expect("an overlap");
+        assert_eq!(refused["code"], "courtyards_overlap");
+        assert!(refused["gap_mm"].as_f64().is_some_and(|gap| gap < 0.0));
+    }
+
     /// KiCAD's DRC checks courtyards, which are wider than the pads inside them.
     /// A move judged by pads alone reported success and left the board failing
     /// `courtyards_overlap`, so the guard must measure what DRC measures.
@@ -1364,15 +1441,15 @@ mod tests {
             layer_names: vec!["F.Cu".to_owned(), "B.Cu".to_owned()],
         };
 
-        let pads_only = MoveBoard::from_snapshot(&snapshot, &BTreeMap::new());
-        let c1 = &pads_only.parts["C1"];
-        assert!((c1.width - 2.5).abs() < 1e-6, "pad bbox: {c1:?}");
+        let pads_only = MoveBoard::from_snapshot(&snapshot, &BTreeMap::new(), &BTreeSet::new());
+        let c1 = pads_only.parts["C1"].courtyard();
+        assert!((c1.width() - 2.5).abs() < 1e-6, "pad bbox: {c1:?}");
 
-        let courtyards = BTreeMap::from([("C1".to_owned(), (3.1, 1.8))]);
-        let with_courtyards = MoveBoard::from_snapshot(&snapshot, &courtyards);
-        let c1 = &with_courtyards.parts["C1"];
-        assert!((c1.width - 3.1).abs() < 1e-6, "courtyard: {c1:?}");
-        assert!((c1.height - 1.8).abs() < 1e-6, "courtyard: {c1:?}");
+        let courtyards = BTreeMap::from([("C1".to_owned(), Rect::new(-1.55, -0.9, 1.55, 0.9))]);
+        let with_courtyards = MoveBoard::from_snapshot(&snapshot, &courtyards, &BTreeSet::new());
+        let c1 = with_courtyards.parts["C1"].courtyard();
+        assert!((c1.width() - 3.1).abs() < 1e-6, "courtyard: {c1:?}");
+        assert!((c1.height() - 1.8).abs() < 1e-6, "courtyard: {c1:?}");
     }
 
     fn fixture_board() -> MoveBoard {
@@ -1384,8 +1461,8 @@ mod tests {
                     MovePart {
                         at: Point2::new(50.0, 25.0),
                         rotation: 0.0,
-                        width: 10.0,
-                        height: 8.0,
+                        back: false,
+                        local: Rect::new(-5.0, -4.0, 5.0, 4.0),
                     },
                 ),
                 (
@@ -1393,8 +1470,8 @@ mod tests {
                     MovePart {
                         at: Point2::new(10.0, 10.0),
                         rotation: 0.0,
-                        width: 2.0,
-                        height: 1.0,
+                        back: false,
+                        local: Rect::new(-1.0, -0.5, 1.0, 0.5),
                     },
                 ),
                 (
@@ -1402,8 +1479,8 @@ mod tests {
                     MovePart {
                         at: Point2::new(20.0, 20.0),
                         rotation: 0.0,
-                        width: 4.0,
-                        height: 2.0,
+                        back: false,
+                        local: Rect::new(-2.0, -1.0, 2.0, 1.0),
                     },
                 ),
                 (
@@ -1411,8 +1488,8 @@ mod tests {
                     MovePart {
                         at: Point2::new(30.0, 30.0),
                         rotation: 90.0,
-                        width: 6.0,
-                        height: 10.0,
+                        back: false,
+                        local: Rect::new(-5.0, -3.0, 5.0, 3.0),
                     },
                 ),
             ]

@@ -17,6 +17,7 @@
 //!
 //! ## Tool families (one module each)
 //!
+//! - [`board`] — the guard every board mutator passes through.
 //! - [`seed`] — board-construction rule/extra input types.
 //! - [`footprints`] — footprint discovery + assignment: `search_footprints`,
 //!   `get_footprint_info`.
@@ -27,6 +28,8 @@
 //! - [`copper`] — copper retraction shared by the board mutators.
 //! - [`rules`] — the design rules the board's own footprints permit.
 //! - [`diagnose`] — actionable payloads for a refused route.
+//! - [`intent`] — board intent (edges, proximity, groups, zones) → placement
+//!   constraints. The model states intent; solvers own coordinates.
 //! - [`sizing`] — how big a board its own parts require.
 //! - [`place`] — `get_board`, IPC snapshot→`PlacementView`, and `place_board`.
 //! - [`route`] — `route_board` IPC copper write-back + triage.
@@ -36,6 +39,7 @@
 //! - [`interactive`] — live IPC board editing (`open_board`, `move_parts`,
 //!   `route_track`, `delete_copper`, `set_net_width`).
 
+mod board;
 mod copper;
 pub mod corpus;
 mod create;
@@ -43,6 +47,7 @@ mod diagnose;
 mod export;
 mod fab;
 mod footprints;
+mod intent;
 mod interactive;
 mod outline;
 mod place;

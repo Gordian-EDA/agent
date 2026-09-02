@@ -856,6 +856,7 @@ dependencies = [
  "directories",
  "futures",
  "genai",
+ "geom",
  "gordian-llm",
  "gordian-runtime",
  "gordian-tools-sch",

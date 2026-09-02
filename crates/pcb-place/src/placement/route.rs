@@ -1,7 +1,7 @@
 //! The single tuned placement phase and its internal optimization passes.
 
 use super::anneal::anneal_placement;
-use super::cost::{compute_hpwl_with_rotations, place_cost};
+use super::cost::{CostTerms, compute_hpwl_with_rotations, place_cost};
 use super::force::{force_layout, snap_caps_to_anchor_ring};
 use super::geometry::{
     PLACEMENT_GRID, clamp_center_for_envelope, courtyard_margin, datum_edge_target,
@@ -270,7 +270,7 @@ fn search_corner_assignments(
 /// empty hints are fully supported. The returned `legal` flag is verified by
 /// exact geometry. Never panics: an impossible board returns `legal: false`
 /// with a report rather than overlapping silently or aborting. This is the
-/// baseline (no idiom variants); [`place_best`] selects among variants.
+/// baseline: no idiom variants, which [`place_tuned`] turns on.
 pub fn place(problem: &PlacementView, hints: &PlacementHints) -> PlaceResult {
     place_variant(problem, hints, PlaceOpts::default())
 }
@@ -284,12 +284,7 @@ pub(crate) fn place_variant(
     let n = problem.parts.len();
     let nets = derive_nets(problem);
     let margin = courtyard_margin(problem.clearance);
-    let pairs = decoupling_pairs(problem);
-    let edge_idx: Vec<usize> = hints
-        .edge_seek
-        .iter()
-        .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
-        .collect();
+    let terms = CostTerms::new(problem, hints, decoupling_pairs(problem));
 
     // Locked parts use their locked rotation (snapped to a quadrant); unlocked
     // parts start at 0 and may be polished after position legalization if a
@@ -339,9 +334,8 @@ pub(crate) fn place_variant(
     //     never recovers that. Snapping it tight first means SA only has to polish a good
     //     start. Skips parts under an explicit group/surround hint (the agent placed those
     //     deliberately). GATED on `opts.decouple` so the baseline (`PlaceOpts::default()`)
-    //     stays UNSNAPPED — `place_best`'s fault-first oracle then has both a snapped and
-    //     an unsnapped candidate and picks whichever routes cleaner per board (the snap
-    //     helps some boards' supply loops but hurts others' routability).
+    //     stays UNSNAPPED: the snap helps some boards' supply loops and hurts others'
+    //     routability, so only the tuned variant asks for it.
     if opts.decouple {
         snap_caps_to_anchor_ring(problem, hints, &half, margin, &mut pos);
     }
@@ -360,8 +354,7 @@ pub(crate) fn place_variant(
         problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &pos,
         &mut rotations,
         &mut half,
@@ -371,8 +364,7 @@ pub(crate) fn place_variant(
         problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &rotations,
         &half,
         &copper_bbox,
@@ -382,8 +374,7 @@ pub(crate) fn place_variant(
         problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &rotations,
         &half,
         &copper_bbox,
@@ -393,8 +384,7 @@ pub(crate) fn place_variant(
         problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &pos,
         &mut rotations,
         &mut half,
@@ -415,7 +405,7 @@ pub(crate) fn place_variant(
 
     let hpwl = compute_hpwl_with_rotations(problem, &nets, &pos, &rotations);
     let layout_cost = place_cost(
-        problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
 
     PlaceResult {
@@ -435,14 +425,13 @@ pub(crate) fn polish_positions(
     problem: &PlacementView,
     nets: &[crate::LogicalNet],
     margin: f64,
-    pairs: &[(usize, usize)],
-    edge_idx: &[usize],
+    terms: &CostTerms,
     rotations: &[f64],
     half: &[(f64, f64)],
     copper_bbox: &[Rect],
     pos: &mut [Point2],
 ) {
-    let mut cost = place_cost(problem, nets, half, margin, rotations, pairs, edge_idx, pos);
+    let mut cost = place_cost(problem, nets, half, margin, rotations, terms, pos);
     let step = PLACEMENT_GRID.pitch();
     let mut moves = Vec::new();
     for scale in [4.0, 2.0, 1.0] {
@@ -471,8 +460,7 @@ pub(crate) fn polish_positions(
                 problem,
                 nets,
                 margin,
-                pairs,
-                edge_idx,
+                terms,
                 rotations,
                 half,
                 copper_bbox,
@@ -495,8 +483,7 @@ fn polish_positions_in_order(
     problem: &PlacementView,
     nets: &[crate::LogicalNet],
     margin: f64,
-    pairs: &[(usize, usize)],
-    edge_idx: &[usize],
+    terms: &CostTerms,
     rotations: &[f64],
     half: &[(f64, f64)],
     copper_bbox: &[Rect],
@@ -550,7 +537,7 @@ fn polish_positions_in_order(
             rotations[i],
             pos,
             i,
-            edge_idx,
+            terms,
         ));
         for candidate in unique_position_candidates(
             problem,
@@ -566,7 +553,7 @@ fn polish_positions_in_order(
                 continue;
             }
             let next_cost =
-                place_cost(problem, nets, half, margin, rotations, pairs, edge_idx, pos);
+                place_cost(problem, nets, half, margin, rotations, terms, pos);
             if next_cost + 1e-9 < best_cost {
                 best_cost = next_cost;
                 best = candidate;
@@ -740,20 +727,35 @@ pub(crate) fn unique_position_candidates(
     out
 }
 
+/// Candidate seats on a board edge for a part the hints steer there: all four
+/// edges for a nearest-edge seeker, and only the named one for an authored
+/// `edge` intent — plus, for the named edge, the FLUSH seat, since the intent is
+/// that the part's courtyard reach the edge, not merely the edge band.
 pub(crate) fn edge_seek_position_candidates(
     problem: &PlacementView,
     half: &[(f64, f64)],
     rotation: f64,
     pos: &[Point2],
     part_idx: usize,
-    edge_idx: &[usize],
+    terms: &CostTerms,
 ) -> Vec<Point2> {
-    if !edge_idx.contains(&part_idx) {
+    let mut edges: Vec<Edge> = Vec::new();
+    if terms.edge_seek.contains(&part_idx) {
+        edges.extend([Edge::N, Edge::S, Edge::W, Edge::E]);
+    }
+    let named: Vec<Edge> = terms
+        .edge_of
+        .iter()
+        .filter(|(part, _)| *part == part_idx)
+        .map(|&(_, edge)| edge)
+        .collect();
+    edges.extend(named.iter().copied());
+    if edges.is_empty() {
         return Vec::new();
     }
     let current = pos[part_idx];
     let h = half[part_idx];
-    [Edge::N, Edge::S, Edge::W, Edge::E]
+    let mut out: Vec<Point2> = edges
         .into_iter()
         .filter_map(|edge| {
             if problem.parts[part_idx].edge_datum.is_some()
@@ -775,7 +777,20 @@ pub(crate) fn edge_seek_position_candidates(
                 },
             })
         })
-        .collect()
+        .collect();
+    let flush = |edge: Edge| {
+        let part = &problem.parts[part_idx];
+        let envelope = part_placement_bounds_envelope(part, h, rotated_copper_bbox(part, rotation));
+        let b = &problem.bounds;
+        match edge {
+            Edge::N => Point2 { x: current.x, y: b.min_y - envelope.min_y },
+            Edge::S => Point2 { x: current.x, y: b.max_y - envelope.max_y },
+            Edge::W => Point2 { x: b.min_x - envelope.min_x, y: current.y },
+            Edge::E => Point2 { x: b.max_x - envelope.max_x, y: current.y },
+        }
+    };
+    out.extend(named.into_iter().map(flush));
+    out
 }
 
 pub(crate) fn net_centroid_position_candidates(
@@ -1432,14 +1447,13 @@ pub(crate) fn polish_swaps(
     problem: &PlacementView,
     nets: &[crate::LogicalNet],
     margin: f64,
-    pairs: &[(usize, usize)],
-    edge_idx: &[usize],
+    terms: &CostTerms,
     rotations: &[f64],
     half: &[(f64, f64)],
     copper_bbox: &[Rect],
     pos: &mut [Point2],
 ) {
-    let mut cost = place_cost(problem, nets, half, margin, rotations, pairs, edge_idx, pos);
+    let mut cost = place_cost(problem, nets, half, margin, rotations, terms, pos);
     for _ in 0..2 {
         let mut improved = false;
         for (a, b) in swap_pair_order(problem, nets, rotations, pos) {
@@ -1449,7 +1463,7 @@ pub(crate) fn polish_swaps(
                 continue;
             }
             let next_cost =
-                place_cost(problem, nets, half, margin, rotations, pairs, edge_idx, pos);
+                place_cost(problem, nets, half, margin, rotations, terms, pos);
             if next_cost + 1e-9 < cost {
                 cost = next_cost;
                 improved = true;
@@ -1573,14 +1587,13 @@ pub(crate) fn polish_rotations(
     problem: &PlacementView,
     nets: &[crate::LogicalNet],
     margin: f64,
-    pairs: &[(usize, usize)],
-    edge_idx: &[usize],
+    terms: &CostTerms,
     pos: &[Point2],
     rotations: &mut [f64],
     half: &mut [(f64, f64)],
     copper_bbox: &mut [Rect],
 ) {
-    let mut cost = place_cost(problem, nets, half, margin, rotations, pairs, edge_idx, pos);
+    let mut cost = place_cost(problem, nets, half, margin, rotations, terms, pos);
 
     for _ in 0..4 {
         let mut improved = false;
@@ -1608,7 +1621,7 @@ pub(crate) fn polish_rotations(
                     continue;
                 }
                 let next_cost =
-                    place_cost(problem, nets, half, margin, rotations, pairs, edge_idx, pos);
+                    place_cost(problem, nets, half, margin, rotations, terms, pos);
                 if next_cost + 1e-9 < best_cost {
                     best_cost = next_cost;
                     best_rot = candidate;

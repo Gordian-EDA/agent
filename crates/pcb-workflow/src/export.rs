@@ -197,16 +197,21 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .filter(|v| !is_zone_self_unconnected(v))
         .collect();
-    // The board's own part list is what turns KiCAD's prose into pad handles —
-    // read only when there is something to name, since taking a snapshot
-    // reopens the session this function deliberately closed. DRC still stands if
-    // the board cannot be read, so this is best-effort.
+    // The board's own part list is what turns KiCAD's prose into pad handles and
+    // says which footprints are still in the seed row. Reading it reopens the
+    // session this function closed; DRC stands either way, so it is best-effort.
+    // A part left in the seed row is not a DRC finding — KiCAD has no rule for
+    // "never laid out" — but it is exactly what the next `place_board({refs})`
+    // call must name, so the completion signal has to say it.
+    let board = crate::active_board(ctx).ok();
+    let unplaced = board
+        .as_ref()
+        .map(|board| kicad_board::seed_row_references(&board.imported))
+        .unwrap_or_default();
     let unconnected = if meaningful_unconnected.is_empty() {
         Vec::new()
     } else {
-        let parts = crate::active_board(ctx)
-            .map(|board| board.imported.parts)
-            .unwrap_or_default();
+        let parts = board.map(|board| board.imported.parts).unwrap_or_default();
         crate::diagnose::unconnected_pairs(
             &parts,
             meaningful_unconnected
@@ -247,15 +252,25 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         // Never a bare count: the two pads that should be joined are what say
         // which route_track / route_board{nets} call repairs the board.
         "unconnected": unconnected,
+        // Footprints still in the seed row: place them with
+        // place_board({refs}) before routing expects copper to reach them.
+        "unplaced": unplaced,
         "note": if gate.is_ok() {
             format!("{note_prefix}KiCAD DRC passed; {silk_warnings} silkscreen warning(s) remain after bounded reference cleanup.")
         } else {
             format!("{note_prefix}KiCAD DRC reported issues; inspect violations/unconnected counts.")
         },
-        "next": if gate.is_ok() {
-            "DRC gate passed; finish the task. Do not resync, replace, or reroute this unchanged board. reported_findings may include tolerated non-copper warnings; blocking_findings is authoritative."
+        "next": if !unplaced.is_empty() {
+            format!(
+                "{} footprint(s) are still in the seed row: call place_board({{\"refs\": {}}}) \
+                 to lay them out, then route_board, then check_board again.",
+                unplaced.len(),
+                serde_json::to_string(&unplaced).unwrap_or_else(|_| "[]".to_owned()),
+            )
+        } else if gate.is_ok() {
+            "DRC gate passed; finish the task. Do not resync, replace, or reroute this unchanged board. reported_findings may include tolerated non-copper warnings; blocking_findings is authoritative.".to_owned()
         } else {
-            "Fix the top blocking violations/unconnected items, then call check_board again. Do not resync blindly."
+            "Fix the top blocking violations/unconnected items, then call check_board again. Do not resync blindly.".to_owned()
         },
     }))
 }
