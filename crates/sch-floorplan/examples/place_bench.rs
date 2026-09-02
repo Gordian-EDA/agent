@@ -21,7 +21,10 @@ fn engines() -> Vec<(PlacementEngineKind, Box<dyn PlacementEngine>)> {
             Box::new(cluster_place::ClusterPlace),
         ),
         (PlacementEngineKind::Anneal, Box::new(anneal_place::Anneal)),
-        (PlacementEngineKind::Spine, Box::new(spine_place::SpinePlace)),
+        (
+            PlacementEngineKind::Spine,
+            Box::new(spine_place::SpinePlace),
+        ),
     ]
 }
 
@@ -64,7 +67,8 @@ fn main() {
                         "{name}\t{label}\t{parts}\t{secs:.1}\t{}",
                         report.committed as u8
                     );
-                    doc.write(format!("{out}/{name}.{label}.kicad_sch")).unwrap();
+                    doc.write(format!("{out}/{name}.{label}.kicad_sch"))
+                        .unwrap();
                 }
                 Err(e) => println!("{name}\t{label}\t{parts}\t{secs:.1}\tERR {e}"),
             }

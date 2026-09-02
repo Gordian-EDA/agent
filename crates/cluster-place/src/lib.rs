@@ -115,7 +115,13 @@ impl PlacementEngine for ClusterPlace {
         //    can only REDUCE crossings, so when the anneal already routed the sheet crossing-free
         //    (the common case) the whole search is wasted realizes — skip it.
         if sa_crossings > 0 && !problem.out_of_time() {
-            pose::search_hub_poses(&eval, &mut problem.items, &problem.inc, &out.ir);
+            pose::search_hub_poses(
+                &eval,
+                &mut problem.items,
+                &problem.inc,
+                &out.ir,
+                problem.deadline,
+            );
         }
         // 3. De-sprawl floorplanner: lay each module
         //    out in isolation + pack, kept only when it strictly out-de-sprawls the SA on both
@@ -127,8 +133,11 @@ impl PlacementEngine for ClusterPlace {
                 &mut problem.items,
                 &problem.inc,
                 &out.ir,
-                baseline_rendered,
-                sa_warnings,
+                compact::Bar {
+                    rendered: baseline_rendered,
+                    warnings: sa_warnings,
+                },
+                problem.deadline,
             );
         }
         // 4. SAFETY NET: pose gates on gate-time (truthfulness, warnings, crossings), which is

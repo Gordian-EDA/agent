@@ -85,7 +85,6 @@ impl<'a> RegionProblem<'a> {
         obstacles: Vec<Rect>,
         ir: LayoutIr,
         engine: &'a dyn PlacementEngine,
-        deadline: Option<Deadline>,
     ) -> Self {
         let mut all = items.clone();
         all.extend(fixed.iter().cloned());
@@ -100,8 +99,14 @@ impl<'a> RegionProblem<'a> {
             ir,
             engine,
             options: PlaceOptions::default(),
-            deadline,
+            deadline: None,
         }
+    }
+
+    /// Stop the search by `deadline`; the engine ships its best-so-far.
+    pub fn by(mut self, deadline: Option<Deadline>) -> Self {
+        self.deadline = deadline;
+        self
     }
 }
 

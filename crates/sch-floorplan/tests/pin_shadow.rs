@@ -93,7 +93,8 @@ fn place_parts_keeps_numbered_pin_assignments_distinct() {
     assert!(!diagnostics.has_errors(), "{diagnostics:#?}");
 
     let mut doc = live::blank_sheet().unwrap();
-    let report = live::place_parts(&env, &mut doc, &input, &cluster_place::ClusterPlace, None).unwrap();
+    let report =
+        live::place_parts(&env, &mut doc, &input, &cluster_place::ClusterPlace, None).unwrap();
     assert!(report.committed, "{:?}", report.mismatch);
     assert!(live::verify(&doc, &design).is_empty());
 
@@ -106,7 +107,11 @@ fn place_parts_keeps_numbered_pin_assignments_distinct() {
     let u2 = cli_pin_nets(&env, &schematic, "U2");
     assert_eq!(u1, u2, "U1 and U2 must share nets pin for pin");
     let distinct: std::collections::BTreeSet<&String> = u1.values().collect();
-    assert_eq!(distinct.len(), 3, "each physical pin on its own net: {u1:?}");
+    assert_eq!(
+        distinct.len(),
+        3,
+        "each physical pin on its own net: {u1:?}"
+    );
     assert_eq!(u1["2"], "B");
 }
 

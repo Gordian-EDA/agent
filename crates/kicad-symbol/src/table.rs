@@ -249,6 +249,23 @@ mod tests {
     }
 
     #[test]
+    fn suggest_reaches_across_libraries_for_an_unknown_library() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Device.kicad_sym"),
+            "(kicad_symbol_lib (symbol \"Fuse\") (symbol \"Fuse_Small\") (symbol \"R\"))",
+        )
+        .expect("write lib");
+        let t = SymbolTable::from_symbol_dir(dir.path().to_path_buf());
+
+        // `Fuse:Fuse` names a library that does not exist, so there is nothing to
+        // search WITHIN — the whole install is ranked instead.
+        let hits = t.suggest("Fuse:Fuse");
+        assert!(hits.contains(&"Device:Fuse".to_string()), "{hits:?}");
+        assert!(hits.contains(&"Device:Fuse_Small".to_string()), "{hits:?}");
+    }
+
+    #[test]
     fn label_global_is_synthesised() {
         let t = SymbolTable::mock();
         assert_eq!(t.symbol("label:global").unwrap().pins.len(), 1);

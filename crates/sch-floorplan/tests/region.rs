@@ -79,7 +79,6 @@ fn arrange_places_new_parts_without_disturbing_the_neighbours() {
         obstacles.clone(),
         ir,
         &spine_place::SpinePlace,
-        None,
     ));
 
     assert_eq!(out.poses.len(), 3);
@@ -154,7 +153,6 @@ fn arrange_with_no_neighbours_is_the_bulk_placement_path() {
         Vec::new(),
         ir,
         &spine_place::SpinePlace,
-        None,
     ));
     assert_eq!(out.poses.len(), n);
     assert_eq!(out.result.truthfulness_breaks, 0);

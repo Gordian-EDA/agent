@@ -688,6 +688,15 @@ pub fn anneal_place(
         // are offered to the pick, which judges on REAL post-solve warnings then true
         // cost — so neither pass can ever ship a worse/colliding sheet than the floor.
         let variants: [(bool, bool); 3] = [(false, false), (true, false), (true, true)];
+        // Every candidate below is scored by ROUTING the whole sheet, which is where a
+        // large fast-lane board spends most of its wall time. Out of time, keep the
+        // conservative floor alone: one candidate off the raw seed, still gated the same
+        // way, so the result is a worse-optimised sheet rather than a missed deadline.
+        let (bases, variants): (&[Vec<Item>], &[(bool, bool)]) = if problem.out_of_time() {
+            (&bases[..1], &variants[..1])
+        } else {
+            (&bases, &variants[..])
+        };
         let candidates: Vec<Vec<Item>> = bases
             .par_iter()
             .flat_map_iter(|b| {

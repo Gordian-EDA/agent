@@ -68,36 +68,41 @@ const SEARCH_SHARE: f64 = 0.7;
 /// keeps it.
 ///
 /// A placement search is unbounded in principle, so "how long may this take" is a
-/// caller's decision, not the engine's. [`plan`](Self::plan) turns the promise into
-/// the two things that keep it: which engine to run, and the [`Deadline`] the search
-/// stops at. Nothing is written before the truthfulness gate, so a call that
-/// overruns anyway is refused with the document untouched.
+/// caller's decision, not the engine's. [`engine`](Self::engine) says which engine
+/// keeps the promise; the deadlines behind it stop the search with room to spare.
+/// Nothing is written before the truthfulness gate, so a call that overruns anyway
+/// is refused with the document untouched.
 ///
 /// ## Why this shape
 ///
-/// Wall time is driven by sheet *topology* — pins routed per candidate — far more
-/// than by part count, so a part-count rule alone cannot bound it. Measured on an
-/// empty sheet, release build (seconds to `place_parts` returning a committed sheet;
-/// `cluster` is the historical default):
+/// `place_parts` on a blank sheet, release build, per engine: unbounded seconds,
+/// then `tools/schematic_critic.py` on the rendered result. Every run was truthful
+/// (committed) and every engine produced the same ERC error count on a given
+/// fixture — the sheets differ only in time and in how they read.
 ///
-/// | fixture                     | parts | cluster | anneal | spine |
-/// |-----------------------------|-------|---------|--------|-------|
-/// | 555-blinker                 |     9 |     1.3 |   73.1 |   1.3 |
-/// | hbridge-nmos                |    13 |     0.6 |    0.4 |   0.6 |
-/// | bga-fpga-ice40              |    30 |    25.3 |   18.5 |  12.5 |
-/// | bedrock-selfrepair-bluepill |    39 |    67.5 |   52.8 |  26.6 |
-/// | bms-10s (BQ76930, 30-pin)   |    46 |    19.7 |   16.7 |  14.5 |
-/// | openmyo-emg                 |    63 |   114.2 |   30.6 |  12.2 |
-/// | stm32f4-buck                |    75 |    69.7 |   57.0 |  27.5 |
-/// | esp32-multifunction         |    92 |    37.5 |   35.6 |  15.3 |
+/// | fixture                     | parts | ERC | cluster    | anneal     | spine     |
+/// |-----------------------------|-------|-----|------------|------------|-----------|
+/// | 555-blinker                 |     9 |   0 |   1.3s / 9 |  73.1s / 4 |  1.3s / 9 |
+/// | hbridge-nmos                |    13 |   4 |   0.6s / 9 |   0.4s / 9 |  0.6s / 8 |
+/// | bga-fpga-ice40              |    30 |   0 |  25.3s / 6 |  18.5s / 6 | 12.5s / 6 |
+/// | bedrock-selfrepair-bluepill |    39 |   1 |  67.5s / 6 |  52.8s / 6 | 26.6s / 7 |
+/// | bms-10s (BQ76930, 30-pin)   |    46 |   0 |  19.7s / 6 |  16.7s / 5 | 14.5s / 8 |
+/// | openmyo-emg                 |    63 |   0 | 114.2s / 5 |  30.6s / 6 | 12.2s / 6 |
+/// | stm32f4-buck                |    75 |   0 |  69.7s / 5 |  57.0s / 5 | 26.8s / 6 |
+/// | esp32-multifunction         |    92 |   1 |  37.5s / 5 |  35.6s / 6 | 15.3s / 6 |
 ///
-/// Every run was truthful (committed) and every sheet ERC-clean, so the choice is
-/// purely one of time. Two readings drive it. `cluster` and `anneal` are
-/// non-monotonic and unbounded — 73 s on a nine-part blinker, 114 s on a 63-part
-/// sheet — so neither can be the default at size. `spine` is deterministic and
-/// stayed under 30 s everywhere. Hence: `cluster` below [`SPINE_ABOVE_PARTS`],
-/// `spine` at or above it, and a real deadline underneath both so no topology can
-/// escape the promise.
+/// Three readings drive the policy. Wall time follows sheet *topology* — pins routed
+/// per candidate — not part count, so `cluster` and `anneal` are non-monotonic and
+/// unbounded: 73 s on a nine-part blinker, 114 s on a 63-part sheet. `spine` is
+/// deterministic and stayed under 30 s everywhere. And above ~30 parts `spine` also
+/// *reads* at least as well as the search engines (7/6, 8/6, 6/5, 6/5), so
+/// preferring it at size costs nothing. Below that, `cluster` either takes its own
+/// spine fast path or has room for the polish that earns its 9s.
+///
+/// Hence: `cluster` below [`SPINE_ABOVE_PARTS`], `spine` at or above it, and a real
+/// deadline underneath both so no topology can escape the promise. Under a 60 s
+/// budget every cell above finishes inside it — the worst are `cluster` at 39 parts
+/// (54.9 s) and a forced `anneal` on the blinker (54.2 s).
 #[derive(Debug, Clone, Copy)]
 pub struct PlacementBudget {
     /// Wall time the whole call — search, realise, gate — may take.
@@ -332,16 +337,18 @@ pub fn place_parts(
     }
     let held = seated_items(doc, &before);
 
-    let out = region_arrange(RegionProblem::new(
-        env,
-        &design,
-        movable.clone(),
-        held,
-        obstacles(doc, &[]),
-        ir,
-        engine,
-        search,
-    ));
+    let out = region_arrange(
+        RegionProblem::new(
+            env,
+            &design,
+            movable.clone(),
+            held,
+            obstacles(doc, &[]),
+            ir,
+            engine,
+        )
+        .by(search),
+    );
     let placed = posed(movable, &out.poses);
     let inc = incidence(&placed);
     let writer = crate::realize::realize_block(
@@ -438,16 +445,18 @@ fn rearrange(
     let snapshot = doc.snapshot();
     let (placed, ir) = match engine {
         Some((engine, _)) => {
-            let out = region_arrange(RegionProblem::new(
-                env,
-                &design,
-                movable.clone(),
-                held.clone(),
-                obstacles(doc, &owned),
-                ir,
-                engine,
-                search,
-            ));
+            let out = region_arrange(
+                RegionProblem::new(
+                    env,
+                    &design,
+                    movable.clone(),
+                    held.clone(),
+                    obstacles(doc, &owned),
+                    ir,
+                    engine,
+                )
+                .by(search),
+            );
             (posed(movable, &out.poses), out.ir)
         }
         None => (movable, ir),
@@ -922,4 +931,42 @@ fn diagnostic_summary(diags: &Diagnostics) -> String {
         .map(|d| format!("{}: {}", d.code, d.message))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_picks_the_engine_that_keeps_the_budget() {
+        let small = PlacementBudget::new(SPINE_ABOVE_PARTS - 1);
+        let large = PlacementBudget::new(SPINE_ABOVE_PARTS);
+        assert_eq!(small.engine(None), PlacementEngineKind::Cluster);
+        assert_eq!(large.engine(None), PlacementEngineKind::Spine);
+        assert_eq!(
+            large.engine(Some(PlacementEngineKind::Anneal)),
+            PlacementEngineKind::Anneal,
+            "an explicit engine overrides the policy"
+        );
+    }
+
+    #[test]
+    fn the_search_stops_before_the_call_is_refused() {
+        let (search, hard) = PlacementBudget::new(40).deadlines();
+        assert!(search.instant() < hard.instant());
+        assert!(
+            hard.remaining() - search.remaining() > Duration::from_secs(10),
+            "realising and gating need real room"
+        );
+    }
+
+    #[test]
+    fn overrun_names_the_budget_and_the_way_out() {
+        let message = PlacementBudget::within(Duration::from_secs(60), 46)
+            .overrun()
+            .to_string();
+        assert!(message.contains("budget of 60s (46 parts)"), "{message}");
+        assert!(message.contains("nothing was written"), "{message}");
+        assert!(message.contains("engine: spine"), "{message}");
+    }
 }
