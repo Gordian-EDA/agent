@@ -663,8 +663,10 @@ pub(crate) fn route_signal(
 /// would put it anyway and which the lint exempts against the pin's own body.
 ///
 /// A rung whose anchor would MERGE the net with another (`anchor_merges`) is not a rung
-/// at all: readability may be given up, truthfulness may not. Only when every rung either
-/// merges or collides does it give up and report the landing as not clear.
+/// at all: readability may be given up, truthfulness may not. When every rung merges —
+/// which needs a foreign wire or pin over this pin's own tip, so only on a block drawn
+/// beside existing content — the default landing comes back reported as not clear, and
+/// the bridge picks another pin.
 fn label_stub(
     w: &SchematicWriter,
     env: &KicadInstallation,
@@ -685,8 +687,6 @@ fn label_stub(
     let landing = |s: f64| {
         geom::GRID_50_MIL.snap_point(::geom::Point2::new(ep[0] + v.x * s, ep[1] + v.y * s))
     };
-    // Rung 0.0 is the pin endpoint itself, which is the net's own terminal and so is
-    // always truthful — the ladder can never come back empty-handed on that count.
     let truthful: Vec<f64> = LADDER
         .into_iter()
         .chain([0.0])
@@ -1063,10 +1063,10 @@ fn plan_port_exits(
 /// byte-identical.
 ///
 /// The two hazards are not equal. Sitting on a body is ugly; sitting on another net's
-/// anchor, wire or pennant is a SHORT, and the netlist cannot tell the pennant from
-/// what it landed on. So a merging candidate is never returned: if nothing on the
-/// ladder is both truthful and clear, the first merely-ugly rung wins over the
-/// caller's own starting point.
+/// anchor, wire or pennant is a SHORT, and the netlist cannot tell the pennant from what
+/// it landed on. So the ladder is walked for truthfulness first: a clear-and-truthful
+/// rung wins, else the first merely-ugly truthful one. Only when EVERY rung merges is
+/// the caller's own starting point handed back, for the audit to report.
 pub(crate) fn nudge_port_exit(
     scene: &sch_model::route::RouteScene,
     at: [f64; 2],

@@ -653,25 +653,30 @@ pub(crate) fn add_orphan_label_columns(w: &mut SchematicWriter, design: &Design,
     // A readable single column: even vertical pitch, each pennant pointing right
     // (text reads outward). PITCH leaves a clear gap between the 1.27 mm-tall rows.
     //
-    // The column's coordinates are nominal — `reframe` shifts it to the page margin on
-    // a whole sheet, but a block placed INTO an existing sheet is never reframed, so the
-    // column can be dropped straight onto drawn geometry. An orphan net has no pin to
-    // reach for, so its label is whatever it lands on: step each row down until its
-    // anchor is on nobody else's net.
+    // The column's coordinates are nominal: on a whole sheet the drawing is translated
+    // around them, so the column is always in clear air and is emitted as-is.
+    //
+    // A block placed INTO a sheet that already has content is the exception — it is
+    // never reframed, so the column lands wherever those constants fall, on top of
+    // whatever is there. An orphan net has no pin to reach for, so its label simply
+    // BECOMES whatever it lands on: step each row down until its anchor is on nobody
+    // else's net.
     const X: f64 = 25.4;
     const Y0: f64 = 25.4;
     const PITCH: f64 = 7.62;
-    let mut scene = w.route_scene();
+    let mut scene = w.joins_existing_content().then(|| w.route_scene());
     for (i, net) in orphans.iter().enumerate() {
         let mut at = [X, Y0 + i as f64 * PITCH];
-        for _ in 0..orphans.len().max(16) {
-            if !crate::floorplan::place::route::anchor_merges(&scene, at.into(), net) {
-                break;
+        if let Some(scene) = scene.as_mut() {
+            for _ in 0..orphans.len().max(16) {
+                if !crate::floorplan::place::route::anchor_merges(scene, at.into(), net) {
+                    break;
+                }
+                at[1] += PITCH;
             }
-            at[1] += PITCH;
+            scene.points.push((at.into(), net.clone()));
         }
         w.add_cluster_label(net, at, Dir::East, true);
-        scene.points.push((at.into(), net.clone()));
     }
 }
 

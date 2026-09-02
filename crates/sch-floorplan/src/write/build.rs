@@ -712,6 +712,12 @@ impl SchematicWriter {
         scene
     }
 
+    /// Whether this writer is drawing a block INTO a sheet that already has content,
+    /// rather than composing a whole sheet of its own.
+    pub fn joins_existing_content(&self) -> bool {
+        !self.beside.points.is_empty() || !self.beside.segments.is_empty()
+    }
+
     /// The neighbouring sheet's terminals, tagged with the nets they already carry.
     pub fn beside_terminals(&self) -> Vec<(Point2, String)> {
         self.beside.points.clone()
@@ -726,7 +732,8 @@ impl SchematicWriter {
             .collect()
     }
 
-    /// Declare the drawing this block is being added beside (see [`Self::beside`]).
+    /// Declare the drawing this block is being added beside: the existing sheet's pins,
+    /// wire ends and label anchors with the nets they already carry.
     ///
     /// A block placed onto a populated sheet is routed by a writer that holds only the
     /// block; without this it draws its wires straight across the sheet's pins and
