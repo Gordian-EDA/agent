@@ -745,11 +745,12 @@ tool gaps, tool results that were confusing or insufficient, information you nee
 and could not get, refusals you did not understand, and what would have made the
 task faster or the result better. Return only JSON:
 {{"struggles": ["..."], "wishes": ["..."]}}
-Each entry one short, specific sentence naming the tool or the missing capability."""
+At most six entries each, one short specific sentence naming the tool or the missing
+capability."""
     body = {
         "model": model,
         "messages": [{"role": "user", "content": text}],
-        "max_tokens": 1500,
+        "max_tokens": 6000,
     }
     request = urllib.request.Request(
         f"{base}/chat/completions",
@@ -1117,6 +1118,7 @@ def findings_for(report):
     findings = []
     if report.get("error"):
         findings.append(("harness", f"runner error: {report['error']}"))
+    board_expected = bool(report.get("board_created") or report.get("pcb_facts"))
     for name in (
         "sch_facts_error",
         "kicad_netlist_error",
@@ -1127,6 +1129,8 @@ def findings_for(report):
         "erc_check_error",
         "drc_check_error",
     ):
+        if name in ("drc_check_error", "board_check_error", "board_metrics_error", "pcb_facts_error") and not board_expected:
+            continue
         if report.get(name):
             findings.append(("harness", f"{name}: {report[name]}"))
     checks = report.get("checks", {})
