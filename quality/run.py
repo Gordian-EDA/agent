@@ -39,7 +39,15 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 CASES = Path(__file__).resolve().parent / "cases"
 CAPPED_SCORE = 3
-FINDING_TAGS = ("tool-contract", "prompt", "engine", "harness", "judge", "variance")
+FINDING_TAGS = (
+    "tool-contract",
+    "prompt",
+    "engine",
+    "harness",
+    "judge",
+    "variance",
+    "self-diagnosis",
+)
 
 
 def command(args, *, timeout=600, check=True, env=None, input_text=None):
@@ -566,7 +574,8 @@ def schematic_visual_facts(renders):
             continue
         measured[name] = visual[name]
         introduced = visual.get(f"{name}_introduced")
-        if isinstance(introduced, list):
+        has_tool_baseline = isinstance(visual.get("baseline_revision"), int)
+        if isinstance(introduced, list) and (has_tool_baseline or not before):
             measured[f"{name}_added"] = introduced
         else:
             seen = {json.dumps(item, sort_keys=True) for item in before.get(name, []) or []}

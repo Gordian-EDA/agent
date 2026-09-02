@@ -2789,7 +2789,22 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             .and_then(Value::as_str)
             .unwrap_or("project state")
             .to_string(),
-        "render_schematic" => "rendered schematic to PNG".to_string(),
+        "render_schematic" => {
+            let introduced = [
+                "body_overlaps_introduced",
+                "text_collisions_introduced",
+                "wires_through_bodies_introduced",
+            ]
+            .iter()
+            .map(|name| {
+                result
+                    .pointer(&format!("/visual/{name}"))
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len)
+            })
+            .sum::<usize>();
+            format!("rendered schematic; {introduced} introduced visual finding(s)")
+        }
         "check_board" => {
             let introduced = result
                 .get("introduced")

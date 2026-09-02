@@ -926,7 +926,8 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
                 .context("measuring turn-start schematic visual facts")
         })
         .transpose()?;
-    let visual_json = visual_with_introduced(&visual, baseline_visual.as_ref())?;
+    let mut visual_json = visual_with_introduced(&visual, baseline_visual.as_ref())?;
+    visual_json["baseline_revision"] = json!(baseline.as_ref().map(|baseline| baseline.revision));
     let content_bounds = render_bounds(visual.sheet_extent);
     let overview_bounds = padded_bounds(content_bounds, 2.54);
     let part_count = doc
