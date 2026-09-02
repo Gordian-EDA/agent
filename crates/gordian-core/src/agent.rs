@@ -362,6 +362,8 @@ fn is_schematic_phase_tool(name: &str) -> bool {
             "search_symbols"
                 | "get_symbol_info"
                 | "project_info"
+                | "undo"
+                | "history"
                 | "render_schematic"
                 | "search_footprints"
                 | "get_footprint_info"

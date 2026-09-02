@@ -146,7 +146,14 @@ pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if failures == done.len() {
         return Ok(json!({ "error": "every connection failed", "connected": done }));
     }
-    Ok(json!({ "connected": done, "failed": failures }))
+    let revision = done
+        .iter()
+        .find_map(|result| result.get("revision").cloned());
+    let mut output = json!({ "connected": done, "failed": failures });
+    if let Some(revision) = revision {
+        output["revision"] = revision;
+    }
+    Ok(output)
 }
 
 /// Route a connection between two ends of the sheet.
