@@ -9,9 +9,10 @@
 //! its own net and puts the connection dots where they now belong.
 //!
 //! Then it checks its work against two invariants, and rolls the document back
-//! if either breaks: the net partition must be unchanged, and no two pins the
-//! *drawing* connected may come apart. The second one is the one that matters —
-//! on a sheet wired with labels, a dropped rail wire changes no netlist at all.
+//! if either breaks: the net partition must be unchanged, and no pin it moved
+//! may be left with nothing drawn on it. The second one is the one that matters
+//! — on a sheet wired with labels, a dropped rail wire changes no netlist at
+//! all, and the drawing still shows a part connected to thin air.
 
 use std::collections::{HashMap, HashSet};
 

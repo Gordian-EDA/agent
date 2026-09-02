@@ -274,36 +274,6 @@ impl Sheet {
         ends <= 1 && through == 0
     }
 
-    /// What the drawing alone connects, before any label or power name merges
-    /// two partitions: a component id per connection point.
-    ///
-    /// The net partition cannot see a wire that was dropped from a rail two
-    /// labels also name; this can, which is what makes it the gate that matters.
-    pub fn drawn(&self) -> HashMap<NodeKey, usize> {
-        let index: HashMap<NodeKey, usize> = self
-            .node_net
-            .keys()
-            .enumerate()
-            .map(|(i, k)| (*k, i))
-            .collect();
-        let mut sets = geom::UnionFind::new(index.len());
-        let mut join = |a: NodeKey, b: NodeKey| {
-            if let (Some(i), Some(j)) = (index.get(&a), index.get(&b)) {
-                sets.union(*i, *j);
-            }
-        };
-        for wire in &self.wires {
-            join(key(wire.a), key(wire.b));
-        }
-        for node in self.junctions.iter().chain(&self.sheet_pins) {
-            let p = point_of(node);
-            for wire in self.wires_through(p) {
-                join(*node, key(self.wires[wire].a));
-            }
-        }
-        index.into_iter().map(|(k, i)| (k, sets.find(i))).collect()
-    }
-
     /// Wire ends left hanging in space — no pin, no dot, no label, not even
     /// resting on another wire. A reader reads one as a mistake, and it is.
     pub fn dangling_ends(&self) -> usize {
