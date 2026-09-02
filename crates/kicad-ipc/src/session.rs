@@ -47,8 +47,8 @@ impl OwnedBoardLock {
 
 /// The single KiCAD board session owner for an agent process.
 ///
-/// Callers ask for a board session; the manager attaches to an existing KiCAD
-/// IPC server if possible, otherwise launches a managed headless `pcbnew`.
+/// Callers ask for a board session. Attached mode only connects to an existing
+/// KiCad process; managed mode launches pcbnew for an explicit live workflow.
 pub struct SessionManager {
     session: Mutex<Option<ManagedSession>>,
     attach_running: bool,
@@ -157,9 +157,8 @@ impl SessionManager {
     }
 
     fn attach_or_launch(&self, board: &Path) -> Result<Session, Error> {
-        if self.attach_running
-            && let Ok(mut session) = Session::connect_running_board(board)
-        {
+        if self.attach_running {
+            let mut session = Session::connect_running_board(board)?;
             session.ensure_major(self.expected_major)?;
             return Ok(session);
         }

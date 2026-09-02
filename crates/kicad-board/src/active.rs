@@ -4,12 +4,11 @@ use std::path::{Path, PathBuf};
 
 use geom::{Point2, Rect};
 use pcb_model::{
-    Connection, LayerRef, Obstacle, RoutePoint, RouteSolution, RoutingView, Trace, Via,
-    ViaSpan,
+    Connection, LayerRef, Obstacle, RoutePoint, RouteSolution, RoutingView, Trace, Via, ViaSpan,
 };
 
 /// Domain view consumed by placement and routing tools.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IpcBoardSnapshot {
     pub problem: RoutingView,
     pub imported: ImportedBoard,
@@ -17,7 +16,7 @@ pub struct IpcBoardSnapshot {
     pub layer_names: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImportedBoard {
     pub layer_count: u32,
     pub bounds: Rect,
@@ -26,7 +25,7 @@ pub struct ImportedBoard {
     pub keepout_count: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImportedPart {
     pub reference: String,
     pub lib_id: String,
@@ -36,7 +35,7 @@ pub struct ImportedPart {
     pub pads: Vec<ImportedPad>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImportedPad {
     pub number: String,
     pub net: Option<String>,
@@ -210,27 +209,19 @@ pub fn save_live_board(
     if !path.exists() {
         return Err("no board exists yet — run sync_board first".to_owned());
     }
-    // A wedged live session must not block file-based consumers: the offline
-    // write paths keep the on-disk board current, so drop the session and hand
-    // back the file.
-    if sessions
-        .with_session(path, |session| session.kicad().save())
-        .is_err()
-    {
+    if sessions.save_if_open().is_err() {
         sessions.close();
     }
     Ok(path.to_path_buf())
 }
 
 /// Read the active board as a routing problem.
-pub fn board_problem(
-    path: &Path,
-    sessions: &kicad_ipc::SessionManager,
-) -> std::result::Result<IpcBoardSnapshot, String> {
-    read_snapshot(path, sessions)
+pub fn board_problem(path: &Path) -> std::result::Result<IpcBoardSnapshot, String> {
+    crate::offline::read_snapshot(path)
 }
 
-fn read_snapshot(
+/// Read the board selected in a live KiCad IPC session.
+pub fn read_live_snapshot(
     path: &Path,
     sessions: &kicad_ipc::SessionManager,
 ) -> std::result::Result<IpcBoardSnapshot, String> {

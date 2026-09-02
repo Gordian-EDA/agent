@@ -6,18 +6,20 @@
 mod active;
 mod edit;
 mod netclass;
+mod offline;
 mod patch;
 mod sexpr;
 
 pub use active::{
     ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot, board_problem, bridge_route,
-    from_bridge, save_live_board, seed_row_references,
+    from_bridge, read_live_snapshot, save_live_board, seed_row_references,
 };
 pub use edit::{BoardDoc, BoardFootprint};
 pub use netclass::{
     NetClassUpdate, NetClassUpdateReport, board_net_widths, patch_board_net_class,
     patch_project_net_class, project_net_widths, write_net_class_update,
 };
+pub use offline::read_snapshot;
 pub use patch::{
     FieldPosition, append_copper, append_copper_file, board_copper_layer_names,
     board_file_plane_nets, board_outline_bbox, field_position, footprint_placement,
