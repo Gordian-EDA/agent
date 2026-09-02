@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use geom::{Point2, Rect};
 use kicad_footprint::{Footprint, FootprintId, FootprintPad, PadTechnology};
 use kicad_ipc::FootprintMove;
-use pcb_model::{LayerRef, ViaSpan};
+use pcb_model::{LayerRef, Trace, Via, ViaSpan};
 use pcb_place::{
     Edge, EdgeDatum, GroupHint, LockedAt, Part, PartPad, PlaceResult, Placement, PlacementHints,
     PlacementView,
@@ -145,10 +145,20 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         },
         "parts": parts,
     });
-    let include_copper = input
-        .get("include_copper")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let net_filter = input
+        .get("net")
+        .and_then(Value::as_str)
+        .filter(|net| !net.is_empty());
+    if let Some(net) = net_filter
+        && !net_pins.contains_key(net)
+    {
+        return Ok(json!({ "error": format!("no net named `{net}` on this board") }));
+    }
+    let include_copper = net_filter.is_some()
+        || input
+            .get("include_copper")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     if include_copper {
         if let Some(layer) = input.get("layer").and_then(Value::as_str)
             && layer_filter_index(layer, board.problem.layer_count).is_none()
@@ -162,11 +172,7 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         board_json["copper"] = copper_json(&board, &input);
     }
-    if let Some(net) = input
-        .get("net")
-        .and_then(Value::as_str)
-        .filter(|net| !net.is_empty())
-    {
+    if let Some(net) = net_filter {
         board_json["terminals"] = terminals_json(&board, net);
     }
 
@@ -230,17 +236,25 @@ fn copper_json(board: &IpcBoardSnapshot, input: &Value) -> Value {
             .copper
             .traces
             .iter()
-            .filter(|trace| net_filter.is_none_or(|net| trace.connection == net))
-            .filter(|trace| {
+            .enumerate()
+            .filter(|(_, trace)| net_filter.is_none_or(|net| trace.connection == net))
+            .filter(|(_, trace)| {
                 layer_filter
                     .is_none_or(|layer| trace.layer.index(board.problem.layer_count) == Some(layer))
             })
-            .map(|trace| {
+            .map(|(index, trace)| {
+                let start = trace.path.first().copied();
+                let end = trace.path.last().copied();
                 json!({
+                    "id": format!("track:{index}"),
                     "net": trace.connection,
                     "layer": layer_name(&trace.layer, board.problem.layer_count),
                     "width": trace.width,
                     "path": trace.path.iter().map(|p| json!([p.x, p.y])).collect::<Vec<_>>(),
+                    "start": start.map(|p| json!([p.x, p.y])),
+                    "end": end.map(|p| json!([p.x, p.y])),
+                    "start_touches": start.map_or_else(Vec::new, |at| trace_endpoint_touches(board, index, trace, at)),
+                    "end_touches": end.map_or_else(Vec::new, |at| trace_endpoint_touches(board, index, trace, at)),
                 })
             })
             .collect()
@@ -253,23 +267,26 @@ fn copper_json(board: &IpcBoardSnapshot, input: &Value) -> Value {
             .copper
             .vias
             .iter()
-            .filter(|via| net_filter.is_none_or(|net| via.connection == net))
-            .filter(|via| {
+            .enumerate()
+            .filter(|(_, via)| net_filter.is_none_or(|net| via.connection == net))
+            .filter(|(_, via)| {
                 layer_filter.is_none_or(|layer| {
                     via_span_indices(&via.span, board.problem.layer_count).contains(&layer)
                 })
             })
-            .map(|via| {
+            .map(|(index, via)| {
                 let layers: Vec<Value> = via_span_indices(&via.span, board.problem.layer_count)
                     .into_iter()
                     .map(|idx| json!(layer_name_from_index(idx, board.problem.layer_count)))
                     .collect();
                 json!({
+                    "id": format!("via:{index}"),
                     "net": via.connection,
                     "at": [via.at.x, via.at.y],
                     "diameter": via.diameter,
                     "drill": via.drill,
                     "layers": layers,
+                    "touches": via_touches(board, index, via),
                 })
             })
             .collect()
@@ -277,12 +294,154 @@ fn copper_json(board: &IpcBoardSnapshot, input: &Value) -> Value {
         Vec::new()
     };
 
+    let pads: Vec<Value> = board
+        .imported
+        .parts
+        .iter()
+        .flat_map(|part| {
+            part.pads.iter().filter_map(move |pad| {
+                let net = pad.net.as_deref()?;
+                net_filter.is_none_or(|wanted| wanted == net).then(|| json!({
+                    "id": format!("pad:{}.{}", part.reference, pad.number),
+                    "pad": format!("{}.{}", part.reference, pad.number),
+                    "net": net,
+                    "at": [pad.at.x, pad.at.y],
+                    "layers": pad.layers.iter().map(|layer| layer_name(layer, board.problem.layer_count)).collect::<Vec<_>>(),
+                    "shape": pad.shape,
+                    "size": [pad.size.x, pad.size.y],
+                }))
+            })
+        })
+        .collect();
+
     json!({
+        "pads": pads,
         "tracks": tracks,
         "vias": vias,
+        "pad_count": pads.len(),
         "track_count": tracks.len(),
         "via_count": vias.len(),
     })
+}
+
+fn trace_endpoint_touches(
+    board: &IpcBoardSnapshot,
+    own_index: usize,
+    trace: &Trace,
+    at: Point2,
+) -> Vec<Value> {
+    let mut touches = pad_touches(
+        board,
+        &trace.connection,
+        &trace.layer,
+        at,
+        trace.width / 2.0,
+    );
+    for (index, other) in board.copper.traces.iter().enumerate() {
+        if index == own_index
+            || other.connection != trace.connection
+            || other.layer != trace.layer
+            || !trace_reaches(other, at, trace.width / 2.0)
+        {
+            continue;
+        }
+        touches.push(json!({ "kind": "track", "id": format!("track:{index}") }));
+    }
+    for (index, via) in board.copper.vias.iter().enumerate() {
+        if via.connection == trace.connection
+            && via_span_indices(&via.span, board.problem.layer_count).contains(
+                &trace
+                    .layer
+                    .index(board.problem.layer_count)
+                    .unwrap_or(u32::MAX),
+            )
+            && via.at.dist(at) <= via.diameter / 2.0 + trace.width / 2.0 + geom::EPS
+        {
+            touches.push(json!({ "kind": "via", "id": format!("via:{index}") }));
+        }
+    }
+    touches
+}
+
+fn via_touches(board: &IpcBoardSnapshot, own_index: usize, via: &Via) -> Vec<Value> {
+    let mut touches = Vec::new();
+    let span = via_span_indices(&via.span, board.problem.layer_count);
+    for index in span {
+        let layer = layer_ref_from_index(index, board.problem.layer_count);
+        touches.extend(pad_touches(
+            board,
+            &via.connection,
+            &layer,
+            via.at,
+            via.diameter / 2.0,
+        ));
+        for (track_index, trace) in board.copper.traces.iter().enumerate() {
+            if trace.connection == via.connection
+                && trace.layer == layer
+                && trace_reaches(trace, via.at, via.diameter / 2.0)
+            {
+                touches.push(json!({
+                    "kind": "track",
+                    "id": format!("track:{track_index}"),
+                    "layer": layer_name(&layer, board.problem.layer_count),
+                }));
+            }
+        }
+    }
+    for (index, other) in board.copper.vias.iter().enumerate() {
+        if index != own_index
+            && other.connection == via.connection
+            && other.at.dist(via.at) <= other.diameter / 2.0 + via.diameter / 2.0 + geom::EPS
+        {
+            touches.push(json!({ "kind": "via", "id": format!("via:{index}") }));
+        }
+    }
+    touches
+}
+
+fn pad_touches(
+    board: &IpcBoardSnapshot,
+    net: &str,
+    layer: &LayerRef,
+    at: Point2,
+    radius: f64,
+) -> Vec<Value> {
+    board
+        .imported
+        .parts
+        .iter()
+        .flat_map(|part| {
+            part.pads.iter().filter_map(move |pad| {
+                (pad.net.as_deref() == Some(net)
+                    && pad.layers.contains(layer)
+                    && (at.x - pad.at.x).abs() <= pad.size.x / 2.0 + radius + geom::EPS
+                    && (at.y - pad.at.y).abs() <= pad.size.y / 2.0 + radius + geom::EPS)
+                    .then(|| {
+                        json!({
+                            "kind": "pad",
+                            "pad": format!("{}.{}", part.reference, pad.number),
+                        })
+                    })
+            })
+        })
+        .collect()
+}
+
+fn trace_reaches(trace: &Trace, at: Point2, radius: f64) -> bool {
+    trace.path.windows(2).any(|pair| {
+        geom::Segment::new(pair[0], pair[1]).dist_to_point(at)
+            <= trace.width / 2.0 + radius + geom::EPS
+    })
+}
+
+fn layer_ref_from_index(index: u32, layer_count: u32) -> LayerRef {
+    if index == 0 {
+        LayerRef::top()
+    } else if index + 1 == layer_count {
+        LayerRef::bottom()
+    } else {
+        LayerRef(format!("inner{index}"))
+    }
 }
 
 fn copper_kind_enabled(input: &Value, kind: &str) -> bool {
@@ -4057,7 +4216,24 @@ mod tests {
             imported: ImportedBoard {
                 layer_count: 2,
                 bounds: problem.bounds,
-                parts: vec![],
+                parts: vec![ImportedPart {
+                    reference: "U1".to_owned(),
+                    lib_id: "Package:Test".to_owned(),
+                    at: Point2::new(1.0, 1.0),
+                    rotation: 0,
+                    side: kicad_board::BoardSide::Front,
+                    locked: false,
+                    courtyard: None,
+                    pads: vec![ImportedPad {
+                        number: "1".to_owned(),
+                        net: Some("SIG".to_owned()),
+                        at: Point2::new(1.0, 1.0),
+                        layers: vec![LayerRef::top()],
+                        shape: "rect".to_owned(),
+                        size: Point2::new(1.0, 1.0),
+                        drill: None,
+                    }],
+                }],
                 placement_keepouts: vec![],
                 keepout_count: 0,
             },
@@ -4095,9 +4271,14 @@ mod tests {
 
         assert_eq!(out["track_count"], json!(1));
         assert_eq!(out["via_count"], json!(1));
+        assert_eq!(out["pad_count"], json!(1));
+        assert_eq!(out["pads"][0]["pad"], json!("U1.1"));
         assert_eq!(out["tracks"][0]["net"], json!("SIG"));
         assert_eq!(out["tracks"][0]["layer"], json!("F.Cu"));
+        assert_eq!(out["tracks"][0]["start_touches"][0]["pad"], json!("U1.1"));
+        assert_eq!(out["tracks"][0]["end_touches"][0]["kind"], json!("via"));
         assert_eq!(out["vias"][0]["net"], json!("SIG"));
+        assert_eq!(out["vias"][0]["touches"][0]["kind"], json!("track"));
 
         let tracks_only = copper_json(
             &board,

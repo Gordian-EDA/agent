@@ -430,7 +430,8 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "get_board".into(),
-            description: "Return board; net adds pad centers, include_copper adds copper.".into(),
+            description: "Inspect the board; net returns its pads, tracks, vias, coordinates, and endpoint touches."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
