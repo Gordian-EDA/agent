@@ -1433,7 +1433,7 @@ pub(crate) fn emit_rail(
     // rows stepping OUTWARD from the parts. A trunk is drawn with no obstacle router of
     // its own, so a row it cannot own alone is rejected whole rather than patched.
     let foreign_wires: Vec<(f64, f64, f64)> = if fan_risers {
-        horizontal_runs_off_net(w, net)
+        foreign_rows(w, net)
     } else {
         Vec::new()
     };
@@ -1500,17 +1500,25 @@ pub(crate) fn emit_rail(
     Ok(())
 }
 
-/// Horizontal wire runs already drawn for some OTHER net, as `(y, x_lo, x_hi)`.
-fn horizontal_runs_off_net(w: &SchematicWriter, net: &str) -> Vec<(f64, f64, f64)> {
-    w.wires_with_nets()
-        .iter()
-        .filter(|seg| seg.net.as_deref() != Some(net))
-        .filter(|seg| (seg.segment.a.y - seg.segment.b.y).abs() < EPS)
-        .map(|seg| {
-            let (a, b) = (seg.segment.a, seg.segment.b);
-            (a.y, a.x.min(b.x), a.x.max(b.x))
-        })
-        .collect()
+/// What another net already occupies that a trunk could land on, as rows `(y, x_lo,
+/// x_hi)`: a horizontal run is the whole stretch it covers, and a vertical run
+/// contributes its two ENDPOINTS (a trunk crossing a foreign vertical mid-span merely
+/// crosses over, but ending on one welds them).
+fn foreign_rows(w: &SchematicWriter, net: &str) -> Vec<(f64, f64, f64)> {
+    let mut out = Vec::new();
+    for seg in w.wires_with_nets() {
+        if seg.net.as_deref() == Some(net) {
+            continue;
+        }
+        let (a, b) = (seg.segment.a, seg.segment.b);
+        if (a.y - b.y).abs() < EPS {
+            out.push((a.y, a.x.min(b.x), a.x.max(b.x)));
+        } else {
+            out.push((a.y, a.x, a.x));
+            out.push((b.y, b.x, b.x));
+        }
+    }
+    out
 }
 
 /// Would a trunk on row `rail_y` spanning `span` keep `clearance` from every foreign pin
