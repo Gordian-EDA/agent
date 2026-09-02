@@ -283,6 +283,15 @@ fn schematic_parts(ctx: &AgentRuntime) -> std::result::Result<Vec<SchematicPart>
         .env()
         .netlist(ctx.sch_path())
         .map_err(|e| json!({ "error": format!("could not export the schematic netlist: {e}") }))?;
+    let doc = sch_doc::SchDoc::read(ctx.sch_path())
+        .map_err(|e| json!({ "error": format!("could not read the schematic: {e}") }))?;
+    let ignored_pins = sch_doc::connect::extract(&doc)
+        .no_connect
+        .into_iter()
+        .fold(BTreeMap::<String, BTreeSet<String>>::new(), |mut pins, pin| {
+            pins.entry(pin.refdes).or_default().insert(pin.pin);
+            pins
+        });
     let erc = ctx.env().erc(ctx.sch_path()).map_err(
         |e| json!({ "error": format!("could not run ERC before syncing the board: {e}") }),
     )?;
@@ -354,8 +363,12 @@ fn schematic_parts(ctx: &AgentRuntime) -> std::result::Result<Vec<SchematicPart>
         }));
     }
 
-    let mismatches = gordian_runtime::footprint_compat::netlist_pin_mismatches(ctx, &netlist)
-        .map_err(|e| json!({ "error": format!("could not compare symbol pins to pads: {e}") }))?;
+    let mismatches = gordian_runtime::footprint_compat::netlist_pin_mismatches(
+        ctx,
+        &netlist,
+        &ignored_pins,
+    )
+    .map_err(|e| json!({ "error": format!("could not compare symbol pins to pads: {e}") }))?;
     if !mismatches.is_empty() {
         return Err(json!({
             "ok": false,
