@@ -1023,12 +1023,14 @@ pub(crate) fn ic_port_exit_override(
     Some((side, exit))
 }
 
-/// Settle every marked port net's pennant ONCE, before any of them is drawn, and
-/// reserve what it occupies: the pennant box, so a later net's wire routes around
-/// someone else's edge tag, and the anchor point, so a later port's own pennant can
-/// never be nudged onto this one. Two global labels sharing a coordinate ARE one net
-/// — the `I2C_SCL`/`I2C_SDA` short on a pull-up network, where the first pennant slid
-/// off its body straight onto its neighbour's anchor.
+/// Settle every marked port net's pennant ONCE, before any of them is drawn, reserving
+/// the box it occupies. The box contains its own anchor, so a later port cannot be
+/// nudged onto an earlier one — two global labels sharing a coordinate ARE one net, the
+/// `I2C_SCL`/`I2C_SDA` short on a pull-up network, where the first pennant slid off its
+/// body straight onto its neighbour's anchor.
+///
+/// The anchor is reserved as a point too, which is what stops the next port
+/// landing on it; the box alone would be far too coarse a keepout (see `anchor_merges`).
 ///
 /// [`route_signal`] reads the answer instead of recomputing it, so the reservation and
 /// the label it stands for can never disagree.
@@ -1108,24 +1110,23 @@ pub(crate) fn nudge_port_exit(
 
 /// Whether seating `net`'s label at `at` would MERGE it with another net.
 ///
-/// A label is an electrical terminal: whatever its anchor lands on, it joins. So the
-/// anchor may not sit on a foreign net's wire, on a foreign terminal (pin tip or another
-/// label's anchor), or inside a foreign port's pennant. This is the truthfulness half of
-/// every label-seating decision — readability is the other half, and it is the one that
-/// gives way.
+/// A label is an electrical terminal: whatever its anchor lands ON, it joins. So the
+/// anchor may not sit on a foreign net's wire or on a foreign terminal — a pin tip, or
+/// another label's anchor. This is the truthfulness half of every label-seating
+/// decision; readability is the other half, and it is the one that gives way.
+///
+/// A foreign pennant's TEXT BOX is not a merge hazard, only an ugly one: it is long, and
+/// treating it as untouchable pushed a GPIO bank's pennants past anywhere their nets
+/// could route to, leaving three of them dangling.
 pub(crate) fn anchor_merges(scene: &sch_model::route::RouteScene, at: ::geom::Point2, net: &str) -> bool {
     scene
         .segments
         .iter()
-        .any(|seg| seg.net != net && seg.segment.dist2_to_point(at) < 0.01)
+        .any(|s| s.net != net && s.segment.dist2_to_point(at) < 0.01)
         || scene
             .points
             .iter()
             .any(|(p, other)| other != net && p.dist2(at) < 0.01)
-        || scene
-            .label_solids
-            .iter()
-            .any(|(r, other)| other != net && r.contains(at))
 }
 
 fn solids_hit(solids: &[::geom::Rect], r: &::geom::Rect) -> bool {
