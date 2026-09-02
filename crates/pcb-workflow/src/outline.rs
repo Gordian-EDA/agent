@@ -63,7 +63,7 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("reading board {}", path.display()))?;
     let changed = !edge_cuts_match(&text, &outline)?;
-    let updated = replace_edge_cuts(&text, &outline, false)?;
+    let updated = replace_edge_cuts(&text, &outline, None)?;
     if changed {
         ctx.close_kicad_session();
         crate::route::write_board_atomically(&path, updated.as_bytes())
@@ -280,7 +280,7 @@ fn parse_outline(v: Option<&Value>) -> std::result::Result<Polygon, String> {
     Polygon::new(points)
 }
 
-fn replace_edge_cuts(board: &str, outline: &Outline, managed: bool) -> Result<String> {
+fn replace_edge_cuts(board: &str, outline: &Outline, managed: Option<bool>) -> Result<String> {
     let stripped = remove_edge_cut_shapes(board)?;
     let insert_at = stripped
         .find("\n\t(footprint ")
@@ -392,7 +392,7 @@ fn points_match(a: Point2, b: Point2) -> bool {
     a.near_eq(b, geom::STRICT_EPS)
 }
 
-fn edge_cut_sexpr(outline: &Outline, managed: bool) -> String {
+fn edge_cut_sexpr(outline: &Outline, managed: Option<bool>) -> String {
     match outline {
         Outline::Rect(rect) => {
             let x0 = super::fmt_num(rect.min_x);
@@ -403,10 +403,9 @@ fn edge_cut_sexpr(outline: &Outline, managed: bool) -> String {
                 "\n\t(gr_rect\n\t\t(start {x0} {y0})\n\t\t(end {x1} {y1})\n\
                  \t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n\
                  \t\t(fill no)\n\t\t(layer \"Edge.Cuts\")\n\t\t(uuid \"{}\")\n\t)\n",
-                if managed {
-                    managed_rect_uuid(rect)
-                } else {
-                    outline_uuid("rect", 0)
+                match managed {
+                    Some(explicit) => managed_rect_uuid(rect, explicit),
+                    None => outline_uuid("rect", 0),
                 }
             )
         }
@@ -432,9 +431,12 @@ fn edge_cut_sexpr(outline: &Outline, managed: bool) -> String {
     }
 }
 
-fn managed_rect_uuid(rect: &Rect) -> String {
+/// A seeded rectangle's identity: its coordinates and whether the caller fixed them
+/// (`explicit`) or the seeder sized them (`auto`). Re-fit rewrites only the latter.
+fn managed_rect_uuid(rect: &Rect, explicit: bool) -> String {
+    let kind = if explicit { "explicit" } else { "auto" };
     seed_uuid(&format!(
-        "edge:{}:{}:{}:{}",
+        "edge:{kind}:{}:{}:{}:{}",
         super::fmt_num(rect.min_x),
         super::fmt_num(rect.min_y),
         super::fmt_num(rect.max_x),
@@ -462,7 +464,14 @@ fn seed_uuid(key: &str) -> String {
     )
 }
 
-pub(crate) fn managed_outline_bounds(board: &str) -> std::result::Result<Rect, String> {
+/// The single seeded rectangle on Edge.Cuts, and whether its bounds were explicit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ManagedOutline {
+    pub rect: Rect,
+    pub explicit: bool,
+}
+
+pub(crate) fn managed_outline_bounds(board: &str) -> std::result::Result<ManagedOutline, String> {
     let blocks = edge_cut_blocks(board).map_err(|error| error.to_string())?;
     let [block] = blocks.as_slice() else {
         return Err(managed_outline_error());
@@ -485,12 +494,15 @@ pub(crate) fn managed_outline_bounds(board: &str) -> std::result::Result<Rect, S
         .split_once("(uuid \"")
         .and_then(|(_, tail)| tail.split_once("\")"))
         .map(|(uuid, _)| uuid);
-    if actual_uuid != Some(managed_rect_uuid(&rect).as_str()) {
-        return Err(
+    let explicit = [false, true]
+        .into_iter()
+        .find(|&explicit| actual_uuid == Some(managed_rect_uuid(&rect, explicit).as_str()));
+    match explicit {
+        Some(explicit) => Ok(ManagedOutline { rect, explicit }),
+        None => Err(
             "cannot re-fit outline: the rectangular Edge.Cuts was hand-edited after seeding; automatic re-fit only changes its matching managed seed rectangle".to_owned(),
-        );
+        ),
     }
-    Ok(rect)
 }
 
 fn managed_outline_error() -> String {
@@ -498,8 +510,8 @@ fn managed_outline_error() -> String {
 }
 
 pub(crate) fn replace_managed_outline(board: &str, rect: Rect) -> Result<String> {
-    managed_outline_bounds(board).map_err(anyhow::Error::msg)?;
-    replace_edge_cuts(board, &Outline::Rect(rect), true)
+    let managed = managed_outline_bounds(board).map_err(anyhow::Error::msg)?;
+    replace_edge_cuts(board, &Outline::Rect(rect), Some(managed.explicit))
 }
 
 pub(crate) fn outline_refit_json(plan: &super::place::OutlineRefitPlan) -> Value {
@@ -558,7 +570,7 @@ mod tests {
                 max_x: 12.0,
                 max_y: 13.0,
             }),
-            false,
+            None,
         )
         .unwrap();
         assert!(updated.contains("(start 2 3)"));
@@ -594,7 +606,7 @@ mod tests {
             Point2 { x: 5.0, y: 8.0 },
         ])
         .unwrap();
-        let updated = replace_edge_cuts(board, &Outline::Polygon(poly), false).unwrap();
+        let updated = replace_edge_cuts(board, &Outline::Polygon(poly), None).unwrap();
         assert_eq!(updated.matches("(layer \"Edge.Cuts\")").count(), 3);
         assert!(updated.contains("(gr_line"));
         assert!(!updated.contains("(gr_rect"));
@@ -605,10 +617,10 @@ mod tests {
         let original = Rect::new(2.0, 3.0, 12.0, 13.0);
         let board = format!(
             "(kicad_pcb{})",
-            edge_cut_sexpr(&Outline::Rect(original), true)
+            edge_cut_sexpr(&Outline::Rect(original), Some(false))
         );
 
-        assert_eq!(managed_outline_bounds(&board).unwrap(), original);
+        assert_eq!(managed_outline_bounds(&board).unwrap().rect, original);
         let changed = board.replacen("(end 12 13)", "(end 12.5 13)", 1);
         assert!(
             managed_outline_bounds(&changed)

@@ -612,7 +612,9 @@ mod tests {
         after
             .outside_outline
             .insert("R1:moved".to_owned(), "R1".to_owned());
-        after.copper_outside_outline.insert("via:old-outline".to_owned());
+        after
+            .copper_outside_outline
+            .insert("via:old-outline".to_owned());
 
         let added = introduced(&before, &after, &[]);
         assert_eq!(added.outside_outline, [&"R1".to_owned()]);
@@ -622,9 +624,13 @@ mod tests {
         );
 
         let mut before = defects(&[], &[]);
-        before.copper_outside_outline.insert("trace:before".to_owned());
+        before
+            .copper_outside_outline
+            .insert("trace:before".to_owned());
         let mut after = defects(&[], &[]);
-        after.copper_outside_outline.insert("trace:after".to_owned());
+        after
+            .copper_outside_outline
+            .insert("trace:after".to_owned());
         assert_eq!(
             introduced(&before, &after, &[]).copper_outside_outline,
             [&"trace:after".to_owned()],

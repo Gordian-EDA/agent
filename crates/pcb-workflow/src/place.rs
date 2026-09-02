@@ -2880,16 +2880,24 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         if refs.is_none() {
             let path = ctx.pcb_path();
             let board_text = std::fs::read_to_string(&path)?;
-            if let Err(error) = super::outline::managed_outline_bounds(&board_text) {
-                return Ok(json!({ "error": error }));
-            }
-            let mut routing = board.problem.clone();
-            routing.fixed_copper = board.copper.clone();
-            if let Some(plan) =
-                plan_outline_refit(&problem, &board.imported.parts, &routing, &hints, &result)
-            {
-                result = plan.result.clone();
-                outline_refit = Some(plan);
+            let managed = match super::outline::managed_outline_bounds(&board_text) {
+                Ok(managed) => managed,
+                Err(error) => return Ok(json!({ "error": error })),
+            };
+            // Bounds the caller fixed are theirs; only a seeder-sized outline is
+            // re-fitted to what placement produced. `update_board_outline{fit:true}`
+            // is the explicit way to shrink a fixed one.
+            if managed.explicit {
+                tracing::info!("outline bounds were explicit; placement leaves them as set");
+            } else {
+                let mut routing = board.problem.clone();
+                routing.fixed_copper = board.copper.clone();
+                if let Some(plan) =
+                    plan_outline_refit(&problem, &board.imported.parts, &routing, &hints, &result)
+                {
+                    result = plan.result.clone();
+                    outline_refit = Some(plan);
+                }
             }
         }
         let locked_refs: std::collections::BTreeSet<&str> = board

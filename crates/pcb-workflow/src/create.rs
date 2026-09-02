@@ -270,6 +270,7 @@ pub(super) fn emit_seed_plan(plan: SeedPlan) -> std::result::Result<SeededBoard,
     let text = SeedBoardWriter::new(
         &plan.parts,
         &plan.bounds,
+        plan.bounds_were_explicit,
         &plan.rules,
         plan.outline.as_ref(),
     )
@@ -449,6 +450,8 @@ fn seed_net_classes(
 struct SeedBoardWriter<'a> {
     parts: &'a [SeedFootprint],
     bounds: &'a Rect,
+    /// The caller fixed `bounds`; a re-fit after placement must leave them alone.
+    bounds_explicit: bool,
     rules: &'a SeedRules,
     outline: Option<&'a Polygon>,
     net_codes: BTreeMap<String, i32>,
@@ -459,6 +462,7 @@ impl<'a> SeedBoardWriter<'a> {
     fn new(
         parts: &'a [SeedFootprint],
         bounds: &'a Rect,
+        bounds_explicit: bool,
         rules: &'a SeedRules,
         outline: Option<&'a Polygon>,
     ) -> Self {
@@ -467,6 +471,7 @@ impl<'a> SeedBoardWriter<'a> {
         Self {
             parts,
             bounds,
+            bounds_explicit,
             rules,
             outline,
             net_codes,
@@ -578,7 +583,12 @@ impl<'a> SeedBoardWriter<'a> {
         }
         let (x0, y0) = (fmt_num(self.bounds.min_x), fmt_num(self.bounds.min_y));
         let (x1, y1) = (fmt_num(self.bounds.max_x), fmt_num(self.bounds.max_y));
-        let uuid = seed_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));
+        let kind = if self.bounds_explicit {
+            "explicit"
+        } else {
+            "auto"
+        };
+        let uuid = seed_uuid(&format!("edge:{kind}:{x0}:{y0}:{x1}:{y1}"));
         let _ = write!(
             out,
             "\t(gr_rect\n\t\t(start {x0} {y0})\n\t\t(end {x1} {y1})\n\
@@ -1873,7 +1883,7 @@ mod tests {
             pad_connection: PourPadConnection::Solid,
         });
 
-        let board = SeedBoardWriter::new(&parts, &bounds, &rules, None)
+        let board = SeedBoardWriter::new(&parts, &bounds, false, &rules, None)
             .emit()
             .unwrap();
 
@@ -1916,10 +1926,15 @@ mod tests {
         assert_eq!(classes[0].name, "Default");
         assert_eq!(classes[0].clearance, 0.2);
 
-        let board =
-            SeedBoardWriter::new(&[part], &Rect::new(0.0, 0.0, 20.0, 10.0), &effective, None)
-                .emit()
-                .unwrap();
+        let board = SeedBoardWriter::new(
+            &[part],
+            &Rect::new(0.0, 0.0, 20.0, 10.0),
+            false,
+            &effective,
+            None,
+        )
+        .emit()
+        .unwrap();
         assert!(board.contains("(net_class \"Default\""));
         // Library overrides remain present; only the board/router rule was raised.
         assert!(board.contains("\n\t\t(clearance 0.2)\n"));
@@ -1983,7 +1998,7 @@ mod tests {
             .collect();
         let bounds = Rect::new(0.0, 0.0, 90.0, 58.0);
 
-        let board = SeedBoardWriter::new(&parts, &bounds, &SeedRules::default(), None)
+        let board = SeedBoardWriter::new(&parts, &bounds, false, &SeedRules::default(), None)
             .emit()
             .unwrap();
 
@@ -2018,7 +2033,7 @@ mod tests {
             .collect();
         let bounds = Rect::new(0.0, 0.0, 90.0, 58.0);
 
-        let board = SeedBoardWriter::new(&parts, &bounds, &SeedRules::default(), None)
+        let board = SeedBoardWriter::new(&parts, &bounds, false, &SeedRules::default(), None)
             .emit()
             .unwrap();
 
@@ -2062,7 +2077,7 @@ mod tests {
             ..SeedRules::default()
         };
 
-        let board = SeedBoardWriter::new(&parts, &bounds, &rules, None)
+        let board = SeedBoardWriter::new(&parts, &bounds, false, &rules, None)
             .emit()
             .unwrap();
 
@@ -2182,6 +2197,7 @@ mod tests {
         let board = SeedBoardWriter::new(
             &[part],
             &Rect::new(0.0, 0.0, 20.0, 10.0),
+            false,
             &SeedRules::default(),
             None,
         )

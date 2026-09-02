@@ -68,7 +68,11 @@ fn undo_and_history_span_schematic_and_board_mutators() {
         "10k"
     );
 
-    let synced = tool(&ctx, "sync_board", json!({}));
+    let synced = tool(
+        &ctx,
+        "sync_board",
+        json!({ "bounds": { "min_x": 0.0, "min_y": 0.0, "max_x": 60.0, "max_y": 60.0 } }),
+    );
     assert!(synced["revision"].as_u64().is_some());
     let board_before_move = std::fs::read(ctx.pcb_path()).unwrap();
     let position_before_move = position(&ctx, "R1");

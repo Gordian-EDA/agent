@@ -511,13 +511,8 @@ fn route_live_board(
 
     replace_route_atomically(ctx, &rp, &result.solution, &board.layer_names, existing)
         .map_err(|e| refusal(format!("could not write route to the board: {e}")))?;
-    let fallback_plane_nets = validate_written_plane_routes(
-        ctx,
-        &solve_view,
-        &rp,
-        &board.layer_names,
-        &mut result,
-    )?;
+    let fallback_plane_nets =
+        validate_written_plane_routes(ctx, &solve_view, &rp, &board.layer_names, &mut result)?;
 
     // A connection can acquire more than one failure reason as the route is
     // cleaned up (for example, an initial router miss followed by an honest
@@ -662,7 +657,11 @@ fn validate_written_plane_routes(
         ctx.kicad(),
         ctx.config().kicad.attach_running,
     )
-    .map_err(|error| refusal(format!("could not refill zones after plane fallback: {error}")))?;
+    .map_err(|error| {
+        refusal(format!(
+            "could not refill zones after plane fallback: {error}"
+        ))
+    })?;
     let report = ctx.env().drc(&path).map_err(|error| {
         refusal(format!(
             "could not validate track-routed plane fallback: {error}"
@@ -725,9 +724,7 @@ fn route_rejected_planes(
         .plane_nets
         .retain(|net, _| !rejected.contains(net));
     let fixed_obstacles = copper_obstacles(&fallback_view, &result.solution);
-    fallback_view
-        .obstacles
-        .extend(fixed_obstacles);
+    fallback_view.obstacles.extend(fixed_obstacles);
     let fallback = route_with_engine(&fallback_view).result;
     let failed = fallback
         .failed
@@ -785,8 +782,7 @@ fn plane_pad_report(
                                                 <= pad.size.x.max(pad.size.y) / 2.0 + geom::EPS
                                         })
                                         && trace.path.last().is_some_and(|at| {
-                                            at.dist(via.at)
-                                                <= via.diameter / 2.0 + geom::EPS
+                                            at.dist(via.at) <= via.diameter / 2.0 + geom::EPS
                                         })
                                 }))
                     });
@@ -3823,19 +3819,22 @@ mod escape_bottleneck_tests {
                     width: 0.6,
                     path: vec![Point2 { x: 1.13, y: 1.13 }, Point2 { x: 1.5, y: 1.5 }],
                 }],
-                vias: vec![Via {
-                    connection: "GND".to_string(),
-                    at: Point2 { x: 1.5, y: 1.5 },
-                    diameter: 0.6,
-                    drill: 0.3,
-                    span: pcb_model::ViaSpan::Through,
-                }, Via {
-                    connection: "GND".to_string(),
-                    at: Point2 { x: 4.13, y: 1.13 },
-                    diameter: 0.6,
-                    drill: 0.3,
-                    span: pcb_model::ViaSpan::Through,
-                }],
+                vias: vec![
+                    Via {
+                        connection: "GND".to_string(),
+                        at: Point2 { x: 1.5, y: 1.5 },
+                        diameter: 0.6,
+                        drill: 0.3,
+                        span: pcb_model::ViaSpan::Through,
+                    },
+                    Via {
+                        connection: "GND".to_string(),
+                        at: Point2 { x: 4.13, y: 1.13 },
+                        diameter: 0.6,
+                        drill: 0.3,
+                        span: pcb_model::ViaSpan::Through,
+                    },
+                ],
             },
         };
         let planes = BTreeSet::from(["GND".to_string()]);
@@ -3923,7 +3922,13 @@ mod escape_bottleneck_tests {
 
         assert_eq!(fallback, rejected);
         assert!(result.failed.is_empty(), "{:?}", result.failed);
-        assert!(result.solution.traces.iter().any(|trace| trace.connection == "GND"));
+        assert!(
+            result
+                .solution
+                .traces
+                .iter()
+                .any(|trace| trace.connection == "GND")
+        );
         assert!(result.solution.vias.is_empty());
     }
 
