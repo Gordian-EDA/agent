@@ -339,7 +339,14 @@ impl SchematicWriter {
     pub fn add_junction_on_net(&mut self, at: impl Into<Point2>, net: &str) {
         let at = GRID_50_MIL.snap_point(at.into());
         let uuid_key = format!("{}:{}", at.x, at.y);
-        if self.junctions.iter().any(|j| j.uuid_key == uuid_key) {
+        // Keyed on (point, NET): two nets wanting a tap at one point is a short the audit
+        // reports, but dropping the second one would cost that net its split as well and
+        // open it. Only one dot is ever DRAWN there (`finish` keeps the first).
+        if self
+            .junctions
+            .iter()
+            .any(|j| j.uuid_key == uuid_key && j.net == net)
+        {
             return;
         }
         let welds_foreign = self
@@ -674,15 +681,16 @@ impl SchematicWriter {
 
     /// Junction-dot count (a routing-quality signal for the refinement scorer).
     pub fn junction_count(&self) -> usize {
-        self.junctions.iter().filter(|j| j.dot).count()
+        self.junction_positions().len()
     }
 
     /// Junction-dot positions (for the scorer's merge check: a junction sitting
     /// on wires of two different nets fuses them).
     pub fn junction_positions(&self) -> Vec<[f64; 2]> {
+        let mut seen = std::collections::BTreeSet::new();
         self.junctions
             .iter()
-            .filter(|j| j.dot)
+            .filter(|j| j.dot && seen.insert(j.uuid_key.clone()))
             .map(|j| j.at.into())
             .collect()
     }

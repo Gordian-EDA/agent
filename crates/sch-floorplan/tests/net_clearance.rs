@@ -85,3 +85,55 @@ fn realised_corpus_sheets_never_share_a_point_between_two_nets() {
         offenders.join("\n")
     );
 }
+
+/// The same corpus through the LIVE path the agent calls — `place_parts` onto a blank
+/// sheet under the spine engine — asserting the gate it is refused by. A refusal here is
+/// the `place_parts` failure a campaign pays a whole retry for, reproduced without one.
+#[test]
+fn live_place_parts_commits_every_corpus_fixture() {
+    if !corpus().is_dir() {
+        eprintln!("SKIP: validation corpus not present");
+        return;
+    }
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no KiCAD environment detected");
+        return;
+    };
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
+    let only = std::env::var("CLEARANCE_ONLY").unwrap_or_default();
+    let only: Vec<&str> = only.split(',').filter(|s| !s.is_empty()).collect();
+    let mut refused: Vec<String> = Vec::new();
+    for name in fixtures() {
+        if !only.is_empty() && !only.contains(&name.as_str()) {
+            continue;
+        }
+        let src =
+            std::fs::read_to_string(corpus().join(format!("{name}.place-parts.json"))).unwrap();
+        let input: sch_check::PlacePartsInput = serde_json::from_str(&src).unwrap();
+        let (_, diags, _) = sch_check::into_design(&input, &provider, &Default::default());
+        assert!(!diags.has_errors(), "{name}: {diags:#?}");
+        let mut doc = sch_floorplan::live::blank_sheet().unwrap();
+        match sch_floorplan::live::place_parts(
+            &env,
+            &mut doc,
+            &input,
+            &spine_place::SpinePlace,
+            None,
+        ) {
+            Ok(report) if !report.committed => {
+                refused.push(format!("{name}: {:?}", report.mismatch))
+            }
+            Ok(_) => {}
+            // A payload the live surface rejects outright says nothing about the
+            // realiser: the corpus is written for the whole-sheet path, which accepts
+            // forms (authored `power:` declarations, say) that live editing does not.
+            Err(sch_floorplan::live::Error::InvalidPayload(_)) => {}
+            Err(e) => panic!("{name}: {e}"),
+        }
+    }
+    assert!(
+        refused.is_empty(),
+        "live place_parts refused fixtures the realiser should draw truthfully:\n{}",
+        refused.join("\n")
+    );
+}

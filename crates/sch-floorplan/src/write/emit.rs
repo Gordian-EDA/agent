@@ -145,6 +145,8 @@ impl SchematicWriter {
         let mut junctions = self.junctions;
         junctions.retain(|j| j.dot);
         junctions.sort_by(|a, b| a.uuid_key.cmp(&b.uuid_key));
+        let mut drawn = std::collections::BTreeSet::new();
+        junctions.retain(|j| drawn.insert(j.uuid_key.clone()));
         for j in &junctions {
             let uuid = stable_uuid("junction", &j.uuid_key);
             let _ = writeln!(
