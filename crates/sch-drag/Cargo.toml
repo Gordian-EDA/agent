@@ -11,7 +11,3 @@ geom = { path = "../geom" }
 sch-doc = { path = "../sch-doc" }
 
 fastrand.workspace = true
-
-[dev-dependencies]
-geom = { path = "../geom" }
-fastrand.workspace = true
