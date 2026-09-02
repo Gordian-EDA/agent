@@ -47,13 +47,24 @@ impl Annotation {
         self
     }
 
+    /// Set one `gordian:` property. Naming anything else panics: the write
+    /// replaces the whole property node, so pointing it at `Reference` or
+    /// `Value` would destroy a field KiCad owns.
     pub fn set(mut self, name: &str, value: impl Into<String>) -> Self {
-        self.properties
-            .insert(name.to_owned(), Some(value.into()));
+        assert!(
+            name.starts_with(GORDIAN_PREFIX),
+            "annotations own the `{GORDIAN_PREFIX}` namespace only, not `{name}`"
+        );
+        self.properties.insert(name.to_owned(), Some(value.into()));
         self
     }
 
+    /// Remove one `gordian:` property.
     pub fn clear(mut self, name: &str) -> Self {
+        assert!(
+            name.starts_with(GORDIAN_PREFIX),
+            "annotations own the `{GORDIAN_PREFIX}` namespace only, not `{name}`"
+        );
         self.properties.insert(name.to_owned(), None);
         self
     }
@@ -91,7 +102,10 @@ fn read_string(text: &str) -> Option<(String, &str)> {
     let mut index = 1;
     while index < bytes.len() {
         match bytes[index] {
-            b'\\' if index + 1 < bytes.len() => {
+            // KiCad escapes exactly two characters. Anything else after a
+            // backslash is literal text, and copying it as a byte would split a
+            // multi-byte character and de-sync the rest of the walk.
+            b'\\' if matches!(bytes.get(index + 1), Some(b'"' | b'\\')) => {
                 out.push(bytes[index + 1] as char);
                 index += 2;
             }
@@ -127,6 +141,7 @@ pub fn patch_annotations(text: &str, annotations: &[Annotation]) -> Result<Strin
         .collect();
     let (body_start, body_end) = root_body(text)?;
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    let mut matched: BTreeMap<String, ()> = BTreeMap::new();
     let mut seen = 0usize;
     for footprint in child_nodes(text, body_start, body_end) {
         if node_head(text, &footprint) != "footprint" {
@@ -139,6 +154,7 @@ pub fn patch_annotations(text: &str, annotations: &[Annotation]) -> Result<Strin
             continue;
         };
         seen += 1;
+        matched.insert(reference.clone(), ());
         let children = child_nodes(text, footprint.start + 1, footprint.end - 1);
         let indent = block_indent(text, &footprint);
         if let Some(locked) = annotation.locked {
@@ -155,15 +171,33 @@ pub fn patch_annotations(text: &str, annotations: &[Annotation]) -> Result<Strin
             ));
         }
     }
-    if seen != by_reference.len() {
-        let missing: Vec<&str> = by_reference.keys().copied().collect();
+    report_matches(seen, &matched, by_reference.keys().copied(), "annotate")?;
+    Ok(apply_edits(text, edits))
+}
+
+/// Say exactly which references a walk could not find, and call a board that
+/// carries the same refdes twice what it is.
+fn report_matches<'a>(
+    seen: usize,
+    matched: &BTreeMap<String, ()>,
+    requested: impl Iterator<Item = &'a str>,
+    verb: &str,
+) -> Result<(), String> {
+    let missing: Vec<&str> = requested
+        .filter(|reference| !matched.contains_key(*reference))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!("no footprint to {verb} for {}", missing.join(", ")));
+    }
+    if seen != matched.len() {
         return Err(format!(
-            "matched {seen} of {} footprints to annotate (requested: {})",
-            by_reference.len(),
-            missing.join(", ")
+            "the board carries {} footprints for {} distinct reference(s); fix the duplicate \
+             refdes before editing",
+            seen,
+            matched.len()
         ));
     }
-    Ok(apply_edits(text, edits))
+    Ok(())
 }
 
 /// Drop whole footprints from a document.
@@ -177,6 +211,7 @@ pub fn remove_footprints(text: &str, references: &[String]) -> Result<String, St
         .collect();
     let (body_start, body_end) = root_body(text)?;
     let mut edits = Vec::new();
+    let mut matched: BTreeMap<String, ()> = BTreeMap::new();
     let mut seen = 0usize;
     for footprint in child_nodes(text, body_start, body_end) {
         if node_head(text, &footprint) != "footprint" {
@@ -189,18 +224,14 @@ pub fn remove_footprints(text: &str, references: &[String]) -> Result<String, St
             continue;
         }
         seen += 1;
+        matched.insert(reference.clone(), ());
         let mut start = footprint.start;
         while start > body_start && matches!(text.as_bytes()[start - 1], b' ' | b'\t' | b'\n') {
             start -= 1;
         }
         edits.push((start, footprint.end, String::new()));
     }
-    if seen != wanted.len() {
-        return Err(format!(
-            "matched {seen} of {} footprints to remove",
-            wanted.len()
-        ));
-    }
+    report_matches(seen, &matched, wanted.keys().copied(), "remove")?;
     Ok(apply_edits(text, edits))
 }
 
@@ -323,13 +354,11 @@ mod tests {
 
     #[test]
     fn locking_and_unlocking_round_trips_through_the_file() {
-        let locked =
-            patch_annotations(BOARD, &[Annotation::new("R1").locked(true)]).unwrap();
+        let locked = patch_annotations(BOARD, &[Annotation::new("R1").locked(true)]).unwrap();
         assert!(locked.contains("(locked yes)"));
         assert!(snapshot_of(&locked).imported.parts[0].locked);
 
-        let unlocked =
-            patch_annotations(&locked, &[Annotation::new("R1").locked(false)]).unwrap();
+        let unlocked = patch_annotations(&locked, &[Annotation::new("R1").locked(false)]).unwrap();
         assert!(!unlocked.contains("(locked yes)"));
         assert!(!snapshot_of(&unlocked).imported.parts[0].locked);
     }

@@ -5,7 +5,6 @@
 //! Real `kicad-cli`, a real `.kicad_sch` and a real `.kicad_pcb` on disk — no
 //! network, no mocks. Skips when no KiCAD is installed.
 
-
 use gordian_core::AgentRuntime;
 use gordian_core::tools::run_tool;
 use kicad_board::{BoardDoc, BoardFootprint};

@@ -212,8 +212,7 @@ pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let gate = match Guard::open(
         ctx,
-        Edit::new("route_board", "Route the project board", &[ctx.pcb_path()])
-            .expecting(&input),
+        Edit::new("route_board", "Route the project board", &[ctx.pcb_path()]).expecting(&input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
@@ -344,11 +343,26 @@ fn route_live_board(
                     .filter(|net| routable.contains(net.as_str()))
                     .collect();
             if selected.is_empty() {
-                return Err(refusal(format!(
-                    "no routable net has a pad or copper inside that box \
-                     ({:.2},{:.2})-({:.2},{:.2}); check_board lists what is unrouted",
-                    bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y
-                )));
+                // An empty window is a legal question with an empty answer, not
+                // a mistake: nothing was selected, so nothing was written.
+                return Ok(json!({
+                    "ok": true,
+                    "routed": "0/0",
+                    "routed_connection_count": 0,
+                    "total_connection_count": 0,
+                    "ratsnest": [],
+                    "blocked": [],
+                    "bbox": {
+                        "min_x": bbox.min_x, "min_y": bbox.min_y,
+                        "max_x": bbox.max_x, "max_y": bbox.max_y,
+                    },
+                    "note": format!(
+                        "no routable net has a pad or copper inside ({:.2},{:.2})-({:.2},{:.2}), \
+                         so nothing was routed and nothing was written; check_board lists what \
+                         is still open",
+                        bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y
+                    ),
+                }));
             }
             Some(selected)
         }
@@ -538,8 +552,6 @@ fn route_live_board(
         },
     );
     let m = result.solution.metrics();
-    let total_connections = board.problem.connections.len();
-    let routed_connections = total_connections.saturating_sub(failure_summary.connection_count);
     // Every net's terminals (so an out-of-scope net can still be named by its
     // pads) over the obstacles the router actually faced (so the copper this
     // call kept can be named as the thing in the way).
@@ -547,15 +559,22 @@ fn route_live_board(
         obstacles: solve_view.obstacles.clone(),
         ..rp.clone()
     };
-    // Re-read the board so the ratsnest is the connectivity the file really
-    // carries after this write, not the solver's view of it.
-    let written = crate::active_board(ctx).unwrap_or(board.clone());
+    // The ratsnest is the connectivity the FILE carries after this write, so it
+    // is read back from disk. A board that cannot be re-read is a board whose
+    // result cannot be trusted, and the guard is owed the chance to restore it.
+    let written = crate::active_board(ctx).map_err(|error| {
+        refusal(format!(
+            "the route was written but the board could not be read back: {error}"
+        ))
+    })?;
     let ratsnest = crate::ratsnest::build(&written, &report_view, &result.failed, None);
     Ok(json!({
         "router": result.engine,
-        "routed": format!("{routed_connections}/{total_connections}"),
-        "routed_connection_count": routed_connections,
-        "total_connection_count": total_connections,
+        // One denominator for the whole tool surface: what the board's own
+        // copper joins, exactly as check_board and get_board count it.
+        "routed": format!("{}/{}", ratsnest.routed, ratsnest.total),
+        "routed_connection_count": ratsnest.routed,
+        "total_connection_count": ratsnest.total,
         "ratsnest": ratsnest.entries,
         "blocked": ratsnest.blocked(),
         "staged_nets": staged_nets.iter().collect::<Vec<_>>(),
@@ -610,9 +629,10 @@ fn route_live_board(
             "routed and saved the KiCAD board cleanly".to_owned()
         } else {
             format!(
-                "saved the KiCAD board with {routed_connections} of {total_connections} net(s) \
-                 routed; the rest carry no copper — see `unrouted` for the pads, the obstacle and \
-                 the repair for each"
+                "saved the KiCAD board with {} of {} net(s) routed; the rest carry no copper — \
+                 see `ratsnest` for each one's pads, its status, what is in the way and the \
+                 calls that would free it",
+                ratsnest.routed, ratsnest.total
             )
         },
     }))
@@ -636,7 +656,7 @@ fn validate_written_plane_routes(
     }
     let path = ctx.pcb_path();
     crate::export::materialize_zones_for_drc(&path, ctx.env())
-    .map_err(|error| refusal(format!("could not refill routed copper zones: {error}")))?;
+        .map_err(|error| refusal(format!("could not refill routed copper zones: {error}")))?;
     let report = ctx
         .env()
         .drc(&path)
@@ -649,8 +669,7 @@ fn validate_written_plane_routes(
     let fallback = route_rejected_planes(solve_view, result, &rejected);
     replace_route_atomically(ctx, full_view, &result.solution, layer_names, (1, 0))
         .map_err(|error| refusal(format!("could not replace rejected plane fanout: {error}")))?;
-    crate::export::materialize_zones_for_drc(&path, ctx.env())
-    .map_err(|error| {
+    crate::export::materialize_zones_for_drc(&path, ctx.env()).map_err(|error| {
         refusal(format!(
             "could not refill zones after plane fallback: {error}"
         ))
@@ -3950,7 +3969,6 @@ mod escape_bottleneck_tests {
         assert_eq!(split.real, 0, "{remaining:?}");
         assert_eq!(split.expected_gaps, 1);
         assert_eq!(result.solution.traces.len(), 1, "the routed net is kept");
-
     }
 
     /// `route_board{nets}` is the repair loop after a `move_parts`, so the

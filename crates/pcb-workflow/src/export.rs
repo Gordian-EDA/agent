@@ -76,12 +76,24 @@ impl ClassifiedViolation<'_> {
     }
 }
 
-/// Re-classify every finding that involves a staged part, so the DRC verdict is
-/// about the board being built and not about the row waiting to join it.
+/// A finding kind that is settled purely by placing the part it names — copper
+/// that has nowhere to go yet, or a courtyard sitting in the staging row.
+fn is_settled_by_placing(kind: &str) -> bool {
+    matches!(
+        kind,
+        "unconnected_items" | "courtyards_overlap" | "footprint_type_mismatch"
+    )
+}
+
+/// Re-classify the findings a staged part is answerable for, so the DRC verdict
+/// is about the board being built and not about the row waiting to join it.
 ///
-/// Any staged part is enough: a part in the staging row is not on the board, so
-/// neither the copper that does not reach it nor the geometry it sits in is the
-/// board's to answer for. Placing it is what settles the finding.
+/// For a finding that placing the part settles — an unrouted pair, two
+/// courtyards in the staging row — naming ONE staged part is enough. A copper
+/// defect is different: a clearance fault or a short between a placed track and
+/// a staged pad is real copper on the placed board, and it is excused only when
+/// every part it names is staged. `referenced_parts` is a prose heuristic, so
+/// erring toward keeping copper defects in the verdict is the safe direction.
 ///
 /// The list is re-sorted afterwards: what the caller must act on leads, then
 /// what the board arrived with, then the staging row it has not reached yet.
@@ -93,8 +105,13 @@ fn excuse_staged<'a>(
         return;
     }
     for finding in findings.iter_mut() {
-        let (_, refs, _) = violation_key(finding.violation);
-        if refs.iter().any(|reference| staged.contains(reference)) {
+        let (kind, refs, _) = violation_key(finding.violation);
+        let excused = if is_settled_by_placing(&kind) {
+            refs.iter().any(|reference| staged.contains(reference))
+        } else {
+            !refs.is_empty() && refs.iter().all(|reference| staged.contains(reference))
+        };
+        if excused {
             finding.classification = "staged";
         }
     }
@@ -289,8 +306,12 @@ pub fn refill_zones(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
     let gate = match Guard::open(
         ctx,
-        Edit::new("refill_zones", "Refill board copper zones", std::slice::from_ref(&path))
-            .expecting(&input),
+        Edit::new(
+            "refill_zones",
+            "Refill board copper zones",
+            std::slice::from_ref(&path),
+        )
+        .expecting(&input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
@@ -302,7 +323,9 @@ pub fn refill_zones(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         ctx.env()
             .refill_zones(&path, true)
             .map(|_| true)
-            .map_err(|error| format!("kicad-cli pcb drc --refill-zones --save-board failed: {error}"))
+            .map_err(|error| {
+                format!("kicad-cli pcb drc --refill-zones --save-board failed: {error}")
+            })
     } else {
         Ok(false)
     };
@@ -454,8 +477,11 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // A part still in the staging row is progress outstanding, not a defect:
     // excuse its findings before anything counts them.
     let state = crate::staging::BoardState::of(&board);
-    let staged_refs: std::collections::BTreeSet<String> =
-        state.staged.iter().map(|part| part.reference.clone()).collect();
+    let staged_refs: std::collections::BTreeSet<String> = state
+        .staged
+        .iter()
+        .map(|part| part.reference.clone())
+        .collect();
     excuse_staged(&mut violations, &staged_refs);
     excuse_staged(&mut unconnected_findings, &staged_refs);
     let violations = violations;
@@ -605,7 +631,9 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             staged_refs_list.len(),
         )
     } else {
-        format!("{note_prefix}Board checks reported {blocking_findings} blocking finding(s); inspect the introduced DRC findings and absolute outline containment first.")
+        format!(
+            "{note_prefix}Board checks reported {blocking_findings} blocking finding(s); inspect the introduced DRC findings and absolute outline containment first."
+        )
     };
     let next = if !staged_refs_list.is_empty() {
         format!(
@@ -620,23 +648,16 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "Fix the introduced blocking violations/unconnected items, then call check_board again. Leave pre-existing findings alone and do not resync blindly.".to_owned()
     };
     let text = diagnostics.join("\n");
-    Ok(json!({
-        "ok": blocking_findings == 0,
-        "drc_clean": blocking_findings == 0,
-        "path": path.display().to_string(),
+    // The DRC detail and the silkscreen pass each get their own object: the
+    // board's verdict and its progress stay at the top level, where a caller
+    // reads them, and no single `json!` grows past what the macro can expand.
+    let drc = json!({
         "baseline_revision": baseline.as_ref().map(|baseline| baseline.revision),
         "baseline_error": baseline_error,
         "introduced": introduced,
         "pre_existing": pre_existing,
-        "blocking_findings": blocking_findings,
         "blocking_findings_absolute": blocking_findings_absolute,
         "reported_findings": reported_findings,
-        "silk_warnings": silk_warnings,
-        "introduced_silk_warnings": introduced_silk_warnings,
-        "silk_warnings_fixed": initial_silk_warnings.saturating_sub(silk_warnings),
-        "silk_cleanup_attempts": silk_cleanup_attempts,
-        "silk_references_moved": silk_references_moved,
-        "silk_cleanup_error": silk_cleanup_error,
         "violations": report.violations.len(),
         "copper_violations": copper_violations,
         "introduced_copper_violations": introduced_copper,
@@ -647,25 +668,32 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "ignored_zone_self_unconnected": gate.ignored_zone_self_unconnected,
         "outside_outline": containment.outside_outline,
         "copper_outside_outline": containment.copper_outside_outline > 0,
-        "findings": findings,
-        "diagnostics": diagnostics,
-        "text": text,
         "top_violations": classified_summaries(
             violations.iter().filter(|finding| !is_non_copper(finding.violation)),
             5,
         ),
-        "top_silk_violations": classified_summaries(
+        "top_unconnected": classified_summaries(meaningful_unconnected.iter(), 5),
+    });
+    let silk = json!({
+        "warnings": silk_warnings,
+        "introduced_warnings": introduced_silk_warnings,
+        "warnings_fixed": initial_silk_warnings.saturating_sub(silk_warnings),
+        "cleanup_attempts": silk_cleanup_attempts,
+        "references_moved": silk_references_moved,
+        "cleanup_error": silk_cleanup_error,
+        "top_violations": classified_summaries(
             violations.iter().filter(|finding| {
                 finding.violation.severity == "warning" && matches!(finding.violation.kind.as_str(),
                     "silk_over_copper" | "silk_overlap" | "silk_edge_clearance" | "silk_over_silk")
             }),
             5,
         ),
-        "top_unconnected": classified_summaries(meaningful_unconnected.iter(), 5),
-        // Never a bare count: the two pads that should be joined are what say
-        // which route_track / route_board{nets} call repairs the board.
-        "unconnected": unconnected,
-        "islands": islands,
+    });
+    Ok(json!({
+        "ok": blocking_findings == 0,
+        "drc_clean": blocking_findings == 0,
+        "path": path.display().to_string(),
+        "blocking_findings": blocking_findings,
         // Progress, not pass/fail: how much of the board is routed, what is
         // standing in the way of the rest, and who is still in the staging row.
         "routed": format!("{}/{}", ratsnest.routed, ratsnest.total),
@@ -674,6 +702,15 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "blocked": blocked,
         "staged": staged,
         "staged_count": staged_refs_list.len(),
+        "drc": drc,
+        "silk": silk,
+        "findings": findings,
+        "diagnostics": diagnostics,
+        "text": text,
+        // Never a bare count: the two pads that should be joined are what say
+        // which route_track / route_board{nets} call repairs the board.
+        "unconnected": unconnected,
+        "islands": islands,
         "note": note,
         "next": next,
     }))

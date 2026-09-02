@@ -329,22 +329,28 @@ impl<'a> Edit<'a> {
     }
 
     /// Read `expect_revision` off a tool's own input.
-    pub(crate) fn expecting(mut self, input: &Value) -> Self {
-        self.expect_revision = input
-            .get("expect_revision")
-            .and_then(Value::as_u64)
-            .map(RevisionId::new);
+    pub(crate) fn expecting(self, input: &Value) -> Self {
+        self.expect(expected_revision(input))
+    }
+
+    /// Carry a token a caller already read off its input.
+    pub(crate) fn expect(mut self, expected: Option<RevisionId>) -> Self {
+        self.expect_revision = expected;
         self
     }
 }
 
+/// The `expect_revision` a tool input carries, if any.
+pub(crate) fn expected_revision(input: &Value) -> Option<RevisionId> {
+    input
+        .get("expect_revision")
+        .and_then(Value::as_u64)
+        .map(RevisionId::new)
+}
+
 /// The refusal a stale `expect_revision` earns: the current revision and what
 /// the writer that took it touched, so the caller can re-read and retry.
-fn conflict_refusal(
-    ctx: &AgentRuntime,
-    tool: &'static str,
-    expected: RevisionId,
-) -> Option<Value> {
+fn conflict_refusal(ctx: &AgentRuntime, tool: &'static str, expected: RevisionId) -> Option<Value> {
     let current = ctx.revisions().conflict(expected).ok()??;
     Some(json!({
         "error": format!(

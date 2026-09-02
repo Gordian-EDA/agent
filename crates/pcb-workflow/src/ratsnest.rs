@@ -83,13 +83,18 @@ fn escapes(
             serde_json::to_string(staged).unwrap_or_else(|_| "[]".to_owned())
         )];
     }
+    // A pad handle is a JSON string and a bare coordinate a JSON array, so the
+    // suggestion is valid `route_track` input either way.
     let hand_route = format!(
-        "route_track {{\"net\":\"{net}\",\"from\":\"{}\",\"to\":\"{}\"}}",
-        from.pad, to.pad
+        "route_track {{\"net\":\"{net}\",\"from\":{},\"to\":{}}}",
+        from.to_literal(),
+        to.to_literal()
     );
     match obstruction.and_then(|obstruction| obstruction.owner_ref.as_deref()) {
         Some(blocker) => vec![
-            format!("move_parts to shift {blocker} off the line, then route_board {{\"nets\":[\"{net}\"]}}"),
+            format!(
+                "move_parts to shift {blocker} off the line, then route_board {{\"nets\":[\"{net}\"]}}"
+            ),
             hand_route,
         ],
         None => vec![
@@ -117,9 +122,9 @@ pub(crate) fn build(
 ) -> Ratsnest {
     let unrouted = unrouted_connections(board);
     let staged = crate::staging::staged_references(board);
-    let mut attempted: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut reasons: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for record in failed.iter().filter(|record| !record.connection.is_empty()) {
-        attempted
+        reasons
             .entry(record.connection.as_str())
             .or_default()
             .push(record.reason.as_str());
@@ -150,21 +155,22 @@ pub(crate) fn build(
             .filter_map(|terminal| terminal.reference.as_deref())
             .filter(|reference| staged.contains(*reference))
             .collect();
+        // Status is read off the board, not off whether some call happened to
+        // try this net: copper that joins the pads is routed, a net whose
+        // direct path is crossed by foreign copper is blocked, and everything
+        // else is simply open. That way `get_board`, `check_board` and
+        // `route_board` answer the same question the same way.
         let status = if !unrouted.contains(net) && on_staged.is_empty() {
             routed += 1;
             Status::Routed
-        } else if on_staged.is_empty() && attempted.contains_key(net) {
-            Status::Blocked
         } else {
             Status::Open
         };
-        let obstruction = (status == Status::Blocked)
+        let obstruction = (status == Status::Open && on_staged.is_empty())
             .then(|| obstruction_between(problem, &board.imported.parts, net, from, to))
             .flatten();
         let status = match (status, &obstruction) {
-            // Nothing concrete was in the way: the router simply found no
-            // channel, which is an open connection, not a blocked one.
-            (Status::Blocked, None) => Status::Open,
+            (Status::Open, Some(_)) => Status::Blocked,
             (status, _) => status,
         };
         let mut entry = json!({
@@ -182,8 +188,8 @@ pub(crate) fn build(
                     "escapes".to_owned(),
                     json!(escapes(net, from, to, &on_staged, obstruction.as_ref())),
                 );
-                if let Some(reasons) = attempted.get(net) {
-                    object.insert("reason".to_owned(), json!(reasons.join("; ")));
+                if let Some(reason) = reasons.get(net) {
+                    object.insert("reason".to_owned(), json!(reason.join("; ")));
                 }
             }
         }

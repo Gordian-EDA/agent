@@ -8,8 +8,8 @@ use pcb_model::{
     Connection, LayerRef, Obstacle, RoutePoint, RouteSolution, RoutingView, Trace, Via, ViaSpan,
 };
 
-use crate::snapshot::{BoardSide, BoardSnapshot, ImportedBoard, ImportedPad, ImportedPart};
 use crate::patch::{Node, child_nodes, node_head, root_body};
+use crate::snapshot::{BoardSide, BoardSnapshot, ImportedBoard, ImportedPad, ImportedPart};
 
 const DEFAULT_MIN_TRACE_WIDTH_MM: f64 = 0.2;
 const DEFAULT_CLEARANCE_MM: f64 = 0.2;
@@ -1162,5 +1162,4 @@ mod tests {
         assert_eq!(snapshot.problem.via_drill, 0.4);
         assert_eq!(snapshot.problem.net_widths["SIG"], 0.5);
     }
-
 }

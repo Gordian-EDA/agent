@@ -37,10 +37,6 @@ use serde_json::{Value, json};
 
 use crate::{AgentRuntime, Tool};
 
-/// The JSON-Schema definitions for every tool, in a stable order. The
-/// The `intent` object both board-building tools take: what the layout should
-/// be, never where a part goes. `zones` is `sync_board`'s half (it seeds the
-/// pours); the rest is `place_board`'s.
 /// The optimistic-concurrency token every board mutator accepts.
 fn expect_revision_schema() -> Value {
     json!({
@@ -69,6 +65,9 @@ fn bbox_schema(what: &str) -> Value {
     })
 }
 
+/// The `intent` object both board-building tools take: what the layout should
+/// be, never where a part goes. `zones` is `sync_board`'s half (it seeds the
+/// pours); the rest is `place_board`'s.
 fn intent_schema() -> Value {
     json!({
         "type": "object",
@@ -199,15 +198,17 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "reserve_refs".into(),
-            description: "Reserve a block of reference designators (R7…R12) in the project so \
-                 nothing else mints them. Use it before adding parts while another agent is \
-                 working on the same design."
+            description: "Claim a block of reference designators (R7…R12) and record the claim \
+                 in the project. Use it before adding parts while another agent works on the \
+                 same design, then name those exact refs in place_parts/add_parts — the claim \
+                 is recorded and skipped by later reserve_refs calls, so two agents that both \
+                 reserve never collide."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "prefix": { "type": "string", "minLength": 1, "description": "Letters only: R, C, U, TP." },
-                    "count": { "type": "integer", "minimum": 1, "maximum": 200 }
+                    "count": { "type": "integer", "minimum": 1, "maximum": gordian_runtime::refdes::MAX_RESERVATION }
                 },
                 "required": ["prefix", "count"],
                 "additionalProperties": false
@@ -443,7 +444,7 @@ pub fn tool_defs() -> Vec<Tool> {
                         "enum": ["mechanical", "agent", "user"],
                         "description": "Default agent. `mechanical` for a position the physical world fixes."
                     },
-                    "expect_revision": { "type": "integer", "minimum": 1 }
+                    "expect_revision": expect_revision_schema()
                 },
                 "required": ["refs"],
                 "additionalProperties": false
@@ -456,7 +457,7 @@ pub fn tool_defs() -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "refs": { "type": "array", "minItems": 1, "items": { "type": "string" } },
-                    "expect_revision": { "type": "integer", "minimum": 1 }
+                    "expect_revision": expect_revision_schema()
                 },
                 "required": ["refs"],
                 "additionalProperties": false
@@ -1146,9 +1147,10 @@ fn checkpoint(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "error": "this project has no schematic or board to checkpoint yet",
         }));
     }
-    match ctx.revisions().capture(
-        gordian_runtime::revisions::Capture::new("checkpoint", label, &files).label(label),
-    ) {
+    match ctx
+        .revisions()
+        .capture(gordian_runtime::revisions::Capture::new("checkpoint", label, &files).label(label))
+    {
         Ok(revision) => Ok(json!({
             "ok": true,
             "revision": revision,
@@ -1157,7 +1159,11 @@ fn checkpoint(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 .iter()
                 .map(|path| path.display().to_string())
                 .collect::<Vec<_>>(),
-            "note": "Pass this revision as `expect_revision` to a board mutator to write only                      while the project is still in this state, or to undo({revision}) to come                      back to it.",
+            "note": format!(
+                "Pass revision {revision} as `expect_revision` to a board mutator to write only \
+                 while the project is still in this state, or undo({{\"revision\": {revision}}}) \
+                 to come back to it."
+            ),
         })),
         Err(error) => Ok(json!({ "error": format!("could not checkpoint: {error}") })),
     }
@@ -1178,7 +1184,7 @@ fn reserve_refs(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "start": reservation.start,
             "count": reservation.count,
             "refs": reservation.refs,
-            "note": "These references are yours; nothing else in this project will be given them.",
+            "note": "These references are recorded as yours: no later reserve_refs will hand                      them out, and no part in the design carries them today. Use exactly these                      refs when you add the parts.",
         })),
         Err(error) => Ok(json!({ "error": error.to_string() })),
     }

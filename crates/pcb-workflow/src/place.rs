@@ -176,9 +176,8 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Some(net) = net_filter {
         board_json["terminals"] = terminals_json(&board, net);
         let scope = std::collections::BTreeSet::from([net.to_owned()]);
-        board_json["ratsnest"] = json!(
-            crate::ratsnest::build(&board, &board.problem, &[], Some(&scope)).entries
-        );
+        board_json["ratsnest"] =
+            json!(crate::ratsnest::build(&board, &board.problem, &[], Some(&scope)).entries);
     }
 
     Ok(json!({
@@ -2553,9 +2552,9 @@ fn placement_subset(
         ),
         locked: locked
             .iter()
-            .map(|(reference, reason)| {
-                json!({ "ref": reference, "locked_reason": reason.as_str() })
-            })
+            .map(
+                |(reference, reason)| json!({ "ref": reference, "locked_reason": reason.as_str() }),
+            )
             .collect(),
     }
 }
@@ -2715,8 +2714,7 @@ fn write_mechanical_locks(
                 .iter()
                 .find(|part| part.reference == **reference)
                 .is_some_and(|part| {
-                    is_connector(&part.lib_id, &part.reference)
-                        || is_mounting_hole(&part.lib_id)
+                    is_connector(&part.lib_id, &part.reference) || is_mounting_hole(&part.lib_id)
                 })
         })
         .map(str::to_owned)
@@ -2789,6 +2787,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Err(error) = check_references(intent.references().into_iter(), &board, "intent") {
         return Ok(json!({ "error": error }));
     }
+    let expect_revision = crate::board::guard::expected_revision(&input);
     let replace = input
         .get("replace")
         .and_then(Value::as_bool)
@@ -2825,7 +2824,6 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // they land at the perimeter (where a cable or the enclosure reaches them),
     // not stranded in the interior with copper wrapping around them. Skip any
     // part the model already steered with an explicit group `edge` hint.
-    let expect_revision = json!({ "expect_revision": input.get("expect_revision") });
     let mut hints = match placement_hints_from_input(input) {
         Ok(hints) => hints,
         Err(error) => return Ok(json!({ "error": error })),
@@ -2996,7 +2994,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 ctx,
                 Edit::new("place_board", "Place board footprints", &[ctx.pcb_path()])
                     .refs(moves.iter().map(|m| m.reference.clone()))
-                    .expecting(&expect_revision),
+                    .expect(expect_revision),
             ) {
                 Ok(opened) => opened,
                 Err(refusal) => return Ok(refusal),

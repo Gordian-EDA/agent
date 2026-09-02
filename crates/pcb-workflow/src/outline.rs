@@ -28,7 +28,7 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .unwrap_or(false);
 
     if fit {
-        return refit_existing_board(ctx);
+        return refit_existing_board(&input, ctx);
     }
 
     let outline = if input.get("outline").is_some() {
@@ -80,7 +80,7 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     })))
 }
 
-fn refit_existing_board(ctx: &AgentRuntime) -> Result<Value> {
+fn refit_existing_board(input: &Value, ctx: &AgentRuntime) -> Result<Value> {
     let board = match crate::active_board(ctx) {
         Ok(board) => board,
         Err(err) => return Ok(json!({ "error": err })),
@@ -127,20 +127,20 @@ fn refit_existing_board(ctx: &AgentRuntime) -> Result<Value> {
         &hints,
         &current,
     ) else {
+        // Nothing smaller is legal, so there is nothing to do. That is an
+        // answer, not a failure: the board keeps the outline it has.
         return Ok(json!({
-            "error": "cannot re-fit this placement to a smaller legal rule-derived rectangle"
+            "ok": true,
+            "changed": false,
+            "bounds": {
+                "min_x": board.imported.bounds.min_x,
+                "min_y": board.imported.bounds.min_y,
+                "max_x": board.imported.bounds.max_x,
+                "max_y": board.imported.bounds.max_y,
+            },
+            "note": "the current outline is already the smallest legal rectangle these \
+                     footprints and rules allow; nothing was changed",
         }));
-    };
-    let gate = match Guard::open(
-        ctx,
-        Edit::new(
-            "update_board_outline",
-            "Re-fit the board outline",
-            std::slice::from_ref(&path),
-        ),
-    ) {
-        Ok(gate) => gate,
-        Err(refusal) => return Ok(refusal),
     };
     let locked: std::collections::BTreeSet<&str> = board
         .imported
@@ -149,6 +149,19 @@ fn refit_existing_board(ctx: &AgentRuntime) -> Result<Value> {
         .filter(|part| part.locked)
         .map(|part| part.reference.as_str())
         .collect();
+    let gate = match Guard::open(
+        ctx,
+        Edit::new(
+            "update_board_outline",
+            "Re-fit the board outline",
+            std::slice::from_ref(&path),
+        )
+        .refs(moved_references(&plan, &locked))
+        .expecting(input),
+    ) {
+        Ok(gate) => gate,
+        Err(refusal) => return Ok(refusal),
+    };
     let moves: Vec<kicad_board::FootprintPlacement> = plan
         .result
         .placements
@@ -214,7 +227,9 @@ fn refit_existing_board(ctx: &AgentRuntime) -> Result<Value> {
             "path": path.display().to_string(),
             "bounds": plan.to,
             "outline_refit": outline_refit_json(&plan),
-            "note": "re-placed the unrouted board on its compact rule-derived managed outline",
+            "skipped_locked": locked.iter().collect::<Vec<_>>(),
+            "note": "re-placed the unrouted board on its compact rule-derived managed outline; \
+                     locked footprints kept their pose",
         }),
     ))
 }
@@ -511,6 +526,20 @@ fn managed_outline_error() -> String {
 pub(crate) fn replace_managed_outline(board: &str, rect: Rect) -> Result<String> {
     let managed = managed_outline_bounds(board).map_err(anyhow::Error::msg)?;
     replace_edge_cuts(board, &Outline::Rect(rect), Some(managed.explicit))
+}
+
+/// The references a re-fit will actually move: everything the plan places that
+/// a lock does not hold.
+fn moved_references(
+    plan: &super::place::OutlineRefitPlan,
+    locked: &std::collections::BTreeSet<&str>,
+) -> Vec<String> {
+    plan.result
+        .placements
+        .iter()
+        .map(|placement| placement.reference.clone())
+        .filter(|reference| !locked.contains(reference.as_str()))
+        .collect()
 }
 
 pub(crate) fn outline_refit_json(plan: &super::place::OutlineRefitPlan) -> Value {

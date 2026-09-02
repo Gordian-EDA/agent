@@ -586,14 +586,17 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok((problem, solution, request, layer_names)) => {
             let gate = match Guard::open(
                 ctx,
-                Edit::new("route_track", "Route one board connection", &[ctx.pcb_path()])
-                    .expecting(&input),
+                Edit::new(
+                    "route_track",
+                    "Route one board connection",
+                    &[ctx.pcb_path()],
+                )
+                .expecting(&input),
             ) {
                 Ok(gate) => gate,
                 Err(refusal) => return Ok(refusal),
             };
-            if let Err(err) =
-                super::route::write_route_file(ctx, &problem, &solution, &layer_names)
+            if let Err(err) = super::route::write_route_file(ctx, &problem, &solution, &layer_names)
             {
                 let error =
                     json!({ "error": format!("route_track could not write copper: {err}") });
@@ -618,8 +621,12 @@ pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let gate = match Guard::open(
         ctx,
-        Edit::new("delete_copper", "Delete board copper", std::slice::from_ref(&path))
-            .expecting(&input),
+        Edit::new(
+            "delete_copper",
+            "Delete board copper",
+            std::slice::from_ref(&path),
+        )
+        .expecting(&input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),

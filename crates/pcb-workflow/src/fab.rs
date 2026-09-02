@@ -38,12 +38,10 @@ pub fn export_fab(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // A part still in the staging row is not on the board yet, so it must not
     // reach a board house. Everything below runs against a copy with the row
     // removed, and the report names what was left out.
-    let (source, staged, staging_dir) = match export_source(ctx, &board) {
+    let (board, staged, _staging_dir) = match export_source(ctx, &board) {
         Ok(source) => source,
         Err(error) => return Ok(json!({ "error": error })),
     };
-    let _staging_dir = staging_dir;
-    let board = source;
 
     let cli = ctx.env();
     let drc = match cli.refill_zones(&board, true) {

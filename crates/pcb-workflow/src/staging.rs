@@ -84,9 +84,7 @@ pub(crate) fn staged(board: &BoardSnapshot) -> Vec<StagedPart> {
                 .property(kicad_board::STAGED_REASON)
                 .and_then(StagedReason::parse)
                 .unwrap_or(StagedReason::Unplaced),
-            detail: part
-                .property(kicad_board::STAGED_DETAIL)
-                .map(str::to_owned),
+            detail: part.property(kicad_board::STAGED_DETAIL).map(str::to_owned),
         })
         .collect()
 }
@@ -149,10 +147,7 @@ pub(crate) struct BoardState {
 impl BoardState {
     pub(crate) fn of(board: &BoardSnapshot) -> Self {
         let staged = staged(board);
-        let in_row: BTreeSet<&str> = staged
-            .iter()
-            .map(|part| part.reference.as_str())
-            .collect();
+        let in_row: BTreeSet<&str> = staged.iter().map(|part| part.reference.as_str()).collect();
         Self {
             placed: board
                 .imported
@@ -166,9 +161,9 @@ impl BoardState {
                 .parts
                 .iter()
                 .filter_map(|part| {
-                    lock_reason(part).map(|reason| {
-                        json!({ "ref": part.reference, "locked_reason": reason.as_str() })
-                    })
+                    lock_reason(part).map(
+                        |reason| json!({ "ref": part.reference, "locked_reason": reason.as_str() }),
+                    )
                 })
                 .collect(),
             staged,
@@ -215,11 +210,9 @@ mod tests {
 
     #[test]
     fn the_seed_row_is_the_staging_area_and_carries_its_reason() {
-        let board = board_with(&[
-            kicad_board::Annotation::new("R2")
-                .set(kicad_board::STAGED_REASON, "footprint_mismatch")
-                .set(kicad_board::STAGED_DETAIL, "pin 3 has no pad"),
-        ]);
+        let board = board_with(&[kicad_board::Annotation::new("R2")
+            .set(kicad_board::STAGED_REASON, "footprint_mismatch")
+            .set(kicad_board::STAGED_DETAIL, "pin 3 has no pad")]);
         let state = BoardState::of(&board);
 
         assert_eq!(state.staged_references(), ["R1", "R2"]);

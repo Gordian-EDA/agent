@@ -11,7 +11,8 @@ mod sexpr;
 mod snapshot;
 
 pub use annotate::{
-    Annotation, GORDIAN_PREFIX, LOCKED_REASON, STAGED_DETAIL, STAGED_REASON, patch_annotations, remove_footprints,
+    Annotation, GORDIAN_PREFIX, LOCKED_REASON, STAGED_DETAIL, STAGED_REASON, patch_annotations,
+    remove_footprints,
 };
 pub use edit::{BoardDoc, BoardFootprint};
 pub use netclass::{

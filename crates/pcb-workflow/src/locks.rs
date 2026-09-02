@@ -81,7 +81,8 @@ fn apply(
         .map_err(|error| format!("could not read the board: {error}"))
         .and_then(|text| kicad_board::patch_annotations(&text, &annotations))
         .and_then(|text| {
-            std::fs::write(&path, text).map_err(|error| format!("could not write the board: {error}"))
+            std::fs::write(&path, text)
+                .map_err(|error| format!("could not write the board: {error}"))
         });
     if let Err(error) = written {
         return Ok(gate.rollback(ctx, json!({ "error": format!("{tool}: {error}") })));

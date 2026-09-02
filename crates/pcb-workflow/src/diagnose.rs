@@ -45,7 +45,6 @@ impl Explained {
             "suggestion": self.suggestion,
         })
     }
-
 }
 
 fn round2(v: f64) -> f64 {
@@ -369,14 +368,32 @@ pub(crate) struct Terminal {
 
 impl Terminal {
     /// The ratsnest endpoint shape: the part, the pad, where it is, and on what.
+    ///
+    /// A point with no pad on it has no part and no pad number — only a
+    /// coordinate — and saying so beats splitting a `[x, y]` literal on its
+    /// decimal point.
     pub(crate) fn to_endpoint_json(&self) -> Value {
         json!({
             "ref": self.reference,
-            "pad": self.pad.rsplit_once('.').map_or(self.pad.as_str(), |(_, pad)| pad),
+            "pad": self.reference.is_some().then(|| {
+                self.pad
+                    .rsplit_once('.')
+                    .map_or(self.pad.as_str(), |(_, pad)| pad)
+            }),
             "x": round2(self.at.x),
             "y": round2(self.at.y),
             "layer": self.layer,
         })
+    }
+
+    /// The endpoint as `route_track` input: a pad handle is a JSON string, a
+    /// bare coordinate a JSON array. Quote only the former.
+    pub(crate) fn to_literal(&self) -> String {
+        if self.reference.is_some() {
+            format!("\"{}\"", self.pad)
+        } else {
+            self.pad.clone()
+        }
     }
 }
 

@@ -33,7 +33,7 @@ pub struct AgentRuntime {
     services: ToolServices,
     /// Project-wide schematic and board revision history.
     revisions: crate::revisions::Revisions,
-    /// Project-wide refdes reservations shared by every caller in this process.
+    /// The project's refdes reservations, read from and written to its own file.
     reservations: crate::refdes::Reservations,
     /// Keeps a test tempdir alive for the runtime's lifetime; `None` for real runtimes.
     _tempdir: Option<tempfile::TempDir>,

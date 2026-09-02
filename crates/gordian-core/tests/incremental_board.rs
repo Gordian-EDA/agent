@@ -73,7 +73,11 @@ fn design(ctx: &AgentRuntime) {
     );
     for chain in 0..8 {
         let index = 1 + chain * 3;
-        tool(ctx, "place_parts", chain_block(&format!("chain{chain}"), index));
+        tool(
+            ctx,
+            "place_parts",
+            chain_block(&format!("chain{chain}"), index),
+        );
     }
 }
 
@@ -138,7 +142,11 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
     assert_eq!(placed["still_staged"].as_array().unwrap().len(), 24);
 
     // ── locks: what is locked never moves, and says who locked it ───────────
-    tool(&ctx, "lock_parts", json!({ "refs": ["R99"], "reason": "agent" }));
+    tool(
+        &ctx,
+        "lock_parts",
+        json!({ "refs": ["R99"], "reason": "agent" }),
+    );
     let board = tool(&ctx, "get_board", json!({}));
     let locked = board["summary"]["locked"].as_array().unwrap();
     assert_eq!(
@@ -149,7 +157,12 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
         ],
         "{board:#}"
     );
-    let refused = run_tool("move_parts", json!({"moves": [{"reference": "J1", "to": [45.0, 45.0]}]}), &ctx).unwrap();
+    let refused = run_tool(
+        "move_parts",
+        json!({"moves": [{"reference": "J1", "to": [45.0, 45.0]}]}),
+        &ctx,
+    )
+    .unwrap();
     assert_eq!(refused["code"], json!("parts_locked"), "{refused:#}");
     assert!(
         refused["error"].as_str().unwrap().contains("mechanical"),
@@ -187,7 +200,8 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
     }
     // A net that reaches a part nobody has placed is open, and its way out is
     // to place that part — not to move copper that does not exist yet.
-    let staged_now: Vec<String> = staged_refs(&run_tool("get_board", json!({}), &ctx).unwrap()["summary"]);
+    let staged_now: Vec<String> =
+        staged_refs(&run_tool("get_board", json!({}), &ctx).unwrap()["summary"]);
     let reaches_staging = |entry: &Value| {
         ["from", "to"].iter().any(|end| {
             entry[end]["ref"]
@@ -221,7 +235,9 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
         if finding["classification"] == json!("introduced") {
             for reference in finding["refs"].as_array().unwrap() {
                 assert!(
-                    !staged_now.iter().any(|staged| staged == reference.as_str().unwrap()),
+                    !staged_now
+                        .iter()
+                        .any(|staged| staged == reference.as_str().unwrap()),
                     "a staged part is never blamed for a DRC finding: {finding:#}"
                 );
             }
@@ -268,10 +284,7 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
     );
     for entry in routed["ratsnest"].as_array().unwrap() {
         let status = entry["status"].as_str().unwrap();
-        assert!(
-            ["open", "routed", "blocked"].contains(&status),
-            "{entry:#}"
-        );
+        assert!(["open", "routed", "blocked"].contains(&status), "{entry:#}");
         if status == "blocked" {
             for field in ["kind", "owner_ref", "at", "gap_mm", "need_mm"] {
                 assert!(
@@ -285,7 +298,11 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
     let checked = run_tool("check_board", json!({}), &ctx).unwrap();
     assert_eq!(checked["staged"], json!([]), "{checked:#}");
     assert_eq!(checked["staged_count"], json!(0), "{checked:#}");
-    assert_eq!(checked["total_connection_count"], json!(nets), "{checked:#}");
+    assert_eq!(
+        checked["total_connection_count"],
+        json!(nets),
+        "{checked:#}"
+    );
     assert_eq!(
         checked["routed"],
         json!(format!("{}/{nets}", checked["routed_connection_count"])),
@@ -380,12 +397,13 @@ fn reserved_references_are_recorded_in_the_project_not_in_this_process() {
 
     // A fresh runtime over the same project directory is what a restart looks
     // like: it reads the claim off disk rather than remembering it.
-    let restarted = AgentRuntime::for_project(
-        ctx.env().clone(),
-        ctx.project_dir().to_path_buf(),
+    let restarted = AgentRuntime::for_project(ctx.env().clone(), ctx.project_dir().to_path_buf())
+        .expect("a second runtime over the same project");
+    let second = run_tool(
+        "reserve_refs",
+        json!({ "prefix": "R", "count": 2 }),
+        &restarted,
     )
-    .expect("a second runtime over the same project");
-    let second =
-        run_tool("reserve_refs", json!({ "prefix": "R", "count": 2 }), &restarted).unwrap();
+    .unwrap();
     assert_eq!(second["refs"], json!(["R4", "R5"]), "{second:#}");
 }

@@ -39,10 +39,6 @@
 //! - [`interactive`] — file-backed board editing (`move_parts`, `route_track`,
 //!   `delete_copper`, `set_net_width`). Reload the file in KiCad after changes.
 
-// `check_board`'s single JSON payload is wider than the `json!` macro's default
-// expansion depth.
-#![recursion_limit = "256"]
-
 mod board;
 mod copper;
 pub mod corpus;
@@ -52,19 +48,19 @@ mod export;
 mod fab;
 mod footprints;
 mod intent;
-mod locks;
 mod interactive;
+mod locks;
 mod outline;
 mod place;
+mod ratsnest;
 mod render;
 mod route;
-mod ratsnest;
 mod rules;
 mod seed;
 mod selection;
 mod silk;
-mod staging;
 mod sizing;
+mod staging;
 mod sync;
 
 pub(crate) struct WorkflowPhase {
@@ -128,8 +124,6 @@ pub fn board_references(ctx: &gordian_runtime::AgentRuntime) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn active_board(
-    ctx: &gordian_runtime::AgentRuntime,
-) -> Result<kicad_board::BoardSnapshot, String> {
+fn active_board(ctx: &gordian_runtime::AgentRuntime) -> Result<kicad_board::BoardSnapshot, String> {
     kicad_board::read_snapshot(&ctx.pcb_path())
 }
