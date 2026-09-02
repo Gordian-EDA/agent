@@ -75,12 +75,7 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(refusal);
     }
     let retract = retracted_copper(&snapshot, &plan);
-    let gate = match Guard::open(
-        ctx,
-        Edit::new("move_parts", "Move board footprints", &[ctx.pcb_path()])
-            .refs(plan.positions.iter().map(|p| p.reference.clone()))
-            .expecting(&input),
-    ) {
+    let gate = match Guard::open(ctx, Edit::new("move_parts", &[ctx.pcb_path()])) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
@@ -249,7 +244,7 @@ impl MoveBoard {
                 let rotation = part.rotation as f64;
                 let on_back = back.contains(&part.reference);
                 // Without a resolvable footprint the pads are all we know. They
-                // come in board coordinates, so undo the pose to get the same
+                // come in board coordinates, so reverse the pose to get the same
                 // footprint-local rectangle a courtyard would have given —
                 // exact, since a board rotation is a quadrant.
                 let local = courtyards.get(&part.reference).copied().unwrap_or_else(|| {
@@ -584,15 +579,7 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     });
     match prepared {
         Ok((problem, solution, request, layer_names)) => {
-            let gate = match Guard::open(
-                ctx,
-                Edit::new(
-                    "route_track",
-                    "Route one board connection",
-                    &[ctx.pcb_path()],
-                )
-                .expecting(&input),
-            ) {
+            let gate = match Guard::open(ctx, Edit::new("route_track", &[ctx.pcb_path()])) {
                 Ok(gate) => gate,
                 Err(refusal) => return Ok(refusal),
             };
@@ -619,15 +606,7 @@ pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(request) => request,
         Err(error) => return Ok(json!({ "error": error })),
     };
-    let gate = match Guard::open(
-        ctx,
-        Edit::new(
-            "delete_copper",
-            "Delete board copper",
-            std::slice::from_ref(&path),
-        )
-        .expecting(&input),
-    ) {
+    let gate = match Guard::open(ctx, Edit::new("delete_copper", std::slice::from_ref(&path))) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
@@ -670,12 +649,7 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let project_path = ctx.sch_path().with_extension("kicad_pro");
     let gate = match Guard::open(
         ctx,
-        Edit::new(
-            "set_net_width",
-            "Set a board net class",
-            &[path.clone(), project_path.clone()],
-        )
-        .expecting(&input),
+        Edit::new("set_net_width", &[path.clone(), project_path.clone()]),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),

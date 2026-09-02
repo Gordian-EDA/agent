@@ -2787,7 +2787,6 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Err(error) = check_references(intent.references().into_iter(), &board, "intent") {
         return Ok(json!({ "error": error }));
     }
-    let expect_revision = crate::board::guard::expected_revision(&input);
     let replace = input
         .get("replace")
         .and_then(Value::as_bool)
@@ -2990,12 +2989,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             })
             .collect();
         if !moves.is_empty() || outline_refit.is_some() {
-            let opened = match Guard::open(
-                ctx,
-                Edit::new("place_board", "Place board footprints", &[ctx.pcb_path()])
-                    .refs(moves.iter().map(|m| m.reference.clone()))
-                    .expect(expect_revision),
-            ) {
+            let opened = match Guard::open(ctx, Edit::new("place_board", &[ctx.pcb_path()])) {
                 Ok(opened) => opened,
                 Err(refusal) => return Ok(refusal),
             };

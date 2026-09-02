@@ -302,17 +302,9 @@ pub(crate) fn materialize_zones_for_drc(
 
 /// Refill every copper zone in the saved board and persist KiCad's fill cache.
 #[tracing::instrument(skip_all, fields(project = %ctx.project_dir().display()))]
-pub fn refill_zones(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+pub fn refill_zones(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
-    let gate = match Guard::open(
-        ctx,
-        Edit::new(
-            "refill_zones",
-            "Refill board copper zones",
-            std::slice::from_ref(&path),
-        )
-        .expecting(&input),
-    ) {
+    let gate = match Guard::open(ctx, Edit::new("refill_zones", std::slice::from_ref(&path))) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
@@ -441,15 +433,29 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let silk_warnings = super::silk::silk_warning_count(&report);
     let gate = gate_drc(&report);
-    let baseline = ctx.revisions().turn_baseline(&path)?;
-    let (baseline_report, baseline_error) = match baseline
-        .as_ref()
-        .and_then(|baseline| baseline.path.as_deref())
-        .map(|baseline_path| cli.drc(baseline_path))
-        .transpose()
+    let baseline = ctx.turn_baseline()?;
+    let (baseline_report, baseline_error) = if let Some(baseline) = baseline.as_ref()
+        && baseline.file(ctx.project_dir(), &path).is_some()
     {
-        Ok(report) => (report, None),
-        Err(error) => (None, Some(format!("running baseline DRC: {error}"))),
+        let result = (|| -> Result<_> {
+            let directory = tempfile::tempdir()?;
+            for (relative, bytes) in &baseline.files {
+                let destination = directory.path().join(relative);
+                if let Some(parent) = destination.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&destination, bytes)?;
+            }
+            let relative = path.strip_prefix(ctx.project_dir())?;
+            cli.drc(&directory.path().join(relative))
+                .map_err(Into::into)
+        })();
+        match result {
+            Ok(report) => (Some(report), None),
+            Err(error) => (None, Some(format!("running turn-start DRC: {error}"))),
+        }
+    } else {
+        (None, None)
     };
     let baseline_violations = baseline_report
         .as_ref()
@@ -652,7 +658,7 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // board's verdict and its progress stay at the top level, where a caller
     // reads them, and no single `json!` grows past what the macro can expand.
     let drc = json!({
-        "baseline_revision": baseline.as_ref().map(|baseline| baseline.revision),
+        "baseline": baseline.as_ref().map(|_| "turn-start"),
         "baseline_error": baseline_error,
         "introduced": introduced,
         "pre_existing": pre_existing,
@@ -772,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn board_undo_to_baseline_has_no_introduced_findings() {
+    fn restored_board_baseline_has_no_introduced_findings() {
         let baseline = vec![
             violation("clearance", "R1", "A"),
             violation("clearance", "R2", "B"),

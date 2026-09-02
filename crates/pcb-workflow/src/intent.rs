@@ -16,7 +16,7 @@
 //!
 //! This module is the single lowering from that vocabulary. The placement half
 //! becomes [`PlacementHints`], which `pcb-place` honours as cost terms, so the
-//! annealer cannot quietly undo what the seed arranged. `zones` are board rules
+//! annealer cannot quietly reverse what the seed arranged. `zones` are board rules
 //! rather than placement, so they belong to `sync_board`; each tool applies its
 //! own half and names the other rather than dropping it silently.
 

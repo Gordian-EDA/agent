@@ -13,7 +13,7 @@
 //! footprints unless the caller names `bounds`.
 //!
 //! Every run that writes goes through [`crate::board::guard`] like every other
-//! board mutator: capture a revision, edit, re-check, then write or roll back.
+//! board mutator: snapshot its files, edit, re-check, then write or roll back.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,7 +22,6 @@ use serde_json::{Value, json};
 
 use geom::Rect;
 use gordian_runtime::AgentRuntime;
-use gordian_runtime::revisions::RevisionId;
 use kicad_board::{BoardDoc, BoardFootprint};
 use kicad_footprint::FootprintCatalog;
 use pcb_model::Point2;
@@ -567,7 +566,7 @@ fn create_board(
     input: &Value,
     ctx: &AgentRuntime,
 ) -> Value {
-    let mut result = seed_board(parts, input, None, None, ctx);
+    let mut result = seed_board(parts, input, None, ctx);
     if result.get("error").is_some() {
         return result;
     }
@@ -598,7 +597,6 @@ fn seed_board(
     parts: &[SchematicPart],
     input: &Value,
     base: Option<SeedRules>,
-    revision: Option<RevisionId>,
     ctx: &AgentRuntime,
 ) -> Value {
     let catalog = match ctx.footprint_catalog() {
@@ -663,29 +661,9 @@ fn seed_board(
         return out;
     }
     let outline = plan.bounds;
-    let revision = match revision.map_or_else(
-        || {
-            ctx.revisions()
-                .capture(gordian_runtime::revisions::Capture::new(
-                    "sync_board",
-                    if rebuilding {
-                        "Rebuild the project board"
-                    } else {
-                        "Create the project board"
-                    },
-                    &[ctx.pcb_path()],
-                ))
-        },
-        Ok,
-    ) {
-        Ok(revision) => revision,
-        Err(error) => {
-            return json!({ "error": format!("could not capture the board before sync: {error}") });
-        }
-    };
     let seeded = match write_seed_plan(plan, ctx) {
         Ok(seeded) => seeded,
-        Err(e) => return json!({ "error": e, "revision": revision }),
+        Err(e) => return json!({ "error": e }),
     };
     let mut out = json!({
         "ok": true,
@@ -706,7 +684,6 @@ fn seed_board(
         },
         "rules_from_footprints": seeded.rule_notes,
         "path": ctx.pcb_path().display().to_string(),
-        "revision": revision,
         // Seeded is staged: every part sits in the board's staging row until
         // place_board lays it out, and naming them is what makes that obvious.
         "staged": parts.iter().map(|part| part.reference.clone()).collect::<Vec<_>>(),
@@ -819,15 +796,7 @@ fn update_board(
         return result;
     }
 
-    let gate = match Guard::open(
-        ctx,
-        Edit::new(
-            "sync_board",
-            "Synchronize the project board",
-            &[ctx.pcb_path()],
-        )
-        .expecting(input),
-    ) {
+    let gate = match Guard::open(ctx, Edit::new("sync_board", &[ctx.pcb_path()])) {
         Ok(gate) => gate,
         Err(refusal) => return refusal,
     };
@@ -992,14 +961,10 @@ fn has_top_level_net(text: &str) -> bool {
 /// So a rules change re-synthesizes the board and restores the placement — the
 /// layout survives, the copper does not, and the model re-routes.
 fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> Value {
-    let gate = match Guard::open(
-        ctx,
-        Edit::new("sync_board", "Rebuild the project board", &[ctx.pcb_path()]).expecting(input),
-    ) {
+    let gate = match Guard::open(ctx, Edit::new("sync_board", &[ctx.pcb_path()])) {
         Ok(gate) => gate,
         Err(refusal) => return refusal,
     };
-    let revision = gate.revision();
     let before = match crate::active_board(ctx) {
         Ok(board) => board,
         Err(e) => return json!({ "error": e }),
@@ -1043,13 +1008,7 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
             max_y,
         });
     }
-    let mut result = seed_board(
-        parts,
-        &seed_input,
-        Some(board_rules(&before)),
-        Some(revision),
-        ctx,
-    );
+    let mut result = seed_board(parts, &seed_input, Some(board_rules(&before)), ctx);
     if result.get("ok").and_then(Value::as_bool) != Some(true) {
         return result;
     }
