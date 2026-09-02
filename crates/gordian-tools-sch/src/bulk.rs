@@ -103,15 +103,18 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             return Ok(json!({
                 "ok": false,
                 "code": "invalid_payload",
-                "dangling": audit.dangling,
+                "input_errors": audit.input_errors,
                 "duplicate_refs": audit.duplicate_refs,
-                "did_you_mean": audit.did_you_mean,
                 "unknown_pins": audit.unknown_pins,
-                "note": "each dangling pin names a net that would carry no second pin. \
-                         `on_sheet: false` means the sheet has no such net — name a net the \
-                         payload or the sheet already carries, or declare the pin that joins it \
-                         in this same call. Re-read the schematic before retrying if an earlier \
-                         edit emptied the net.",
+                "dangling": audit.dangling,
+                "did_you_mean": audit.did_you_mean,
+                "unreliable_nets": audit.unreliable_nets,
+                "note": "this lists EVERY fault in the payload — fix them all before retrying. \
+                         `place_parts` appends to the sheet, so resubmit only the parts named \
+                         here, not the whole payload. `input_errors` are unresolvable lib_ids \
+                         and pin conflicts; `duplicate_refs` give the next free refdes; \
+                         `unknown_pins` name a key the symbol does not have. `dangling` pins are \
+                         NOT fatal on their own — they are listed so you can finish them.",
             }));
         }
         Err(error) => return Err(error.into()),

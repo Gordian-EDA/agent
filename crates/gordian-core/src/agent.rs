@@ -50,22 +50,46 @@ const UNCHANGED_SCHEMATIC_NUDGE: &str = "the schematic is unchanged since the tu
 /// narrower commit-nudge and routing retry budgets handle known stalls, while
 /// this bounds every other cycle (and therefore cost and context growth). An
 /// explicit component floor in the request raises it via [`TurnBudgets`].
-const MAX_PROVIDER_REQUESTS_PER_TURN: usize = 32;
+///
+/// [`TURN_WALL_CLOCK`], not this count, is the bound the product actually
+/// promises. The campaign suite measured a 50-part board+schematic end to end at
+/// roughly 16-22 requests when nothing is refused, and 30-45 with the ERC repair
+/// that real designs need; at 32 all four cases died mid-schematic and none ever
+/// reached the PCB. The ceiling is set above the measured need so that running
+/// out of *requests* is a bug, and running out of *time* is the real limit.
+const MAX_PROVIDER_REQUESTS_PER_TURN: usize = 56;
 
-/// How many provider requests are left when the model is told to wrap up.
-/// A turn that runs into [`MAX_PROVIDER_REQUESTS_PER_TURN`] aborts with the
-/// schematic in whatever state the last edit left it, which is the worst
-/// outcome available; the model cannot see the budget, so it is told once,
-/// while there is still room to land a correction and a final check.
-const PROVIDER_REQUEST_WRAP_UP_RESERVE: usize = 6;
+/// Wall time one agent subturn may take. The north-star promise is a finished
+/// schematic and PCB in under five minutes, so that is the bound enforced here —
+/// a turn that has spent it is stopped no matter how many requests remain.
+const TURN_WALL_CLOCK: Duration = Duration::from_secs(300);
+
+/// Fraction of [`TURN_WALL_CLOCK`] after which the model is told to wrap up.
+const WRAP_UP_AT_ELAPSED: f64 = 0.75;
+
+/// Share of the request budget held back for the wrap-up. A turn that runs into
+/// its ceiling aborts with the schematic in whatever state the last edit left
+/// it, which is the worst outcome available; the model cannot see the budget, so
+/// it is told once, while there is still room to land a correction and a final
+/// check. Relative to the ceiling so raising one raises the other.
+fn wrap_up_reserve(ceiling: usize) -> usize {
+    (ceiling / 8).max(4)
+}
 
 fn wrap_up_nudge(remaining: usize) -> String {
     format!(
         "Budget warning: {remaining} model requests remain in this turn, after which it aborts \
          and the work is reported incomplete. Stop exploring. Land at most one more corrective \
          edit, run check_schematic, and then answer with your final summary. Do not repeat a call \
-         that has already failed with the same arguments."
+         that has already failed with the same arguments. Answer with prose ONLY — a response \
+         that still carries tool calls spends another request."
     )
+}
+
+fn out_of_time_nudge() -> String {
+    "Time limit: this turn has spent its wall-clock budget. Stop all work now and answer with \
+     your final summary in prose only — no tool calls."
+        .to_string()
 }
 
 /// A provider request has no project-side effects, so transient transport
@@ -517,6 +541,12 @@ pub enum StopReason {
         /// Number of provider invocations made before the loop stopped.
         requests: usize,
     },
+    /// The turn spent its wall-clock budget. This, not the request ceiling, is
+    /// the bound the product promises.
+    TimeLimit {
+        /// How long the turn had run when it stopped.
+        elapsed: Duration,
+    },
     /// A non-cancellable project mutation timed out. Further mutations in the
     /// same subturn are unsafe, so the loop reported the incomplete state
     /// without spending more provider requests on impossible recovery.
@@ -727,6 +757,7 @@ impl<P: Provider> Agent<P> {
         let mut successful_place_parts = 0usize;
         let mut check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
+        let started = std::time::Instant::now();
         let mut provider_requests = 0usize;
         let mut wrap_up_sent = false;
         let mut provider_error_retries_left = MAX_PROVIDER_ERROR_RETRIES;
@@ -758,11 +789,35 @@ impl<P: Provider> Agent<P> {
                     },
                 });
             }
+            if started.elapsed() >= TURN_WALL_CLOCK {
+                let final_text = time_limit_final_text(
+                    started.elapsed(),
+                    applied,
+                    tool_calls_made,
+                    last_tool_status.as_deref(),
+                );
+                emit(events, AgentEvent::AssistantText(final_text.clone()));
+                return Ok(TurnOutcome {
+                    applied,
+                    final_text,
+                    tool_calls_made,
+                    stop_reason: StopReason::TimeLimit {
+                        elapsed: started.elapsed(),
+                    },
+                });
+            }
             let remaining = budgets.provider_requests - provider_requests;
-            if !wrap_up_sent && remaining <= PROVIDER_REQUEST_WRAP_UP_RESERVE {
+            let out_of_time = started.elapsed().as_secs_f64()
+                >= TURN_WALL_CLOCK.as_secs_f64() * WRAP_UP_AT_ELAPSED;
+            if !wrap_up_sent
+                && (remaining <= wrap_up_reserve(budgets.provider_requests) || out_of_time)
+            {
                 wrap_up_sent = true;
-                self.history
-                    .push(ChatMessage::user(wrap_up_nudge(remaining)));
+                self.history.push(ChatMessage::user(if out_of_time {
+                    out_of_time_nudge()
+                } else {
+                    wrap_up_nudge(remaining)
+                }));
             }
             provider_requests += 1;
 
@@ -1409,6 +1464,26 @@ fn provider_limit_final_text(
         report.push_str(partial.trim());
     }
     report
+}
+
+fn time_limit_final_text(
+    elapsed: Duration,
+    applied: bool,
+    tool_calls_made: usize,
+    last_tool_status: Option<&str>,
+) -> String {
+    let committed = if applied {
+        " A schematic was committed, but the requested end-to-end workflow may be incomplete."
+    } else {
+        " No schematic commit was completed."
+    };
+    let last_tool = last_tool_status
+        .map(|status| format!(" Last tool result: {status}."))
+        .unwrap_or_default();
+    format!(
+        "Stopped after the turn spent its {}s wall-clock budget ({tool_calls_made} tool calls).{committed}{last_tool}",
+        elapsed.as_secs()
+    )
 }
 
 fn mutation_timeout_final_text(

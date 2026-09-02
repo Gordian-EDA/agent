@@ -199,6 +199,10 @@ fn discover_libraries(symbol_dir: &Path) -> io::Result<Vec<SymbolLibrary>> {
     Ok(libs)
 }
 
+/// How far an edit-distance backfill candidate may sit from the needle, as a
+/// share of the longer string. Past this the "suggestion" is noise.
+const MAX_BACKFILL_DISTANCE: f64 = 0.5;
+
 /// Rank `entries` against an already-normalized `needle`, returning the indices
 /// of the best `n`, best first.
 ///
@@ -208,7 +212,8 @@ fn discover_libraries(symbol_dir: &Path) -> io::Result<Vec<SymbolLibrary>> {
 /// — e.g. the query has a transposition — the remainder is backfilled by edit
 /// distance, so the caller is never starved of candidates. Ordering is
 /// deterministic: fuzzy ties break on shorter normalized text then `lib_id`;
-/// backfill ties break on `lib_id`.
+/// backfill ties break on `lib_id`. A backfill candidate further than
+/// [`MAX_BACKFILL_DISTANCE`] is dropped rather than offered.
 fn rank(entries: &[Entry], needle: &str, n: usize) -> Vec<usize> {
     let matcher = SkimMatcherV2::default();
 
@@ -233,7 +238,12 @@ fn rank(entries: &[Entry], needle: &str, n: usize) -> Vec<usize> {
         return chosen;
     }
 
-    // Backfill: never starve the agent of candidates on a typo / non-subsequence.
+    // Backfill the remainder on a typo / non-subsequence — but only with candidates
+    // that actually resemble the needle. A long query the index cannot match at all
+    // (a footprint name written where a lib_id belongs) otherwise came back with the
+    // least-bad edit-distance neighbour out of 20 000, which reads as an answer and
+    // sends the caller chasing a part that was never there. Below the floor, saying
+    // nothing is the honest result.
     let taken: std::collections::HashSet<usize> = chosen.iter().copied().collect();
     let mut rest: Vec<(f64, usize)> = entries
         .iter()
@@ -245,13 +255,15 @@ fn rank(entries: &[Entry], needle: &str, n: usize) -> Vec<usize> {
                 i,
             )
         })
+        .filter(|(distance, _)| *distance < MAX_BACKFILL_DISTANCE)
         .collect();
     rest.sort_by(|&(da, ia), &(db, ib)| {
         da.partial_cmp(&db)
             .expect("distances are finite")
             .then_with(|| entries[ia].lib_id.cmp(&entries[ib].lib_id))
     });
-    chosen.extend(rest.into_iter().take(n - chosen.len()).map(|(_, i)| i));
+    let want = n - chosen.len();
+    chosen.extend(rest.into_iter().take(want).map(|(_, i)| i));
     chosen
 }
 

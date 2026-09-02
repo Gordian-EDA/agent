@@ -114,10 +114,35 @@ pub enum Relation {
         name: String,
         members: Vec<String>,
         #[serde(default)]
-        side: Option<(Side, String)>,
+        side: Option<GroupSide>,
     },
     /// `members` share one row (`Horizontal`) or column (`Vertical`).
     Align { members: Vec<String>, axis: Axis },
+}
+
+/// Where a [`Relation::Group`] sits, optionally relative to an anchor part.
+///
+/// Written either positionally (`["left", "U1"]`), by name
+/// (`{"side": "left", "anchor": "U1"}`), or as a bare edge (`"left"`) when the
+/// group has no anchor to hang off. All three round-trip to the positional form
+/// when an anchor is present.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GroupSide {
+    Anchored(Side, String),
+    Named { side: Side, anchor: String },
+    Edge(Side),
+}
+
+impl GroupSide {
+    /// The edge, and the anchor refdes when one was named.
+    pub fn parts(&self) -> (Side, Option<&str>) {
+        match self {
+            GroupSide::Anchored(side, anchor) => (*side, Some(anchor.as_str())),
+            GroupSide::Named { side, anchor } => (*side, Some(anchor.as_str())),
+            GroupSide::Edge(side) => (*side, None),
+        }
+    }
 }
 
 impl Relation {
@@ -133,7 +158,7 @@ impl Relation {
             } => members
                 .iter()
                 .map(String::as_str)
-                .chain(side.iter().map(|(_, anchor)| anchor.as_str()))
+                .chain(side.iter().filter_map(|side| side.parts().1))
                 .collect(),
             Relation::Align { members, .. } => members.iter().map(String::as_str).collect(),
         }
@@ -224,5 +249,32 @@ impl LayoutIr {
     /// fixture sidecar).
     pub fn from_json(s: &str) -> serde_json::Result<LayoutIr> {
         serde_json::from_str(s)
+    }
+}
+
+#[cfg(test)]
+mod group_side_tests {
+    use super::*;
+
+    #[test]
+    fn a_group_side_is_accepted_in_all_three_written_forms() {
+        let positional: GroupSide = serde_json::from_str(r#"["left","U1"]"#).unwrap();
+        let named: GroupSide =
+            serde_json::from_str(r#"{"side":"left","anchor":"U1"}"#).unwrap();
+        assert_eq!(positional.parts(), (Side::Left, Some("U1")));
+        assert_eq!(named.parts(), (Side::Left, Some("U1")));
+
+        // The bare edge is what two of four campaign agents actually wrote.
+        let bare: GroupSide = serde_json::from_str(r#""top""#).unwrap();
+        assert_eq!(bare.parts(), (Side::Top, None));
+    }
+
+    #[test]
+    fn a_group_relation_deserializes_with_a_bare_side() {
+        let rel: Relation = serde_json::from_str(
+            r#"{"kind":"group","name":"power","members":["J1","F1"],"side":"left"}"#,
+        )
+        .unwrap();
+        assert_eq!(rel.refdes(), vec!["J1", "F1"]);
     }
 }

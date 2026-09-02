@@ -144,7 +144,7 @@ async fn unchanged_tool_cycles_reach_the_provider_request_limit() {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
-    let script = (0..32)
+    let script = (0..56)
         .map(|index| tool_call(&format!("read-{index}"), "project_info", json!({})))
         .collect();
     let (client, seen) = ScriptedClient::recording(script);
@@ -157,8 +157,8 @@ async fn unchanged_tool_cycles_reach_the_provider_request_limit() {
 
     assert_eq!(
         outcome.stop_reason,
-        StopReason::ProviderRequestLimit { requests: 32 }
+        StopReason::ProviderRequestLimit { requests: 56 }
     );
-    assert_eq!(outcome.tool_calls_made, 32);
-    assert_eq!(seen.lock().unwrap().len(), 32);
+    assert_eq!(outcome.tool_calls_made, 56);
+    assert_eq!(seen.lock().unwrap().len(), 56);
 }

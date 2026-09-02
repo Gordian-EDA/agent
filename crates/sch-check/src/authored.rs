@@ -35,10 +35,20 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
 /// (`Fuse:Fuse`) needs the whole shortlist, not just the single best, to pick the
 /// part it meant. The first is also attached as the machine-readable suggestion.
 pub fn unknown_part(refdes: &str, part: &str, provider: &SymbolTable) -> Diagnostic {
+    if looks_like_footprint(part) {
+        return Diagnostic::error(
+            "unknown-part",
+            format!(
+                "{refdes}: `{part}` is a FOOTPRINT name, not a symbol. `part` takes a symbol \
+                 lib_id like `Device:R` or `Connector_Generic:Conn_01x11`; put the footprint in \
+                 this part's `footprint` field instead. Use search_symbols to find the symbol."
+            ),
+        );
+    }
     let near = provider.suggest(part);
     let did_you_mean = match near.first() {
         Some(_) => format!("; did you mean {}?", near.join(", ")),
-        None => String::new(),
+        None => "; search_symbols will find the right lib_id".to_string(),
     };
     let mut e = Diagnostic::error(
         "unknown-part",
@@ -50,6 +60,23 @@ pub fn unknown_part(refdes: &str, part: &str, provider: &SymbolTable) -> Diagnos
     e
 }
 
+/// Whether `part` reads as a KiCAD footprint identifier rather than a symbol one.
+///
+/// The two namespaces look alike — both are `Library:Name` — so a model that has
+/// the footprint to hand readily writes it where the symbol belongs. Footprint
+/// names carry package geometry that symbol names never do: a pitch, a pad count
+/// in `NxM` form, or a mounting word.
+fn looks_like_footprint(part: &str) -> bool {
+    let name = part.rsplit(':').next().unwrap_or(part);
+    let lower = name.to_ascii_lowercase();
+    lower.contains("mm")
+        && (lower.contains("_p")
+            || lower.contains("pitch")
+            || lower.ends_with("vertical")
+            || lower.ends_with("horizontal")
+            || lower.contains("handsolder"))
+}
+
 /// `key` is not a pin of `part`, with the closest pin name or number as a
 /// suggestion.
 pub fn unknown_pin(refdes: &str, part: &str, meta: &SymbolMeta, key: &str) -> Diagnostic {
@@ -57,7 +84,7 @@ pub fn unknown_pin(refdes: &str, part: &str, meta: &SymbolMeta, key: &str) -> Di
         .pins
         .iter()
         .map(|pin| {
-            if pin.name.is_empty() || pin.name == pin.number {
+            if pins::is_unnamed(&pin.name) || pin.name == pin.number {
                 pin.number.clone()
             } else {
                 format!("{}={}", pin.number, pin.name)

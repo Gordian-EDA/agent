@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{EPS, Point2, Rect};
 
-use crate::ir::{Axis, LayoutIr, Relation, Side};
+use crate::ir::{Axis, GroupSide, LayoutIr, Relation, Side};
 use crate::item::Item;
 
 use crate::geometry::item_rect;
@@ -140,10 +140,10 @@ pub fn relation_viol(items: &[Item], ir: &LayoutIr) -> usize {
                         .filter(|it| !set.contains(it.refdes.as_str()) && bbox.contains(it.at))
                         .count();
                 }
-                if let Some((side, anchor)) = side
-                    && let Some(pa) = pos.get(anchor.as_str())
+                if let Some((side, Some(anchor))) = side.as_ref().map(GroupSide::parts)
+                    && let Some(pa) = pos.get(anchor)
                 {
-                    let (ix, sign) = side_axis(*side);
+                    let (ix, sign) = side_axis(side);
                     viol += members
                         .iter()
                         .filter_map(|m| pos.get(m.as_str()))
@@ -206,17 +206,20 @@ fn repair_group_sides(items: &mut [Item], ir: &LayoutIr) {
     for rel in &ir.relations {
         let Relation::Group {
             members,
-            side: Some((side, anchor)),
+            side: Some(side),
             ..
         } = rel
         else {
             continue;
         };
-        let pos = centroids(items);
-        let Some(pa) = pos.get(anchor.as_str()).copied() else {
+        let (side, Some(anchor)) = side.parts() else {
             continue;
         };
-        let (ix, sign) = side_axis(*side);
+        let pos = centroids(items);
+        let Some(pa) = pos.get(anchor).copied() else {
+            continue;
+        };
+        let (ix, sign) = side_axis(side);
         let anchor_half = half_extent(items, anchor, ix);
         let mut delta: f64 = 0.0;
         for m in members {

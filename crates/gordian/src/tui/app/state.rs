@@ -221,6 +221,10 @@ impl App {
                     "Worked for {elapsed} — stopped after {requests} model requests (safety limit)"
                 ),
             )),
+            TurnEndReason::TimeLimit { elapsed_secs } => Some(Entry::notice(
+                NoticeLevel::Error,
+                format!("Worked for {elapsed} — stopped after {elapsed_secs}s (wall-clock limit)"),
+            )),
             TurnEndReason::MutationTimedOut => Some(Entry::notice(
                 NoticeLevel::Error,
                 format!(

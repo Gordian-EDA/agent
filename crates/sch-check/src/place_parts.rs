@@ -80,7 +80,7 @@ pub struct ExistingSheet {
 }
 
 /// An explicit reference designator that is already occupied.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DuplicateRef {
     #[serde(rename = "ref")]
     pub refdes: RefDes,
@@ -88,7 +88,7 @@ pub struct DuplicateRef {
 }
 
 /// A new pin whose named net would have no other pin after placement.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DanglingPin {
     #[serde(rename = "ref")]
     pub refdes: RefDes,
@@ -103,18 +103,43 @@ pub struct DanglingPin {
 }
 
 /// Findings that make a bulk-create payload electrically incomplete.
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PayloadAudit {
     pub dangling: Vec<DanglingPin>,
     pub duplicate_refs: Vec<DuplicateRef>,
     pub did_you_mean: BTreeMap<NetName, NetName>,
     pub unknown_pins: Vec<String>,
+    /// Lowering errors — unknown lib_ids, pin conflicts, missing prefixes —
+    /// reported alongside the audit so one refusal names every fault.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_errors: Vec<String>,
+    /// Nets whose pin count could not be trusted because a part naming them was
+    /// dropped for a missing reference prefix. Their dangling reports may clear
+    /// on their own once the lib_id is fixed.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unreliable_nets: BTreeSet<NetName>,
 }
 
 impl PayloadAudit {
     /// Whether the payload may proceed to placement.
+    ///
+    /// Dangling pins do not block it. A net with one pin is unfinished work, not a
+    /// malformed payload: the placement commits and [`crate::lint`]'s
+    /// `single-pin-net` error — which `place_parts` returns in the same response —
+    /// is what holds the board back until it is closed. Refusing a whole 50-part
+    /// payload for it only forces the caller to resend everything.
     pub fn is_valid(&self) -> bool {
-        self.dangling.is_empty() && self.duplicate_refs.is_empty() && self.unknown_pins.is_empty()
+        self.duplicate_refs.is_empty() && self.unknown_pins.is_empty()
+    }
+
+    /// Whether anything at all is worth telling the caller about.
+    pub fn is_clean(&self) -> bool {
+        self.is_valid() && self.dangling.is_empty() && self.input_errors.is_empty()
+    }
+
+    /// Nets that would carry a single pin — reported, never fatal.
+    pub fn dangling_nets(&self) -> BTreeSet<NetName> {
+        self.dangling.iter().map(|d| d.net.clone()).collect()
     }
 }
 
@@ -320,7 +345,17 @@ fn audit_payload(
         }
     }
 
-    let mut audit = PayloadAudit::default();
+    let mut audit = PayloadAudit {
+        // A part dropped for want of a reference prefix takes its pins' net counts with
+        // it, so its nets' dangling verdicts are guesses until its lib_id is fixed.
+        unreliable_nets: input
+            .parts
+            .iter()
+            .filter(|spec| spec.refdes.is_none())
+            .flat_map(|spec| spec.pins.values().cloned())
+            .collect(),
+        ..PayloadAudit::default()
+    };
     for spec in &input.parts {
         let Some(refdes) = spec.refdes.as_ref() else {
             continue;
