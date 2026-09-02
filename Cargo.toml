@@ -46,3 +46,4 @@ futures = "0.3"
 pulldown-cmark = { version = "0.13", default-features = false }
 resvg = { version = "0.47", default-features = false, features = ["system-fonts", "text"] }
 base64 = "0.22"
+chrono = "0.4"

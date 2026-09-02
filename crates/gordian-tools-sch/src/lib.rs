@@ -45,8 +45,7 @@ pub fn schematic_content_hash(ctx: &AgentRuntime) -> Result<Option<u64>> {
 }
 
 /// The tools that write the schematic.
-pub const MUTATORS: [&str; 16] = [
-    "undo",
+pub const MUTATORS: [&str; 15] = [
     "place_parts",
     "arrange",
     "rewire",
@@ -370,19 +369,14 @@ pub fn tool_defs() -> Vec<Tool> {
                 "additionalProperties": false
             }),
         ),
-        (
-            "undo",
-            "Restore the schematic to the `snapshot` id a previous mutator returned.",
-            json!({
-                "type": "object",
-                "properties": { "snapshot": { "type": "string" } },
-                "required": ["snapshot"],
-                "additionalProperties": false
-            }),
-        ),
     ];
     defs.into_iter()
         .map(|(name, description, schema)| {
+            let description = if MUTATORS.contains(&name) {
+                format!("{description} Success returns the pre-write `revision`.")
+            } else {
+                description.to_owned()
+            };
             Tool::new(name)
                 .with_description(description)
                 .with_schema(schema)
@@ -422,7 +416,6 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "no_connect" => wiring::no_connect(input, ctx),
         "add_power" => wiring::add_power(input, ctx),
         "delete_wires" => wiring::delete_wires(input, ctx),
-        "undo" => session::undo(input, ctx),
         _ => return None,
     })
 }

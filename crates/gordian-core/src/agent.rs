@@ -362,6 +362,8 @@ fn is_schematic_phase_tool(name: &str) -> bool {
             "search_symbols"
                 | "get_symbol_info"
                 | "project_info"
+                | "undo"
+                | "history"
                 | "render_schematic"
                 | "search_footprints"
                 | "get_footprint_info"
@@ -396,7 +398,7 @@ fn is_discovery_tool(name: &str) -> bool {
 }
 
 fn is_schematic_mutator(name: &str) -> bool {
-    gordian_tools_sch::MUTATORS.contains(&name)
+    name == "undo" || gordian_tools_sch::MUTATORS.contains(&name)
 }
 
 fn request_supplies_multiple_library_ids(intent: &str) -> bool {
@@ -1429,9 +1431,7 @@ fn mutation_timeout_final_text(
 }
 
 fn schematic_mutation_succeeded(name: &str, value: &Value) -> bool {
-    gordian_tools_sch::MUTATORS.contains(&name)
-        && value.get("error").is_none()
-        && value.get("changed").is_some()
+    is_schematic_mutator(name) && value.get("error").is_none() && value.get("changed").is_some()
 }
 
 fn check_schematic_is_clean(value: &Value) -> bool {
@@ -1935,6 +1935,7 @@ fn tool_effect(name: &str) -> ToolEffect {
         | "delete_copper"
         | "set_net_width"
         | "update_board_outline"
+        | "undo"
         | "export_fab" => ToolEffect::Mutating,
         name if gordian_tools_sch::MUTATORS.contains(&name) => ToolEffect::Mutating,
         _ => ToolEffect::ReadOnly,

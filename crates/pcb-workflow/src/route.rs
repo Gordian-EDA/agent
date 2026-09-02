@@ -368,8 +368,22 @@ fn route_live_board(
         ));
     }
 
-    replace_route_atomically(ctx, &rp, &result.solution, &board.layer_names, existing)
-        .map_err(|e| refusal(format!("could not write route to the board: {e}")))?;
+    let revision = ctx
+        .revisions()
+        .capture("route_board", "Route the project board", &[ctx.pcb_path()])
+        .map_err(|error| {
+            refusal(format!(
+                "could not capture the board before routing: {error}"
+            ))
+        })?;
+    replace_route_atomically(ctx, &rp, &result.solution, &board.layer_names, existing).map_err(
+        |e| {
+            json!({
+                "error": format!("could not write route to the board: {e}"),
+                "revision": revision,
+            })
+        },
+    )?;
 
     // A connection can acquire more than one failure reason as the route is
     // cleaned up (for example, an initial router miss followed by an honest
@@ -446,6 +460,7 @@ fn route_live_board(
         },
         "congestion": congestion,
         "escape_bottleneck": escape,
+        "revision": revision,
         "note": if result.failed.is_empty() {
             "routed and saved the KiCAD board cleanly".to_owned()
         } else {

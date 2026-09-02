@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::{Event, Subscriber};
@@ -21,6 +22,8 @@ pub const EVENTS_TARGET: &str = "gordian::events";
 /// session log is not dominated by frame-level connection chatter.
 const FILE_DEFAULT_FILTER: &str =
     "debug,hyper=info,hyper_util=info,h2=info,reqwest=info,rustls=info,tokio=info,tower=info";
+
+static THREAD_ID: OnceLock<String> = OnceLock::new();
 
 /// Keeps the non-blocking file writer alive and flushes it when dropped.
 #[must_use = "the logging guard must be held until process exit"]
@@ -56,6 +59,7 @@ pub fn init_stderr_only() {
 }
 
 fn init_with_stderr(project_dir: &Path, thread_id: &str, stderr_enabled: bool) -> LogGuard {
+    let _ = THREAD_ID.set(thread_id.to_owned());
     let logs_dir = project_dir.join(".gordian/logs");
     std::fs::create_dir_all(&logs_dir).expect("create Gordian log directory");
     let filename = format!(
@@ -100,6 +104,11 @@ fn init_with_stderr(project_dir: &Path, thread_id: &str, stderr_enabled: bool) -
         _file_guard: file_guard,
         path,
     }
+}
+
+/// Returns the conversation identifier attached to this process's log, when configured.
+pub fn thread_id() -> Option<&'static str> {
+    THREAD_ID.get().map(String::as_str)
 }
 
 fn env_filter(default_level: &str) -> EnvFilter {

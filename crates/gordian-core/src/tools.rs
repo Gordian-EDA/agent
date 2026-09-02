@@ -92,6 +92,28 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         Def {
+            name: "undo".into(),
+            description: "Restore every project file captured by a revision; defaults to the latest revision. Returns a new revision for the state being replaced.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "revision": { "type": "integer", "minimum": 1 }
+                },
+                "additionalProperties": false
+            }),
+        },
+        Def {
+            name: "history".into(),
+            description: "List project revisions as plain text, newest first.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+                },
+                "additionalProperties": false
+            }),
+        },
+        Def {
             name: "render_schematic".into(),
             description: "Render the schematic to a PNG with mm axes to check the visual result; use it whenever you want to see what an edit did. Not a substitute for `check_schematic`.".into(),
             input_schema: json!({ "type": "object", "properties": {} }),
@@ -446,8 +468,26 @@ pub fn tool_defs() -> Vec<Tool> {
     gordian_tools_sch::tool_defs()
         .into_iter()
         .chain(defs.into_iter().map(|d| {
+            let description = if matches!(
+                d.name.as_str(),
+                "sync_board"
+                    | "place_board"
+                    | "route_board"
+                    | "move_parts"
+                    | "route_track"
+                    | "delete_copper"
+                    | "set_net_width"
+                    | "update_board_outline"
+            ) {
+                format!(
+                    "{} Success returns the pre-write `revision`.",
+                    d.description
+                )
+            } else {
+                d.description
+            };
             Tool::new(d.name)
-                .with_description(d.description)
+                .with_description(description)
                 .with_schema(d.input_schema)
         }))
         .collect()
@@ -464,6 +504,8 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "search_symbols" => search_symbols(input, ctx),
         "get_symbol_info" => get_symbol_info(input, ctx),
         "project_info" => project_info(ctx),
+        "undo" => undo(input, ctx),
+        "history" => history(input, ctx),
         "render_schematic" => render_schematic(ctx),
         "search_footprints" => pcb_workflow::search_footprints(input, ctx),
         "get_footprint_info" => pcb_workflow::get_footprint_info(input, ctx),
@@ -675,6 +717,83 @@ fn project_info(ctx: &AgentRuntime) -> Result<Value> {
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
     }))
+}
+
+fn undo(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let id = match input.get("revision") {
+        None | Some(Value::Null) => None,
+        Some(value) => match value.as_u64() {
+            Some(id) if id > 0 => Some(gordian_runtime::revisions::RevisionId::new(id)),
+            _ => return Ok(json!({ "error": "revision must be a positive integer" })),
+        },
+    };
+    let target = match ctx.revisions().manifest(id) {
+        Ok(manifest) => manifest,
+        Err(error) => return Ok(json!({ "error": error.to_string() })),
+    };
+    let files: Vec<_> = target
+        .files
+        .iter()
+        .map(|file| ctx.project_dir().join(&file.path))
+        .collect();
+    let revision = match ctx.revisions().capture(
+        "undo",
+        &format!("Restore revision {}", target.id),
+        &files,
+    ) {
+        Ok(revision) => revision,
+        Err(error) => {
+            return Ok(
+                json!({ "error": format!("could not capture the current project before undo: {error}") }),
+            );
+        }
+    };
+    let restored = match ctx.revisions().restore(Some(target.id)) {
+        Ok(restored) => restored,
+        Err(error) => {
+            return Ok(
+                json!({ "error": format!("could not restore revision {}: {error}", target.id), "revision": revision }),
+            );
+        }
+    };
+    Ok(json!({
+        "changed": format!("restored project revision {}", restored.id),
+        "restored_revision": restored.id,
+        "files": restored.files,
+        "revision": revision,
+    }))
+}
+
+fn history(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let limit = input
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(20)
+        .clamp(1, 50) as usize;
+    let manifests = match ctx.revisions().history(limit) {
+        Ok(manifests) => manifests,
+        Err(error) => return Ok(json!({ "error": error.to_string() })),
+    };
+    if manifests.is_empty() {
+        return Ok(Value::String("No project revisions.".to_owned()));
+    }
+    let mut out = String::new();
+    for manifest in manifests {
+        let files = manifest
+            .files
+            .iter()
+            .map(|file| file.path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        use std::fmt::Write as _;
+        writeln!(
+            out,
+            "{}  {}  {}  {}  [{}]",
+            manifest.id, manifest.created_at, manifest.tool, manifest.summary, files
+        )
+        .expect("writing to a string cannot fail");
+    }
+    Ok(Value::String(out))
 }
 
 /// Result key carrying a PNG path for the agent loop to attach as an image

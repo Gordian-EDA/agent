@@ -1,8 +1,7 @@
 //! Project-local persistent state: `<project>/.gordian/`.
 //!
-//! Holds generated `renders/` and schematic undo snapshots. The directory ships its own
-//! `.gitignore` containing `*` so it never pollutes the user's repo. The
-//! `session/` subdirectory is reserved for a future resume feature.
+//! Holds generated `renders/` and project revision history. The directory ships its own
+//! `.gitignore` containing `*` so it never pollutes the user's repo.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

@@ -57,10 +57,27 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     };
 
+    let path = ctx.pcb_path();
+    let revision = match ctx.revisions().capture(
+        "update_board_outline",
+        "Update the board outline",
+        std::slice::from_ref(&path),
+    ) {
+        Ok(revision) => revision,
+        Err(error) => {
+            return Ok(
+                json!({ "error": format!("could not capture the board before updating its outline: {error}") }),
+            );
+        }
+    };
     // If KiCad has the board open, save first so the file edit is applied to the
     // latest state; close after writing so later tools reopen the updated board.
-    let _ = ctx.kicad().save_if_open();
-    let path = ctx.pcb_path();
+    if let Err(error) = ctx.kicad().save_if_open() {
+        return Ok(json!({
+            "error": format!("could not save the open board before updating its outline: {error}"),
+            "revision": revision,
+        }));
+    }
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("reading board {}", path.display()))?;
     let changed = !edge_cuts_match(&text, &outline)?;
@@ -78,6 +95,7 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "path": path.display().to_string(),
         "bounds": bounds,
         "outline_points": outline.point_count(),
+        "revision": revision,
         "note": "updated Edge.Cuts on the existing PCB without regenerating placement or routing",
     }))
 }

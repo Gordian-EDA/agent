@@ -1935,6 +1935,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     }
 
+    let mut revision = None;
     if result.legal {
         let locked_refs: std::collections::BTreeSet<&str> = board
             .imported
@@ -1954,10 +1955,26 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 rotation_deg: Some(p.rotation),
             })
             .collect();
-        if !moves.is_empty()
-            && let Err(e) = write_placement(ctx, &moves)
-        {
-            return Ok(json!({ "error": format!("could not write placement: {e}") }));
+        if !moves.is_empty() {
+            let captured = match ctx.revisions().capture(
+                "place_board",
+                "Place board footprints",
+                &[ctx.pcb_path()],
+            ) {
+                Ok(revision) => revision,
+                Err(error) => {
+                    return Ok(
+                        json!({ "error": format!("could not capture the board before placement: {error}") }),
+                    );
+                }
+            };
+            revision = Some(captured);
+            if let Err(e) = write_placement(ctx, &moves) {
+                return Ok(json!({
+                    "error": format!("could not write placement: {e}"),
+                    "revision": captured,
+                }));
+            }
         }
     }
     let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
@@ -2082,6 +2099,9 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     if !hint_suggestions.is_empty() {
         out["hint_suggestions"] = Value::Array(hint_suggestions);
+    }
+    if let Some(revision) = revision {
+        out["revision"] = json!(revision);
     }
     if !result.legal {
         out["error"] = Value::String(illegal_placement_error(&out));
