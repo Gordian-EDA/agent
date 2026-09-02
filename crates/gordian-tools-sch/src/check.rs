@@ -45,14 +45,7 @@ pub(crate) fn design(doc: &SchDoc, netlist: &Netlist) -> Design {
         for pin in pins.iter().filter(|p| p.owner == symbol.uuid) {
             let target = match crate::refs::net_of(netlist, &pin.refdes, &pin.number) {
                 Some(net) => PinTarget::Net(net.to_string()),
-                None if netlist
-                    .no_connect
-                    .iter()
-                    .any(|marked| marked.refdes == pin.refdes && marked.pin == pin.number) =>
-                {
-                    PinTarget::NoConnect
-                }
-                None => continue,
+                None => PinTarget::NoConnect,
             };
             component.pins.insert(pin.number.clone(), target);
         }
@@ -1015,6 +1008,48 @@ struct Inspection {
     erc: std::result::Result<kicad::ErcReport, String>,
 }
 
+fn live_footprint_mismatches(
+    ctx: &AgentRuntime,
+    doc: &SchDoc,
+    netlist: &Netlist,
+) -> Result<Vec<gordian_runtime::footprint_compat::FootprintPinMismatch>> {
+    let mut seen = BTreeSet::new();
+    let mut mismatches = Vec::new();
+    for symbol in doc.symbols() {
+        if ctx.provider().symbol(&symbol.lib_id).is_none() {
+            continue;
+        }
+        let reference = symbol.refdes();
+        if !seen.insert(reference.to_owned()) {
+            continue;
+        }
+        let Some(footprint) = symbol
+            .fields
+            .get("Footprint")
+            .map(|field| field.value.as_str())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let ignored_pins = netlist
+            .no_connect
+            .iter()
+            .filter(|pin| pin.refdes == reference)
+            .map(|pin| pin.pin.clone())
+            .collect();
+        if let Some(mismatch) = gordian_runtime::footprint_compat::assignment_pin_mismatch_ignoring(
+            ctx,
+            reference,
+            &symbol.lib_id,
+            footprint,
+            &ignored_pins,
+        )? {
+            mismatches.push(mismatch);
+        }
+    }
+    Ok(mismatches)
+}
+
 fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
     let doc = SchDoc::read(path).with_context(|| format!("reading {}", path.display()))?;
     let netlist = sch_doc::connect::extract(&doc);
@@ -1051,7 +1086,7 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
         };
         findings.push(diagnostic_finding(&locator, &diagnostic, "footprint"));
     }
-    for mismatch in gordian_runtime::footprint_compat::design_pin_mismatches(ctx, &design)? {
+    for mismatch in live_footprint_mismatches(ctx, &doc, &netlist)? {
         let message = format!(
             "symbol `{}` and footprint `{}` do not agree{}{}{}",
             mismatch.symbol,
