@@ -345,7 +345,8 @@ pub fn drag_many(
     let (added, dropped) = settle_junctions(doc, &after, &touched);
     report.junctions_added = added;
     report.junctions_removed = dropped;
-    if added + dropped > 0 {
+    let stranded = strip_stranded_labels(doc, &after, &touched);
+    if added + dropped + stranded > 0 {
         after = Sheet::of(doc);
     }
 
@@ -393,6 +394,22 @@ pub(crate) fn settle_junctions(
         doc.add_junction(*at);
     }
     (missing.len(), dropped)
+}
+
+/// Take away a label the drag left speaking for nothing.
+///
+/// A pin re-routed to a different point of its own net leaves the label that
+/// used to hold it naming an empty spot. The netlist does not notice — the name
+/// still merges — but KiCAD reports it and a reader sees a name in mid-air. The
+/// partition gate has the last word: a label that was carrying the connection
+/// cannot be dropped, because dropping it changes the partition.
+fn strip_stranded_labels(doc: &mut SchDoc, sheet: &Sheet, touched: &HashSet<NodeKey>) -> usize {
+    let stranded: Vec<String> = doc
+        .labels()
+        .filter(|l| touched.contains(&key(l.at.point())) && sheet.label_stranded(l.at.point()))
+        .map(|l| l.uuid.clone())
+        .collect();
+    doc.remove_drawing(&stranded)
 }
 
 /// The net partition as the drag gate compares it: which pins share a net.

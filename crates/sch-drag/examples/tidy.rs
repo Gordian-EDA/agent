@@ -25,7 +25,7 @@ fn movable(doc: &SchDoc) -> Vec<String> {
 fn json(m: &Metrics, w: &Weights) -> String {
     format!(
         "{{\"wire_length\":{:.1},\"bends\":{},\"crossings\":{},\"through_bodies\":{},\
-\"body_overlaps\":{},\"dangling_ends\":{},\"junction_faults\":{},\"text_collisions\":{},\
+\"body_overlaps\":{},\"dangling_ends\":{},\"stranded_labels\":{},\"junction_faults\":{},\"text_collisions\":{},\
 \"crowding\":{},\"labels\":{},\"net_spread\":{:.1},\"misalignment\":{:.1},\"faults\":{},\
 \"score\":{:.1}}}",
         m.wire_length,
@@ -34,6 +34,7 @@ fn json(m: &Metrics, w: &Weights) -> String {
         m.through_bodies,
         m.body_overlaps,
         m.dangling_ends,
+        m.stranded_labels,
         m.junction_faults,
         m.text_collisions,
         m.crowding,

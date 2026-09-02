@@ -310,6 +310,24 @@ impl Sheet {
             .count()
     }
 
+    /// Whether a label at this point is speaking for nothing: no wire end, no
+    /// pin, not even a wire running past. KiCAD calls it "label not connected";
+    /// a reader calls it a name floating in space.
+    pub fn label_stranded(&self, p: Point2) -> bool {
+        let k = key(p);
+        !self.incident.contains_key(&k)
+            && !self.pins_at.contains_key(&k)
+            && self.wires_through(p).next().is_none()
+    }
+
+    /// Labels speaking for nothing.
+    pub fn stranded_labels(&self) -> usize {
+        self.label_names
+            .keys()
+            .filter(|k| self.label_stranded(point_of(k)))
+            .count()
+    }
+
     /// Dots that connect nothing, and points that need one and have none.
     pub fn junction_faults(&self) -> usize {
         let stray = self

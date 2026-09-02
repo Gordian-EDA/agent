@@ -26,6 +26,7 @@ pub struct Weights {
     pub through_body: f64,
     pub body_overlap: f64,
     pub dangling_end: f64,
+    pub stranded_label: f64,
     pub junction_fault: f64,
     pub crossing: f64,
     pub bend: f64,
@@ -42,6 +43,7 @@ impl Default for Weights {
             through_body: 400.0,
             body_overlap: 600.0,
             dangling_end: 400.0,
+            stranded_label: 400.0,
             junction_fault: 200.0,
             crossing: 25.0,
             bend: 10.0,
@@ -63,6 +65,8 @@ pub struct Metrics {
     pub through_bodies: usize,
     pub body_overlaps: usize,
     pub dangling_ends: usize,
+    /// Labels naming a point with nothing drawn on it.
+    pub stranded_labels: usize,
     pub junction_faults: usize,
     pub text_collisions: usize,
     /// Bodies closer than a wire can pass between.
@@ -82,7 +86,11 @@ impl Metrics {
     /// How many outright faults the sheet has — what a reviewer's score is
     /// capped by, however tidy the rest of it is.
     pub fn faults(&self) -> usize {
-        self.through_bodies + self.body_overlaps + self.dangling_ends + self.junction_faults
+        self.through_bodies
+            + self.body_overlaps
+            + self.dangling_ends
+            + self.stranded_labels
+            + self.junction_faults
     }
 
     /// The single number the search minimises.
@@ -91,6 +99,7 @@ impl Metrics {
             + w.through_body * self.through_bodies as f64
             + w.body_overlap * self.body_overlaps as f64
             + w.dangling_end * self.dangling_ends as f64
+            + w.stranded_label * self.stranded_labels as f64
             + w.junction_fault * self.junction_faults as f64
             + w.crossing * self.crossings as f64
             + w.bend * self.bends as f64
@@ -260,6 +269,7 @@ pub fn measure(sheet: &Sheet) -> Metrics {
         through_bodies: through_bodies(sheet),
         body_overlaps,
         dangling_ends: sheet.dangling_ends(),
+        stranded_labels: sheet.stranded_labels(),
         junction_faults: sheet.junction_faults(),
         text_collisions: text_collisions(sheet),
         crowding,
