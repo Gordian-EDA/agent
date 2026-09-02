@@ -69,7 +69,12 @@ fn rename_generated(symbol: &mut SymbolInst, sheet_path: &str, refdes: &str) {
         None => {
             symbol.fields.insert(
                 "Reference".to_string(),
-                new_field("Reference", refdes, Pose::new(origin.x, origin.y, 0.0), true),
+                new_field(
+                    "Reference",
+                    refdes,
+                    Pose::new(origin.x, origin.y, 0.0),
+                    true,
+                ),
             );
         }
     }
@@ -195,6 +200,20 @@ impl SchDoc {
                 symbol.fields.insert(name.to_string(), field);
             }
         }
+        drop(symbol);
+        self.mark_edited();
+        Ok(())
+    }
+
+    /// Move one existing field to an absolute sheet pose.
+    pub fn set_field_pose(&mut self, id: &str, name: &str, at: Pose) -> Result<()> {
+        let uuid = self.uuid_of(id)?;
+        let mut symbol = self.symbol_mut(&uuid)?;
+        let field = symbol
+            .fields
+            .get_mut(name)
+            .ok_or_else(|| Error::UnknownField(name.to_string()))?;
+        field.at = Some(at);
         drop(symbol);
         self.mark_edited();
         Ok(())
@@ -642,10 +661,7 @@ impl SchDoc {
         if want == now {
             return false;
         }
-        let paper = tagged(
-            "paper",
-            vec![quoted("User"), num(want[0]), num(want[1])],
-        );
+        let paper = tagged("paper", vec![quoted("User"), num(want[0]), num(want[1])]);
         let replaced = self.items_mut().iter_mut().any(|item| match item {
             Item::Other(raw) if crate::sexpr::head(&raw.node) == Some("paper") => {
                 raw.node = paper.clone();

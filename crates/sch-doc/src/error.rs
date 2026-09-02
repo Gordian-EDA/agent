@@ -13,6 +13,8 @@ pub enum Error {
     UnknownSymbol(String),
     #[error("no symbol with reference {0}")]
     UnknownReference(String),
+    #[error("no symbol field named {0}")]
+    UnknownField(String),
     #[error("{0} names several units of one symbol; address a unit by its uuid")]
     AmbiguousReference(String),
     #[error("reference {0} is already in use")]

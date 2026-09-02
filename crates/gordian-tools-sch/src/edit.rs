@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use geom::{EPS, Point2, Rect};
 use gordian_runtime::AgentRuntime;
-use sch_doc::{LabelKind, Pose, SchDoc, placed_pins};
+use sch_doc::{LabelKind, Pose, SchDoc, body_rect, placed_pins};
 use serde_json::{Value, json};
 
 use crate::place::{Occupancy, Side, snap, snap_point};
@@ -46,6 +46,86 @@ fn valid_refdes(refdes: &str) -> bool {
         && letters < refdes.len()
         && refdes[..letters].chars().all(|ch| ch.is_ascii_alphabetic())
         && refdes[letters..].chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn swapped_field_collisions(doc: &SchDoc, refdes: &str) -> usize {
+    sch_floorplan::visual::measure(doc)
+        .text_collisions
+        .iter()
+        .filter(|collision| {
+            collision.reference == refdes
+                && matches!(collision.field.as_str(), "Reference" | "Value")
+        })
+        .count()
+}
+
+fn reflow_swapped_fields(doc: &mut SchDoc, refdes: &str, units: &[(u32, String)]) -> Result<()> {
+    for (_, uuid) in units {
+        let Some(symbol) = doc.symbol(uuid) else {
+            continue;
+        };
+        let Some(body) = body_rect(doc, symbol) else {
+            continue;
+        };
+        let fields = ["Reference", "Value"];
+        let Some(original) = fields
+            .iter()
+            .map(|name| symbol.fields.get(*name)?.at)
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let center = body.center();
+        let candidates = [
+            [
+                Point2::new(center.x, body.min_y - 3.81),
+                Point2::new(center.x, body.min_y - 2.03),
+            ],
+            [
+                Point2::new(center.x, body.max_y + 2.03),
+                Point2::new(center.x, body.max_y + 3.81),
+            ],
+            [
+                Point2::new(body.min_x - 6.35, center.y - 1.27),
+                Point2::new(body.min_x - 6.35, center.y + 1.27),
+            ],
+            [
+                Point2::new(body.max_x + 6.35, center.y - 1.27),
+                Point2::new(body.max_x + 6.35, center.y + 1.27),
+            ],
+            [
+                Point2::new(center.x, body.min_y - 6.35),
+                Point2::new(center.x, body.min_y - 4.57),
+            ],
+            [
+                Point2::new(center.x, body.max_y + 4.57),
+                Point2::new(center.x, body.max_y + 6.35),
+            ],
+        ];
+        let mut best = (swapped_field_collisions(doc, refdes), original.clone());
+        for candidate in candidates {
+            for (name, point) in fields.iter().zip(candidate) {
+                doc.set_field_pose(uuid, name, Pose::new(point.x, point.y, 0.0))?;
+            }
+            let collisions = swapped_field_collisions(doc, refdes);
+            if collisions < best.0 {
+                best = (
+                    collisions,
+                    candidate
+                        .iter()
+                        .map(|point| Pose::new(point.x, point.y, 0.0))
+                        .collect(),
+                );
+            }
+            if collisions == 0 {
+                break;
+            }
+        }
+        for ((name, _), pose) in fields.iter().zip(&original).zip(best.1) {
+            doc.set_field_pose(uuid, name, pose)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1300,6 +1380,7 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             no_connected.join(", ")
         ));
     }
+    reflow_swapped_fields(&mut edit.doc, refdes, &units)?;
     dropped.retain(|number| {
         plan.assignments
             .iter()
