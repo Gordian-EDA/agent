@@ -212,7 +212,13 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     };
     if !report.committed {
-        return Ok(refused_place(report, &payload, &tried, sheet_parts));
+        return Ok(refused_place(
+            report,
+            &payload,
+            &tried,
+            &skipped,
+            sheet_parts,
+        ));
     }
     let refs = report.placed.clone();
     let mut value = edit
@@ -338,6 +344,12 @@ fn budget_refusal(error: &sch_floorplan::live::Error) -> Value {
         unreachable!("budget_refusal only formats a budget error")
     };
     let millis = |duration: Duration| duration.as_millis().min(u128::from(u64::MAX)) as u64;
+    let overrun = elapsed.saturating_sub(*budget);
+    let overran_ms = if elapsed > budget {
+        millis(overrun).max(1)
+    } else {
+        0
+    };
     json!({
         "error": error.to_string(),
         "placement": {
@@ -345,7 +357,7 @@ fn budget_refusal(error: &sch_floorplan::live::Error) -> Value {
             "parts": parts,
             "budget_ms": millis(*budget),
             "elapsed_ms": millis(*elapsed),
-            "overran_ms": millis(elapsed.saturating_sub(*budget)),
+            "overran_ms": overran_ms,
             "phase": phase,
         }
     })
@@ -465,6 +477,7 @@ fn refused_place(
     report: PlaceReport,
     payload: &sch_check::PlacePartsInput,
     tried: &[&str],
+    skipped: &[&str],
     sheet_parts: usize,
 ) -> Value {
     let m = &report.mismatch;
@@ -510,6 +523,7 @@ fn refused_place(
             block_guidance,
         ),
         "engines_tried": tried,
+        "engines_skipped": skipped,
         "split_into": split,
         "report": report,
     })
@@ -632,6 +646,17 @@ mod tests {
         ) -> PlacementOutput {
             panic!("stub placement panic")
         }
+    }
+
+    #[test]
+    fn budget_refusal_reports_a_real_sub_millisecond_overrun() {
+        let error = PlacementBudget::within(Duration::from_secs(1), 70).overrun(
+            Duration::from_secs(1) + Duration::from_nanos(1),
+            "spine",
+            "verify",
+        );
+        let value = budget_refusal(&error);
+        assert_eq!(value.pointer("/placement/overran_ms"), Some(&json!(1)));
     }
 
     #[test]
