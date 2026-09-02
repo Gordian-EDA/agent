@@ -2837,11 +2837,18 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                         .collect::<Vec<_>>()
                         .join(", ");
                     let message = finding.get("message")?.as_str()?;
-                    Some(if references.is_empty() {
+                    let mut summary = if references.is_empty() {
                         format!("{code}: {message}")
                     } else {
                         format!("{code} at {references}: {message}")
-                    })
+                    };
+                    if let (Some(tool), Some(args)) = (
+                        finding.pointer("/fix/tool").and_then(Value::as_str),
+                        finding.pointer("/fix/args"),
+                    ) {
+                        summary.push_str(&format!(" → fix: {tool}{args}"));
+                    }
+                    Some(summary)
                 })
                 .map(|finding| {
                     format!(
@@ -3239,14 +3246,18 @@ mod tests {
                 "severity": "error",
                 "code": "power_pin_not_driven",
                 "message": "no driver on net VCC",
-                "refs": ["U1.8"]
+                "refs": ["U1.8"],
+                "fix": {
+                    "tool": "add_power",
+                    "args": {"net": "VCC", "pin": "U1.8"}
+                }
             }]
         });
 
         assert_eq!(
             tool_summary("check_schematic", &json!({}), &result),
             "1 introduced, 11 pre-existing — first blocking finding: power_pin_not_driven at \
-             U1.8: no driver on net VCC"
+             U1.8: no driver on net VCC → fix: add_power{\"net\":\"VCC\",\"pin\":\"U1.8\"}"
         );
     }
 
