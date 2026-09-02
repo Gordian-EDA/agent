@@ -2374,19 +2374,59 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             format!("{files} file(s) in {dir}")
         }
         "check_schematic" => {
-            let errors = result.get("errors").and_then(Value::as_u64).unwrap_or(0);
-            let warnings = result.get("warnings").and_then(Value::as_u64).unwrap_or(0);
-            let erc = result
-                .get("erc")
-                .and_then(|erc| erc.get("errors"))
+            let erc_errors = result
+                .pointer("/erc/errors")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let erc_warnings = result
+                .pointer("/erc/warnings")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let check_errors = result
+                .pointer("/checks/errors")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let check_warnings = result
+                .pointer("/checks/warnings")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             let completeness = result
                 .pointer("/completeness/warnings")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
+            let first = result
+                .get("findings")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|finding| finding.get("severity").and_then(Value::as_str) == Some("error"))
+                .and_then(|finding| {
+                    let code = finding.get("code")?.as_str()?;
+                    let references = finding
+                        .get("refs")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let message = finding.get("message")?.as_str()?;
+                    Some(if references.is_empty() {
+                        format!("{code}: {message}")
+                    } else {
+                        format!("{code} at {references}: {message}")
+                    })
+                })
+                .map(|finding| {
+                    format!(
+                        " — first blocking finding: {}",
+                        compact_summary_text(&finding, 180)
+                    )
+                })
+                .unwrap_or_default();
             format!(
-                "{errors} errors, {warnings} warnings, {erc} ERC errors, {completeness} completeness gaps"
+                "{erc_errors} ERC errors, {erc_warnings} ERC warnings; {check_errors} other errors, \
+                 {check_warnings} other warnings, {completeness} completeness gaps{first}"
             )
         }
         "place_parts" => {
@@ -2748,13 +2788,21 @@ mod tests {
             "ok": false,
             "errors": 1,
             "warnings": 9,
-            "erc": {"errors": 3},
-            "completeness": {"warnings": 2}
+            "erc": {"errors": 3, "warnings": 7},
+            "checks": {"errors": 1, "warnings": 2},
+            "completeness": {"warnings": 2},
+            "findings": [{
+                "severity": "error",
+                "code": "power_pin_not_driven",
+                "message": "no driver on net VCC",
+                "refs": ["U1.8"]
+            }]
         });
 
         assert_eq!(
             tool_summary("check_schematic", &json!({}), &result),
-            "1 errors, 9 warnings, 3 ERC errors, 2 completeness gaps"
+            "3 ERC errors, 7 ERC warnings; 1 other errors, 2 other warnings, 2 completeness gaps \
+             — first blocking finding: power_pin_not_driven at U1.8: no driver on net VCC"
         );
     }
 
