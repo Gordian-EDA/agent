@@ -547,16 +547,19 @@ fn replace_route_atomically(
     let original = std::fs::read(&path).map_err(|error| {
         format!("could not snapshot existing board before replacement: {error}")
     })?;
-    let ipc_route = kicad_board::bridge_route(rp, solution);
-    let live = ctx.kicad().with_session(&path, |session| {
-        session
-            .kicad()
-            .replace_route_solution(&ipc_route, layer_names)
-    });
-    let replace = match live {
-        Ok(_) => Ok(()),
-        Err(live_error) => replace_route_offline(ctx, rp, solution, layer_names)
-            .map_err(|offline| format!("{live_error}; offline fallback failed: {offline}")),
+    let replace = if ctx.config().kicad.attach_running {
+        let ipc_route = kicad_board::bridge_route(rp, solution);
+        match ctx.kicad().with_session(&path, |session| {
+            session
+                .kicad()
+                .replace_route_solution(&ipc_route, layer_names)
+        }) {
+            Ok(_) => Ok(()),
+            Err(live_error) => replace_route_offline(ctx, rp, solution, layer_names)
+                .map_err(|offline| format!("{live_error}; offline replacement failed: {offline}")),
+        }
+    } else {
+        replace_route_offline(ctx, rp, solution, layer_names)
     };
     if let Err(error) = replace {
         ctx.close_kicad_session();
@@ -2093,6 +2096,9 @@ fn write_route(
     solution: &RouteSolution,
     layer_names: &[String],
 ) -> std::result::Result<(), String> {
+    if !ctx.config().kicad.attach_running {
+        return write_route_offline(ctx, rp, solution, layer_names);
+    }
     let ipc_route = kicad_board::bridge_route(rp, solution);
     let path = ctx.pcb_path();
     let live = ctx.kicad().with_session(&path, |session| {
@@ -2101,9 +2107,8 @@ fn write_route(
             .create_route_solution(&ipc_route, layer_names)
     });
     let Err(live_err) = live else { return Ok(()) };
-    // Headless fallback: append the copper to the board file directly.
     write_route_offline(ctx, rp, solution, layer_names)
-        .map_err(|err| format!("{live_err}; offline fallback failed: {err}"))
+        .map_err(|err| format!("{live_err}; offline route write failed: {err}"))
 }
 
 /// Append one solution directly to the board file while preserving its copper.

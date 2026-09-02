@@ -1,4 +1,4 @@
-//! Placement over the live KiCAD IPC board.
+//! Placement over the saved KiCad board.
 
 use circuit_graph::netclass::is_ground;
 use std::collections::BTreeMap;
@@ -2508,22 +2508,30 @@ pub(crate) fn write_placement(
     moves: &[FootprintMove],
 ) -> std::result::Result<(), String> {
     let path = ctx.pcb_path();
+    if !ctx.config().kicad.attach_running {
+        return write_placement_offline(ctx, &path, moves);
+    }
     let live = ctx.kicad().with_session(&path, |session| {
         session.kicad().move_footprints(moves)?;
         session.kicad().save()
     });
     let Err(live_err) = live else { return Ok(()) };
-    // Headless / pre-9.0.3 fallback: apply the same moves to the board file
-    // as s-expression edits. Any open session now holds stale state — drop it
-    // so the next read reopens from disk.
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("{live_err}; offline fallback could not read the board: {e}"))?;
-    let patched = kicad_board::patch_placements(&text, moves)
-        .map_err(|e| format!("{live_err}; offline fallback failed: {e}"))?;
-    std::fs::write(&path, patched)
-        .map_err(|e| format!("{live_err}; offline fallback could not write the board: {e}"))?;
+    write_placement_offline(ctx, &path, moves)
+        .map_err(|offline| format!("{live_err}; offline placement failed: {offline}"))
+}
+
+fn write_placement_offline(
+    ctx: &AgentRuntime,
+    path: &std::path::Path,
+    moves: &[FootprintMove],
+) -> std::result::Result<(), String> {
     ctx.close_kicad_session();
-    Ok(())
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read the board: {e}"))?;
+    let patched = kicad_board::patch_placements(&text, moves)
+        .map_err(|e| format!("could not patch placement: {e}"))?;
+    crate::route::write_board_atomically(path, patched.as_bytes())
+        .map_err(|e| format!("could not replace the board: {e}"))
 }
 
 #[cfg(test)]
