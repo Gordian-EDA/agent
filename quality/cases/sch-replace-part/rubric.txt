@@ -3,3 +3,4 @@ R4 must end up with value 4.7k and footprint Resistor_SMD:R_0805_2012Metric, sti
 Everything else must be untouched: schematic_changes.symbols_moved must be empty, symbols_added and symbols_removed must be empty, and no net other than the ones R4 already sat on may appear in nets_changed. ERC errors must not increase.
 
 Score 0 if any other part moved or changed value, or if R4's connections changed. Score 10 only if the single value+footprint change landed and nothing else did.
+expect: text_collisions == []

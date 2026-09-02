@@ -5,3 +5,4 @@ expect: unconnected_items == 0
 expect: board_parts_moved == []
 expect: board_lib_ids_changed == []
 expect: board_outline_changed == false
+expect: unrouted == []

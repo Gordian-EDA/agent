@@ -1,1 +1,2 @@
 The requested subsystems should be complete and recognizable. Power protection and decoupling should be plausible. The schematic should be readable, the PCB placement should group related parts, connectors should be accessible, and routing should look deliberate rather than tangled or wasteful.
+expect: unrouted == []

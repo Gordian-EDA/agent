@@ -1,1 +1,2 @@
 The sensor pinout, pull-ups, decoupling, and address state must be correct. The header should sit at an edge, supporting passives should cluster around the sensor, and the compact board must be fully routed and DRC-clean.
+expect: unrouted == []
