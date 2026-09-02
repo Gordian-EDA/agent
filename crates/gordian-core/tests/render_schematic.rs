@@ -42,5 +42,10 @@ fn renders_fixture_with_visual_facts() {
         "dangling_wire_ends",
     ] {
         assert!(visual[fact].is_array(), "visual.{fact} must be an array");
+        let introduced = format!("{fact}_introduced");
+        assert!(
+            visual[&introduced].is_array(),
+            "visual.{fact}_introduced must be an array"
+        );
     }
 }
