@@ -55,18 +55,8 @@ fn a_two_pin_part_keeps_its_pin_order_in_every_pose() {
     for angle in ANGLES {
         for mirror in [false, true] {
             let mut w = SchematicWriter::new();
-            w.add_symbol_full(
-                &env,
-                "Device:R",
-                "R1",
-                "1k",
-                [100.0, 100.0],
-                angle,
-                None,
-                &[],
-                None,
-            )
-            .unwrap();
+            w.add_symbol_full(&env, "Device:R", "R1", "1k", [100.0, 100.0], angle, None, &[], None)
+                .unwrap();
             if mirror {
                 w.set_mirror_last();
             }
@@ -129,17 +119,13 @@ fn placing_a_two_pin_part_honours_every_authored_orientation() {
                 continue;
             }
             // `verify` shares the writer's pose transform, so confirm against KiCAD too.
-            let path = dir
-                .path()
-                .join(format!("place-{orient}-{mirror}.kicad_sch"));
+            let path = dir.path().join(format!("place-{orient}-{mirror}.kicad_sch"));
             doc.write(&path).unwrap();
             let nets: std::collections::BTreeMap<String, String> =
                 cli_pin_nets(&env, &path).into_iter().collect();
             let (one, two) = (nets.get("X1.1"), nets.get("X1.2"));
             if one.is_none() || one == two {
-                wrong.push(format!(
-                    "{orient}/mirror={mirror}: X1 pins on {one:?}/{two:?}"
-                ));
+                wrong.push(format!("{orient}/mirror={mirror}: X1 pins on {one:?}/{two:?}"));
             }
             if nets.get("X1.1") != nets.get("R8.1") || nets.get("X1.2") != nets.get("R9.1") {
                 wrong.push(format!(

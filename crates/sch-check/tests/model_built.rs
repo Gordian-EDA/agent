@@ -261,7 +261,10 @@ fn reversed_led_indicator_is_a_blocking_error() {
 
 #[test]
 fn reversed_led_on_unnamed_power_connector_net_is_an_error() {
-    let mut connector = part("Legacy:CONN_2", &[("1", "Net-(P3-P1)"), ("2", "GND")]);
+    let mut connector = part(
+        "Legacy:CONN_2",
+        &[("1", "Net-(P3-P1)"), ("2", "GND")],
+    );
     connector.value = Some("POWER".into());
     let d = design(&[
         ("P3", connector),
@@ -272,12 +275,11 @@ fn reversed_led_on_unnamed_power_connector_net_is_an_error() {
         ("D1", part("Device:LED", &[("1", "LED_K"), ("2", "GND")])),
     ]);
 
-    assert!(erc::defects(&d, &provider()).iter().any(|finding| {
-        finding.blocking
-            && finding
-                .line
-                .contains("swap D1: anode should face Net-(P3-P1)")
-    }));
+    assert!(
+        erc::defects(&d, &provider()).iter().any(|finding| {
+            finding.blocking && finding.line.contains("swap D1: anode should face Net-(P3-P1)")
+        })
+    );
 }
 
 #[test]

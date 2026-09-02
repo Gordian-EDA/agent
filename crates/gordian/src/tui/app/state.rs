@@ -254,7 +254,9 @@ impl App {
     pub fn preview_at(&self, x: u16, y: u16) -> Option<usize> {
         self.preview_zones
             .iter()
-            .find(|z| y >= z.y && y < z.y + z.height && x >= z.x && x < z.x + z.width)
+            .find(|z| {
+                y >= z.y && y < z.y + z.height && x >= z.x && x < z.x + z.width
+            })
             .map(|z| z.idx)
     }
 

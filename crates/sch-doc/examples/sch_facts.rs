@@ -147,24 +147,11 @@ fn facts(root: &Path) -> String {
     out.add("nets", array(nets.iter().map(|n| quote(n))));
     out.add(
         "partition",
-        array(
-            partition
-                .iter()
-                .map(|net| array(net.iter().map(|p| quote(p)))),
-        ),
+        array(partition.iter().map(|net| array(net.iter().map(|p| quote(p))))),
     );
-    out.add(
-        "unconnected_pins",
-        array(unconnected.iter().map(|p| quote(p))),
-    );
-    out.add(
-        "no_connect_pins",
-        array(no_connect.iter().map(|p| quote(p))),
-    );
-    out.add(
-        "extractor_warnings",
-        array(warnings.iter().map(|w| quote(w))),
-    );
+    out.add("unconnected_pins", array(unconnected.iter().map(|p| quote(p))));
+    out.add("no_connect_pins", array(no_connect.iter().map(|p| quote(p))));
+    out.add("extractor_warnings", array(warnings.iter().map(|w| quote(w))));
     out.add("errors", array(errors.iter().map(|e| quote(e))));
     out.finish()
 }
@@ -180,39 +167,23 @@ fn diff(before: &Path, after: &Path) -> String {
     out.add("removed", array(delta.removed.iter().map(|n| quote(n))));
     out.add(
         "merged",
-        array(
-            delta
-                .merged
-                .iter()
-                .map(|(from, to)| pair(array(from.iter().map(|n| quote(n))), quote(to))),
-        ),
+        array(delta.merged.iter().map(|(from, to)| {
+            pair(array(from.iter().map(|n| quote(n))), quote(to))
+        })),
     );
     out.add(
         "split",
-        array(
-            delta
-                .split
-                .iter()
-                .map(|(from, to)| pair(quote(from), array(to.iter().map(|n| quote(n))))),
-        ),
+        array(delta.split.iter().map(|(from, to)| {
+            pair(quote(from), array(to.iter().map(|n| quote(n))))
+        })),
     );
     out.add(
         "renamed",
-        array(
-            delta
-                .renamed
-                .iter()
-                .map(|(from, to)| pair(quote(from), quote(to))),
-        ),
+        array(delta.renamed.iter().map(|(from, to)| pair(quote(from), quote(to)))),
     );
     out.add(
         "pins_now_unconnected",
-        array(
-            delta
-                .pins_now_unconnected
-                .iter()
-                .map(|p| quote(&pin_name(p))),
-        ),
+        array(delta.pins_now_unconnected.iter().map(|p| quote(&pin_name(p)))),
     );
     out.add(
         "pins_now_connected",
@@ -281,11 +252,7 @@ impl Symbol {
 }
 
 fn field(symbol: &SymbolInst, name: &str) -> String {
-    symbol
-        .fields
-        .get(name)
-        .map(|f| f.value.clone())
-        .unwrap_or_default()
+    symbol.fields.get(name).map(|f| f.value.clone()).unwrap_or_default()
 }
 
 fn pin_name(pin: &sch_doc::PinRef) -> String {

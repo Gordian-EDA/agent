@@ -106,11 +106,7 @@ fn place_parts_keeps_numbered_pin_assignments_distinct() {
     let u2 = cli_pin_nets(&env, &schematic, "U2");
     assert_eq!(u1, u2, "U1 and U2 must share nets pin for pin");
     let distinct: std::collections::BTreeSet<&String> = u1.values().collect();
-    assert_eq!(
-        distinct.len(),
-        3,
-        "each physical pin on its own net: {u1:?}"
-    );
+    assert_eq!(distinct.len(), 3, "each physical pin on its own net: {u1:?}");
     assert_eq!(u1["2"], "B");
 }
 

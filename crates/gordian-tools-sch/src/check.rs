@@ -134,14 +134,8 @@ pub fn check_schematic(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 mismatch.reference,
                 mismatch.symbol,
                 mismatch.footprint,
-                pad_clause(
-                    " (pads with no pin: ",
-                    &mismatch.footprint_pads_absent_from_symbol
-                ),
-                pad_clause(
-                    " (pins with no pad: ",
-                    &mismatch.symbol_pins_absent_from_footprint
-                ),
+                pad_clause(" (pads with no pin: ", &mismatch.footprint_pads_absent_from_symbol),
+                pad_clause(" (pins with no pad: ", &mismatch.symbol_pins_absent_from_footprint),
                 mismatch
                     .polarity_mismatch
                     .map(|why| format!(" ({why})"))

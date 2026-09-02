@@ -201,7 +201,10 @@ fn on_gnd(it: &Item) -> bool {
 }
 fn is_diode(c: &Component) -> bool {
     let part = c.part.to_ascii_uppercase();
-    part.contains("LED") || part.contains("DIODE") || part.ends_with(":D") || part.contains(":D_")
+    part.contains("LED")
+        || part.contains("DIODE")
+        || part.ends_with(":D")
+        || part.contains(":D_")
 }
 fn is_connector(c: &Component) -> bool {
     c.part.to_uppercase().contains("CONNECTOR")
@@ -288,7 +291,9 @@ pub fn defects(d: &Design, provider: &SymbolTable) -> Vec<Defect> {
     let mut advisory = Vec::new();
     run_checks(d, provider, &mut blocking, &mut advisory);
     let mark = |lines: Vec<String>, blocking: bool| {
-        lines.into_iter().map(move |line| Defect { blocking, line })
+        lines
+            .into_iter()
+            .map(move |line| Defect { blocking, line })
     };
     mark(blocking, true).chain(mark(advisory, false)).collect()
 }
@@ -450,7 +455,8 @@ fn check_led_indicator_polarity(
                     return None;
                 }
                 let rail = far(resistor, cathode);
-                is_positive_supply(rail, items, net_items).then_some((resistor.refdes, rail))
+                is_positive_supply(rail, items, net_items)
+                    .then_some((resistor.refdes, rail))
             });
         if let Some((resistor, rail)) = rail_resistor {
             out.push(format!(
@@ -461,7 +467,11 @@ fn check_led_indicator_polarity(
     }
 }
 
-fn is_positive_supply(net: &str, items: &[Item], net_items: &HashMap<&str, Vec<usize>>) -> bool {
+fn is_positive_supply(
+    net: &str,
+    items: &[Item],
+    net_items: &HashMap<&str, Vec<usize>>,
+) -> bool {
     if is_ground(net) || is_neg_supply(net) {
         return false;
     }
@@ -478,7 +488,8 @@ fn is_positive_supply(net: &str, items: &[Item], net_items: &HashMap<&str, Vec<u
             .unwrap_or_default()
             .to_ascii_uppercase();
         let supply_pin = source.pins.iter().any(|pin| {
-            pin.net == net && matches!(pin.key.to_ascii_uppercase().as_str(), "1" | "P1" | "PIN1")
+            pin.net == net
+                && matches!(pin.key.to_ascii_uppercase().as_str(), "1" | "P1" | "PIN1")
         });
         (is_connector_like(&source.comp.part)
             || part.contains("CONN")

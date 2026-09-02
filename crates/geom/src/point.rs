@@ -175,10 +175,7 @@ mod tests {
         let p = Point2::new(1.0, 2.0);
         assert_eq!(p.transform_offset(0.0, true), Point2::new(-1.0, -2.0));
         let q = p.transform_offset(90.0, true);
-        assert!(
-            (q.x - 2.0).abs() < 1e-9 && (q.y - -1.0).abs() < 1e-9,
-            "{q:?}"
-        );
+        assert!((q.x - 2.0).abs() < 1e-9 && (q.y - -1.0).abs() < 1e-9, "{q:?}");
     }
 
     #[test]

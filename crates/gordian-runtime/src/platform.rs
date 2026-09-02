@@ -32,8 +32,8 @@ pub fn load_config() -> anyhow::Result<GordianConfig> {
         }
         Err(err) => return Err(anyhow::anyhow!("reading {}: {err}", path.display())),
     };
-    let config: GordianConfig = toml::from_str(&text)
-        .map_err(|err| anyhow::anyhow!("parsing {}: {err}", path.display()))?;
+    let config: GordianConfig =
+        toml::from_str(&text).map_err(|err| anyhow::anyhow!("parsing {}: {err}", path.display()))?;
     config
         .validate()
         .map_err(|err| anyhow::anyhow!("invalid config in {}: {err}", path.display()))?;
