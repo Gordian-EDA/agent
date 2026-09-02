@@ -1,7 +1,7 @@
 //! KiCad installation and library path discovery.
 
-use std::path::{Path, PathBuf};
 use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Known symbol-library locations, checked in order. The macOS installer's
@@ -139,6 +139,19 @@ impl KicadInstallation {
 
     pub fn version(&self) -> &str {
         &self.cli_version
+    }
+
+    /// Build a KiCad 10 command with its configured standard-library roots.
+    ///
+    /// Project library tables use KiCad's portable `KICAD10_*_DIR` variables;
+    /// binding them here makes every CLI operation honor the same installation
+    /// selected by Gordian instead of whichever libraries the shell exposes.
+    pub(crate) fn command(&self) -> Command {
+        let mut command = Command::new(&self.cli_path);
+        command
+            .env("KICAD10_SYMBOL_DIR", &self.symbol_dir)
+            .env("KICAD10_FOOTPRINT_DIR", &self.footprint_dir);
+        command
     }
 }
 
