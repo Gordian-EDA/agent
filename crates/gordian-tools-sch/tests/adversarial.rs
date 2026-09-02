@@ -183,6 +183,50 @@ fn delete_wires_by_net_removes_a_label_directly_on_a_pin() {
 }
 
 #[test]
+fn delete_wires_accepts_an_auto_name_left_by_stacked_pins() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let added = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{
+            "lib_id": "Connector:USB_C_Receptacle_PowerOnly_6P",
+            "ref": "J1"
+        }]}),
+    );
+    assert!(added.get("error").is_none(), "fixture failed: {added}");
+    let labelled = call(&ctx, "label", json!({"pin": "J1.A9", "net": "VBUS_RAW"}));
+    assert!(
+        labelled.get("error").is_none(),
+        "fixture failed: {labelled}"
+    );
+
+    let result = call(&ctx, "delete_wires", json!({"net": "VBUS_RAW"}));
+
+    assert!(result.get("error").is_none(), "delete failed: {result}");
+    assert!(
+        result["net_delta"]["renamed"]
+            .as_array()
+            .is_some_and(|renamed| renamed.iter().any(|pair| {
+                pair[0] == "VBUS_RAW"
+                    && pair[1]
+                        .as_str()
+                        .is_some_and(|name| name.starts_with("Net-("))
+            })),
+        "the stacked pins did not reproduce the auto-name transition: {result}"
+    );
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    assert!(
+        sch_doc::connect::extract(&doc)
+            .nets
+            .iter()
+            .all(|net| net.name != "VBUS_RAW")
+    );
+}
+
+#[test]
 fn place_parts_refuses_a_reference_already_on_the_sheet() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCAD detected");

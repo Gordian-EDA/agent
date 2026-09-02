@@ -888,7 +888,7 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .flat_map(|net| net.pins.iter().map(|p| p.refdes.clone()))
         .collect();
     let allow = Allow::nothing()
-        .nets(nets)
+        .unname_nets(nets)
         .parts(named)
         .parts(loosened)
         .creating();
