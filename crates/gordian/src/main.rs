@@ -535,9 +535,8 @@ fn run_agent_command(args: &[String]) -> Result<()> {
 
     // 1. Detect KiCAD (symbol libs + kicad).
     let env = config::detect_kicad(&config).context(
-        "no KiCAD installation found — install KiCAD 9+/10 or set kicad.symbolDir / \
-         kicad.footprintDir / kicad.cliPath in config.toml so the agent can resolve \
-         symbols and run ERC",
+        "KiCad 10 is required; set kicad.cliPath, kicad.symbolDir, and \
+         kicad.footprintDir in config.toml",
     )?;
     // 2. Build the LLM client from TOML config.
     let mut client = gordian_core::GenaiProvider::from_config(&config.llm).with_context(|| {
@@ -551,10 +550,9 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     }
     let _log_guard = logging::init(&project_dir, client.thread_identifier());
     tracing::info!(
-        "kicad: {} (cli: {}, pcbnew: {}, symbols: {})",
+        "kicad: {} (cli: {}, symbols: {})",
         env.version(),
         env.cli_path().display(),
-        env.pcbnew_path().display(),
         env.symbol_dir().display()
     );
     tracing::info!("config: {}", loaded.path.display());

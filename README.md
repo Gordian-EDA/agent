@@ -26,8 +26,8 @@ part of design — intent, part selection, and triage.
 
 ## Quick start
 
-Requires a recent **Rust** toolchain (edition 2024, rustc ≥ 1.85) and an installed **KiCAD 9 or 10**
-(for its symbol/footprint libraries and `kicad-cli` ERC/DRC). The engines auto-detect KiCAD's
+Requires a recent **Rust** toolchain (edition 2024, rustc ≥ 1.85) and **KiCAD 10 or newer**
+(for its symbol/footprint libraries and `kicad-cli`). The engines auto-detect KiCAD's
 libraries (e.g. `/usr/share/kicad/symbols`).
 
 Auto-detection uses the single KiCAD installation selected by the current
@@ -39,13 +39,11 @@ installation explicitly:
 symbolDir = "/opt/kicad10/share/kicad/symbols"
 footprintDir = "/opt/kicad10/share/kicad/footprints"
 cliPath = "/opt/kicad10/bin/kicad-cli"
-pcbnewPath = "/opt/kicad10/bin/pcbnew"
-attachRunning = false
-enableApiConfig = true # explicit opt-in if managed launch should enable IPC
 ```
 
-The live IPC connection verifies that the selected/running PCB editor has the
-same major version as `kicad-cli`.
+Gordian reads and atomically writes `.kicad_sch` and `.kicad_pcb` files and uses
+KiCAD 10's CLI for ERC, DRC, zone refill, rendering, and fabrication exports.
+Reload an open design in KiCAD after Gordian changes it.
 
 ```sh
 # Build
@@ -80,7 +78,7 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | `gordian-core` / `gordian-llm` / `gordian-runtime` | Agent loop and prompts, provider abstraction, configuration, project context, and the tool-result contract |
 | `gordian-tools-sch` | Live `.kicad_sch` queries, guarded mutators, bulk placement, rewiring, and authoritative checks |
 | `pcb-workflow` | Application workflows that coordinate PCB creation, placement, routing, validation, rendering, and fabrication export |
-| `kicad-board` | KiCad PCB persistence boundary: live IPC snapshots, domain conversion, and atomic offline board edits |
+| `kicad-board` | KiCad PCB persistence boundary: saved-board parsing and atomic file edits |
 | `sch-check` | The kernel circuit model (`Design`), its semantic lints and deterministic ERC, and the `place_parts` tool input |
 | `circuit-graph` | Attributed circuit graph + a declarative idiom matcher |
 | `sch-doc` | Lossless editable `.kicad_sch` document and pure-Rust connectivity extractor |
@@ -94,14 +92,13 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | `pcb-route-grid` | Grid/A\* primitives for the tuned routing phase |
 | `pcb-route-mesh` | Tuned routing pipeline and lower-level mesh diagnostics |
 | `pcb-drc` | Extensible PCB geometry and connectivity DRC |
-| `kicad` / `kicad-ipc` | KiCAD discovery and CLI driver, plus the live pcbnew IPC session |
+| `kicad` | KiCAD 10 discovery and typed CLI driver |
 | `geom` | Shared geometry primitives |
 
 ## Testing
 
 ```sh
 cargo test --workspace --quiet  # unit + integration tests
-tools/live_kicad_test.sh 9      # live pcbnew IPC suite; also accepts 10
 cargo clippy --workspace --all-targets -- -D warnings
                                # lints for libs, bins, examples, tests, and doctests
 cargo run -p pcb-workflow --example validate_pcb_corpus --quiet

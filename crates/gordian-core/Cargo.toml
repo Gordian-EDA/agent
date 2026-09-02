@@ -28,8 +28,6 @@ tracing.workspace = true
 futures.workspace = true
 directories.workspace = true
 base64 = { workspace = true }
-prost = "0.13"
-prost-types = "0.13"
 
 [dev-dependencies]
 tokio.workspace = true

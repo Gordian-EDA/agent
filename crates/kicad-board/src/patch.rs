@@ -1,12 +1,10 @@
-//! Offline `.kicad_pcb` writes for board placement, routing, and inspection.
+//! `.kicad_pcb` writes for board placement, routing, and inspection.
 //!
-//! These functions are the default write path and apply s-expression edits
-//! directly to the durable board. An explicitly attached KiCad session can use
-//! the equivalent IPC operations where supported.
+//! These functions apply s-expression edits directly to the durable board.
 
 use std::{collections::BTreeMap, io::Write, path::Path};
 
-use kicad_ipc::FootprintMove;
+use crate::FootprintPlacement;
 use pcb_model::{LayerRef, RouteSolution, ViaSpan};
 
 /// One balanced s-expression node: byte range in the source text.
@@ -79,7 +77,7 @@ pub(crate) fn root_body(text: &str) -> Result<(usize, usize), String> {
 }
 
 /// Copper layers enabled by the board file's authoritative `(layers ...)`
-/// table, in stack order. Unlike the live IPC stackup count, this cannot refer
+/// table, in stack order. This cannot refer
 /// to a board that was open immediately before the current project.
 pub fn board_copper_layer_names(text: &str) -> Result<Vec<String>, String> {
     let (body_start, body_end) = root_body(text)?;
@@ -499,8 +497,8 @@ fn parse_at(text: &str, node: &Node) -> Option<(f64, f64, Option<f64>)> {
 /// matched footprint's block-level `(at x y [rot])` and shift the angle term of
 /// every child `(at …)` that carries one (pads and text items sum the footprint
 /// rotation into their own angle, so a rotation delta propagates to them).
-pub fn patch_placements(text: &str, moves: &[FootprintMove]) -> Result<String, String> {
-    let by_ref: BTreeMap<&str, &FootprintMove> =
+pub fn patch_placements(text: &str, moves: &[FootprintPlacement]) -> Result<String, String> {
+    let by_ref: BTreeMap<&str, &FootprintPlacement> =
         moves.iter().map(|m| (m.reference.as_str(), m)).collect();
     let (body_start, body_end) = root_body(text)?;
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
@@ -524,10 +522,7 @@ pub fn patch_placements(text: &str, moves: &[FootprintMove]) -> Result<String, S
             .ok_or_else(|| format!("footprint {reference}: malformed (at …)"))?;
         let old_rot = old_rot.unwrap_or(0.0);
         let new_rot = mv.rotation_deg.unwrap_or(old_rot);
-        let (x, y) = (
-            kicad_ipc::units::nm_to_mm(mv.x_nm),
-            kicad_ipc::units::nm_to_mm(mv.y_nm),
-        );
+        let (x, y) = (mv.at.x, mv.at.y);
         let new_at = if new_rot.rem_euclid(360.0).abs() < 1e-9 {
             format!("(at {} {})", fmt_num(x), fmt_num(y))
         } else {
@@ -662,7 +657,7 @@ pub(crate) fn line_start(text: &str, pos: usize) -> usize {
 }
 
 /// Append a routed [`RouteSolution`] as `(segment …)`/`(via …)` nodes before
-/// the document's closing paren, mirroring the IPC writer's mapping (trace
+/// the document's closing paren, using the router's mapping (trace
 /// polylines → per-window segments; via spans → layer pairs).
 pub fn append_copper(
     text: &str,
@@ -914,10 +909,9 @@ mod tests {
 
     #[test]
     fn patch_moves_and_rotates_footprint() {
-        let moves = vec![FootprintMove {
+        let moves = vec![FootprintPlacement {
             reference: "R1".to_string(),
-            x_nm: 30_000_000,
-            y_nm: 25_500_000,
+            at: geom::Point2::new(30.0, 25.5),
             rotation_deg: Some(90.0),
         }];
         let out = patch_placements(BOARD, &moves).unwrap();
@@ -960,10 +954,9 @@ mod tests {
 
     #[test]
     fn patch_translation_only_keeps_angles() {
-        let moves = vec![FootprintMove {
+        let moves = vec![FootprintPlacement {
             reference: "R1".to_string(),
-            x_nm: 5_000_000,
-            y_nm: 6_000_000,
+            at: geom::Point2::new(5.0, 6.0),
             rotation_deg: None,
         }];
         let out = patch_placements(BOARD, &moves).unwrap();
@@ -973,10 +966,9 @@ mod tests {
 
     #[test]
     fn patch_unknown_reference_errors() {
-        let moves = vec![FootprintMove {
+        let moves = vec![FootprintPlacement {
             reference: "R9".to_string(),
-            x_nm: 0,
-            y_nm: 0,
+            at: geom::Point2::new(0.0, 0.0),
             rotation_deg: None,
         }];
         assert!(patch_placements(BOARD, &moves).is_err());

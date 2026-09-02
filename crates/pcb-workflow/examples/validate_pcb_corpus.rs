@@ -400,10 +400,7 @@ struct Args {
     /// Directory each routed board is written to as `<name>.kicad_pcb`, for
     /// rendering and critic scoring.
     emit_dir: Option<PathBuf>,
-    /// Skip the KiCad DRC oracle. KiCad's IPC session is a machine-wide
-    /// singleton, so two concurrent runs fight over it; a lane iterating on
-    /// route geometry wants the deterministic metrics without that contention.
-    /// The gate itself always runs WITH the oracle.
+    /// Skip the KiCad DRC oracle for deterministic router-only measurements.
     no_kicad: bool,
 }
 

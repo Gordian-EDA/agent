@@ -50,6 +50,28 @@ FINDING_TAGS = (
 )
 
 
+def platform_config():
+    """The same platform configuration used by Gordian itself."""
+    config_root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    config_path = config_root / "gordian" / "config.toml"
+    try:
+        return tomllib.loads(config_path.read_text(encoding="utf-8")), config_path
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise RuntimeError(f"cannot read Gordian configuration from {config_path}: {error}") from error
+
+
+def kicad_cli():
+    """Configured KiCad 10 command-line executable."""
+    configured = os.environ.get("KICAD_CLI")
+    if configured:
+        return configured
+    config, config_path = platform_config()
+    cli = config.get("kicad", {}).get("cliPath")
+    if not cli:
+        raise RuntimeError(f"set kicad.cliPath to KiCad 10 in {config_path}")
+    return str(cli)
+
+
 def command(args, *, timeout=600, check=True, env=None, input_text=None):
     result = subprocess.run(
         args, cwd=ROOT, text=True, capture_output=True, timeout=timeout, env=env,
@@ -272,7 +294,7 @@ def kicad_partition(schematic, out_path):
     where a wire passing behind a symbol reads as a short that is not there."""
     result = command(
         [
-            "kicad-cli", "sch", "export", "netlist",
+            kicad_cli(), "sch", "export", "netlist",
             "--format", "kicadxml", "-o", str(out_path), str(schematic),
         ],
         check=False,
@@ -452,7 +474,7 @@ def run_check(kind, design, report_path):
         return None
     result = command(
         [
-            "kicad-cli", kind, "erc" if kind == "sch" else "drc",
+            kicad_cli(), kind, "erc" if kind == "sch" else "drc",
             "--format", "json", "--severity-all", "--output", str(report_path),
             str(design),
         ],
@@ -492,7 +514,7 @@ def severity_counts(report, prefix):
 BOARD_TOOLS = {
     "sync_board", "place_board", "route_board", "check_board", "export_fab",
     "move_parts", "route_track", "delete_copper", "set_net_width",
-    "update_board_outline", "render_board", "open_board",
+    "update_board_outline", "render_board",
 }
 
 # The tools that own board geometry. A refusal here is the board contract
@@ -683,11 +705,10 @@ def extract_object(text, key="score"):
 
 
 def llm_config():
-    config_root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    config_path = config_root / "gordian" / "config.toml"
+    config, config_path = platform_config()
     try:
-        llm = tomllib.loads(config_path.read_text(encoding="utf-8"))["llm"]
-    except (OSError, KeyError, tomllib.TOMLDecodeError) as error:
+        llm = config["llm"]
+    except KeyError as error:
         raise RuntimeError(
             f"cannot read judge configuration from {config_path}: {error}"
         ) from error

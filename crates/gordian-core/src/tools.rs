@@ -218,11 +218,6 @@ pub fn tool_defs() -> Vec<Tool> {
             }),
         },
         Def {
-            name: "open_board".into(),
-            description: "Open PCB for live IPC edits; return board state.".into(),
-            input_schema: json!({ "type": "object", "properties": {} }),
-        },
-        Def {
             name: "move_parts".into(),
             description: "Move footprints by to, by, near, or edge, with rotation/offsets.".into(),
             input_schema: json!({
@@ -626,7 +621,6 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "check_board" => pcb_workflow::check_board(input, ctx),
         "refill_zones" => pcb_workflow::refill_zones(input, ctx),
         "export_fab" => pcb_workflow::export_fab(input, ctx),
-        "open_board" => pcb_workflow::open_board(input, ctx),
         "move_parts" => pcb_workflow::move_parts(input, ctx),
         "route_track" => pcb_workflow::route_track(input, ctx),
         "delete_copper" => pcb_workflow::delete_copper(input, ctx),

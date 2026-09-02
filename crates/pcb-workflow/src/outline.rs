@@ -47,9 +47,6 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     };
 
-    // The guard captures the revision and saves any live session first, so the
-    // file edit lands on the latest state, and drops the session after a write
-    // so later tools reopen the updated board.
     let path = ctx.pcb_path();
     let gate = match Guard::open(
         ctx,
@@ -65,7 +62,6 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let changed = !edge_cuts_match(&text, &outline)?;
     let updated = replace_edge_cuts(&text, &outline, None)?;
     if changed {
-        ctx.close_kicad_session();
         crate::route::write_board_atomically(&path, updated.as_bytes())
             .with_context(|| format!("writing board {}", path.display()))?;
     }
@@ -148,15 +144,14 @@ fn refit_existing_board(ctx: &AgentRuntime) -> Result<Value> {
         .filter(|part| part.locked)
         .map(|part| part.reference.as_str())
         .collect();
-    let moves: Vec<kicad_ipc::FootprintMove> = plan
+    let moves: Vec<kicad_board::FootprintPlacement> = plan
         .result
         .placements
         .iter()
         .filter(|placement| !locked.contains(placement.reference.as_str()))
-        .map(|placement| kicad_ipc::FootprintMove {
+        .map(|placement| kicad_board::FootprintPlacement {
             reference: placement.reference.clone(),
-            x_nm: kicad_ipc::units::mm_to_nm(placement.at.x),
-            y_nm: kicad_ipc::units::mm_to_nm(placement.at.y),
+            at: placement.at,
             rotation_deg: Some(placement.rotation),
         })
         .collect();
@@ -200,7 +195,6 @@ fn refit_existing_board(ctx: &AgentRuntime) -> Result<Value> {
         Ok(updated) => updated,
         Err(error) => return Ok(gate.rollback(ctx, json!({ "error": error.to_string() }))),
     };
-    ctx.close_kicad_session();
     if let Err(error) = crate::route::write_board_atomically(&path, updated.as_bytes()) {
         return Ok(gate.rollback(
             ctx,

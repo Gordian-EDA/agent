@@ -1,20 +1,14 @@
 //! Persistence boundary for KiCad PCB documents.
 //!
-//! This crate owns conversion between KiCad IPC snapshots and the neutral PCB
-//! domain model, plus the offline s-expression edits used when IPC is unavailable.
+//! This crate owns saved-board parsing and atomic s-expression edits.
 
-mod active;
 mod edit;
 mod netclass;
 mod offline;
 mod patch;
 mod sexpr;
+mod snapshot;
 
-pub use active::{
-    BoardSide, ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot, SEED_ROW_PITCH,
-    board_problem, bridge_route, from_bridge, read_live_snapshot, save_live_board,
-    seed_row_references, seed_row_x, seed_row_y,
-};
 pub use edit::{BoardDoc, BoardFootprint};
 pub use netclass::{
     NetClassUpdate, NetClassUpdateReport, board_net_widths, patch_board_net_class,
@@ -28,3 +22,7 @@ pub use patch::{
     patch_placements, silk_field_owners, strip_copper,
 };
 pub use sexpr::{sexpr_end, sexpr_point};
+pub use snapshot::{
+    BoardSide, BoardSnapshot, FootprintPlacement, ImportedBoard, ImportedPad, ImportedPart,
+    SEED_ROW_PITCH, seed_row_references, seed_row_x, seed_row_y,
+};

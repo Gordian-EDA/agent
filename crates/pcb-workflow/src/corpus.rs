@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use kicad_footprint::{FootprintCatalog, FootprintId};
-use kicad_ipc::FootprintMove;
+use kicad_board::FootprintPlacement;
 use pcb_model::{
     Edge, GroupHint, LayerRef, LockedAt, Obstacle, Placement, PlacementHints, PlacementView,
     Point2, Polygon, Rect, RouteSolution, RoutingView,
@@ -157,10 +157,9 @@ pub fn routed_board_text(
     let seed = super::create::emit_seed_board(&spec, catalog)?.text;
     let moves = placements
         .iter()
-        .map(|placement| FootprintMove {
+        .map(|placement| FootprintPlacement {
             reference: placement.reference.clone(),
-            x_nm: kicad_ipc::units::mm_to_nm(placement.at.x),
-            y_nm: kicad_ipc::units::mm_to_nm(placement.at.y),
+            at: placement.at,
             rotation_deg: Some(placement.rotation),
         })
         .collect::<Vec<_>>();
@@ -170,7 +169,7 @@ pub fn routed_board_text(
 }
 
 /// Synthesize a temporary routed board and check it with KiCad's DRC using the
-/// same acceptance policy as the live `check_board` tool.
+/// same acceptance policy as the `check_board` tool.
 pub fn run_kicad_drc(
     board: &CorpusBoard,
     placements: &[Placement],
@@ -186,15 +185,7 @@ pub fn run_kicad_drc(
     let path = dir.path().join("corpus.kicad_pcb");
     std::fs::write(&path, text)
         .map_err(|e| format!("could not write temporary routed board: {e}"))?;
-    let sessions = kicad_ipc::SessionManager::with_installation(
-        env.pcbnew_path().to_path_buf(),
-        env.major_version(),
-        false,
-        false,
-    );
-    let materialized = super::export::materialize_zones_for_drc(&path, env, &sessions, false);
-    sessions.close();
-    materialized?;
+    super::export::materialize_zones_for_drc(&path, env)?;
     let report = env
         .drc(&path)
         .map_err(|e| format!("kicad-cli pcb drc failed: {e}"))?;
@@ -237,136 +228,6 @@ fn copper_layer_names(layer_count: u32) -> Vec<String> {
     }
     names.push("B.Cu".to_owned());
     names
-}
-
-#[cfg(test)]
-mod live_snapshot_tests {
-    use super::*;
-
-    #[test]
-    #[ignore = "live KiCad IPC comparison; run through tools/live_kicad_test.sh"]
-    fn offline_snapshots_match_ipc_for_corpus_and_quality_boards() {
-        let Some(env) = kicad::KicadInstallation::detect() else {
-            eprintln!("SKIP: no KiCad installation detected");
-            return;
-        };
-        let catalog = FootprintCatalog::from_root(env.footprint_dir()).unwrap();
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let corpus_dir = manifest.join("examples/pcb_circuits");
-        let mut corpus_paths: Vec<_> = std::fs::read_dir(&corpus_dir)
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "json")
-            })
-            .collect();
-        corpus_paths.sort();
-        assert!(!corpus_paths.is_empty(), "PCB corpus must not be empty");
-
-        let dir = tempfile::tempdir().unwrap();
-        let generated_path = dir.path().join("comparison.kicad_pcb");
-        let mut paths = Vec::new();
-        for corpus_path in corpus_paths {
-            let board = load_corpus_board(&corpus_path, &catalog).unwrap();
-            let placements = board
-                .problem
-                .parts
-                .iter()
-                .enumerate()
-                .map(|(index, part)| Placement {
-                    reference: part.reference.clone(),
-                    at: Point2::new(
-                        board.board_bounds.min_x + 2.0 + 2.54 * index as f64,
-                        board.board_bounds.min_y + 2.0,
-                    ),
-                    rotation: 0.0,
-                })
-                .collect::<Vec<_>>();
-            let text = routed_board_text(&board, &placements, &RouteSolution::default(), &catalog)
-                .unwrap();
-            std::fs::write(&generated_path, text).unwrap();
-            let available = compare_one(
-                &generated_path,
-                corpus_path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("corpus board"),
-                &env,
-                paths.is_empty(),
-            );
-            if !available {
-                return;
-            }
-            paths.push(corpus_path);
-        }
-
-        let quality_dir = manifest.join("../../quality/cases");
-        let mut quality_paths = Vec::new();
-        collect_boards(&quality_dir, &mut quality_paths);
-        quality_paths.sort();
-        for path in &quality_paths {
-            let _ = compare_one(
-                path,
-                path.strip_prefix(&quality_dir)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .as_ref(),
-                &env,
-                false,
-            );
-        }
-        eprintln!(
-            "compared {} corpus boards and {} quality input boards",
-            paths.len(),
-            quality_paths.len()
-        );
-    }
-
-    fn compare_one(
-        path: &Path,
-        label: &str,
-        env: &kicad::KicadInstallation,
-        may_skip: bool,
-    ) -> bool {
-        let offline = kicad_board::read_snapshot(path).unwrap();
-        let sessions = kicad_ipc::SessionManager::with_installation(
-            env.pcbnew_path().to_path_buf(),
-            env.major_version(),
-            false,
-            false,
-        );
-        let live = match kicad_board::read_live_snapshot(path, &sessions) {
-            Ok(snapshot) => snapshot,
-            Err(error) if may_skip => {
-                eprintln!("SKIP: headless pcbnew unavailable: {error}");
-                sessions.close();
-                return false;
-            }
-            Err(error) => panic!("{label}: live snapshot failed after the suite started: {error}"),
-        };
-        sessions.close();
-        assert_eq!(offline, live, "snapshot mismatch for {label}");
-        true
-    }
-
-    fn collect_boards(dir: &Path, paths: &mut Vec<std::path::PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_boards(&path, paths);
-            } else if path
-                .extension()
-                .is_some_and(|extension| extension == "kicad_pcb")
-            {
-                paths.push(path);
-            }
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]

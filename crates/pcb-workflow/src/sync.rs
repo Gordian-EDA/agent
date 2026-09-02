@@ -577,11 +577,6 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         Ok(catalog) => catalog,
         Err(e) => return json!({ "error": format!("footprint catalog unavailable: {e}") }),
     };
-    if let Err(e) = ctx.kicad().save_if_open() {
-        return json!({
-            "error": format!("could not save the open KiCAD board before syncing: {e}"),
-        });
-    }
     let before = match crate::active_board(ctx) {
         Ok(board) => board,
         Err(e) => return json!({ "error": e }),
@@ -601,7 +596,7 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         return json!({
             "error": format!(
                 "the board has more than one footprint for {}; a part-by-part sync cannot tell \
-                 them apart. Delete the duplicates in pcbnew first.",
+                 them apart. Delete the duplicates in KiCad first.",
                 duplicates.join(", ")
             ),
         });
@@ -777,12 +772,6 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         Err(refusal) => return refusal,
     };
     let revision = gate.revision();
-    if let Err(e) = ctx.kicad().save_if_open() {
-        return json!({
-            "error": format!("could not save the open KiCAD board before rebuilding it: {e}"),
-            "revision": revision,
-        });
-    }
     let before = match crate::active_board(ctx) {
         Ok(board) => board,
         Err(e) => return json!({ "error": e }),
@@ -799,19 +788,18 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
     if !doc.outline_is_rectangular() {
         return json!({
             "error": "this board has a drawn outline, which a rules rebuild cannot reproduce. \
-                      Change the rules in pcbnew, or square the outline with update_board_outline \
+                      Change the rules in KiCad, or square the outline with update_board_outline \
                       first.",
         });
     }
     let delta = diff(parts, &doc.footprints());
-    let poses: Vec<kicad_ipc::FootprintMove> = doc
+    let poses: Vec<kicad_board::FootprintPlacement> = doc
         .footprints()
         .into_iter()
         .filter(|fp| parts.iter().any(|part| part.reference == fp.reference))
-        .map(|fp| kicad_ipc::FootprintMove {
+        .map(|fp| kicad_board::FootprintPlacement {
             reference: fp.reference,
-            x_nm: kicad_ipc::units::mm_to_nm(fp.at.x),
-            y_nm: kicad_ipc::units::mm_to_nm(fp.at.y),
+            at: fp.at,
             rotation_deg: Some(fp.rotation),
         })
         .collect();
@@ -878,7 +866,7 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
 
 /// The rules the board is already built with, as the starting point a rules
 /// change overlays. Everything here is what the board file itself declares.
-fn board_rules(board: &kicad_board::IpcBoardSnapshot) -> SeedRules {
+fn board_rules(board: &kicad_board::BoardSnapshot) -> SeedRules {
     let layer_count = board.problem.layer_count;
     let pours = board
         .problem
@@ -921,11 +909,8 @@ fn delta_nets(parts: &[SchematicPart]) -> Vec<String> {
 
 /// Replace the board document on disk.
 ///
-/// The write is atomic — an interrupted sync must not leave half a board — and
-/// the live session is dropped first: a cached pcbnew otherwise keeps serving
-/// the old in-memory document for the same pathname and could save it back.
+/// The write is atomic so an interrupted sync cannot leave half a board.
 fn write_board(ctx: &AgentRuntime, text: &str) -> std::result::Result<(), String> {
-    ctx.close_kicad_session();
     let path = ctx.pcb_path();
     crate::route::write_board_atomically(&path, text.as_bytes())
         .map_err(|e| format!("could not write {}: {e}", path.display()))
@@ -956,7 +941,7 @@ fn apply(
     }) {
         return Err(format!(
             "{} sits on the back of the board, and sync_board can only re-emit a swapped \
-             footprint on the front. Move it to the front, or change the package in pcbnew.",
+             footprint on the front. Move it to the front, or change the package in KiCad.",
             change.reference
         ));
     }
@@ -1053,14 +1038,13 @@ fn place_added(added: &[String], ctx: &AgentRuntime) -> std::result::Result<Vec<
                      positions — grow the outline with update_board_outline or move them with move_parts",
         })]);
     }
-    let moves: Vec<kicad_ipc::FootprintMove> = result
+    let moves: Vec<kicad_board::FootprintPlacement> = result
         .placements
         .iter()
         .filter(|placement| new.contains(placement.reference.as_str()))
-        .map(|placement| kicad_ipc::FootprintMove {
+        .map(|placement| kicad_board::FootprintPlacement {
             reference: placement.reference.clone(),
-            x_nm: kicad_ipc::units::mm_to_nm(placement.at.x),
-            y_nm: kicad_ipc::units::mm_to_nm(placement.at.y),
+            at: placement.at,
             rotation_deg: Some(placement.rotation),
         })
         .collect();

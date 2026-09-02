@@ -2,8 +2,7 @@
 //! Gerbers + Excellon drill + pick-and-place + (when a schematic is present) a
 //! BOM, all under a single `fab/` directory the user can hand to a board house.
 //!
-//! This is the one-click bundle for the active board after saving any open IPC
-//! session.
+//! This is the one-click bundle for the saved project board.
 
 use std::path::{Path, PathBuf};
 
@@ -26,10 +25,6 @@ use gordian_runtime::AgentRuntime;
 /// exporter failures are surfaced as a recoverable `{error}` value, not `Err`.
 pub fn export_fab(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let board = ctx.pcb_path();
-    if super::interactive::save_session_if_open(ctx).is_err() {
-        // Export the on-disk board — the offline write paths keep it current.
-        ctx.close_kicad_session();
-    }
     if !board.is_file() {
         return Ok(json!({
             "error": format!(
@@ -41,12 +36,7 @@ pub fn export_fab(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 
     let cli = ctx.env();
-    if let Err(error) = super::export::materialize_zones_for_drc(
-        &board,
-        cli,
-        ctx.kicad(),
-        ctx.config().kicad.attach_running,
-    ) {
+    if let Err(error) = super::export::materialize_zones_for_drc(&board, cli) {
         return Ok(
             json!({ "error": format!("could not refill zones before fab export: {error}") }),
         );

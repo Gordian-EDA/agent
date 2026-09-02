@@ -1,4 +1,4 @@
-//! Live-board validation through KiCAD DRC.
+//! Saved-board validation through KiCad 10 DRC.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -205,8 +205,8 @@ pub(super) struct DrcGate {
     pub ignored_zone_self_unconnected: usize,
 }
 
-/// Apply the same production DRC policy to live boards and offline corpus
-/// boards. Library/silkscreen warnings and KiCad's zone-self artifacts do not
+/// Apply the same production DRC policy to project and corpus boards.
+/// Library/silkscreen warnings and KiCad's zone-self artifacts do not
 /// describe routed-copper correctness; every other finding blocks the gate.
 pub(super) fn gate_drc(report: &kicad::DrcReport) -> DrcGate {
     let copper_violations = report
@@ -229,13 +229,10 @@ pub(super) fn gate_drc(report: &kicad::DrcReport) -> DrcGate {
     }
 }
 
-/// Ensure generated copper zones have cached fills before a headless DRC run.
-/// KiCad 10+ can refill through the CLI; KiCad 9 needs its board IPC API.
+/// Recompute generated copper zones through KiCad 10 before a DRC decision.
 pub(crate) fn materialize_zones_for_drc(
     path: &Path,
     env: &kicad::KicadInstallation,
-    sessions: &kicad_ipc::SessionManager,
-    attach_running: bool,
 ) -> std::result::Result<bool, String> {
     let has_zones = std::fs::read_to_string(path)
         .map(|text| text.contains("\n\t(zone") || text.contains("\n  (zone"))
@@ -243,27 +240,8 @@ pub(crate) fn materialize_zones_for_drc(
     if !has_zones {
         return Ok(false);
     }
-    let major = env
-        .version()
-        .split('.')
-        .next()
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(0);
-    // KiCad 9 has no CLI refill operation, and a CLI refill on newer versions
-    // does not persist the fill cache the next tool needs to inspect.
-    let _ = attach_running;
-    if major < 9 {
-        return Err(format!(
-            "KiCad {} cannot refill generated zones headlessly; KiCad 9+ is required to DRC boards with zones",
-            env.version()
-        ));
-    }
-    sessions
-        .with_session(path, |session| {
-            session.kicad().refill_zones()?;
-            session.kicad().save()
-        })
-        .map_err(|e| format!("could not refill board zones over KiCad IPC: {e}"))?;
+    env.refill_zones(path, false)
+        .map_err(|e| format!("kicad-cli pcb drc --refill-zones failed: {e}"))?;
     Ok(true)
 }
 
@@ -280,12 +258,18 @@ pub fn refill_zones(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
-    match materialize_zones_for_drc(
-        &path,
-        ctx.env(),
-        ctx.kicad(),
-        ctx.config().kicad.attach_running,
-    ) {
+    let has_zones = std::fs::read_to_string(&path)
+        .map(|text| text.contains("\n\t(zone") || text.contains("\n  (zone"))
+        .unwrap_or(false);
+    let result = if has_zones {
+        ctx.env()
+            .refill_zones(&path, true)
+            .map(|_| true)
+            .map_err(|error| format!("kicad-cli pcb drc --refill-zones --save-board failed: {error}"))
+    } else {
+        Ok(false)
+    };
+    match result {
         Ok(refilled) => Ok(gate.commit(
             ctx,
             json!({
@@ -303,7 +287,7 @@ pub fn refill_zones(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             ctx,
             json!({
                 "error": error,
-                "next": "Open the board in KiCad, press B to refill all zones, save, then run check_board."
+                "next": "Fix the reported board error, then run refill_zones again."
             }),
         )),
     }
@@ -360,27 +344,9 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !path.exists() {
         return Ok(json!({ "error": "no board exists yet — run sync_board first" }));
     }
-    let mut note_prefix = if ctx.kicad().is_open() {
-        match crate::save_active_board(ctx) {
-            Ok(_) => "Saved the live KiCAD board, then ran DRC. ",
-            Err(_) => {
-                // A wedged live session must not block DRC: the offline write
-                // paths keep the file current, so lint the file itself and drop
-                // the session so the next tool reopens from disk.
-                ctx.close_kicad_session();
-                "Live KiCAD save failed; dropped the session and ran DRC on the board file. "
-            }
-        }
-    } else {
-        "No live KiCAD session was open; ran DRC directly on the board file. "
-    };
-    match materialize_zones_for_drc(
-        &path,
-        ctx.env(),
-        ctx.kicad(),
-        ctx.config().kicad.attach_running,
-    ) {
-        Ok(true) => note_prefix = "Refilled and saved the live KiCAD board zones, then ran DRC. ",
+    let mut note_prefix = "Ran KiCad 10 DRC on the saved board file. ";
+    match materialize_zones_for_drc(&path, ctx.env()) {
+        Ok(true) => note_prefix = "Recomputed zones with KiCad 10, then ran DRC. ",
         Ok(false) => {}
         Err(e) => return Ok(json!({ "error": e })),
     }
@@ -394,9 +360,6 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut silk_references_moved = Vec::new();
     let mut silk_cleanup_error = None;
     let report = if initial_silk_warnings > 0 {
-        // Cleanup edits the durable board between CLI DRC passes. Drop any live
-        // editor session first so stale in-memory state cannot overwrite it.
-        ctx.close_kicad_session();
         match super::silk::cleanup_silk_text(&path, cli, initial_report.clone()) {
             Ok(cleanup) => {
                 silk_cleanup_attempts = cleanup.attempts;

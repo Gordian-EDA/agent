@@ -92,7 +92,7 @@ async fn guard_turn_task(future: impl Future<Output = TurnEndReason>) -> TurnEnd
 pub async fn run(project_dir: PathBuf, config: GordianConfig, config_path: PathBuf) -> Result<()> {
     // 1. Detect KiCAD (best-effort: the UI still launches without it, just shows
     //    a disconnected indicator and the agent's tools will error).
-    let env = crate::config::detect_kicad(&config);
+    let env = crate::config::detect_kicad(&config).ok();
     let kicad_connected = env.is_some();
 
     // 2. Build the agent if we have both KiCAD and LLM config; otherwise launch

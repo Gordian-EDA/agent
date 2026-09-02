@@ -38,8 +38,8 @@ pub fn kicad10() -> Option<KicadInstallation> {
         Some(&first_existing("share/kicad/symbols")?),
         Some(&first_existing("share/kicad/footprints")?),
         Some(&first_existing("usr/bin/kicad-cli")?),
-        Some(&first_existing("usr/bin/pcbnew")?),
     )
+    .ok()
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {

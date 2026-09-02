@@ -56,6 +56,16 @@ impl KicadInstallation {
     /// process failure, as long as the JSON report is parseable.
     #[tracing::instrument(skip_all, fields(board = %pcb.display()))]
     pub fn drc(&self, pcb: &Path) -> io::Result<DrcReport> {
+        self.run_drc(pcb, false)
+    }
+
+    /// Refill every copper zone and optionally persist the updated board.
+    #[tracing::instrument(skip_all, fields(board = %pcb.display(), save_board))]
+    pub fn refill_zones(&self, pcb: &Path, save_board: bool) -> io::Result<DrcReport> {
+        self.run_drc(pcb, save_board)
+    }
+
+    fn run_drc(&self, pcb: &Path, save_board: bool) -> io::Result<DrcReport> {
         let out = tempfile::Builder::new()
             .prefix("gordian-drc-")
             .suffix(".json")
@@ -66,8 +76,11 @@ impl KicadInstallation {
             .unwrap_or(false);
         let mut cmd = Command::new(self.cli_path());
         cmd.args(["pcb", "drc", "--format", "json", "--all-track-errors"]);
-        if board_has_zones && self.supports_pcb_drc_refill_zones() {
+        if board_has_zones {
             cmd.arg("--refill-zones");
+            if save_board {
+                cmd.arg("--save-board");
+            }
         }
         let output = cmd
             .arg("--exit-code-violations")
@@ -90,18 +103,6 @@ impl KicadInstallation {
                 Err(io::Error::new(io::ErrorKind::InvalidData, detail))
             }
         }
-    }
-
-    fn supports_pcb_drc_refill_zones(&self) -> bool {
-        Command::new(self.cli_path())
-            .args(["pcb", "drc", "--help"])
-            .output()
-            .ok()
-            .map(|output| {
-                String::from_utf8_lossy(&output.stdout).contains("--refill-zones")
-                    || String::from_utf8_lossy(&output.stderr).contains("--refill-zones")
-            })
-            .unwrap_or(false)
     }
 
     /// Run `kicad-cli sch export netlist --format kicadxml` on `schematic`.

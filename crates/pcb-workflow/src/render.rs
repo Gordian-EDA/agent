@@ -30,31 +30,9 @@ pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "error": "no board exists yet — run sync_board first"
         }));
     }
-    // Mutating board tools save every successful operation. If this process already
-    // owns a live session, flush it without opening or launching anything; otherwise
-    // the on-disk board is immediately authoritative. This avoids the old render-only
-    // board_snapshot + save path, which could launch pcbnew and spend tens of seconds
-    // before the sub-second `kicad-cli` export even began.
-    if ctx.kicad().save_if_open().is_err() {
-        ctx.close_kicad_session();
-    }
     let source = match board_render_source(&pcb_path) {
         Ok(source) => source,
-        Err(file_err) => match crate::active_board(ctx) {
-            Ok(board) => BoardRenderSource {
-                bounds: board.imported.bounds,
-                outline: board.problem.outline,
-                part_count: board.imported.parts.len(),
-                provenance: "live_kicad_fallback",
-            },
-            Err(live_err) => {
-                return Ok(json!({
-                    "error": format!(
-                        "{file_err}; live KiCad geometry fallback also failed: {live_err}"
-                    )
-                }));
-            }
-        },
+        Err(error) => return Ok(json!({ "error": error })),
     };
     let tmp = tempfile::tempdir().context("temp dir for PCB SVG export")?;
     let svg_path = tmp.path().join("board.svg");
