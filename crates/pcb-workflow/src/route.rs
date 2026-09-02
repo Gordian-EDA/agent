@@ -9,15 +9,15 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use kicad_board::ImportedPart;
-use pcb_model::Violation as ConnViolation;
 use pcb_engine::check as lint;
+use pcb_engine::{postroute_cleanup, prepare_wide_terminal_escapes};
 use pcb_model::Finding as DrcViolation;
+use pcb_model::Violation as ConnViolation;
 use pcb_model::{
     FailedNet, LayerRef, Point2, RouteResult, RouteSolution, RoutingView, Trace, Via, ViaSpan,
 };
 use pcb_route_mesh::copper::copper_obstacles;
 use pcb_route_mesh::pathing::GlobalRouteResult;
-use pcb_engine::{postroute_cleanup, prepare_wide_terminal_escapes};
 use pcb_route_mesh::pipeline::RoutePassReport;
 
 use gordian_runtime::AgentRuntime;
@@ -1613,9 +1613,7 @@ fn simplify_candidate_paths(solution: &mut RouteSolution) {
 }
 
 fn direct_candidate_layers(layer_count: u32) -> Vec<LayerRef> {
-    let plane_layers: BTreeSet<u32> = pcb_model::plane_layers(layer_count)
-        .into_iter()
-        .collect();
+    let plane_layers: BTreeSet<u32> = pcb_model::plane_layers(layer_count).into_iter().collect();
     let mut layers = Vec::new();
     for idx in 0..layer_count.max(1) {
         if plane_layers.contains(&idx) {
@@ -2156,7 +2154,9 @@ mod escape_bottleneck_tests {
             lib_id: footprint.to_owned(),
             at: Point2 { x: 0.0, y: 0.0 },
             rotation: 0,
+            side: kicad_board::BoardSide::Front,
             locked: false,
+            courtyard: None,
             pads: nets
                 .iter()
                 .map(|(p, n)| ImportedPad {
@@ -2164,6 +2164,9 @@ mod escape_bottleneck_tests {
                     net: Some(n.to_string()),
                     at: Point2 { x: 0.0, y: 0.0 },
                     layers: vec![LayerRef::top()],
+                    shape: "rect".to_owned(),
+                    size: Point2::new(0.0, 0.0),
+                    drill: None,
                 })
                 .collect(),
         }

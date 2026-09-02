@@ -174,8 +174,17 @@ pub struct ImportedPart {
     pub lib_id: String,
     pub at: Point2,
     pub rotation: i32,
+    pub side: BoardSide,
     pub locked: bool,
+    pub courtyard: Option<Rect>,
     pub pads: Vec<ImportedPad>,
+}
+
+/// Side of the board carrying a footprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardSide {
+    Front,
+    Back,
 }
 
 /// A footprint terminal recovered from the live board.
@@ -186,6 +195,9 @@ pub struct ImportedPad {
     /// Electrical anchor in board coordinates (not an offset copper-shape center).
     pub at: Point2,
     pub layers: Vec<CopperLayer>,
+    pub shape: String,
+    pub size: Point2,
+    pub drill: Option<Point2>,
 }
 
 impl Kicad {
@@ -355,6 +367,12 @@ impl SnapshotBuilder {
             .map(|id| format!("{}:{}", id.library_nickname, id.entry_name))
             .unwrap_or_default();
         let locked = fp.locked == LockedState::LsLocked as i32;
+        let side = if layer_enum(fp.layer) == Some(BoardLayer::BlBCu) {
+            BoardSide::Back
+        } else {
+            BoardSide::Front
+        };
+        let courtyard = footprint_courtyard(fp);
         let mut pads = Vec::new();
         if let Some(definition) = &fp.definition {
             for item in &definition.items {
@@ -394,11 +412,17 @@ impl SnapshotBuilder {
                             layer: layers.first().cloned().unwrap_or_else(LayerRef::top),
                         });
                 }
+                let shape = pad_shape(&pad);
+                let size = pad_size(&pad);
+                let drill = pad_drill(&pad);
                 pads.push(ImportedPad {
                     number: pad.number,
                     net,
                     at: terminal,
                     layers,
+                    shape,
+                    size,
+                    drill,
                 });
             }
         }
@@ -407,7 +431,9 @@ impl SnapshotBuilder {
             lib_id,
             at,
             rotation: rotation as i32,
+            side,
             locked,
+            courtyard,
             pads,
         });
     }
@@ -926,6 +952,113 @@ fn pad_world(fp: &FootprintInstance, pad: &Pad) -> Point2 {
         .map(point)
         .or_else(|| fp.position.as_ref().map(point))
         .unwrap_or(Point2 { x: 0.0, y: 0.0 })
+}
+
+fn pad_shape(pad: &Pad) -> String {
+    let shape = pad
+        .pad_stack
+        .as_ref()
+        .and_then(|stack| stack.copper_layers.first())
+        .and_then(|layer| PadStackShape::try_from(layer.shape).ok());
+    match shape {
+        Some(PadStackShape::PssCircle) => "circle",
+        Some(PadStackShape::PssRectangle) => "rect",
+        Some(PadStackShape::PssOval) => "oval",
+        Some(PadStackShape::PssTrapezoid) => "trapezoid",
+        Some(PadStackShape::PssRoundrect) => "roundrect",
+        Some(PadStackShape::PssChamferedrect) => "chamfered_rect",
+        Some(PadStackShape::PssCustom) => "custom",
+        _ => "unknown",
+    }
+    .to_owned()
+}
+
+fn pad_size(pad: &Pad) -> Point2 {
+    pad.pad_stack
+        .as_ref()
+        .and_then(|stack| {
+            stack
+                .copper_layers
+                .iter()
+                .find_map(|layer| layer.size.as_ref())
+        })
+        .map(|size| Point2::new(nm_to_mm(size.x_nm), nm_to_mm(size.y_nm)))
+        .unwrap_or(Point2::new(0.0, 0.0))
+}
+
+fn pad_drill(pad: &Pad) -> Option<Point2> {
+    pad.pad_stack
+        .as_ref()?
+        .drill
+        .as_ref()?
+        .diameter
+        .as_ref()
+        .map(|diameter| Point2::new(nm_to_mm(diameter.x_nm), nm_to_mm(diameter.y_nm)))
+}
+
+fn footprint_courtyard(fp: &FootprintInstance) -> Option<Rect> {
+    let definition = fp.definition.as_ref()?;
+    let mut points = Vec::new();
+    for item in &definition.items {
+        let Ok(graphic) = item.to_msg::<BoardGraphicShape>() else {
+            continue;
+        };
+        if !matches!(
+            layer_enum(graphic.layer),
+            Some(BoardLayer::BlFCrtYd | BoardLayer::BlBCrtYd)
+        ) {
+            continue;
+        }
+        graphic_points(&graphic, &mut points);
+    }
+    Rect::bounding(&points)
+}
+
+fn graphic_points(graphic: &BoardGraphicShape, points: &mut Vec<Point2>) {
+    let Some(shape) = graphic.shape.as_ref() else {
+        return;
+    };
+    match shape.geometry.as_ref() {
+        Some(Geometry::Segment(segment)) => {
+            points.extend(segment.start.as_ref().map(point));
+            points.extend(segment.end.as_ref().map(point));
+        }
+        Some(Geometry::Rectangle(rectangle)) => {
+            points.extend(rectangle.top_left.as_ref().map(point));
+            points.extend(rectangle.bottom_right.as_ref().map(point));
+        }
+        Some(Geometry::Arc(arc)) => {
+            points.extend(arc.start.as_ref().map(point));
+            points.extend(arc.mid.as_ref().map(point));
+            points.extend(arc.end.as_ref().map(point));
+        }
+        Some(Geometry::Circle(circle)) => {
+            let (Some(center), Some(radius_point)) = (&circle.center, &circle.radius_point) else {
+                return;
+            };
+            let center = point(center);
+            let radius = center.dist(point(radius_point));
+            points.extend([
+                Point2::new(center.x - radius, center.y - radius),
+                Point2::new(center.x + radius, center.y + radius),
+            ]);
+        }
+        Some(Geometry::Polygon(polyset)) => points.extend(polyset_points(Some(polyset))),
+        Some(Geometry::Bezier(bezier)) => {
+            for value in [
+                bezier.start.as_ref(),
+                bezier.control1.as_ref(),
+                bezier.control2.as_ref(),
+                bezier.end.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                points.push(point(value));
+            }
+        }
+        None => {}
+    }
 }
 
 fn footprint_angle(fp: &FootprintInstance) -> f64 {

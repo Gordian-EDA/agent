@@ -31,8 +31,17 @@ pub struct ImportedPart {
     pub lib_id: String,
     pub at: Point2,
     pub rotation: i32,
+    pub side: BoardSide,
     pub locked: bool,
+    pub courtyard: Option<Rect>,
     pub pads: Vec<ImportedPad>,
+}
+
+/// Side of the board carrying a footprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardSide {
+    Front,
+    Back,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +50,9 @@ pub struct ImportedPad {
     pub net: Option<String>,
     pub at: Point2,
     pub layers: Vec<LayerRef>,
+    pub shape: String,
+    pub size: Point2,
+    pub drill: Option<Point2>,
 }
 
 pub fn from_bridge(snapshot: kicad_ipc::snapshot::IpcBoardSnapshot) -> IpcBoardSnapshot {
@@ -100,7 +112,12 @@ pub fn from_bridge(snapshot: kicad_ipc::snapshot::IpcBoardSnapshot) -> IpcBoardS
                     lib_id: part.lib_id,
                     at: part.at,
                     rotation: part.rotation,
+                    side: match part.side {
+                        kicad_ipc::snapshot::BoardSide::Front => BoardSide::Front,
+                        kicad_ipc::snapshot::BoardSide::Back => BoardSide::Back,
+                    },
                     locked: part.locked,
+                    courtyard: part.courtyard,
                     pads: part
                         .pads
                         .into_iter()
@@ -109,6 +126,9 @@ pub fn from_bridge(snapshot: kicad_ipc::snapshot::IpcBoardSnapshot) -> IpcBoardS
                             net: pad.net,
                             at: pad.at,
                             layers: pad.layers.into_iter().map(domain_layer).collect(),
+                            shape: pad.shape,
+                            size: pad.size,
+                            drill: pad.drill,
                         })
                         .collect(),
                 })
@@ -275,6 +295,13 @@ fn reconcile_file_stackup(
 ) -> std::result::Result<(), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("could not read board layer table: {err}"))?;
+    let (body_start, body_end) = crate::patch::root_body(&text)?;
+    let top = crate::patch::child_nodes(&text, body_start, body_end);
+    let rules = crate::offline::file_rules(path, &text, &top)?;
+    snapshot.problem.min_trace_width = rules.min_trace_width;
+    snapshot.problem.clearance = rules.clearance;
+    snapshot.problem.via_diameter = rules.via_diameter;
+    snapshot.problem.via_drill = rules.via_drill;
     let layer_names = crate::patch::board_copper_layer_names(&text)?;
     let ipc_layer_names = snapshot.layer_names.clone();
     let layer_count = layer_names.len() as u32;
@@ -293,24 +320,7 @@ fn reconcile_file_stackup(
     for (net, layer) in crate::patch::board_file_plane_nets(&text)? {
         snapshot.problem.plane_nets.insert(net, layer);
     }
-    snapshot
-        .problem
-        .net_widths
-        .extend(crate::board_net_widths(&text)?);
-    let project_path = path.with_extension("kicad_pro");
-    match std::fs::read_to_string(&project_path) {
-        Ok(project) => snapshot
-            .problem
-            .net_widths
-            .extend(crate::project_net_widths(&project)?),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => {
-            return Err(format!(
-                "could not read project net classes {}: {err}",
-                project_path.display()
-            ));
-        }
-    }
+    snapshot.problem.net_widths.extend(rules.net_widths);
     let known_nets: std::collections::BTreeSet<_> = snapshot
         .imported
         .parts
@@ -393,7 +403,9 @@ mod tests {
             lib_id: "Resistor_SMD:R_0603_1608Metric".to_owned(),
             at: Point2 { x, y },
             rotation,
+            side: BoardSide::Front,
             locked: false,
+            courtyard: None,
             pads: vec![],
         }
     }

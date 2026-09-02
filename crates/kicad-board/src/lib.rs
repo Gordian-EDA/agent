@@ -11,8 +11,8 @@ mod patch;
 mod sexpr;
 
 pub use active::{
-    ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot, board_problem, bridge_route,
-    from_bridge, read_live_snapshot, save_live_board, seed_row_references,
+    BoardSide, ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot, board_problem,
+    bridge_route, from_bridge, read_live_snapshot, save_live_board, seed_row_references,
 };
 pub use edit::{BoardDoc, BoardFootprint};
 pub use netclass::{

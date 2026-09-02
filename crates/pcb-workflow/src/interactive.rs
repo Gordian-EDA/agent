@@ -49,7 +49,7 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut board = MoveBoard::from_snapshot(
         &snapshot,
         &crate::place::courtyard_extents(&snapshot, ctx),
-        &back_side_references(ctx),
+        &back_side_references(&snapshot),
     );
     let plan = match resolve_move_parts(&input, &mut board) {
         Ok(plan) => plan,
@@ -88,20 +88,15 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
 /// The parts sitting on the back of the board. KiCAD mirrors a flipped
 /// footprint about its y axis, so an asymmetric courtyard is on the other side
-/// of the origin there — and the live snapshot does not carry the side, so the
-/// board document is asked.
-fn back_side_references(ctx: &AgentRuntime) -> BTreeSet<String> {
-    std::fs::read_to_string(ctx.pcb_path())
-        .ok()
-        .and_then(|text| kicad_board::BoardDoc::parse(text).ok())
-        .map(|doc| {
-            doc.footprints()
-                .into_iter()
-                .filter(kicad_board::BoardFootprint::on_back)
-                .map(|footprint| footprint.reference)
-                .collect()
-        })
-        .unwrap_or_default()
+/// of the origin there.
+fn back_side_references(snapshot: &IpcBoardSnapshot) -> BTreeSet<String> {
+    snapshot
+        .imported
+        .parts
+        .iter()
+        .filter(|part| part.side == kicad_board::BoardSide::Back)
+        .map(|part| part.reference.clone())
+        .collect()
 }
 
 /// Copper the move invalidates: every net with a trace ending on a pad that
@@ -678,10 +673,9 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             nets: vec![net.clone()],
         };
         return match write_net_width_offline(&path, &project_path, &update) {
-            Ok(report) => Ok(gate.commit(
-                ctx,
-                net_width_output(name, net, width, clearance, report),
-            )),
+            Ok(report) => {
+                Ok(gate.commit(ctx, net_width_output(name, net, width, clearance, report)))
+            }
             Err(error) => Ok(gate.rollback(ctx, json!({ "error": error }))),
         };
     }
@@ -776,7 +770,10 @@ fn delete_copper_offline(
     let mut matches = Vec::<(Selected, CopperHit)>::new();
     if request.kinds.contains(&CopperKind::Track) {
         for (index, trace) in snapshot.copper.traces.iter().enumerate() {
-            if request.net.as_deref().is_some_and(|net| net != trace.connection)
+            if request
+                .net
+                .as_deref()
+                .is_some_and(|net| net != trace.connection)
                 || request
                     .layer
                     .is_some_and(|layer| trace.layer.index(layer_count) != Some(layer))
@@ -808,19 +805,18 @@ fn delete_copper_offline(
     }
     if request.kinds.contains(&CopperKind::Via) {
         for (index, via) in snapshot.copper.vias.iter().enumerate() {
-            if request.net.as_deref().is_some_and(|net| net != via.connection) {
+            if request
+                .net
+                .as_deref()
+                .is_some_and(|net| net != via.connection)
+            {
                 continue;
             }
             let indices: Vec<u32> = match via.span {
                 ViaSpan::Through => (0..layer_count).collect(),
-                ViaSpan::Partial { from, to, .. } => {
-                    (from.min(to)..=from.max(to)).collect()
-                }
+                ViaSpan::Partial { from, to, .. } => (from.min(to)..=from.max(to)).collect(),
             };
-            if request
-                .layer
-                .is_some_and(|layer| !indices.contains(&layer))
-            {
+            if request.layer.is_some_and(|layer| !indices.contains(&layer)) {
                 continue;
             }
             matches.push((
@@ -1603,7 +1599,9 @@ mod tests {
                     lib_id: "Capacitor_SMD:C_0603_1608Metric".to_owned(),
                     at: Point2::new(5.0, 5.0),
                     rotation: 0,
+                    side: kicad_board::BoardSide::Front,
                     locked: false,
+                    courtyard: None,
                     pads: vec![],
                 }],
                 placement_keepouts: vec![],
@@ -2083,19 +2081,27 @@ mod tests {
             lib_id: "Package_TO_SOT_SMD:SOT-23-5".to_owned(),
             at: Point2::new(0.0, 0.0),
             rotation: 0,
+            side: kicad_board::BoardSide::Front,
             locked: false,
+            courtyard: None,
             pads: vec![
                 kicad_board::ImportedPad {
                     number: "3".to_owned(),
                     net: Some("SIG".to_owned()),
                     at: Point2::new(4.0, 2.0),
                     layers: vec![LayerRef::top()],
+                    shape: "rect".to_owned(),
+                    size: Point2::new(0.0, 0.0),
+                    drill: None,
                 },
                 kicad_board::ImportedPad {
                     number: "5".to_owned(),
                     net: Some("SIG".to_owned()),
                     at: Point2::new(9.0, 2.0),
                     layers: vec![LayerRef::top()],
+                    shape: "rect".to_owned(),
+                    size: Point2::new(0.0, 0.0),
+                    drill: None,
                 },
             ],
         }];

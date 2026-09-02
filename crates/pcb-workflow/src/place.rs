@@ -369,21 +369,31 @@ pub(super) fn courtyard_extents(
     board: &IpcBoardSnapshot,
     ctx: &AgentRuntime,
 ) -> std::collections::BTreeMap<String, Rect> {
-    // An unreadable catalog leaves the map empty and the caller falls back to
-    // pad extents — a weaker guard, but never a wrong one.
-    let Ok(catalog) = ctx.footprint_catalog() else {
-        return Default::default();
-    };
-    board
+    let mut courtyards: BTreeMap<String, Rect> = board
         .imported
         .parts
         .iter()
+        .filter_map(|part| {
+            part.courtyard
+                .map(|courtyard| (part.reference.clone(), courtyard))
+        })
+        .collect();
+    let Ok(catalog) = ctx.footprint_catalog() else {
+        return courtyards;
+    };
+    let catalog_courtyards = board
+        .imported
+        .parts
+        .iter()
+        .filter(|part| !courtyards.contains_key(&part.reference))
         .filter_map(|part| {
             let id = FootprintId::parse(&part.lib_id).ok()?;
             let footprint = catalog.footprint(&id).ok()?;
             Some((part.reference.clone(), placement_envelope(&footprint)))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    courtyards.extend(catalog_courtyards);
+    courtyards
 }
 
 /// The footprint's courtyard in FOOTPRINT-LOCAL coordinates, widened to hold
@@ -2526,8 +2536,8 @@ fn write_placement_offline(
     moves: &[FootprintMove],
 ) -> std::result::Result<(), String> {
     ctx.close_kicad_session();
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("could not read the board: {e}"))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("could not read the board: {e}"))?;
     let patched = kicad_board::patch_placements(&text, moves)
         .map_err(|e| format!("could not patch placement: {e}"))?;
     crate::route::write_board_atomically(path, patched.as_bytes())
@@ -2549,7 +2559,9 @@ mod tests {
             lib_id: lib_id.into(),
             at: Point2::new(1.0, 1.0),
             rotation: 0,
+            side: kicad_board::BoardSide::Front,
             locked: false,
+            courtyard: None,
             pads: pads
                 .into_iter()
                 .map(|(number, net)| ImportedPad {
@@ -2557,6 +2569,9 @@ mod tests {
                     net: Some(net),
                     at: Point2::new(1.0, 1.0),
                     layers: vec![LayerRef::top()],
+                    shape: "rect".to_owned(),
+                    size: Point2::new(0.0, 0.0),
+                    drill: None,
                 })
                 .collect(),
         }
@@ -3697,19 +3712,27 @@ mod tests {
                     lib_id: "Package:Test".to_owned(),
                     at: Point2::new(10.0, 10.0),
                     rotation: 0,
+                    side: kicad_board::BoardSide::Front,
                     locked: false,
+                    courtyard: None,
                     pads: vec![
                         ImportedPad {
                             number: "A4".to_owned(),
                             net: Some("VBUS".to_owned()),
                             at: Point2::new(8.75, 9.5),
                             layers: vec![LayerRef::top()],
+                            shape: "rect".to_owned(),
+                            size: Point2::new(0.0, 0.0),
+                            drill: None,
                         },
                         ImportedPad {
                             number: "A6".to_owned(),
                             net: Some("D+".to_owned()),
                             at: Point2::new(8.75, 10.0),
                             layers: vec![LayerRef::top()],
+                            shape: "rect".to_owned(),
+                            size: Point2::new(0.0, 0.0),
+                            drill: None,
                         },
                     ],
                 }],
