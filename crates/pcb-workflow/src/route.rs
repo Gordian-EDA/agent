@@ -210,10 +210,7 @@ pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Err(error) = crate::selection::check_one_selector(&input, "nets") {
         return Ok(refusal(error));
     }
-    let gate = match Guard::open(
-        ctx,
-        Edit::new("route_board", "Route the project board", &[ctx.pcb_path()]).expecting(&input),
-    ) {
+    let gate = match Guard::open(ctx, Edit::new("route_board", &[ctx.pcb_path()])) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
@@ -517,7 +514,7 @@ fn route_live_board(
     }
     let split = lint_summary_from_violations(&final_violations, &result.failed, &plane_nets);
     // A violation that survives the honesty fixpoint is not this route's to
-    // undo: every net it could drop is dropped, so what is left is placement
+    // every net it could drop is dropped, so what is left is placement
     // geometry the board already carried. Routing what it can is the work; the
     // guard still refuses anything this edit itself introduced.
     let standing_violations = crate::diagnose::violations_json(

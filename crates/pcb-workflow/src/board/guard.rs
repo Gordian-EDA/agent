@@ -9,8 +9,8 @@
 //! live session, snapshots the `.kicad_pcb`, and records the defects the board
 //! *already* had), makes its edit, and hands the result to [`Guard::commit`].
 //! The guard re-reads the board, diffs its defects against the baseline, and
-//! either stamps the revision on the result or restores the snapshot and
-//! refuses with the violations it found.
+//! either accepts the result or restores the snapshot and refuses with the
+//! violations it found.
 //!
 //! Faults are compared as `(rule, the nets involved)`, not as exact payloads:
 //! copper moves, so coordinates move with it, but the *fault* does not. A board
@@ -23,7 +23,6 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 
 use gordian_runtime::AgentRuntime;
-use gordian_runtime::revisions::RevisionId;
 use kicad_board::BoardSnapshot;
 use pcb_model::Finding as DrcViolation;
 use pcb_model::{Point2, Polygon, Violation};
@@ -298,78 +297,19 @@ fn introduced<'a>(
     }
 }
 
-/// What a mutator declares before it writes: who it is, which files it may
-/// touch, which references it acts on, and the revision the caller believed the
-/// board was at.
+/// What a mutator declares before it writes: who it is and which files it may touch.
 pub(crate) struct Edit<'a> {
     pub(crate) tool: &'static str,
-    pub(crate) summary: &'a str,
     pub(crate) files: &'a [PathBuf],
-    pub(crate) refs: Vec<String>,
-    /// The caller's `expect_revision`: when it is not the board's current
-    /// revision, someone else wrote since and this edit is refused instead of
-    /// silently landing on top of theirs.
-    pub(crate) expect_revision: Option<RevisionId>,
 }
 
 impl<'a> Edit<'a> {
-    pub(crate) fn new(tool: &'static str, summary: &'a str, files: &'a [PathBuf]) -> Self {
-        Self {
-            tool,
-            summary,
-            files,
-            refs: Vec::new(),
-            expect_revision: None,
-        }
-    }
-
-    pub(crate) fn refs(mut self, refs: impl IntoIterator<Item = String>) -> Self {
-        self.refs = refs.into_iter().collect();
-        self
-    }
-
-    /// Read `expect_revision` off a tool's own input.
-    pub(crate) fn expecting(self, input: &Value) -> Self {
-        self.expect(expected_revision(input))
-    }
-
-    /// Carry a token a caller already read off its input.
-    pub(crate) fn expect(mut self, expected: Option<RevisionId>) -> Self {
-        self.expect_revision = expected;
-        self
+    pub(crate) fn new(tool: &'static str, files: &'a [PathBuf]) -> Self {
+        Self { tool, files }
     }
 }
 
-/// The `expect_revision` a tool input carries, if any.
-pub(crate) fn expected_revision(input: &Value) -> Option<RevisionId> {
-    input
-        .get("expect_revision")
-        .and_then(Value::as_u64)
-        .map(RevisionId::new)
-}
-
-/// The refusal a stale `expect_revision` earns: the current revision and what
-/// the writer that took it touched, so the caller can re-read and retry.
-fn conflict_refusal(ctx: &AgentRuntime, tool: &'static str, expected: RevisionId) -> Option<Value> {
-    let current = ctx.revisions().conflict(expected).ok()??;
-    Some(json!({
-        "error": format!(
-            "{tool} expected revision {expected}, but the project is at revision {} \
-             (written by {}); nothing was written",
-            current.id, current.tool
-        ),
-        "code": "revision_conflict",
-        "expected_revision": expected,
-        "current_revision": current.id,
-        "current_tool": current.tool,
-        "refs_touched": current.refs_touched,
-        "note": "Re-read the board (get_board / check_board) and retry against the current \
-                 revision, or drop expect_revision to write regardless.",
-    }))
-}
-
-/// A board mutation in flight: the pre-edit file, its revision snapshot, and the
-/// defects the board already carried.
+/// A board mutation in flight: the pre-edit files and defects the board already carried.
 pub(crate) struct Guard {
     tool: &'static str,
     phase: crate::WorkflowPhase,
@@ -377,8 +317,7 @@ pub(crate) struct Guard {
     /// all of them back: `set_net_width` writes the project's net classes as
     /// well as the board, and restoring one without the other leaves the two
     /// disagreeing about the same net.
-    original: Vec<(PathBuf, Option<String>)>,
-    revision: RevisionId,
+    original: Vec<(PathBuf, Option<Vec<u8>>)>,
     /// `None` when the board could not be read before the edit — the guard then
     /// has no baseline to compare against and must not refuse on a guess.
     before: Option<Defects>,
@@ -390,33 +329,16 @@ impl Guard {
     /// The `Err` payload is the mutator's refusal, ready to return: the board
     /// has not been touched.
     pub(crate) fn open(ctx: &AgentRuntime, edit: Edit<'_>) -> Result<Self, Value> {
-        let Edit {
-            tool,
-            summary,
-            files,
-            refs,
-            expect_revision,
-        } = edit;
+        let Edit { tool, files } = edit;
         let path = ctx.pcb_path();
         if !path.exists() {
             return Err(json!({
                 "error": format!("{tool}: this project has no board yet — run sync_board first"),
             }));
         }
-        if let Some(expected) = expect_revision
-            && let Some(refusal) = conflict_refusal(ctx, tool, expected)
-        {
-            return Err(refusal);
-        }
-        let revision = ctx
-            .revisions()
-            .capture(gordian_runtime::revisions::Capture::new(tool, summary, files).refs(refs))
-            .map_err(
-                |error| json!({ "error": format!("{tool}: could not capture the board: {error}") }),
-            )?;
         let original = files
             .iter()
-            .map(|file| (file.clone(), std::fs::read_to_string(file).ok()))
+            .map(|file| (file.clone(), std::fs::read(file).ok()))
             .collect::<Vec<_>>();
         if !original
             .iter()
@@ -424,7 +346,6 @@ impl Guard {
         {
             return Err(json!({
                 "error": format!("{tool}: could not read the board"),
-                "revision": revision,
             }));
         }
         let before = crate::active_board(ctx)
@@ -434,37 +355,24 @@ impl Guard {
             tool,
             phase: crate::WorkflowPhase::start("guard", 0, 0),
             original,
-            revision,
             before,
         })
     }
 
-    /// The revision this edit can be undone to.
-    pub(crate) fn revision(&self) -> RevisionId {
-        self.revision
-    }
-
-    /// Put the board back as it was and return `error` with the revision on it.
+    /// Put the board back as it was and return `error` with the restore status.
     /// For an edit that failed on its own terms, before the guard's check.
     pub(crate) fn rollback(self, ctx: &AgentRuntime, error: Value) -> Value {
         self.phase.facts(None, None, Some(1));
-        tracing::info!(tool = self.tool, reason = %error, revision = %self.revision, "board guard rollback");
+        tracing::info!(tool = self.tool, reason = %error, "board guard rollback");
         let restored = self.restore(ctx);
-        merge_into(
-            error,
-            json!({ "revision": self.revision, "restored": restored }),
-        )
+        merge_into(error, json!({ "restored": restored }))
     }
 
-    /// Check the edited board. Returns `result` stamped with the revision when
-    /// the edit kept the board honest, or the refusal after rolling back.
+    /// Check the edited board, accepting it when honest or restoring it on refusal.
     pub(crate) fn commit(self, ctx: &AgentRuntime, result: Value) -> Value {
-        let stamped = |result: Value, revision: RevisionId| {
-            merge_into(result, json!({ "revision": revision }))
-        };
         let Some(before) = self.before.as_ref() else {
             self.phase.facts(None, None, Some(0));
-            return stamped(result, self.revision);
+            return result;
         };
         // A board that cannot be read AFTER the edit is the one case rollback
         // exists for: the check cannot run, so the edit cannot be trusted.
@@ -473,14 +381,13 @@ impl Guard {
             Err(error) => {
                 let tool = self.tool;
                 self.phase.facts(None, None, Some(1));
-                tracing::info!(tool, reason = %error, revision = %self.revision, "board guard refusal");
+                tracing::info!(tool, reason = %error, "board guard refusal");
                 let restored = self.restore(ctx);
                 return json!({
                     "ok": false,
                     "error": format!("{tool}: the edited board could not be read back: {error}"),
                     "code": "board_unreadable_after_edit",
                     "restored": restored,
-                    "revision": self.revision,
                 });
             }
         };
@@ -497,7 +404,7 @@ impl Guard {
             && copper_outside_outline.is_empty()
         {
             self.phase.facts(None, None, Some(0));
-            return stamped(result, self.revision);
+            return result;
         }
         let shorts: Vec<Value> = shorts
             .iter()
@@ -530,7 +437,7 @@ impl Guard {
                     + usize::from(!copper_outside_outline.is_empty()),
             ),
         );
-        tracing::info!(tool, reason = %headline, revision = %self.revision, "board guard refusal");
+        tracing::info!(tool, reason = %headline, "board guard refusal");
         json!({
             "ok": false,
             "error": headline,
@@ -544,22 +451,21 @@ impl Guard {
             // apart from the defects above.
             "unrouted": after.unrouted.iter().collect::<Vec<_>>(),
             "restored": restored,
-            "revision": self.revision,
             "note": if restored {
                 "the board is back to its pre-edit state; nothing was written. Fix what the \
                  violations name — delete the offending copper, move the part, or widen the \
                  board — then try again."
             } else {
-                "the board could NOT be put back — undo this revision before editing further."
+                "the board could NOT be put back — stop editing and recover the project files."
             },
         })
     }
 
     fn restore(&self, _ctx: &AgentRuntime) -> bool {
-        self.original.iter().all(|(path, text)| match text {
-            Some(text) => std::fs::write(path, text).is_ok(),
+        self.original.iter().all(|(path, bytes)| match bytes {
+            Some(bytes) => std::fs::write(path, bytes).is_ok(),
             // The file did not exist before the edit; an edit that created one
-            // is undone by removing it again.
+            // is restored by removing it again.
             None => !path.exists() || std::fs::remove_file(path).is_ok(),
         })
     }

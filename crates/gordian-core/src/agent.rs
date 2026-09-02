@@ -48,7 +48,7 @@ const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. Fix introduced err
 
 const DIFF_SCHEMATIC_NUDGE: &str = "Run diff_schematic now against the default turn baseline. Verify only the requested symbols, fields, poses, wiring counts, and net partitions changed. Use the connectivity/unconnected report already returned for new or swapped parts; do not re-read the whole schematic. Then run check_schematic if the latest edit has not passed it.";
 
-const UNCHANGED_SCHEMATIC_NUDGE: &str = "the schematic is unchanged since the turn began (your edits were undone or refused); the request is not satisfied — either complete it (e.g. `set_fields` when no compatible symbol exists) or state plainly that it cannot be done and why";
+const UNCHANGED_SCHEMATIC_NUDGE: &str = "the schematic is unchanged since the turn began (your edits did not land); the request is not satisfied — either complete it (e.g. `set_fields` when no compatible symbol exists) or state plainly that it cannot be done and why";
 
 /// Base hard ceiling on provider invocations within one agent subturn. This is
 /// a last-resort guard against a model that keeps requesting tools forever: the
@@ -348,7 +348,6 @@ pub enum AgentEvent {
         summary: String,
         image_path: Option<String>,
         elapsed_ms: u64,
-        revision: Option<u64>,
         result: Value,
     },
     /// One provider invocation, including failed requests with zero token counts.
@@ -455,7 +454,7 @@ fn tool_defs_for_phase(
     phase: ToolPhase,
     discovery_rounds_used: &HashMap<String, usize>,
     discovery_rounds_allowed: usize,
-    revision_reads_used: &HashSet<String>,
+    state_reads_used: &HashSet<String>,
 ) -> Vec<Tool> {
     tool_defs()
         .into_iter()
@@ -473,11 +472,11 @@ fn tool_defs_for_phase(
                     .unwrap_or(0)
                     < discovery_rounds_allowed
         })
-        // Unchanged-state reads are single-use at a project revision. Removing
+        // Unchanged-state reads are single-use until a tool changes the project. Removing
         // exhausted schemas prevents another provider round from being spent on
         // a result already present in history; dispatch retains the same guard
         // for stale calls returned by a provider.
-        .filter(|tool| !revision_reads_used.contains(tool.name.as_str()))
+        .filter(|tool| !state_reads_used.contains(tool.name.as_str()))
         .filter(|tool| match phase {
             ToolPhase::BoardActive => true,
             ToolPhase::BoardSeed => {
@@ -495,8 +494,6 @@ fn is_schematic_phase_tool(name: &str) -> bool {
             "search_symbols"
                 | "get_symbol_info"
                 | "project_info"
-                | "undo"
-                | "history"
                 | "render_schematic"
                 | "search_footprints"
                 | "get_footprint_info"
@@ -531,7 +528,7 @@ fn is_discovery_tool(name: &str) -> bool {
 }
 
 fn is_schematic_mutator(name: &str) -> bool {
-    name == "undo" || gordian_tools_sch::MUTATORS.contains(&name)
+    gordian_tools_sch::MUTATORS.contains(&name)
 }
 
 fn request_supplies_multiple_library_ids(intent: &str) -> bool {
@@ -597,7 +594,7 @@ fn coalesced_discovery_call(call: &ToolCall, calls: &[ToolCall]) -> Option<ToolC
     })
 }
 
-fn is_revision_scoped_read(name: &str) -> bool {
+fn is_state_scoped_read(name: &str) -> bool {
     matches!(
         name,
         "project_info" | "read_schematic" | "diff_schematic" | "render_schematic"
@@ -934,28 +931,25 @@ impl<P: Provider> Agent<P> {
         let mut provider_error_retries_left = MAX_PROVIDER_ERROR_RETRIES;
         let mut stream_transport_available = true;
         let mut tool_calls_made = 0usize;
-        let mut tool_state_revision = 0u64;
+        let mut tool_state_generation = 0u64;
         let mut discovery_rounds_used: HashMap<String, usize> = HashMap::new();
-        let mut revision_read_uses: HashMap<String, u64> = HashMap::new();
+        let mut state_read_uses: HashMap<String, u64> = HashMap::new();
         let mut timed_out_tool_calls: Vec<(String, Value, u64)> = Vec::new();
         let mut last_tool_status: Option<String> = None;
-        let mut last_clean_schematic: Option<gordian_runtime::revisions::RevisionId> = None;
         let mut pcb_recovery = PcbRecoveryState::default();
         let mut pcb_quality = PcbQualityState::default();
         let mut progress = TurnProgress::from_project(&self.runtime);
 
         loop {
             if provider_requests >= budgets.provider_requests {
-                let rolled_back = restore_last_clean_schematic(&self.runtime, last_clean_schematic);
                 progress.refresh_files(&self.runtime);
-                let mut final_text = progress.handoff(
+                let final_text = progress.handoff(
                     &format!(
                         "Per-turn request budget reached after {provider_requests} model requests and {tool_calls_made} tool calls."
                     ),
                     tool_calls_made,
                     last_tool_status.as_deref(),
                 );
-                final_text.push_str(rolled_back.as_deref().unwrap_or_default());
                 emit(events, AgentEvent::AssistantText(final_text.clone()));
                 return Ok(TurnOutcome {
                     applied,
@@ -967,9 +961,8 @@ impl<P: Provider> Agent<P> {
                 });
             }
             if started.elapsed() >= TURN_WALL_CLOCK {
-                let rolled_back = restore_last_clean_schematic(&self.runtime, last_clean_schematic);
                 progress.refresh_files(&self.runtime);
-                let mut final_text = progress.handoff(
+                let final_text = progress.handoff(
                     &format!(
                         "Per-turn wall-clock budget reached after {}s and {tool_calls_made} tool calls.",
                         started.elapsed().as_secs()
@@ -977,7 +970,6 @@ impl<P: Provider> Agent<P> {
                     tool_calls_made,
                     last_tool_status.as_deref(),
                 );
-                final_text.push_str(rolled_back.as_deref().unwrap_or_default());
                 emit(events, AgentEvent::AssistantText(final_text.clone()));
                 return Ok(TurnOutcome {
                     applied,
@@ -1017,10 +1009,10 @@ impl<P: Provider> Agent<P> {
             if self.tool_phase != prior_phase {
                 tracing::info!(from = ?prior_phase, to = ?self.tool_phase, "tool phase changed");
             }
-            let revision_reads_used = revision_read_uses
+            let state_reads_used = state_read_uses
                 .iter()
-                .filter(|(name, revision)| {
-                    name.as_str() == "read_schematic" || **revision == tool_state_revision
+                .filter(|(name, generation)| {
+                    name.as_str() == "read_schematic" || **generation == tool_state_generation
                 })
                 .map(|(name, _)| name.clone())
                 .collect::<HashSet<_>>();
@@ -1028,7 +1020,7 @@ impl<P: Provider> Agent<P> {
                 self.tool_phase,
                 &discovery_rounds_used,
                 budgets.discovery_rounds_per_subturn,
-                &revision_reads_used,
+                &state_reads_used,
             );
             if request_supplies_multiple_library_ids(authoritative_intent)
                 && !self.runtime.sch_path().exists()
@@ -1208,11 +1200,11 @@ impl<P: Provider> Agent<P> {
                         .copied()
                         .unwrap_or(0)
                         >= budgets.discovery_rounds_per_subturn;
-                let repeated_read = is_revision_scoped_read(&call.fn_name)
-                    && revision_read_uses
+                let repeated_read = is_state_scoped_read(&call.fn_name)
+                    && state_read_uses
                         .get(&call.fn_name)
-                        .is_some_and(|revision| {
-                            call.fn_name == "read_schematic" || *revision == tool_state_revision
+                        .is_some_and(|generation| {
+                            call.fn_name == "read_schematic" || *generation == tool_state_generation
                         });
                 let mutation_blocked = timed_out_mutation_name(&timed_out_tool_calls).is_some()
                     && effect == ToolEffect::Mutating;
@@ -1278,15 +1270,15 @@ impl<P: Provider> Agent<P> {
                     timed_out_tool_calls.push((
                         call.fn_name.clone(),
                         call.fn_arguments.clone(),
-                        tool_state_revision,
+                        tool_state_generation,
                     ));
                 }
-                if dispatched && is_revision_scoped_read(&call.fn_name) {
-                    revision_read_uses.insert(call.fn_name.clone(), tool_state_revision);
+                if dispatched && is_state_scoped_read(&call.fn_name) {
+                    state_read_uses.insert(call.fn_name.clone(), tool_state_generation);
                 }
-                let prior_revision = tool_state_revision;
-                tool_state_revision =
-                    next_tool_state_revision(tool_state_revision, dispatched, effect, &parsed);
+                let prior_generation = tool_state_generation;
+                tool_state_generation =
+                    next_tool_state_generation(tool_state_generation, dispatched, effect, &parsed);
                 if dispatched && schematic_mutation_succeeded(&call.fn_name, &parsed) {
                     applied = true;
                     schematic_mutated = true;
@@ -1311,7 +1303,7 @@ impl<P: Provider> Agent<P> {
                 }
 
                 if dispatched {
-                    if tool_state_revision != prior_revision
+                    if tool_state_generation != prior_generation
                         && pcb_quality_invalidated_by(&call.fn_name)
                     {
                         pcb_quality.invalidate();
@@ -1325,45 +1317,12 @@ impl<P: Provider> Agent<P> {
                         pcb_recovery.retry_note(),
                     );
                 }
-                // A turn can be cut off by its clock or its ceiling at any point,
-                // including between a `delete_wires` and the `connect` that was going
-                // to put the signal back. Remember the last schematic that checked
-                // clean so a cut-off turn can be handed that instead of a teardown.
-                if call.fn_name == "check_schematic" && check_schematic_is_clean(&parsed) {
-                    last_clean_schematic = self
-                        .runtime
-                        .revisions()
-                        .capture(
-                            gordian_runtime::revisions::Capture::new(
-                                "checkpoint",
-                                "last schematic that checked clean",
-                                &[self.runtime.sch_path().to_path_buf()],
-                            )
-                            .label("last clean schematic"),
-                        )
-                        .ok()
-                        .or(last_clean_schematic);
-                }
                 let summary =
                     tool_summary(&call.fn_name, &call.fn_arguments, &parse_or_null(&content));
                 let result = parse_or_null(&content);
                 tracing::debug!(parent: &span, content = %content, "tool result payload");
                 let elapsed_ms = millis(started.elapsed());
-                let revision = result.get("revision").and_then(serde_json::Value::as_u64);
-                tracing::info!(
-                    parent: &span,
-                    elapsed_ms,
-                    revision,
-                    "tool finished"
-                );
-                if call.fn_name == "undo" {
-                    let restored_revision = result
-                        .get("restored_revision")
-                        .and_then(serde_json::Value::as_u64);
-                    tracing::info!(revision, restored_revision, "undo completed");
-                } else if let Some(revision) = revision {
-                    tracing::info!(tool = %call.fn_name, revision, "revision captured");
-                }
+                tracing::info!(parent: &span, elapsed_ms, "tool finished");
                 emit_result_diagnostic(events, &call.fn_name, &result);
                 last_tool_status = Some(format!("{}: {summary}", call.fn_name));
                 emit(
@@ -1373,7 +1332,6 @@ impl<P: Provider> Agent<P> {
                         summary,
                         image_path,
                         elapsed_ms,
-                        revision,
                         result,
                     },
                 );
@@ -1713,30 +1671,6 @@ fn board_placement_counts(value: &Value) -> Option<(usize, usize)> {
     Some((total.saturating_sub(unplaced), total))
 }
 
-/// Hand a cut-off turn back its last clean schematic rather than a half-finished edit.
-///
-/// Repairing connectivity is two calls — break the net, then remake it — so a turn
-/// stopped on its clock or its ceiling can leave the sheet mid-teardown, with every
-/// pin the edit loosened now unconnected. That is strictly worse than where the turn
-/// started. When a checkpoint exists and the sheet no longer checks clean, restore it.
-fn restore_last_clean_schematic(
-    runtime: &AgentRuntime,
-    checkpoint: Option<gordian_runtime::revisions::RevisionId>,
-) -> Option<String> {
-    let checkpoint = checkpoint?;
-    let current = gordian_tools_sch::run("check_schematic", json!({}), runtime)
-        .and_then(Result::ok)
-        .unwrap_or_else(|| json!({}));
-    if check_schematic_is_clean(&current) {
-        return None;
-    }
-    runtime.revisions().restore(Some(checkpoint)).ok()?;
-    Some(format!(
-        " The turn was cut off mid-edit, so the schematic was rolled back to revision \
-         {checkpoint}, the last one that checked clean."
-    ))
-}
-
 fn schematic_mutation_succeeded(name: &str, value: &Value) -> bool {
     is_schematic_mutator(name) && value.get("error").is_none() && value.get("changed").is_some()
 }
@@ -1978,7 +1912,7 @@ fn tool_result_is_timeout(value: &Value) -> bool {
         })
 }
 
-fn next_tool_state_revision(
+fn next_tool_state_generation(
     current: u64,
     dispatched: bool,
     effect: ToolEffect,
@@ -2156,7 +2090,6 @@ fn tool_effect(name: &str) -> ToolEffect {
         | "delete_copper"
         | "set_net_width"
         | "update_board_outline"
-        | "undo"
         | "export_fab" => ToolEffect::Mutating,
         name if gordian_tools_sch::MUTATORS.contains(&name) => ToolEffect::Mutating,
         _ => ToolEffect::ReadOnly,
@@ -2573,7 +2506,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             format!("{lib} → {n} pads")
         }
         "read_schematic" => "read the schematic".to_string(),
-        "diff_schematic" => "compared the live schematic with its revision baseline".to_string(),
+        "diff_schematic" => "compared the live schematic with its turn-start baseline".to_string(),
         "export_fab" => {
             let files = result
                 .get("file_count")

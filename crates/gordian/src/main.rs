@@ -294,7 +294,6 @@ struct UsageTotals {
 #[derive(Debug, Default)]
 struct AgentDebugLog {
     usage: UsageTotals,
-    revisions: BTreeSet<u64>,
     files: BTreeSet<String>,
 }
 
@@ -314,23 +313,16 @@ impl AgentDebugLog {
                 summary,
                 image_path,
                 elapsed_ms,
-                revision,
                 result,
             } => {
-                if let Some(revision) = revision {
-                    self.revisions.insert(*revision);
-                }
                 collect_result_files(result, &mut self.files);
                 let image = image_path
                     .as_deref()
                     .map(|path| format!(" (image: {path})"))
                     .unwrap_or_default();
-                let revision = revision
-                    .map(|revision| format!(", revision {revision}"))
-                    .unwrap_or_default();
                 let details = tool_result_details(name, result);
                 Some(format!(
-                    "tool <- {name} (elapsed {}s{revision}): {summary}{details}{image}",
+                    "tool <- {name} (elapsed {}s): {summary}{details}{image}",
                     format_tool_elapsed(*elapsed_ms)
                 ))
             }
@@ -428,16 +420,20 @@ fn compact_tool_args(args: &serde_json::Value) -> String {
                     .filter_map(|part| part.get("ref").and_then(serde_json::Value::as_str))
                     .take(6)
                     .collect::<Vec<_>>();
-                let suffix = if items.len() > refs.len() { ", …" } else { "" };
+                let suffix = if items.len() > refs.len() {
+                    ", …"
+                } else {
+                    ""
+                };
                 serde_json::Value::String(format!(
                     "[{}{suffix} {} parts]",
                     refs.join(", "),
                     items.len()
                 ))
             }
-            serde_json::Value::Array(items) => serde_json::Value::Array(
-                items.iter().map(|item| compact(item, None)).collect(),
-            ),
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(|item| compact(item, None)).collect())
+            }
             serde_json::Value::Object(fields) => serde_json::Value::Object(
                 fields
                     .iter()
@@ -513,13 +509,20 @@ fn tool_result_details(name: &str, result: &serde_json::Value) -> String {
 }
 
 fn collect_result_files(result: &serde_json::Value, files: &mut BTreeSet<String>) {
-    for key in ["file", "path", "sch_path", "pcb_path", "fab_dir", "png_path"] {
+    for key in [
+        "file", "path", "sch_path", "pcb_path", "fab_dir", "png_path",
+    ] {
         if let Some(path) = result.get(key).and_then(serde_json::Value::as_str) {
             files.insert(path.to_owned());
         }
     }
     if let Some(paths) = result.get("files").and_then(serde_json::Value::as_array) {
-        files.extend(paths.iter().filter_map(serde_json::Value::as_str).map(str::to_owned));
+        files.extend(
+            paths
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned),
+        );
     }
 }
 
@@ -642,15 +645,9 @@ fn run_agent_command(args: &[String]) -> Result<()> {
                 .map(|outcome| format!("{:?}", outcome.stop_reason))
                 .unwrap_or_else(|_| "Error".to_owned());
             let files = log.files.into_iter().collect::<Vec<_>>().join(",");
-            let revisions = log
-                .revisions
-                .into_iter()
-                .map(|revision| revision.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
             tracing::info!(
                 target: logging::EVENTS_TARGET,
-                "turn: stop={stop} requests={} elapsed={elapsed:.1}s files=[{files}] revisions=[{revisions}]",
+                "turn: stop={stop} requests={} elapsed={elapsed:.1}s files=[{files}]",
                 usage.provider_requests
             );
             tracing::info!(
@@ -683,7 +680,11 @@ fn run_agent_command(args: &[String]) -> Result<()> {
         .cloned()
         .collect::<Vec<_>>();
     if !turn_errors.is_empty() {
-        bail!("{} turn(s) failed: {}", turn_errors.len(), turn_errors.join("; "));
+        bail!(
+            "{} turn(s) failed: {}",
+            turn_errors.len(),
+            turn_errors.join("; ")
+        );
     }
     let outcome = turns
         .iter()
@@ -942,11 +943,10 @@ mod tests {
                 summary: "written".into(),
                 image_path: Some(".gordian/renders/render-001.png".into()),
                 elapsed_ms: 1_200,
-                revision: Some(7),
-                result: serde_json::json!({"revision": 7}),
+                result: serde_json::json!({}),
             }),
             Some(
-                "tool <- sync_board (elapsed 1.2s, revision 7): written (image: .gordian/renders/render-001.png)"
+                "tool <- sync_board (elapsed 1.2s): written (image: .gordian/renders/render-001.png)"
                     .into()
             )
         );
@@ -998,7 +998,6 @@ mod tests {
             summary: "rendered".into(),
             image_path: Some("/tmp/schematic.png".into()),
             elapsed_ms: 20,
-            revision: None,
             result: serde_json::json!({"ok": true}),
         };
         let board = AgentEvent::ToolFinished {
@@ -1006,7 +1005,6 @@ mod tests {
             summary: "rendered".into(),
             image_path: Some("/tmp/board.png".into()),
             elapsed_ms: 20,
-            revision: None,
             result: serde_json::json!({"ok": true}),
         };
 

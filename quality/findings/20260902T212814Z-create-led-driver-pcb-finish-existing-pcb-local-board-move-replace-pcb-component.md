@@ -78,7 +78,7 @@ Questions:
 - `create-led-driver-pcb`: wished: turn 1: Expose a connectivity report mapping each logical net to its traces, vias, and connected pads.
 - `create-led-driver-pcb`: wished: turn 1: Return structured board dimensions, footprint assignments, component coordinates, and silkscreen-clearance results alongside render_board.
 - `create-led-driver-pcb`: wished: turn 1: Add an export manifest listing every generated fabrication file and its purpose.
-- `local-board-move`: struggled: turn 1: move_parts initially refused the valid-looking request because its required field was `reference`, not the undocumented `ref`.
+- `local-board-move`: struggled: turn 1: move_parts initially refused the valid-looking request because its required field was `reference`, not the unlisted `ref`.
 - `local-board-move`: struggled: turn 1: move_parts reported courtyard coordinates and a negative gap without clearly explaining the allowable placement range or suggesting the nearest valid target.
 - `local-board-move`: struggled: turn 1: get_board returned insufficiently visible placement and copper details, making R1/R2 coordinates and affected segments difficult to verify.
 - `local-board-move`: struggled: turn 1: route_board reported routing 3 traces for 1 requested net, which was confusing without a per-net trace summary.
@@ -89,7 +89,6 @@ Questions:
 - `local-board-move`: wished: turn 1: Have route_board report affected nets, trace counts, and preserved-versus-replaced segments separately.
 - `local-board-move`: wished: turn 1: Provide a single final verification tool that checks unchanged constraints, rerouted-net scope, DRC/ERC, and render freshness in one result.
 - `replace-pcb-component`: struggled: turn 1: The initial set_fields call confusingly rejected the Footprint field only after accepting the same mixed payload format conceptually.
-- `replace-pcb-component`: struggled: turn 1: diff_schematic reported revision 5 while the Value change was revision 6, making the verification baseline and current state unclear.
 - `replace-pcb-component`: struggled: turn 1: sync_board rejected the supplied keep-near intent on the existing board, and the required place_board workflow was not explicit enough.
 - `replace-pcb-component`: struggled: turn 1: place_board with an empty payload failed with “illegal layout” even though its facts said both parts were placed.
 - `replace-pcb-component`: struggled: turn 1: route_board reported 3 traces routed for a single requested net, which made the actual routing change difficult to interpret.

@@ -2,7 +2,7 @@
 //!
 //! [`App`] is the whole UI state. [`App::update`] maps a [`Msg`] (a keypress,
 //! an agent event, or an async arrival) into a state transition and returns an
-//! [`Action`] the shell performs (spawn a turn, cancel, undo, quit). Nothing here touches a terminal or the
+//! [`Action`] the shell performs (spawn a turn, cancel, quit). Nothing here touches a terminal or the
 //! network, so it is unit-testable in full.
 //!
 //! The shell ([`super::run`]) owns the terminal, the crossterm event stream, and
@@ -577,7 +577,6 @@ mod tests {
             summary: "rendered board to PNG".into(),
             image_path: Some(path.into()),
             elapsed_ms: 0,
-            revision: None,
             result: serde_json::json!({}),
         }));
         let transcript_len = a.transcript.len();
@@ -785,7 +784,6 @@ mod tests {
             summary: "\"STM32\" → 4 hits".into(),
             image_path: None,
             elapsed_ms: 0,
-            revision: None,
             result: serde_json::json!({}),
         }));
         // The finished card is appended once.

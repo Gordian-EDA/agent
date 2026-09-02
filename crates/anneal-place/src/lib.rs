@@ -1119,22 +1119,22 @@ fn anneal_items(
         let t = (t0 * (1.0 - it as f64 / iters as f64)).max(0.05);
         // Snapshot the item(s) a move touches (at + angle) so it can be rolled back.
         let m = rng.below(10);
-        let undo: Vec<(usize, [f64; 2], f64)>;
+        let rollback: Vec<(usize, [f64; 2], f64)>;
         if m < 6 {
             // Relocate a satellite to a nearby cell (the big move greedy lacks).
             let i = sats[rng.below(sats.len())];
-            undo = vec![(i, items[i].at.into(), items[i].angle)];
+            rollback = vec![(i, items[i].at.into(), items[i].angle)];
             items[i].at = relocate(&mut rng, items[i].at.into(), 2).into();
         } else if m < 8 {
             // Re-orient a satellite.
             let i = sats[rng.below(sats.len())];
-            undo = vec![(i, items[i].at.into(), items[i].angle)];
+            rollback = vec![(i, items[i].at.into(), items[i].angle)];
             items[i].angle = orient_angle(&items[i].geom, orients[rng.below(4)]);
         } else if m < 9 && sats.len() >= 2 {
             // Swap two satellites' positions (keep each orientation).
             let a = sats[rng.below(sats.len())];
             let b = sats[rng.below(sats.len())];
-            undo = vec![
+            rollback = vec![
                 (a, items[a].at.into(), items[a].angle),
                 (b, items[b].at.into(), items[b].angle),
             ];
@@ -1151,7 +1151,7 @@ fn anneal_items(
             let new = relocate(&mut rng, items[i].at.into(), 1);
             let d = [new[0] - items[i].at[0], new[1] - items[i].at[1]];
             let group = cluster_group(i, &blocks, &siblings);
-            undo = group
+            rollback = group
                 .iter()
                 .map(|&k| (k, items[k].at.into(), items[k].angle))
                 .collect();
@@ -1167,7 +1167,7 @@ fn anneal_items(
         }
 
         if relation_regressed(items, ir, cur_rv) {
-            for (i, at, angle) in undo {
+            for (i, at, angle) in rollback {
                 items[i].at = at.into();
                 items[i].angle = angle;
             }
@@ -1183,7 +1183,7 @@ fn anneal_items(
                 best_items.clone_from_slice(items);
             }
         } else {
-            for (i, at, angle) in undo {
+            for (i, at, angle) in rollback {
                 items[i].at = at.into();
                 items[i].angle = angle;
             }
@@ -1346,19 +1346,19 @@ fn anneal_locality(
         let p = it as f64 / iters as f64;
         let t = (t0 * (1.0 - p)).max(0.05);
         let m = rng.below(10);
-        let undo: Vec<(usize, [f64; 2], f64)>;
+        let rollback: Vec<(usize, [f64; 2], f64)>;
         if m < 6 {
             let i = sats[rng.below(sats.len())];
-            undo = vec![(i, items[i].at.into(), items[i].angle)];
+            rollback = vec![(i, items[i].at.into(), items[i].angle)];
             items[i].at = relocate(&mut rng, items[i].at.into(), 2).into();
         } else if m < 8 {
             let i = sats[rng.below(sats.len())];
-            undo = vec![(i, items[i].at.into(), items[i].angle)];
+            rollback = vec![(i, items[i].at.into(), items[i].angle)];
             items[i].angle = orient_angle(&items[i].geom, orients[rng.below(4)]);
         } else if m < 9 && sats.len() >= 2 {
             let a = sats[rng.below(sats.len())];
             let b = sats[rng.below(sats.len())];
-            undo = vec![
+            rollback = vec![
                 (a, items[a].at.into(), items[a].angle),
                 (b, items[b].at.into(), items[b].angle),
             ];
@@ -1373,7 +1373,7 @@ fn anneal_locality(
             let new = relocate(&mut rng, items[i].at.into(), radius);
             let d = [new[0] - items[i].at[0], new[1] - items[i].at[1]];
             let group = cluster_group(i, &blocks, &siblings);
-            undo = group
+            rollback = group
                 .iter()
                 .map(|&k| (k, items[k].at.into(), items[k].angle))
                 .collect();
@@ -1389,7 +1389,7 @@ fn anneal_locality(
         }
 
         if relation_regressed(items, ir, cur_rv) {
-            for (i, at, angle) in undo {
+            for (i, at, angle) in rollback {
                 items[i].at = at.into();
                 items[i].angle = angle;
             }
@@ -1414,7 +1414,7 @@ fn anneal_locality(
                 }
             }
         } else {
-            for (i, at, angle) in undo {
+            for (i, at, angle) in rollback {
                 items[i].at = at.into();
                 items[i].angle = angle;
             }

@@ -12,7 +12,7 @@ use crate::item::{Incidence, Item};
 
 /// each load cap two gaps out, level with its osc pin. Returns true if it moved
 /// anything (so the caller re-runs `decongest`). The cluster members are frozen, so
-/// the placement search has already finished around them and won't undo this.
+/// the placement search has already finished around them and won't reverse this.
 pub fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
     const GAP: f64 = 7.62;
     let snap = |v| geom::GRID_50_MIL.snap(v);

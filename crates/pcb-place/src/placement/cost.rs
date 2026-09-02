@@ -385,7 +385,7 @@ fn ratline_layers_overlap(a: &RatlineSegment, b: &RatlineSegment) -> bool {
 ///
 /// The authored terms are what makes intent survive the search: the force seed
 /// pulls a group together or a connector to its edge, but without a cost term
-/// the annealer is free to undo it again.
+/// the annealer is free to reverse it again.
 pub(crate) struct CostTerms {
     /// Detected co-placement pairs (a bypass cap and the IC it decouples).
     pub(crate) pairs: Vec<(usize, usize)>,

@@ -28,7 +28,7 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .unwrap_or(false);
 
     if fit {
-        return refit_existing_board(&input, ctx);
+        return refit_existing_board(ctx);
     }
 
     let outline = if input.get("outline").is_some() {
@@ -50,12 +50,7 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
     let gate = match Guard::open(
         ctx,
-        Edit::new(
-            "update_board_outline",
-            "Update the board outline",
-            std::slice::from_ref(&path),
-        )
-        .expecting(&input),
+        Edit::new("update_board_outline", std::slice::from_ref(&path)),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
@@ -80,7 +75,7 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     })))
 }
 
-fn refit_existing_board(input: &Value, ctx: &AgentRuntime) -> Result<Value> {
+fn refit_existing_board(ctx: &AgentRuntime) -> Result<Value> {
     let board = match crate::active_board(ctx) {
         Ok(board) => board,
         Err(err) => return Ok(json!({ "error": err })),
@@ -151,13 +146,7 @@ fn refit_existing_board(input: &Value, ctx: &AgentRuntime) -> Result<Value> {
         .collect();
     let gate = match Guard::open(
         ctx,
-        Edit::new(
-            "update_board_outline",
-            "Re-fit the board outline",
-            std::slice::from_ref(&path),
-        )
-        .refs(moved_references(&plan, &locked))
-        .expecting(input),
+        Edit::new("update_board_outline", std::slice::from_ref(&path)),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
@@ -526,20 +515,6 @@ fn managed_outline_error() -> String {
 pub(crate) fn replace_managed_outline(board: &str, rect: Rect) -> Result<String> {
     let managed = managed_outline_bounds(board).map_err(anyhow::Error::msg)?;
     replace_edge_cuts(board, &Outline::Rect(rect), Some(managed.explicit))
-}
-
-/// The references a re-fit will actually move: everything the plan places that
-/// a lock does not hold.
-fn moved_references(
-    plan: &super::place::OutlineRefitPlan,
-    locked: &std::collections::BTreeSet<&str>,
-) -> Vec<String> {
-    plan.result
-        .placements
-        .iter()
-        .map(|placement| placement.reference.clone())
-        .filter(|reference| !locked.contains(reference.as_str()))
-        .collect()
 }
 
 pub(crate) fn outline_refit_json(plan: &super::place::OutlineRefitPlan) -> Value {

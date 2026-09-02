@@ -196,7 +196,6 @@ mod tests {
             summary: "\"STM32\" → 4 hits".into(),
             image_path: None,
             elapsed_ms: 0,
-            revision: None,
             result: serde_json::json!({}),
         }));
 
@@ -231,7 +230,6 @@ mod tests {
             summary: "routed view → ok".into(),
             image_path: Some("/tmp/proj/.gordian/renders/000.png".into()),
             elapsed_ms: 0,
-            revision: None,
             result: serde_json::json!({}),
         }));
         assert_eq!(a.images.len(), 1, "a preview cell was posted");
@@ -287,7 +285,6 @@ mod tests {
             summary: "rendered schematic to PNG".into(),
             image_path: Some("/tmp/proj/.gordian/renders/001.png".into()),
             elapsed_ms: 0,
-            revision: None,
             result: serde_json::json!({}),
         }));
 
@@ -410,7 +407,6 @@ mod tests {
             summary: "ok".into(),
             image_path: None,
             elapsed_ms: 0,
-            revision: None,
             result: serde_json::json!({}),
         }));
         assert!(

@@ -51,7 +51,6 @@ fn unknown_refs(board: &kicad_board::BoardSnapshot, refs: &[String]) -> Vec<Stri
 fn apply(
     ctx: &AgentRuntime,
     tool: &'static str,
-    input: &Value,
     refs: Vec<String>,
     reason: Option<LockReason>,
 ) -> Result<Value> {
@@ -67,13 +66,7 @@ fn apply(
                 .clear(kicad_board::LOCKED_REASON),
         })
         .collect();
-    let summary = format!("{tool} {}", refs.join(", "));
-    let gate = match Guard::open(
-        ctx,
-        Edit::new(tool, &summary, std::slice::from_ref(&path))
-            .refs(refs.clone())
-            .expecting(input),
-    ) {
+    let gate = match Guard::open(ctx, Edit::new(tool, std::slice::from_ref(&path))) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
@@ -130,7 +123,7 @@ pub fn lock_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
         },
     };
-    apply(ctx, "lock_parts", &input, refs, Some(reason))
+    apply(ctx, "lock_parts", refs, Some(reason))
 }
 
 /// Release locks so placement may move these parts again.
@@ -160,7 +153,7 @@ pub fn unlock_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .filter(|part| lock_reason(part).is_none())
         .map(|part| part.reference.as_str())
         .collect();
-    let mut result = apply(ctx, "unlock_parts", &input, refs, None)?;
+    let mut result = apply(ctx, "unlock_parts", refs, None)?;
     if !already.is_empty()
         && let Some(object) = result.as_object_mut()
     {

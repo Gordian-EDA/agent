@@ -132,25 +132,17 @@ fn check_schematic_matches_kicad_warning_count_and_names_each_finding() {
 }
 
 #[test]
-fn check_schematic_uses_the_turn_snapshot_and_survives_undo() {
+fn check_schematic_uses_the_turn_snapshot() {
     let Some(ctx) = passive_fixture() else {
         eprintln!("SKIP: no KiCad detected");
         return;
     };
     ctx.begin_turn().unwrap();
-    let revision = ctx
-        .revisions()
-        .capture(gordian_runtime::revisions::Capture::new(
-            "test_edit",
-            "capture turn baseline",
-            &[ctx.sch_path().to_path_buf()],
-        ))
-        .unwrap();
 
     let unchanged = gordian_tools_sch::run("check_schematic", json!({"detail": true}), &ctx)
         .unwrap()
         .unwrap();
-    assert_eq!(unchanged["baseline_revision"], json!(revision));
+    assert_eq!(unchanged["baseline"], json!("turn-start"));
     assert_eq!(unchanged["introduced"], 0);
     assert_eq!(
         unchanged["pre_existing"],
@@ -173,9 +165,9 @@ fn check_schematic_uses_the_turn_snapshot_and_survives_undo() {
         "edited sheet should have introduced findings: {changed}"
     );
 
-    ctx.revisions().restore(Some(revision)).unwrap();
-    let undone = gordian_tools_sch::run("check_schematic", json!({"detail": true}), &ctx)
+    std::fs::write(ctx.sch_path(), original).unwrap();
+    let restored = gordian_tools_sch::run("check_schematic", json!({"detail": true}), &ctx)
         .unwrap()
         .unwrap();
-    assert_eq!(undone["introduced"], 0);
+    assert_eq!(restored["introduced"], 0);
 }

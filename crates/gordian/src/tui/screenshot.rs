@@ -242,7 +242,6 @@ fn tool(app: &mut App, name: &str, summary: &str) {
         summary: summary.into(),
         image_path: None,
         elapsed_ms: 0,
-        revision: None,
         result: serde_json::json!({}),
     }));
 }
@@ -445,7 +444,6 @@ fn tui_screenshots() {
         summary: "2-layer · 0 failed nets".into(),
         image_path: None,
         elapsed_ms: 0,
-        revision: None,
         result: serde_json::json!({}),
     }));
     app.update(Msg::Agent(AgentEvent::ToolStarted {
@@ -458,7 +456,6 @@ fn tui_screenshots() {
         summary: "routed view → ok".into(),
         image_path: Some("/home/you/projects/buck/.gordian/renders/003.png".into()),
         elapsed_ms: 0,
-        revision: None,
         result: serde_json::json!({}),
     }));
     app.update(Msg::Agent(AgentEvent::AssistantText(
@@ -474,7 +471,7 @@ fn tui_screenshots() {
         push(
             &mut app,
             Speaker::System,
-            &format!("checkpoint {i}"),
+            &format!("milestone {i}"),
             NoticeLevel::Plain,
         );
     }

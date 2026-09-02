@@ -595,7 +595,7 @@ impl RouteGrid {
     }
 
     /// Re-assert every owned pad's **un-inflated** copper footprint as its own net,
-    /// undoing a `BlockedAll` collapse that a *neighbour's clearance halo* caused.
+    /// reversing a `BlockedAll` collapse that a *neighbour's clearance halo* caused.
     ///
     /// The inflation pass ([`Self::rasterize_obstacle`]) reserves `clearance +
     /// trace_half` around each pad and collapses two nets' overlapping halos to

@@ -35,7 +35,7 @@ re-place." Quality first; time later via parallel subagents; schematic too.
 - `route_nets{nets, layer?, width?}` — routes the named nets; partial success is success; returns
   routed/blocked with blockers. `route_track` for a hand-drawn track. `delete_copper{nets|bbox}`.
 - `pour{nets}` explicit; `check_board` = DRC + progress; `render_board` each phase; `export_fab`.
-- Every mutator: guard against connectivity change, revision captured, undo.
+- Every mutator guards against connectivity changes and uses only a same-call snapshot for refusal rollback.
 
 ## PCB workflow (prompt phases)
 1. Outline + connectors/mechanical placed by intent and locked.
@@ -88,9 +88,8 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   status: open|routed|blocked, blocker?:{kind: pad|track|via|zone|courtyard, owner_ref, net, layer, at,
   gap_mm, need_mm}, escapes:[…]}` built on diagnose.rs unrouted_report/obstruction_between.
 - Locks = KiCAD native `locked` + `locked_reason: mechanical|agent|user` (revocable).
-- Revisions carry `{id, tool, refs_touched, label}`; `checkpoint{label}`; every mutator accepts
-  `expect_revision` (optimistic concurrency) → parallel subagents later; `reserve_refs{prefix,count}`;
-  each block gets its own bench rectangle; no tool may depend on in-process session memory.
+- User decision removed revision history, `checkpoint{label}`, `expect_revision`, and undo. Keep
+  `reserve_refs{prefix,count}` independently; each block gets its own bench rectangle.
 - Bench (schematic) = reserved rectangle + `gordian:bench=1`; excluded from check/critic/render; bench
   pins carry net labels; `export_fab`/done FAIL while non-empty.
 - Workflow: pour GND + fan out vias EARLY (phase 3/4, not last); add explicit layer-count choice and
@@ -112,8 +111,8 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   ERC 2 then a clean handoff at 270 s (blocked by `place_parts` "disturbed existing GND" → W3/W0).
 - W1 merged: staging = seed row (`staged_reason`), the three preconditions deleted, one ratsnest shape
   (`open|routed|blocked` + blocker geometry) shared by get_board/check_board/route_board, native locks
-  + `locked_reason`, revisions `{tool, refs_touched, label}` + `checkpoint` + `expect_revision` +
-  `reserve_refs`, `sync_board` stages footprint-mismatched parts. Quality: local-board-move 10,
+  + `locked_reason` + `reserve_refs`, `sync_board` stages footprint-mismatched parts. The later user
+  decision removed revisions, checkpoint, expect_revision, and undo. Quality: local-board-move 10,
   replace-pcb-component 9, finish-existing-pcb 7/7; led-driver fails only on schematic looks.
   Open: `next_refdes` must consult the `reserve_refs` store (W3); human-look PCB reference board fails
   to render (harness fix).

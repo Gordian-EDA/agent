@@ -16,7 +16,6 @@ tempfile.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
-chrono.workspace = true
 fuzzy-matcher.workspace = true
 resvg = { workspace = true }
 sch-check = { path = "../sch-check" }

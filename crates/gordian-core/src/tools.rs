@@ -37,17 +37,6 @@ use serde_json::{Value, json};
 
 use crate::{AgentRuntime, Tool};
 
-/// The optimistic-concurrency token every board mutator accepts.
-fn expect_revision_schema() -> Value {
-    json!({
-        "type": "integer",
-        "minimum": 1,
-        "description": "Write only while the project is still at this revision (from checkpoint \
-                        or history); otherwise the call is refused, naming the current revision \
-                        and the references it touched.",
-    })
-}
-
 /// The board window `place_board` and `route_board` both accept. A box is a
 /// selector: it names what to work on, and everything outside it is left alone.
 fn bbox_schema(what: &str) -> Value {
@@ -162,41 +151,6 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         Def {
-            name: "undo".into(),
-            description: "Restore every project file captured by a revision; defaults to the latest revision. Returns a new revision for the state being replaced.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "revision": { "type": "integer", "minimum": 1 }
-                },
-                "additionalProperties": false
-            }),
-        },
-        Def {
-            name: "history".into(),
-            description: "List project revisions as plain text, newest first.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
-                },
-                "additionalProperties": false
-            }),
-        },
-        Def {
-            name: "checkpoint".into(),
-            description: "Name the project's current state. Returns the revision to pass as \
-                 `expect_revision` to a board mutator, or to `undo`."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "label": { "type": "string", "minLength": 1, "description": "Short name for this state, e.g. \"power section placed\"." }
-                },
-                "additionalProperties": false
-            }),
-        },
-        Def {
             name: "reserve_refs".into(),
             description: "Claim a block of reference designators (R7…R12) and record the claim \
                  in the project. Use it before adding parts while another agent works on the \
@@ -265,7 +219,6 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "expect_revision": expect_revision_schema(),
                     "moves": {
                         "type": "array",
                         "minItems": 1,
@@ -307,7 +260,6 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "expect_revision": expect_revision_schema(),
                     "from": { "oneOf": [
                         { "type": "string", "description": "Pad reference, e.g. \"U1.3\"." },
                         { "type": "array", "items": {"type":"number"}, "minItems": 2, "maxItems": 2 }
@@ -347,7 +299,6 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "expect_revision": expect_revision_schema(),
                     "at": {
                         "type": "array",
                         "items": {"type":"number"},
@@ -386,7 +337,6 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "expect_revision": expect_revision_schema(),
                     "net": { "type": "string" },
                     "name": { "type": "string", "description": "Optional net-class name." },
                     "width": { "type": "number", "description": "Track width in mm." },
@@ -401,7 +351,6 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "expect_revision": expect_revision_schema(),
                     "bounds": {
                         "type": "object",
                         "description": "Rectangle, mm.",
@@ -443,8 +392,7 @@ pub fn tool_defs() -> Vec<Tool> {
                         "type": "string",
                         "enum": ["mechanical", "agent", "user"],
                         "description": "Default agent. `mechanical` for a position the physical world fixes."
-                    },
-                    "expect_revision": expect_revision_schema()
+                    }
                 },
                 "required": ["refs"],
                 "additionalProperties": false
@@ -456,8 +404,7 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "refs": { "type": "array", "minItems": 1, "items": { "type": "string" } },
-                    "expect_revision": expect_revision_schema()
+                    "refs": { "type": "array", "minItems": 1, "items": { "type": "string" } }
                 },
                 "required": ["refs"],
                 "additionalProperties": false
@@ -475,7 +422,6 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "expect_revision": expect_revision_schema(),
                     "intent": intent_schema(),
                     "bounds": {
                         "description": "Omit (or \"auto\") to size the board from its parts. Bounds smaller than required_bounds are refused before anything is written.",
@@ -556,7 +502,6 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "expect_revision": expect_revision_schema(),
                     "refs": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -616,7 +561,6 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "expect_revision": expect_revision_schema(),
                     "nets": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -650,9 +594,7 @@ pub fn tool_defs() -> Vec<Tool> {
                 .into(),
             input_schema: json!({
                 "type": "object",
-                "properties": {
-                    "expect_revision": expect_revision_schema(),
-                },
+                "properties": {},
                 "additionalProperties": false
             }),
         },
@@ -666,27 +608,8 @@ pub fn tool_defs() -> Vec<Tool> {
     gordian_tools_sch::tool_defs()
         .into_iter()
         .chain(defs.into_iter().map(|d| {
-            let description = if matches!(
-                d.name.as_str(),
-                "sync_board"
-                    | "place_board"
-                    | "route_board"
-                    | "move_parts"
-                    | "route_track"
-                    | "delete_copper"
-                    | "refill_zones"
-                    | "set_net_width"
-                    | "update_board_outline"
-            ) {
-                format!(
-                    "{} Success returns the pre-write `revision`.",
-                    d.description
-                )
-            } else {
-                d.description
-            };
             Tool::new(d.name)
-                .with_description(description)
+                .with_description(d.description)
                 .with_schema(d.input_schema)
         }))
         .collect()
@@ -703,9 +626,6 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "search_symbols" => search_symbols(input, ctx),
         "get_symbol_info" => get_symbol_info(input, ctx),
         "project_info" => project_info(ctx),
-        "undo" => undo(input, ctx),
-        "history" => history(input, ctx),
-        "checkpoint" => checkpoint(input, ctx),
         "reserve_refs" => reserve_refs(input, ctx),
         "render_schematic" => render_schematic(ctx),
         "search_footprints" => search_footprints(input, ctx),
@@ -1041,134 +961,6 @@ fn project_info(ctx: &AgentRuntime) -> Result<Value> {
     }))
 }
 
-fn undo(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let id = match input.get("revision") {
-        None | Some(Value::Null) => None,
-        Some(value) => match value.as_u64() {
-            Some(id) if id > 0 => Some(gordian_runtime::revisions::RevisionId::new(id)),
-            _ => return Ok(json!({ "error": "revision must be a positive integer" })),
-        },
-    };
-    let target = match ctx.revisions().manifest(id) {
-        Ok(manifest) => manifest,
-        Err(error) => return Ok(json!({ "error": error.to_string() })),
-    };
-    let files: Vec<_> = target
-        .files
-        .iter()
-        .map(|file| ctx.project_dir().join(&file.path))
-        .collect();
-    let revision = match ctx
-        .revisions()
-        .capture(gordian_runtime::revisions::Capture::new(
-            "undo",
-            &format!("Restore revision {}", target.id),
-            &files,
-        )) {
-        Ok(revision) => revision,
-        Err(error) => {
-            return Ok(
-                json!({ "error": format!("could not capture the current project before undo: {error}") }),
-            );
-        }
-    };
-    let restored = match ctx.revisions().restore(Some(target.id)) {
-        Ok(restored) => restored,
-        Err(error) => {
-            return Ok(
-                json!({ "error": format!("could not restore revision {}: {error}", target.id), "revision": revision }),
-            );
-        }
-    };
-    Ok(json!({
-        "changed": format!("restored project revision {}", restored.id),
-        "restored_revision": restored.id,
-        "files": restored.files,
-        "revision": revision,
-    }))
-}
-
-fn history(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let limit = input
-        .get("limit")
-        .and_then(Value::as_u64)
-        .unwrap_or(20)
-        .clamp(1, 50) as usize;
-    let manifests = match ctx.revisions().history(limit) {
-        Ok(manifests) => manifests,
-        Err(error) => return Ok(json!({ "error": error.to_string() })),
-    };
-    if manifests.is_empty() {
-        return Ok(Value::String("No project revisions.".to_owned()));
-    }
-    let mut out = String::new();
-    for manifest in manifests {
-        let files = manifest
-            .files
-            .iter()
-            .map(|file| file.path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let label = manifest
-            .label
-            .as_ref()
-            .map(|label| format!("  «{label}»"))
-            .unwrap_or_default();
-        let refs = if manifest.refs_touched.is_empty() {
-            String::new()
-        } else {
-            format!("  refs: {}", manifest.refs_touched.join(", "))
-        };
-        use std::fmt::Write as _;
-        writeln!(
-            out,
-            "{}  {}  {}  {}{label}  [{files}]{refs}",
-            manifest.id, manifest.created_at, manifest.tool, manifest.summary
-        )
-        .expect("writing to a string cannot fail");
-    }
-    Ok(Value::String(out))
-}
-
-/// Name the project's current state so a later `undo` or `expect_revision` can
-/// point at it.
-fn checkpoint(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let label = input
-        .get("label")
-        .and_then(Value::as_str)
-        .filter(|label| !label.trim().is_empty())
-        .unwrap_or("checkpoint");
-    let files: Vec<std::path::PathBuf> = [ctx.sch_path().to_path_buf(), ctx.pcb_path()]
-        .into_iter()
-        .filter(|path| path.is_file())
-        .collect();
-    if files.is_empty() {
-        return Ok(json!({
-            "error": "this project has no schematic or board to checkpoint yet",
-        }));
-    }
-    match ctx
-        .revisions()
-        .capture(gordian_runtime::revisions::Capture::new("checkpoint", label, &files).label(label))
-    {
-        Ok(revision) => Ok(json!({
-            "ok": true,
-            "revision": revision,
-            "label": label,
-            "files": files
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>(),
-            "note": format!(
-                "Pass revision {revision} as `expect_revision` to a board mutator to write only \
-                 while the project is still in this state, or undo({{\"revision\": {revision}}}) \
-                 to come back to it."
-            ),
-        })),
-        Err(error) => Ok(json!({ "error": format!("could not checkpoint: {error}") })),
-    }
-}
-
 /// Claim a block of reference designators so two callers never mint the same
 /// `R12`. The reservation is recorded in the project, not in this process.
 fn reserve_refs(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -1211,18 +1003,19 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
     }
     let doc = sch_doc::SchDoc::read(ctx.sch_path()).context("reading schematic visual facts")?;
     let visual = sch_floorplan::visual::measure(&doc);
-    let baseline = ctx.revisions().turn_baseline(ctx.sch_path())?;
+    let baseline = ctx.turn_baseline()?;
     let baseline_visual = baseline
         .as_ref()
-        .and_then(|baseline| baseline.path.as_deref())
-        .map(|path| {
-            sch_doc::SchDoc::read(path)
+        .and_then(|baseline| baseline.file(ctx.project_dir(), ctx.sch_path()))
+        .map(|bytes| {
+            let text = std::str::from_utf8(bytes).context("decoding turn-start schematic")?;
+            sch_doc::SchDoc::parse(text)
                 .map(|doc| sch_floorplan::visual::measure(&doc))
                 .context("measuring turn-start schematic visual facts")
         })
         .transpose()?;
     let mut visual_json = visual_with_introduced(&visual, baseline_visual.as_ref())?;
-    visual_json["baseline_revision"] = json!(baseline.as_ref().map(|baseline| baseline.revision));
+    visual_json["baseline"] = json!(baseline.as_ref().map(|_| "turn-start"));
     let content_bounds = render_bounds(visual.sheet_extent);
     let overview_bounds = padded_bounds(content_bounds, 2.54);
     let part_count = doc

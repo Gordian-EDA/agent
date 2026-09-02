@@ -79,7 +79,7 @@ async fn reviewed_turn_uses_check_schematic_without_a_reviewer_model_call() {
 }
 
 #[tokio::test]
-async fn undone_turn_gets_one_explicit_second_chance() {
+async fn unchanged_turn_gets_one_explicit_second_chance() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -94,8 +94,12 @@ async fn undone_turn_gets_one_explicit_second_chance() {
             "set_fields",
             json!({"ref": "R1", "fields": {"Value": "47k"}}),
         ),
-        tool_call("undo", "undo", json!({"revision": 2})),
-        tool_call("undo-check", "check_schematic", json!({})),
+        tool_call(
+            "restore-edit",
+            "set_fields",
+            json!({"ref": "R1", "fields": {"Value": "10k"}}),
+        ),
+        tool_call("restored-check", "check_schematic", json!({})),
         final_text("done"),
         tool_call(
             "second-edit",
@@ -199,12 +203,9 @@ async fn the_request_ceiling_spans_a_whole_reviewed_turn() {
     );
 }
 
-/// Repairing connectivity takes two calls — break the net, then remake it — so a
-/// turn stopped on its ceiling between them leaves every pin the edit loosened
-/// unconnected. That is worse than where the turn started, so the sheet is rolled
-/// back to the last one that checked clean.
+/// A cut-off turn keeps the last legal partial write for the next turn to continue.
 #[tokio::test]
-async fn a_turn_cut_off_mid_edit_keeps_the_last_clean_schematic() {
+async fn a_turn_cut_off_mid_edit_keeps_the_partial_schematic() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -229,11 +230,9 @@ async fn a_turn_cut_off_mid_edit_keeps_the_last_clean_schematic() {
         outcome.stop_reason
     );
 
-    // The invariant: a cut-off turn never leaves a sheet worse than the last one
-    // that checked clean. R2 is what the teardown removed.
     let after = std::fs::read_to_string(&sch_path).unwrap();
     assert!(
-        after.contains("R2"),
-        "a cut-off turn kept the torn-down sheet instead of the clean checkpoint"
+        !after.contains("R2"),
+        "the last legal partial edit should remain for the next turn"
     );
 }

@@ -8,7 +8,6 @@ Questions:
 
 ## [tool-contract]
 
-- `replace-pcb-component`: tool `diff_schematic` refusal: {"error":"revision 4 did not capture design.kicad_sch"}
 - `replace-pcb-component`: tool `sync_board` refusal: {"code":"intent_after_creation","error":"sync_board takes `intent` only when it creates the board. On an existing board pass the layout half to place_board({intent}) and any zones as rules {\"pours\": [{\"net\": …, \"layer\": …}]}."}
 - `replace-pcb-component`: tool `place_board` refusal: {"code":"board_already_placed","error":"this board is already placed; every part has a position","note":"Nothing was moved. Adjust individual parts with move_parts, name the ones to re-place with {\"refs\": [...]}, or pass {\"replace\": true} to deliberately re-place the whole board and lose the current layout.","placement_applied":false}
 - `create-i2c-sensor-pcb`: tool `get_footprint_info` refusal: {"error":"unknown footprint 'Jumper:SolderJumper-2_P1.3mm_Open'; did you mean Jumper:SolderJumper-2_P1.3mm_Open_Pad1.0x1.5mm, Jumper:SolderJumper-2_P1.3mm_Open_RoundedPad1.0x1.5mm, Jumper:SolderJumper-2_P1.3mm_Open_TrianglePad1.0x1.5mm?","suggestions":["Jumper:SolderJumper-2_P1.3mm_Open_Pad1.0x1.5mm","Jumper:SolderJumper-2_P1.3mm_Open_RoundedPad1.0x1.5mm","Jumper:SolderJumper-2_P1.3mm_Open_TrianglePad1.0x1.5mm"]}
@@ -17,8 +16,7 @@ Questions:
 
 - `local-board-move`: runner error: sync_board failed: {
   "error": "board has no net table",
-  "restored": true,
-  "revision": 2
+  "restored": true
 }
 
 ## [judge]
@@ -59,12 +57,10 @@ Questions:
 - `create-led-driver-pcb`: wished: Have review_board report concrete findings with severity, locations, and recommended corrections instead of only done.
 - `create-led-driver-pcb`: wished: Expose rendered-image metadata or an image inspection result covering board dimensions, silkscreen overlaps, and readable labels.
 - `create-led-driver-pcb`: wished: Add an ERC-fix operation for redundant local/global labels and other nonblocking schematic warnings.
-- `replace-pcb-component`: struggled: diff_schematic rejected revision 4 because it had not captured the schematic, without clearly exposing valid revision-selection guidance.
 - `replace-pcb-component`: struggled: sync_board refused the placement intent on the existing board, requiring knowledge of the separate place_board workflow.
 - `replace-pcb-component`: struggled: place_board then refused because the board was already placed, making the attempted preservation-oriented placement step unnecessary.
 - `replace-pcb-component`: struggled: get_board returned no summarized placement, outline, or copper details, so verifying what would be preserved required indirect tool results.
 - `replace-pcb-component`: struggled: render_board and render_schematic returned image paths but no structured visual observations or inspectable image content in the transcript.
-- `replace-pcb-component`: wished: Provide a clear current-revision or baseline identifier directly from diff_schematic and explain invalid revision errors.
 - `replace-pcb-component`: wished: Allow sync_board on an existing board to update only changed footprints while preserving placement and routing automatically.
 - `replace-pcb-component`: wished: Make place_board idempotent when called without an intent on an already placed board instead of returning a refusal.
 - `replace-pcb-component`: wished: Return concise structured board facts from get_board, including outline dimensions, footprint positions, and affected tracks.

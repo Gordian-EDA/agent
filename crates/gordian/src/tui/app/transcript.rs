@@ -16,7 +16,7 @@ pub enum Speaker {
     Assistant,
     /// A collapsed tool-call card (`▸ name(args) → summary`).
     Tool,
-    /// A system/status note (errors, undo confirmations, help).
+    /// A system/status note for errors, help, and other notices.
     System,
 }
 
@@ -26,7 +26,7 @@ pub enum Speaker {
 /// ignores it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NoticeLevel {
-    /// The default dim/gray note (paths, undo confirmations, hints).
+    /// The default dim/gray note for paths and hints.
     #[default]
     Plain,
     /// A failure (red) — a turn that errored out.

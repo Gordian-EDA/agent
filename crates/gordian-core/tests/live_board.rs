@@ -110,7 +110,6 @@ fn sync_board_creates_then_edits_a_board_without_disturbing_it() {
     assert!(refs(&synced, "removed").is_empty());
     assert!(refs(&synced, "footprint_changed").is_empty());
     assert_eq!(synced["retracted_tracks"], json!(0));
-    assert!(synced["revision"].as_u64().is_some());
 
     let after_value = board(&ctx);
     assert_eq!(part(&after_value, "R1").value, "4.7k");

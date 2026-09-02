@@ -81,7 +81,7 @@ Questions:
 - `campaign-audio-preamp`: struggled: The footprint-pin check revealed symbol/footprint pad mismatches for AudioJack3_Switch, but the toolset offered no clear way to map or select a compatible switched-jack symbol.
 - `campaign-audio-preamp`: struggled: Removing a ground power symbol unexpectedly left its pin unconnected, making it unclear which physical schematic object needed reconnection.
 - `campaign-audio-preamp`: struggled: Duplicate local/global-label warnings were repeatedly reported without a bulk rename, scope-conversion, or warning-suppression operation.
-- `campaign-audio-preamp`: struggled: There was no concise project-status or remaining-requirements check to prevent spending the turn on incremental schematic edits while major PCB and fabrication tasks remained undone.
+- `campaign-audio-preamp`: struggled: There was no concise project-status or remaining-requirements check to prevent spending the turn on incremental schematic edits while major PCB and fabrication tasks remained unfinished.
 - `campaign-audio-preamp`: wished: A diagnostic tool should return exact object references and coordinates for dangling labels and wire endpoints, with a suggested repair operation.
 - `campaign-audio-preamp`: wished: A symbol-footprint compatibility tool should list compatible library alternatives and automatically remap switched-jack pins.
 - `campaign-audio-preamp`: wished: A bulk label-management tool should convert duplicate local/global labels to hierarchical labels or remove redundant labels safely.

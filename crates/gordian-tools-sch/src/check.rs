@@ -1243,6 +1243,30 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
     })
 }
 
+fn inspect_turn_baseline(ctx: &AgentRuntime) -> Result<(bool, Option<Inspection>)> {
+    let Some(baseline) = ctx.turn_baseline()? else {
+        return Ok((false, None));
+    };
+    if baseline.file(ctx.project_dir(), ctx.sch_path()).is_none() {
+        return Ok((true, None));
+    }
+    let directory = tempfile::tempdir().context("creating turn-start inspection directory")?;
+    for (relative, bytes) in &baseline.files {
+        let path = directory.path().join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, bytes)
+            .with_context(|| format!("preparing turn-start file {}", relative.display()))?;
+    }
+    let relative = ctx
+        .sch_path()
+        .strip_prefix(ctx.project_dir())
+        .context("schematic is outside project")?;
+    inspect_schematic(&directory.path().join(relative), ctx)
+        .map(|inspection| (true, Some(inspection)))
+}
+
 fn finding_key(finding: &Finding) -> (String, Vec<String>, Vec<String>) {
     (
         finding.code.clone(),
@@ -1272,13 +1296,7 @@ fn classify_findings(findings: &mut [Finding], baseline: &[Finding]) {
 pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let detail = input.get("detail").and_then(Value::as_bool) == Some(true);
     let mut inspection = inspect_schematic(ctx.sch_path(), ctx)?;
-    let baseline = crate::session::comparison_revision(ctx, None)?;
-    let baseline_revision = baseline.as_ref().map(|baseline| baseline.revision);
-    let baseline_inspection = baseline
-        .as_ref()
-        .and_then(|baseline| baseline.path.as_deref())
-        .map(|path| inspect_schematic(path, ctx))
-        .transpose()?;
+    let (has_baseline, baseline_inspection) = inspect_turn_baseline(ctx)?;
     if let Some(baseline) = &baseline_inspection {
         classify_findings(&mut inspection.findings, &baseline.findings);
     }
@@ -1322,7 +1340,7 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .count();
     let mut report = json!({
         "ok": introduced_errors == 0,
-        "baseline_revision": baseline_revision,
+        "baseline": has_baseline.then_some("turn-start"),
         "introduced": introduced,
         "pre_existing": pre_existing,
         "detail": detail,
@@ -1473,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    fn undo_to_baseline_has_no_introduced_warnings() {
+    fn restored_baseline_has_no_introduced_warnings() {
         let baseline = vec![
             warning("first", "R1", [1.0, 1.0]),
             warning("second", "R2", [2.0, 2.0]),
