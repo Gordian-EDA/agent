@@ -59,6 +59,7 @@ fn check_schematic_matches_kicad_warning_count_and_names_each_finding() {
             "refs",
             "nets",
             "fix",
+            "why",
         ] {
             assert!(
                 finding.get(field).is_some(),
@@ -66,8 +67,17 @@ fn check_schematic_matches_kicad_warning_count_and_names_each_finding() {
             );
         }
         assert!(
-            finding["fix"].as_str().is_some_and(|fix| !fix.is_empty()),
-            "finding has no fix: {finding}"
+            finding["fix"].is_null()
+                || finding["fix"].get("tool").and_then(Value::as_str).is_some()
+                    && finding["fix"]
+                        .get("args")
+                        .and_then(Value::as_object)
+                        .is_some(),
+            "finding has no executable fix shape: {finding}"
+        );
+        assert!(
+            finding["why"].as_str().is_some_and(|why| !why.is_empty()),
+            "finding has no rationale: {finding}"
         );
     }
     let p1 = findings
@@ -75,6 +85,28 @@ fn check_schematic_matches_kicad_warning_count_and_names_each_finding() {
         .find(|finding| finding["code"] == "footprint-unknown" && finding["refs"] == json!(["P1"]))
         .expect("P1 footprint finding");
     assert_eq!(p1["refs"], json!(["P1"]));
+    assert_eq!(
+        p1["fix"],
+        json!({
+            "tool": "assign_footprints",
+            "args": {"assignments": [{
+                "reference": "P1",
+                "footprint": "TerminalBlock_Altech:Altech_AK300_1x02_P5.00mm_45-Degree"
+            }]}
+        })
+    );
+    assert_eq!(
+        checked["fix_count"].as_u64().unwrap() as usize,
+        checked["fix_groups"].as_array().unwrap().len()
+    );
+    assert!(
+        checked["text"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .next()
+            .is_some_and(|line| line.contains("findings") && line.contains("fixes"))
+    );
     assert_eq!(
         checked["text"].as_str().unwrap().lines().count(),
         findings.len() + 1,

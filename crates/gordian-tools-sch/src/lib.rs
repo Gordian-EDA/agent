@@ -168,7 +168,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "check_schematic",
-            "Lint + electrical rules + KiCAD ERC over the live file. Findings are `introduced` or `pre_existing` against the turn's first pre-write revision, matched by code, refs, and nets. `ok` and `erc_clean` consider introduced errors only: fix those and leave inherited findings alone unless asked. Compact results put introduced findings first and use at most forty finding lines; pass `detail: true` to get all. Completeness findings are advisory: resolve them when the request implies a complete powered/interface design, but never expand a deliberately minimal or focused edit.",
+            "Lint + electrical rules + KiCAD ERC over the live file. Every finding includes an executable `{tool,args}` fix or `null` with a reason; `fix_groups` coalesces findings closed by one call. Findings are `introduced` or `pre_existing` against the turn's first pre-write revision, matched by code, refs, and nets. `ok` and `erc_clean` consider introduced errors only: fix those and leave inherited findings alone unless asked. Compact results put introduced findings first and use at most forty finding lines; pass `detail: true` to get all. Completeness findings are advisory: resolve them when the request implies a complete powered/interface design, but never expand a deliberately minimal or focused edit.",
             json!({
                 "type": "object",
                 "properties": {
@@ -379,7 +379,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "add_power",
-            "Drop a power/ground symbol straight onto a pin, which puts that pin on the rail.",
+            "Put a loose pin on a named rail, or add a PWR_FLAG when the pin is already on that rail so KiCad sees it as driven.",
             json!({
                 "type": "object",
                 "properties": {

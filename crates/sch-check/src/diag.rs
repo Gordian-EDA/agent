@@ -22,6 +22,13 @@ pub struct Diagnostic {
     pub message: String,
     pub span: Option<Span>,
     pub suggestion: Option<String>,
+    pub subjects: Box<DiagnosticSubjects>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DiagnosticSubjects {
+    pub refs: Vec<String>,
+    pub nets: Vec<String>,
 }
 
 impl Diagnostic {
@@ -32,6 +39,7 @@ impl Diagnostic {
             message: message.into(),
             span: None,
             suggestion: None,
+            subjects: Box::default(),
         }
     }
     pub fn warning(code: &'static str, message: impl Into<String>) -> Self {
@@ -41,6 +49,7 @@ impl Diagnostic {
             message: message.into(),
             span: None,
             suggestion: None,
+            subjects: Box::default(),
         }
     }
     pub fn with_span(mut self, span: Span) -> Self {
@@ -49,6 +58,18 @@ impl Diagnostic {
     }
     pub fn with_suggestion(mut self, s: impl Into<String>) -> Self {
         self.suggestion = Some(s.into());
+        self
+    }
+
+    /// Attach exact schematic pin or part references to this finding.
+    pub fn with_refs(mut self, refs: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.subjects.refs = refs.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Attach exact net names to this finding.
+    pub fn with_nets(mut self, nets: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.subjects.nets = nets.into_iter().map(Into::into).collect();
         self
     }
 }
