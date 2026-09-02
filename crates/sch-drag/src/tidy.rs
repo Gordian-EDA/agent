@@ -421,7 +421,9 @@ pub fn tidy(doc: &mut SchDoc, movable: &[String], options: &TidyOptions) -> Tidy
         };
         let trial_sheet = match outcome {
             Ok(after) => after,
-            Err(DragError::Truthfulness(_) | DragError::Disconnection(_)) => {
+            Err(
+                DragError::Truthfulness(_) | DragError::Disconnection(_) | DragError::Litter(_),
+            ) => {
                 report.refused += 1;
                 continue;
             }

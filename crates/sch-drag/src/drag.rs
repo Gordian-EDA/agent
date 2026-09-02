@@ -70,6 +70,9 @@ pub enum DragError {
     /// carry the connection — the netlist would still read correctly and the
     /// drawing would be a lie.
     Disconnection(usize),
+    /// The move would have left more wire ends hanging in space, or more names
+    /// speaking for nothing, than it found.
+    Litter(usize),
     /// The document rejected the edit.
     Doc(String),
 }
@@ -82,6 +85,7 @@ impl std::fmt::Display for DragError {
                 write!(f, "drag would change the netlist: {}", nets.join(", "))
             }
             DragError::Disconnection(n) => write!(f, "drag would break {n} drawn connections"),
+            DragError::Litter(n) => write!(f, "drag would leave {n} loose ends behind"),
             DragError::Doc(e) => write!(f, "{e}"),
         }
     }
@@ -385,6 +389,14 @@ pub fn drag_many(
     if lost > 0 {
         *doc = backup;
         return Err(DragError::Disconnection(lost));
+    }
+    // Nothing about a drag justifies leaving the sheet with more wire ends in
+    // mid-air, or more names attached to nothing, than it started with.
+    let litter = (after.dangling_ends() + after.stranded_labels())
+        .saturating_sub(before.dangling_ends() + before.stranded_labels());
+    if litter > 0 {
+        *doc = backup;
+        return Err(DragError::Litter(litter));
     }
     Ok((report, after))
 }
