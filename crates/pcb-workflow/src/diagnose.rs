@@ -378,8 +378,12 @@ fn obstruction_between(
         if obstacle.connected_to.iter().any(|n| n == net) {
             continue;
         }
-        let half = (obstacle.width / 2.0).hypot(obstacle.height / 2.0);
-        let gap = path.dist_to_point(obstacle.center) - half;
+        let gap = path.dist_to_rect(&geom::Rect::new(
+            obstacle.center.x - obstacle.width / 2.0,
+            obstacle.center.y - obstacle.height / 2.0,
+            obstacle.center.x + obstacle.width / 2.0,
+            obstacle.center.y + obstacle.height / 2.0,
+        ));
         if gap < problem.clearance && best.is_none_or(|(d, _)| gap < d) {
             best = Some((gap, obstacle));
         }
