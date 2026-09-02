@@ -41,6 +41,16 @@ pub fn export_fab(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 
     let cli = ctx.env();
+    if let Err(error) = super::export::materialize_zones_for_drc(
+        &board,
+        cli,
+        ctx.kicad(),
+        ctx.config().kicad.attach_running,
+    ) {
+        return Ok(
+            json!({ "error": format!("could not refill zones before fab export: {error}") }),
+        );
+    }
     let drc = match cli.drc(&board) {
         Ok(report) => report,
         Err(e) => {
@@ -126,6 +136,13 @@ pub fn export_fab(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
     files.sort();
     let names: Vec<String> = files.iter().filter_map(|p| file_name(p)).collect();
+    let (verified_files, missing_files) = verify_files(&files);
+    let all_files_exist = !files.is_empty() && missing_files.is_empty();
+    for missing in &missing_files {
+        errors.push(format!(
+            "exporter reported a file that does not exist: {missing}"
+        ));
+    }
 
     let note = if files.is_empty() {
         "fab export produced no files — see errors.".to_string()
@@ -145,17 +162,57 @@ pub fn export_fab(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
 
     Ok(json!({
-        "ok": errors.is_empty() && !files.is_empty(),
+        "ok": errors.is_empty() && all_files_exist,
         "board": board.display().to_string(),
         "fab_dir": out_dir.display().to_string(),
         "files": names,
+        "verified_files": verified_files,
+        "all_files_exist": all_files_exist,
+        "missing_files": missing_files,
         "file_count": files.len(),
         "errors": errors,
         "note": note,
     }))
 }
 
+fn verify_files(files: &[PathBuf]) -> (Vec<Value>, Vec<String>) {
+    let verified = files
+        .iter()
+        .map(|path| {
+            json!({
+                "path": path.display().to_string(),
+                "exists": path.is_file(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let missing = files
+        .iter()
+        .filter(|path| !path.is_file())
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    (verified, missing)
+}
+
 /// The file name of `p` as a `String`, or `None` if it has none.
 fn file_name(p: &Path) -> Option<String> {
     p.file_name().and_then(|n| n.to_str()).map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fabrication_file_report_verifies_every_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("board-F_Cu.gbr");
+        let missing = dir.path().join("board.drl");
+        std::fs::write(&present, "gerber").unwrap();
+
+        let (verified, absent) = verify_files(&[present, missing.clone()]);
+
+        assert_eq!(verified[0]["exists"], true);
+        assert_eq!(verified[1]["exists"], false);
+        assert_eq!(absent, [missing.display().to_string()]);
+    }
 }

@@ -13,7 +13,7 @@ use kicad_board::ImportedPart;
 use pcb_model::Finding as DrcViolation;
 use pcb_model::Violation as ConnViolation;
 use pcb_model::{Point2, RoutingView};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// How far from a violation's reported point a pad may sit and still be named as
 /// the item involved. Pads are millimetre-scale, so a hit past this is noise.
@@ -609,7 +609,10 @@ pub(crate) fn unrouted_report(
 /// own part list is what turns that back into a handle a caller can pass
 /// straight to `route_track`, so only a reference the board really carries and a
 /// pad that part really has is ever reported.
-fn pad_handle(parts: &[ImportedPart], description: &str) -> Option<(String, String, Point2)> {
+pub(crate) fn pad_handle(
+    parts: &[ImportedPart],
+    description: &str,
+) -> Option<(String, String, Point2)> {
     let words: Vec<&str> = description
         .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
         .filter(|w| !w.is_empty())
@@ -629,20 +632,7 @@ fn pad_handle(parts: &[ImportedPart], description: &str) -> Option<(String, Stri
     ))
 }
 
-/// KiCAD's unconnected findings as the pad pairs they are.
-///
-/// A bare count tells a caller nothing; the two pads that should be joined tell
-/// it exactly which `route_track` or `route_board{nets}` call to make.
-pub(crate) fn unconnected_pairs<'a>(
-    parts: &[ImportedPart],
-    violations: impl IntoIterator<Item = &'a kicad::Violation>,
-) -> Vec<Value> {
-    violations
-        .into_iter()
-        .filter_map(|violation| unconnected_pair(parts, violation))
-        .collect()
-}
-
+/// Resolve one KiCad unconnected finding to two verified same-net board pads.
 pub(crate) fn unconnected_pair(
     parts: &[ImportedPart],
     violation: &kicad::Violation,
@@ -919,7 +909,7 @@ mod tests {
             ],
         };
 
-        let pairs = unconnected_pairs(&parts, &[violation]);
+        let pairs = vec![unconnected_pair(&parts, &violation).unwrap()];
 
         assert_eq!(pairs[0]["net"], "VOUT");
         assert_eq!(pairs[0]["from"]["pad"], "U1.3");
@@ -962,7 +952,7 @@ mod tests {
             ],
         };
 
-        assert!(unconnected_pairs(&parts, &[violation]).is_empty());
+        assert!(unconnected_pair(&parts, &violation).is_none());
     }
 
     #[test]

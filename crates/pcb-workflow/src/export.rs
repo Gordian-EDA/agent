@@ -4,11 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use kicad::Violation;
 
 use gordian_runtime::AgentRuntime;
+
+use crate::board::guard::Guard;
 
 /// DRC findings KiCAD raises that are independent of routed copper.
 const NON_COPPER_WARNINGS: &[&str] = &[
@@ -229,7 +231,7 @@ pub(super) fn gate_drc(report: &kicad::DrcReport) -> DrcGate {
 
 /// Ensure generated copper zones have cached fills before a headless DRC run.
 /// KiCad 10+ can refill through the CLI; KiCad 9 needs its board IPC API.
-pub(super) fn materialize_zones_for_drc(
+pub(crate) fn materialize_zones_for_drc(
     path: &Path,
     env: &kicad::KicadInstallation,
     sessions: &kicad_ipc::SessionManager,
@@ -247,13 +249,8 @@ pub(super) fn materialize_zones_for_drc(
         .next()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(0);
-    if major >= 10 {
-        // drc uses `--refill-zones` when this version supports it.
-        return Ok(false);
-    }
-    // KiCad 9 has no CLI refill operation, and DRC on unfilled zones reports
-    // every stitching via as dangling. Refilling is the one explicit reason a
-    // check may open a (headless, or attached when configured) pcbnew session.
+    // KiCad 9 has no CLI refill operation, and a CLI refill on newer versions
+    // does not persist the fill cache the next tool needs to inspect.
     let _ = attach_running;
     if major < 9 {
         return Err(format!(
@@ -268,6 +265,89 @@ pub(super) fn materialize_zones_for_drc(
         })
         .map_err(|e| format!("could not refill board zones over KiCad IPC: {e}"))?;
     Ok(true)
+}
+
+/// Refill every copper zone in the saved board and persist KiCad's fill cache.
+#[tracing::instrument(skip_all, fields(project = %ctx.project_dir().display()))]
+pub fn refill_zones(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let path = ctx.pcb_path();
+    let gate = match Guard::open(
+        ctx,
+        "refill_zones",
+        "Refill board copper zones",
+        std::slice::from_ref(&path),
+    ) {
+        Ok(gate) => gate,
+        Err(refusal) => return Ok(refusal),
+    };
+    match materialize_zones_for_drc(
+        &path,
+        ctx.env(),
+        ctx.kicad(),
+        ctx.config().kicad.attach_running,
+    ) {
+        Ok(refilled) => Ok(gate.commit(
+            ctx,
+            json!({
+                "ok": true,
+                "refilled": refilled,
+                "path": path.display().to_string(),
+                "note": if refilled {
+                    "KiCad refilled and saved every board zone."
+                } else {
+                    "The board has no copper zones to refill."
+                },
+            }),
+        )),
+        Err(error) => Ok(gate.rollback(
+            ctx,
+            json!({
+                "error": error,
+                "next": "Open the board in KiCad, press B to refill all zones, save, then run check_board."
+            }),
+        )),
+    }
+}
+
+fn isolated_copper<'a>(
+    parts: &[kicad_board::ImportedPart],
+    violations: impl IntoIterator<Item = &'a Violation>,
+) -> Vec<Value> {
+    violations
+        .into_iter()
+        .filter_map(|violation| {
+            let nets = violation
+                .items
+                .iter()
+                .flat_map(|item| bracketed_names(&item.description))
+                .collect::<BTreeSet<_>>();
+            if nets.len() != 1 {
+                return None;
+            }
+            let net = *nets.iter().next()?;
+            let mut pads = Vec::new();
+            let mut pad_at = None;
+            for item in &violation.items {
+                let Some((pad, pad_net, at)) =
+                    crate::diagnose::pad_handle(parts, &item.description)
+                else {
+                    continue;
+                };
+                if pad_net == net {
+                    pads.push(pad);
+                    pad_at.get_or_insert(at);
+                }
+            }
+            pads.sort();
+            pads.dedup();
+            let at = violation
+                .items
+                .iter()
+                .find_map(|item| item.pos.map(|pos| [pos.x, pos.y]))
+                .or_else(|| pad_at.map(|at| [at.x, at.y]));
+            Some(json!({ "net": net, "at": at, "pads": pads }))
+        })
+        .collect()
 }
 
 /// Run DRC and classify findings against this turn's first board snapshot.
@@ -409,9 +489,23 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let unconnected = if meaningful_unconnected.is_empty() {
         Vec::new()
     } else {
-        let parts = board.map(|board| board.imported.parts).unwrap_or_default();
+        let parts = board
+            .as_ref()
+            .map(|board| board.imported.parts.clone())
+            .unwrap_or_default();
         classified_unconnected(&parts, &meaningful_unconnected)
     };
+    let islands = board
+        .as_ref()
+        .map(|board| {
+            isolated_copper(
+                &board.imported.parts,
+                meaningful_unconnected
+                    .iter()
+                    .map(|finding| finding.violation),
+            )
+        })
+        .unwrap_or_default();
     let findings = violations
         .iter()
         .chain(&unconnected_findings)
@@ -473,6 +567,7 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         // Never a bare count: the two pads that should be joined are what say
         // which route_track / route_board{nets} call repairs the board.
         "unconnected": unconnected,
+        "islands": islands,
         // Footprints still in the seed row: place them with
         // place_board({refs}) before routing expects copper to reach them.
         "unplaced": unplaced,
@@ -489,7 +584,7 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 serde_json::to_string(&unplaced).unwrap_or_else(|_| "[]".to_owned()),
             )
         } else if blocking_findings == 0 {
-            "DRC gate passed for this turn; finish the task and leave pre-existing findings alone unless asked. blocking_findings is the introduced gate; blocking_findings_absolute is informational.".to_owned()
+            "export_fab".to_owned()
         } else {
             "Fix the introduced blocking violations/unconnected items, then call check_board again. Leave pre-existing findings alone and do not resync blindly.".to_owned()
         },
@@ -499,6 +594,7 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pcb_model::{LayerRef, Point2};
 
     fn violation(code: &str, reference: &str, net: &str) -> Violation {
         Violation {
@@ -556,9 +652,11 @@ mod tests {
 
         let classified = classify_violations(&restored, &baseline);
 
-        assert!(classified
-            .iter()
-            .all(|finding| finding.classification == "pre_existing"));
+        assert!(
+            classified
+                .iter()
+                .all(|finding| finding.classification == "pre_existing")
+        );
     }
 
     #[test]
@@ -570,8 +668,71 @@ mod tests {
 
         let classified = classify_violations(&current, &[]);
 
-        assert!(classified
-            .iter()
-            .all(|finding| finding.classification == "introduced"));
+        assert!(
+            classified
+                .iter()
+                .all(|finding| finding.classification == "introduced")
+        );
+    }
+
+    #[test]
+    fn isolated_copper_reports_only_same_net_items_and_pads() {
+        let parts = vec![kicad_board::ImportedPart {
+            reference: "U1".to_owned(),
+            lib_id: "Package:Test".to_owned(),
+            at: Point2::new(4.0, 5.0),
+            rotation: 0,
+            side: kicad_board::BoardSide::Front,
+            locked: false,
+            courtyard: None,
+            pads: vec![kicad_board::ImportedPad {
+                number: "1".to_owned(),
+                net: Some("GND".to_owned()),
+                at: Point2::new(4.0, 5.0),
+                layers: vec![LayerRef::top()],
+                shape: "rect".to_owned(),
+                size: Point2::new(1.0, 1.0),
+                drill: None,
+            }],
+        }];
+        let same_net = Violation {
+            severity: "error".to_owned(),
+            kind: "unconnected_items".to_owned(),
+            description: "Missing connection between items".to_owned(),
+            items: vec![
+                kicad::ViolationItem {
+                    description: "Via [GND] on F.Cu - B.Cu".to_owned(),
+                    uuid: None,
+                    pos: None,
+                },
+                kicad::ViolationItem {
+                    description: "Pad 1 [GND] of U1 on F.Cu".to_owned(),
+                    uuid: None,
+                    pos: None,
+                },
+            ],
+        };
+        let cross_net = Violation {
+            items: vec![
+                kicad::ViolationItem {
+                    description: "Via [GND] on F.Cu - B.Cu".to_owned(),
+                    uuid: None,
+                    pos: None,
+                },
+                kicad::ViolationItem {
+                    description: "Via [/OP2_OUT] on F.Cu - B.Cu".to_owned(),
+                    uuid: None,
+                    pos: None,
+                },
+            ],
+            ..same_net.clone()
+        };
+
+        let islands = isolated_copper(&parts, [&same_net, &cross_net]);
+
+        assert_eq!(islands.len(), 1);
+        assert_eq!(islands[0]["net"], "GND");
+        assert_eq!(islands[0]["at"], json!([4.0, 5.0]));
+        assert_eq!(islands[0]["pads"], json!(["U1.1"]));
     }
 }

@@ -559,6 +559,12 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         Def {
+            name: "refill_zones".into(),
+            description: "Refill every copper zone in KiCad and persist the filled board before checking connectivity."
+                .into(),
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        Def {
             name: "export_fab".into(),
             description: "Export fabrication files to <project>/fab after clean check_board."
                 .into(),
@@ -576,6 +582,7 @@ pub fn tool_defs() -> Vec<Tool> {
                     | "move_parts"
                     | "route_track"
                     | "delete_copper"
+                    | "refill_zones"
                     | "set_net_width"
                     | "update_board_outline"
             ) {
@@ -614,6 +621,7 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "place_board" => pcb_workflow::place_board(input, ctx),
         "route_board" => pcb_workflow::route_board(input, ctx),
         "check_board" => pcb_workflow::check_board(input, ctx),
+        "refill_zones" => pcb_workflow::refill_zones(input, ctx),
         "export_fab" => pcb_workflow::export_fab(input, ctx),
         "open_board" => pcb_workflow::open_board(input, ctx),
         "move_parts" => pcb_workflow::move_parts(input, ctx),
