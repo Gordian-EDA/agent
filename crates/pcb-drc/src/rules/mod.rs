@@ -9,6 +9,7 @@ mod geom;
 pub mod board_edge;
 pub mod clearance;
 pub mod connectivity_rule;
+pub mod dangling_end;
 pub mod hole_clearance;
 pub mod invalid_layer;
 pub mod out_of_bounds;
@@ -18,6 +19,7 @@ pub mod via_diameter;
 pub use board_edge::BoardEdgeClearanceRule;
 pub use clearance::PairClearanceRule;
 pub use connectivity_rule::ConnectivityRule;
+pub use dangling_end::DanglingEndRule;
 pub use hole_clearance::HoleClearanceRule;
 pub use invalid_layer::InvalidLayerRule;
 pub use out_of_bounds::OutOfBoundsRule;
@@ -39,6 +41,7 @@ pub(crate) fn standard_rules() -> Vec<Box<dyn Rule>> {
         Box::new(PairClearanceRule),
         Box::new(HoleClearanceRule),
         Box::new(ViaDiameterRule),
+        Box::new(DanglingEndRule),
         Box::new(ConnectivityRule),
     ]
 }

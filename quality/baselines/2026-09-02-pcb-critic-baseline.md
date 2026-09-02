@@ -65,15 +65,15 @@ Same command on `lane/local-algos`, RELEASE build, `--required` **7/7 OK with re
 `kicad_faults=0` on every board. Critic sampled twice per board (the noise is real; the
 deterministic columns are not).
 
-| board | parts | layers | place ms | route ms | vias | wirelength mm | bends | off-angle | critic before → after (×2) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| rc-divider | 3 | 2 | 0 | 0 | 0 | 28.65 | 3 | 0 | 6 → 8, 7 |
-| transistor-led-driver | 6 | 2 | 5 | 1 | 0 | 85.20 | 11 | 0 | 6 → 6, 8 |
-| keepout-route | 2 | 2 | 1 | 2 | 0 | 36.00 | 0 | 0 | 6 → 4, 5 |
-| rc-lowpass-chain | 8 | 2 | 16 | 2 | 0 | 98.70 | 8 | 0 | 6 → 8, 6 |
-| power-buck | 8 | 4 | 20 | 296 | 5 | 77.98 | 13 | 0 | 4 → 6, 6 |
-| led-array | 9 | 2 | 1 | 5 | 0 | 115.64 | 8 | 0 | 9 → 7, 7 |
-| bga25-route | 2 | 4 | 3 | 733 | 24 | 117.55 | 28 | 0 | 5 → 5, 5 |
+| board | parts | layers | place ms | route ms | vias | wirelength mm | bends | off-angle | critic before → after (×2) | outline-refit after |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| rc-divider | 3 | 2 | 0 | 0 | 0 | 28.65 | 3 | 0 | 6 → 8, 7 | 8 |
+| transistor-led-driver | 6 | 2 | 5 | 1 | 0 | 85.20 | 11 | 0 | 6 → 6, 8 | 8 |
+| keepout-route | 2 | 2 | 1 | 2 | 0 | 36.00 | 0 | 0 | 6 → 4, 5 | 9 |
+| rc-lowpass-chain | 8 | 2 | 16 | 2 | 0 | 98.70 | 8 | 0 | 6 → 8, 6 | 6 |
+| power-buck | 8 | 4 | 20 | 296 | 5 | 77.98 | 13 | 0 | 4 → 6, 6 | 5 |
+| led-array | 9 | 2 | 1 | 5 | 0 | 115.64 | 8 | 0 | 9 → 7, 7 | 7 |
+| bga25-route | 2 | 4 | 3 | 733 | 24 | 117.55 | 28 | 0 | 5 → 5, 5 | 6 |
 
 Critic total 42 (before, one sample) → **44** on both after-samples. Deterministic totals:
 **bends 140 → 71 (−49%)**, vias 36 → 29, wirelength 573 → 560, and `off_angle` 0 on every
@@ -92,6 +92,18 @@ corpus ceiling is about 7-8, and `keepout-route` (two headers on a huge canvas) 
 measuring that. The routing complaints from the before-run ("short diagonal stubs into
 D1/D3", "a wide bottom-layer trace crosses U1 at a diagonal") are gone from every summary.
 Board sizing only bites end-to-end, where `sync_board` auto-sizes, and there it is snug.
+
+The `outline-refit after` column is one fresh sample on `lane/outline-refit`. These corpus
+fixtures still prescribe their bounds and the corpus harness calls the placement engine
+directly, so this column is a routing/DRC regression measurement rather than a measurement
+of the workflow-level refit. Its critic total is **49**, versus 42 before and 44 in both
+local-algorithm samples. The required corpus remained 7/7 KiCad-clean with zero internal
+lint findings.
+
+The workflow-level measurement is `create-led-driver-pcb`: its managed outline shrank from
+17 × 17 mm to 14 × 17 mm after the first legal placement, all five deterministic checks
+passed, and PCB critic improved **6 → 8**. `create-i2c-sensor-pcb` also passed its required
+check and scored 7 for PCB layout.
 
 `led-array` 9 → 7 is the one score that fell; its baseline sampled both 9 and 7, and its
 only remaining fault is an empty band, so it is inside the critic's own noise.

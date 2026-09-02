@@ -1008,6 +1008,7 @@ fn geometry_violation_nets(v: &DrcViolation) -> Vec<String> {
         | DrcViolation::OutOfBounds { connection, .. }
         | DrcViolation::ViaDiameterBelowMin { connection, .. }
         | DrcViolation::InvalidLayer { connection, .. } => vec![connection.clone()],
+        DrcViolation::DanglingEnd { net, .. } => vec![net.clone()],
         DrcViolation::Connectivity { .. } => Vec::new(),
     }
 }

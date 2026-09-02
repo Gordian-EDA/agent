@@ -308,6 +308,18 @@ fn explain(violation: &DrcViolation, problem: &RoutingView, parts: &[ImportedPar
                 (diameter * 0.5 * 100.0).floor() / 100.0
             ),
         },
+        DrcViolation::DanglingEnd { net, at, layer } => Explained {
+            kind: "dangling copper",
+            nets: vec![net.clone()],
+            items: pads_at(parts, *at),
+            at: Some(*at),
+            measured: None,
+            required: None,
+            detail: format!("copper on {net} ends without an anchor on {layer}"),
+            suggestion: format!(
+                "route {net} into a same-net pad, via, track, or zone, or remove the unused spur"
+            ),
+        },
         DrcViolation::Connectivity {
             violation:
                 ConnViolation::Unconnected {

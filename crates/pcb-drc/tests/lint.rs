@@ -152,6 +152,51 @@ use pcb_model::{Drc, Finding, Violation};
         vs.iter().filter(|v| f(v)).count()
     }
 
+    #[test]
+    fn one_free_trace_end_produces_one_dangling_finding() {
+        let p = problem(
+            vec![conn("SIG", &[(10.0, 10.0, "top")])],
+            vec![pad(&["SIG"], (10.0, 10.0), 1.0, 1.0, &["top"])],
+        );
+        let s = RouteSolution {
+            traces: vec![trace("SIG", "top", 0.25, &[(10.0, 10.0), (20.0, 10.0)])],
+            vias: vec![],
+        };
+        let dangling: Vec<_> = StandardDrc
+            .check(&p, &s)
+            .into_iter()
+            .filter(|finding| matches!(finding, Finding::DanglingEnd { .. }))
+            .collect();
+        assert_eq!(dangling.len(), 1, "got {dangling:?}");
+        assert!(matches!(
+            &dangling[0],
+            Finding::DanglingEnd { net, at, layer }
+                if net == "SIG" && at.near_eq(Point2::new(20.0, 10.0), 1e-9) && layer == "top"
+        ));
+    }
+
+    #[test]
+    fn via_touching_copper_on_only_one_layer_produces_one_dangling_finding() {
+        let p = problem(
+            vec![conn("SIG", &[(10.0, 10.0, "top")])],
+            vec![pad(&["SIG"], (10.0, 10.0), 1.0, 1.0, &["top"])],
+        );
+        let s = RouteSolution {
+            traces: vec![],
+            vias: vec![via("SIG", (10.0, 10.0))],
+        };
+        let dangling: Vec<_> = StandardDrc
+            .check(&p, &s)
+            .into_iter()
+            .filter(|finding| matches!(finding, Finding::DanglingEnd { .. }))
+            .collect();
+        assert_eq!(dangling.len(), 1, "got {dangling:?}");
+        assert!(matches!(
+            &dangling[0],
+            Finding::DanglingEnd { net, layer, .. } if net == "SIG" && layer == "bottom"
+        ));
+    }
+
     // ── per-variant triggers ────────────────────────────────────────────────
 
     #[test]

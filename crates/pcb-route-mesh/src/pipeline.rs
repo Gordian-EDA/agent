@@ -66,7 +66,10 @@ const ADAPTIVE_RIPUP_MAX_BLOCKERS: usize = 3;
 /// *any* stage contributes no copper to the returned solution. The result is
 /// tagged with [`ENGINE`] (`"detailed"`).
 pub fn route_detailed(deps: &MeshDeps, problem: &RoutingView) -> RouteResult {
-    route_detailed_with_global(deps, problem).0
+    let mut result = route_detailed_with_global(deps, problem).0;
+    postroute_cleanup(deps, problem, &mut result.solution);
+    reconcile_connectivity(deps, problem, &mut result.solution, &mut result.failed);
+    result
 }
 
 /// As [`route_detailed`], but also returns the negotiated global-routing result
@@ -2158,7 +2161,6 @@ const NAIVE_DETOUR_TOLERANCE: f64 = 1.15;
 /// surviving copper is fully DRC-clean, so `route_tuned`'s comparison ranks a
 /// silent violation or phantom-route below an engine that cleanly connected
 /// fewer nets, and the engine never ships copper that fails DRC.
-#[cfg(test)]
 fn reconcile_connectivity(
     deps: &MeshDeps,
     problem: &RoutingView,
@@ -5108,7 +5110,12 @@ mod tests {
                 span: ViaSpan::Through,
             }],
         };
-        assert!(DRC.check(&p, &solution).is_empty());
+        let baseline = DRC.check(&p, &solution);
+        assert!(
+            baseline
+                .iter()
+                .any(|finding| matches!(finding, pcb_model::Finding::DanglingEnd { .. }))
+        );
 
         postroute_cleanup(&DEPS, &p, &mut solution);
 
@@ -5117,7 +5124,7 @@ mod tests {
             vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(4.0, 4.0)],
             "shortcut must be rejected because it disconnects the via anchor"
         );
-        assert!(DRC.check(&p, &solution).is_empty());
+        assert_eq!(DRC.check(&p, &solution), baseline);
     }
 
     #[test]
@@ -5231,7 +5238,10 @@ mod tests {
                 span: ViaSpan::Through,
             }],
         };
-        assert!(DRC.check(&p, &solution).is_empty());
+        assert!(matches!(
+            DRC.check(&p, &solution).as_slice(),
+            [pcb_model::Finding::DanglingEnd { net, .. }] if net == "N"
+        ));
 
         postroute_cleanup(&DEPS, &p, &mut solution);
 
@@ -5309,8 +5319,8 @@ mod tests {
             detailed
                 .failed
                 .iter()
-                .all(|f| f.reason.contains("finisher")),
-            "every congested residual must carry finisher provenance: {:?}",
+                .all(|f| f.reason.contains("finisher") || f.reason.contains("DRC oracle")),
+            "every congested residual must carry finisher or DRC provenance: {:?}",
             detailed.failed
         );
         let geom_violations: Vec<_> = DRC.check(&p, &detailed.solution)

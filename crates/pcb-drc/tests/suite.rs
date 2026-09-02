@@ -68,8 +68,9 @@ fn trace(connection: &str, layer: &str, width: f64, path: &[(f64, f64)]) -> Trac
 
 /// A board carrying, deterministically: one trace below min width, two parallel
 /// foreign traces too close (trace/trace clearance), and a stranded second
-/// connection (connectivity Unconnected). The exact, ordered finding set the
-/// suite must reproduce — geometry first, connectivity last.
+/// connection (connectivity Unconnected). Route points are the terminal-pad
+/// anchors in this compact fixture. The exact, ordered finding set the suite
+/// must reproduce keeps connectivity last.
 fn mixed_board() -> (RoutingView, RouteSolution) {
     let p = problem(
         vec![

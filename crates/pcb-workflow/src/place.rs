@@ -1727,6 +1727,292 @@ fn board_sizing(
     )
 }
 
+/// A legal compact placement and the managed outline it requires.
+pub(crate) struct OutlineRefitPlan {
+    pub result: PlaceResult,
+    pub from: Rect,
+    pub to: Rect,
+    pub headroom: crate::sizing::EdgeHeadroom,
+    pub edge_net_counts: [usize; 4],
+}
+
+/// Re-run a completed placement on the smallest rule-derived rectangular frame.
+///
+/// Edge-seated parts are removed from the interior bbox because their old
+/// outward coordinate encodes the oversized seed outline. Their physical depth
+/// and tangential span are added back explicitly, and the second placement
+/// seats them on the new frame before exact legality is accepted.
+pub(crate) fn plan_outline_refit(
+    problem: &PlacementView,
+    imported: &[ImportedPart],
+    routing: &pcb_model::RoutingView,
+    hints: &PlacementHints,
+    result: &PlaceResult,
+) -> Option<OutlineRefitPlan> {
+    if !result.legal || problem.parts.is_empty() {
+        return None;
+    }
+    let from = problem.bounds;
+    let placed: BTreeMap<&str, &Placement> = result
+        .placements
+        .iter()
+        .map(|placement| (placement.reference.as_str(), placement))
+        .collect();
+    let edge_parts = seated_edge_parts(problem, hints, &placed);
+    let mut core = None;
+    let mut edge_depth = [0.0_f64; 4];
+    let mut edge_spans: [Vec<f64>; 4] = Default::default();
+    for (index, part) in problem.parts.iter().enumerate() {
+        let placement = placed.get(part.reference.as_str())?;
+        let half = pcb_place::rotated_courtyard_half(part, placement.rotation);
+        let rect = Rect::from_center_half(placement.at, half);
+        if let Some(edge) = edge_parts.get(&index) {
+            let slot = edge_slot(*edge);
+            let (depth, span) = match edge {
+                Edge::W | Edge::E => (rect.width(), rect.height()),
+                Edge::N | Edge::S => (rect.height(), rect.width()),
+            };
+            edge_depth[slot] = edge_depth[slot].max(depth);
+            edge_spans[slot].push(span);
+        } else {
+            include_rect(&mut core, rect);
+        }
+    }
+    let center = from.center();
+    let core = core.unwrap_or_else(|| Rect::new(center.x, center.y, center.x, center.y));
+    let edge_net_counts = routing_edge_net_counts(problem, &placed);
+    let headroom = crate::sizing::routing_headroom(crate::sizing::RoutingChannels {
+        clearance: routing.clearance,
+        track_width: routing.max_route_width(),
+        via_diameter: routing.via_diameter,
+        layer_count: routing.layer_count,
+        edge_net_counts,
+    });
+    let courtyard_gap = pcb_place::courtyard_margin(problem.clearance);
+    let span = |values: &[f64]| {
+        values.iter().sum::<f64>()
+            + values.len().saturating_sub(1) as f64 * courtyard_gap
+    };
+    let mut width = core.width() + headroom.west + headroom.east;
+    let mut height = core.height() + headroom.north + headroom.south;
+    width = width
+        .max(edge_depth[edge_slot(Edge::W)] + headroom.east)
+        .max(edge_depth[edge_slot(Edge::E)] + headroom.west);
+    height = height
+        .max(edge_depth[edge_slot(Edge::N)] + headroom.south)
+        .max(edge_depth[edge_slot(Edge::S)] + headroom.north);
+    width = width
+        .max(span(&edge_spans[edge_slot(Edge::N)]) + headroom.west + headroom.east)
+        .max(span(&edge_spans[edge_slot(Edge::S)]) + headroom.west + headroom.east);
+    height = height
+        .max(span(&edge_spans[edge_slot(Edge::W)]) + headroom.north + headroom.south)
+        .max(span(&edge_spans[edge_slot(Edge::E)]) + headroom.north + headroom.south);
+
+    let hard = board_sizing(problem, imported, routing);
+    width = width.max(hard.required_w);
+    height = height.max(hard.required_h);
+    for keepout in &problem.keepouts {
+        width = width.max(2.0 * (keepout.min_x - center.x).abs());
+        width = width.max(2.0 * (keepout.max_x - center.x).abs());
+        height = height.max(2.0 * (keepout.min_y - center.y).abs());
+        height = height.max(2.0 * (keepout.max_y - center.y).abs());
+    }
+    for copper in copper_keepouts(&routing.fixed_copper) {
+        width = width.max(2.0 * (copper.min_x - center.x).abs() + 2.0 * EDGE_CLEAR_MM);
+        width = width.max(2.0 * (copper.max_x - center.x).abs() + 2.0 * EDGE_CLEAR_MM);
+        height = height.max(2.0 * (copper.min_y - center.y).abs() + 2.0 * EDGE_CLEAR_MM);
+        height = height.max(2.0 * (copper.max_y - center.y).abs() + 2.0 * EDGE_CLEAR_MM);
+    }
+    let width = width.ceil().max(1.0).min(from.width());
+    let height = height.ceil().max(1.0).min(from.height());
+    let candidate = Rect::from_center_half(center, (width / 2.0, height / 2.0));
+    let mut compact = problem.clone();
+    compact.bounds = candidate;
+    let candidate_result = pcb_engine::place_tuned(&compact, hints);
+    let (to, compact_result) = if candidate_result.legal {
+        (candidate, candidate_result)
+    } else {
+        let mut low = (width, height);
+        let mut high = (
+            from.width().ceil().max(low.0),
+            from.height().ceil().max(low.1),
+        );
+        compact.bounds = Rect::from_center_half(center, (high.0 / 2.0, high.1 / 2.0));
+        let mut best = if high == (from.width(), from.height()) {
+            result.clone()
+        } else {
+            pcb_engine::place_tuned(&compact, hints)
+        };
+        if !best.legal {
+            return None;
+        }
+        while high.0 - low.0 > 1.0 || high.1 - low.1 > 1.0 {
+            let middle = (
+                (low.0 + (high.0 - low.0) / 2.0).floor(),
+                (low.1 + (high.1 - low.1) / 2.0).floor(),
+            );
+            if middle == low || middle == high {
+                break;
+            }
+            compact.bounds = Rect::from_center_half(center, (middle.0 / 2.0, middle.1 / 2.0));
+            let trial = pcb_engine::place_tuned(&compact, hints);
+            if trial.legal {
+                high = middle;
+                best = trial;
+            } else {
+                low = middle;
+            }
+        }
+        (
+            Rect::from_center_half(center, (high.0 / 2.0, high.1 / 2.0)),
+            best,
+        )
+    };
+    Some(OutlineRefitPlan {
+        result: compact_result,
+        from,
+        to,
+        headroom,
+        edge_net_counts,
+    })
+}
+
+fn seated_edge_parts(
+    problem: &PlacementView,
+    hints: &PlacementHints,
+    placed: &BTreeMap<&str, &Placement>,
+) -> BTreeMap<usize, Edge> {
+    let mut explicit = BTreeMap::new();
+    for group in &hints.groups {
+        if let Some(edge) = group.edge {
+            for member in &group.members {
+                explicit.insert(member.as_str(), edge);
+            }
+        }
+    }
+    let seeking: std::collections::BTreeSet<&str> = hints
+        .edge_seek
+        .iter()
+        .map(String::as_str)
+        .chain(explicit.keys().copied())
+        .collect();
+    problem
+        .parts
+        .iter()
+        .enumerate()
+        .filter(|(_, part)| seeking.contains(part.reference.as_str()))
+        .filter_map(|(index, part)| {
+            let placement = placed.get(part.reference.as_str())?;
+            let half = pcb_place::rotated_courtyard_half(part, placement.rotation);
+            let rect = Rect::from_center_half(placement.at, half);
+            let edge = explicit
+                .get(part.reference.as_str())
+                .copied()
+                .unwrap_or_else(|| nearest_rect_edge(&problem.bounds, &rect));
+            Some((index, edge))
+        })
+        .collect()
+}
+
+fn nearest_rect_edge(bounds: &Rect, rect: &Rect) -> Edge {
+    [Edge::W, Edge::E, Edge::N, Edge::S]
+        .into_iter()
+        .min_by(|a, b| {
+            rect_edge_gap(bounds, rect, *a).total_cmp(&rect_edge_gap(bounds, rect, *b))
+        })
+        .expect("four board edges")
+}
+
+fn rect_edge_gap(bounds: &Rect, rect: &Rect, edge: Edge) -> f64 {
+    match edge {
+        Edge::W => rect.min_x - bounds.min_x,
+        Edge::E => bounds.max_x - rect.max_x,
+        Edge::N => rect.min_y - bounds.min_y,
+        Edge::S => bounds.max_y - rect.max_y,
+    }
+    .abs()
+}
+
+fn edge_slot(edge: Edge) -> usize {
+    match edge {
+        Edge::W => 0,
+        Edge::E => 1,
+        Edge::N => 2,
+        Edge::S => 3,
+    }
+}
+
+fn routing_edge_net_counts(
+    problem: &PlacementView,
+    placed: &BTreeMap<&str, &Placement>,
+) -> [usize; 4] {
+    let mut by_net: BTreeMap<&str, Vec<Point2>> = BTreeMap::new();
+    for part in &problem.parts {
+        let Some(placement) = placed.get(part.reference.as_str()) else {
+            continue;
+        };
+        for pad in &part.pads {
+            let Some(net) = pad.net.as_deref() else {
+                continue;
+            };
+            let offset = pad.offset.rotate(placement.rotation);
+            by_net.entry(net).or_default().push(Point2::new(
+                placement.at.x + offset.x,
+                placement.at.y + offset.y,
+            ));
+        }
+    }
+    let x_intervals: Vec<_> = by_net
+        .values()
+        .filter_map(|points| axis_interval(points, |point| point.x))
+        .collect();
+    let y_intervals: Vec<_> = by_net
+        .values()
+        .filter_map(|points| axis_interval(points, |point| point.y))
+        .collect();
+    let horizontal = maximum_cut_density(&x_intervals).div_ceil(2);
+    let vertical = maximum_cut_density(&y_intervals).div_ceil(2);
+    [vertical, vertical, horizontal, horizontal]
+}
+
+fn axis_interval(points: &[Point2], axis: impl Fn(Point2) -> f64) -> Option<(f64, f64)> {
+    let min = points.iter().copied().map(&axis).reduce(f64::min)?;
+    let max = points.iter().copied().map(axis).reduce(f64::max)?;
+    (max - min > geom::EPS).then_some((min, max))
+}
+
+fn maximum_cut_density(intervals: &[(f64, f64)]) -> usize {
+    let mut endpoints: Vec<f64> = intervals
+        .iter()
+        .flat_map(|(min, max)| [*min, *max])
+        .collect();
+    endpoints.sort_by(f64::total_cmp);
+    endpoints.dedup_by(|a, b| (*a - *b).abs() <= geom::EPS);
+    endpoints
+        .windows(2)
+        .map(|window| (window[0] + window[1]) / 2.0)
+        .map(|cut| {
+            intervals
+                .iter()
+                .filter(|(min, max)| *min < cut && cut < *max)
+                .count()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn include_rect(bounds: &mut Option<Rect>, rect: Rect) {
+    *bounds = Some(match *bounds {
+        None => rect,
+        Some(existing) => Rect::new(
+            existing.min_x.min(rect.min_x),
+            existing.min_y.min(rect.min_y),
+            existing.max_x.max(rect.max_x),
+            existing.max_y.max(rect.max_y),
+        ),
+    });
+}
+
 /// Estimate a one-retry board size from packing area and the largest footprint.
 /// The 817 plan requests a landscape result because its continuous horizontal
 /// isolation row is the dominant shape; generic failures preserve the caller's
@@ -2358,12 +2644,35 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // a locked part is not the same bytes the board already has.
     let mut gate = None;
     let mut retracted = None;
+    let mut outline_refit = None;
     // A subset placement answers only for the parts it may move.
     let legal = match &refs {
         Some(_) => subset_is_legal(&problem, &result, &free),
         None => result.legal,
     };
     if legal {
+        if refs.is_none() {
+            let path = ctx.pcb_path();
+            let board_text = std::fs::read_to_string(&path)?;
+            if let Err(error) = super::outline::managed_outline_bounds(&board_text) {
+                return Ok(json!({ "error": error }));
+            }
+            let mut routing = board.problem.clone();
+            routing.fixed_copper = board.copper.clone();
+            let Some(plan) = plan_outline_refit(
+                &problem,
+                &board.imported.parts,
+                &routing,
+                &hints,
+                &result,
+            ) else {
+                return Ok(json!({
+                    "error": "the first placement was legal, but no compact rule-derived outline could preserve legal placement"
+                }));
+            };
+            result = plan.result.clone();
+            outline_refit = Some(plan);
+        }
         let locked_refs: std::collections::BTreeSet<&str> = board
             .imported
             .parts
@@ -2383,7 +2692,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 rotation_deg: Some(p.rotation),
             })
             .collect();
-        if !moves.is_empty() {
+        if !moves.is_empty() || outline_refit.is_some() {
             let opened = match Guard::open(
                 ctx,
                 "place_board",
@@ -2393,33 +2702,60 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 Ok(opened) => opened,
                 Err(refusal) => return Ok(refusal),
             };
-            if let Err(e) = write_placement(ctx, &moves) {
-                let error = json!({ "error": format!("could not write placement: {e}") });
-                return Ok(opened.rollback(ctx, error));
+            if !moves.is_empty() {
+                if let Err(e) = write_placement(ctx, &moves) {
+                    let error = json!({ "error": format!("could not write placement: {e}") });
+                    return Ok(opened.rollback(ctx, error));
+                }
+                // A part that moves leaves its copper behind, and copper that no
+                // longer ends on a pad is at best dangling and at worst a short.
+                // Retract every net the moved parts touched, exactly as move_parts
+                // does, and name them for the re-route. This is also why placement
+                // never needs to treat that copper as an obstacle: it is going.
+                let moved = moves.iter().map(|m| m.reference.as_str());
+                let pads = crate::copper::pad_extents(&board.problem, moved);
+                let retract =
+                    crate::copper::retract(&board.copper, &pads, &std::collections::BTreeSet::new());
+                if retract.count > 0
+                    && let Err(e) = crate::copper::write_retained(
+                        ctx,
+                        board.problem.layer_count,
+                        &board.layer_names,
+                        &retract,
+                    )
+                {
+                    let error = json!({
+                        "error": format!("the parts were placed but their copper was not retracted: {e}"),
+                    });
+                    return Ok(opened.rollback(ctx, error));
+                }
+                retracted = Some(retract);
             }
-            // A part that moves leaves its copper behind, and copper that no
-            // longer ends on a pad is at best dangling and at worst a short.
-            // Retract every net the moved parts touched, exactly as move_parts
-            // does, and name them for the re-route. This is also why placement
-            // never needs to treat that copper as an obstacle: it is going.
-            let moved = moves.iter().map(|m| m.reference.as_str());
-            let pads = crate::copper::pad_extents(&board.problem, moved);
-            let retract =
-                crate::copper::retract(&board.copper, &pads, &std::collections::BTreeSet::new());
-            if retract.count > 0
-                && let Err(e) = crate::copper::write_retained(
-                    ctx,
-                    board.problem.layer_count,
-                    &board.layer_names,
-                    &retract,
-                )
-            {
-                let error = json!({
-                    "error": format!("the parts were placed but their copper was not retracted: {e}"),
-                });
-                return Ok(opened.rollback(ctx, error));
+            if let Some(plan) = &outline_refit {
+                let path = ctx.pcb_path();
+                let placed = match std::fs::read_to_string(&path) {
+                    Ok(placed) => placed,
+                    Err(error) => {
+                        return Ok(opened.rollback(
+                            ctx,
+                            json!({ "error": format!("could not read placed board: {error}") }),
+                        ));
+                    }
+                };
+                let updated = match super::outline::replace_managed_outline(&placed, plan.to) {
+                    Ok(updated) => updated,
+                    Err(error) => {
+                        return Ok(opened.rollback(ctx, json!({ "error": error.to_string() })));
+                    }
+                };
+                ctx.close_kicad_session();
+                if let Err(error) = crate::route::write_board_atomically(&path, updated.as_bytes()) {
+                    return Ok(opened.rollback(
+                        ctx,
+                        json!({ "error": format!("could not write fitted outline: {error}") }),
+                    ));
+                }
             }
-            retracted = Some(retract);
             gate = Some(opened);
         }
     }
@@ -2484,6 +2820,9 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     if !legal {
         out["error"] = Value::String(illegal_placement_error(&out));
+    }
+    if let Some(plan) = &outline_refit {
+        out["outline_refit"] = super::outline::outline_refit_json(plan);
     }
     let retract = retracted.unwrap_or_default();
     out["retracted_tracks"] = json!(retract.count);
