@@ -14,3 +14,4 @@ fastrand.workspace = true
 
 [dev-dependencies]
 geom = { path = "../geom" }
+fastrand.workspace = true

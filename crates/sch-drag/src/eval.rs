@@ -1,41 +1,55 @@
 //! What "cleanest" means, as a number.
 //!
-//! The terms are the ones a reviewer's eye lands on: how much wire there is,
-//! how often it turns, how often it crosses, whether it runs through a part,
-//! whether text collides, whether a connection was made with a label instead of
-//! a wire, and how far apart the parts of one net were left. Everything is read
-//! off a [`Sheet`], so scoring a candidate costs one scene pass and no KiCAD.
+//! The terms are the ones a reviewer's eye lands on, in the three tiers a
+//! reviewer reads them in. A **fault** makes the drawing wrong to look at — a
+//! wire ruled through a part, a wire end hanging in space, a dot that connects
+//! nothing, two bodies on top of each other. One of those caps a sheet's score
+//! however tidy the rest is, so each is worth hundreds of millimetres here. A
+//! **blemish** is a crossing or a needless corner. The rest is *tidiness*: total
+//! wire, how far apart one net's pins were left, how badly identical parts fail
+//! to line up.
+//!
+//! Everything is read off a [`Sheet`], so scoring a candidate costs one scene
+//! pass and no KiCAD.
+
+use std::collections::HashMap;
 
 use geom::{Point2, Rect, Segment};
 
 use crate::sheet::Sheet;
 
-/// How much each defect counts against a sheet.
-///
-/// Millimetres are the unit of account: a weight is "how many millimetres of
-/// extra wire this defect is worth", which is what keeps the terms comparable
-/// when the search trades one for another.
+/// How much each defect counts against a sheet, in millimetres of equivalent
+/// wire — the unit that keeps the terms comparable when the search trades one
+/// for another.
 #[derive(Debug, Clone, Copy)]
 pub struct Weights {
-    pub bend: f64,
-    pub crossing: f64,
     pub through_body: f64,
+    pub body_overlap: f64,
+    pub dangling_end: f64,
+    pub junction_fault: f64,
+    pub crossing: f64,
+    pub bend: f64,
     pub text_collision: f64,
+    pub crowding: f64,
     pub label: f64,
     pub net_spread: f64,
-    pub body_overlap: f64,
+    pub misalignment: f64,
 }
 
 impl Default for Weights {
     fn default() -> Self {
         Weights {
-            bend: 2.0,
-            crossing: 14.0,
-            through_body: 60.0,
-            text_collision: 8.0,
-            label: 20.0,
+            through_body: 400.0,
+            body_overlap: 600.0,
+            dangling_end: 400.0,
+            junction_fault: 200.0,
+            crossing: 25.0,
+            bend: 10.0,
+            text_collision: 12.0,
+            crowding: 40.0,
+            label: 30.0,
             net_spread: 0.30,
-            body_overlap: 500.0,
+            misalignment: 1.0,
         }
     }
 }
@@ -47,25 +61,44 @@ pub struct Metrics {
     pub bends: usize,
     pub crossings: usize,
     pub through_bodies: usize,
-    pub text_collisions: usize,
-    pub labels: usize,
-    /// Sum over nets of the half-perimeter of the box their pins span — the
-    /// term that pulls a decoupling cap onto its IC's pin.
-    pub net_spread: f64,
     pub body_overlaps: usize,
+    pub dangling_ends: usize,
+    pub junction_faults: usize,
+    pub text_collisions: usize,
+    /// Bodies closer than a wire can pass between.
+    pub crowding: usize,
+    /// Local labels standing in for a wire — the "wired it with a name" debit,
+    /// and the only label count worth having: a power, global or hierarchical
+    /// name is design, not a shortcut.
+    pub labels: usize,
+    /// Sum over small nets of the half-perimeter of the box their pins span —
+    /// the term that pulls a decoupling cap onto its IC's pin.
+    pub net_spread: f64,
+    /// How badly identical parts fail to share a row or a column.
+    pub misalignment: f64,
 }
 
 impl Metrics {
+    /// How many outright faults the sheet has — what a reviewer's score is
+    /// capped by, however tidy the rest of it is.
+    pub fn faults(&self) -> usize {
+        self.through_bodies + self.body_overlaps + self.dangling_ends + self.junction_faults
+    }
+
     /// The single number the search minimises.
     pub fn score(&self, w: &Weights) -> f64 {
         self.wire_length
-            + w.bend * self.bends as f64
-            + w.crossing * self.crossings as f64
             + w.through_body * self.through_bodies as f64
+            + w.body_overlap * self.body_overlaps as f64
+            + w.dangling_end * self.dangling_ends as f64
+            + w.junction_fault * self.junction_faults as f64
+            + w.crossing * self.crossings as f64
+            + w.bend * self.bends as f64
             + w.text_collision * self.text_collisions as f64
+            + w.crowding * self.crowding as f64
             + w.label * self.labels as f64
             + w.net_spread * self.net_spread
-            + w.body_overlap * self.body_overlaps as f64
+            + w.misalignment * self.misalignment
     }
 }
 
@@ -73,7 +106,7 @@ fn segment_rect(a: Point2, b: Point2) -> Rect {
     Rect::from_points(a, b).inflate(0.01)
 }
 
-/// Perpendicular wire crossings that are not connections.
+/// Perpendicular wire crossings, which are not connections.
 pub fn crossings(sheet: &Sheet) -> usize {
     let boxes: Vec<Rect> = sheet.wires.iter().map(|w| segment_rect(w.a, w.b)).collect();
     geom::candidate_pairs(&boxes)
@@ -136,29 +169,44 @@ pub fn text_collisions(sheet: &Sheet) -> usize {
         }
     }
     for text in &sheet.texts {
-        if sheet
-            .wires
-            .iter()
-            .any(|w| Segment::new(w.a, w.b).axis_aligned_hits_rect_interior(&text.rect))
-        {
-            count += 1;
-        }
+        count += usize::from(
+            sheet
+                .wires
+                .iter()
+                .any(|w| Segment::new(w.a, w.b).axis_aligned_hits_rect_interior(&text.rect)),
+        );
     }
     count
 }
 
-/// Part bodies that overlap each other.
-pub fn body_overlaps(sheet: &Sheet) -> usize {
+/// Part bodies that overlap, and part bodies too close for a wire to pass.
+pub fn spacing(sheet: &Sheet) -> (usize, usize) {
     let boxes: Vec<Rect> = sheet.part_bodies().map(|b| b.rect).collect();
-    geom::candidate_pairs(&boxes)
-        .into_iter()
-        .filter(|(i, j)| boxes[*i].overlaps(&boxes[*j]))
-        .count()
+    let near: Vec<Rect> = boxes.iter().map(|r| r.inflate(1.27)).collect();
+    let (mut overlaps, mut crowded) = (0, 0);
+    for (i, j) in geom::candidate_pairs(&near) {
+        if boxes[i].overlaps(&boxes[j]) {
+            overlaps += 1;
+        } else if near[i].overlaps(&near[j]) {
+            crowded += 1;
+        }
+    }
+    (overlaps, crowded)
 }
 
-/// Sum over nets of the half-perimeter of the box their pins span.
+/// Local labels standing in for a wire: a name used exactly twice, which is
+/// what a two-ended connection drawn as a name looks like.
+pub fn substitute_labels(sheet: &Sheet) -> usize {
+    let mut uses: HashMap<&str, usize> = HashMap::new();
+    for name in sheet.label_names.values() {
+        *uses.entry(name.as_str()).or_default() += 1;
+    }
+    uses.values().filter(|n| **n == 2).count()
+}
+
+/// Sum over small nets of the half-perimeter of the box their pins span.
 pub fn net_spread(sheet: &Sheet) -> f64 {
-    let mut by_net: std::collections::HashMap<&str, Vec<Point2>> = std::collections::HashMap::new();
+    let mut by_net: HashMap<&str, Vec<Point2>> = HashMap::new();
     for pin in &sheet.pins {
         if let Some(net) = sheet.net_at(pin.at)
             && !net.starts_with('#')
@@ -168,25 +216,55 @@ pub fn net_spread(sheet: &Sheet) -> f64 {
     }
     by_net
         .values()
-        .filter(|pins| pins.len() > 1)
         // A rail with dozens of pins is never drawn compactly; charging its full
         // span would drown every local decision out.
-        .filter(|pins| pins.len() <= 8)
+        .filter(|pins| (2..=8).contains(&pins.len()))
         .filter_map(|pins| Rect::bounding(pins))
         .map(|r| r.half_perimeter())
         .sum()
 }
 
+/// How far identical parts are from sharing a row or a column.
+///
+/// A bank of decoupling caps or pull-ups a human drew is flush; the same parts
+/// scattered are not, and no wire-length term notices the difference.
+pub fn misalignment(sheet: &Sheet) -> f64 {
+    let mut banks: HashMap<&str, Vec<Point2>> = HashMap::new();
+    for body in sheet.part_bodies() {
+        banks
+            .entry(body.lib_id.as_str())
+            .or_default()
+            .push(body.rect.center());
+    }
+    let mut debt = 0.0;
+    for centres in banks.values().filter(|c| c.len() > 1) {
+        for centre in centres {
+            debt += centres
+                .iter()
+                .filter(|other| **other != *centre)
+                .map(|other| (other.x - centre.x).abs().min((other.y - centre.y).abs()))
+                .fold(f64::INFINITY, f64::min)
+                .min(5.08);
+        }
+    }
+    debt
+}
+
 /// Measure a sheet.
 pub fn measure(sheet: &Sheet) -> Metrics {
+    let (body_overlaps, crowding) = spacing(sheet);
     Metrics {
         wire_length: sheet.wires.iter().map(|w| w.length()).sum(),
         bends: bends(sheet),
         crossings: crossings(sheet),
         through_bodies: through_bodies(sheet),
+        body_overlaps,
+        dangling_ends: sheet.dangling_ends(),
+        junction_faults: sheet.junction_faults(),
         text_collisions: text_collisions(sheet),
-        labels: sheet.label_names.len(),
+        crowding,
+        labels: substitute_labels(sheet),
         net_spread: net_spread(sheet),
-        body_overlaps: body_overlaps(sheet),
+        misalignment: misalignment(sheet),
     }
 }

@@ -15,11 +15,17 @@ pub fn key(p: Point2) -> NodeKey {
     p.quantized_key(1000.0)
 }
 
+/// The point a connection-node key stands for.
+pub fn point_of(k: &NodeKey) -> Point2 {
+    Point2::new(k.0 as f64 / 1000.0, k.1 as f64 / 1000.0)
+}
+
 /// A placed symbol's drawn outline.
 #[derive(Debug, Clone)]
 pub struct Body {
     pub uuid: String,
     pub refdes: String,
+    pub lib_id: String,
     pub rect: Rect,
     /// A power symbol is a rail marker, not a part: it may sit anywhere and its
     /// tiny body is not an obstacle worth routing around.
@@ -76,6 +82,10 @@ pub struct Sheet {
     pub pins_at: HashMap<NodeKey, Vec<usize>>,
     /// Nodes a junction, no-connect, label or sheet pin pins in place.
     pub fixtures: HashSet<NodeKey>,
+    /// Connection dots, which also attach part-way along a wire.
+    pub junctions: HashSet<NodeKey>,
+    /// Hierarchical sheet pins, which attach part-way along a wire too.
+    pub sheet_pins: HashSet<NodeKey>,
     /// Local/global/hierarchical label anchors, by node.
     pub label_names: HashMap<NodeKey, String>,
 }
@@ -103,6 +113,8 @@ impl Sheet {
 
         let mut wires = Vec::new();
         let mut fixtures = HashSet::new();
+        let mut junctions = HashSet::new();
+        let mut sheet_pins = HashSet::new();
         let mut label_names = HashMap::new();
         let mut texts = Vec::new();
         for item in doc.items() {
@@ -122,6 +134,7 @@ impl Sheet {
                 }
                 Item::Junction(j) => {
                     fixtures.insert(key(j.at));
+                    junctions.insert(key(j.at));
                 }
                 Item::NoConnect(n) => {
                     fixtures.insert(key(n.at));
@@ -139,6 +152,7 @@ impl Sheet {
                 Item::Sheet(s) => {
                     for pin in &s.pins {
                         fixtures.insert(key(pin.at.point()));
+                        sheet_pins.insert(key(pin.at.point()));
                     }
                 }
                 _ => {}
@@ -154,6 +168,7 @@ impl Sheet {
             bodies.push(Body {
                 uuid: symbol.uuid.clone(),
                 refdes: symbol.refdes().to_string(),
+                lib_id: symbol.lib_id.clone(),
                 rect,
                 power,
             });
@@ -189,8 +204,108 @@ impl Sheet {
             incident,
             pins_at,
             fixtures,
+            junctions,
+            sheet_pins,
             label_names,
         }
+    }
+
+    /// Wires whose *interior* the point lies on — where a junction or a sheet
+    /// pin makes a connection and a bare wire end does not.
+    pub fn wires_through(&self, p: Point2) -> impl Iterator<Item = usize> {
+        self.wires.iter().enumerate().filter_map(move |(i, w)| {
+            let inside = if w.horizontal() {
+                (w.a.y - p.y).abs() < geom::EPS
+                    && p.x > w.a.x.min(w.b.x) + geom::EPS
+                    && p.x < w.a.x.max(w.b.x) - geom::EPS
+            } else {
+                (w.a.x - p.x).abs() < geom::EPS
+                    && p.y > w.a.y.min(w.b.y) + geom::EPS
+                    && p.y < w.a.y.max(w.b.y) - geom::EPS
+            };
+            inside.then_some(i)
+        })
+    }
+
+    /// Wire ends at a point, and wires running through it.
+    pub fn incidence(&self, p: Point2) -> (usize, usize) {
+        (
+            self.incident.get(&key(p)).map_or(0, Vec::len),
+            self.wires_through(p).count(),
+        )
+    }
+
+    /// Whether KiCAD needs a connection dot here: three or more wire ends
+    /// meeting, or an end landing part-way along another wire. Two wires merely
+    /// crossing need none — and a dot there would mean the opposite.
+    pub fn junction_needed(&self, p: Point2) -> bool {
+        let (ends, through) = self.incidence(p);
+        ends >= 3 || (ends >= 1 && through >= 1)
+    }
+
+    /// Whether a dot here connects nothing at all.
+    pub fn junction_inert(&self, p: Point2) -> bool {
+        let (ends, through) = self.incidence(p);
+        ends <= 1 && through == 0
+    }
+
+    /// What the drawing alone connects, before any label or power name merges
+    /// two partitions: a component id per connection point.
+    ///
+    /// The net partition cannot see a wire that was dropped from a rail two
+    /// labels also name; this can, which is what makes it the gate that matters.
+    pub fn drawn(&self) -> HashMap<NodeKey, usize> {
+        let index: HashMap<NodeKey, usize> = self
+            .node_net
+            .keys()
+            .enumerate()
+            .map(|(i, k)| (*k, i))
+            .collect();
+        let mut sets = geom::UnionFind::new(index.len());
+        let mut join = |a: NodeKey, b: NodeKey| {
+            if let (Some(i), Some(j)) = (index.get(&a), index.get(&b)) {
+                sets.union(*i, *j);
+            }
+        };
+        for wire in &self.wires {
+            join(key(wire.a), key(wire.b));
+        }
+        for node in self.junctions.iter().chain(&self.sheet_pins) {
+            let p = point_of(node);
+            for wire in self.wires_through(p) {
+                join(*node, key(self.wires[wire].a));
+            }
+        }
+        index.into_iter().map(|(k, i)| (k, sets.find(i))).collect()
+    }
+
+    /// Wire ends left hanging in space — no pin, no dot, no label, not even
+    /// resting on another wire. A reader reads one as a mistake, and it is.
+    pub fn dangling_ends(&self) -> usize {
+        self.incident
+            .iter()
+            .filter(|(node, wires)| {
+                wires.len() == 1
+                    && !self.fixtures.contains(*node)
+                    && !self.pins_at.contains_key(*node)
+                    && self.wires_through(point_of(node)).next().is_none()
+            })
+            .count()
+    }
+
+    /// Dots that connect nothing, and points that need one and have none.
+    pub fn junction_faults(&self) -> usize {
+        let stray = self
+            .junctions
+            .iter()
+            .filter(|k| self.junction_inert(point_of(k)))
+            .count();
+        let missing = self
+            .incident
+            .keys()
+            .filter(|k| !self.junctions.contains(*k) && self.junction_needed(point_of(k)))
+            .count();
+        stray + missing
     }
 
     /// The net at a connection point, if the sheet has one there.

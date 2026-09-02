@@ -13,7 +13,7 @@ use std::time::Instant;
 use geom::Point2;
 use sch_doc::{Mirror, SchDoc};
 
-use crate::drag::{DragError, Placement, drag};
+use crate::drag::{DragError, Placement, drag_from};
 use crate::eval::{Metrics, Weights, measure};
 use crate::route::snap;
 use crate::sheet::Sheet;
@@ -85,7 +85,12 @@ fn page_bounds(doc: &SchDoc) -> geom::Rect {
 /// Line one of a symbol's pins up with a pin it shares a net with — the move
 /// that turns a dog-leg into a straight wire.
 fn alignment(sheet: &Sheet, rng: &mut fastrand::Rng, id: &str, here: Placement) -> Option<Step> {
-    let uuid = sheet.pins.iter().find(|p| p.refdes == id)?.owner.clone();
+    let uuid = sheet
+        .pins
+        .iter()
+        .find(|p| p.owner == id || p.refdes == id)?
+        .owner
+        .clone();
     let mine: Vec<&sch_doc::PlacedPin> = sheet.pins_of(&uuid).collect();
     if mine.is_empty() {
         return None;
@@ -159,9 +164,11 @@ fn propose(
     }
 }
 
-fn apply(doc: &mut SchDoc, step: &Step) -> Result<(), DragError> {
+/// Apply a step, threading the sheet view through so each drag pays for one
+/// scene pass instead of two.
+fn apply(doc: &mut SchDoc, step: &Step, before: &Sheet) -> Result<Sheet, DragError> {
     match step {
-        Step::Pose(id, to) => drag(doc, id, *to).map(|_| ()),
+        Step::Pose(id, to) => drag_from(doc, id, *to, before).map(|(_, after)| after),
         Step::Swap(a, to_a, b, to_b) => {
             // Park the first one clear of the second, or the two drags collide
             // on the square they are exchanging.
@@ -169,17 +176,18 @@ fn apply(doc: &mut SchDoc, step: &Step) -> Result<(), DragError> {
                 at: Point2::new(to_a.at.x, to_a.at.y - 1000.0),
                 ..*to_a
             };
-            drag(doc, a, park)?;
-            drag(doc, b, *to_b)?;
-            drag(doc, a, *to_a)?;
-            Ok(())
+            let (_, parked) = drag_from(doc, a, park, before)?;
+            let (_, swapped) = drag_from(doc, b, *to_b, &parked)?;
+            drag_from(doc, a, *to_a, &swapped).map(|(_, after)| after)
         }
     }
 }
 
 /// Search over drags for the cleanest version of this sheet.
 ///
-/// Symbols outside `movable` never move. The best sheet found is written back
+/// `movable` names symbols by UUID or by reference designator; a reference a
+/// multi-unit part shares names only its first unit, so a caller that wants
+/// every unit to move should pass UUIDs. Symbols outside `movable` never move. The best sheet found is written back
 /// into `doc`; if nothing beat the start, `doc` is left exactly as it was.
 pub fn tidy(doc: &mut SchDoc, movable: &[String], options: &TidyOptions) -> TidyReport {
     let weights = options.weights;
@@ -187,7 +195,8 @@ pub fn tidy(doc: &mut SchDoc, movable: &[String], options: &TidyOptions) -> Tidy
     let mut rng = fastrand::Rng::with_seed(options.seed);
     let start = Instant::now();
 
-    let before = measure(&Sheet::of(doc));
+    let mut sheet = Sheet::of(doc);
+    let before = measure(&sheet);
     let mut current = doc.clone();
     let mut current_score = before.score(&weights);
     let mut best = current.clone();
@@ -206,7 +215,6 @@ pub fn tidy(doc: &mut SchDoc, movable: &[String], options: &TidyOptions) -> Tidy
         let progress = start.elapsed().as_secs_f64() / options.seconds;
         let temperature = hot * (0.02_f64).powf(progress);
 
-        let sheet = Sheet::of(&current);
         let poses: HashMap<String, Placement> = movable
             .iter()
             .filter_map(|id| Placement::of(&current, id).map(|p| (id.clone(), p)))
@@ -217,16 +225,16 @@ pub fn tidy(doc: &mut SchDoc, movable: &[String], options: &TidyOptions) -> Tidy
         report.proposed += 1;
 
         let mut trial = current.clone();
-        match apply(&mut trial, &step) {
-            Ok(()) => {}
+        let trial_sheet = match apply(&mut trial, &step, &sheet) {
+            Ok(after) => after,
             Err(DragError::Truthfulness(_)) => {
                 report.refused += 1;
                 continue;
             }
             Err(_) => continue,
-        }
+        };
 
-        let score = measure(&Sheet::of(&trial)).score(&weights);
+        let score = measure(&trial_sheet).score(&weights);
         let delta = score - current_score;
         let keep = delta < 0.0 || rng.f64() < (-delta / temperature).exp();
         if !keep {
@@ -238,6 +246,7 @@ pub fn tidy(doc: &mut SchDoc, movable: &[String], options: &TidyOptions) -> Tidy
         }
         current = trial;
         current_score = score;
+        sheet = trial_sheet;
         if current_score < best_score - 1e-9 {
             best_score = current_score;
             best = current.clone();

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use geom::{Point2, Segment};
 
-use crate::sheet::{Sheet, key};
+use crate::sheet::Sheet;
 
 /// KiCAD's schematic grid. Every point this module invents lands on it.
 pub const GRID: f64 = 1.27;
@@ -52,23 +52,21 @@ fn strictly_between(v: f64, a: f64, b: f64) -> bool {
 }
 
 impl<'a> Obstacles<'a> {
-    /// Index everything the router must avoid. `removed` names wire UUIDs the
-    /// drag has retracted, which are no longer scenery.
-    pub fn new(sheet: &'a Sheet, removed: &[String]) -> Obstacles<'a> {
+    /// Index everything the router must avoid.
+    pub fn new(sheet: &'a Sheet) -> Obstacles<'a> {
         let mut horizontal: HashMap<i64, Vec<(f64, f64, &str)>> = HashMap::new();
         let mut vertical: HashMap<i64, Vec<(f64, f64, &str)>> = HashMap::new();
         let mut live_nodes: Vec<(Point2, &str)> = Vec::new();
         for seg in &sheet.wires {
-            if removed.contains(&seg.uuid) {
-                continue;
-            }
             if seg.horizontal() {
                 horizontal.entry(q(seg.a.y)).or_default().push((
                     seg.a.x,
                     seg.b.x,
                     seg.net.as_str(),
                 ));
-            } else if seg.vertical() {
+            } else {
+                // A wire drawn off-axis still blocks its own line; treating it
+                // as vertical keeps it visible to the span test either way.
                 vertical
                     .entry(q(seg.a.x))
                     .or_default()
@@ -99,7 +97,15 @@ impl<'a> Obstacles<'a> {
             nodes_by_x.entry(q(p.x)).or_default().push((p.y, net));
         }
 
-        let bodies = sheet.part_bodies().map(|b| b.rect.inflate(-0.05)).collect();
+        // Every body, power rail glyphs included: a wire ruled through a GND
+        // symbol reads exactly as badly as one ruled through an IC. Text is an
+        // obstacle too, or the router keeps buying collisions the score pays for.
+        let bodies = sheet
+            .bodies
+            .iter()
+            .map(|b| b.rect.inflate(-0.05))
+            .chain(sheet.texts.iter().map(|t| t.rect.inflate(-0.05)))
+            .collect();
 
         Obstacles {
             sheet,
@@ -132,7 +138,7 @@ impl<'a> Obstacles<'a> {
         }
     }
 
-    fn hits_body(&self, a: Point2, b: Point2) -> bool {
+    pub(crate) fn hits_body(&self, a: Point2, b: Point2) -> bool {
         let seg = Segment::new(a, b);
         self.bodies
             .iter()
@@ -141,7 +147,7 @@ impl<'a> Obstacles<'a> {
 
     /// Whether a segment runs along another wire, or through a connection point
     /// of a foreign net.
-    fn conflicts(&self, a: Point2, b: Point2, net: &str) -> bool {
+    pub(crate) fn conflicts(&self, a: Point2, b: Point2, net: &str) -> bool {
         let horizontal = (a.y - b.y).abs() < geom::EPS;
         let (lane, others) = if horizontal {
             (q(a.y), &self.horizontal)
@@ -173,7 +179,7 @@ impl<'a> Obstacles<'a> {
 
     /// Whether a corner would land on a foreign net's wire or point, which
     /// reads as a connection that is not one.
-    fn corner_blocked(&self, p: Point2, net: &str) -> bool {
+    pub(crate) fn corner_blocked(&self, p: Point2, net: &str) -> bool {
         if let Some(n) = self.sheet.net_at(p)
             && n != net
         {
@@ -188,7 +194,8 @@ impl<'a> Obstacles<'a> {
         on_foreign(self.horizontal.get(&q(p.y)), p.x) || on_foreign(self.vertical.get(&q(p.x)), p.y)
     }
 
-    fn path_ok(&self, path: &[Point2], net: &str) -> bool {
+    /// Whether a whole path is legal — the check the label fallback needs too.
+    pub fn path_ok(&self, path: &[Point2], net: &str) -> bool {
         for pair in path.windows(2) {
             if pair[0].near_eq(pair[1], geom::EPS) {
                 continue;
@@ -291,7 +298,100 @@ pub fn route(
         })
 }
 
-/// Whether a point already carries a connection node.
-pub fn is_node(sheet: &Sheet, p: Point2) -> bool {
-    sheet.node_net.contains_key(&key(p))
+/// A lattice search for a path the L/Z candidates cannot see.
+///
+/// The enumerated shapes never leave the box spanned by the two ends, so on a
+/// crowded sheet — where the only free channel runs *around* a part — they all
+/// fail and the caller is forced into a label. This finds the detour: a
+/// bend-penalised shortest path on the [`GRID`] lattice through `from`, inside
+/// a window generous enough to go around a part and tight enough to stay cheap.
+pub fn maze(
+    obstacles: &Obstacles,
+    from: Point2,
+    out_dir: Point2,
+    to: Point2,
+    net: &str,
+) -> Option<Path> {
+    let steps = |v: f64| (v / GRID).round() as i32;
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    if (dx - steps(dx) as f64 * GRID).abs() > 1e-6 || (dy - steps(dy) as f64 * GRID).abs() > 1e-6 {
+        return None;
+    }
+    const MARGIN: i32 = 12;
+    let (goal_x, goal_y) = (steps(dx), steps(dy));
+    let (lo_x, hi_x) = (goal_x.min(0) - MARGIN, goal_x.max(0) + MARGIN);
+    let (lo_y, hi_y) = (goal_y.min(0) - MARGIN, goal_y.max(0) + MARGIN);
+    let (width, height) = ((hi_x - lo_x + 1) as usize, (hi_y - lo_y + 1) as usize);
+    let point = |x: i32, y: i32| Point2::new(from.x + x as f64 * GRID, from.y + y as f64 * GRID);
+    let index =
+        |x: i32, y: i32, d: usize| (((y - lo_y) as usize * width + (x - lo_x) as usize) * 4) + d;
+
+    const DIRS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+    let bend = 6.0;
+    let mut best = vec![f64::INFINITY; width * height * 4];
+    let mut from_state: Vec<u32> = vec![u32::MAX; width * height * 4];
+    let mut queue: std::collections::BinaryHeap<(std::cmp::Reverse<u64>, u32)> = Default::default();
+    let encode = |cost: f64| std::cmp::Reverse((cost * 64.0) as u64);
+
+    for (d, (sx, sy)) in DIRS.iter().enumerate() {
+        let straight = *sx as f64 * out_dir.x + *sy as f64 * out_dir.y > 0.5;
+        let cost = if straight { 0.0 } else { bend * 2.0 };
+        let state = index(0, 0, d) as u32;
+        best[state as usize] = cost;
+        queue.push((encode(cost), state));
+    }
+
+    let mut goal = None;
+    while let Some((std::cmp::Reverse(raw), state)) = queue.pop() {
+        let cost = raw as f64 / 64.0;
+        if cost > best[state as usize] + 1e-9 {
+            continue;
+        }
+        let d = state as usize % 4;
+        let cell = state as usize / 4;
+        let (x, y) = ((cell % width) as i32 + lo_x, (cell / width) as i32 + lo_y);
+        if (x, y) == (goal_x, goal_y) {
+            goal = Some(state);
+            break;
+        }
+        for (nd, (sx, sy)) in DIRS.iter().enumerate() {
+            let (nx, ny) = (x + sx, y + sy);
+            if nx < lo_x || nx > hi_x || ny < lo_y || ny > hi_y {
+                continue;
+            }
+            let (a, b) = (point(x, y), point(nx, ny));
+            if obstacles.hits_body(a, b) || obstacles.conflicts(a, b, net) {
+                continue;
+            }
+            // Only a cell the path actually turns at reads as a connection;
+            // one it runs straight through is just a crossing.
+            if nd != d && obstacles.corner_blocked(point(x, y), net) {
+                continue;
+            }
+            let next = cost + GRID + if nd == d { 0.0 } else { bend };
+            let slot = index(nx, ny, nd);
+            if next + 1e-9 < best[slot] {
+                best[slot] = next;
+                from_state[slot] = state;
+                queue.push((encode(next), slot as u32));
+            }
+        }
+    }
+
+    let mut state = goal?;
+    let mut cells = Vec::new();
+    loop {
+        let cell = state as usize / 4;
+        cells.push(point(
+            (cell % width) as i32 + lo_x,
+            (cell / width) as i32 + lo_y,
+        ));
+        let previous = from_state[state as usize];
+        if previous == u32::MAX {
+            break;
+        }
+        state = previous;
+    }
+    cells.reverse();
+    Some(dedup(cells))
 }
