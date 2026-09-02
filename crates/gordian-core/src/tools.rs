@@ -468,8 +468,26 @@ pub fn tool_defs() -> Vec<Tool> {
     gordian_tools_sch::tool_defs()
         .into_iter()
         .chain(defs.into_iter().map(|d| {
+            let description = if matches!(
+                d.name.as_str(),
+                "sync_board"
+                    | "place_board"
+                    | "route_board"
+                    | "move_parts"
+                    | "route_track"
+                    | "delete_copper"
+                    | "set_net_width"
+                    | "update_board_outline"
+            ) {
+                format!(
+                    "{} Success returns the pre-write `revision`.",
+                    d.description
+                )
+            } else {
+                d.description
+            };
             Tool::new(d.name)
-                .with_description(d.description)
+                .with_description(description)
                 .with_schema(d.input_schema)
         }))
         .collect()

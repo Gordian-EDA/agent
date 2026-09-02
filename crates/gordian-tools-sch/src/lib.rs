@@ -372,6 +372,11 @@ pub fn tool_defs() -> Vec<Tool> {
     ];
     defs.into_iter()
         .map(|(name, description, schema)| {
+            let description = if MUTATORS.contains(&name) {
+                format!("{description} Success returns the pre-write `revision`.")
+            } else {
+                description.to_owned()
+            };
             Tool::new(name)
                 .with_description(description)
                 .with_schema(schema)

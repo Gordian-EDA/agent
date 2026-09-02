@@ -55,8 +55,23 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": err }));
     }
     let retract = retracted_copper(&snapshot, &plan);
+    let revision = match ctx.revisions().capture(
+        "move_parts",
+        "Move board footprints",
+        &[ctx.pcb_path()],
+    ) {
+        Ok(revision) => revision,
+        Err(error) => {
+            return Ok(
+                json!({ "error": format!("could not capture the board before moving parts: {error}") }),
+            );
+        }
+    };
     if let Err(err) = crate::place::write_placement(ctx, &plan.ipc_moves) {
-        return Ok(json!({ "error": format!("move_parts could not write the board: {err}") }));
+        return Ok(json!({
+            "error": format!("move_parts could not write the board: {err}"),
+            "revision": revision,
+        }));
     }
     if let Err(err) = crate::copper::write_retained(
         ctx,
@@ -66,9 +81,12 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     ) {
         return Ok(json!({
             "error": format!("move_parts moved the parts but could not retract their copper: {err}"),
+            "revision": revision,
         }));
     }
-    Ok(plan.output(&retract))
+    let mut output = plan.output(&retract);
+    output["revision"] = json!(revision);
+    Ok(output)
 }
 
 /// Copper the move invalidates: every net with a trace ending on a pad that
@@ -531,14 +549,29 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     ctx.close_kicad_session();
     match prepared {
         Ok((problem, solution, request, layer_names)) => {
+            let revision = match ctx.revisions().capture(
+                "route_track",
+                "Route one board connection",
+                &[ctx.pcb_path()],
+            ) {
+                Ok(revision) => revision,
+                Err(error) => {
+                    return Ok(
+                        json!({ "error": format!("could not capture the board before routing: {error}") }),
+                    );
+                }
+            };
             if let Err(err) =
                 super::route::write_route_offline(ctx, &problem, &solution, &layer_names)
             {
-                return Ok(
-                    json!({ "error": format!("route_track could not write copper: {err}") }),
-                );
+                return Ok(json!({
+                    "error": format!("route_track could not write copper: {err}"),
+                    "revision": revision,
+                }));
             }
-            Ok(route_track_output(&problem, &solution, &request))
+            let mut output = route_track_output(&problem, &solution, &request);
+            output["revision"] = json!(revision);
+            Ok(output)
         }
         Err(err) => Ok(json!({ "error": err })),
     }
@@ -547,20 +580,37 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// Delete live-board track/via copper near a click point.
 pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
+    let snapshot = match crate::active_board(ctx) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
+    let request = match parse_delete_copper_request(&input, snapshot.layer_names.len() as u32) {
+        Ok(request) => request,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
+    let revision = match ctx.revisions().capture(
+        "delete_copper",
+        "Delete board copper",
+        &[path.clone()],
+    ) {
+        Ok(revision) => revision,
+        Err(error) => {
+            return Ok(
+                json!({ "error": format!("could not capture the board before deleting copper: {error}") }),
+            );
+        }
+    };
     match ctx.kicad().with_session(&path, |session| {
-        let snapshot = session.kicad().board_snapshot()?;
-        let request = match parse_delete_copper_request(&input, snapshot.layer_names.len() as u32) {
-            Ok(request) => request,
-            Err(err) => return Ok(Err(err)),
-        };
-        let hits = session
+        session
             .kicad()
-            .delete_copper_near(&request, &snapshot.layer_names)?;
-        Ok(Ok(delete_copper_output(&request, &hits)))
+            .delete_copper_near(&request, &snapshot.layer_names)
     }) {
-        Ok(Ok(out)) => Ok(out),
-        Ok(Err(err)) => Ok(json!({ "error": err })),
-        Err(e) => Ok(json!({ "error": e.to_string() })),
+        Ok(hits) => {
+            let mut output = delete_copper_output(&request, &hits);
+            output["revision"] = json!(revision);
+            Ok(output)
+        }
+        Err(e) => Ok(json!({ "error": e.to_string(), "revision": revision })),
     }
 }
 
@@ -594,6 +644,19 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "name must be non-empty and not Default" }));
     }
     let path = ctx.pcb_path();
+    let project_path = ctx.sch_path().with_extension("kicad_pro");
+    let revision = match ctx.revisions().capture(
+        "set_net_width",
+        "Set a board net class",
+        &[path.clone(), project_path.clone()],
+    ) {
+        Ok(revision) => revision,
+        Err(error) => {
+            return Ok(
+                json!({ "error": format!("could not capture the board rules before editing: {error}") }),
+            );
+        }
+    };
     let live = ctx.kicad().with_session(&path, |session| {
         let width_nm = mm_to_nm(width);
         let clearance_nm = mm_to_nm(clearance);
@@ -617,10 +680,10 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "nets": [net.clone()],
             "changed_nets": if changed { vec![net] } else { Vec::new() },
             "changed_classes": if changed { vec![name] } else { Vec::new() },
+            "revision": revision,
         })),
         Err(live_error) => {
             ctx.close_kicad_session();
-            let project_path = ctx.sch_path().with_extension("kicad_pro");
             let update = kicad_board::NetClassUpdate {
                 name: name.clone(),
                 width,
@@ -641,11 +704,13 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     "nets": [net],
                     "changed_nets": report.nets,
                     "changed_classes": report.classes,
+                    "revision": revision,
                 })),
                 Err(offline_error) => Ok(json!({
                     "error": format!(
                         "{live_error}; offline net-width fallback failed: {offline_error}"
-                    )
+                    ),
+                    "revision": revision,
                 })),
             }
         }
