@@ -1827,13 +1827,41 @@ pub(crate) fn plan_outline_refit(
     }
     let width = width.ceil().max(1.0);
     let height = height.ceil().max(1.0);
-    let to = Rect::from_center_half(center, (width / 2.0, height / 2.0));
+    let candidate = Rect::from_center_half(center, (width / 2.0, height / 2.0));
     let mut compact = problem.clone();
-    compact.bounds = to;
-    let compact_result = pcb_engine::place_tuned(&compact, hints);
-    if !compact_result.legal {
-        return None;
-    }
+    compact.bounds = candidate;
+    let candidate_result = pcb_engine::place_tuned(&compact, hints);
+    let (to, compact_result) = if candidate_result.legal {
+        (candidate, candidate_result)
+    } else {
+        let mut low = (width, height);
+        let mut high = (from.width().ceil(), from.height().ceil());
+        if high.0 < low.0 || high.1 < low.1 {
+            return None;
+        }
+        let mut best = result.clone();
+        while high.0 - low.0 > 1.0 || high.1 - low.1 > 1.0 {
+            let middle = (
+                (low.0 + (high.0 - low.0) / 2.0).floor(),
+                (low.1 + (high.1 - low.1) / 2.0).floor(),
+            );
+            if middle == low || middle == high {
+                break;
+            }
+            compact.bounds = Rect::from_center_half(center, (middle.0 / 2.0, middle.1 / 2.0));
+            let trial = pcb_engine::place_tuned(&compact, hints);
+            if trial.legal {
+                high = middle;
+                best = trial;
+            } else {
+                low = middle;
+            }
+        }
+        (
+            Rect::from_center_half(center, (high.0 / 2.0, high.1 / 2.0)),
+            best,
+        )
+    };
     Some(OutlineRefitPlan {
         result: compact_result,
         from,
