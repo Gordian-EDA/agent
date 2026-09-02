@@ -43,7 +43,7 @@ impl Rule for BoardEdgeClearanceRule {
             };
             if gap < EDGE_CLEAR + half - EPS {
                 out.push(Finding::OutOfBounds {
-                    connection: item.first_owner(),
+                    connection: item.first_owner().to_string(),
                     overshoot: (EDGE_CLEAR + half - gap).max(0.0),
                     at,
                 });

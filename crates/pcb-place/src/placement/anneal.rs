@@ -81,8 +81,7 @@ pub(crate) fn anneal_placement(
     let mut rng = SaRng(SA_SEED);
     let iters = (250 * movable.len()).clamp(1000, 8000);
     let t0 = 8.0;
-    let cost_of =
-        |p: &[Point2]| place_cost(problem, nets, half, margin, rotations, &terms, p);
+    let cost_of = |p: &[Point2]| place_cost(problem, nets, half, margin, rotations, &terms, p);
     let mut cost = cost_of(pos);
 
     let mut restore: Vec<(usize, Point2)> = Vec::with_capacity(8);

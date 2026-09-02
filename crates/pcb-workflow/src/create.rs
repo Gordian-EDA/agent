@@ -195,8 +195,8 @@ pub(super) fn plan_seed_board(
         },
         SeedBounds::Auto => Point2 { x: 0.0, y: 0.0 },
     };
-    let mut x = seed_origin.x + 2.0;
-    let y = seed_origin.y + 2.0;
+    let mut x = kicad_board::seed_row_x(seed_origin.x, 0);
+    let y = kicad_board::seed_row_y(seed_origin.y);
     for dp in &spec.parts {
         let id = FootprintId::parse(&dp.footprint).map_err(|e| {
             let clause = footprint_suggestion_clause(&catalog.suggest(&dp.footprint));
@@ -229,7 +229,7 @@ pub(super) fn plan_seed_board(
             rotation: dp.locked.as_ref().map(|l| l.rotation).unwrap_or(0.0),
             locked: dp.locked.is_some(),
         });
-        x += 2.54;
+        x += kicad_board::SEED_ROW_PITCH;
     }
     let (effective_rules, rule_notes) = effective_seed_rules(&spec.rules, &parts);
     let sizing = crate::sizing::size_board(

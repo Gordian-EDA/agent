@@ -489,12 +489,7 @@ fn plane_fanout(deps: &MeshDeps, problem: &RoutingView) -> Option<(RoutingView, 
     };
     const SITE_STEP_MM: f64 = 0.1;
     const SITE_RADIUS_MM: f64 = 5.0;
-    let steps = (SITE_RADIUS_MM / SITE_STEP_MM) as i32;
-    let mut offsets: Vec<_> = (-steps..=steps)
-        .flat_map(|dx| (-steps..=steps).map(move |dy| (dx, dy)))
-        .filter(|(dx, dy)| *dx != 0 || *dy != 0)
-        .collect();
-    offsets.sort_by_key(|(dx, dy)| (dx * dx + dy * dy, *dx, *dy));
+    let offsets = octilinear_offsets((SITE_RADIUS_MM / SITE_STEP_MM) as i32);
 
     let mut fanout = RouteSolution {
         traces: Vec::new(),
@@ -635,12 +630,7 @@ pub fn prepare_wide_terminal_escapes(deps: &MeshDeps, problem: &RoutingView) -> 
     const SITE_RADIUS_MM: f64 = 1.5;
     const LANDING_MM: f64 = 0.1;
 
-    let steps = (SITE_RADIUS_MM / SITE_STEP_MM) as i32;
-    let mut offsets: Vec<_> = (-steps..=steps)
-        .flat_map(|dx| (-steps..=steps).map(move |dy| (dx, dy)))
-        .filter(|(dx, dy)| *dx != 0 || *dy != 0)
-        .collect();
-    offsets.sort_by_key(|(dx, dy)| (dx * dx + dy * dy, *dx, *dy));
+    let offsets = octilinear_offsets((SITE_RADIUS_MM / SITE_STEP_MM) as i32);
 
     let mut transformed = problem.clone();
     let mut escapes = RouteSolution {
@@ -806,7 +796,9 @@ fn adaptive_grid_rescue(deps: &MeshDeps, problem: &RoutingView, selected: &Route
 
     let mut best: Option<(RouteResult, RouteQuality)> = None;
     let base = adaptive_rescue_base(problem, selected, &failed_names);
-    for order in adaptive_rescue_orders(problem, &failed_names)
+    let orders = adaptive_rescue_orders(problem, &failed_names);
+    let hopeless = hopeless_nets(deps, problem, &base.obstacles, &orders);
+    for order in prune_orders(orders, &hopeless)
         .into_iter()
         .take(ADAPTIVE_RESCUE_MAX_ORDERS)
     {
@@ -835,7 +827,10 @@ fn adaptive_grid_rescue(deps: &MeshDeps, problem: &RoutingView, selected: &Route
         selected,
         deps.drc.geometry_violations(problem, &selected.solution),
     );
-    for order in adaptive_ripup_rescue_orders(problem, selected, &failed_names)
+    let ripup_orders = adaptive_ripup_rescue_orders(problem, selected, &failed_names);
+    let floor = ripup_floor(problem, selected, &ripup_orders);
+    let ripup_hopeless = hopeless_nets(deps, problem, &floor, &ripup_orders);
+    for order in prune_orders(ripup_orders, &ripup_hopeless)
         .into_iter()
         .take(ADAPTIVE_RESCUE_MAX_ORDERS)
     {
@@ -873,7 +868,11 @@ fn adaptive_grid_rescue(deps: &MeshDeps, problem: &RoutingView, selected: &Route
             .map(|f| f.connection.clone())
             .filter(|name| !name.is_empty())
             .collect();
-        for order in adaptive_ripup_rescue_orders(problem, &residual, &residual_failed_names)
+        let residual_orders =
+            adaptive_ripup_rescue_orders(problem, &residual, &residual_failed_names);
+        let residual_floor = ripup_floor(problem, &residual, &residual_orders);
+        let residual_hopeless = hopeless_nets(deps, problem, &residual_floor, &residual_orders);
+        for order in prune_orders(residual_orders, &residual_hopeless)
             .into_iter()
             .take(ADAPTIVE_RESCUE_MAX_ORDERS)
         {
@@ -1079,6 +1078,76 @@ fn adaptive_grid_ripup_rescue_order(
         failed,
         engine: format!("{}+{}", selected.engine, ADAPTIVE_GRID_RIPUP_RESCUE_ENGINE),
     })
+}
+
+/// The failed nets no attempt in a rescue phase can save.
+///
+/// Every attempt routes one net against `floor` plus whatever copper the nets
+/// before it in that attempt laid down, so the obstacle set an attempt presents
+/// only ever grows from `floor`. A net the grid router cannot route against
+/// `floor` is therefore unroutable in *every* order of that phase, and probing
+/// it once per order is exactly where a board that cannot be finished spends
+/// its time — `mcu-board` burnt 46 of its 62 routing seconds inside A* searches
+/// that had already been proven hopeless.
+///
+/// Order-independent and clock-free, so the emitted board is unchanged.
+fn hopeless_nets(
+    deps: &MeshDeps,
+    problem: &RoutingView,
+    floor: &[Obstacle],
+    orders: &[Vec<usize>],
+) -> BTreeSet<usize> {
+    let mut probed = BTreeSet::new();
+    let mut hopeless = BTreeSet::new();
+    for idx in orders.iter().flatten().copied() {
+        if !probed.insert(idx) {
+            continue;
+        }
+        let Some(conn) = problem.connections.get(idx) else {
+            continue;
+        };
+        if conn.points_to_connect.len() < 2 {
+            continue;
+        }
+        let sub = problem_with_single_connection_and_obstacles(problem, idx, floor);
+        if !deps.grid.route(&sub, &deps.budget).failed.is_empty() {
+            hopeless.insert(idx);
+        }
+    }
+    hopeless
+}
+
+/// Drop the hopeless nets from every order, then drop the orders that collapse
+/// to nothing or to a duplicate of an earlier one — different orders of the same
+/// nets are only worth trying while the nets differ.
+fn prune_orders(orders: Vec<Vec<usize>>, hopeless: &BTreeSet<usize>) -> Vec<Vec<usize>> {
+    let mut pruned = Vec::new();
+    for order in orders {
+        let kept: Vec<usize> = order
+            .into_iter()
+            .filter(|idx| !hopeless.contains(idx))
+            .collect();
+        push_adaptive_rescue_order(&mut pruned, kept);
+    }
+    pruned
+}
+
+/// The copper `selected` keeps once every net any rip-up order might remove is
+/// removed — the emptiest board those orders can present.
+fn ripup_floor(problem: &RoutingView, selected: &RouteResult, orders: &[Vec<usize>]) -> Vec<Obstacle> {
+    let removable: BTreeSet<&str> = orders
+        .iter()
+        .flatten()
+        .filter_map(|&idx| problem.connections.get(idx).map(|c| c.name.as_str()))
+        .collect();
+    let mut solution = selected.solution.clone();
+    solution
+        .traces
+        .retain(|t| !removable.contains(t.connection.as_str()));
+    solution
+        .vias
+        .retain(|v| !removable.contains(v.connection.as_str()));
+    copper_obstacles(problem, &solution)
 }
 
 fn adaptive_rescue_orders(
@@ -1692,8 +1761,7 @@ pub fn postroute_cleanup(deps: &MeshDeps, problem: &RoutingView, solution: &mut 
     drop_duplicate_traces(solution);
     drop_covered_collinear_traces(deps, problem, solution);
     merge_touching_traces(deps, problem, solution);
-    shortcut_octilinear_traces(deps, problem, solution);
-    pull_orthogonal_trace_corners(deps, problem, solution);
+    pcb_grid::tidy::straighten_traces(deps.drc, problem, solution, pcb_grid::tidy::Corners::Octilinear);
     drop_trace_spurs(deps, problem, solution);
     simplify_trace_paths(deps, problem, solution);
     drop_duplicate_traces(solution);
@@ -1706,6 +1774,10 @@ pub fn postroute_cleanup(deps: &MeshDeps, problem: &RoutingView, solution: &mut 
 /// trace stays connected THROUGH the pad (both trace ends land inside it, and the
 /// pad bridges the layers). A pad is through-hole when its obstacle reaches both
 /// the top and bottom copper layers.
+///
+/// This removal is unguarded, so containment is judged on the pad's *proven*
+/// capsule, never its bounding box: a via in a round pad's box corner sits on
+/// bare laminate, and dropping it silently opens the layer change.
 fn drop_redundant_thruhole_vias(problem: &RoutingView, solution: &mut RouteSolution) {
     let (top, bottom) = (LayerRef::top(), LayerRef::bottom());
     solution.vias.retain(|v| {
@@ -1713,8 +1785,7 @@ fn drop_redundant_thruhole_vias(problem: &RoutingView, solution: &mut RouteSolut
             ob.connected_to.contains(&v.connection)
                 && ob.layers.contains(&top)
                 && ob.layers.contains(&bottom)
-                && (v.at.x - ob.center.x).abs() <= ob.width / 2.0
-                && (v.at.y - ob.center.y).abs() <= ob.height / 2.0
+                && ob.proven_capsule().dist_to_point(v.at) <= 0.0
         })
     });
 }
@@ -1735,7 +1806,7 @@ fn drop_dangling_vias(deps: &MeshDeps, problem: &RoutingView, solution: &mut Rou
         let mut candidate = solution.clone();
         candidate.vias.remove(idx);
         let findings = deps.drc.check(problem, &candidate);
-        if !introduces_new_findings(&baseline, &findings)
+        if !pcb_grid::tidy::introduces_new_findings(&baseline, &findings)
             && candidate.metrics().via_count < solution.metrics().via_count
         {
             *solution = candidate;
@@ -1744,15 +1815,6 @@ fn drop_dangling_vias(deps: &MeshDeps, problem: &RoutingView, solution: &mut Rou
             idx += 1;
         }
     }
-}
-
-fn introduces_new_findings(
-    baseline: &[pcb_model::Finding],
-    candidate: &[pcb_model::Finding],
-) -> bool {
-    candidate
-        .iter()
-        .any(|finding| !baseline.iter().any(|known| known == finding))
 }
 
 fn via_connected_layers(
@@ -1874,7 +1936,7 @@ fn drop_trace_spurs(deps: &MeshDeps, problem: &RoutingView, solution: &mut Route
                     }
                     let findings = deps.drc.check(problem, &candidate);
                     lint_budget -= 1;
-                    if !introduces_new_findings(&baseline, &findings) {
+                    if !pcb_grid::tidy::introduces_new_findings(&baseline, &findings) {
                         *solution = candidate;
                         baseline = findings;
                         improved = true;
@@ -2059,184 +2121,28 @@ fn merge_touching_traces(deps: &MeshDeps, problem: &RoutingView, solution: &mut 
 /// the trace without introducing new lint findings, which protects via anchors,
 /// T-junctions, clearance, board-edge, and connectivity invariants while allowing
 /// cleanup to remove an existing detour-caused finding.
-fn shortcut_octilinear_traces(deps: &MeshDeps, problem: &RoutingView, solution: &mut RouteSolution) {
-    if !has_octilinear_shortcut_candidate_shape(solution) {
-        return;
-    }
-
-    let mut baseline = deps.drc.check(problem, solution);
-    let mut lint_budget = 256usize;
-
-    loop {
-        let mut improved = false;
-        'candidate: for ti in 0..solution.traces.len() {
-            let n = solution.traces[ti].path.len();
-            if n < 3 {
-                continue;
-            }
-            for span in (2..n).rev() {
-                for i in 0..(n - span) {
-                    if lint_budget == 0 {
-                        return;
-                    }
-                    let j = i + span;
-                    let a = solution.traces[ti].path[i];
-                    let b = solution.traces[ti].path[j];
-                    if !is_octilinear_segment(a, b) {
-                        continue;
-                    }
-
-                    let old_len = path_len(&solution.traces[ti].path[i..=j]);
-                    let new_len = a.dist(b);
-                    if new_len + 0.01 >= old_len {
-                        continue;
-                    }
-
-                    let mut candidate = solution.clone();
-                    candidate.traces[ti].path.drain(i + 1..j);
-                    let findings = deps.drc.check(problem, &candidate);
-                    lint_budget -= 1;
-                    if !introduces_new_findings(&baseline, &findings) {
-                        *solution = candidate;
-                        baseline = findings;
-                        improved = true;
-                        break 'candidate;
-                    }
-                }
-            }
-        }
-
-        if !improved {
-            break;
-        }
-    }
-}
-
-fn has_octilinear_shortcut_candidate_shape(solution: &RouteSolution) -> bool {
-    solution.traces.iter().any(|trace| {
-        let n = trace.path.len();
-        if n < 3 {
-            return false;
-        }
-        for span in (2..n).rev() {
-            for i in 0..(n - span) {
-                let j = i + span;
-                let a = trace.path[i];
-                let b = trace.path[j];
-                if !is_octilinear_segment(a, b) {
-                    continue;
-                }
-                let old_len = path_len(&trace.path[i..=j]);
-                let new_len = a.dist(b);
-                if new_len + 0.01 < old_len {
-                    return true;
-                }
-            }
-        }
-        false
-    })
-}
-
-/// Line-pull Manhattan detours that a direct straight/45-degree shortcut cannot
-/// express. For a subpath `a..b`, try both L-shaped replacements (`a -> (a.x,b.y)
-/// -> b` and `a -> (b.x,a.y) -> b`) and keep the first one that shortens copper
-/// without introducing new lint findings. This borrows freerouting-style
-/// post-optimization without changing the router's preferred orthogonal output.
-fn pull_orthogonal_trace_corners(deps: &MeshDeps, problem: &RoutingView, solution: &mut RouteSolution) {
-    if !has_orthogonal_pull_candidate_shape(solution) {
-        return;
-    }
-
-    let mut baseline = deps.drc.check(problem, solution);
-    let mut lint_budget = 256usize;
-
-    loop {
-        let mut improved = false;
-        'candidate: for ti in 0..solution.traces.len() {
-            let n = solution.traces[ti].path.len();
-            if n < 4 {
-                continue;
-            }
-            for span in (3..n).rev() {
-                for i in 0..(n - span) {
-                    if lint_budget == 0 {
-                        return;
-                    }
-                    let j = i + span;
-                    let a = solution.traces[ti].path[i];
-                    let b = solution.traces[ti].path[j];
-                    if (a.x - b.x).abs() < geom::EPS || (a.y - b.y).abs() < geom::EPS {
-                        continue;
-                    }
-
-                    let old_len = path_len(&solution.traces[ti].path[i..=j]);
-                    for corner in [Point2 { x: a.x, y: b.y }, Point2 { x: b.x, y: a.y }] {
-                        let new_len = a.dist(corner) + corner.dist(b);
-                        if new_len + 0.01 >= old_len {
-                            continue;
-                        }
-
-                        let mut candidate = solution.clone();
-                        candidate.traces[ti].path.splice(i + 1..j, [corner]);
-                        candidate.traces[ti].path =
-                            geom::Polyline::new(candidate.traces[ti].path.clone())
-                                .simplify()
-                                .into_points();
-                        let findings = deps.drc.check(problem, &candidate);
-                        lint_budget -= 1;
-                        if !introduces_new_findings(&baseline, &findings) {
-                            *solution = candidate;
-                            baseline = findings;
-                            improved = true;
-                            break 'candidate;
-                        }
-                        if lint_budget == 0 {
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-
-        if !improved {
-            break;
-        }
-    }
-}
-
-fn has_orthogonal_pull_candidate_shape(solution: &RouteSolution) -> bool {
-    solution.traces.iter().any(|trace| {
-        let n = trace.path.len();
-        if n < 4 {
-            return false;
-        }
-        for span in (3..n).rev() {
-            for i in 0..(n - span) {
-                let j = i + span;
-                let a = trace.path[i];
-                let b = trace.path[j];
-                if (a.x - b.x).abs() < geom::EPS || (a.y - b.y).abs() < geom::EPS {
-                    continue;
-                }
-                let old_len = path_len(&trace.path[i..=j]);
-                let new_len = (a.x - b.x).abs() + (a.y - b.y).abs();
-                if new_len + 0.01 < old_len {
-                    return true;
-                }
-            }
-        }
-        false
-    })
-}
-
-fn is_octilinear_segment(a: Point2, b: Point2) -> bool {
-    let dx = (a.x - b.x).abs();
-    let dy = (a.y - b.y).abs();
-    dx < geom::EPS || dy < geom::EPS || (dx - dy).abs() < 0.01
-}
-
-fn path_len(path: &[Point2]) -> f64 {
-    path.windows(2).map(|w| w[0].dist(w[1])).sum()
+/// Escape-site offsets: the eight octilinear rays out to `steps`, nearest first.
+///
+/// A pad's escape stub is one straight or 45-degree leg to its site, so picking
+/// sites off these rays makes that stub octilinear by construction instead of
+/// leaving it at whatever angle a full square scan happened to land on. It also
+/// cuts the DRC-gated search from `(2n+1)²` sites to `8n`.
+fn octilinear_offsets(steps: i32) -> Vec<(i32, i32)> {
+    const DIRS: [(i32, i32); 8] = [
+        (1, 0),
+        (1, 1),
+        (0, 1),
+        (-1, 1),
+        (-1, 0),
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+    ];
+    let mut offsets: Vec<(i32, i32)> = (1..=steps)
+        .flat_map(|r| DIRS.map(|(ux, uy)| (ux * r, uy * r)))
+        .collect();
+    offsets.sort_by_key(|(dx, dy)| (dx * dx + dy * dy, *dx, *dy));
+    offsets
 }
 
 /// At equal faults, keep the tidy orthogonal naive route unless its copper is more
@@ -4756,7 +4662,7 @@ mod tests {
     }
 
     #[test]
-    fn postroute_cleanup_pulls_clean_orthogonal_detour() {
+    fn postroute_cleanup_pulls_a_detour_into_an_axial_run_and_one_45_degree_leg() {
         let mut p = simple_two_point_problem();
         p.connections[0].points_to_connect[0].x = 1.0;
         p.connections[0].points_to_connect[0].y = 1.0;
@@ -4783,7 +4689,7 @@ mod tests {
 
         assert_eq!(
             solution.traces[0].path,
-            vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(5.0, 4.0)]
+            vec![pt(1.0, 1.0), pt(2.0, 1.0), pt(5.0, 4.0)]
         );
         assert!(solution.metrics().wirelength < before);
         assert!(DRC.check(&p, &solution).is_empty());
@@ -4832,88 +4738,12 @@ mod tests {
 
         assert_eq!(
             solution.traces[0].path,
-            vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(5.0, 4.0)]
+            vec![pt(1.0, 1.0), pt(2.0, 1.0), pt(5.0, 4.0)]
         );
         assert!(
             DRC.check(&p, &solution).is_empty(),
-            "line-pull should be allowed to remove existing lint findings without adding new ones"
+            "straightening should be allowed to remove existing lint findings without adding new ones"
         );
-    }
-
-    #[test]
-    fn orthogonal_pull_candidate_shape_filters_trivial_routes() {
-        let straight = RouteSolution {
-            traces: vec![Trace {
-                connection: "N".to_owned(),
-                layer: LayerRef::top(),
-                width: 0.2,
-                path: vec![pt(1.0, 1.0), pt(5.0, 1.0)],
-            }],
-            vias: vec![],
-        };
-        let already_tight_l = RouteSolution {
-            traces: vec![Trace {
-                connection: "N".to_owned(),
-                layer: LayerRef::top(),
-                width: 0.2,
-                path: vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(5.0, 4.0)],
-            }],
-            vias: vec![],
-        };
-        let detour = RouteSolution {
-            traces: vec![Trace {
-                connection: "N".to_owned(),
-                layer: LayerRef::top(),
-                width: 0.2,
-                path: vec![
-                    pt(1.0, 1.0),
-                    pt(1.0, 5.0),
-                    pt(3.0, 5.0),
-                    pt(3.0, 4.0),
-                    pt(5.0, 4.0),
-                ],
-            }],
-            vias: vec![],
-        };
-
-        assert!(!has_orthogonal_pull_candidate_shape(&straight));
-        assert!(!has_orthogonal_pull_candidate_shape(&already_tight_l));
-        assert!(has_orthogonal_pull_candidate_shape(&detour));
-    }
-
-    #[test]
-    fn octilinear_shortcut_candidate_shape_filters_trivial_routes() {
-        let straight = RouteSolution {
-            traces: vec![Trace {
-                connection: "N".to_owned(),
-                layer: LayerRef::top(),
-                width: 0.2,
-                path: vec![pt(1.0, 1.0), pt(5.0, 1.0)],
-            }],
-            vias: vec![],
-        };
-        let already_tight_l = RouteSolution {
-            traces: vec![Trace {
-                connection: "N".to_owned(),
-                layer: LayerRef::top(),
-                width: 0.2,
-                path: vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(5.0, 4.0)],
-            }],
-            vias: vec![],
-        };
-        let diagonal_detour = RouteSolution {
-            traces: vec![Trace {
-                connection: "N".to_owned(),
-                layer: LayerRef::top(),
-                width: 0.2,
-                path: vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(4.0, 4.0)],
-            }],
-            vias: vec![],
-        };
-
-        assert!(!has_octilinear_shortcut_candidate_shape(&straight));
-        assert!(!has_octilinear_shortcut_candidate_shape(&already_tight_l));
-        assert!(has_octilinear_shortcut_candidate_shape(&diagonal_detour));
     }
 
     #[test]

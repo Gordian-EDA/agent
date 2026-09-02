@@ -261,7 +261,10 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .get("nets_to_reroute")
             .and_then(Value::as_array)
             .map(Vec::len),
-        result.get("violations").and_then(Value::as_array).map(Vec::len),
+        result
+            .get("violations")
+            .and_then(Value::as_array)
+            .map(Vec::len),
     );
     Ok(result)
 }

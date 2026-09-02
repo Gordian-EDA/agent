@@ -1,8 +1,10 @@
 //! The single tuned placement phase and its internal optimization passes.
 
+use super::align::snap_same_kind_axes;
 use super::anneal::anneal_placement;
 use super::cost::{CostTerms, compute_hpwl_with_rotations, place_cost};
 use super::force::{force_layout, snap_caps_to_anchor_ring};
+use super::frame::{center_placement, seat_edge_seek_parts};
 use super::geometry::{
     PLACEMENT_GRID, clamp_center_for_envelope, courtyard_margin, datum_edge_target,
     part_edge_target, part_placement_bounds_envelope, rotated_copper_bbox, rotated_courtyard_half,
@@ -50,6 +52,8 @@ pub fn place_tuned(problem: &PlacementView, hints: &PlacementHints) -> PlaceResu
             anneal: !structured,
         },
     );
+    center_placement(problem, hints, &mut result);
+    seat_edge_seek_parts(problem, hints, &mut result);
     seat_corner_seek_parts(problem, hints, &mut result);
     result
 }
@@ -370,6 +374,16 @@ pub(crate) fn place_variant(
         &copper_bbox,
         &mut pos,
     );
+    snap_same_kind_axes(
+        problem,
+        &nets,
+        margin,
+        &terms,
+        &rotations,
+        &half,
+        &copper_bbox,
+        &mut pos,
+    );
     polish_swaps(
         problem,
         &nets,
@@ -404,9 +418,7 @@ pub(crate) fn place_variant(
     let legal = is_legal(problem, &half, &copper_bbox, margin, &pos);
 
     let hpwl = compute_hpwl_with_rotations(problem, &nets, &pos, &rotations);
-    let layout_cost = place_cost(
-        problem, &nets, &half, margin, &rotations, &terms, &pos,
-    );
+    let layout_cost = place_cost(problem, &nets, &half, margin, &rotations, &terms, &pos);
 
     PlaceResult {
         placements,
@@ -552,8 +564,7 @@ fn polish_positions_in_order(
             if !is_legal(problem, half, copper_bbox, margin, pos) {
                 continue;
             }
-            let next_cost =
-                place_cost(problem, nets, half, margin, rotations, terms, pos);
+            let next_cost = place_cost(problem, nets, half, margin, rotations, terms, pos);
             if next_cost + 1e-9 < best_cost {
                 best_cost = next_cost;
                 best = candidate;
@@ -729,8 +740,9 @@ pub(crate) fn unique_position_candidates(
 
 /// Candidate seats on a board edge for a part the hints steer there: all four
 /// edges for a nearest-edge seeker, and only the named one for an authored
-/// `edge` intent — plus, for the named edge, the FLUSH seat, since the intent is
-/// that the part's courtyard reach the edge, not merely the edge band.
+/// `edge` intent. Each eligible edge offers TWO seats — the edge band, and the
+/// FLUSH seat where the part's envelope actually reaches the edge, since that is
+/// what "on the edge" means to anyone looking at the board.
 pub(crate) fn edge_seek_position_candidates(
     problem: &PlacementView,
     half: &[(f64, f64)],
@@ -756,7 +768,8 @@ pub(crate) fn edge_seek_position_candidates(
     let current = pos[part_idx];
     let h = half[part_idx];
     let mut out: Vec<Point2> = edges
-        .into_iter()
+        .iter()
+        .copied()
         .filter_map(|edge| {
             if problem.parts[part_idx].edge_datum.is_some()
                 && datum_edge_target(&problem.parts[part_idx], rotation, edge, &problem.bounds)
@@ -783,13 +796,25 @@ pub(crate) fn edge_seek_position_candidates(
         let envelope = part_placement_bounds_envelope(part, h, rotated_copper_bbox(part, rotation));
         let b = &problem.bounds;
         match edge {
-            Edge::N => Point2 { x: current.x, y: b.min_y - envelope.min_y },
-            Edge::S => Point2 { x: current.x, y: b.max_y - envelope.max_y },
-            Edge::W => Point2 { x: b.min_x - envelope.min_x, y: current.y },
-            Edge::E => Point2 { x: b.max_x - envelope.max_x, y: current.y },
+            Edge::N => Point2 {
+                x: current.x,
+                y: b.min_y - envelope.min_y,
+            },
+            Edge::S => Point2 {
+                x: current.x,
+                y: b.max_y - envelope.max_y,
+            },
+            Edge::W => Point2 {
+                x: b.min_x - envelope.min_x,
+                y: current.y,
+            },
+            Edge::E => Point2 {
+                x: b.max_x - envelope.max_x,
+                y: current.y,
+            },
         }
     };
-    out.extend(named.into_iter().map(flush));
+    out.extend(edges.into_iter().map(flush));
     out
 }
 
@@ -1462,8 +1487,7 @@ pub(crate) fn polish_swaps(
                 pos.swap(a, b);
                 continue;
             }
-            let next_cost =
-                place_cost(problem, nets, half, margin, rotations, terms, pos);
+            let next_cost = place_cost(problem, nets, half, margin, rotations, terms, pos);
             if next_cost + 1e-9 < cost {
                 cost = next_cost;
                 improved = true;
@@ -1582,6 +1606,14 @@ fn push_pair(set: &mut std::collections::BTreeSet<(usize, usize)>, a: usize, b: 
     set.insert(if a < b { (a, b) } else { (b, a) });
 }
 
+/// Tie-break rank among quadrant rotations: 0° and 90° read as upright, 180° and
+/// 270° as gratuitously flipped. Only ever consulted when two rotations cost
+/// EXACTLY the same — 180° genuinely matters for asymmetric pad geometry, and a
+/// rotation that earns its keep still wins on cost.
+fn upright_rank(rotation: f64) -> u8 {
+    u8::from(matches!(geom::snap_quadrant(rotation) as i32, 180 | 270))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn polish_rotations(
     problem: &PlacementView,
@@ -1620,9 +1652,11 @@ pub(crate) fn polish_rotations(
                 if !is_legal(problem, half, copper_bbox, margin, pos) {
                     continue;
                 }
-                let next_cost =
-                    place_cost(problem, nets, half, margin, rotations, terms, pos);
-                if next_cost + 1e-9 < best_cost {
+                let next_cost = place_cost(problem, nets, half, margin, rotations, terms, pos);
+                let tied = (next_cost - best_cost).abs() <= 1e-9;
+                if next_cost + 1e-9 < best_cost
+                    || (tied && upright_rank(candidate) < upright_rank(best_rot))
+                {
                     best_cost = next_cost;
                     best_rot = candidate;
                     best_half = half[i];

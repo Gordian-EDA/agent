@@ -41,6 +41,23 @@ use crate::{AgentRuntime, Tool};
 /// The `intent` object both board-building tools take: what the layout should
 /// be, never where a part goes. `zones` is `sync_board`'s half (it seeds the
 /// pours); the rest is `place_board`'s.
+/// The board window `place_board` and `route_board` both accept. A box is a
+/// selector: it names what to work on, and everything outside it is left alone.
+fn bbox_schema(what: &str) -> Value {
+    json!({
+        "type": "object",
+        "description": format!("Board window in millimetres. {what}"),
+        "properties": {
+            "min_x": { "type": "number" },
+            "min_y": { "type": "number" },
+            "max_x": { "type": "number" },
+            "max_y": { "type": "number" }
+        },
+        "required": ["min_x", "min_y", "max_x", "max_y"],
+        "additionalProperties": false
+    })
+}
+
 fn intent_schema() -> Value {
     json!({
         "type": "object",
@@ -432,9 +449,12 @@ pub fn tool_defs() -> Vec<Tool> {
             name: "place_board".into(),
             description: "Place a PCB from stated intent: `intent` gives edges, \
                  proximities and groups (never coordinates); `groups` steers regions, grids \
-                 and surrounds. With no arguments it places exactly the parts that are still \
-                 unplaced, leaving every laid-out pose alone; `refs` names a subset instead. \
-                 Copper on the parts it moves is retracted (see nets_to_reroute). It refuses \
+                 and surrounds. LOCAL by default: `refs` names the parts to move, or `bbox` \
+                 selects every footprint whose centre is inside a board window — everything \
+                 else stays locked where it sits and its copper becomes a keep-out. With no \
+                 arguments it places exactly the parts that are still unplaced, leaving every \
+                 laid-out pose alone. Copper on the parts it moves is retracted (see \
+                 nets_to_reroute), and a local call reports what is still_unplaced. It refuses \
                  only when nothing is unplaced — pass replace:true to re-place a finished \
                  board and lose its layout."
                 .into(),
@@ -446,6 +466,10 @@ pub fn tool_defs() -> Vec<Tool> {
                         "items": { "type": "string" },
                         "description": "Place only these footprints, with every other part locked where it sits and the existing copper as keep-outs. Omit to place the whole board."
                     },
+                    "bbox": bbox_schema(
+                        "Every footprint whose courtyard centre is inside the window is placed, \
+                         and the window is where they should end up."
+                    ),
                     "intent": intent_schema(),
                     "replace": {
                         "type": "boolean",
@@ -487,8 +511,10 @@ pub fn tool_defs() -> Vec<Tool> {
             description: "Auto-route the PLACED board, committing every net whose copper is \
                  DRC-clean; refuses while any part is unplaced. \
                  Reports routed N/M and, per unrouted net, the two pads, the obstacle in the \
-                 way and the repair. Pass `nets` to re-route only those nets after a \
-                 move_parts, keeping every other net's copper."
+                 way and the repair. LOCAL by default: pass `nets` to re-route only those \
+                 nets after a move_parts, or `bbox` to rip and re-route only the nets that \
+                 reach into a board window. Every other net's copper is kept exactly as it is \
+                 and treated as fixed obstacle."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -497,7 +523,11 @@ pub fn tool_defs() -> Vec<Tool> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Route only these nets, keeping all other copper. Omit for the whole board."
-                    }
+                    },
+                    "bbox": bbox_schema(
+                        "Every net with a pad in the window, or copper entering it, is ripped \
+                         and re-routed; every other net's copper is fixed."
+                    )
                 }
             }),
         },

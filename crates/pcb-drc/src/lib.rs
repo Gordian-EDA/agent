@@ -41,6 +41,8 @@
 
 pub mod connectivity;
 mod ctx;
+#[cfg(test)]
+mod goldens;
 pub mod rules;
 
 pub use ctx::{CopperGeom, CopperItem, DrcCtx, collect_copper};

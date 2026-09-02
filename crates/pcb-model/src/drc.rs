@@ -255,7 +255,11 @@ pub trait Drc {
     /// silent clearance violation that looks routed is not. Bounded by the net
     /// count so it always terminates. Connectivity is handled separately by
     /// [`Drc::drop_unconnected_copper`]; callers typically run both.
-    fn drop_violating_copper(&self, view: &RoutingView, solution: &mut RouteSolution) -> Vec<String> {
+    fn drop_violating_copper(
+        &self,
+        view: &RoutingView,
+        solution: &mut RouteSolution,
+    ) -> Vec<String> {
         let mut dropped: BTreeSet<String> = BTreeSet::new();
         // One net can be dropped per pass; at most one pass per net plus a margin.
         let max_passes = view.connections.len() + 1;

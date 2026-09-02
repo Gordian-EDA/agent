@@ -200,12 +200,22 @@ pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let phase = crate::WorkflowPhase::start(
         "route",
         0,
-        input.get("nets").and_then(Value::as_array).map_or(0, Vec::len),
+        input
+            .get("nets")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len),
     );
     let nets = match requested_nets(&input) {
         Ok(nets) => nets,
         Err(message) => return Ok(refusal(message)),
     };
+    let bbox = match crate::selection::parse_bbox(&input) {
+        Ok(bbox) => bbox,
+        Err(message) => return Ok(refusal(message)),
+    };
+    if let Err(error) = crate::selection::check_one_selector(&input, "nets") {
+        return Ok(refusal(error));
+    }
     if let Some(refusal) = unplaced_refusal(ctx) {
         return Ok(refusal);
     }
@@ -218,12 +228,15 @@ pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
-    let result = match route_live_board(ctx, nets) {
+    let result = match route_live_board(ctx, nets, bbox) {
         Ok(out) => gate.commit(ctx, out),
         Err(out) => gate.rollback(ctx, out),
     };
     phase.facts(
-        result.pointer("/metrics/traces").and_then(Value::as_u64).map(|n| n as usize),
+        result
+            .pointer("/metrics/traces")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize),
         result
             .get("failed_connection_count")
             .and_then(Value::as_u64)
@@ -312,6 +325,7 @@ fn requested_nets(input: &Value) -> std::result::Result<Option<BTreeSet<String>>
 fn route_live_board(
     ctx: &AgentRuntime,
     nets: Option<BTreeSet<String>>,
+    bbox: Option<geom::Rect>,
 ) -> std::result::Result<Value, Value> {
     let board = crate::active_board(ctx).map_err(refusal)?;
     if is_seed_placement(&board.imported.bounds, &board.imported.parts) {
@@ -319,6 +333,38 @@ fn route_live_board(
             "board has only the initial seed-row footprint positions — run place_board before route_board",
         ));
     }
+
+    // A window selects nets; from here on a local route is the `nets` route, so
+    // one code path rips, re-routes and reports.
+    //
+    // The selection is narrowed to nets that are actually routable connections:
+    // a one-pad net is a legal board net but nothing to route, and the caller
+    // never named it, so a box that happens to cover one must not abort the
+    // call the way a mistyped `nets` entry does.
+    let nets = match bbox {
+        None => nets,
+        Some(bbox) => {
+            let routable: BTreeSet<&str> = board
+                .problem
+                .connections
+                .iter()
+                .map(|connection| connection.name.as_str())
+                .collect();
+            let selected: BTreeSet<String> =
+                crate::selection::nets_in_bbox(&board, &board.copper, &bbox)
+                    .into_iter()
+                    .filter(|net| routable.contains(net.as_str()))
+                    .collect();
+            if selected.is_empty() {
+                return Err(refusal(format!(
+                    "no routable net has a pad or copper inside that box \
+                     ({:.2},{:.2})-({:.2},{:.2}); check_board lists what is unrouted",
+                    bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y
+                )));
+            }
+            Some(selected)
+        }
+    };
 
     let existing = (board.copper.traces.len(), board.copper.vias.len());
     let mut rp = board.problem.clone();
@@ -375,6 +421,13 @@ fn route_live_board(
         }
     };
     let kept_counts = (kept.traces.len(), kept.vias.len());
+    // The nets whose copper this call promised to leave alone.
+    let kept_nets: BTreeSet<String> = kept
+        .traces
+        .iter()
+        .map(|trace| trace.connection.clone())
+        .chain(kept.vias.iter().map(|via| via.connection.clone()))
+        .collect();
     let (router_problem, terminal_escapes) = prepare_wide_terminal_escapes(&solve_view);
     let (routing_subproblem, reserved_wide_routes) = reserve_wide_multi_pin_routes(&router_problem);
     let routed = route_with_engine(&routing_subproblem);
@@ -392,7 +445,7 @@ fn route_live_board(
     result.solution.vias.extend(terminal_escapes.vias);
     let dropped_failed = drop_failed_net_copper(&mut result);
     let failed = failed_connections(&result);
-    add_terminal_stubs(&routing_subproblem, &mut result.solution, &failed);
+    anchor_terminals(&routing_subproblem, &mut result.solution, &failed);
     // Auto/Astar/Mesh candidates already passed this exact cleanup before
     // selection. Terminal stubs are simple pad-to-grid joins and the strict
     // final oracle validates them; rerunning the full lint-guarded cleanup here
@@ -419,12 +472,12 @@ fn route_live_board(
             .map(|connection| connection.name.clone())
             .filter(|name| !scope.contains(name) && !has_copper(&result.solution, name))
             .collect();
+        let reason = match bbox {
+            Some(_) => "it does not reach into this call's `bbox`, and it had no copper to keep",
+            None => "not in this call's `nets`, and it had no copper to keep",
+        };
         for net in out_of_scope {
-            append_failed(
-                &mut result,
-                &net,
-                "not in this call's `nets`, and it had no copper to keep",
-            );
+            append_failed(&mut result, &net, reason);
         }
     }
     // `prune_dangling_spurs_if_safe` reverts its own pruning whenever the lint
@@ -432,6 +485,25 @@ fn route_live_board(
     let pruned_spurs = prune_dangling_spurs_if_safe(&rp, &mut result);
     let plane_nets = rp.plane_nets.keys().cloned().collect();
     let (dropped, final_violations) = make_route_honest_with_report(&rp, &mut result, &plane_nets);
+    // The promise a LOCAL call makes is that copper it did not select is left
+    // alone. The honesty pass answers a dirty net by dropping ALL of its copper,
+    // and it judges the merged board — so it can delete a route this call never
+    // touched. That is damage, not a to-do, and the caller must not be told the
+    // copper was "kept". Refuse and let the guard restore.
+    let lost = lost_kept_nets(&kept_nets, &result.solution);
+    if !lost.is_empty() {
+        return Err(json!({
+            "error": format!(
+                "route_board refused: re-routing the selection would have destroyed copper on \
+                 {}, which this call promised to leave alone",
+                lost.join(", ")
+            ),
+            "code": "local_route_would_damage_kept_copper",
+            "damaged_nets": lost,
+            "note": "Nothing was written. Widen the selection to include these nets, or move \
+                     what is crowding them first.",
+        }));
+    }
     let split = lint_summary_from_violations(&final_violations, &result.failed, &plane_nets);
     if split.real > 0 {
         let failure_summary = failed_route_summary(&result.failed);
@@ -493,6 +565,9 @@ fn route_live_board(
             Some(nets) => json!(nets.iter().collect::<Vec<_>>()),
             None => json!("whole board"),
         },
+        "bbox": bbox.map(|b| json!({
+            "min_x": b.min_x, "min_y": b.min_y, "max_x": b.max_x, "max_y": b.max_y,
+        })),
         "router_attempts": route_attempts_json(&router_attempts),
         "failed": failure_summary.records,
         "failed_record_count": failure_summary.record_count,
@@ -796,10 +871,57 @@ fn drop_failed_net_copper(result: &mut RouteResult) -> Vec<String> {
     failed.into_iter().collect()
 }
 
+/// How a pad's anchoring leg reaches the routing lattice.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PadExit {
+    /// Straight out of the pad, then one 45° turn — what a board editor draws.
+    Octilinear,
+    /// One direct segment at whatever angle the lattice happens to need.
+    Direct,
+}
+
+/// Anchor every pad, preferring the octilinear leg.
+///
+/// The knee occupies copper the straight segment did not, so on a crowded pad
+/// it can cost a clearance violation — and the honesty pass answers a dirty net
+/// by dropping ALL of its copper, turning a routed net into an unrouted one.
+/// Falling back costs at most two extra lints and only when the tidy leg is
+/// actually dirty.
+fn anchor_terminals(
+    rp: &RoutingView,
+    solution: &mut RouteSolution,
+    skip_connections: &BTreeSet<String>,
+) {
+    let bare = solution.clone();
+    add_terminal_stubs(rp, solution, skip_connections, PadExit::Octilinear);
+    if pcb_engine::geometry_violations(rp, solution) == 0 {
+        return;
+    }
+    let tidy = std::mem::replace(solution, bare);
+    add_terminal_stubs(rp, solution, skip_connections, PadExit::Direct);
+    if pcb_engine::geometry_violations(rp, solution) > pcb_engine::geometry_violations(rp, &tidy) {
+        *solution = tidy;
+    }
+}
+
+/// Nets whose kept copper did not survive to the final solution.
+///
+/// Counted per net rather than per trace: cleanup legitimately merges and
+/// simplifies kept polylines, so the honest question is whether the net still
+/// has copper at all.
+fn lost_kept_nets(kept_nets: &BTreeSet<String>, final_solution: &RouteSolution) -> Vec<String> {
+    kept_nets
+        .iter()
+        .filter(|net| !has_copper(final_solution, net))
+        .cloned()
+        .collect()
+}
+
 fn add_terminal_stubs(
     rp: &RoutingView,
     solution: &mut RouteSolution,
     skip_connections: &BTreeSet<String>,
+    exit: PadExit,
 ) {
     let pitch = rp.grid_pitch();
     for conn in &rp.connections {
@@ -838,7 +960,10 @@ fn add_terminal_stubs(
                 connection: conn.name.clone(),
                 layer: point.layer.clone(),
                 width,
-                path: vec![exact, center],
+                path: match exit {
+                    PadExit::Octilinear => pcb_model::octilinear_path(exact, center),
+                    PadExit::Direct => vec![exact, center],
+                },
             });
         }
     }
@@ -3792,10 +3917,96 @@ mod escape_bottleneck_tests {
             }],
         };
 
-        add_terminal_stubs(&problem, &mut solution, &BTreeSet::new());
+        add_terminal_stubs(
+            &problem,
+            &mut solution,
+            &BTreeSet::new(),
+            PadExit::Octilinear,
+        );
 
         assert_eq!(solution.traces.len(), 1);
         assert_eq!(solution.traces[0].path[0], Point2 { x: 4.13, y: 1.13 });
+    }
+
+    #[test]
+    fn kept_copper_that_did_not_survive_is_named() {
+        let kept: BTreeSet<String> = ["GND".to_owned(), "VIN".to_owned()].into();
+        let survived = RouteSolution {
+            traces: vec![Trace {
+                connection: "GND".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![Point2 { x: 0.0, y: 0.0 }, Point2 { x: 1.0, y: 0.0 }],
+            }],
+            vias: vec![],
+        };
+
+        assert_eq!(lost_kept_nets(&kept, &survived), ["VIN"]);
+        assert!(lost_kept_nets(&BTreeSet::new(), &survived).is_empty());
+    }
+
+    #[test]
+    fn a_net_kept_only_as_a_via_still_counts_as_surviving() {
+        let kept: BTreeSet<String> = ["GND".to_owned()].into();
+        let survived = RouteSolution {
+            traces: vec![],
+            vias: vec![Via {
+                connection: "GND".to_owned(),
+                at: Point2 { x: 1.0, y: 1.0 },
+                diameter: 0.6,
+                drill: 0.3,
+                span: pcb_model::ViaSpan::Through,
+            }],
+        };
+
+        assert!(lost_kept_nets(&kept, &survived).is_empty());
+    }
+
+    #[test]
+    fn every_pad_exit_leaves_the_pad_on_an_octilinear_leg() {
+        let problem = bottom_plane_problem();
+        let mut solution = RouteSolution::default();
+
+        add_terminal_stubs(
+            &problem,
+            &mut solution,
+            &BTreeSet::new(),
+            PadExit::Octilinear,
+        );
+
+        assert!(
+            !solution.traces.is_empty(),
+            "the fixture has pads to anchor"
+        );
+        let pads: Vec<Point2> = problem
+            .connections
+            .iter()
+            .flat_map(|c| c.points_to_connect.iter().map(|p| p.point()))
+            .collect();
+        let pitch = problem.grid_pitch();
+        for trace in &solution.traces {
+            for pair in trace.path.windows(2) {
+                assert!(
+                    pcb_model::is_octilinear(pair[0], pair[1]),
+                    "{:?} is an arbitrary angle",
+                    pair
+                );
+            }
+            // The rest of the pipeline keys on both ends: the plane-net skip
+            // matches `path.first()` against the pad.
+            let first = *trace.path.first().expect("a stub has points");
+            assert!(
+                pads.iter().any(|pad| pad.dist(first) < geom::EPS),
+                "a stub starts on its pad, not at {first:?}"
+            );
+            let last = *trace.path.last().expect("a stub has points");
+            assert!(
+                (cell_center(problem.bounds.min_x, last.x, pitch) - last.x).abs() < geom::EPS
+                    && (cell_center(problem.bounds.min_y, last.y, pitch) - last.y).abs()
+                        < geom::EPS,
+                "a stub ends on a lattice cell centre, not at {last:?}"
+            );
+        }
     }
 
     #[test]

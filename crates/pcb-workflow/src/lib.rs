@@ -30,6 +30,8 @@
 //! - [`diagnose`] — actionable payloads for a refused route.
 //! - [`intent`] — board intent (edges, proximity, groups, zones) → placement
 //!   constraints. The model states intent; solvers own coordinates.
+//! - [`selection`] — `bbox` board-window selection, lowered to the `refs` /
+//!   `nets` subsets the local tools take.
 //! - [`sizing`] — how big a board its own parts require.
 //! - [`place`] — `get_board`, IPC snapshot→`PlacementView`, and `place_board`.
 //! - [`route`] — `route_board` IPC copper write-back + triage.
@@ -55,6 +57,7 @@ mod render;
 mod route;
 mod rules;
 mod seed;
+mod selection;
 mod silk;
 mod sizing;
 mod sync;
@@ -67,12 +70,7 @@ pub(crate) struct WorkflowPhase {
 impl WorkflowPhase {
     pub(crate) fn start(phase: &'static str, parts: usize, nets: usize) -> Self {
         Self {
-            span: tracing::info_span!(
-                "pcb_workflow_phase",
-                phase,
-                parts,
-                nets
-            ),
+            span: tracing::info_span!("pcb_workflow_phase", phase, parts, nets),
             started: std::time::Instant::now(),
         }
     }
@@ -89,11 +87,7 @@ impl WorkflowPhase {
 
 impl Drop for WorkflowPhase {
     fn drop(&mut self) {
-        let elapsed_ms = self
-            .started
-            .elapsed()
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64;
+        let elapsed_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         tracing::info!(parent: &self.span, elapsed_ms, "PCB workflow phase finished");
     }
 }

@@ -44,11 +44,11 @@ fn out_of_bounds(item: &CopperItem, problem: &RoutingView) -> Option<Finding> {
             } else {
                 (o_b, segment.b)
             };
-            (over, at, item.first_owner())
+            (over, at, item.first_owner().to_string())
         }
         CopperGeom::Via { at, radius } => {
             let over = problem.bounds.disc_overshoot(*at, *radius);
-            (over, *at, item.first_owner())
+            (over, *at, item.first_owner().to_string())
         }
         CopperGeom::Rect { .. } => return None,
     };

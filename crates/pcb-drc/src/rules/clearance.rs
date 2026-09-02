@@ -1,8 +1,9 @@
 //! `PairClearanceRule` — copper-edge clearance between every unordered pair of
 //! copper items.
 //!
-//! Brute-force O(n²) over the flat copper collection (element counts are tiny).
-//! Three conflict categories: trace↔trace (same layer, foreign nets),
+//! Pairs come from [`DrcCtx::pairs_within`], so only copper whose bounding boxes
+//! fall inside the clearance reach is tested — in the same order the exhaustive
+//! `i < j` loop visited it. Three conflict categories: trace↔trace (same layer, foreign nets),
 //! trace↔obstacle (shared layer, foreign owner), and via↔anything (through-hole,
 //! so any layer). Same-owner pairs and obstacle↔obstacle pairs never conflict.
 
@@ -21,18 +22,17 @@ impl Rule for PairClearanceRule {
     }
 
     fn check(&self, ctx: &DrcCtx) -> Vec<Finding> {
-        let items = &ctx.copper;
         let clearance = ctx.problem.clearance;
-        let mut out = Vec::new();
-        for i in 0..items.len() {
-            for j in (i + 1)..items.len() {
-                if let Some(v) = pair_clearance(&items[i], &items[j], clearance) {
-                    out.push(v);
-                }
-            }
-        }
-        out
+        findings_over(&ctx.copper, clearance, &ctx.pairs_within(clearance))
     }
+}
+
+/// Every clearance finding over the given index pairs, in pair order.
+fn findings_over(items: &[CopperItem], clearance: f64, pairs: &[(usize, usize)]) -> Vec<Finding> {
+    pairs
+        .iter()
+        .filter_map(|&(i, j)| pair_clearance(&items[i], &items[j], clearance))
+        .collect()
 }
 
 /// Clearance test for one unordered item pair. Returns a finding if their copper
@@ -69,8 +69,8 @@ fn pair_clearance(x: &CopperItem, y: &CopperItem, clearance: f64) -> Option<Find
             let gap = s1.dist_to_segment(*s2) - w1 - w2;
             if gap + EPS < clearance {
                 Some(Finding::ClearanceTraceTrace {
-                    a: x.first_owner(),
-                    b: y.first_owner(),
+                    a: x.first_owner().to_string(),
+                    b: y.first_owner().to_string(),
                     layer: l1.0.clone(),
                     gap,
                     required: clearance,
@@ -124,14 +124,14 @@ fn trace_obstacle(
     // The obstacle constrains the trace only on a shared layer, and only if the
     // obstacle is not owned by the trace's own connection.
     let conn = seg.first_owner();
-    if !layers.contains(layer) || rect.owned_by(&conn) {
+    if !layers.contains(layer) || rect.owned_by(conn) {
         return None;
     }
     let gap = segment.dist_to_rect(bounds) - half_w;
     if gap + EPS < clearance {
         Some(Finding::ClearanceTraceObstacle {
-            connection: conn,
-            obstacle_owners: rect.owners.clone(),
+            connection: conn.to_string(),
+            obstacle_owners: rect.owners.to_vec(),
             layer: layer.0.clone(),
             gap,
             required: clearance,
@@ -159,14 +159,14 @@ fn via_pair(
     let (edge_dist, other_owners) = match &other.geom {
         CopperGeom::Segment {
             segment, half_w, ..
-        } => (segment.dist_to_point(at) - half_w, other.owners.clone()),
-        CopperGeom::Rect { rect, .. } => (rect.dist_to_point(at), other.owners.clone()),
-        CopperGeom::Via { at: p, radius: r2 } => (at.dist(*p) - r2, other.owners.clone()),
+        } => (segment.dist_to_point(at) - half_w, other.owners.to_vec()),
+        CopperGeom::Rect { rect, .. } => (rect.dist_to_point(at), other.owners.to_vec()),
+        CopperGeom::Via { at: p, radius: r2 } => (at.dist(*p) - r2, other.owners.to_vec()),
     };
     let gap = edge_dist - radius;
     if gap + EPS < clearance {
         Some(Finding::ClearanceViaAny {
-            connection: conn,
+            connection: conn.to_string(),
             other_owners,
             gap,
             required: clearance,
@@ -174,5 +174,47 @@ fn via_pair(
         })
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod broad_phase_equivalence {
+    use super::*;
+    use crate::goldens;
+    use pcb_model::Drc;
+
+    /// The bounding-box filter must not change the report: over real boards and
+    /// tilings large enough to take the hash-grid path, the filtered findings
+    /// equal the exhaustive `i < j` loop's, in the same order.
+    #[test]
+    fn filtered_and_exhaustive_agree() {
+        for (name, view, solution) in goldens::boards() {
+            for n in [1, 4] {
+                let (view, solution) = goldens::tiled(&view, &solution, n);
+                let ctx = DrcCtx::build(&view, &solution);
+                let clearance = view.clearance;
+                let exhaustive: Vec<_> = (0..ctx.copper.len())
+                    .flat_map(|i| ((i + 1)..ctx.copper.len()).map(move |j| (i, j)))
+                    .collect();
+                assert_eq!(
+                    PairClearanceRule.check(&ctx),
+                    findings_over(&ctx.copper, clearance, &exhaustive),
+                    "{name} tiled {n}x{n}"
+                );
+            }
+        }
+    }
+
+    /// Tiling multiplies the copper without changing any tile's verdict, so a
+    /// clean board stays clean at scale — the property the filter must preserve.
+    #[test]
+    fn tiling_a_clean_board_stays_clean() {
+        for (name, view, solution) in goldens::boards() {
+            if !crate::StandardDrc.check(&view, &solution).is_empty() {
+                continue;
+            }
+            let (view, solution) = goldens::tiled(&view, &solution, 4);
+            assert_eq!(crate::StandardDrc.check(&view, &solution), vec![], "{name}");
+        }
     }
 }

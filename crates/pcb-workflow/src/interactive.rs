@@ -297,7 +297,7 @@ impl MovePlan {
                 })
             })
             .collect();
-        json!({
+        let mut out = json!({
             "ok": true,
             "moved": self.positions.len(),
             "changed": self.changed,
@@ -305,7 +305,19 @@ impl MovePlan {
             "retracted_tracks": retract.count,
             "retracted_nets": retract.nets.len(),
             "nets_to_reroute": retract.nets.iter().collect::<Vec<_>>(),
-        })
+        });
+        // A move is a LOCAL edit, so name the local repair. Routing the whole
+        // board instead throws away every route the move did not invalidate.
+        if !retract.nets.is_empty() {
+            out["next_tool"] = json!("route_board");
+            out["note"] = json!(format!(
+                "only these nets lost copper: call route_board {{\"nets\": {}}} to repair just \
+                 them, or route_board {{\"bbox\": …}} for the area you edited. Routing the whole \
+                 board would discard the routes this move left standing.",
+                serde_json::to_string(&retract.nets).unwrap_or_else(|_| "[…]".to_owned())
+            ));
+        }
+        out
     }
 }
 

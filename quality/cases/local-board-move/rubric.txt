@@ -1,2 +1,5 @@
 R1 should end closer to R2, while R2 and the outline remain fixed and the schematic stays unchanged. The modification should be local rather than a wholesale replacement, and the final board must be fully connected and DRC-clean.
 expect: unrouted == []
+expect: drc_errors == 0
+expect: board_outline_changed == false
+expect: len(board_parts_added) == 0

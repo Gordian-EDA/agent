@@ -252,12 +252,10 @@ pub(super) fn materialize_zones_for_drc(
         // drc uses `--refill-zones` when this version supports it.
         return Ok(false);
     }
-    if !attach_running {
-        // KiCad 9 has no CLI refill operation. Offline DRC still reads the
-        // durable zone definitions; do not turn a quality check into an
-        // implicit pcbnew launch just to update cached fill polygons.
-        return Ok(false);
-    }
+    // KiCad 9 has no CLI refill operation, and DRC on unfilled zones reports
+    // every stitching via as dangling. Refilling is the one explicit reason a
+    // check may open a (headless, or attached when configured) pcbnew session.
+    let _ = attach_running;
     if major < 9 {
         return Err(format!(
             "KiCad {} cannot refill generated zones headlessly; KiCad 9+ is required to DRC boards with zones",

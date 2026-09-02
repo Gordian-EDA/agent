@@ -7,3 +7,4 @@
 
 pub mod astar;
 pub mod grid;
+pub mod tidy;

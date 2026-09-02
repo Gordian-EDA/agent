@@ -297,3 +297,4 @@ mod tests {
         assert!(!diagonal.axis_aligned_hits_rect_interior(&r));
     }
 }
+

@@ -1,0 +1,418 @@
+{
+  "layerCount": 2,
+  "minTraceWidth": 0.15,
+  "obstacles": [
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 2.0,
+        "y": 9.5
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "VCC"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 2.0,
+        "y": 12.04
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "GND"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 6.5875,
+        "y": 7.5
+      },
+      "width": 1.025,
+      "height": 1.4,
+      "connectedTo": [
+        "VCC"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 8.4125,
+        "y": 7.5
+      },
+      "width": 1.025,
+      "height": 1.4,
+      "connectedTo": [
+        "A1"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 13.5625,
+        "y": 7.5
+      },
+      "width": 0.975,
+      "height": 1.4,
+      "connectedTo": [
+        "A1"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 15.4375,
+        "y": 7.5
+      },
+      "width": 0.975,
+      "height": 1.4,
+      "connectedTo": [
+        "GND"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 20.5875,
+        "y": 7.5
+      },
+      "width": 1.025,
+      "height": 1.4,
+      "connectedTo": [
+        "VCC"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 22.4125,
+        "y": 7.5
+      },
+      "width": 1.025,
+      "height": 1.4,
+      "connectedTo": [
+        "A2"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 27.5625,
+        "y": 7.5
+      },
+      "width": 0.975,
+      "height": 1.4,
+      "connectedTo": [
+        "A2"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 29.4375,
+        "y": 7.5
+      },
+      "width": 0.975,
+      "height": 1.4,
+      "connectedTo": [
+        "GND"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 6.5875,
+        "y": 14.5
+      },
+      "width": 1.025,
+      "height": 1.4,
+      "connectedTo": [
+        "VCC"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 8.4125,
+        "y": 14.5
+      },
+      "width": 1.025,
+      "height": 1.4,
+      "connectedTo": [
+        "A3"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 13.5625,
+        "y": 14.5
+      },
+      "width": 0.975,
+      "height": 1.4,
+      "connectedTo": [
+        "A3"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 15.4375,
+        "y": 14.5
+      },
+      "width": 0.975,
+      "height": 1.4,
+      "connectedTo": [
+        "GND"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 20.5875,
+        "y": 14.5
+      },
+      "width": 1.025,
+      "height": 1.4,
+      "connectedTo": [
+        "VCC"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 22.4125,
+        "y": 14.5
+      },
+      "width": 1.025,
+      "height": 1.4,
+      "connectedTo": [
+        "A4"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 27.5625,
+        "y": 14.5
+      },
+      "width": 0.975,
+      "height": 1.4,
+      "connectedTo": [
+        "A4"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 29.4375,
+        "y": 14.5
+      },
+      "width": 0.975,
+      "height": 1.4,
+      "connectedTo": [
+        "GND"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "name": "A1",
+      "pointsToConnect": [
+        {
+          "x": 8.4125,
+          "y": 7.5,
+          "layer": "top"
+        },
+        {
+          "x": 13.5625,
+          "y": 7.5,
+          "layer": "top"
+        }
+      ]
+    },
+    {
+      "name": "A2",
+      "pointsToConnect": [
+        {
+          "x": 22.4125,
+          "y": 7.5,
+          "layer": "top"
+        },
+        {
+          "x": 27.5625,
+          "y": 7.5,
+          "layer": "top"
+        }
+      ]
+    },
+    {
+      "name": "A3",
+      "pointsToConnect": [
+        {
+          "x": 8.4125,
+          "y": 14.5,
+          "layer": "top"
+        },
+        {
+          "x": 13.5625,
+          "y": 14.5,
+          "layer": "top"
+        }
+      ]
+    },
+    {
+      "name": "A4",
+      "pointsToConnect": [
+        {
+          "x": 22.4125,
+          "y": 14.5,
+          "layer": "top"
+        },
+        {
+          "x": 27.5625,
+          "y": 14.5,
+          "layer": "top"
+        }
+      ]
+    },
+    {
+      "name": "GND",
+      "pointsToConnect": [
+        {
+          "x": 2.0,
+          "y": 12.04,
+          "layer": "top"
+        },
+        {
+          "x": 15.4375,
+          "y": 7.5,
+          "layer": "top"
+        },
+        {
+          "x": 29.4375,
+          "y": 7.5,
+          "layer": "top"
+        },
+        {
+          "x": 15.4375,
+          "y": 14.5,
+          "layer": "top"
+        },
+        {
+          "x": 29.4375,
+          "y": 14.5,
+          "layer": "top"
+        }
+      ]
+    },
+    {
+      "name": "VCC",
+      "pointsToConnect": [
+        {
+          "x": 2.0,
+          "y": 9.5,
+          "layer": "top"
+        },
+        {
+          "x": 6.5875,
+          "y": 7.5,
+          "layer": "top"
+        },
+        {
+          "x": 20.5875,
+          "y": 7.5,
+          "layer": "top"
+        },
+        {
+          "x": 6.5875,
+          "y": 14.5,
+          "layer": "top"
+        },
+        {
+          "x": 20.5875,
+          "y": 14.5,
+          "layer": "top"
+        }
+      ]
+    }
+  ],
+  "bounds": {
+    "minX": 0.5,
+    "minY": 0.5,
+    "maxX": 35.5,
+    "maxY": 23.5
+  },
+  "clearance": 0.15,
+  "viaDiameter": 0.6,
+  "viaDrill": 0.3,
+  "netWidths": {},
+  "outline": null,
+  "planeNets": {},
+  "escapeLayers": {},
+  "fixedCopper": {
+    "traces": [],
+    "vias": []
+  },
+  "nets": null
+}

@@ -131,3 +131,25 @@ fn the_probe_estimate_matches_the_single_pass_router_it_wraps() {
         assert_eq!(estimate.via_count, direct.solution.metrics().via_count);
     }
 }
+
+/// Every segment of emitted copper is axis-aligned or exactly 45° — the same
+/// invariant the premium leaf holds, checked on the engine that authors the
+/// terminal and pad-escape legs.
+#[test]
+fn every_emitted_segment_is_octilinear() {
+    for (name, view) in boards() {
+        let result = route(&view, &Budget::unlimited());
+        for trace in &result.solution.traces {
+            for w in trace.path.windows(2) {
+                assert!(
+                    pcb_model::is_octilinear(w[0], w[1]),
+                    "{name}: {} emits an off-angle segment {:?} -> {:?}",
+                    trace.connection,
+                    w[0],
+                    w[1]
+                );
+            }
+        }
+        assert_eq!(result.solution.metrics().off_angle_segments, 0, "{name}");
+    }
+}

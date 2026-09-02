@@ -1,0 +1,375 @@
+{
+  "layerCount": 2,
+  "minTraceWidth": 0.15,
+  "obstacles": [
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 4.0,
+        "y": 13.5
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "IN"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 4.0,
+        "y": 16.04
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "GND"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 12.0875,
+        "y": 6.0
+      },
+      "width": 1.025,
+      "height": 1.4,
+      "connectedTo": [
+        "IN"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 13.9125,
+        "y": 6.0
+      },
+      "width": 1.025,
+      "height": 1.4,
+      "connectedTo": [
+        "N1"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 16.225,
+        "y": 14.5
+      },
+      "width": 0.9,
+      "height": 0.95,
+      "connectedTo": [
+        "N1"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 17.775,
+        "y": 14.5
+      },
+      "width": 0.9,
+      "height": 0.95,
+      "connectedTo": [
+        "GND"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 21.5875,
+        "y": 6.0
+      },
+      "width": 1.025,
+      "height": 1.4,
+      "connectedTo": [
+        "N1"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 23.4125,
+        "y": 6.0
+      },
+      "width": 1.025,
+      "height": 1.4,
+      "connectedTo": [
+        "N2"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 16.225,
+        "y": 10.5
+      },
+      "width": 0.9,
+      "height": 0.95,
+      "connectedTo": [
+        "N2"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 17.775,
+        "y": 10.5
+      },
+      "width": 0.9,
+      "height": 0.95,
+      "connectedTo": [
+        "GND"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 21.5875,
+        "y": 14.5
+      },
+      "width": 1.025,
+      "height": 1.4,
+      "connectedTo": [
+        "N2"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 23.4125,
+        "y": 14.5
+      },
+      "width": 1.025,
+      "height": 1.4,
+      "connectedTo": [
+        "OUT"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 27.725,
+        "y": 14.5
+      },
+      "width": 0.9,
+      "height": 0.95,
+      "connectedTo": [
+        "OUT"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top"
+      ],
+      "center": {
+        "x": 29.275,
+        "y": 14.5
+      },
+      "width": 0.9,
+      "height": 0.95,
+      "connectedTo": [
+        "GND"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 28.5,
+        "y": 6.5
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "OUT"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 28.5,
+        "y": 9.04
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "GND"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "name": "GND",
+      "pointsToConnect": [
+        {
+          "x": 4.0,
+          "y": 16.04,
+          "layer": "top"
+        },
+        {
+          "x": 17.775,
+          "y": 14.5,
+          "layer": "top"
+        },
+        {
+          "x": 17.775,
+          "y": 10.5,
+          "layer": "top"
+        },
+        {
+          "x": 29.275,
+          "y": 14.5,
+          "layer": "top"
+        },
+        {
+          "x": 28.5,
+          "y": 9.04,
+          "layer": "top"
+        }
+      ]
+    },
+    {
+      "name": "IN",
+      "pointsToConnect": [
+        {
+          "x": 4.0,
+          "y": 13.5,
+          "layer": "top"
+        },
+        {
+          "x": 12.0875,
+          "y": 6.0,
+          "layer": "top"
+        }
+      ]
+    },
+    {
+      "name": "N1",
+      "pointsToConnect": [
+        {
+          "x": 13.9125,
+          "y": 6.0,
+          "layer": "top"
+        },
+        {
+          "x": 16.225,
+          "y": 14.5,
+          "layer": "top"
+        },
+        {
+          "x": 21.5875,
+          "y": 6.0,
+          "layer": "top"
+        }
+      ]
+    },
+    {
+      "name": "N2",
+      "pointsToConnect": [
+        {
+          "x": 23.4125,
+          "y": 6.0,
+          "layer": "top"
+        },
+        {
+          "x": 16.225,
+          "y": 10.5,
+          "layer": "top"
+        },
+        {
+          "x": 21.5875,
+          "y": 14.5,
+          "layer": "top"
+        }
+      ]
+    },
+    {
+      "name": "OUT",
+      "pointsToConnect": [
+        {
+          "x": 23.4125,
+          "y": 14.5,
+          "layer": "top"
+        },
+        {
+          "x": 27.725,
+          "y": 14.5,
+          "layer": "top"
+        },
+        {
+          "x": 28.5,
+          "y": 6.5,
+          "layer": "top"
+        }
+      ]
+    }
+  ],
+  "bounds": {
+    "minX": 0.5,
+    "minY": 0.5,
+    "maxX": 39.5,
+    "maxY": 17.5
+  },
+  "clearance": 0.15,
+  "viaDiameter": 0.6,
+  "viaDrill": 0.3,
+  "netWidths": {},
+  "outline": null,
+  "planeNets": {},
+  "escapeLayers": {},
+  "fixedCopper": {
+    "traces": [],
+    "vias": []
+  },
+  "nets": null
+}

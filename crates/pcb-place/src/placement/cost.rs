@@ -33,6 +33,7 @@ pub(crate) const SA_KEEP_NEAR_W: f64 = 4.0; // authored `keep_near` pair → eac
 // Below SA_COHERE_W: a detected bypass cap is an electrical necessity, an authored
 // proximity is a preference. Above SA_WL_W so it survives ordinary wirelength pull.
 pub(crate) const SA_GROUP_W: f64 = 1.5; // authored group member → the group's centroid
+pub(crate) const SA_ALIGN_W: f64 = 1.0; // same-kind part → its nearest twin's row/column and orientation
 /// Breathing room (mm) a refdes needs around a part before it crowds a neighbour.
 pub(crate) const SA_SILK_GAP: f64 = 1.0;
 
@@ -398,6 +399,65 @@ pub(crate) struct CostTerms {
     pub(crate) cohere: Vec<Vec<usize>>,
     /// Authored groups that should stay inside a prescribed region.
     pub(crate) region: Vec<(Vec<usize>, Rect)>,
+    /// Interchangeable-looking parts that should read as a row or a column
+    /// ([`same_kind_groups`]). Groups of one carry no expectation and are dropped.
+    pub(crate) kinds: Vec<Vec<usize>>,
+}
+
+/// Group parts a reader would expect to see lined up: the same refdes alpha
+/// prefix (R with R, C with C) AND the same courtyard, i.e. the same footprint.
+/// Two 0402 resistors scattered at unrelated angles look like an accident; a
+/// resistor and an inductor at different angles do not.
+///
+/// `steered` parts are left out. A connector steered to a board edge takes its
+/// line from that edge, and two of them on opposite edges are correct however
+/// unaligned they look; without this, a pair of identical headers holds each
+/// other in the middle of the board rather than let one go to its edge.
+pub(crate) fn same_kind_groups(
+    problem: &PlacementView,
+    steered: &std::collections::BTreeSet<usize>,
+) -> Vec<Vec<usize>> {
+    let key = |part: &crate::Part| {
+        (
+            part.reference
+                .chars()
+                .take_while(|c| c.is_ascii_alphabetic())
+                .collect::<String>(),
+            (part.courtyard_w * 1000.0).round() as i64,
+            (part.courtyard_h * 1000.0).round() as i64,
+        )
+    };
+    let mut by_kind: std::collections::BTreeMap<_, Vec<usize>> = Default::default();
+    for (i, part) in problem.parts.iter().enumerate() {
+        if !steered.contains(&i) {
+            by_kind.entry(key(part)).or_default().push(i);
+        }
+    }
+    by_kind
+        .into_values()
+        .filter(|members| members.len() > 1)
+        .collect()
+}
+
+/// How far part `i` is from reading as a twin of its NEAREST same-kind partner:
+/// the off-axis offset (zero once they share a row or a column) plus the
+/// half-extent mismatch (zero once they point the same way).
+///
+/// Restricting to the nearest partner is what keeps the term local — a part on
+/// the far side of the board exerts no pull, so alignment never fights the net
+/// springs over long distances.
+fn kind_misalignment(group: &[usize], half: &[(f64, f64)], pos: &[Point2], i: usize) -> f64 {
+    let Some(&j) = group.iter().filter(|&&j| j != i).min_by(|&&a, &&b| {
+        pos[i]
+            .dist(pos[a])
+            .total_cmp(&pos[i].dist(pos[b]))
+            .then(a.cmp(&b))
+    }) else {
+        return 0.0;
+    };
+    let dx = (pos[i].x - pos[j].x).abs();
+    let dy = (pos[i].y - pos[j].y).abs();
+    dx.min(dy) + (half[i].0 - half[j].0).abs() + (half[i].1 - half[j].1).abs()
 }
 
 impl CostTerms {
@@ -413,6 +473,19 @@ impl CostTerms {
                 .position(|part| &part.reference == reference)
         };
         let members = |refs: &[String]| refs.iter().filter_map(index).collect::<Vec<_>>();
+        let steered: std::collections::BTreeSet<usize> = hints
+            .edge_seek
+            .iter()
+            .chain(&hints.corner_seek)
+            .chain(
+                hints
+                    .groups
+                    .iter()
+                    .filter(|group| group.edge.is_some())
+                    .flat_map(|group| &group.members),
+            )
+            .filter_map(index)
+            .collect();
         Self {
             pairs,
             edge_seek: members(&hints.edge_seek),
@@ -420,9 +493,7 @@ impl CostTerms {
                 .groups
                 .iter()
                 .filter_map(|group| Some((group.edge?, &group.members)))
-                .flat_map(|(edge, refs)| {
-                    members(refs).into_iter().map(move |part| (part, edge))
-                })
+                .flat_map(|(edge, refs)| members(refs).into_iter().map(move |part| (part, edge)))
                 .collect(),
             keep_near: hints
                 .keep_near
@@ -446,6 +517,7 @@ impl CostTerms {
                 .filter_map(|group| Some((members(&group.members), group.region?)))
                 .filter(|(members, _)| !members.is_empty())
                 .collect(),
+            kinds: same_kind_groups(problem, &steered),
         }
     }
 }
@@ -548,7 +620,8 @@ pub(crate) fn place_cost(
 
     // Authored intent: a named edge, a proximity, a group.
     for &(i, edge) in &terms.edge_of {
-        cost += SA_EDGE_W * named_edge_distance(&problem.parts[i], rotations[i], pos[i], b, half[i], edge);
+        cost += SA_EDGE_W
+            * named_edge_distance(&problem.parts[i], rotations[i], pos[i], b, half[i], edge);
     }
     for &(a, b) in &terms.keep_near {
         cost += SA_KEEP_NEAR_W * pos[a].dist(pos[b]);
@@ -566,6 +639,14 @@ pub(crate) fn place_cost(
         let cy = members.iter().map(|&m| pos[m].y).sum::<f64>() * inv;
         let centroid = Point2 { x: cx, y: cy };
         cost += SA_GROUP_W * members.iter().map(|&m| pos[m].dist(centroid)).sum::<f64>();
+    }
+    // Same-kind alignment. Exact alignment is a measure-zero set the annealer
+    // would never land on by chance, so the objective at least has to stop
+    // actively destroying it; the discrete snap pass then lands on it.
+    for group in &terms.kinds {
+        for &i in group {
+            cost += SA_ALIGN_W * kind_misalignment(group, half, pos, i);
+        }
     }
     cost
 }

@@ -48,7 +48,6 @@ impl Budget {
     pub fn expired(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
     }
-
 }
 
 impl Default for Budget {
