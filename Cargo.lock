@@ -1420,6 +1420,7 @@ name = "kicad-board"
 version = "0.1.0"
 dependencies = [
  "geom",
+ "kicad",
  "kicad-ipc",
  "pcb-model",
  "pcb-place",

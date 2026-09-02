@@ -4,6 +4,7 @@
 //! domain model, plus the offline s-expression edits used when IPC is unavailable.
 
 mod active;
+mod edit;
 mod netclass;
 mod patch;
 mod sexpr;
@@ -12,6 +13,7 @@ pub use active::{
     ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot, board_problem, bridge_route,
     from_bridge, is_seed_imported_board, save_live_board,
 };
+pub use edit::{BoardDoc, BoardFootprint};
 pub use netclass::{
     NetClassUpdate, NetClassUpdateReport, board_net_widths, patch_board_net_class,
     patch_project_net_class, project_net_widths, write_net_class_update,

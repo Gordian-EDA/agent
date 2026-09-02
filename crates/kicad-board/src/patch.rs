@@ -197,7 +197,7 @@ pub fn board_file_plane_nets(text: &str) -> Result<BTreeMap<String, u32>, String
     Ok(planes)
 }
 
-fn quoted_field<'a>(block: &'a str, head: &str) -> Option<&'a str> {
+pub(crate) fn quoted_field<'a>(block: &'a str, head: &str) -> Option<&'a str> {
     let prefix = format!("({head} \"");
     let rest = block.split_once(&prefix)?.1;
     Some(rest.split_once('"')?.0)
@@ -588,7 +588,7 @@ fn rotate_child_angles(
     }
 }
 
-fn apply_edits(text: &str, mut edits: Vec<(usize, usize, String)>) -> String {
+pub(crate) fn apply_edits(text: &str, mut edits: Vec<(usize, usize, String)>) -> String {
     edits.sort_by_key(|e| e.0);
     let mut out = String::with_capacity(text.len() + 256);
     let mut pos = 0usize;
@@ -647,7 +647,7 @@ pub fn strip_copper(text: &str) -> Result<(String, usize, usize), String> {
     Ok((apply_edits(text, edits), tracks, vias))
 }
 
-fn line_start(text: &str, pos: usize) -> usize {
+pub(crate) fn line_start(text: &str, pos: usize) -> usize {
     text[..pos]
         .rfind('\n')
         .map(|nl| {
