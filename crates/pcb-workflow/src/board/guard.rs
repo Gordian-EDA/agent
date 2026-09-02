@@ -100,6 +100,35 @@ impl Defects {
     }
 }
 
+/// What an edit added to a board's defects. Everything the board already
+/// carried is excused: a mutator answers for its own damage, not for arriving at
+/// a board someone else broke.
+struct Introduced<'a> {
+    shorts: Vec<&'a (String, String)>,
+    faults: Vec<&'a Fault>,
+}
+
+fn introduced<'a>(
+    before: &'a Defects,
+    after: &'a Defects,
+    explained: &'a [Fault],
+) -> Introduced<'a> {
+    let mut budget = before.faults.clone();
+    Introduced {
+        shorts: after.shorts.difference(&before.shorts).collect(),
+        faults: explained
+            .iter()
+            .filter(|fault| match budget.get_mut(&fault.key) {
+                Some(remaining) if *remaining > 0 => {
+                    *remaining -= 1;
+                    false
+                }
+                _ => true,
+            })
+            .collect(),
+    }
+}
+
 /// A board mutation in flight: the pre-edit file, its revision snapshot, and the
 /// defects the board already carried.
 pub(crate) struct Guard {
@@ -161,26 +190,17 @@ impl Guard {
             return stamped(result, &self.revision);
         };
         let (after, explained) = Defects::of(&board);
-
-        let shorts: Vec<Value> = after
-            .shorts
-            .difference(&before.shorts)
-            .map(|(a, b)| json!({ "a": a, "b": b }))
-            .collect();
-        let mut budget = before.faults.clone();
-        let introduced: Vec<&Fault> = explained
-            .iter()
-            .filter(|fault| match budget.get_mut(&fault.key) {
-                Some(remaining) if *remaining > 0 => {
-                    *remaining -= 1;
-                    false
-                }
-                _ => true,
-            })
-            .collect();
+        let Introduced {
+            shorts,
+            faults: introduced,
+        } = introduced(before, &after, &explained);
         if shorts.is_empty() && introduced.is_empty() {
             return stamped(result, &self.revision);
         }
+        let shorts: Vec<Value> = shorts
+            .iter()
+            .map(|(a, b)| json!({ "a": a, "b": b }))
+            .collect();
 
         let restored = self.restore(ctx);
         let tool = self.tool;
@@ -226,4 +246,64 @@ fn merge_into(mut base: Value, extra: Value) -> Value {
         base.extend(extra);
     }
     base
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn short(a: &str, b: &str) -> (String, String) {
+        (a.to_owned(), b.to_owned())
+    }
+
+    fn fault(rule: &'static str, nets: &[&str]) -> Fault {
+        Fault {
+            key: (rule, nets.iter().map(|net| (*net).to_owned()).collect()),
+            json: json!({ "rule": rule, "nets": nets }),
+        }
+    }
+
+    fn defects(shorts: &[(String, String)], faults: &[Fault]) -> Defects {
+        let mut counts: BTreeMap<FaultKey, usize> = BTreeMap::new();
+        for fault in faults {
+            *counts.entry(fault.key.clone()).or_default() += 1;
+        }
+        Defects {
+            shorts: shorts.iter().cloned().collect(),
+            faults: counts,
+            unrouted: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn a_short_the_edit_created_is_refused() {
+        let before = defects(&[], &[]);
+        let after = defects(&[short("GND", "VBUS")], &[]);
+        let introduced = introduced(&before, &after, &[]);
+        assert_eq!(introduced.shorts, [&short("GND", "VBUS")]);
+    }
+
+    #[test]
+    fn a_short_the_board_arrived_with_is_not_this_edit_to_answer_for() {
+        let already = defects(&[short("GND", "VBUS")], &[]);
+        let introduced = introduced(&already, &already, &[]);
+        assert!(introduced.shorts.is_empty());
+        assert!(introduced.faults.is_empty());
+    }
+
+    #[test]
+    fn a_fault_is_matched_by_rule_and_nets_so_moved_copper_does_not_look_new() {
+        let clearance = fault("clearance (track to track)", &["GND", "SDA"]);
+        let before = defects(&[], std::slice::from_ref(&clearance));
+        // Same fault, reported at a different place after the copper moved.
+        let mut moved = fault("clearance (track to track)", &["GND", "SDA"]);
+        moved.json = json!({ "rule": "clearance (track to track)", "at_mm": [9.0, 9.0] });
+        let after = defects(&[], std::slice::from_ref(&moved));
+        assert!(introduced(&before, &after, std::slice::from_ref(&moved)).faults.is_empty());
+
+        // A SECOND one of the same fault is one the edit added.
+        let two = [moved.clone(), moved.clone()];
+        let after_two = defects(&[], &two);
+        assert_eq!(introduced(&before, &after_two, &two).faults.len(), 1);
+    }
 }

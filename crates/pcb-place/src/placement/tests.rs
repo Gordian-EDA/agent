@@ -18,8 +18,8 @@ use super::route::{
     seat_corner_seek_parts, swap_pair_order, unique_position_candidates,
 };
 use crate::{
-    Edge, GroupHint, LockedAt, Part, PartPad, PlacementHints, PlacementView, derive_nets,
-    routing_view, series_pairs,
+    Edge, GroupHint, LockedAt, Part, PartPad, PlaceResult, Placement, PlacementHints,
+    PlacementView, derive_nets, routing_view, series_pairs,
 };
 use crate::{compute_hpwl, compute_hpwl_with_rotations};
 use geom::Rect;
@@ -4125,5 +4125,139 @@ fn tuned_placement_is_byte_identical_across_runs() {
     assert_eq!(
         first, second,
         "tuned placement must be byte-for-byte deterministic"
+    );
+}
+
+/// A part whose only pull is its net, so a hint has something to overcome.
+fn hint_part(reference: &str, net: &str, w: f64, h: f64) -> Part {
+    Part {
+        reference: reference.to_owned(),
+        courtyard_w: w,
+        courtyard_h: h,
+        pads: vec![PartPad {
+            number: "1".to_owned(),
+            offset: Point2 { x: 0.0, y: 0.0 },
+            width: 0.8,
+            height: 0.8,
+            layers: top(),
+            net: Some(net.to_owned()),
+        }],
+        edge_datum: None,
+        locked: None,
+    }
+}
+
+fn intent_hints(groups: Vec<GroupHint>, keep_near: Vec<[String; 2]>) -> PlacementHints {
+    PlacementHints {
+        groups,
+        edge_seek: vec![],
+        corner_seek: vec![],
+        keep_near,
+    }
+}
+
+fn placed_at(result: &PlaceResult, reference: &str) -> Placement {
+    result
+        .placements
+        .iter()
+        .find(|placement| placement.reference == reference)
+        .unwrap_or_else(|| panic!("{reference} was placed"))
+        .clone()
+}
+
+/// `intent.edge` is a constraint, not a preference: the connector's courtyard
+/// ends up on the side the author named even though its only net pulls it to
+/// the far side of the board.
+#[test]
+fn an_edge_intent_seats_the_connector_courtyard_on_that_edge() {
+    let mut anchor = hint_part("U1", "SIG", 6.0, 6.0);
+    anchor.locked = Some(LockedAt {
+        at: Point2 { x: 54.0, y: 20.0 },
+        rotation: 0.0,
+    });
+    let problem = PlacementView {
+        bounds: board(60.0, 40.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![hint_part("J1", "SIG", 5.0, 10.0), anchor],
+        outline: None,
+    };
+
+    let free = place_tuned(&problem, &PlacementHints::default());
+    let steered = place_tuned(
+        &problem,
+        &intent_hints(
+            vec![GroupHint {
+                name: "edge:J1".into(),
+                members: vec!["J1".into()],
+                region: None,
+                edge: Some(Edge::W),
+                grid: false,
+                rotation: None,
+                surround: None,
+            }],
+            vec![],
+        ),
+    );
+    assert!(steered.legal, "{steered:#?}");
+
+    let west_gap = |result: &PlaceResult| {
+        let placement = placed_at(result, "J1");
+        let half = rotated_courtyard_half(&problem.parts[0], placement.rotation);
+        placement.at.x - half.0 - problem.bounds.min_x
+    };
+    assert!(
+        west_gap(&steered) <= EDGE_BAND,
+        "an `edge: left` intent must put J1's courtyard on the west edge, not {} mm from it",
+        west_gap(&steered)
+    );
+    assert!(
+        west_gap(&steered) < west_gap(&free),
+        "the intent must move J1 west of where its net alone put it: {} vs {}",
+        west_gap(&steered),
+        west_gap(&free)
+    );
+}
+
+/// `intent.keep_near` shortens the distance between the two parts it names,
+/// against the net pull that would otherwise separate them.
+#[test]
+fn keep_near_pulls_the_cap_toward_its_ic() {
+    let mut ic = hint_part("U1", "VCC", 6.0, 6.0);
+    ic.locked = Some(LockedAt {
+        at: Point2 { x: 8.0, y: 8.0 },
+        rotation: 0.0,
+    });
+    let mut far = hint_part("R1", "SIG", 3.0, 3.0);
+    far.locked = Some(LockedAt {
+        at: Point2 { x: 52.0, y: 32.0 },
+        rotation: 0.0,
+    });
+    let problem = PlacementView {
+        bounds: board(60.0, 40.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        // C1 shares SIG with the far part, and nothing at all with the IC.
+        parts: vec![hint_part("C1", "SIG", 2.0, 2.0), ic, far],
+        outline: None,
+    };
+
+    let ic_at = Point2 { x: 8.0, y: 8.0 };
+    let free = placed_at(&place_tuned(&problem, &PlacementHints::default()), "C1");
+    let steered = place_tuned(
+        &problem,
+        &intent_hints(vec![], vec![["C1".to_owned(), "U1".to_owned()]]),
+    );
+    assert!(steered.legal, "{steered:#?}");
+    let steered = placed_at(&steered, "C1");
+    assert!(
+        steered.at.dist(ic_at) < free.at.dist(ic_at),
+        "keep_near must bring C1 closer to U1: {} vs {}",
+        steered.at.dist(ic_at),
+        free.at.dist(ic_at)
     );
 }

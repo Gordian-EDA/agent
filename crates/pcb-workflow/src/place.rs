@@ -1833,7 +1833,6 @@ pub(crate) fn restrict_to_refs(
     board: &IpcBoardSnapshot,
     free: &std::collections::BTreeSet<&str>,
 ) {
-    problem.keepouts.extend(copper_keepouts(&board.copper));
     let existing: BTreeMap<&str, &ImportedPart> = board
         .imported
         .parts
@@ -1850,6 +1849,31 @@ pub(crate) fn restrict_to_refs(
             });
         }
     }
+
+    // Copper that touches a part which is not moving is that part's own
+    // connection, not an obstacle — and a keep-out is checked against EVERY
+    // part, so keeping it would declare the board illegal where it already sits.
+    let held: Vec<Rect> = problem
+        .parts
+        .iter()
+        .filter_map(|part| {
+            let at = part.locked.as_ref()?.at;
+            Some(Rect::from_center_half(
+                at,
+                (part.courtyard_w / 2.0, part.courtyard_h / 2.0),
+            ))
+        })
+        .collect();
+    problem.keepouts.extend(
+        copper_keepouts(&board.copper)
+            .into_iter()
+            .filter(|rect| !held.iter().any(|part| overlaps(rect, part))),
+    );
+}
+
+fn overlaps(a: &Rect, b: &Rect) -> bool {
+    let (ox, oy) = a.axis_penetration(b);
+    ox > 0.0 && oy > 0.0
 }
 
 /// The `refs` subset a `place_board` call names, checked against the board.
@@ -2081,6 +2105,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // other footprint's pose stays byte-identical — the placer's own answer for
     // a locked part is not the same bytes the board already has.
     let mut gate = None;
+    let mut retracted = None;
     if result.legal {
         let locked_refs: std::collections::BTreeSet<&str> = board
             .imported
@@ -2110,6 +2135,28 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 let error = json!({ "error": format!("could not write placement: {e}") });
                 return Ok(opened.rollback(ctx, error));
             }
+            // A part that moves leaves its copper behind, and copper that no
+            // longer ends on a pad is at best dangling and at worst a short.
+            // Retract every net the moved parts touched, exactly as move_parts
+            // does, and name them for the re-route.
+            let moved = moves.iter().map(|m| m.reference.as_str());
+            let pads = crate::copper::pad_extents(&board.problem, moved);
+            let retract =
+                crate::copper::retract(&board.copper, &pads, &std::collections::BTreeSet::new());
+            if retract.count > 0
+                && let Err(e) = crate::copper::write_retained(
+                    ctx,
+                    board.problem.layer_count,
+                    &board.layer_names,
+                    &retract,
+                )
+            {
+                let error = json!({
+                    "error": format!("the parts were placed but their copper was not retracted: {e}"),
+                });
+                return Ok(opened.rollback(ctx, error));
+            }
+            retracted = Some(retract);
             gate = Some(opened);
         }
     }
@@ -2243,8 +2290,12 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         out["placed_refs"] = json!(refs);
         out["note"] = json!(
             "placed only the named parts; every other footprint kept its pose and its copper. \
-             Call route_board({nets}) on the nets those parts carry, then check_board."
+             Call route_board({nets: nets_to_reroute}), then check_board."
         );
+        let retract = retracted.unwrap_or_default();
+        out["retracted_tracks"] = json!(retract.count);
+        out["nets_to_reroute"] = json!(retract.nets);
+        out["next_tool"] = json!("route_board");
     }
     if !zones.is_empty() {
         out["ignored_intent_zones"] = json!(zones);

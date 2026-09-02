@@ -115,6 +115,7 @@ pub(crate) type FaultKey = (&'static str, Vec<String>);
 
 /// One explained violation, keyed so a guard can tell a fault the board already
 /// had from one an edit introduced.
+#[derive(Debug, Clone)]
 pub(crate) struct Fault {
     pub(crate) key: FaultKey,
     pub(crate) json: Value,
