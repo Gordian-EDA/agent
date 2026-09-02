@@ -249,8 +249,9 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "set_net_width".into(),
-            description: "Set one existing board net's net-class width; prefer regeneration rules pre-route."
-                .into(),
+            description:
+                "Set one existing board net's net-class width; prefer regeneration rules pre-route."
+                    .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -297,7 +298,10 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "regenerate_board".into(),
-            description: "Seed PCB; optional bounds/rules use safe defaults.".into(),
+            description: "Seed PCB; bounds/rules default safely and clearance/min_trace_width \
+                 are lowered to what the board's own footprints permit (reported in \
+                 design_rules)."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -394,7 +398,9 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "route_board".into(),
-            description: "Auto-route board; reports exact failed connections.".into(),
+            description: "Auto-route board; on failure names every DRC violation (rule, nets, \
+                 pads, mm, measured vs required) and the fix for each."
+                .into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         Def {
@@ -404,7 +410,9 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "check_board".into(),
-            description: "Run PCB DRC; stop when ok.".into(),
+            description: "Run PCB DRC; stop when ok. On failure lists the blocking \
+                 violations and unconnected items."
+                .into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         Def {

@@ -1931,6 +1931,8 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(out)
 }
 
+/// The refusal a caller can act on in one move: how much copper area the parts
+/// need against how much the board offers, and the exact bounds that would fit.
 fn illegal_placement_error(result: &Value) -> String {
     let current_w = result
         .pointer("/current_bounds_mm/w")
@@ -1948,11 +1950,19 @@ fn illegal_placement_error(result: &Value) -> String {
         .pointer("/suggested_min_bounds_mm/h")
         .and_then(Value::as_f64)
         .unwrap_or(current_h);
+    let courtyard = result
+        .get("parts_courtyard_area_mm2")
+        .and_then(Value::as_f64)
+        .unwrap_or_default();
+    let board_area = current_w * current_h;
     format!(
         "placement failed and no positions were written: the placer could not legally pack the \
-         selected footprints in {current_w} x {current_h} mm. Choose smaller appropriate \
-         footprints to preserve that board size, or regenerate with at least \
-         {suggested_w} x {suggested_h} mm, then run place_board once."
+         selected footprints in {current_w} x {current_h} mm ({board_area:.0} mm² of board for \
+         {courtyard:.0} mm² of part courtyards, and packing plus routing needs roughly twice the \
+         courtyard area). Call regenerate_board with \
+         bounds {{\"min_x\":0,\"min_y\":0,\"max_x\":{suggested_w},\"max_y\":{suggested_h}}} \
+         (the smallest size that fits) and then place_board once — or choose smaller footprints \
+         to keep the current board size."
     )
 }
 
@@ -3193,11 +3203,16 @@ mod tests {
         let message = illegal_placement_error(&json!({
             "current_bounds_mm": {"w": 45.0, "h": 30.0},
             "suggested_min_bounds_mm": {"w": 69.0, "h": 46.0},
+            "parts_courtyard_area_mm2": 1580.0,
         }));
 
-        assert!(message.contains("no positions were written"));
-        assert!(message.contains("smaller appropriate footprints"));
-        assert!(message.contains("69 x 46 mm"));
+        assert!(message.contains("no positions were written"), "{message}");
+        assert!(message.contains("smaller footprints"), "{message}");
+        // Area budget: what the parts need against what the board offers.
+        assert!(message.contains("1350 mm² of board"), "{message}");
+        assert!(message.contains("1580 mm² of part courtyards"), "{message}");
+        // The one call that fixes it, spelled out.
+        assert!(message.contains("\"max_x\":69,\"max_y\":46"), "{message}");
     }
 
     #[test]

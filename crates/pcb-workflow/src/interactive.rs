@@ -125,8 +125,8 @@ fn write_retained_copper(
     }
     ctx.close_kicad_session();
     let path = ctx.pcb_path();
-    let text = std::fs::read_to_string(&path)
-        .map_err(|err| format!("could not read the board: {err}"))?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|err| format!("could not read the board: {err}"))?;
     let (stripped, _, _) = kicad_board::strip_copper(&text)?;
     let replacement = kicad_board::append_copper(
         &stripped,
@@ -134,8 +134,7 @@ fn write_retained_copper(
         snapshot.problem.layer_count,
         &snapshot.layer_names,
     )?;
-    std::fs::write(&path, replacement)
-        .map_err(|err| format!("could not write the board: {err}"))
+    std::fs::write(&path, replacement).map_err(|err| format!("could not write the board: {err}"))
 }
 
 /// Reject a move that would land a part on top of another one: the pad extents
@@ -164,11 +163,7 @@ fn overlap_error(board: &MoveBoard, plan: &MovePlan, clearance: f64) -> Option<S
             return Some(format!(
                 "move_parts refused: {} at [{:.3}, {:.3}] would overlap {} — leave at least \
                  {:.3} mm between their pad extents",
-                position.reference,
-                position.at.x,
-                position.at.y,
-                reference,
-                clearance
+                position.reference, position.at.x, position.at.y, reference, clearance
             ));
         }
     }
@@ -1362,7 +1357,10 @@ mod tests {
 
         assert_eq!(plan.positions.len(), 1);
         assert_eq!(plan.changed, 0);
-        assert_eq!(plan.output(&RetractedCopper::default())["changed"], json!(0));
+        assert_eq!(
+            plan.output(&RetractedCopper::default())["changed"],
+            json!(0)
+        );
     }
 
     #[test]
@@ -1748,6 +1746,9 @@ mod tests {
         let board = std::fs::read_to_string(board_path).unwrap();
         let project = std::fs::read_to_string(project_path).unwrap();
         assert_eq!(kicad_board::board_net_widths(&board).unwrap()["SIG"], 0.5);
-        assert_eq!(kicad_board::project_net_widths(&project).unwrap()["SIG"], 0.5);
+        assert_eq!(
+            kicad_board::project_net_widths(&project).unwrap()["SIG"],
+            0.5
+        );
     }
 }

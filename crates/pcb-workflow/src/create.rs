@@ -241,15 +241,22 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         outline: None,
     };
 
-    match write_seed_board(&spec, ctx) {
-        Ok(()) => {}
+    let seeded = match write_seed_board(&spec, ctx) {
+        Ok(seeded) => seeded,
         Err(msg) => return Ok(json!({ "error": msg })),
-    }
+    };
     Ok(json!({
         "ok": true,
         "part_count": part_count,
-        "layer_count": spec.rules.layer_count,
+        "layer_count": seeded.rules.layer_count,
         "path": ctx.pcb_path().display().to_string(),
+        "design_rules": {
+            "clearance": seeded.rules.clearance,
+            "min_trace_width": seeded.rules.min_trace_width,
+            "via_diameter": seeded.rules.via_diameter,
+            "via_drill": seeded.rules.via_drill,
+        },
+        "rules_from_footprints": seeded.rule_notes,
         "note": "board regenerated from the committed schematic file (not F8 sync; existing placement/routing may be replaced) — run place_board, then route_board, then check_board",
     }))
 }
@@ -267,19 +274,31 @@ fn apply_complexity_default_layer_count(
     }
 }
 
-fn write_seed_board(spec: &BoardSeedSpec, ctx: &AgentRuntime) -> std::result::Result<(), String> {
+fn write_seed_board(
+    spec: &BoardSeedSpec,
+    ctx: &AgentRuntime,
+) -> std::result::Result<SeededBoard, String> {
     let catalog = ctx
         .footprint_catalog()
         .map_err(|e| format!("footprint catalog unavailable: {e}"))?;
-    let text = emit_seed_board(spec, catalog)?;
+    let seeded = emit_seed_board(spec, catalog)?;
     // Regeneration replaces the document, not merely its on-disk bytes. A
     // cached pcbnew session otherwise keeps serving the old in-memory board for
     // the same pathname, so the next tool sees stale bounds and footprints.
     // Close before overwrite to prevent that process from later saving stale
     // state back over the fresh seed.
     ctx.close_kicad_session();
-    std::fs::write(ctx.pcb_path(), text)
-        .map_err(|e| format!("could not write {}: {e}", ctx.pcb_path().display()))
+    std::fs::write(ctx.pcb_path(), &seeded.text)
+        .map_err(|e| format!("could not write {}: {e}", ctx.pcb_path().display()))?;
+    Ok(seeded)
+}
+
+/// A synthesized seed board: its text, the rules it was actually written with,
+/// and one sentence per rule the board's own footprints forced down.
+pub(super) struct SeededBoard {
+    pub text: String,
+    pub rules: SeedRules,
+    pub rule_notes: Vec<String>,
 }
 
 /// Synthesize the production seed-board representation without writing it.
@@ -290,7 +309,7 @@ fn write_seed_board(spec: &BoardSeedSpec, ctx: &AgentRuntime) -> std::result::Re
 pub(super) fn emit_seed_board(
     spec: &BoardSeedSpec,
     catalog: &FootprintCatalog,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<SeededBoard, String> {
     let mut parts = Vec::with_capacity(spec.parts.len());
     let mut x = spec.bounds.min_x + 2.0;
     let y = spec.bounds.min_y + 2.0;
@@ -328,7 +347,7 @@ pub(super) fn emit_seed_board(
         });
         x += 2.54;
     }
-    let effective_rules = effective_seed_rules(&spec.rules, &parts);
+    let (effective_rules, rule_notes) = effective_seed_rules(&spec.rules, &parts);
     let text = SeedBoardWriter::new(
         &parts,
         &spec.bounds,
@@ -337,14 +356,30 @@ pub(super) fn emit_seed_board(
     )
     .emit()
     .map_err(|e| format!("board synthesis failed: {e}"))?;
-    Ok(text)
+    Ok(SeededBoard {
+        text,
+        rules: effective_rules,
+        rule_notes,
+    })
 }
 
-/// KiCad applies a footprint's direct `(clearance ...)` override in addition to its board
-/// netclass.  The router only sees the board/netclass clearance through IPC, so seed both with
-/// the strictest value present in the canonical footprint sources.  This keeps router-clean
-/// copper clean under KiCad DRC without rewriting the library footprint text.
-fn effective_seed_rules(requested: &SeedRules, parts: &[SeedFootprint]) -> SeedRules {
+/// The rules the board is actually written with, and why they differ from the
+/// requested ones.
+///
+/// Two corrections, both forced by the parts themselves:
+///
+/// - KiCad applies a footprint's direct `(clearance ...)` override in addition to its board
+///   netclass. The router only sees the board/netclass clearance through IPC, so seed both with
+///   the strictest value present in the canonical footprint sources. This keeps router-clean
+///   copper clean under KiCad DRC without rewriting the library footprint text.
+/// - A clearance wider than a part's own pad gap, or a track wider than the
+///   narrowest pad, makes the board unroutable the moment it is born. The pads
+///   are fixed geometry, so the rule is what gives — down to the fabrication
+///   floor, never past it.
+fn effective_seed_rules(
+    requested: &SeedRules,
+    parts: &[SeedFootprint],
+) -> (SeedRules, Vec<String>) {
     let mut effective = requested.clone();
     for override_clearance in parts
         .iter()
@@ -352,7 +387,16 @@ fn effective_seed_rules(requested: &SeedRules, parts: &[SeedFootprint]) -> SeedR
     {
         effective.clearance = effective.clearance.max(override_clearance);
     }
-    effective
+    let limits = crate::rules::board_limits(
+        parts
+            .iter()
+            .map(|part| (part.lib_id.as_str(), part.source.as_str())),
+    );
+    let (clearance, min_trace_width, notes) =
+        crate::rules::pad_limited_rules(effective.clearance, effective.min_trace_width, &limits);
+    effective.clearance = clearance;
+    effective.min_trace_width = min_trace_width;
+    (effective, notes)
 }
 
 fn add_default_power_pours(rules: &mut SeedRules, parts: &[SeedPart]) {
@@ -1807,7 +1851,8 @@ mod tests {
              \t)\n\
              )",
         );
-        let effective = effective_seed_rules(&SeedRules::default(), std::slice::from_ref(&part));
+        let (effective, _) =
+            effective_seed_rules(&SeedRules::default(), std::slice::from_ref(&part));
         let classes = seed_net_classes(&effective, ["SIG".to_string()]);
 
         assert_eq!(effective.clearance, 0.2);
@@ -1839,7 +1884,7 @@ mod tests {
             ..SeedRules::default()
         };
 
-        let effective = effective_seed_rules(&requested, &[part]);
+        let (effective, _) = effective_seed_rules(&requested, &[part]);
 
         assert_eq!(effective.clearance, 0.25);
     }
@@ -1857,7 +1902,9 @@ mod tests {
 
         assert_eq!(footprint_clearance_override(&part.source), None);
         assert_eq!(
-            effective_seed_rules(&SeedRules::default(), &[part]).clearance,
+            effective_seed_rules(&SeedRules::default(), &[part])
+                .0
+                .clearance,
             0.15
         );
     }
@@ -2011,7 +2058,7 @@ mod tests {
             parts: vec![part("R1", "R"), part("R2", "10k"), part("U1", "NE555P")],
             outline: None,
         };
-        let board = emit_seed_board(&spec, &catalog).unwrap();
+        let board = emit_seed_board(&spec, &catalog).unwrap().text;
 
         assert!(board.contains("(property \"Value\" \"R\""));
         assert!(board.contains("(property \"Value\" \"10k\""));

@@ -193,7 +193,7 @@ pub fn routed_board_text(
             .collect(),
         outline: board.problem.outline.clone(),
     };
-    let seed = super::create::emit_seed_board(&spec, catalog)?;
+    let seed = super::create::emit_seed_board(&spec, catalog)?.text;
     let moves = placements
         .iter()
         .map(|placement| FootprintMove {

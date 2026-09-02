@@ -21,6 +21,8 @@
 //!   `get_footprint_info`.
 //! - [`create`] — board construction + input parsing: `regenerate_board`,
 //!   rules and bounds parsing.
+//! - [`rules`] — the design rules the board's own footprints permit.
+//! - [`diagnose`] — actionable payloads for a refused route.
 //! - [`place`] — `get_board`, IPC snapshot→`PlacementView`, and `place_board`.
 //! - [`route`] — `route_board` IPC copper write-back + triage.
 //! - [`export`] — `check_board`.
@@ -31,6 +33,7 @@
 
 pub mod corpus;
 mod create;
+mod diagnose;
 mod export;
 mod fab;
 mod footprints;
@@ -39,6 +42,7 @@ mod outline;
 mod place;
 mod render;
 mod route;
+mod rules;
 mod seed;
 mod silk;
 

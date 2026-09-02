@@ -54,6 +54,42 @@ fn lint_summary(
     lint_summary_from_violations(&violations, failed, plane_nets)
 }
 
+/// An `Unconnected` is an EXPECTED gap (not an engine bug) when:
+///  - the net was already reported failed (an honest finisher/global drop), OR
+///  - the net is a copper PLANE net. A plane net is NOT trace-routed — it was
+///    removed from the routed connections and its pins connect through the full-board
+///    plane (emitted at export) plus a per-pad stitching via; any pad whose via
+///    couldn't be placed is already reported as a failed stitch. So the trace-
+///    connectivity oracle, which sees the stitch vias but not the plane copper,
+///    reads every stitched plane pad as "unconnected" — a false signal. KiCAD DRC
+///    (which has the plane) is the authority on real plane connectivity.
+fn is_expected_gap(
+    v: &DrcViolation,
+    failed_nets: &BTreeSet<&str>,
+    plane_nets: &BTreeSet<String>,
+) -> bool {
+    matches!(
+        v,
+        DrcViolation::Connectivity {
+            violation: ConnViolation::Unconnected { connection, .. },
+        } if failed_nets.contains(connection.as_str()) || plane_nets.contains(connection)
+    )
+}
+
+/// The violations a refusal must explain: everything the split counts as real.
+fn real_violations(
+    violations: &[DrcViolation],
+    failed: &[FailedNet],
+    plane_nets: &BTreeSet<String>,
+) -> Vec<DrcViolation> {
+    let failed_nets: BTreeSet<&str> = failed.iter().map(|f| f.connection.as_str()).collect();
+    violations
+        .iter()
+        .filter(|v| !is_expected_gap(v, &failed_nets, plane_nets))
+        .cloned()
+        .collect()
+}
+
 fn lint_summary_from_violations(
     violations: &[DrcViolation],
     failed: &[FailedNet],
@@ -67,20 +103,7 @@ fn lint_summary_from_violations(
     let mut expected_gaps = 0usize;
 
     for v in violations {
-        // An Unconnected is an EXPECTED gap (not an engine bug) when:
-        //  - the net was already reported failed (an honest finisher/global drop), OR
-        //  - the net is a copper PLANE net. A plane net is NOT trace-routed — it was
-        //    removed from the routed connections and its pins connect through the full-board
-        //    plane (emitted at export) plus a per-pad stitching via; any pad whose via
-        //    couldn't be placed is already reported as a failed stitch. So the trace-
-        //    connectivity oracle, which sees the stitch vias but not the plane copper,
-        //    reads every stitched plane pad as "unconnected" — a false signal. KiCAD DRC
-        //    (which has the plane) is the authority on real plane connectivity.
-        if let DrcViolation::Connectivity {
-            violation: ConnViolation::Unconnected { connection, .. },
-        } = v
-            && (failed_nets.contains(connection.as_str()) || plane_nets.contains(connection))
-        {
+        if is_expected_gap(v, &failed_nets, plane_nets) {
             expected_gaps += 1;
             continue;
         }
@@ -171,15 +194,21 @@ fn escape_bottleneck(
 #[tracing::instrument(skip_all, fields(project = %ctx.project_dir().display()))]
 pub fn route_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     match route_live_board(ctx) {
-        Ok(out) => Ok(out),
-        Err(err) => Ok(json!({ "error": err })),
+        Ok(out) | Err(out) => Ok(out),
     }
 }
 
-fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
-    let board = crate::active_board(ctx)?;
+/// A recoverable routing failure, as the JSON payload the caller receives.
+fn refusal(message: impl Into<String>) -> Value {
+    json!({ "error": message.into() })
+}
+
+fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, Value> {
+    let board = crate::active_board(ctx).map_err(refusal)?;
     if is_seed_placement(&board.imported.bounds, &board.imported.parts) {
-        return Err("board has only the initial seed-row footprint positions — run place_board before route_board".to_owned());
+        return Err(refusal(
+            "board has only the initial seed-row footprint positions — run place_board before route_board",
+        ));
     }
 
     let existing = (board.copper.traces.len(), board.copper.vias.len());
@@ -217,27 +246,24 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     if has_auxiliary_copper || !router_postroute_cleaned {
         postroute_cleanup(&rp, &mut result.solution);
     }
-    let original_solution = result.solution.clone();
-    let mut pruned_spurs = prune_dangling_spurs_if_safe(&rp, &mut result);
+    // `prune_dangling_spurs_if_safe` reverts its own pruning whenever the lint
+    // reads worse afterwards, so a surviving prune is already known clean.
+    let pruned_spurs = prune_dangling_spurs_if_safe(&rp, &mut result);
     let plane_nets = rp.plane_nets.keys().cloned().collect();
-    let (dropped, mut final_violations) =
-        make_route_honest_with_report(&rp, &mut result, &plane_nets);
-    let mut split = lint_summary_from_violations(&final_violations, &result.failed, &plane_nets);
-    if split.real > 0 && pruned_spurs > 0 {
-        result.solution = original_solution;
-        pruned_spurs = 0;
-        final_violations = lint(&rp, &result.solution);
-        split = lint_summary_from_violations(&final_violations, &result.failed, &plane_nets);
-    }
+    let (dropped, final_violations) = make_route_honest_with_report(&rp, &mut result, &plane_nets);
+    let split = lint_summary_from_violations(&final_violations, &result.failed, &plane_nets);
     if split.real > 0 {
-        return Err(format!(
-            "router produced {} real DRC violation(s); refusing to write copper to live KiCAD board",
-            split.real
+        let failure_summary = failed_route_summary(&result.failed);
+        return Err(crate::diagnose::route_refusal(
+            &real_violations(&final_violations, &result.failed, &plane_nets),
+            &rp,
+            &board.imported.parts,
+            &failure_summary.connections,
         ));
     }
 
     replace_route_atomically(ctx, &rp, &result.solution, &board.layer_names, existing)
-        .map_err(|e| format!("could not write route to the board: {e}"))?;
+        .map_err(|e| refusal(format!("could not write route to the board: {e}")))?;
 
     // A connection can acquire more than one failure reason as the route is
     // cleaned up (for example, an initial router miss followed by an honest
