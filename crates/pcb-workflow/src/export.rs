@@ -10,7 +10,7 @@ use kicad::Violation;
 
 use gordian_runtime::AgentRuntime;
 
-use crate::board::guard::Guard;
+use crate::board::guard::{Edit, Guard};
 
 /// DRC findings KiCAD raises that are independent of routed copper.
 const NON_COPPER_WARNINGS: &[&str] = &[
@@ -247,13 +247,12 @@ pub(crate) fn materialize_zones_for_drc(
 
 /// Refill every copper zone in the saved board and persist KiCad's fill cache.
 #[tracing::instrument(skip_all, fields(project = %ctx.project_dir().display()))]
-pub fn refill_zones(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
+pub fn refill_zones(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
     let gate = match Guard::open(
         ctx,
-        "refill_zones",
-        "Refill board copper zones",
-        std::slice::from_ref(&path),
+        Edit::new("refill_zones", "Refill board copper zones", std::slice::from_ref(&path))
+            .expecting(&input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use gordian_runtime::AgentRuntime;
 
-use crate::board::guard::Guard;
+use crate::board::guard::{Edit, Guard};
 
 use super::create::req_num;
 
@@ -50,9 +50,12 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
     let gate = match Guard::open(
         ctx,
-        "update_board_outline",
-        "Update the board outline",
-        std::slice::from_ref(&path),
+        Edit::new(
+            "update_board_outline",
+            "Update the board outline",
+            std::slice::from_ref(&path),
+        )
+        .expecting(&input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
@@ -130,9 +133,11 @@ fn refit_existing_board(ctx: &AgentRuntime) -> Result<Value> {
     };
     let gate = match Guard::open(
         ctx,
-        "update_board_outline",
-        "Re-fit the board outline",
-        std::slice::from_ref(&path),
+        Edit::new(
+            "update_board_outline",
+            "Re-fit the board outline",
+            std::slice::from_ref(&path),
+        ),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),

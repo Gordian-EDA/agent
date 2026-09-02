@@ -33,6 +33,8 @@ pub struct AgentRuntime {
     services: ToolServices,
     /// Project-wide schematic and board revision history.
     revisions: crate::revisions::Revisions,
+    /// Project-wide refdes reservations shared by every caller in this process.
+    reservations: crate::refdes::Reservations,
     /// Keeps a test tempdir alive for the runtime's lifetime; `None` for real runtimes.
     _tempdir: Option<tempfile::TempDir>,
 }
@@ -92,10 +94,12 @@ impl AgentRuntime {
         let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
         let services = ToolServices::new(provider, None);
         let revisions = crate::revisions::Revisions::for_project(project.project_dir.clone());
+        let reservations = crate::refdes::Reservations::for_project(project.project_dir.clone());
         Ok(Self {
             env,
             services,
             revisions,
+            reservations,
             project,
             config,
             _tempdir: None,
@@ -136,11 +140,13 @@ impl AgentRuntime {
         let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
         let services = ToolServices::new(provider, None);
         let revisions = crate::revisions::Revisions::for_project(project.project_dir.clone());
+        let reservations = crate::refdes::Reservations::for_project(project.project_dir.clone());
         Some(Self {
             env,
             project,
             services,
             revisions,
+            reservations,
             config: GordianConfig::default(),
             _tempdir: Some(tempdir),
         })
@@ -162,11 +168,13 @@ impl AgentRuntime {
         let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
         let services = ToolServices::new(provider, Some(footprint_dir));
         let revisions = crate::revisions::Revisions::for_project(project.project_dir.clone());
+        let reservations = crate::refdes::Reservations::for_project(project.project_dir.clone());
         Some(Self {
             env,
             project,
             services,
             revisions,
+            reservations,
             config: GordianConfig::default(),
             _tempdir: Some(tempdir),
         })
@@ -205,6 +213,11 @@ impl AgentRuntime {
     /// The project-wide schematic and board revision store.
     pub fn revisions(&self) -> &crate::revisions::Revisions {
         &self.revisions
+    }
+
+    /// The project's refdes reservation store.
+    pub fn reservations(&self) -> &crate::refdes::Reservations {
+        &self.reservations
     }
 
     /// Starts per-file baseline tracking for a new user turn.

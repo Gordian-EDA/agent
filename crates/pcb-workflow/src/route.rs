@@ -22,7 +22,7 @@ use pcb_route_mesh::pipeline::RoutePassReport;
 
 use gordian_runtime::AgentRuntime;
 
-use crate::board::guard::Guard;
+use crate::board::guard::{Edit, Guard};
 
 // ── route_board ──────────────────────────────────────────────────────────────
 
@@ -215,9 +215,8 @@ pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let gate = match Guard::open(
         ctx,
-        "route_board",
-        "Route the project board",
-        &[ctx.pcb_path()],
+        Edit::new("route_board", "Route the project board", &[ctx.pcb_path()])
+            .expecting(&input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),

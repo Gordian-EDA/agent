@@ -28,7 +28,7 @@ use kicad_footprint::FootprintCatalog;
 use pcb_model::Point2;
 use pcb_place::PlacementHints;
 
-use crate::board::guard::Guard;
+use crate::board::guard::{Edit, Guard};
 use crate::seed::{PourPadConnection, PourSpec};
 
 use crate::create::{
@@ -464,15 +464,16 @@ fn seed_board(
     let outline = plan.bounds;
     let revision = match revision.map_or_else(
         || {
-            ctx.revisions().capture(
-                "sync_board",
-                if rebuilding {
-                    "Rebuild the project board"
-                } else {
-                    "Create the project board"
-                },
-                &[ctx.pcb_path()],
-            )
+            ctx.revisions()
+                .capture(gordian_runtime::revisions::Capture::new(
+                    "sync_board",
+                    if rebuilding {
+                        "Rebuild the project board"
+                    } else {
+                        "Create the project board"
+                    },
+                    &[ctx.pcb_path()],
+                ))
         },
         Ok,
     ) {
@@ -614,9 +615,8 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
 
     let gate = match Guard::open(
         ctx,
-        "sync_board",
-        "Synchronize the project board",
-        &[ctx.pcb_path()],
+        Edit::new("sync_board", "Synchronize the project board", &[ctx.pcb_path()])
+            .expecting(input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return refusal,
@@ -764,9 +764,8 @@ fn has_top_level_net(text: &str) -> bool {
 fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> Value {
     let gate = match Guard::open(
         ctx,
-        "sync_board",
-        "Rebuild the project board",
-        &[ctx.pcb_path()],
+        Edit::new("sync_board", "Rebuild the project board", &[ctx.pcb_path()])
+            .expecting(input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return refusal,

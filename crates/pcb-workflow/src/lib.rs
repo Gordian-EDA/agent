@@ -22,6 +22,8 @@
 //! - [`copper`] — copper retraction shared by the board mutators.
 //! - [`rules`] — the design rules the board's own footprints permit.
 //! - [`diagnose`] — actionable payloads for a refused route.
+//! - [`locks`] — `lock_parts` / `unlock_parts`: the poses no helper moves.
+//! - [`staging`] — the seed row read back as board state: staged, placed, locked.
 //! - [`intent`] — board intent (edges, proximity, groups, zones) → placement
 //!   constraints. The model states intent; solvers own coordinates.
 //! - [`selection`] — `bbox` board-window selection, lowered to the `refs` /
@@ -44,6 +46,7 @@ mod export;
 mod fab;
 mod footprints;
 mod intent;
+mod locks;
 mod interactive;
 mod outline;
 mod place;
@@ -53,6 +56,7 @@ mod rules;
 mod seed;
 mod selection;
 mod silk;
+mod staging;
 mod sizing;
 mod sync;
 
@@ -95,6 +99,7 @@ pub use export::{check_board, refill_zones};
 pub use fab::export_fab;
 pub use footprints::{get_footprint_info, search_footprints};
 pub use interactive::{delete_copper, move_parts, route_track, set_net_width};
+pub use locks::{lock_parts, unlock_parts};
 pub use outline::update_board_outline;
 pub use place::{get_board, place_board};
 pub use render::render_board;

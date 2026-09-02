@@ -16,7 +16,7 @@ use gordian_runtime::tool::require_str;
 
 use kicad_board::{BoardSnapshot, FootprintPlacement, ImportedPart};
 
-use crate::board::guard::Guard;
+use crate::board::guard::{Edit, Guard};
 use crate::copper::RetractedCopper;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -68,9 +68,9 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let retract = retracted_copper(&snapshot, &plan);
     let gate = match Guard::open(
         ctx,
-        "move_parts",
-        "Move board footprints",
-        &[ctx.pcb_path()],
+        Edit::new("move_parts", "Move board footprints", &[ctx.pcb_path()])
+            .refs(plan.positions.iter().map(|p| p.reference.clone()))
+            .expecting(&input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
@@ -577,9 +577,8 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok((problem, solution, request, layer_names)) => {
             let gate = match Guard::open(
                 ctx,
-                "route_track",
-                "Route one board connection",
-                &[ctx.pcb_path()],
+                Edit::new("route_track", "Route one board connection", &[ctx.pcb_path()])
+                    .expecting(&input),
             ) {
                 Ok(gate) => gate,
                 Err(refusal) => return Ok(refusal),
@@ -610,9 +609,8 @@ pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let gate = match Guard::open(
         ctx,
-        "delete_copper",
-        "Delete board copper",
-        std::slice::from_ref(&path),
+        Edit::new("delete_copper", "Delete board copper", std::slice::from_ref(&path))
+            .expecting(&input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
@@ -656,9 +654,12 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let project_path = ctx.sch_path().with_extension("kicad_pro");
     let gate = match Guard::open(
         ctx,
-        "set_net_width",
-        "Set a board net class",
-        &[path.clone(), project_path.clone()],
+        Edit::new(
+            "set_net_width",
+            "Set a board net class",
+            &[path.clone(), project_path.clone()],
+        )
+        .expecting(&input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),

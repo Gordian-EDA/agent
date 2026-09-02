@@ -18,7 +18,7 @@ use gordian_runtime::AgentRuntime;
 
 use kicad_board::{BoardSnapshot, FootprintPlacement, ImportedPad, ImportedPart};
 
-use crate::board::guard::Guard;
+use crate::board::guard::{Edit, Guard};
 
 pub(super) fn part_from_footprint_layers(
     footprint: &Footprint,
@@ -2753,6 +2753,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // they land at the perimeter (where a cable or the enclosure reaches them),
     // not stranded in the interior with copper wrapping around them. Skip any
     // part the model already steered with an explicit group `edge` hint.
+    let expect_revision = json!({ "expect_revision": input.get("expect_revision") });
     let mut hints = match placement_hints_from_input(input) {
         Ok(hints) => hints,
         Err(error) => return Ok(json!({ "error": error })),
@@ -2920,9 +2921,9 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         if !moves.is_empty() || outline_refit.is_some() {
             let opened = match Guard::open(
                 ctx,
-                "place_board",
-                "Place board footprints",
-                &[ctx.pcb_path()],
+                Edit::new("place_board", "Place board footprints", &[ctx.pcb_path()])
+                    .refs(moves.iter().map(|m| m.reference.clone()))
+                    .expecting(&expect_revision),
             ) {
                 Ok(opened) => opened,
                 Err(refusal) => return Ok(refusal),
