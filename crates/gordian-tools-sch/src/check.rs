@@ -778,8 +778,8 @@ fn diagnostic_finding(
     let message = finding_message(&diagnostic.message);
     let (refs, nets, at) = locator.locate(
         &message,
-        diagnostic.refs.iter().cloned(),
-        diagnostic.nets.iter().cloned(),
+        diagnostic.subjects.refs.iter().cloned(),
+        diagnostic.subjects.nets.iter().cloned(),
     );
     let message = strip_subject_prefix(message, &refs, &nets);
     Finding {
