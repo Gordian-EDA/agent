@@ -18,8 +18,8 @@ pub(crate) const FAB_MIN_CLEARANCE_MM: f64 = 0.1;
 /// Fabrication floor for track width, for the same reason.
 pub(crate) const FAB_MIN_TRACE_WIDTH_MM: f64 = 0.1;
 
-/// Keep a hair of margin under the measured pad gap so a rule sitting exactly on
-/// the geometry does not fail on floating-point noise in KiCAD's own DRC.
+/// A 10% derate under the measured pad gap: a rule sitting exactly on the
+/// geometry has no room for the router's own rounding, or for KiCAD's.
 const GAP_MARGIN: f64 = 0.9;
 
 /// The tightest geometry any one footprint contributes.
@@ -59,7 +59,10 @@ impl PadLimits {
     }
 }
 
-/// A pad's axis-aligned copper extent, honouring 90°-family rotations.
+/// A pad's axis-aligned copper extent, honouring 90°-family rotations. A pad at
+/// any other angle, or a `custom` pad whose outline exceeds its anchor, is
+/// measured by its unrotated size — an approximation, and the reason a derived
+/// rule is a floor rather than a promise.
 fn pad_half_extent(pad: &FootprintPad) -> Point2 {
     let quarter_turn = (pad.rotation.rem_euclid(180.0) - 90.0).abs() < 1.0;
     let (w, h) = if quarter_turn {
@@ -76,11 +79,13 @@ fn pad_half_extent(pad: &FootprintPad) -> Point2 {
 fn shares_copper_layer(a: &FootprintPad, b: &FootprintPad) -> bool {
     let matches = |x: &str, y: &str| x == y || x == "*.Cu" || y == "*.Cu";
     a.copper_layers()
-        .iter()
-        .any(|la| b.copper_layers().iter().any(|lb| matches(la, lb)))
+        .any(|la| b.copper_layers().any(|lb| matches(la, lb)))
 }
 
 /// Edge-to-edge gap between two axis-aligned pads (0 when they overlap).
+///
+/// Conservative for a diagonal pair — the true gap there is the corner-to-corner
+/// distance, which is larger — so a derived rule is never too loose.
 fn pad_gap(a: &FootprintPad, b: &FootprintPad) -> f64 {
     let ha = pad_half_extent(a);
     let hb = pad_half_extent(b);
@@ -106,7 +111,7 @@ pub(crate) fn footprint_limits(
     let pads: Vec<&FootprintPad> = footprint
         .pads
         .iter()
-        .filter(|pad| !pad.copper_layers().is_empty())
+        .filter(|pad| pad.copper_layers().next().is_some())
         .collect();
     let mut limits = PadLimits::none();
     for pad in &pads {
@@ -116,12 +121,16 @@ pub(crate) fn footprint_limits(
             limits.min_pad_width = Some(limits.min_pad_width.map_or(width, |m| m.min(width)));
         }
     }
+    // Two pads constrain clearance only when they are known to be different
+    // nodes. A pad with no schematic net is mechanical — a shield tab, a mount,
+    // an NC — and connector shields routinely touch each other, so a pad the
+    // netlist does not mention constrains nothing.
     let same_node = |a: &FootprintPad, b: &FootprintPad| {
         a.number == b.number
-            || matches!(
-                (pad_nets.get(&a.number), pad_nets.get(&b.number)),
-                (Some(x), Some(y)) if x == y
-            )
+            || match (pad_nets.get(&a.number), pad_nets.get(&b.number)) {
+                (Some(x), Some(y)) => x == y,
+                _ => true,
+            }
     };
     for (i, a) in pads.iter().enumerate() {
         for b in &pads[i + 1..] {
@@ -157,9 +166,14 @@ fn to_rule_grid(v: f64) -> f64 {
 /// Lower `clearance` and `min_trace_width` to what `limits` permits, floored at
 /// the fabrication minimums. Returns the adjusted pair plus one sentence per
 /// change, for the caller to publish.
+/// `clearance_floor` is the strictest clearance a footprint on the board
+/// *declares* for itself. KiCAD applies that override on top of the netclass, so
+/// lowering the board rule under it would not make the board pass DRC — it would
+/// only make the board's own rule a lie.
 pub(crate) fn pad_limited_rules(
     clearance: f64,
     min_trace_width: f64,
+    clearance_floor: f64,
     limits: &PadLimits,
 ) -> (f64, f64, Vec<String>) {
     let mut notes = Vec::new();
@@ -167,7 +181,9 @@ pub(crate) fn pad_limited_rules(
     let mut width_out = min_trace_width;
 
     if let Some(gap) = limits.min_pad_gap {
-        let cap = to_rule_grid(gap * GAP_MARGIN).max(FAB_MIN_CLEARANCE_MM);
+        let cap = to_rule_grid(gap * GAP_MARGIN)
+            .max(FAB_MIN_CLEARANCE_MM)
+            .max(clearance_floor);
         if cap < clearance_out {
             let where_at = limits.tightest.as_ref().map_or_else(
                 || "a footprint on this board".to_owned(),
@@ -185,7 +201,8 @@ pub(crate) fn pad_limited_rules(
         if cap < width_out {
             notes.push(format!(
                 "min_trace_width {min_trace_width:.2} → {cap:.2} mm: the narrowest pad on this \
-                 board is {pad_width:.3} mm, and a track may not be wider than the pad it lands on"
+                 board is {pad_width:.3} mm, and a track wider than the pad it lands on \
+                 overhangs it into its neighbours' clearance"
             ));
             width_out = cap;
         }
@@ -217,6 +234,14 @@ mod tests {
       (pad "9" smd rect (at 1.05 0) (size 1.0 1.0) (layers "F.Cu" "F.Paste" "F.Mask"))
     )"#;
 
+    /// Every pad on its own net, so pure geometry is what the test measures.
+    fn one_net_per_pad(numbers: &[&str]) -> BTreeMap<String, String> {
+        numbers
+            .iter()
+            .map(|n| ((*n).to_owned(), format!("NET{n}")))
+            .collect()
+    }
+
     fn approx(a: Option<f64>, expected: f64) {
         let got = a.expect("a measured limit");
         assert!((got - expected).abs() < 1e-6, "{got} != {expected}");
@@ -224,7 +249,11 @@ mod tests {
 
     #[test]
     fn pad_gap_is_measured_edge_to_edge() {
-        let limits = footprint_limits("Package_TO_SOT_SMD:SOT-23", SOT23_ROW, &BTreeMap::new());
+        let limits = footprint_limits(
+            "Package_TO_SOT_SMD:SOT-23",
+            SOT23_ROW,
+            &one_net_per_pad(&["1", "2", "3"]),
+        );
         approx(limits.min_pad_gap, 0.35);
         approx(limits.min_pad_width, 0.6);
         assert_eq!(
@@ -239,21 +268,29 @@ mod tests {
 
     #[test]
     fn pads_sharing_a_number_are_one_node_and_never_constrain_clearance() {
-        let limits = footprint_limits("Package_DFN_QFN:DFN", SPLIT_THERMAL, &BTreeMap::new());
+        let limits = footprint_limits(
+            "Package_DFN_QFN:DFN",
+            SPLIT_THERMAL,
+            &one_net_per_pad(&["9"]),
+        );
         assert_eq!(limits.min_pad_gap, None);
         approx(limits.min_pad_width, 1.0);
     }
 
     #[test]
     fn a_fine_pitch_part_lowers_the_seed_clearance_below_the_default() {
-        let limits = board_limits([("Connector_USB:USB_C", FINE_PITCH, &BTreeMap::new())]);
+        let limits = board_limits([(
+            "Connector_USB:USB_C",
+            FINE_PITCH,
+            &one_net_per_pad(&["A1", "A2", "A3"]),
+        )]);
         approx(limits.min_pad_gap, 0.2);
-        let (clearance, width, notes) = pad_limited_rules(0.15, 0.15, &limits);
+        let (clearance, width, notes) = pad_limited_rules(0.15, 0.15, 0.0, &limits);
         assert_eq!(clearance, 0.15, "0.2 mm of pad gap still admits 0.15");
         assert_eq!(width, 0.15);
         assert!(notes.is_empty(), "{notes:?}");
 
-        let (clearance, _, notes) = pad_limited_rules(0.25, 0.15, &limits);
+        let (clearance, _, notes) = pad_limited_rules(0.25, 0.15, 0.0, &limits);
         assert_eq!(clearance, 0.18);
         assert!(
             notes[0].contains("Connector_USB:USB_C pads A1/A2"),
@@ -272,7 +309,11 @@ mod tests {
           (pad "B12" smd rect (at 0.6 0) (size 0.6 1.2) (layers "F.Cu"))
           (pad "A4" smd rect (at 2.0 0) (size 0.6 1.2) (layers "F.Cu"))
         )"#;
-        let touching = footprint_limits("Connector_USB:USB_C", MERGED_GROUND, &BTreeMap::new());
+        let touching = footprint_limits(
+            "Connector_USB:USB_C",
+            MERGED_GROUND,
+            &one_net_per_pad(&["A1", "B12", "A4"]),
+        );
         approx(touching.min_pad_gap, 0.0);
 
         let nets = BTreeMap::from([
@@ -285,6 +326,42 @@ mod tests {
         assert_eq!(with_nets.tightest.unwrap().1, "B12");
     }
 
+    /// Paste and mask are stencil and solder resist, not copper. A numberless
+    /// mask pad overlapping a copper pad is ordinary in the KiCAD library (453
+    /// of its footprints have one); reading it as copper collapsed the whole
+    /// board's clearance and track width to the fabrication floor.
+    #[test]
+    fn paste_and_mask_pads_are_not_copper_and_constrain_nothing() {
+        const MASK_OVER_PAD: &str = r#"(footprint "Photodiode"
+          (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu" "F.Paste" "F.Mask"))
+          (pad "2" smd rect (at 4.7 0) (size 1.0 1.0) (layers "F.Cu" "F.Paste" "F.Mask"))
+          (pad "" smd rect (at 0 0) (size 3.0 3.0) (layers "F.Mask"))
+        )"#;
+        let limits = footprint_limits(
+            "OptoDevice:Photodiode",
+            MASK_OVER_PAD,
+            &one_net_per_pad(&["1", "2"]),
+        );
+        approx(limits.min_pad_gap, 3.7);
+        approx(limits.min_pad_width, 1.0);
+        assert!(pad_limited_rules(0.15, 0.15, 0.0, &limits).2.is_empty());
+    }
+
+    /// A connector's shield tabs carry no schematic net and routinely touch.
+    /// Only pads the netlist puts on different nodes constrain clearance.
+    #[test]
+    fn pads_the_netlist_never_mentions_constrain_nothing() {
+        const SHIELDS: &str = r#"(footprint "USB_C"
+          (pad "MP1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu"))
+          (pad "MP2" smd rect (at 1.0 0) (size 1.0 1.0) (layers "F.Cu"))
+          (pad "A4" smd rect (at 5.0 0) (size 1.0 1.0) (layers "F.Cu"))
+        )"#;
+        let nets = BTreeMap::from([("A4".to_owned(), "VBUS".to_owned())]);
+        let limits = footprint_limits("Connector_USB:USB_C", SHIELDS, &nets);
+        assert_eq!(limits.min_pad_gap, None);
+        assert!(pad_limited_rules(0.15, 0.15, 0.0, &limits).2.is_empty());
+    }
+
     #[test]
     fn the_fabrication_floor_is_never_crossed() {
         let overlapping = PadLimits {
@@ -292,7 +369,7 @@ mod tests {
             min_pad_width: Some(0.01),
             tightest: None,
         };
-        let (clearance, width, notes) = pad_limited_rules(0.2, 0.2, &overlapping);
+        let (clearance, width, notes) = pad_limited_rules(0.2, 0.2, 0.0, &overlapping);
         assert_eq!(clearance, FAB_MIN_CLEARANCE_MM);
         assert_eq!(width, FAB_MIN_TRACE_WIDTH_MM);
         assert_eq!(notes.len(), 2);
@@ -300,10 +377,11 @@ mod tests {
 
     #[test]
     fn the_tightest_footprint_on_the_board_wins() {
-        let no_nets = BTreeMap::new();
+        let sot = one_net_per_pad(&["1", "2", "3"]);
+        let usb = one_net_per_pad(&["A1", "A2", "A3"]);
         let limits = board_limits([
-            ("Package_TO_SOT_SMD:SOT-23", SOT23_ROW, &no_nets),
-            ("Connector_USB:USB_C", FINE_PITCH, &no_nets),
+            ("Package_TO_SOT_SMD:SOT-23", SOT23_ROW, &sot),
+            ("Connector_USB:USB_C", FINE_PITCH, &usb),
         ]);
         approx(limits.min_pad_gap, 0.2);
         approx(limits.min_pad_width, 0.3);

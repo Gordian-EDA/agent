@@ -1889,7 +1889,8 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let ch = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
         // The same two numbers `regenerate_board` publishes, so a caller reading
         // either tool sees one board-size story.
-        let sizing = board_sizing(&problem, &board.imported.parts, &board.problem);
+        let sizing =
+            board_sizing(&problem, &board.imported.parts, &board.problem).grown_past(cw, ch);
         extra = json!({
             "overlap_pairs": placement_overlap_pairs(&problem, &result),
             "parts_courtyard_area_mm2": (estimate.total_area * 10.0).round() / 10.0,
@@ -1990,16 +1991,14 @@ fn illegal_placement_error(result: &Value) -> String {
             .and_then(Value::as_f64)
             .unwrap_or(fallback)
     };
-    let required_w = at(
-        "/required_bounds/width",
-        at("/suggested_min_bounds_mm/w", current_w),
-    );
-    let required_h = at(
-        "/required_bounds/height",
-        at("/suggested_min_bounds_mm/h", current_h),
-    );
-    let recommended_w = at("/recommended_bounds/width", required_w);
-    let recommended_h = at("/recommended_bounds/height", required_h);
+    // The 817 rejection publishes only `suggested_min_bounds_mm`; the generic
+    // path publishes all three, with the suggestion equal to the recommendation.
+    let suggested_w = at("/suggested_min_bounds_mm/w", current_w);
+    let suggested_h = at("/suggested_min_bounds_mm/h", current_h);
+    let required_w = at("/required_bounds/width", suggested_w);
+    let required_h = at("/required_bounds/height", suggested_h);
+    let recommended_w = at("/recommended_bounds/width", suggested_w);
+    let recommended_h = at("/recommended_bounds/height", suggested_h);
     let courtyard = at("/parts_courtyard_area_mm2", 0.0);
     let board_area = current_w * current_h;
     format!(

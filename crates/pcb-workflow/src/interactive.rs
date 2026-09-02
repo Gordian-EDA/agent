@@ -21,7 +21,7 @@ use pcb_model::{
 use gordian_runtime::AgentRuntime;
 use gordian_runtime::tool::require_str;
 
-use kicad_board::IpcBoardSnapshot;
+use kicad_board::{ImportedPart, IpcBoardSnapshot};
 
 fn ipc_err(e: kicad_ipc::Error) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
@@ -552,7 +552,8 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // duplicate copper. Use the resilient, read-only snapshot path (including
     // its timeout reconnect) and then commit offline.
     let prepared = crate::active_board(ctx).and_then(|snapshot| {
-        let request = parse_route_track_request(&input, &snapshot.problem)?;
+        let request =
+            parse_route_track_request(&input, &snapshot.problem, &snapshot.imported.parts)?;
         let (problem, solution) = manual_route_solution(&snapshot.problem, &request)?;
         Ok((problem, solution, request, snapshot.layer_names))
     });
@@ -713,9 +714,32 @@ struct RouteViaAnchor {
     to_layer: LayerRef,
 }
 
+/// A `route_track` endpoint: a point in mm, or the `"R1.1"` pad reference that
+/// `route_board`'s `unrouted` report hands back, so a repair is copy-paste.
+fn parse_endpoint(
+    input: &Value,
+    key: &str,
+    ctx: &str,
+    parts: &[ImportedPart],
+) -> std::result::Result<Point2, String> {
+    let Some(Value::String(reference)) = input.get(key) else {
+        return parse_point(input, key, ctx);
+    };
+    let (refdes, pad) = reference.split_once('.').ok_or_else(|| {
+        format!("{ctx}: `{key}` = \"{reference}\" is not a pad reference; use \"REF.PAD\" (e.g. \"U1.3\") or [x, y] in mm")
+    })?;
+    parts
+        .iter()
+        .find(|part| part.reference == refdes)
+        .and_then(|part| part.pads.iter().find(|p| p.number == pad))
+        .map(|p| p.at)
+        .ok_or_else(|| format!("{ctx}: no pad {reference} on this board"))
+}
+
 fn parse_route_track_request(
     input: &Value,
     problem: &RoutingView,
+    parts: &[ImportedPart],
 ) -> std::result::Result<RouteTrackRequest, String> {
     let ctx = "route_track";
     if input.get("start").is_some() || input.get("end").is_some() || input.get("layer").is_some() {
@@ -724,8 +748,8 @@ fn parse_route_track_request(
                 .to_owned(),
         );
     }
-    let from = parse_point(input, "from", ctx)?;
-    let to = parse_point(input, "to", ctx)?;
+    let from = parse_endpoint(input, "from", ctx, parts)?;
+    let to = parse_endpoint(input, "to", ctx, parts)?;
     let net = input
         .get("net")
         .and_then(Value::as_str)
@@ -1541,6 +1565,7 @@ mod tests {
                 "width": 0.2
             }),
             &problem,
+            &[],
         )
         .unwrap();
 
@@ -1570,6 +1595,7 @@ mod tests {
                 "vias": [{ "at": [5.0, 1.0], "to_layer": "B.Cu" }]
             }),
             &problem,
+            &[],
         )
         .unwrap();
 
@@ -1600,6 +1626,7 @@ mod tests {
                 "vias": [{ "at": [5.0, 1.0], "to_layer": "B.Cu" }]
             }),
             &problem,
+            &[],
         )
         .unwrap();
 
@@ -1626,6 +1653,7 @@ mod tests {
                 "net": "SIG"
             }),
             &problem,
+            &[],
         )
         .unwrap();
 
@@ -1711,10 +1739,57 @@ mod tests {
                 "net": "SIG"
             }),
             &problem,
+            &[],
         )
         .unwrap_err();
 
         assert!(err.contains("legacy `start`/`end`/`layer`"), "{err}");
+    }
+
+    /// `route_board`'s `unrouted` report hands back `"U1.3"`-style pad handles;
+    /// a repair is only copy-paste if `route_track` takes them as they are.
+    #[test]
+    fn route_track_takes_the_pad_handles_the_unrouted_report_hands_back() {
+        let parts = vec![ImportedPart {
+            reference: "U1".to_owned(),
+            lib_id: "Package_TO_SOT_SMD:SOT-23-5".to_owned(),
+            at: Point2::new(0.0, 0.0),
+            rotation: 0,
+            locked: false,
+            pads: vec![
+                kicad_board::ImportedPad {
+                    number: "3".to_owned(),
+                    net: Some("SIG".to_owned()),
+                    at: Point2::new(4.0, 2.0),
+                    layers: vec![LayerRef::top()],
+                },
+                kicad_board::ImportedPad {
+                    number: "5".to_owned(),
+                    net: Some("SIG".to_owned()),
+                    at: Point2::new(9.0, 2.0),
+                    layers: vec![LayerRef::top()],
+                },
+            ],
+        }];
+        let problem = route_problem(vec![]);
+
+        let request = parse_route_track_request(
+            &json!({ "from": "U1.3", "to": "U1.5", "net": "SIG" }),
+            &problem,
+            &parts,
+        )
+        .unwrap();
+
+        assert_eq!(request.from, Point2::new(4.0, 2.0));
+        assert_eq!(request.to, Point2::new(9.0, 2.0));
+
+        let err = parse_route_track_request(
+            &json!({ "from": "U1.9", "to": "U1.5", "net": "SIG" }),
+            &problem,
+            &parts,
+        )
+        .unwrap_err();
+        assert!(err.contains("no pad U1.9 on this board"), "{err}");
     }
 
     #[test]

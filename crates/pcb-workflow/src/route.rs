@@ -192,8 +192,12 @@ fn escape_bottleneck(
 }
 
 #[tracing::instrument(skip_all, fields(project = %ctx.project_dir().display()))]
-pub fn route_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    match route_live_board(ctx) {
+pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let nets = match requested_nets(&input) {
+        Ok(nets) => nets,
+        Err(message) => return Ok(refusal(message)),
+    };
+    match route_live_board(ctx, nets) {
         Ok(out) | Err(out) => Ok(out),
     }
 }
@@ -203,7 +207,37 @@ fn refusal(message: impl Into<String>) -> Value {
     json!({ "error": message.into() })
 }
 
-fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, Value> {
+/// The nets a `route_board` call is allowed to touch.
+///
+/// `nets` names a subset — the repair loop after a `move_parts`: everything else
+/// keeps the copper it already has, and that copper stays in the problem as
+/// obstacle so the new routes go around it.
+fn requested_nets(input: &Value) -> std::result::Result<Option<BTreeSet<String>>, String> {
+    let value = match input.get("nets") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(value) => value,
+    };
+    let Some(items) = value.as_array() else {
+        return Err("nets must be an array of net names".to_owned());
+    };
+    let nets: BTreeSet<String> = items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "each entry of nets must be a net name string".to_owned())
+        })
+        .collect::<std::result::Result<_, String>>()?;
+    if nets.is_empty() {
+        return Err("nets was empty — omit it to route the whole board".to_owned());
+    }
+    Ok(Some(nets))
+}
+
+fn route_live_board(
+    ctx: &AgentRuntime,
+    nets: Option<BTreeSet<String>>,
+) -> std::result::Result<Value, Value> {
     let board = crate::active_board(ctx).map_err(refusal)?;
     if is_seed_placement(&board.imported.bounds, &board.imported.parts) {
         return Err(refusal(
@@ -220,7 +254,52 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, Value> {
         remove_existing_copper_obstacles(&mut rp);
     }
     rp.bounds = super::place::routing_bounds(&rp.bounds, rp.outline.as_ref());
-    let (router_problem, terminal_escapes) = prepare_wide_terminal_escapes(&rp);
+
+    // The subset view the router actually solves, and the copper it must not
+    // disturb. For a whole-board route these are the full view and nothing.
+    let (solve_view, kept) = match &nets {
+        None => (rp.clone(), RouteSolution::default()),
+        Some(nets) => {
+            let known: BTreeSet<&str> = board
+                .problem
+                .connections
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect();
+            if let Some(unknown) = nets.iter().find(|n| !known.contains(n.as_str())) {
+                return Err(refusal(format!(
+                    "no net named {unknown} on this board; get_board lists the board's nets"
+                )));
+            }
+            let mut view = board.problem.clone();
+            // Foreign copper stays an obstacle so the re-route goes around it;
+            // the re-routed nets' own copper is about to be replaced.
+            view.obstacles.retain(|obstacle| {
+                !(matches!(obstacle.kind.as_str(), "track" | "via")
+                    && obstacle.connected_to.iter().any(|n| nets.contains(n)))
+            });
+            view.connections.retain(|c| nets.contains(&c.name));
+            view.bounds = rp.bounds;
+            let kept = RouteSolution {
+                traces: board
+                    .copper
+                    .traces
+                    .iter()
+                    .filter(|t| !nets.contains(&t.connection))
+                    .cloned()
+                    .collect(),
+                vias: board
+                    .copper
+                    .vias
+                    .iter()
+                    .filter(|v| !nets.contains(&v.connection))
+                    .cloned()
+                    .collect(),
+            };
+            (view, kept)
+        }
+    };
+    let (router_problem, terminal_escapes) = prepare_wide_terminal_escapes(&solve_view);
     let (routing_subproblem, reserved_wide_routes) = reserve_wide_multi_pin_routes(&router_problem);
     let routed = route_with_engine(&routing_subproblem);
     let router_postroute_cleaned = routed.postroute_cleaned;
@@ -244,8 +323,12 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, Value> {
     // is redundant unless raw auxiliary copper was merged or the explicitly
     // selected sequential engine has not run shared cleanup yet.
     if has_auxiliary_copper || !router_postroute_cleaned {
-        postroute_cleanup(&rp, &mut result.solution);
+        postroute_cleanup(&solve_view, &mut result.solution);
     }
+    // Everything from here on judges the WHOLE board: the copper this call left
+    // alone is as much part of the result as the copper it just made.
+    result.solution.traces.extend(kept.traces);
+    result.solution.vias.extend(kept.vias);
     // `prune_dangling_spurs_if_safe` reverts its own pruning whenever the lint
     // reads worse afterwards, so a surviving prune is already known clean.
     let pruned_spurs = prune_dangling_spurs_if_safe(&rp, &mut result);
@@ -286,8 +369,25 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, Value> {
         },
     );
     let m = result.solution.metrics();
+    let total_connections = board.problem.connections.len();
+    let routed_connections = total_connections.saturating_sub(failure_summary.connection_count);
+    let unrouted = crate::diagnose::unrouted_report(
+        &rp,
+        &board.imported.parts,
+        &result.failed,
+        &board.layer_names,
+        nets.as_ref(),
+    );
     Ok(json!({
         "router": result.engine,
+        "routed": format!("{routed_connections}/{total_connections}"),
+        "routed_connection_count": routed_connections,
+        "total_connection_count": total_connections,
+        "unrouted": unrouted,
+        "scope": match &nets {
+            Some(nets) => json!(nets.iter().collect::<Vec<_>>()),
+            None => json!("whole board"),
+        },
         "router_attempts": route_attempts_json(&router_attempts),
         "failed": failure_summary.records,
         "failed_record_count": failure_summary.record_count,
@@ -310,9 +410,13 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, Value> {
         "congestion": congestion,
         "escape_bottleneck": escape,
         "note": if result.failed.is_empty() {
-            "routed and saved the KiCAD board cleanly"
+            "routed and saved the KiCAD board cleanly".to_owned()
         } else {
-            "routed and saved the KiCAD board with honest failed nets"
+            format!(
+                "saved the KiCAD board with {routed_connections} of {total_connections} net(s) \
+                 routed; the rest carry no copper — see `unrouted` for the pads, the obstacle and \
+                 the repair for each"
+            )
         },
     }))
 }
@@ -415,8 +519,10 @@ fn make_route_honest_with_report(
 ) -> (Vec<String>, Vec<DrcViolation>) {
     let mut dropped = Vec::new();
     let mut violations = lint(rp, &result.solution);
-    for _ in 0..=rp.connections.len() {
-        let disconnected = disconnected_non_plane_nets(&violations, plane_nets);
+    // Plane nets are not in `connections` but their stitch vias are in the
+    // solution, so they can be dropped too — the bound must cover both.
+    for _ in 0..=(rp.connections.len() + plane_nets.len()) {
+        let disconnected = defective_nets(&violations, plane_nets, &result.solution);
         let violating: BTreeSet<String> = violations
             .iter()
             .flat_map(geometry_violation_nets)
@@ -457,31 +563,44 @@ fn make_route_honest(
     make_route_honest_with_report(rp, result, plane_nets).0
 }
 
-fn disconnected_non_plane_nets(
+/// The nets whose copper the connectivity oracle says must go.
+///
+/// An `Unconnected` plane net is expected — a plane joins its pads through
+/// copper this solution does not carry. A SHORT is a defect on any net, but the
+/// copper that must go is the non-plane side wherever there is one: dropping a
+/// plane's stitch vias to clear another net's stray trace would take the whole
+/// plane's connectivity with it. Only when every side of a short is a plane net
+/// are the planes themselves dropped, so the loop can still make progress.
+fn defective_nets(
     violations: &[DrcViolation],
     plane_nets: &BTreeSet<String>,
+    solution: &RouteSolution,
 ) -> BTreeSet<String> {
-    let mut disconnected = BTreeSet::new();
+    let mut defective = BTreeSet::new();
     for violation in violations {
         match violation {
             DrcViolation::Connectivity {
                 violation: ConnViolation::Unconnected { connection, .. },
             } if !plane_nets.contains(connection) => {
-                disconnected.insert(connection.clone());
+                defective.insert(connection.clone());
             }
-            // A short is a defect on any net, plane or not. Exempting plane nets
-            // here left the shorted copper in place and the lint counting it
-            // forever, so every later route_board refused with the same
-            // violation count and no move could clear it.
             DrcViolation::Connectivity {
                 violation: ConnViolation::CrossNetMerge { a, b },
             } => {
-                disconnected.extend([a.clone(), b.clone()]);
+                let droppable: Vec<&String> = [a, b]
+                    .into_iter()
+                    .filter(|net| !plane_nets.contains(*net) && has_copper(solution, net))
+                    .collect();
+                if droppable.is_empty() {
+                    defective.extend([a.clone(), b.clone()]);
+                } else {
+                    defective.extend(droppable.into_iter().cloned());
+                }
             }
             _ => {}
         }
     }
-    disconnected
+    defective
 }
 
 fn drop_solution_nets(solution: &mut RouteSolution, nets: &BTreeSet<String>) {
@@ -3204,6 +3323,29 @@ mod escape_bottleneck_tests {
         assert!(result.failed.is_empty());
     }
 
+    /// `route_board{nets}` is the repair loop after a `move_parts`, so the
+    /// scope has to be unambiguous: absent means the whole board, and an empty
+    /// list is a mistake rather than a request to route nothing.
+    #[test]
+    fn the_route_scope_is_the_whole_board_unless_nets_names_a_subset() {
+        assert_eq!(requested_nets(&json!({})).unwrap(), None);
+        assert_eq!(requested_nets(&json!({ "nets": null })).unwrap(), None);
+        assert_eq!(
+            requested_nets(&json!({ "nets": ["GND", "VBUS"] })).unwrap(),
+            Some(BTreeSet::from(["GND".to_owned(), "VBUS".to_owned()]))
+        );
+        assert!(
+            requested_nets(&json!({ "nets": [] }))
+                .unwrap_err()
+                .contains("omit it to route the whole board")
+        );
+        assert!(
+            requested_nets(&json!({ "nets": "GND" }))
+                .unwrap_err()
+                .contains("must be an array")
+        );
+    }
+
     /// The honesty pass must leave NO real violation standing, whatever mix of
     /// defects the router handed it. A pass that runs out with violations
     /// remaining makes `route_board` refuse with the same count forever, and no
@@ -3328,7 +3470,11 @@ mod escape_bottleneck_tests {
         )));
 
         let (dropped, remaining) = make_route_honest_with_report(&problem, &mut result, &planes);
-        assert!(dropped.contains(&"V3V3".to_string()), "{dropped:?}");
+        assert_eq!(
+            dropped,
+            vec!["V3V3".to_string()],
+            "the plane keeps its copper"
+        );
         assert!(result.solution.traces.is_empty());
         assert_eq!(
             lint_summary_from_violations(&remaining, &result.failed, &planes).real,

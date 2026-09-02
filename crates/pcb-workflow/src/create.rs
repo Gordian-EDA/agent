@@ -525,19 +525,22 @@ fn effective_seed_rules(
     parts: &[SeedFootprint],
 ) -> (SeedRules, Vec<String>) {
     let mut effective = requested.clone();
-    for override_clearance in parts
+    let declared_floor = parts
         .iter()
         .filter_map(|part| footprint_clearance_override(&part.source))
-    {
-        effective.clearance = effective.clearance.max(override_clearance);
-    }
+        .fold(0.0_f64, f64::max);
+    effective.clearance = effective.clearance.max(declared_floor);
     let limits = crate::rules::board_limits(
         parts
             .iter()
             .map(|part| (part.lib_id.as_str(), part.source.as_str(), &part.pad_nets)),
     );
-    let (clearance, min_trace_width, notes) =
-        crate::rules::pad_limited_rules(effective.clearance, effective.min_trace_width, &limits);
+    let (clearance, min_trace_width, notes) = crate::rules::pad_limited_rules(
+        effective.clearance,
+        effective.min_trace_width,
+        declared_floor,
+        &limits,
+    );
     effective.clearance = clearance;
     effective.min_trace_width = min_trace_width;
     (effective, notes)

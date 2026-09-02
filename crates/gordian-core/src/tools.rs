@@ -185,18 +185,14 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "from": {
-                        "type": "array",
-                        "items": {"type":"number"},
-                        "minItems": 2,
-                        "maxItems": 2,
-                    },
-                    "to": {
-                        "type": "array",
-                        "items": {"type":"number"},
-                        "minItems": 2,
-                        "maxItems": 2,
-                    },
+                    "from": { "oneOf": [
+                        { "type": "string", "description": "Pad reference, e.g. \"U1.3\"." },
+                        { "type": "array", "items": {"type":"number"}, "minItems": 2, "maxItems": 2 }
+                    ] },
+                    "to": { "oneOf": [
+                        { "type": "string", "description": "Pad reference, e.g. \"R1.1\"." },
+                        { "type": "array", "items": {"type":"number"}, "minItems": 2, "maxItems": 2 }
+                    ] },
                     "net": { "type": "string" },
                     "from_layer": { "type": "string", "description": "Layer; default F.Cu." },
                     "to_layer": { "type": "string" },

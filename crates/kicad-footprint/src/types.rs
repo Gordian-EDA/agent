@@ -83,9 +83,16 @@ pub struct PcbEdgeDatum {
 }
 
 impl FootprintPad {
-    /// The KiCAD layer tokens this pad occupies.
-    pub fn copper_layers(&self) -> &[String] {
-        &self.layers
+    /// The COPPER layers this pad occupies — `F.Cu`, `B.Cu`, `In2.Cu`, `*.Cu`.
+    ///
+    /// A pad may also list `F.Paste` / `F.Mask`; those are stencil and solder
+    /// resist, not copper, and a caller reasoning about clearance or nets must
+    /// not see them. A paste-only pad has no copper layers at all.
+    pub fn copper_layers(&self) -> impl Iterator<Item = &str> {
+        self.layers
+            .iter()
+            .map(String::as_str)
+            .filter(|layer| layer.ends_with(".Cu"))
     }
 
     /// Whether the pad is a drilled through-hole pad (plated or not).
