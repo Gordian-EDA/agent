@@ -364,8 +364,10 @@ fn pad_clause(prefix: &str, pads: &[String]) -> String {
 fn add_rendered_findings(report: &mut Value, findings: &[Finding], detail: bool) {
     let shown = if detail {
         findings.len()
+    } else if findings.len() > COMPACT_FINDING_LIMIT {
+        COMPACT_FINDING_LIMIT - 1
     } else {
-        findings.len().min(COMPACT_FINDING_LIMIT)
+        findings.len()
     };
     let mut lines = findings[..shown]
         .iter()

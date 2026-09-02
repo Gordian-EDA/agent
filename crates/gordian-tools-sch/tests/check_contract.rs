@@ -81,7 +81,8 @@ fn check_schematic_matches_kicad_warning_count_and_names_each_finding() {
         .expect("registered tool")
         .expect("compact check_schematic result");
     if findings.len() > 40 {
-        assert_eq!(compact["findings"].as_array().unwrap().len(), 40);
+        assert_eq!(compact["findings"].as_array().unwrap().len(), 39);
+        assert_eq!(compact["text"].as_str().unwrap().lines().count(), 40);
         assert!(
             compact["text"]
                 .as_str()

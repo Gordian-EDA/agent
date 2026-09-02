@@ -142,7 +142,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "check_schematic",
-            "Lint + electrical rules + KiCAD ERC over the live file. Every finding names its severity, rule code, objects, nets, location, and fix. Compact results show forty findings; pass `detail: true` to get all. Completeness findings are advisory: resolve them when the request implies a complete powered/interface design, but never expand a deliberately minimal or focused edit.",
+            "Lint + electrical rules + KiCAD ERC over the live file. Every finding names its severity, rule code, objects, nets, location, and fix. Compact results use at most forty lines; pass `detail: true` to get all. Completeness findings are advisory: resolve them when the request implies a complete powered/interface design, but never expand a deliberately minimal or focused edit.",
             json!({
                 "type": "object",
                 "properties": {
