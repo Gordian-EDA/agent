@@ -41,6 +41,17 @@ use crate::{AgentRuntime, Tool};
 /// The `intent` object both board-building tools take: what the layout should
 /// be, never where a part goes. `zones` is `sync_board`'s half (it seeds the
 /// pours); the rest is `place_board`'s.
+/// The optimistic-concurrency token every board mutator accepts.
+fn expect_revision_schema() -> Value {
+    json!({
+        "type": "integer",
+        "minimum": 1,
+        "description": "Write only while the project is still at this revision (from checkpoint \
+                        or history); otherwise the call is refused, naming the current revision \
+                        and the references it touched.",
+    })
+}
+
 /// The board window `place_board` and `route_board` both accept. A box is a
 /// selector: it names what to work on, and everything outside it is left alone.
 fn bbox_schema(what: &str) -> Value {
@@ -173,6 +184,35 @@ pub fn tool_defs() -> Vec<Tool> {
             }),
         },
         Def {
+            name: "checkpoint".into(),
+            description: "Name the project's current state. Returns the revision to pass as \
+                 `expect_revision` to a board mutator, or to `undo`."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "minLength": 1, "description": "Short name for this state, e.g. \"power section placed\"." }
+                },
+                "additionalProperties": false
+            }),
+        },
+        Def {
+            name: "reserve_refs".into(),
+            description: "Reserve a block of reference designators (R7…R12) in the project so \
+                 nothing else mints them. Use it before adding parts while another agent is \
+                 working on the same design."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "prefix": { "type": "string", "minLength": 1, "description": "Letters only: R, C, U, TP." },
+                    "count": { "type": "integer", "minimum": 1, "maximum": 200 }
+                },
+                "required": ["prefix", "count"],
+                "additionalProperties": false
+            }),
+        },
+        Def {
             name: "render_schematic".into(),
             description: "Render the schematic to a PNG with mm axes to check the visual result; use it whenever you want to see what an edit did. Not a substitute for `check_schematic`.".into(),
             input_schema: json!({ "type": "object", "properties": {} }),
@@ -223,6 +263,7 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "expect_revision": expect_revision_schema(),
                     "moves": {
                         "type": "array",
                         "minItems": 1,
@@ -264,6 +305,7 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "expect_revision": expect_revision_schema(),
                     "from": { "oneOf": [
                         { "type": "string", "description": "Pad reference, e.g. \"U1.3\"." },
                         { "type": "array", "items": {"type":"number"}, "minItems": 2, "maxItems": 2 }
@@ -303,6 +345,7 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "expect_revision": expect_revision_schema(),
                     "at": {
                         "type": "array",
                         "items": {"type":"number"},
@@ -341,6 +384,7 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "expect_revision": expect_revision_schema(),
                     "net": { "type": "string" },
                     "name": { "type": "string", "description": "Optional net-class name." },
                     "width": { "type": "number", "description": "Track width in mm." },
@@ -355,6 +399,7 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "expect_revision": expect_revision_schema(),
                     "bounds": {
                         "type": "object",
                         "description": "Rectangle, mm.",
@@ -383,6 +428,40 @@ pub fn tool_defs() -> Vec<Tool> {
             }),
         },
         Def {
+            name: "lock_parts".into(),
+            description: "Lock footprints where they sit. A locked part is never moved by \
+                 place_board or any other helper, and move_parts refuses it. Lock the parts \
+                 whose position is decided — connectors, mounting holes, a pose worth keeping."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "refs": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+                    "reason": {
+                        "type": "string",
+                        "enum": ["mechanical", "agent", "user"],
+                        "description": "Default agent. `mechanical` for a position the physical world fixes."
+                    },
+                    "expect_revision": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["refs"],
+                "additionalProperties": false
+            }),
+        },
+        Def {
+            name: "unlock_parts".into(),
+            description: "Release locks so placement may move these parts again.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "refs": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+                    "expect_revision": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["refs"],
+                "additionalProperties": false
+            }),
+        },
+        Def {
             name: "sync_board".into(),
             description: "Sync the PCB to the schematic: creates the board when absent, \
                  else applies only the delta and keeps placement and copper. bounds/rules \
@@ -394,6 +473,7 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "expect_revision": expect_revision_schema(),
                     "intent": intent_schema(),
                     "bounds": {
                         "description": "Omit (or \"auto\") to size the board from its parts. Bounds smaller than required_bounds are refused before anything is written.",
@@ -439,7 +519,9 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "get_board".into(),
-            description: "Inspect the board; net returns its pads, tracks, vias, coordinates, and endpoint touches."
+            description: "Inspect the board: its parts split into `staged` (with staged_reason), \
+                 `placed` and `locked`, its rules and its nets. `net` adds that net's pads, \
+                 copper, endpoint touches and its `ratsnest` entry — status, blocker, escapes."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -461,16 +543,18 @@ pub fn tool_defs() -> Vec<Tool> {
                  proximities and groups (never coordinates); `groups` steers regions, grids \
                  and surrounds. LOCAL by default: `refs` names the parts to move, or `bbox` \
                  selects every footprint whose centre is inside a board window — everything \
-                 else stays locked where it sits and its copper becomes a keep-out. With no \
-                 arguments it places exactly the parts that are still unplaced, leaving every \
-                 laid-out pose alone. Copper on the parts it moves is retracted (see \
-                 nets_to_reroute), and a local call reports what is still_unplaced. It refuses \
-                 only when nothing is unplaced — pass replace:true to re-place a finished \
-                 board and lose its layout."
+                 else stays where it sits and its copper becomes a keep-out. With no arguments \
+                 it places exactly the parts that are still staged, leaving every laid-out \
+                 pose alone; when there is nothing staged it reports that and moves nothing. \
+                 Copper on the parts it moves is retracted (see nets_to_reroute), and a local \
+                 call reports what is still_staged. Locked parts are never moved and come \
+                 back as skipped_locked; pass replace:true to re-place a finished board and \
+                 lose its layout."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "expect_revision": expect_revision_schema(),
                     "refs": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -518,17 +602,19 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "route_board".into(),
-            description: "Auto-route the PLACED board, committing every net whose copper is \
-                 DRC-clean; refuses while any part is unplaced. \
-                 Reports routed N/M and, per unrouted net, the two pads, the obstacle in the \
-                 way and the repair. LOCAL by default: pass `nets` to re-route only those \
-                 nets after a move_parts, or `bbox` to rip and re-route only the nets that \
-                 reach into a board window. Every other net's copper is kept exactly as it is \
-                 and treated as fixed obstacle."
+            description: "Auto-route the board, committing every net whose copper is \
+                 DRC-clean. A partially placed board routes what it can: nets that reach a \
+                 STAGED part are left alone and reported open with the part to place. Returns \
+                 routed N/M and a `ratsnest` entry per net — the two pads, status \
+                 open/routed/blocked, the blocker, and the escapes. LOCAL by default: pass \
+                 `nets` to re-route only those nets after a move_parts, or `bbox` to rip and \
+                 re-route only the nets that reach into a board window. Every other net's \
+                 copper is kept exactly as it is and treated as fixed obstacle."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "expect_revision": expect_revision_schema(),
                     "nets": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -548,11 +634,11 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "check_board".into(),
-            description: "Run PCB DRC and classify violations and unrouted pairs against the \
-                 turn-start board. `ok` considers introduced blocking findings only: fix those \
-                 and leave inherited findings alone unless asked. On failure lists every introduced \
-                 unconnected item as the pad pair it is, and `unplaced` — the footprints still in \
-                 the seed row, which place_board({refs}) lays out."
+            description: "Progress and DRC for the board as it stands: `routed N/M`, `blocked` \
+                 (the same ratsnest entries route_board returns), `staged` (the parts still in \
+                 the staging row, with the reason), and the classified DRC findings. `ok` \
+                 considers introduced blocking findings only: fix those and leave inherited \
+                 findings alone unless asked. A staged part is never a violation."
                 .into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
@@ -560,7 +646,13 @@ pub fn tool_defs() -> Vec<Tool> {
             name: "refill_zones".into(),
             description: "Refill every copper zone in KiCad and persist the filled board before checking connectivity."
                 .into(),
-            input_schema: json!({ "type": "object", "properties": {} }),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "expect_revision": expect_revision_schema(),
+                },
+                "additionalProperties": false
+            }),
         },
         Def {
             name: "export_fab".into(),
@@ -611,6 +703,8 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "project_info" => project_info(ctx),
         "undo" => undo(input, ctx),
         "history" => history(input, ctx),
+        "checkpoint" => checkpoint(input, ctx),
+        "reserve_refs" => reserve_refs(input, ctx),
         "render_schematic" => render_schematic(ctx),
         "search_footprints" => search_footprints(input, ctx),
         "get_footprint_info" => pcb_workflow::get_footprint_info(input, ctx),
@@ -622,6 +716,8 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "refill_zones" => pcb_workflow::refill_zones(input, ctx),
         "export_fab" => pcb_workflow::export_fab(input, ctx),
         "move_parts" => pcb_workflow::move_parts(input, ctx),
+        "lock_parts" => pcb_workflow::lock_parts(input, ctx),
+        "unlock_parts" => pcb_workflow::unlock_parts(input, ctx),
         "route_track" => pcb_workflow::route_track(input, ctx),
         "delete_copper" => pcb_workflow::delete_copper(input, ctx),
         "set_net_width" => pcb_workflow::set_net_width(input, ctx),
@@ -957,11 +1053,13 @@ fn undo(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .map(|file| ctx.project_dir().join(&file.path))
         .collect();
-    let revision = match ctx.revisions().capture(
-        "undo",
-        &format!("Restore revision {}", target.id),
-        &files,
-    ) {
+    let revision = match ctx
+        .revisions()
+        .capture(gordian_runtime::revisions::Capture::new(
+            "undo",
+            &format!("Restore revision {}", target.id),
+            &files,
+        )) {
         Ok(revision) => revision,
         Err(error) => {
             return Ok(
@@ -1006,15 +1104,91 @@ fn history(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .map(|file| file.path.display().to_string())
             .collect::<Vec<_>>()
             .join(", ");
+        let label = manifest
+            .label
+            .as_ref()
+            .map(|label| format!("  «{label}»"))
+            .unwrap_or_default();
+        let refs = if manifest.refs_touched.is_empty() {
+            String::new()
+        } else {
+            format!("  refs: {}", manifest.refs_touched.join(", "))
+        };
         use std::fmt::Write as _;
         writeln!(
             out,
-            "{}  {}  {}  {}  [{}]",
-            manifest.id, manifest.created_at, manifest.tool, manifest.summary, files
+            "{}  {}  {}  {}{label}  [{files}]{refs}",
+            manifest.id, manifest.created_at, manifest.tool, manifest.summary
         )
         .expect("writing to a string cannot fail");
     }
     Ok(Value::String(out))
+}
+
+/// Name the project's current state so a later `undo` or `expect_revision` can
+/// point at it.
+fn checkpoint(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let label = input
+        .get("label")
+        .and_then(Value::as_str)
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or("checkpoint");
+    let files: Vec<std::path::PathBuf> = [ctx.sch_path().to_path_buf(), ctx.pcb_path()]
+        .into_iter()
+        .filter(|path| path.is_file())
+        .collect();
+    if files.is_empty() {
+        return Ok(json!({
+            "error": "this project has no schematic or board to checkpoint yet",
+        }));
+    }
+    match ctx.revisions().capture(
+        gordian_runtime::revisions::Capture::new("checkpoint", label, &files).label(label),
+    ) {
+        Ok(revision) => Ok(json!({
+            "ok": true,
+            "revision": revision,
+            "label": label,
+            "files": files
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>(),
+            "note": "Pass this revision as `expect_revision` to a board mutator to write only                      while the project is still in this state, or to undo({revision}) to come                      back to it.",
+        })),
+        Err(error) => Ok(json!({ "error": format!("could not checkpoint: {error}") })),
+    }
+}
+
+/// Claim a block of reference designators so two callers never mint the same
+/// `R12`. The reservation is recorded in the project, not in this process.
+fn reserve_refs(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let Some(prefix) = input.get("prefix").and_then(Value::as_str) else {
+        return Ok(json!({ "error": "reserve_refs needs a `prefix` such as \"R\"" }));
+    };
+    let count = input.get("count").and_then(Value::as_u64).unwrap_or(1) as u32;
+    let taken = designators_in_use(ctx);
+    match ctx.reservations().reserve(prefix, count, &taken) {
+        Ok(reservation) => Ok(json!({
+            "ok": true,
+            "prefix": reservation.prefix,
+            "start": reservation.start,
+            "count": reservation.count,
+            "refs": reservation.refs,
+            "note": "These references are yours; nothing else in this project will be given them.",
+        })),
+        Err(error) => Ok(json!({ "error": error.to_string() })),
+    }
+}
+
+/// Every reference the project's schematic and board already carry, so a
+/// reservation never collides with a part that exists but was never reserved.
+fn designators_in_use(ctx: &AgentRuntime) -> std::collections::BTreeSet<String> {
+    let mut taken = std::collections::BTreeSet::new();
+    taken.extend(pcb_workflow::board_references(ctx));
+    if let Ok(doc) = sch_doc::SchDoc::read(ctx.sch_path()) {
+        taken.extend(doc.symbols().map(|symbol| symbol.refdes().to_owned()));
+    }
+    taken
 }
 
 /// Result key carrying a PNG path for the agent loop to attach as an image

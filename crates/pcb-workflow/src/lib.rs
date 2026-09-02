@@ -114,6 +114,20 @@ pub use route::route_board;
 pub use seed::{BoardSeedRules, PourSpec};
 pub use sync::sync_board;
 
+/// The references the saved board carries, or nothing when there is no board.
+pub fn board_references(ctx: &gordian_runtime::AgentRuntime) -> Vec<String> {
+    active_board(ctx)
+        .map(|board| {
+            board
+                .imported
+                .parts
+                .into_iter()
+                .map(|part| part.reference)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn active_board(
     ctx: &gordian_runtime::AgentRuntime,
 ) -> Result<kicad_board::BoardSnapshot, String> {

@@ -139,17 +139,6 @@ pub(crate) fn lock_reason(part: &ImportedPart) -> Option<LockReason> {
     })
 }
 
-/// The references KiCad's own `locked` flag protects.
-pub(crate) fn locked_references(board: &BoardSnapshot) -> BTreeSet<String> {
-    board
-        .imported
-        .parts
-        .iter()
-        .filter(|part| part.locked)
-        .map(|part| part.reference.clone())
-        .collect()
-}
-
 /// The board's parts split into the three states a partial board has.
 pub(crate) struct BoardState {
     pub(crate) staged: Vec<StagedPart>,
@@ -257,10 +246,6 @@ mod tests {
                 json!({ "ref": "R1", "locked_reason": "user" }),
                 json!({ "ref": "U1", "locked_reason": "mechanical" }),
             ]
-        );
-        assert_eq!(
-            locked_references(&board),
-            BTreeSet::from(["R1".to_owned(), "U1".to_owned()])
         );
     }
 }

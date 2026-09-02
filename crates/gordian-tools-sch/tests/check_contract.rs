@@ -140,11 +140,11 @@ fn check_schematic_uses_the_turn_snapshot_and_survives_undo() {
     ctx.begin_turn().unwrap();
     let revision = ctx
         .revisions()
-        .capture(
+        .capture(gordian_runtime::revisions::Capture::new(
             "test_edit",
             "capture turn baseline",
             &[ctx.sch_path().to_path_buf()],
-        )
+        ))
         .unwrap();
 
     let unchanged = gordian_tools_sch::run("check_schematic", json!({"detail": true}), &ctx)
