@@ -65,3 +65,60 @@ fn returned_fix_closes_a_broken_passive_connection_verbatim() {
     );
     assert_eq!(repaired["ok"], true, "repaired schematic is not clean");
 }
+
+#[test]
+fn returned_fix_closes_reversed_led_polarity_verbatim() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    tool(
+        &ctx,
+        "place_parts",
+        json!({"block": "indicator", "parts": [
+            {
+                "ref": "R1",
+                "part": "Device:R",
+                "value": "1k",
+                "footprint": "Resistor_SMD:R_0603_1608Metric",
+                "pins": {"1": "+3V3", "2": "LED_K"}
+            },
+            {
+                "ref": "D1",
+                "part": "Device:LED",
+                "footprint": "LED_SMD:LED_0603_1608Metric",
+                "pins": {"1": "LED_K", "2": "GND"}
+            }
+        ]}),
+    );
+    let broken = tool(&ctx, "check_schematic", json!({"detail": true}));
+    let finding = broken["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["code"] == "led-polarity")
+        .expect("reversed LED finding");
+    assert_eq!(
+        finding["fix"],
+        json!({
+            "tool": "move_symbols",
+            "args": {"moves": [{"ref": "D1", "rot": 90.0}]}
+        })
+    );
+
+    tool(
+        &ctx,
+        finding.pointer("/fix/tool").unwrap().as_str().unwrap(),
+        finding.pointer("/fix/args").unwrap().clone(),
+    );
+    let repaired = tool(&ctx, "check_schematic", json!({"detail": true}));
+
+    assert!(
+        repaired["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|finding| finding["code"] != "led-polarity"),
+        "verbatim fix left LED polarity finding: {repaired:#}"
+    );
+}

@@ -290,7 +290,6 @@ struct FixPin {
     refdes: String,
     name: String,
     etype: String,
-    at: [f64; 2],
     net: Option<String>,
     unconnected: bool,
 }
@@ -298,8 +297,8 @@ struct FixPin {
 struct FixPlanner {
     pins: Vec<FixPin>,
     baseline_nets: BTreeMap<String, String>,
-    rotations: BTreeMap<String, f64>,
     parts: BTreeMap<String, String>,
+    rotations: BTreeMap<String, f64>,
     default_footprints: BTreeMap<String, String>,
 }
 
@@ -324,7 +323,6 @@ impl FixPlanner {
                     refdes: pin.refdes,
                     name: pin.name,
                     etype: pin.etype,
-                    at: round_point(pin.at.x, pin.at.y),
                 }
             })
             .collect();
@@ -337,14 +335,14 @@ impl FixPlanner {
                     .map(move |pin| (format!("{}.{}", pin.refdes, pin.pin), net.name.clone()))
             })
             .collect();
-        let rotations = doc
-            .symbols()
-            .map(|symbol| (symbol.refdes().to_string(), symbol.at.rot))
-            .collect();
         let parts = doc
             .symbols()
             .map(|symbol| (symbol.refdes().to_string(), symbol.lib_id.clone()))
             .collect::<BTreeMap<_, _>>();
+        let rotations = doc
+            .symbols()
+            .map(|symbol| (symbol.refdes().to_string(), symbol.at.rot))
+            .collect();
         let default_footprints = parts
             .iter()
             .filter_map(|(reference, part)| {
@@ -358,8 +356,8 @@ impl FixPlanner {
         Self {
             pins,
             baseline_nets,
-            rotations,
             parts,
+            rotations,
             default_footprints,
         }
     }
@@ -388,6 +386,20 @@ impl FixPlanner {
         if let Some((fix, why)) = planned {
             finding.fix = Some(fix);
             finding.why = why;
+        } else if is_connection_finding(&code, &message) {
+            finding.why =
+                "No baseline, same-net, or same-function endpoint proves the intended connection."
+                    .to_string();
+        } else if is_output_conflict(&code, &message) {
+            finding.why =
+                "The turn baseline does not identify exactly one newly added driver to disconnect."
+                    .to_string();
+        } else if is_assignable_footprint(&code, &message) {
+            finding.why =
+                "No installed footprint matches both the symbol family and its pad numbers."
+                    .to_string();
+        } else if code.contains("polarity") {
+            finding.why = "The finding does not identify a two-pin symbol whose assignments can be swapped safely.".to_string();
         } else if finding.why.is_empty() {
             finding.why = "The finding does not identify a safe one-call repair.".to_string();
         }
@@ -438,7 +450,8 @@ impl FixPlanner {
                     .filter(|pin| is_power_net(&pin.name))
                     .map(|pin| pin.name.clone())
             })
-            .or_else(|| affected.and_then(|pin| pin.net.clone()))?;
+            .or_else(|| affected.and_then(|pin| pin.net.clone()))
+            .or_else(|| affected.map(|pin| pin.name.clone()))?;
         if is_power_net(&net) {
             let anchor = self
                 .pins
@@ -523,7 +536,7 @@ impl FixPlanner {
                     })
                     .min_by(|left, right| left.id.cmp(&right.id))
             })
-            .or_else(|| self.nearest_loose(from))?;
+            .or_else(|| self.intent_matched_pin(from))?;
         let (from, to) = if from.unconnected && to.unconnected && from.id > to.id {
             (to, from)
         } else {
@@ -540,23 +553,38 @@ impl FixPlanner {
                     to.id, from.id
                 ),
                 None => format!(
-                    "{} is the nearest compatible loose endpoint to {}.",
+                    "{} has the same explicit pin function as {}.",
                     to.id, from.id
                 ),
             },
         ))
     }
 
-    fn nearest_loose<'a>(&'a self, from: &FixPin) -> Option<&'a FixPin> {
+    fn intent_matched_pin<'a>(&'a self, from: &FixPin) -> Option<&'a FixPin> {
+        let intended_net = if circuit_graph::netclass::is_ground(&from.name) {
+            Some("GND")
+        } else if is_power_net(&from.name) {
+            Some(from.name.as_str())
+        } else {
+            None
+        };
+        if let Some(net) = intended_net {
+            return self
+                .pins
+                .iter()
+                .filter(|pin| pin.refdes != from.refdes)
+                .filter(|pin| pin.net.as_deref() == Some(net))
+                .min_by(|left, right| left.id.cmp(&right.id));
+        }
+        if from.name == "~" || from.name.is_empty() {
+            return None;
+        }
         self.pins
             .iter()
-            .filter(|pin| pin.id != from.id && pin.unconnected)
+            .filter(|pin| pin.refdes != from.refdes && pin.unconnected)
             .filter(|pin| !is_library_no_connect(&pin.etype))
-            .min_by(|left, right| {
-                squared_distance(from, left)
-                    .total_cmp(&squared_distance(from, right))
-                    .then_with(|| left.id.cmp(&right.id))
-            })
+            .filter(|pin| pin.name.eq_ignore_ascii_case(&from.name))
+            .min_by(|left, right| left.id.cmp(&right.id))
     }
 
     fn output_conflict(&self, finding: &Finding) -> Option<(ToolFix, String)> {
@@ -568,7 +596,14 @@ impl FixPlanner {
             .filter(|pin| is_output(&pin.etype) || is_power_output(&pin.etype))
             .collect::<Vec<_>>();
         drivers.sort_by(|left, right| left.id.cmp(&right.id));
-        let disconnect = drivers.get(1).or_else(|| drivers.first())?;
+        let newcomers = drivers
+            .iter()
+            .copied()
+            .filter(|driver| self.baseline_nets.get(&driver.id).map(String::as_str) != Some(net))
+            .collect::<Vec<_>>();
+        let [disconnect] = newcomers.as_slice() else {
+            return None;
+        };
         Some((
             ToolFix {
                 tool: "delete_wires",
@@ -587,14 +622,28 @@ impl FixPlanner {
             .iter()
             .map(|reference| reference.split('.').next().unwrap_or(reference))
             .find(|reference| self.rotations.contains_key(*reference))?;
-        let rotation = self.rotations[reference];
-        let rotation = ((rotation + 180.0).rem_euclid(360.0) * 1000.0).round() / 1000.0;
+        let mut pins = self
+            .pins
+            .iter()
+            .filter(|pin| pin.refdes == reference)
+            .filter_map(|pin| pin.id.rsplit_once('.').map(|(_, number)| number.to_owned()))
+            .collect::<Vec<_>>();
+        pins.sort();
+        pins.dedup();
+        if pins.len() != 2 {
+            return None;
+        }
         Some((
             ToolFix {
                 tool: "move_symbols",
-                args: json!({"moves": [{"ref": reference, "rot": rotation}]}),
+                args: json!({
+                    "moves": [{
+                        "ref": reference,
+                        "rot": (self.rotations[reference] + 180.0).rem_euclid(360.0)
+                    }]
+                }),
             },
-            format!("Rotating {reference} by 180° reverses its anode and cathode."),
+            format!("Rotating {reference} 180 degrees swaps its two fixed net positions."),
         ))
     }
 
@@ -606,26 +655,23 @@ impl FixPlanner {
             .find(|reference| self.parts.contains_key(*reference))?;
         let footprint = self
             .suggested_footprint(&finding.message)
-            .filter(|footprint| catalog_has(ctx, footprint))
-            .map(str::to_owned)
+            .and_then(|footprint| self.verified_footprint(reference, footprint, ctx))
             .or_else(|| {
                 self.default_footprints
                     .get(reference)
-                    .cloned()
-                    .filter(|footprint| catalog_has(ctx, footprint))
+                    .and_then(|footprint| self.verified_footprint(reference, footprint, ctx))
             })
             .or_else(|| {
                 conventional_footprint(&self.parts[reference])
-                    .filter(|footprint| catalog_has(ctx, footprint))
-                    .map(str::to_owned)
+                    .and_then(|footprint| self.verified_footprint(reference, footprint, ctx))
             })
             .or_else(|| {
                 let query = format!("{} {}", self.parts[reference], finding.message);
                 ctx.footprint_catalog()
                     .ok()?
                     .search(query)
-                    .first()
-                    .map(|hit| hit.id.to_string())
+                    .into_iter()
+                    .find_map(|hit| self.verified_footprint(reference, &hit.id.to_string(), ctx))
             })?;
         Some(footprint_assignment(
             reference,
@@ -643,27 +689,58 @@ impl FixPlanner {
             .filter(|candidate| candidate.contains(':'))
     }
 
+    fn verified_footprint(
+        &self,
+        reference: &str,
+        candidate: &str,
+        ctx: &AgentRuntime,
+    ) -> Option<String> {
+        let part = self.parts.get(reference)?;
+        if !footprint_family_matches(part, candidate) {
+            return None;
+        }
+        let id = kicad_footprint::FootprintId::parse(candidate).ok()?;
+        let footprint = ctx.footprint_catalog().ok()?.footprint(&id).ok()?;
+        let symbol_pins = self
+            .pins
+            .iter()
+            .filter(|pin| pin.refdes == reference)
+            .filter(|pin| !is_library_no_connect(&pin.etype))
+            .filter_map(|pin| pin.id.rsplit_once('.').map(|(_, number)| number))
+            .collect::<BTreeSet<_>>();
+        let footprint_pads = footprint
+            .pads
+            .iter()
+            .map(|pad| pad.number.as_str())
+            .filter(|number| !number.is_empty())
+            .collect::<BTreeSet<_>>();
+        (symbol_pins == footprint_pads).then(|| candidate.to_owned())
+    }
+
     fn library_no_connect(&self, finding: &Finding) -> Option<(ToolFix, String)> {
         let pin = self.affected_pin(finding)?;
         let functional = self
             .pins
             .iter()
             .filter(|candidate| candidate.refdes == pin.refdes)
-            .find(|candidate| !is_library_no_connect(&candidate.etype));
+            .filter(|candidate| !is_library_no_connect(&candidate.etype) && candidate.unconnected)
+            .collect::<Vec<_>>();
         Some((
             ToolFix {
                 tool: "delete_wires",
                 args: json!({"pins": [pin.id.clone()]}),
             },
-            functional.map_or_else(
-                || format!("{} is a library NC pin and must not be wired.", pin.id),
-                |functional| {
-                    format!(
-                        "{} is a library NC pin; use functional pin {} instead.",
-                        pin.id, functional.id
-                    )
-                },
-            ),
+            (functional.len() == 1)
+                .then_some(functional[0])
+                .map_or_else(
+                    || format!("{} is a library NC pin and must not be wired.", pin.id),
+                    |functional| {
+                        format!(
+                            "{} is a library NC pin; use functional pin {} instead.",
+                            pin.id, functional.id
+                        )
+                    },
+                ),
         ))
     }
 }
@@ -723,10 +800,6 @@ fn is_unused_output(pin: &FixPin, finding: &Finding) -> bool {
                 .contains("unused output"))
 }
 
-fn squared_distance(left: &FixPin, right: &FixPin) -> f64 {
-    (left.at[0] - right.at[0]).powi(2) + (left.at[1] - right.at[1]).powi(2)
-}
-
 fn conventional_footprint(part: &str) -> Option<&'static str> {
     let symbol = part.split_once(':').map_or(part, |(_, symbol)| symbol);
     if symbol == "R" {
@@ -750,12 +823,37 @@ fn footprint_assignment(reference: &str, footprint: &str, part: &str) -> (ToolFi
     )
 }
 
-fn catalog_has(ctx: &AgentRuntime, footprint: &str) -> bool {
-    let Ok(id) = kicad_footprint::FootprintId::parse(footprint) else {
-        return false;
-    };
-    ctx.footprint_catalog()
-        .is_ok_and(|catalog| catalog.contains(&id))
+fn footprint_family_matches(part: &str, footprint: &str) -> bool {
+    let part = part.to_ascii_uppercase();
+    let footprint = footprint.to_ascii_uppercase();
+    if part.contains("C_POLARIZED") || part.ends_with(":CP") {
+        return footprint.starts_with("CAPACITOR_")
+            && (footprint.contains(":CP_") || footprint.contains("C_ELEC"));
+    }
+    if part.ends_with(":C") || part.contains(":C_SMALL") {
+        return footprint.starts_with("CAPACITOR_")
+            && !footprint.contains(":CP_")
+            && !footprint.contains("C_ELEC");
+    }
+    if part.contains("LED") {
+        return footprint.starts_with("LED_");
+    }
+    if part.contains("DIODE") || part.ends_with(":D") || part.contains(":D_") {
+        return footprint.starts_with("DIODE_");
+    }
+    if part.contains("FERRITE") || part.ends_with(":L") || part.contains(":L_") {
+        return footprint.starts_with("INDUCTOR_");
+    }
+    if part.ends_with(":R") || part.contains(":R_SMALL") {
+        return footprint.starts_with("RESISTOR_");
+    }
+    if part.contains("CONNECTOR") || part.contains(":CONN_") {
+        return footprint.starts_with("CONNECTOR_")
+            || footprint.starts_with("TERMINALBLOCK_")
+            || footprint.starts_with("TESTPOINT:")
+            || footprint.starts_with("MOUNTINGHOLE:");
+    }
+    true
 }
 
 fn finding_message(message: &str) -> String {
@@ -912,6 +1010,33 @@ fn fix_groups(findings: &[Finding]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn inherit_duplicate_footprint_fixes(findings: &mut [Finding]) {
+    let fixes = findings
+        .iter()
+        .filter(|finding| finding.code == "footprint-unknown")
+        .filter_map(|finding| {
+            let reference = finding.refs.first()?.split('.').next()?.to_owned();
+            Some((reference, (finding.fix.clone()?, finding.why.clone())))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for finding in findings {
+        if finding.code != "footprint_link_issues" || finding.fix.is_some() {
+            continue;
+        }
+        let Some(reference) = finding
+            .refs
+            .first()
+            .and_then(|reference| reference.split('.').next())
+        else {
+            continue;
+        };
+        if let Some((fix, why)) = fixes.get(reference) {
+            finding.fix = Some(fix.clone());
+            finding.why = why.clone();
+        }
+    }
 }
 
 struct Inspection {
@@ -1105,6 +1230,7 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     for finding in &mut inspection.findings {
         planner.plan(finding, ctx);
     }
+    inherit_duplicate_footprint_fixes(&mut inspection.findings);
     inspection.findings.sort_by_key(|finding| {
         (
             finding.classification != "introduced",
@@ -1197,13 +1323,12 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 mod tests {
     use super::*;
 
-    fn pin(id: &str, name: &str, etype: &str, net: Option<&str>, x: f64) -> FixPin {
+    fn pin(id: &str, name: &str, etype: &str, net: Option<&str>, _x: f64) -> FixPin {
         FixPin {
             id: id.to_owned(),
             refdes: id.split('.').next().unwrap().to_owned(),
             name: name.to_owned(),
             etype: etype.to_owned(),
-            at: [x, 0.0],
             net: net.map(str::to_owned),
             unconnected: net.is_none(),
         }
@@ -1213,8 +1338,8 @@ mod tests {
         FixPlanner {
             pins,
             baseline_nets: BTreeMap::new(),
-            rotations: BTreeMap::new(),
             parts: BTreeMap::new(),
+            rotations: BTreeMap::new(),
             default_footprints: BTreeMap::new(),
         }
     }
@@ -1381,6 +1506,44 @@ mod tests {
     }
 
     #[test]
+    fn dangling_passive_never_connects_its_own_two_loose_pins() {
+        let planner = planner(vec![
+            pin("R1.1", "~", "passive", None, 10.0),
+            pin("R1.2", "~", "passive", None, 20.0),
+        ]);
+        let finding = finding(
+            "dangling-passive",
+            &["R1.1"],
+            &[],
+            "a 2-pin part has a pin left unconnected",
+        );
+
+        assert!(planner.connection(&finding).is_none());
+    }
+
+    #[test]
+    fn loose_nonrail_power_input_gets_a_power_flag_fix() {
+        let planner = planner(vec![pin("U1.4", "VREF", "power_in", None, 10.0)]);
+        let finding = finding(
+            "power_pin_not_driven",
+            &["U1.4"],
+            &[],
+            "power input not driven",
+        );
+
+        assert_eq!(
+            planner.power(&finding).unwrap().0,
+            ToolFix {
+                tool: "place_parts",
+                args: json!({
+                    "block": "erc_repair",
+                    "parts": [{"part": "power:PWR_FLAG", "pins": {"1": "VREF"}}]
+                }),
+            }
+        );
+    }
+
+    #[test]
     fn unused_output_gets_an_exact_no_connect_fix() {
         let planner = planner(vec![pin("U1.7", "OUT2", "output", None, 10.0)]);
         let finding = finding(
@@ -1401,10 +1564,13 @@ mod tests {
 
     #[test]
     fn conflicting_outputs_disconnect_the_second_driver_exactly() {
-        let planner = planner(vec![
+        let mut planner = planner(vec![
             pin("U1.1", "OUT", "output", Some("BUS"), 10.0),
             pin("U2.1", "OUT", "output", Some("BUS"), 20.0),
         ]);
+        planner
+            .baseline_nets
+            .insert("U1.1".to_owned(), "BUS".to_owned());
         let finding = finding(
             "output-short",
             &["U1", "U2"],
@@ -1422,8 +1588,27 @@ mod tests {
     }
 
     #[test]
-    fn reversed_led_rotates_the_symbol_exactly() {
-        let mut planner = planner(Vec::new());
+    fn conflicting_outputs_without_one_new_driver_have_no_destructive_guess() {
+        let planner = planner(vec![
+            pin("U1.1", "OUT", "output", Some("BUS"), 10.0),
+            pin("U2.1", "OUT", "output", Some("BUS"), 20.0),
+        ]);
+        let finding = finding(
+            "output-short",
+            &["U1", "U2"],
+            &["BUS"],
+            "multiple outputs tie to this net",
+        );
+
+        assert!(planner.output_conflict(&finding).is_none());
+    }
+
+    #[test]
+    fn reversed_led_rotates_onto_the_fixed_net_positions_exactly() {
+        let mut planner = planner(vec![
+            pin("D1.1", "K", "passive", Some("LED_K"), 10.0),
+            pin("D1.2", "A", "passive", Some("GND"), 20.0),
+        ]);
         planner.rotations.insert("D1".to_owned(), 90.0);
         let finding = finding("led-polarity", &["D1"], &["GND", "+3V3"], "LED is reversed");
 
@@ -1448,6 +1633,18 @@ mod tests {
                 }]}),
             }
         );
+        assert!(footprint_family_matches(
+            "Device:C_Polarized",
+            "Capacitor_SMD:C_Elec_6.3x5.8"
+        ));
+        assert!(!footprint_family_matches(
+            "Device:C_Polarized",
+            "Inductor_SMD:L_0805_2012Metric"
+        ));
+        assert!(!footprint_family_matches(
+            "Device:LED",
+            "Fuse:Fuse_0603_1608Metric"
+        ));
     }
 
     #[test]

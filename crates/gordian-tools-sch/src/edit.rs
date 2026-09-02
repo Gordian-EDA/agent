@@ -735,6 +735,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "every move needs a `ref`" }));
     }
     let mut placed = Vec::new();
+    let mut allow = Allow::nothing();
     // A part still waiting its turn is not an obstacle to the one being placed;
     // one already placed in this batch is.
     let mut pending: Vec<String> = moves
@@ -793,6 +794,21 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         if edit.doc.symbol(&uuid).is_none() {
             return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
         }
+        let reverse_polarity = edit.doc.symbol(&uuid).is_some_and(|symbol| {
+            let pins = placed_pins(&edit.doc)
+                .into_iter()
+                .filter(|pin| pin.owner == uuid)
+                .count();
+            let desired = step.get("rot").and_then(Value::as_f64);
+            let turn = desired.map(|desired| (desired - symbol.at.rot).rem_euclid(360.0));
+            pins == 2
+                && is_polarized_symbol(&symbol.lib_id)
+                && turn.is_some_and(|turn| (turn - 180.0).abs() < EPS)
+                && step.get("mirror").is_none()
+                && ["to", "by", "near"]
+                    .iter()
+                    .all(|key| step.get(key).is_none())
+        });
         // Where the pins are *now*, before any turn: their wires follow them
         // through both the rotation and the move.
         let was: Vec<Point2> = placed_pins(&edit.doc)
@@ -858,13 +874,22 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .filter(|p| p.owner == uuid)
             .map(|p| p.at)
             .collect();
-        let mut landed = Vec::new();
-        for (from, to) in was.into_iter().zip(now) {
-            edit.doc.move_attached(from, to);
-            carry_glued_symbols(&mut edit.doc, &uuid, from, to)?;
-            landed.push(to);
-        }
-        let straightened = crate::wiring::straighten(&mut edit.doc, &landed);
+        let straightened = if reverse_polarity {
+            let nets = refs::nets_touching(edit.before(), std::slice::from_ref(&refdes));
+            allow = std::mem::take(&mut allow)
+                .nets(nets)
+                .part(refdes.clone())
+                .creating();
+            0
+        } else {
+            let mut landed = Vec::new();
+            for (from, to) in was.into_iter().zip(now) {
+                edit.doc.move_attached(from, to);
+                carry_glued_symbols(&mut edit.doc, &uuid, from, to)?;
+                landed.push(to);
+            }
+            crate::wiring::straighten(&mut edit.doc, &landed)
+        };
         pending.retain(|pending_uuid| *pending_uuid != uuid);
         let mut report = json!({ "ref": refdes, "at": [at.x, at.y] });
         if let Some(to) = nudge {
@@ -886,8 +911,17 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "moved": placed,
             "placement": "final and clean; any nudged_to coordinate is the collision-free final position, so do not move it again",
         }),
-        Allow::nothing(),
+        allow,
     )
+}
+
+fn is_polarized_symbol(lib_id: &str) -> bool {
+    let id = lib_id.to_ascii_uppercase();
+    id.contains("LED")
+        || id.contains("DIODE")
+        || id.ends_with(":D")
+        || id.contains(":D_")
+        || id.contains("OPTO")
 }
 
 /// Set or clear a part's properties.

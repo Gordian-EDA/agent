@@ -712,7 +712,7 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .find(|(from, to, _)| from.near_eq(a, EPS) && to.near_eq(b, EPS))
             .map(|(_, _, name)| name.clone())
     };
-    let doomed: Vec<String> = edit
+    let mut doomed: Vec<String> = edit
         .doc
         .wires()
         .filter(|wire| {
@@ -726,6 +726,18 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         })
         .map(|wire| wire.uuid.clone())
         .collect();
+    doomed.extend(
+        edit.doc
+            .labels()
+            .filter(|label| {
+                wanted_pins
+                    .iter()
+                    .any(|pin| pin.near_eq(label.at.point(), EPS))
+            })
+            .map(|label| label.uuid.clone()),
+    );
+    doomed.sort();
+    doomed.dedup();
     if doomed.is_empty() {
         return Ok(json!({ "changed": "no wire matched", "net_delta": "connectivity unchanged" }));
     }
