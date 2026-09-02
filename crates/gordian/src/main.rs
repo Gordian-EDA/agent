@@ -326,8 +326,8 @@ impl AgentDebugLog {
                     .unwrap_or_default();
                 let details = tool_result_details(name, result);
                 Some(format!(
-                    "tool <- {name} (elapsed {:.1}s{revision}): {summary}{details}{image}",
-                    *elapsed_ms as f64 / 1_000.0
+                    "tool <- {name} (elapsed {}s{revision}): {summary}{details}{image}",
+                    format_tool_elapsed(*elapsed_ms)
                 ))
             }
             AgentEvent::ProviderRequest {
@@ -387,6 +387,14 @@ impl AgentDebugLog {
                 ))
             }
         }
+    }
+}
+
+fn format_tool_elapsed(elapsed_ms: u64) -> String {
+    if elapsed_ms < 1_000 {
+        format!("{:.3}", elapsed_ms as f64 / 1_000.0)
+    } else {
+        format!("{:.1}", elapsed_ms as f64 / 1_000.0)
     }
 }
 
