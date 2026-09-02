@@ -108,8 +108,6 @@ struct Stub {
     anchor: Anchor,
 }
 
-/// Peel every wire chain attached to these symbols' pins back to the first
-/// point that holds something else.
 /// What a retraction leaves behind: the wires to delete, the pieces of a cut
 /// wire to keep, and where each pin now has to reconnect.
 struct Retraction {
@@ -118,6 +116,8 @@ struct Retraction {
     stubs: Vec<Stub>,
 }
 
+/// Peel every wire chain attached to these symbols' pins back to the first
+/// point that holds something else.
 fn retract(sheet: &Sheet, moving: &HashSet<String>) -> Retraction {
     let own: HashMap<NodeKey, PinId> = sheet
         .pins
@@ -330,16 +330,34 @@ pub fn drag_many(
 
     let (mut report, mut touched) = redraw(doc, &stubs, &new_pins);
     report.moved = moves.iter().map(|(id, _)| id.clone()).collect();
+    let cut: Vec<&crate::sheet::WireSeg> = before
+        .wires
+        .iter()
+        .filter(|w| removed.contains(&w.uuid))
+        .collect();
+    touched.extend(cut.iter().flat_map(|w| [key(w.a), key(w.b)]));
+    touched.extend(old_pins.values().map(|at| key(*at)));
+    // A dot the retraction stranded part-way along a wire it deleted has to be
+    // reconsidered too.
     touched.extend(
         before
-            .wires
+            .junctions
             .iter()
-            .filter(|w| removed.contains(&w.uuid))
-            .flat_map(|w| [key(w.a), key(w.b)]),
+            .filter(|node| {
+                let p = point_of(node);
+                cut.iter().any(|w| {
+                    let on = |v: f64, a: f64, b: f64| {
+                        v >= a.min(b) - geom::EPS && v <= a.max(b) + geom::EPS
+                    };
+                    if w.horizontal() {
+                        (w.a.y - p.y).abs() < geom::EPS && on(p.x, w.a.x, w.b.x)
+                    } else {
+                        (w.a.x - p.x).abs() < geom::EPS && on(p.y, w.a.y, w.b.y)
+                    }
+                })
+            })
+            .copied(),
     );
-    touched.extend(old_pins.values().map(|at| key(*at)));
-    // A dot the retraction left sitting on nothing has to be reconsidered too.
-    touched.extend(before.junctions.iter().copied());
 
     let mut after = Sheet::of(doc);
     let (added, dropped) = settle_junctions(doc, &after, &touched);
