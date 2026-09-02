@@ -278,23 +278,19 @@ impl SchematicWriter {
         self.add_symbol(env, "power:PWR_FLAG", refdes, "PWR_FLAG", at.into(), angle)
     }
 
-    /// Add a wire segment between two sheet points (snapped).
+    /// Add a wire segment between two sheet points (snapped), on the net it is
+    /// drawn for. Same-net touches against it are deliberate joins; a foreign-net
+    /// touch is a short.
     ///
     /// If the two points are identical after snapping, the segment is silently
     /// dropped (a zero-length wire would clutter the schematic with no benefit).
     /// The `uuid_key` is content-derived so repeated calls with the same
     /// endpoints produce one deterministic wire.
-    pub fn add_wire(&mut self, a: impl Into<Point2>, b: impl Into<Point2>) {
-        self.push_wire(a.into(), b.into(), None);
-    }
-
-    /// Add a wire that belongs to a known net (cluster geometry). Same-net
-    /// touches against it are deliberate joins, not collisions.
     pub fn add_wire_on_net(&mut self, a: impl Into<Point2>, b: impl Into<Point2>, net: &str) {
-        self.push_wire(a.into(), b.into(), Some(net.to_string()));
+        self.push_wire(a.into(), b.into(), net.to_string());
     }
 
-    fn push_wire(&mut self, a: Point2, b: Point2, net: Option<String>) {
+    fn push_wire(&mut self, a: Point2, b: Point2, net: String) {
         let a = GRID_50_MIL.snap_point(a);
         let b = GRID_50_MIL.snap_point(b);
         if a == b {
@@ -331,14 +327,44 @@ impl SchematicWriter {
         });
     }
 
-    /// Add a junction dot at a wire join. Deduplicated by position.
-    pub fn add_junction(&mut self, at: impl Into<Point2>) {
+    /// Record a tap where `net`'s own wires meet. Deduplicated by position.
+    ///
+    /// The tap always splits this net's through-wire at `at` (which is what makes the
+    /// join real in the netlist). It is also DRAWN as a junction dot unless
+    /// [`Self::set_weld_guard`] is on and a foreign net's wire runs through the point: a
+    /// dot welds everything through it, and the shipped sheet must never be the thing
+    /// that merges two nets. Suppressing the dot does not make such a point tidy — the
+    /// geometry is still crowded and [`crate::floorplan::place::net_conflicts`] reports
+    /// anything it does weld — but this net stays whole either way.
+    pub fn add_junction_on_net(&mut self, at: impl Into<Point2>, net: &str) {
         let at = GRID_50_MIL.snap_point(at.into());
         let uuid_key = format!("{}:{}", at.x, at.y);
-        if self.junctions.iter().any(|j| j.uuid_key == uuid_key) {
+        // Keyed on (point, NET): two nets wanting a tap at one point is a short the audit
+        // reports, but dropping the second one would cost that net its split as well and
+        // open it. Only one dot is ever DRAWN there (`finish` keeps the first).
+        if self
+            .junctions
+            .iter()
+            .any(|j| j.uuid_key == uuid_key && j.net == net)
+        {
             return;
         }
-        self.junctions.push(Junction { at, uuid_key });
+        let welds_foreign = self
+            .wires
+            .iter()
+            .any(|w| w.net != net && Segment::new(w.a, w.b).contains_point(at));
+        self.junctions.push(Junction {
+            at,
+            uuid_key,
+            net: net.to_string(),
+            dot: !(self.weld_guard && welds_foreign),
+        });
+    }
+
+    /// Refuse junction dots that would weld two nets (see [`Self::add_junction_on_net`]).
+    /// Finalize-only, so the per-move placement scorer is never perturbed by the repair.
+    pub fn set_weld_guard(&mut self, on: bool) {
+        self.weld_guard = on;
     }
 
     /// Set the sheet title (rendered in the drawing frame's title block).
@@ -590,11 +616,9 @@ impl SchematicWriter {
     /// exactly ON the solid boundary (open-interval checks let wires depart
     /// from them) while the glyph stays protected. Points carry the same
     /// foreign-anchor model as `retract_colliding_stubs` (power origins,
-    /// no-connects, label anchors); wire segments carry their net (the power
-    /// sentinel for unattributed stubs/risers).
+    /// no-connects, label anchors); wire segments carry the net they were drawn for.
     pub fn route_scene(&self) -> sch_model::route::RouteScene {
         const NC: &str = "\0no_connect";
-        const PWR: &str = "\0power_wire";
         let mut scene = sch_model::route::RouteScene {
             solids: Vec::new(),
             points: Vec::new(),
@@ -641,8 +665,7 @@ impl SchematicWriter {
             }
         }
         for w in &self.wires {
-            let net = w.net.clone().unwrap_or_else(|| PWR.to_string());
-            scene.segments.push(NetSegment::new(w.a, w.b, net));
+            scene.segments.push(NetSegment::new(w.a, w.b, w.net.clone()));
         }
         scene
     }
@@ -651,20 +674,51 @@ impl SchematicWriter {
     pub fn wire_segments_on_net(&self, net: &str) -> Vec<Segment> {
         self.wires
             .iter()
-            .filter(|w| w.net.as_deref() == Some(net))
+            .filter(|w| w.net == net)
             .map(|w| Segment::new(w.a, w.b))
             .collect()
     }
 
     /// Junction-dot count (a routing-quality signal for the refinement scorer).
     pub fn junction_count(&self) -> usize {
-        self.junctions.len()
+        self.junction_positions().len()
     }
 
     /// Junction-dot positions (for the scorer's merge check: a junction sitting
     /// on wires of two different nets fuses them).
     pub fn junction_positions(&self) -> Vec<[f64; 2]> {
-        self.junctions.iter().map(|j| j.at.into()).collect()
+        let mut seen = std::collections::BTreeSet::new();
+        self.junctions
+            .iter()
+            .filter(|j| j.dot && seen.insert(j.uuid_key.clone()))
+            .map(|j| j.at.into())
+            .collect()
+    }
+
+    /// The connection point and net of every power symbol (`power:` graphic port),
+    /// whose single pin sits at the symbol origin and whose Value names the net.
+    /// `PWR_FLAG` is excluded: it drives whatever it is attached to rather than a
+    /// net of its own.
+    pub fn power_pins(&self) -> Vec<([f64; 2], String)> {
+        self.instances
+            .iter()
+            .filter(|i| i.lib_id.starts_with("power:") && i.lib_id != "power:PWR_FLAG")
+            .map(|i| (i.at.into(), i.value.clone()))
+            .collect()
+    }
+
+    /// The anchor point and net of every label — for a stub-mounted label, both the
+    /// text anchor and the pin endpoint the stub runs from, since the stub binds
+    /// both ends to the net.
+    pub fn label_anchors(&self) -> Vec<([f64; 2], String)> {
+        let mut out = Vec::new();
+        for l in &self.labels {
+            out.push((l.at.into(), l.net.clone()));
+            if let Some(stub) = &l.stub {
+                out.push((stub.pin_at.into(), l.net.clone()));
+            }
+        }
+        out
     }
 
     /// Count of plain (non-global) labels — i.e. signal-label fallbacks where the
@@ -688,12 +742,12 @@ impl SchematicWriter {
             .collect()
     }
 
-    /// Every drawn wire segment with its net (`None` for unattributed power
-    /// stubs). For the refinement scorer's crossing / length / short metrics.
+    /// Every drawn wire segment with its net. For the refinement scorer's
+    /// crossing / length / short metrics.
     pub fn wires_with_nets(&self) -> Vec<DrawnSegment> {
         self.wires
             .iter()
-            .map(|w| DrawnSegment::new(w.a, w.b, w.net.clone()))
+            .map(|w| DrawnSegment::new(w.a, w.b, Some(w.net.clone())))
             .collect()
     }
 
@@ -1072,7 +1126,7 @@ mod tests {
     fn translate_refreshes_coordinate_derived_keys() {
         let mut w = SchematicWriter::new();
         w.add_wire_on_net([1.27, 2.54], [3.81, 2.54], "SIG");
-        w.add_junction([3.81, 2.54]);
+        w.add_junction_on_net([3.81, 2.54], "SIG");
         w.add_cluster_label("SIG", [3.81, 2.54], Dir::East, false);
 
         w.translate(12.7, 25.4);

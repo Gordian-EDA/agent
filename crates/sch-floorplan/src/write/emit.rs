@@ -43,7 +43,7 @@ impl SchematicWriter {
         for l in &self.labels {
             acc(l.at[0] + text_width(&l.net), l.at[1]);
         }
-        for j in &self.junctions {
+        for j in self.junctions.iter().filter(|j| j.dot) {
             acc(j.at[0], j.at[1]);
         }
         for nc in &self.no_connects {
@@ -143,7 +143,10 @@ impl SchematicWriter {
 
         // Junction dots, sorted by uuid_key for deterministic order/uuids.
         let mut junctions = self.junctions;
+        junctions.retain(|j| j.dot);
         junctions.sort_by(|a, b| a.uuid_key.cmp(&b.uuid_key));
+        let mut drawn = std::collections::BTreeSet::new();
+        junctions.retain(|j| drawn.insert(j.uuid_key.clone()));
         for j in &junctions {
             let uuid = stable_uuid("junction", &j.uuid_key);
             let _ = writeln!(
@@ -545,7 +548,7 @@ mod tests {
     fn titled_user_page_reserves_bottom_title_block() {
         let mut w = SchematicWriter::new();
         w.set_title("my_board");
-        w.add_junction([25.4, 25.4]);
+        w.add_junction_on_net([25.4, 25.4], "N1");
 
         let text = w.finish();
         let paper = text
@@ -607,9 +610,9 @@ mod tests {
     #[test]
     fn junctions_render_sorted_and_deduped() {
         let mut w = SchematicWriter::new();
-        w.add_junction([50.8, 25.4]);
-        w.add_junction([25.4, 25.4]);
-        w.add_junction([50.8, 25.4]); // duplicate -> dropped
+        w.add_junction_on_net([50.8, 25.4], "N2");
+        w.add_junction_on_net([25.4, 25.4], "N1");
+        w.add_junction_on_net([50.8, 25.4], "N2"); // duplicate -> dropped
         let sch = w.finish();
         let count = sch.matches("(junction").count();
         assert_eq!(count, 2);

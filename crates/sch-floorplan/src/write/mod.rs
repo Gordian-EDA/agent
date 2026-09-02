@@ -172,16 +172,25 @@ pub(super) struct Wire {
     pub(super) b: Point2,
     /// Stable key for the wire uuid (content-derived from the endpoints).
     pub(super) uuid_key: String,
-    /// The net this wire belongs to, when known (cluster-generated wires).
-    /// `None` for power stubs/risers (treated as a reserved foreign net).
-    pub(super) net: Option<String>,
+    /// The net this wire belongs to. Every wire the realiser draws is drawn *for*
+    /// a net, so this is total — it is what makes same-net touches deliberate
+    /// joins and foreign-net touches shorts.
+    pub(super) net: String,
 }
 
-/// One `(junction …)` dot marking a deliberate ≥3-way wire join.
+/// One tap: a point where `net`'s own wires meet.
+///
+/// A tap is what the finalize split cuts a through-wire at, so the three ends coincide
+/// and KiCAD joins them. `dot` is whether it is also DRAWN as a `(junction …)`: a dot
+/// welds every wire passing through it, so where a foreign net's wire runs through the
+/// tap the dot is suppressed — the split still keeps this net whole, and the foreign
+/// wire, meeting only wire ENDS on its interior, stays separate.
 pub(super) struct Junction {
     pub(super) at: Point2,
     /// Stable key for the junction uuid (content-derived from the position).
     pub(super) uuid_key: String,
+    pub(super) net: String,
+    pub(super) dot: bool,
 }
 
 /// Free-standing sheet text annotation.
@@ -227,9 +236,9 @@ pub struct SchematicWriter {
     pub(super) labels: Vec<PinLabel>,
     /// `(no_connect)` markers at intentionally-unconnected pin endpoints.
     pub(super) no_connects: Vec<NoConnect>,
-    /// Wire segments added via `add_wire`, sorted by `uuid_key` at `finish`.
+    /// Wire segments added via `add_wire_on_net`, sorted by `uuid_key` at `finish`.
     pub(super) wires: Vec<Wire>,
-    /// Junction dots added via `add_junction`, sorted by `uuid_key` at `finish`.
+    /// Junction dots added via `add_junction_on_net`, sorted by `uuid_key` at `finish`.
     pub(super) junctions: Vec<Junction>,
     pub(super) texts: Vec<SheetText>,
     pub(super) rects: Vec<SheetRect>,
@@ -247,6 +256,11 @@ pub struct SchematicWriter {
     /// extend past the symbol bodies). Off for direct-writer and fixed-coordinate paths,
     /// which place content at fixed absolute coordinates.
     pub(super) frame: bool,
+    /// When set, a junction dot is refused where a FOREIGN net's wire already runs — a
+    /// dot welds everything through it, so on a shipped sheet the realiser must never be
+    /// the thing that merges two nets. A finalize-only repair, like the riser fan: the
+    /// per-move scorer leaves it off so its cost landscape stays the geometry alone.
+    pub(super) weld_guard: bool,
 }
 
 impl SchematicWriter {

@@ -50,6 +50,12 @@ pub fn realize_block(
     add_orphan_label_columns(&mut writer, design, inc);
     writer.set_frame(draw.frame);
     writer.prepare();
+    // The truthfulness invariant of the drawn geometry, before the caller grafts it and
+    // gates on the extracted netlist: no point may carry two nets. A break here is what
+    // the gate will later report as a refused edit, named at the coordinate it happened.
+    for short in crate::floorplan::place::net_conflicts(env, &writer, items, inc) {
+        tracing::warn!("realised block shorts nets — {short}");
+    }
     Ok(writer)
 }
 

@@ -33,6 +33,7 @@ pub(crate) fn wire(
     flag_points: &mut BTreeMap<String, ([f64; 2], f64)>,
     fan_risers: bool,
 ) -> io::Result<()> {
+    w.set_weld_guard(fan_risers);
     let refdes_of = |i: usize| items[i].refdes.clone();
     // Auto-distributing a spread rail into local power symbols only applies to LARGER
     // boards (`pins > FAST_PINS`). Every reference/snapshot fixture (≤34 pins) keeps
@@ -647,7 +648,7 @@ pub(crate) fn route_signal(
         all.push(vec![segment.a, segment.b]);
     }
     for j in crate::wire::junction_points(&all) {
-        w.add_junction(j);
+        w.add_junction_on_net(j, net);
     }
     // A terminal landing inside another same-net segment is a T-join.
     for (p, _) in &terms {
@@ -657,7 +658,7 @@ pub(crate) fn route_signal(
             !ends && segment.contains_point(point)
         });
         if interior {
-            w.add_junction(*p);
+            w.add_junction_on_net(*p, net);
         }
     }
     // The port label sits at the virtual exit terminal, facing the edge.
@@ -806,7 +807,7 @@ pub(crate) fn route_local_tee(
                 w.add_wire_on_net(*p, [p[0], ty], net);
             }
             if p[0] > min_x + EPS && p[0] < max_x - EPS {
-                w.add_junction([p[0], ty]);
+                w.add_junction_on_net([p[0], ty], net);
             }
         }
     } else {
@@ -822,7 +823,7 @@ pub(crate) fn route_local_tee(
                 w.add_wire_on_net(*p, [tx, p[1]], net);
             }
             if p[1] > min_y + EPS && p[1] < max_y - EPS {
-                w.add_junction([tx, p[1]]);
+                w.add_junction_on_net([tx, p[1]], net);
             }
         }
     }
@@ -1406,11 +1407,10 @@ pub(crate) fn riser_hits_foreign_pin(
     })
 }
 
-/// A rail: with ≥3 pins, draw a horizontal wire at `rail_y` spanning them, stub
-/// each pin to it, and put one power symbol at the left end. With fewer pins (or
-/// no common band), emit a per-pin power symbol instead (the clustered case,
-/// e.g. a divider's two GNDs).
-///
+/// A rail: with ≥3 pins, draw a horizontal wire spanning them, stub each pin up to it,
+/// and put one power symbol at the left end. With fewer pins, no common band, or no row
+/// the trunk can occupy without touching another net, emit a per-pin power symbol
+/// instead ([`emit_local_power`] — the clustered case, e.g. a divider's two GNDs).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_rail(
     env: &KicadInstallation,
@@ -1427,79 +1427,152 @@ pub(crate) fn emit_rail(
     fan_risers: bool,
     used_lanes: &mut Vec<(f64, f64, f64, String)>,
 ) -> io::Result<()> {
-    let lib = power_lib_id(net);
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
-        // One power symbol per pin — but MERGE a pin into a nearby, COLLINEAR
-        // already-placed symbol (≤2 grid, same x or y) via a short connecting wire
-        // instead of stamping a second symbol. Two adjacent same-net pins (e.g. the
-        // 3V3 tops of two I2C pull-ups) otherwise render duplicate side-by-side "3V3"
-        // labels (the recurring text-overlap defect). The ≤2-grid limit only fuses an
-        // immediate neighbour, never the whole spread (which would recreate the long
-        // trunk distribution exists to avoid).
-        const MERGE: f64 = 5.08;
-        let split_flag = flag
-            .as_ref()
-            .and_then(|_| split_flag_power_pair(eps, MERGE));
-        let mut rail_taps: Vec<[f64; 2]> = Vec::new();
-        let mut idx = 0usize;
-        let mut first_flag: Option<([f64; 2], f64)> = None;
-        for (k, (ep, dir)) in eps.iter().enumerate() {
-            if split_flag.is_some_and(|(flag_idx, _)| k == flag_idx) {
-                continue;
-            }
-            if let Some(&near) = rail_taps.iter().find(|&&p| {
-                let d = (p[0] - ep[0]).abs() + (p[1] - ep[1]).abs();
-                d > EPS && d <= MERGE && ((p[0] - ep[0]).abs() < EPS || (p[1] - ep[1]).abs() < EPS)
-            }) {
-                w.add_wire_on_net(*ep, near, net);
-                w.add_junction(*ep);
-                w.add_junction(near);
-                continue;
-            }
-            // A GND symbol on an E/W pin points SIDEWAYS (angle 90/270), reading as a dangling port.
-            // Re-orient it to point DOWN (angle 0 — the conventional GND triangle) IN PLACE: a pure
-            // angle change adds no wire, so the measured crossing geometry the SA scores on is
-            // unchanged and the placement is not perturbed. The triangle's connection point stays at
-            // the pin tip, so connectivity is identical.
-            let angle = choose_power_angle(net, *dir, *ep, power_keepouts);
-            if let Some((flag_idx, symbol_idx)) = split_flag
-                && k == symbol_idx
-            {
-                let flag_ep = eps[flag_idx].0;
-                w.add_wire_on_net(flag_ep, *ep, net);
-                w.add_junction(flag_ep);
-                w.add_junction(*ep);
-                rail_taps.push(flag_ep);
-                first_flag.get_or_insert((flag_ep, flag_angle(power_glyph_dir(net, angle))));
-            }
-            w.add_power_symbol(env, &lib, &format!("#PWR_{net}_{idx}"), net, *ep, angle)?;
-            first_flag.get_or_insert((*ep, flag_angle(power_glyph_dir(net, angle))));
-            rail_taps.push(*ep);
-            idx += 1;
-        }
-        // One ERC flag per net (KiCAD treats an undriven power-input pin as an
-        // error here). Place it COINCIDENT with the first power symbol, rotated
-        // so its diamond extends the SAME outward direction as that symbol's
-        // arrow/triangle — into the open space the power symbol already claims,
-        // so the flag reads as part of the supply marker, never a floating leash.
-        if let (Some(flag_points), Some((ep, angle))) = (flag, first_flag) {
-            flag_points.entry(net.to_string()).or_insert((ep, angle));
-        }
-        return Ok(());
+        return emit_local_power(env, w, net, eps, flag, power_keepouts);
     };
-    // Each pin's attach point on the rail. A side (E/W) pin leads OUTWARD first
-    // and attaches there, so its riser never runs up the IC edge past the other
-    // pins on that side (which would block their signals). On top of that, a riser
-    // sharing a column with a different rail's overlapping riser gets fanned into
-    // a separate lane (`riser_offsets`) so the two rails never merge into a short.
-    // Final riser x per pin: the base column + any anti-short fan offset, THEN a
-    // finalize JOG one lane at a time until the L-shaped run (lead-out + riser) is
-    // clear of ALL THREE hazards at once — a part body drawn through (a stacked
-    // same-rail cap column, or a mis-oriented cap whose own body sits between its pin
-    // and the rail), a FOREIGN pin the run would weld onto, and a lane another net's
-    // riser already occupies. One predicate, one search: jogging off one hazard can no
-    // longer land on another. `bodies`/`foreign_pins` are empty on the per-move scorer
-    // (finalize-only), so the placement is never churned by this.
+    // A rail's whole geometry — every riser column, the trunk and its span — follows from
+    // the row it sits on, so the row is what is searched: the assigned row first, then
+    // rows stepping OUTWARD from the parts. A trunk is drawn with no obstacle router of
+    // its own, so a row it cannot own alone is rejected whole rather than patched.
+    let foreign_wires: Vec<(f64, f64, f64)> = if fan_risers {
+        foreign_rows(w, net)
+    } else {
+        Vec::new()
+    };
+    let plan = |y: f64| {
+        let attaches =
+            plan_rail_attaches(net, eps, y, riser_offsets, bodies, foreign_pins, used_lanes);
+        let span = (
+            attaches.iter().copied().fold(f64::MAX, f64::min),
+            attaches.iter().copied().fold(f64::MIN, f64::max),
+        );
+        (attaches, span)
+    };
+    // The NEAREST row the trunk can own: the assigned one, then rows stepping OUTWARD from
+    // the parts a lane at a time. Everything is on the 50-mil grid, so "shares no point
+    // with another net" already means a full grid step of air. A rail with nowhere to go
+    // gives up the trunk for distributed local power symbols.
+    let outward = if band == Band::Top { -1.0 } else { 1.0 };
+    let Some((rail_y, attaches, (span_lo, span_hi))) = std::iter::once(rail_y)
+        .chain((1..=8).map(|k| rail_y + outward * k as f64 * RAIL_LANE))
+        .enumerate()
+        .find_map(|(step, y)| {
+            let (attaches, span) = plan(y);
+            let clear = trunk_clear(net, y, span, foreign_pins, &foreign_wires)
+                // The assigned row is where the level assignment put the rail, bodies and
+                // all; only a row we moved to has to earn its way past them.
+                && (step == 0 || !trunk_hits_body(y, span, power_keepouts));
+            clear.then_some((y, attaches, span))
+        })
+    else {
+        return emit_local_power(env, w, net, eps, flag, power_keepouts);
+    };
+    if fan_risers {
+        for (ep, &ax) in eps.iter().map(|(p, _)| p).zip(&attaches) {
+            used_lanes.push((ax, ep[1].min(rail_y), ep[1].max(rail_y), net.to_string()));
+        }
+    }
+    w.add_wire_on_net([span_lo, rail_y], [span_hi, rail_y], net);
+    for ((ep, _dir), &ax) in eps.iter().zip(&attaches) {
+        if (ax - ep[0]).abs() > EPS {
+            w.add_wire_on_net(*ep, [ax, ep[1]], net); // lead out
+        }
+        w.add_wire_on_net([ax, ep[1]], [ax, rail_y], net); // riser
+        w.add_junction_on_net([ax, rail_y], net);
+    }
+    // One power symbol at the left end (pin coincident with the rail). A top
+    // rail's symbol sits above, a bottom rail's below — both at angle 0.
+    let sym_x = span_lo;
+    let flag_at = [sym_x, rail_y];
+    w.add_power_symbol(env, &power_lib_id(net), &format!("#PWR_{net}"), net, flag_at, 0.0)?;
+    // The ERC flag (only when this net needs one) sits COINCIDENT with the rail's
+    // power symbol, rotated to extend the same way the symbol does (up for a top
+    // V+ rail, down for a bottom GND rail) — into open space, no dangling stub.
+    if let Some(flag_points) = flag {
+        let angle = if band == Band::Top { 0.0 } else { 180.0 };
+        flag_points
+            .entry(net.to_string())
+            .or_insert(([sym_x, rail_y], angle));
+    }
+    Ok(())
+}
+
+/// What another net already occupies that a trunk could land on, as rows `(y, x_lo,
+/// x_hi)`: a horizontal run is the whole stretch it covers, and a vertical run
+/// contributes its two ENDPOINTS (a trunk crossing a foreign vertical mid-span merely
+/// crosses over, but ending on one welds them).
+fn foreign_rows(w: &SchematicWriter, net: &str) -> Vec<(f64, f64, f64)> {
+    let mut out = Vec::new();
+    for seg in w.wires_with_nets() {
+        if seg.net.as_deref() == Some(net) {
+            continue;
+        }
+        let (a, b) = (seg.segment.a, seg.segment.b);
+        if (a.y - b.y).abs() < EPS {
+            out.push((a.y, a.x.min(b.x), a.x.max(b.x)));
+        } else {
+            out.push((a.y, a.x, a.x));
+            out.push((b.y, b.x, b.x));
+        }
+    }
+    out
+}
+
+/// Does a trunk on row `rail_y` spanning `span` share no point with another net — no
+/// foreign pin tip on it, no foreign run along it, no foreign wire end on it?
+fn trunk_clear(
+    net: &str,
+    rail_y: f64,
+    span: (f64, f64),
+    foreign_pins: &[([f64; 2], String)],
+    foreign_runs: &[(f64, f64, f64)],
+) -> bool {
+    let (lo, hi) = span;
+    let overlaps_x = |a: f64, b: f64| a <= hi + EPS && b >= lo - EPS;
+    !foreign_pins
+        .iter()
+        .any(|(p, pin_net)| {
+            pin_net != net && (p[1] - rail_y).abs() < EPS && overlaps_x(p[0], p[0])
+        })
+        && !foreign_runs
+            .iter()
+            .any(|&(y, x_lo, x_hi)| (y - rail_y).abs() < EPS && overlaps_x(x_lo, x_hi))
+}
+
+/// Would a trunk on row `rail_y` spanning `span` be drawn through a symbol body? The row
+/// search can step a rail well past its band, and a trunk sliced through a module reads
+/// as a defect even where it shorts nothing.
+fn trunk_hits_body(rail_y: f64, span: (f64, f64), bodies: &[Rect]) -> bool {
+    let (lo, hi) = span;
+    bodies.iter().any(|b| {
+        rail_y > b.min_y + EPS
+            && rail_y < b.max_y - EPS
+            && lo < b.max_x - EPS
+            && hi > b.min_x + EPS
+    })
+}
+
+/// Where each pin attaches to a trunk on row `rail_y`.
+///
+/// A side (E/W) pin leads OUTWARD first and attaches there, so its riser never runs up
+/// the IC edge past the other pins on that side. On top of that, a riser sharing a column
+/// with a different rail's overlapping riser gets fanned into a separate lane
+/// (`riser_offsets`), then JOGGED one lane at a time until the L-shaped run (lead-out +
+/// riser) is clear of ALL THREE hazards at once — a part body drawn through (a stacked
+/// same-rail cap column, or a mis-oriented cap whose own body sits between its pin and the
+/// rail), a FOREIGN pin the run would weld onto, and a lane another net's riser already
+/// occupies. One predicate, one search: jogging off one hazard can no longer land on
+/// another. `bodies`/`foreign_pins` are empty on the per-move scorer (finalize-only), so
+/// the placement is never churned by this.
+fn plan_rail_attaches(
+    net: &str,
+    eps: &[([f64; 2], Dir)],
+    rail_y: f64,
+    riser_offsets: &BTreeMap<(String, i64), f64>,
+    bodies: &[([f64; 2], [f64; 2])],
+    foreign_pins: &[([f64; 2], String)],
+    used_lanes: &[(f64, f64, f64, String)],
+) -> Vec<f64> {
     let mut attaches: Vec<f64> = Vec::with_capacity(eps.len());
     for (ep, dir) in eps {
         let base = riser_base_x(ep, *dir);
@@ -1511,49 +1584,92 @@ pub(crate) fn emit_rail(
         let (rlo, rhi) = (ep[1].min(rail_y), ep[1].max(rail_y));
         // The fan plans against BASE columns and the jog moves risers independently, so
         // two different nets can still land one lane; `used_lanes` is the last word.
-        let clear = |x: f64, lanes: &[(f64, f64, f64, String)]| {
+        let clear = |x: f64| {
             !riser_hits_body(x, rlo, rhi, bodies)
                 && !riser_hits_foreign_pin(net, *ep, x, rail_y, foreign_pins)
-                && !lanes.iter().any(|(lx, lo, hi, lnet)| {
+                && !used_lanes.iter().any(|(lx, lo, hi, lnet)| {
                     lnet != net && (lx - x).abs() < EPS && rlo < hi - EPS && *lo < rhi - EPS
                 })
         };
-        if !clear(ax, used_lanes)
+        if !clear(ax)
             && let Some(jogged) = (1..=8)
                 .flat_map(|k| [k as f64, -(k as f64)])
                 .map(|m| ax + m * RAIL_LANE)
-                .find(|&c| clear(c, used_lanes))
+                .find(|&c| clear(c))
         {
             ax = jogged;
         }
-        if fan_risers {
-            used_lanes.push((ax, rlo, rhi, net.to_string()));
-        }
         attaches.push(ax);
     }
-    let span_lo = attaches.iter().copied().fold(f64::MAX, f64::min);
-    let span_hi = attaches.iter().copied().fold(f64::MIN, f64::max);
-    w.add_wire_on_net([span_lo, rail_y], [span_hi, rail_y], net);
-    for ((ep, _dir), &ax) in eps.iter().zip(&attaches) {
-        if (ax - ep[0]).abs() > EPS {
-            w.add_wire_on_net(*ep, [ax, ep[1]], net); // lead out
+    attaches
+}
+
+/// One power symbol per pin: the clustered/distributed idiom, and the fallback whenever a
+/// spanning trunk is not available.
+fn emit_local_power(
+    env: &KicadInstallation,
+    w: &mut SchematicWriter,
+    net: &str,
+    eps: &[([f64; 2], Dir)],
+    flag: Option<&mut BTreeMap<String, ([f64; 2], f64)>>,
+    power_keepouts: &[Rect],
+) -> io::Result<()> {
+    let lib = power_lib_id(net);
+    // One power symbol per pin — but MERGE a pin into a nearby, COLLINEAR
+    // already-placed symbol (≤2 grid, same x or y) via a short connecting wire
+    // instead of stamping a second symbol. Two adjacent same-net pins (e.g. the
+    // 3V3 tops of two I2C pull-ups) otherwise render duplicate side-by-side "3V3"
+    // labels (the recurring text-overlap defect). The ≤2-grid limit only fuses an
+    // immediate neighbour, never the whole spread (which would recreate the long
+    // trunk distribution exists to avoid).
+    const MERGE: f64 = 5.08;
+    let split_flag = flag
+        .as_ref()
+        .and_then(|_| split_flag_power_pair(eps, MERGE));
+    let mut rail_taps: Vec<[f64; 2]> = Vec::new();
+    let mut idx = 0usize;
+    let mut first_flag: Option<([f64; 2], f64)> = None;
+    for (k, (ep, dir)) in eps.iter().enumerate() {
+        if split_flag.is_some_and(|(flag_idx, _)| k == flag_idx) {
+            continue;
         }
-        w.add_wire_on_net([ax, ep[1]], [ax, rail_y], net); // riser
-        w.add_junction([ax, rail_y]);
+        if let Some(&near) = rail_taps.iter().find(|&&p| {
+            let d = (p[0] - ep[0]).abs() + (p[1] - ep[1]).abs();
+            d > EPS && d <= MERGE && ((p[0] - ep[0]).abs() < EPS || (p[1] - ep[1]).abs() < EPS)
+        }) {
+            w.add_wire_on_net(*ep, near, net);
+            w.add_junction_on_net(*ep, net);
+            w.add_junction_on_net(near, net);
+            continue;
+        }
+        // A GND symbol on an E/W pin points SIDEWAYS (angle 90/270), reading as a dangling port.
+        // Re-orient it to point DOWN (angle 0 — the conventional GND triangle) IN PLACE: a pure
+        // angle change adds no wire, so the measured crossing geometry the SA scores on is
+        // unchanged and the placement is not perturbed. The triangle's connection point stays at
+        // the pin tip, so connectivity is identical.
+        let angle = choose_power_angle(net, *dir, *ep, power_keepouts);
+        if let Some((flag_idx, symbol_idx)) = split_flag
+            && k == symbol_idx
+        {
+            let flag_ep = eps[flag_idx].0;
+            w.add_wire_on_net(flag_ep, *ep, net);
+            w.add_junction_on_net(flag_ep, net);
+            w.add_junction_on_net(*ep, net);
+            rail_taps.push(flag_ep);
+            first_flag.get_or_insert((flag_ep, flag_angle(power_glyph_dir(net, angle))));
+        }
+        w.add_power_symbol(env, &lib, &format!("#PWR_{net}_{idx}"), net, *ep, angle)?;
+        first_flag.get_or_insert((*ep, flag_angle(power_glyph_dir(net, angle))));
+        rail_taps.push(*ep);
+        idx += 1;
     }
-    // One power symbol at the left end (pin coincident with the rail). A top
-    // rail's symbol sits above, a bottom rail's below — both at angle 0.
-    let sym_x = span_lo;
-    let flag_at = [sym_x, rail_y];
-    w.add_power_symbol(env, &lib, &format!("#PWR_{net}"), net, flag_at, 0.0)?;
-    // The ERC flag (only when this net needs one) sits COINCIDENT with the rail's
-    // power symbol, rotated to extend the same way the symbol does (up for a top
-    // V+ rail, down for a bottom GND rail) — into open space, no dangling stub.
-    if let Some(flag_points) = flag {
-        let angle = if band == Band::Top { 0.0 } else { 180.0 };
-        flag_points
-            .entry(net.to_string())
-            .or_insert(([sym_x, rail_y], angle));
+    // One ERC flag per net (KiCAD treats an undriven power-input pin as an
+    // error here). Place it COINCIDENT with the first power symbol, rotated
+    // so its diamond extends the SAME outward direction as that symbol's
+    // arrow/triangle — into the open space the power symbol already claims,
+    // so the flag reads as part of the supply marker, never a floating leash.
+    if let (Some(flag_points), Some((ep, angle))) = (flag, first_flag) {
+        flag_points.entry(net.to_string()).or_insert((ep, angle));
     }
     Ok(())
 }
@@ -1696,6 +1812,94 @@ mod tests {
         let (ep, rail_y) = ([30.48, 33.02], 55.88);
         assert!(riser_hits_foreign_pin("GND", ep, 38.1, rail_y, &pins));
         assert!(!riser_hits_foreign_pin("GND", ep, 33.02, rail_y, &pins));
+    }
+
+    /// The trunk itself was planned from the rail's own pins alone, so a foreign pin on
+    /// the chosen row was welded to the rail by the finalize wire-split. The row search
+    /// must step the trunk off it — the riser guard cannot see this: the run to the pin's
+    /// own column is clear, it is the SPAN that crosses the foreign pin.
+    #[test]
+    fn a_trunk_row_carrying_a_foreign_pin_is_rejected() {
+        let eps = [
+            ([20.32, 40.64], Dir::South),
+            ([40.64, 40.64], Dir::South),
+            ([60.96, 40.64], Dir::South),
+        ];
+        let foreign = vec![([40.64, 45.72], "SIG".to_string())];
+        let attaches = plan_rail_attaches("GND", &eps, 45.72, &BTreeMap::new(), &[], &foreign, &[]);
+        let span = (
+            attaches.iter().copied().fold(f64::MAX, f64::min),
+            attaches.iter().copied().fold(f64::MIN, f64::max),
+        );
+        assert!(!trunk_clear("GND", 45.72, span, &foreign, &[]));
+        assert!(trunk_clear("GND", 45.72 + RAIL_LANE, span, &foreign, &[]));
+        // A foreign pin OUTSIDE the span never blocks the row.
+        let aside = vec![([90.0, 45.72], "SIG".to_string())];
+        assert!(trunk_clear("GND", 45.72, span, &aside, &[]));
+    }
+
+    /// A trunk laid along another rail's trunk merges the two nets outright; ending on a
+    /// foreign riser does too, which is why a vertical contributes its endpoints.
+    #[test]
+    fn a_trunk_row_occupied_by_a_foreign_run_is_rejected() {
+        let span = (20.32, 60.96);
+        let runs = vec![(45.72, 30.0, 50.0)];
+        assert!(!trunk_clear("GND", 45.72, span, &[], &runs));
+        assert!(trunk_clear("GND", 45.72 + RAIL_LANE, span, &[], &runs));
+    }
+
+    /// End to end: the rail is emitted and NOTHING it draws may touch the foreign pin.
+    /// Before the row search this failed — the trunk was drawn at the assigned row
+    /// whatever sat on it, and the finalize wire-split then welded the two nets.
+    #[test]
+    fn an_emitted_rail_never_draws_over_a_foreign_pin() {
+        let Some(env) = KicadInstallation::detect() else {
+            eprintln!("SKIP: no KiCAD environment detected");
+            return;
+        };
+        let eps = [
+            ([20.32, 40.64], Dir::South),
+            ([40.64, 40.64], Dir::South),
+            ([60.96, 40.64], Dir::South),
+        ];
+        let foreign = [([40.64, 45.72], "SIG".to_string())];
+        let mut w = SchematicWriter::new();
+        w.set_weld_guard(true);
+        emit_rail(
+            &env,
+            &mut w,
+            "GND",
+            &eps,
+            Band::Bottom,
+            Some(45.72),
+            None,
+            &BTreeMap::new(),
+            &[],
+            &foreign,
+            &[],
+            true,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let pin = ::geom::Point2::from(foreign[0].0);
+        for seg in w.wires_with_nets() {
+            assert!(
+                !seg.segment.contains_point(pin),
+                "the rail was drawn onto the foreign SIG pin: {:?} -> {:?}",
+                seg.segment.a,
+                seg.segment.b
+            );
+        }
+    }
+
+    /// A row the search stepped out to must not slice a symbol body in half.
+    #[test]
+    fn a_searched_row_through_a_body_is_rejected() {
+        let body = Rect::new(30.0, 40.0, 50.0, 60.0);
+        assert!(trunk_hits_body(50.0, (20.32, 60.96), &[body]));
+        assert!(!trunk_hits_body(70.0, (20.32, 60.96), &[body]));
+        // A trunk that stops short of the body never reaches it.
+        assert!(!trunk_hits_body(50.0, (0.0, 20.0), &[body]));
     }
 
     /// A rail's own terminals sit on its lead-out and riser by construction; only

@@ -2,6 +2,7 @@
 //! flat namespace (re-exported below so every `floorplan::place::…` path resolves
 //! verbatim):
 //!
+//! - [`audit`] — the net-occupancy check: no point shared by two nets.
 //! - [`emit`] — gather + grid seed + engine orchestration + `SchematicWriter` assembly.
 //! - [`score`] — the routed `count_*` crossing/merge/short terms + the geometry primitives
 //!   the [`measure`] library reads off a built sheet.
@@ -13,11 +14,13 @@
 //! Realizing a sheet is heavy + non-algorithmic (how to draw and measure), so it lives
 //! here as a shared library; the cost weights and the search are engine-owned method.
 
+mod audit;
 mod emit;
 mod measure;
 mod route;
 mod score;
 
+pub use audit::*;
 pub use emit::*;
 pub use measure::*;
 pub use score::*;

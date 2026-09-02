@@ -42,7 +42,7 @@ impl SchematicWriter {
     ///
     /// The pass only processes labels with `stub.is_some()` and clears `stub` to
     /// `None` on any that retract; a *surviving* stub keeps its `Some(..)`, its
-    /// emitted wire is `add_wire`-deduped, and that wire is registered **on the
+    /// emitted wire is endpoint-deduped, and that wire is registered **on the
     /// stub's own net**, so a re-run reads it as a deliberate same-net join (not
     /// a foreign segment) and the survivor survives again. A second call is
     /// therefore a no-op. This lets a caller run it early (e.g. to lint the
@@ -51,11 +51,9 @@ impl SchematicWriter {
     /// **Foreign geometry** at pass start = every *fixed* connection point (power
     /// symbol pins — origin, net = the Value; no-connect markers — a reserved
     /// sentinel net; direct labels; and every signal stub's own pin endpoint,
-    /// always safe) plus every existing wire **segment**. Existing wires are
-    /// registered under their own net when known (cluster wires added via
-    /// `add_wire_on_net`) or the reserved `PWR` sentinel (power stubs/risers).
-    /// A stub touching a wire of the *same* net is a deliberate join and
-    /// survives; only a touch with a *different* net is foreign.
+    /// always safe) plus every existing wire **segment and endpoint**, under the
+    /// net that wire was drawn for. A stub touching a wire of the *same* net is a
+    /// deliberate join and survives; only a touch with a *different* net is foreign.
     ///
     /// Signal stubs are then walked in deterministic `uuid_key` order. A stub is
     /// **retracted** — its label snapped back onto its always-safe pin endpoint
@@ -70,9 +68,6 @@ impl SchematicWriter {
         // Sentinel "net" for no-connect anchors: a stub on a no-connect pin is
         // still a wrong attachment, so treat it as a foreign net.
         const NC: &str = "\0no_connect";
-        // Sentinel net for the pre-existing power wires (all power-net, never a
-        // signal net — any signal touch is therefore foreign).
-        const PWR: &str = "\0power_wire";
 
         let bits = |p: Point2| {
             let p = GRID_50_MIL.snap_point(p);
@@ -105,21 +100,13 @@ impl SchematicWriter {
                 Some(stub) => add_point(stub.pin_at, &label.net, &mut points),
             }
         }
-        // Existing wires: power stubs/risers carry the reserved PWR net; cluster
-        // wires carry their real net so same-net stubs may touch them.
+        // Every wire carries the net it was drawn for, so its endpoints are that
+        // net's anchors: a same-net stub landing on one is a deliberate join, a
+        // foreign one is a short and retracts.
         for w in &self.wires {
-            let net = w.net.clone().unwrap_or_else(|| PWR.to_string());
-            segments.push(sch_model::route::NetSegment::new(w.a, w.b, net.clone()));
-            // Only register endpoints as points for wires with a known net, so
-            // that a same-net stub whose end lands exactly on a cluster wire
-            // endpoint is recognized as a deliberate join. Power-wire endpoints
-            // stay off the points map (they already block via the segment check,
-            // and adding them under PWR would over-retract power stubs that
-            // happen to share the same location).
-            if let Some(n) = &w.net {
-                add_point(w.a, n, &mut points);
-                add_point(w.b, n, &mut points);
-            }
+            segments.push(sch_model::route::NetSegment::new(w.a, w.b, w.net.clone()));
+            add_point(w.a, &w.net, &mut points);
+            add_point(w.b, &w.net, &mut points);
         }
 
         // Deterministic processing order for stub labels.
@@ -160,10 +147,9 @@ impl SchematicWriter {
                 self.labels[i].at = pin_at;
                 self.labels[i].stub = None;
             } else {
-                // The stub wire is attributed to its own net: a later pass (or
-                // a re-run of this one) must read it as a deliberate same-net
-                // join, not a foreign PWR-sentinel segment — otherwise the
-                // second call would retract every survivor onto its pin.
+                // The stub wire is attributed to its own net so a re-run reads it
+                // as a deliberate same-net join and does not retract every
+                // survivor onto its pin.
                 self.add_wire_on_net(pin_at, end, &net);
                 add_point(end, &net, &mut points);
                 segments.push(sch_model::route::NetSegment::new(pin_at, end, net));
@@ -647,19 +633,26 @@ impl SchematicWriter {
     /// junction dots but never splits them, so without this pass every mid-span
     /// tap is silently disconnected (decoupling caps off a rail, a filter cap off
     /// an OUT trunk, …) — the schematic renders fine but netlists wrong. Run once
-    /// at finalize. Only endpoints-on-interior split a wire, so a clean
-    /// perpendicular crossing of two different nets is never split (and never
-    /// merged): the router already forbids a foreign endpoint on our wire, so any
-    /// interior node is a same-net tap.
+    /// at finalize.
+    ///
+    /// A wire splits only at a node of its OWN net. Splitting is what turns a
+    /// touch into a connection, so splitting at a foreign node would be this pass
+    /// welding two nets together — the last place a short can be manufactured
+    /// after the router and the rails have cleared their geometry.
     fn split_wires_at_nodes(&mut self) {
         let same = |p: Point2, q: Point2| (p[0] - q[0]).abs() < EPS && (p[1] - q[1]).abs() < EPS;
-        // Candidate split points: every junction position + every wire endpoint.
-        let mut pts: Vec<Point2> = self.junctions.iter().map(|j| j.at).collect();
+        // Candidate split points, each tagged with the net that owns it: every
+        // junction dot + every wire endpoint.
+        let mut pts: Vec<(Point2, String)> = self
+            .junctions
+            .iter()
+            .map(|j| (j.at, j.net.clone()))
+            .collect();
         for w in &self.wires {
-            pts.push(w.a);
-            pts.push(w.b);
+            pts.push((w.a, w.net.clone()));
+            pts.push((w.b, w.net.clone()));
         }
-        let mk = |a: Point2, b: Point2, net: Option<String>| Wire {
+        let mk = |a: Point2, b: Point2, net: String| Wire {
             a,
             b,
             uuid_key: format!("{}:{}:{}:{}", a[0], a[1], b[0], b[1]),
@@ -673,8 +666,13 @@ impl SchematicWriter {
                 // The interior split point closest to `a` (deterministic order).
                 let mut best: Option<Point2> = None;
                 let mut best_d = f64::INFINITY;
-                for &p in &pts {
-                    if same(p, w.a) || same(p, w.b) || !Segment::new(w.a, w.b).contains_point(p) {
+                for (p, net) in &pts {
+                    let p = *p;
+                    if *net != w.net
+                        || same(p, w.a)
+                        || same(p, w.b)
+                        || !Segment::new(w.a, w.b).contains_point(p)
+                    {
                         continue;
                     }
                     let d = (p[0] - w.a[0]).abs() + (p[1] - w.a[1]).abs();
