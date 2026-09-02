@@ -563,7 +563,9 @@ fn route_with_order(problem: &RoutingView, costs: AStarCosts, order: Vec<usize>)
                     y: grid.cell_center_y(cell.iy),
                 };
                 let exact = terminal.point();
-                if !exact.near_eq(center, geom::EPS) {
+                if !exact.near_eq(center, geom::EPS)
+                    && !is_pad_internal_sliver(problem, &conn.name, terminal, center, nw)
+                {
                     let path = tidy::leg(exact, center, corners);
                     traces.push(Trace {
                         connection: conn.name.clone(),
@@ -581,6 +583,39 @@ fn route_with_order(problem: &RoutingView, costs: AStarCosts, order: Vec<usize>)
         failed,
         engine: ENGINE.to_owned(),
     }
+}
+
+/// Would the leg from the routed cell centre back to the exact terminal be a
+/// sliver *inside the terminal's own pad* — copper joining the pad to itself?
+///
+/// Grid paths land on cell centres, so a terminal that is not lattice-aligned
+/// normally needs that leg. Two things make it noise instead: it is shorter than
+/// the copper is wide (a segment shorter than its own width is a blob, not a
+/// run), and the pad provably carries both of its ends. `power-buck` shipped one
+/// — 0.0707 mm of VIN — and KiCAD reported its free end as `track_dangling`
+/// while the in-house oracle saw nothing, because the pad joins both ends.
+///
+/// Uses the pad's proven capsule, not its bounding box: skipping a leg the pad
+/// might not actually carry would strand the terminal.
+fn is_pad_internal_sliver(
+    problem: &RoutingView,
+    connection: &str,
+    terminal: &pcb_model::RoutePoint,
+    center: Point2,
+    width: f64,
+) -> bool {
+    if terminal.point().dist(center) > width {
+        return false;
+    }
+    problem.obstacles.iter().any(|ob| {
+        ob.connected_to.iter().any(|owner| owner == connection)
+            && ob.layers.contains(&terminal.layer)
+            && {
+                let capsule = ob.proven_capsule();
+                capsule.dist_to_point(terminal.point()) <= geom::EPS
+                    && capsule.dist_to_point(center) <= geom::EPS
+            }
+    })
 }
 
 fn route_tree_leg(
