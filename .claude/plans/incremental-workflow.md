@@ -134,3 +134,10 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   net_conflicts audit); short refusals 0 on stm32/bms. Pre-existing on main (lane/snapshot-rebless):
   esp32 netlist fixture dangling IO25/IO32 after the KiCAD-10 pin rename; six placement snapshots.
 - USER: undo/history/checkpoint + revision store REMOVED (lane/remove-undo running).
+- sch-drag experiment merged (crate `sch-drag`: gated `drag`/`drag_many` with rollback on any net change,
+  lattice `route`, tiered `measure`, `tidy` search). Verdict: `tidy` does NOT beat the engines on the
+  critic (BluePill 5→5; two good human sheets 9→8, 7→6 while its own score improved) → not in the loop.
+  Kept for the primitive. Found+fixed in sch-doc: `gc_lib_symbols` dropped sheet-local `(lib_name)`
+  symbol copies on EVERY write (pins lost), `body_rect` unioned multi-unit bodies, `pins::resolve`
+  ignored `lib_name`. QUEUED: wire `sch_drag::drag` into `move_symbols` (replace move_attached +
+  straighten) once lane/bluepill-erc merges; delete `tidy` if still unused after W3.
