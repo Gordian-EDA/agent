@@ -87,8 +87,9 @@ fn wrap_up_nudge(remaining: usize) -> String {
 }
 
 fn out_of_time_nudge() -> String {
-    "Time limit: this turn has spent its wall-clock budget. Stop all work now and answer with \
-     your final summary in prose only — no tool calls."
+    "Time limit: most of this turn's wall-clock budget is spent. Do not start anything new. \
+     Land the single most valuable step still outstanding — a clean check, or the board if the \
+     schematic is already clean — and then answer with your final summary."
         .to_string()
 }
 
@@ -841,9 +842,17 @@ impl<P: Provider> Agent<P> {
                 });
             }
             let remaining = budgets.provider_requests - provider_requests;
-            let out_of_time = started.elapsed().as_secs_f64()
-                >= TURN_WALL_CLOCK.as_secs_f64() * WRAP_UP_AT_ELAPSED;
+            // Telling a turn that has produced nothing to stop and summarise gets
+            // exactly that: two campaign cases answered "it cannot be completed in
+            // this session" with no schematic on disk, having spent under a third of
+            // their requests. A wrap-up is advice about how to land work, so it is
+            // only advice once there is work to land; before that the hard bounds are
+            // the only thing that should stop the turn.
+            let out_of_time = applied
+                && started.elapsed().as_secs_f64()
+                    >= TURN_WALL_CLOCK.as_secs_f64() * WRAP_UP_AT_ELAPSED;
             if !wrap_up_sent
+                && applied
                 && (remaining <= wrap_up_reserve(budgets.provider_requests) || out_of_time)
             {
                 wrap_up_sent = true;
