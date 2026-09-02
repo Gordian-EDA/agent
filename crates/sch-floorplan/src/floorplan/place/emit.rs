@@ -458,14 +458,15 @@ pub fn build_writer(
             w.set_mirror_last();
         }
     }
-    for it in items {
-        let wired = it
-            .pins
-            .iter()
-            .filter(|(_, _, net)| net.is_some())
-            .map(|(num, _, _)| (it.refdes.as_str(), num.as_str()));
-        w.declare_connected(env, wired)?;
-    }
+    // Only a net with a SECOND pin gets wiring drawn to it, so only those endpoints are
+    // ones a no-connect marker could sever. A lone pin on a net of its own is exactly
+    // what the singleton no-connect in `route::route_signal` is for.
+    let wired = inc
+        .values()
+        .filter(|pins| pins.len() >= 2)
+        .flatten()
+        .map(|(i, num)| (items[*i].refdes.as_str(), num.as_str()));
+    w.declare_connected(env, wired)?;
     for it in items {
         for (num, _name, net) in &it.pins {
             if net.is_none() {
