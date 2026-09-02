@@ -318,6 +318,137 @@ fn wrong_footprint_is_refused_and_its_suggestion_closes_the_loop() {
 }
 
 #[test]
+fn nonexistent_footprints_are_input_errors_with_same_library_repairs() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let invented = "Capacitor_SMD:C_1206_3216Metric_Polarized";
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [{
+            "ref": "C1",
+            "part": "Device:C",
+            "footprint": invented,
+            "pins": {"1": "VIN", "2": "GND"}
+        }]}),
+    );
+    assert_eq!(result["code"], "invalid_payload");
+    let error = result["input_errors"][0].as_str().unwrap();
+    assert!(
+        error.contains("did you mean Capacitor_SMD:C_1206_3216Metric?"),
+        "wrong repair: {result}"
+    );
+    assert!(!listing(&ctx).contains("C1"), "refusal wrote the part");
+
+    labelled_resistor(&ctx);
+    for (tool, input) in [
+        (
+            "assign_footprints",
+            json!({"assignments": [{"reference": "R1", "footprint": invented}]}),
+        ),
+        (
+            "set_fields",
+            json!({"ref": "R1", "fields": {"Footprint": invented}}),
+        ),
+    ] {
+        let refused = call(&ctx, tool, input);
+        assert_eq!(refused["code"], "invalid_payload", "{tool}: {refused}");
+        assert!(
+            refused["input_errors"][0]
+                .as_str()
+                .is_some_and(|message| message.contains("Capacitor_SMD:C_1206_3216Metric")),
+            "{tool} gave an unrelated suggestion: {refused}"
+        );
+    }
+}
+
+#[test]
+fn footprint_mismatch_suggestions_preserve_the_package_family() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let cases = [
+        (
+            "J1",
+            "Connector:Micro_SD_Card_Det1",
+            "Connector_Card:microSD_HC_Hirose_DM3D-SF",
+            "Connector_Card:microSD_",
+        ),
+        (
+            "J2",
+            "Connector_Audio:AudioJack2_Switch",
+            "Connector_Audio:Jack_3.5mm_CUI_SJ1-3514N_Horizontal",
+            "Connector_Audio:Jack_3.5mm_",
+        ),
+    ];
+    for (reference, symbol, footprint, family) in cases {
+        let result = call(
+            &ctx,
+            "place_parts",
+            json!({"parts": [{
+                "ref": reference,
+                "part": symbol,
+                "footprint": footprint,
+                "pins": {}
+            }]}),
+        );
+        let mismatch = &result["footprint_mismatch"][0];
+        assert_eq!(result["code"], "invalid_payload", "{result}");
+        assert!(
+            mismatch["suggestion"]
+                .as_str()
+                .is_some_and(|suggestion| suggestion.starts_with(family)),
+            "suggestion escaped {family}: {result}"
+        );
+        assert!(
+            mismatch["message"].as_str().is_some_and(
+                |message| message.contains("symbol pin") || message.contains("footprint pad")
+            ),
+            "mismatch did not identify the unmatched pin or pad: {result}"
+        );
+    }
+
+    let without_detect_pad = "Connector_Card:microSD_HC_Molex_47219-2001";
+    let refused = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [{
+            "ref": "J3",
+            "part": "Connector:Micro_SD_Card_Det1",
+            "footprint": without_detect_pad,
+            "pins": {"10": "SD_DETECT"}
+        }]}),
+    );
+    assert!(
+        refused["footprint_mismatch"][0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("symbol pin(s) 10 have no footprint pad")),
+        "missing symbol pin was not explained: {refused}"
+    );
+    let accepted = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [{
+            "ref": "J3",
+            "part": "Connector:Micro_SD_Card_Det1",
+            "footprint": without_detect_pad,
+            "pins": {"10": "nc"}
+        }]}),
+    );
+    assert!(
+        accepted.get("footprint_mismatch").is_none(),
+        "explicit no-connect pin still required a pad: {accepted}"
+    );
+    assert!(
+        accepted.get("error").is_none(),
+        "placement failed: {accepted}"
+    );
+}
+
+#[test]
 fn add_symbols_cannot_bypass_footprint_compatibility() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCad detected");

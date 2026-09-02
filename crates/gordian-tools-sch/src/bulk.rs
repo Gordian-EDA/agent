@@ -110,18 +110,37 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .collect(),
     };
     let (design, diags, mut audit) = sch_check::into_design(&payload, ctx.provider(), &existing);
+    audit.input_errors = diags
+        .0
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == sch_check::Severity::Error)
+        .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
+        .collect();
+    for block in design.blocks.values() {
+        for (reference, component) in &block.components {
+            let Some(footprint) = component
+                .footprint
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if let Some(error) = gordian_runtime::footprint_compat::footprint_input_error(
+                ctx,
+                reference,
+                &component.part,
+                footprint,
+            )? {
+                audit.input_errors.push(error);
+            }
+        }
+    }
     audit.footprint_mismatch =
         gordian_runtime::footprint_compat::design_pin_mismatches(ctx, &design)?
             .iter()
             .map(gordian_runtime::footprint_compat::FootprintPinMismatch::payload)
             .collect::<Vec<_>>();
     if !audit.is_valid() || diags.has_errors() {
-        audit.input_errors = diags
-            .0
-            .iter()
-            .filter(|diagnostic| diagnostic.severity == sch_check::Severity::Error)
-            .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
-            .collect();
         return Ok(invalid_payload_response(audit));
     }
     let derived: Vec<String> = payload
@@ -273,7 +292,7 @@ fn invalid_payload_response(audit: sch_check::PayloadAudit) -> Value {
                  here, not the whole payload. `input_errors` are unresolvable lib_ids \
                  and pin conflicts; `duplicate_refs` give the next free refdes; \
                  `unknown_pins` name a key the symbol does not have; `footprint_mismatch` \
-                 includes a compatible assignment when the catalog has one. `dangling` pins \
+                 includes the closest same-library pad-set repair. `dangling` pins \
                  are NOT fatal on their own — they are listed so you can finish them.",
     })
 }

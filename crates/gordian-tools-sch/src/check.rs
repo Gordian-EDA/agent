@@ -45,7 +45,14 @@ pub(crate) fn design(doc: &SchDoc, netlist: &Netlist) -> Design {
         for pin in pins.iter().filter(|p| p.owner == symbol.uuid) {
             let target = match crate::refs::net_of(netlist, &pin.refdes, &pin.number) {
                 Some(net) => PinTarget::Net(net.to_string()),
-                None => PinTarget::NoConnect,
+                None if netlist
+                    .no_connect
+                    .iter()
+                    .any(|marked| marked.refdes == pin.refdes && marked.pin == pin.number) =>
+                {
+                    PinTarget::NoConnect
+                }
+                None => continue,
             };
             component.pins.insert(pin.number.clone(), target);
         }
@@ -1057,8 +1064,27 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
                 .map(|why| format!(" ({why})"))
                 .unwrap_or_default(),
         );
-        let (fix, why) = if let Some(suggestion) = mismatch.suggestion.as_deref() {
+        let (fix, why) = if let Some(suggestion) = mismatch
+            .suggestion
+            .as_deref()
+            .filter(|_| mismatch.suggestion_compatible)
+        {
             footprint_assignment(&mismatch.reference, suggestion, &mismatch.symbol)
+        } else if !mismatch.missing_pads.is_empty() {
+            (
+                ToolFix {
+                    tool: "no_connect",
+                    args: json!({
+                        "pins": mismatch.missing_pads.iter().map(|pin| {
+                            format!("{}.{}", mismatch.reference, pin)
+                        }).collect::<Vec<_>>()
+                    }),
+                },
+                format!(
+                    "The footprint has no pad for symbol pin(s) {}; mark them no-connect only if the package intentionally omits them.",
+                    mismatch.missing_pads.join(", ")
+                ),
+            )
         } else if let Some(symbol) = mismatch.symbol_suggestion.as_deref() {
             (
                 ToolFix {
