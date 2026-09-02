@@ -155,3 +155,11 @@ realiser on a worker thread, abandon it at the deadline (discard its result, ret
 refusal immediately), and size the default block so ≥60-part sheets are placed as
 regions (`place_parts` of a block onto the existing sheet) rather than whole-sheet
 re-placements. After `lane/spine-panic` merges (shared `bulk.rs` ladder).
+
+## Status 2026-09-02 (night)
+Merged: rail-clearance (zero shorts), board-repair (in gate), ERC fixes carry calls, outline
+re-fit + dangling-end DRC, hard placement deadline, spine guards, diff_schematic, offline
+board I/O, multi-turn transcript. Campaign: bms ERC 0 in 15 requests; audio ERC 0 + board
+created; stopping on the 270 s wall clock now, not the cap. Running: engine-opens (UART
+field overlap; scattered-GND opens), footprint-compat (compatibility before placement).
+Next: full campaign run on the integrated tree → accounting round 2 → lanes.
