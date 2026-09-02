@@ -738,15 +738,15 @@ mod tests {
         let mut w = SchematicWriter::new();
         w.add_symbol(&env, "Timer:NE555P", "U1", "", [45.72, 45.72], 0.0)
             .unwrap();
-        // KiCad 9's Timer:NE555P names the output pin "Q" (older libs used "OUT").
-        w.add_signal_label(&env, "U1", "Q", "N_Q").unwrap();
+        // KiCad 10's Timer:NE555P names the output pin "OUT".
+        w.add_signal_label(&env, "U1", "OUT", "N_OUT").unwrap();
         let sch = w.finish();
         let seg = sch.split("(property \"Reference\" \"U1\"").nth(1).unwrap();
         let at = seg.lines().nth(1).unwrap();
         println!("U1 ref at: {at}");
         assert!(
             !at.contains("(at 59.69"),
-            "U1 ref must not sit on the N_Q label:\n{at}"
+            "U1 ref must not sit on the N_OUT label:\n{at}"
         );
     }
 }

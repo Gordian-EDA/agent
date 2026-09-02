@@ -103,7 +103,6 @@ pub(crate) fn write_retained(
     if retract.count == 0 {
         return Ok(());
     }
-    ctx.close_kicad_session();
     let path = ctx.pcb_path();
     let text =
         std::fs::read_to_string(&path).map_err(|err| format!("could not read the board: {err}"))?;

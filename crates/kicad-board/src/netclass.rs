@@ -101,7 +101,7 @@ pub fn patch_board_net_class(
     ))
 }
 
-/// Patch KiCad 9 project net settings while retaining bytes outside the two changed values.
+/// Patch project net settings while retaining bytes outside the two changed values.
 pub fn patch_project_net_class(
     text: &str,
     update: &NetClassUpdate,

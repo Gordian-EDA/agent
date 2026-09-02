@@ -1,9 +1,4 @@
-//! Interactive saved-board editing with an explicit IPC escape hatch.
-//!
-//! Once the engine has seeded a board (sync_board → place_board → route_board),
-//! geometry tools read and atomically patch the durable board file. `open_board`
-//! is the explicit operation that launches or inspects a live KiCad session;
-//! configured attached sessions may also receive edits directly.
+//! Interactive editing of saved board files.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,8 +6,6 @@ use anyhow::Result;
 use geom::{Point2, Rect};
 use serde_json::{Value, json};
 
-use kicad_ipc::units::mm_to_nm;
-use kicad_ipc::{CopperDeleteRequest, CopperHit, CopperKind, FootprintMove};
 use pcb_model::{
     Connection, FailedNet, LayerRef, RoutePoint, RouteResult, RouteSolution, RoutingView, Trace,
     Via, ViaSpan,
@@ -21,26 +14,40 @@ use pcb_model::{
 use gordian_runtime::AgentRuntime;
 use gordian_runtime::tool::require_str;
 
-use kicad_board::{ImportedPart, IpcBoardSnapshot};
+use kicad_board::{BoardSnapshot, FootprintPlacement, ImportedPart};
 
 use crate::board::guard::Guard;
 use crate::copper::RetractedCopper;
 
-fn ipc_err(e: kicad_ipc::Error) -> anyhow::Error {
-    anyhow::anyhow!(e.to_string())
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CopperKind {
+    Track,
+    Via,
 }
 
-/// Open the project board in a live headless KiCAD for interactive editing.
-pub fn open_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let path = ctx.pcb_path();
-    match ctx.kicad().open(&path) {
-        Ok(()) => {}
-        Err(e) => return Ok(json!({ "error": format!("could not open the board in KiCAD: {e}") })),
-    };
-    super::place::get_board(json!({}), ctx)
+#[derive(Debug, Clone)]
+struct CopperDeleteRequest {
+    at: Point2,
+    radius: f64,
+    kinds: BTreeSet<CopperKind>,
+    net: Option<String>,
+    layer: Option<u32>,
+    all: bool,
 }
 
-/// Move one or more saved-board parts in one atomic edit, or one attached IPC commit.
+#[derive(Debug, Clone, PartialEq)]
+struct CopperHit {
+    kind: CopperKind,
+    distance: f64,
+    net: Option<String>,
+    layer: Option<String>,
+    layers: Vec<String>,
+    at: Option<Point2>,
+    start: Option<Point2>,
+    end: Option<Point2>,
+}
+
+/// Move one or more saved-board parts in one atomic edit.
 pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let snapshot = match crate::active_board(ctx) {
         Ok(snapshot) => snapshot,
@@ -68,7 +75,7 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
-    if let Err(err) = crate::place::write_placement(ctx, &plan.ipc_moves) {
+    if let Err(err) = crate::place::write_placement(ctx, &plan.placements) {
         let error = json!({ "error": format!("move_parts could not write the board: {err}") });
         return Ok(gate.rollback(ctx, error));
     }
@@ -89,7 +96,7 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// The parts sitting on the back of the board. KiCAD mirrors a flipped
 /// footprint about its y axis, so an asymmetric courtyard is on the other side
 /// of the origin there.
-fn back_side_references(snapshot: &IpcBoardSnapshot) -> BTreeSet<String> {
+fn back_side_references(snapshot: &BoardSnapshot) -> BTreeSet<String> {
     snapshot
         .imported
         .parts
@@ -101,7 +108,7 @@ fn back_side_references(snapshot: &IpcBoardSnapshot) -> BTreeSet<String> {
 
 /// Copper the move invalidates: every net with a trace ending on a pad that
 /// moved, retracted whole so no stub is left hanging.
-fn retracted_copper(snapshot: &IpcBoardSnapshot, plan: &MovePlan) -> RetractedCopper {
+fn retracted_copper(snapshot: &BoardSnapshot, plan: &MovePlan) -> RetractedCopper {
     let moved = plan
         .positions
         .iter()
@@ -187,7 +194,7 @@ impl MovePart {
 
 #[derive(Debug, Clone)]
 struct MovePlan {
-    ipc_moves: Vec<FootprintMove>,
+    placements: Vec<FootprintPlacement>,
     positions: Vec<ResolvedPosition>,
     changed: usize,
 }
@@ -221,7 +228,7 @@ impl MoveBoard {
     /// could report success and leave the board failing `courtyards_overlap`.
     /// A part missing from the map falls back to its pad bounding box.
     fn from_snapshot(
-        snapshot: &IpcBoardSnapshot,
+        snapshot: &BoardSnapshot,
         courtyards: &BTreeMap<String, Rect>,
         back: &BTreeSet<String>,
     ) -> Self {
@@ -433,12 +440,11 @@ fn resolve_move_parts(
         .into_iter()
         .filter_map(|reference| finals.get(&reference).cloned())
         .collect();
-    let ipc_moves = positions
+    let placements = positions
         .iter()
-        .map(|p| FootprintMove {
+        .map(|p| FootprintPlacement {
             reference: p.reference.clone(),
-            x_nm: mm_to_nm(p.at.x),
-            y_nm: mm_to_nm(p.at.y),
+            at: p.at,
             rotation_deg: Some(p.rotation),
         })
         .collect();
@@ -455,7 +461,7 @@ fn resolve_move_parts(
         })
         .count();
     Ok(MovePlan {
-        ipc_moves,
+        placements,
         positions,
         changed,
     })
@@ -561,20 +567,12 @@ fn edge_position(part: &MovePart, bounds: Rect, edge: Edge, gap: f64) -> Point2 
 
 /// Route a single saved-board connection with grid-A* obstacle avoidance.
 pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    // KiCad 9.0.2 can apply CreateItems but time out before acknowledging the
-    // commit, leaving route_track unable to tell whether retrying would
-    // duplicate copper. Use the resilient, read-only snapshot path (including
-    // its timeout reconnect) and then commit offline.
     let prepared = crate::active_board(ctx).and_then(|snapshot| {
         let request =
             parse_route_track_request(&input, &snapshot.problem, &snapshot.imported.parts)?;
         let (problem, solution) = manual_route_solution(&snapshot.problem, &request)?;
         Ok((problem, solution, request, snapshot.layer_names))
     });
-    // The managed pcbnew process must not retain stale in-memory board state
-    // while the file is replaced. Close on every result, including parse and
-    // routing failures, so the next board tool reopens the current file.
-    ctx.close_kicad_session();
     match prepared {
         Ok((problem, solution, request, layer_names)) => {
             let gate = match Guard::open(
@@ -587,7 +585,7 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 Err(refusal) => return Ok(refusal),
             };
             if let Err(err) =
-                super::route::write_route_offline(ctx, &problem, &solution, &layer_names)
+                super::route::write_route_file(ctx, &problem, &solution, &layer_names)
             {
                 let error =
                     json!({ "error": format!("route_track could not write copper: {err}") });
@@ -619,25 +617,14 @@ pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
-    let deleted = if ctx.config().kicad.attach_running && selection.bbox.is_none() {
-        ctx.kicad()
-            .with_session(&path, |session| {
-                session
-                    .kicad()
-                    .delete_copper_near(&selection.request, &snapshot.layer_names)
-            })
-            .map_err(|error| error.to_string())
-    } else {
-        delete_copper_offline(ctx, &snapshot, &selection)
-    };
+    let deleted = delete_copper_file(ctx, &snapshot, &selection);
     match deleted {
         Ok(hits) => Ok(gate.commit(ctx, delete_copper_output(&selection, &hits))),
         Err(error) => Ok(gate.rollback(ctx, json!({ "error": error }))),
     }
 }
 
-/// Set one board net's track width through a live net-class update or its
-/// atomic on-disk equivalent.
+/// Set one board net's track width in the saved project files.
 pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let net = require_str(&input, "net")?;
     if net.is_empty() {
@@ -676,72 +663,15 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
-    if !ctx.config().kicad.attach_running {
-        ctx.close_kicad_session();
-        let update = kicad_board::NetClassUpdate {
-            name: name.clone(),
-            width,
-            clearance,
-            nets: vec![net.clone()],
-        };
-        return match write_net_width_offline(&path, &project_path, &update) {
-            Ok(report) => {
-                Ok(gate.commit(ctx, net_width_output(name, net, width, clearance, report)))
-            }
-            Err(error) => Ok(gate.rollback(ctx, json!({ "error": error }))),
-        };
-    }
-    let live = ctx.kicad().with_session(&path, |session| {
-        let width_nm = mm_to_nm(width);
-        let clearance_nm = mm_to_nm(clearance);
-        let changed = session.kicad().set_net_class_if_changed(
-            &name,
-            width_nm,
-            clearance_nm,
-            &[net.as_str()],
-        )?;
-        session.kicad().save()?;
-        Ok(changed)
-    });
-    match live {
-        Ok(changed) => Ok(gate.commit(
-            ctx,
-            json!({
-                "ok": true,
-                "write_path": "ipc",
-                "changed": changed,
-                "net_class": name.clone(),
-                "width": width,
-                "clearance": clearance,
-                "nets": [net.clone()],
-                "changed_nets": if changed { vec![net] } else { Vec::new() },
-                "changed_classes": if changed { vec![name] } else { Vec::new() },
-            }),
-        )),
-        Err(live_error) => {
-            ctx.close_kicad_session();
-            let update = kicad_board::NetClassUpdate {
-                name: name.clone(),
-                width,
-                clearance,
-                nets: vec![net.clone()],
-            };
-            match write_net_width_offline(&path, &project_path, &update) {
-                Ok(report) => {
-                    let mut output = net_width_output(name, net, width, clearance, report);
-                    output["fallback_reason"] = json!(live_error.to_string());
-                    Ok(gate.commit(ctx, output))
-                }
-                Err(offline_error) => Ok(gate.rollback(
-                    ctx,
-                    json!({
-                        "error": format!(
-                            "{live_error}; offline net-width fallback failed: {offline_error}"
-                        )
-                    }),
-                )),
-            }
-        }
+    let update = kicad_board::NetClassUpdate {
+        name: name.clone(),
+        width,
+        clearance,
+        nets: vec![net.clone()],
+    };
+    match write_net_width_file(&path, &project_path, &update) {
+        Ok(report) => Ok(gate.commit(ctx, net_width_output(name, net, width, clearance, report))),
+        Err(error) => Ok(gate.rollback(ctx, json!({ "error": error }))),
     }
 }
 
@@ -754,7 +684,7 @@ fn net_width_output(
 ) -> Value {
     json!({
         "ok": true,
-        "write_path": "offline",
+        "write_path": "file",
         "changed": report.changed,
         "board_changed": report.board_changed,
         "project_changed": report.project_changed,
@@ -767,9 +697,9 @@ fn net_width_output(
     })
 }
 
-fn delete_copper_offline(
+fn delete_copper_file(
     ctx: &AgentRuntime,
-    snapshot: &IpcBoardSnapshot,
+    snapshot: &BoardSnapshot,
     selection: &DeleteCopperSelection,
 ) -> std::result::Result<Vec<CopperHit>, String> {
     #[derive(Clone, Copy)]
@@ -908,7 +838,6 @@ fn delete_copper_offline(
             .map(|(_, via)| via.clone())
             .collect(),
     };
-    ctx.close_kicad_session();
     let path = ctx.pcb_path();
     let text = std::fs::read_to_string(&path)
         .map_err(|error| format!("could not read the board: {error}"))?;
@@ -932,17 +861,12 @@ fn via_hits_bbox(via: &Via, bbox: &Rect) -> bool {
     bbox.dist_to_point(via.at) <= via.diameter / 2.0 + geom::EPS
 }
 
-fn write_net_width_offline(
+fn write_net_width_file(
     board_path: &std::path::Path,
     project_path: &std::path::Path,
     update: &kicad_board::NetClassUpdate,
 ) -> std::result::Result<kicad_board::NetClassUpdateReport, String> {
     kicad_board::write_net_class_update(board_path, project_path, update)
-}
-
-/// Save the live KiCAD board to disk if a session is open. Returns whether it saved.
-pub fn save_session_if_open(ctx: &AgentRuntime) -> Result<bool> {
-    ctx.kicad().save_if_open().map_err(ipc_err)
 }
 
 #[derive(Debug, Clone)]
@@ -1649,7 +1573,7 @@ mod tests {
             height: 1.0,
             connected_to: vec![number.to_owned()],
         };
-        let snapshot = IpcBoardSnapshot {
+        let snapshot = BoardSnapshot {
             imported: kicad_board::ImportedBoard {
                 layer_count: 2,
                 bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
@@ -1750,9 +1674,8 @@ mod tests {
         let got = pos(&plan, "U1");
         assert_eq!(got.at, Point2::new(25.0, 20.0));
         assert_eq!(got.rotation, 180.0);
-        assert_eq!(plan.ipc_moves[0].x_nm, 25_000_000);
-        assert_eq!(plan.ipc_moves[0].y_nm, 20_000_000);
-        assert_eq!(plan.ipc_moves[0].rotation_deg, Some(180.0));
+        assert_eq!(plan.placements[0].at, Point2::new(25.0, 20.0));
+        assert_eq!(plan.placements[0].rotation_deg, Some(180.0));
         assert_eq!(plan.changed, 1);
     }
 
@@ -2262,7 +2185,7 @@ mod tests {
             nets: vec!["SIG".into()],
         };
 
-        let report = write_net_width_offline(&board_path, &project_path, &update).unwrap();
+        let report = write_net_width_file(&board_path, &project_path, &update).unwrap();
 
         assert_eq!(report.nets, vec!["SIG"]);
         assert_eq!(report.classes, vec!["Width_0_5"]);

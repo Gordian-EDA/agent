@@ -5,7 +5,6 @@
 //! Real `kicad-cli`, a real `.kicad_sch` and a real `.kicad_pcb` on disk — no
 //! network, no mocks. Skips when no KiCAD is installed.
 
-mod common;
 
 use gordian_core::AgentRuntime;
 use gordian_core::tools::run_tool;
@@ -64,7 +63,6 @@ fn seed(ctx: &AgentRuntime) {
 
 #[test]
 fn a_window_places_only_what_is_inside_it() {
-    let _kicad = common::KicadLock::acquire();
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -105,7 +103,6 @@ fn a_window_places_only_what_is_inside_it() {
 
 #[test]
 fn a_window_that_holds_no_footprint_is_refused_before_anything_is_written() {
-    let _kicad = common::KicadLock::acquire();
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -131,7 +128,6 @@ fn a_window_that_holds_no_footprint_is_refused_before_anything_is_written() {
 
 #[test]
 fn a_window_routes_the_nets_that_reach_it_and_keeps_the_rest() {
-    let _kicad = common::KicadLock::acquire();
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;

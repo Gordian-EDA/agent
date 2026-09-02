@@ -8,7 +8,7 @@
 //! the work and one guard protects it. Omitting both selects the whole board.
 
 use geom::Rect;
-use kicad_board::IpcBoardSnapshot;
+use kicad_board::BoardSnapshot;
 use pcb_model::RouteSolution;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -57,7 +57,7 @@ pub(crate) fn parse_bbox(input: &Value) -> std::result::Result<Option<Rect>, Str
 ///
 /// The centre, not any overlap: a large part clipping the corner of the window
 /// belongs to whatever is outside it, and moving it would not be a local edit.
-pub(crate) fn parts_in_bbox(board: &IpcBoardSnapshot, bbox: &Rect) -> Vec<String> {
+pub(crate) fn parts_in_bbox(board: &BoardSnapshot, bbox: &Rect) -> Vec<String> {
     board
         .imported
         .parts
@@ -76,7 +76,7 @@ pub(crate) fn parts_in_bbox(board: &IpcBoardSnapshot, bbox: &Rect) -> Vec<String
 /// net that does *not* reach into the window keeps its copper untouched and
 /// becomes fixed obstacle.
 pub(crate) fn nets_in_bbox(
-    board: &IpcBoardSnapshot,
+    board: &BoardSnapshot,
     copper: &RouteSolution,
     bbox: &Rect,
 ) -> BTreeSet<String> {
@@ -165,7 +165,7 @@ mod tests {
         assert!(error.contains("bbox.max_y"), "{error}");
     }
 
-    fn board() -> IpcBoardSnapshot {
+    fn board() -> BoardSnapshot {
         use kicad_board::{ImportedBoard, ImportedPad, ImportedPart};
         let pad = |net: &str, x: f64, y: f64| ImportedPad {
             shape: "circle".into(),
@@ -177,7 +177,7 @@ mod tests {
             layers: vec![pcb_model::LayerRef::top()],
         };
         let bounds = Rect::new(0.0, 0.0, 40.0, 40.0);
-        IpcBoardSnapshot {
+        BoardSnapshot {
             imported: ImportedBoard {
                 layer_count: 2,
                 bounds,

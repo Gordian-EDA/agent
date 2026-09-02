@@ -8,7 +8,6 @@ use serde_json::{Value, json};
 
 use geom::{Point2, Polygon, Rect};
 use kicad_footprint::{Footprint, FootprintId, FootprintPad, PadTechnology};
-use kicad_ipc::FootprintMove;
 use pcb_model::{LayerRef, Trace, Via, ViaSpan};
 use pcb_place::{
     Edge, EdgeDatum, GroupHint, LockedAt, Part, PartPad, PlaceResult, Placement, PlacementHints,
@@ -17,7 +16,7 @@ use pcb_place::{
 
 use gordian_runtime::AgentRuntime;
 
-use kicad_board::{ImportedPad, ImportedPart, IpcBoardSnapshot};
+use kicad_board::{BoardSnapshot, FootprintPlacement, ImportedPad, ImportedPart};
 
 use crate::board::guard::Guard;
 
@@ -192,7 +191,7 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
 const MAX_FILTERED_TERMINALS: usize = 128;
 
-fn terminals_json(board: &IpcBoardSnapshot, net: &str) -> Value {
+fn terminals_json(board: &BoardSnapshot, net: &str) -> Value {
     let matching = board.imported.parts.iter().flat_map(|part| {
         part.pads
             .iter()
@@ -219,7 +218,7 @@ fn terminals_json(board: &IpcBoardSnapshot, net: &str) -> Value {
     })
 }
 
-fn copper_json(board: &IpcBoardSnapshot, input: &Value) -> Value {
+fn copper_json(board: &BoardSnapshot, input: &Value) -> Value {
     let net_filter = input
         .get("net")
         .and_then(Value::as_str)
@@ -325,7 +324,7 @@ fn copper_json(board: &IpcBoardSnapshot, input: &Value) -> Value {
 }
 
 fn trace_endpoint_touches(
-    board: &IpcBoardSnapshot,
+    board: &BoardSnapshot,
     own_index: usize,
     trace: &Trace,
     at: Point2,
@@ -363,7 +362,7 @@ fn trace_endpoint_touches(
     touches
 }
 
-fn via_touches(board: &IpcBoardSnapshot, own_index: usize, via: &Via) -> Vec<Value> {
+fn via_touches(board: &BoardSnapshot, own_index: usize, via: &Via) -> Vec<Value> {
     let mut touches = Vec::new();
     let span = via_span_indices(&via.span, board.problem.layer_count);
     for index in span {
@@ -400,7 +399,7 @@ fn via_touches(board: &IpcBoardSnapshot, own_index: usize, via: &Via) -> Vec<Val
 }
 
 fn pad_touches(
-    board: &IpcBoardSnapshot,
+    board: &BoardSnapshot,
     net: &str,
     layer: &LayerRef,
     at: Point2,
@@ -506,7 +505,7 @@ fn via_span_indices(span: &ViaSpan, layer_count: u32) -> Vec<u32> {
     }
 }
 
-fn snapshot_net_pin_counts(board: &IpcBoardSnapshot) -> BTreeMap<String, usize> {
+fn snapshot_net_pin_counts(board: &BoardSnapshot) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for part in &board.imported.parts {
         for pad in &part.pads {
@@ -518,7 +517,7 @@ fn snapshot_net_pin_counts(board: &IpcBoardSnapshot) -> BTreeMap<String, usize> 
     counts
 }
 
-// ── IPC snapshot to engine problem ───────────────────────────────────────────
+// ── Board snapshot to engine problem ─────────────────────────────────────────
 
 /// Each part's COURTYARD extent (mm), by reference.
 ///
@@ -527,7 +526,7 @@ fn snapshot_net_pin_counts(board: &IpcBoardSnapshot) -> BTreeMap<String, usize> 
 /// turned a quarter-turn presents its courtyard the other way round. A part
 /// whose footprint no longer resolves is simply absent.
 pub(super) fn courtyard_extents(
-    board: &IpcBoardSnapshot,
+    board: &BoardSnapshot,
     ctx: &AgentRuntime,
 ) -> std::collections::BTreeMap<String, Rect> {
     let mut courtyards: BTreeMap<String, Rect> = board
@@ -604,7 +603,7 @@ pub(super) fn courtyard_at(local: Rect, at: Point2, rotation: f64, back: bool) -
 }
 
 pub(super) fn place_problem_from_snapshot(
-    board: &IpcBoardSnapshot,
+    board: &BoardSnapshot,
     ctx: &AgentRuntime,
 ) -> std::result::Result<PlacementView, String> {
     let catalog = ctx
@@ -905,7 +904,7 @@ fn live_schematic_design(ctx: &AgentRuntime) -> anyhow::Result<sch_check::model:
 /// off unrelated four-pad devices and electrically reversed schematics.
 fn opto817_channels(
     design: &sch_check::model::Design,
-    board: &IpcBoardSnapshot,
+    board: &BoardSnapshot,
 ) -> Vec<Opto817Channel> {
     let imported: BTreeMap<&str, &ImportedPart> = board
         .imported
@@ -1030,7 +1029,7 @@ fn opto_bridge_midpoint_y(part: &Part, channel: &Opto817Channel, rotation: f64) 
 /// channels are present, preserving generic placement on every other board.
 fn add_817_array_hints(
     design: &sch_check::model::Design,
-    board: &IpcBoardSnapshot,
+    board: &BoardSnapshot,
     problem: &PlacementView,
     hints: &mut PlacementHints,
 ) -> Option<Opto817Requirements> {
@@ -2347,7 +2346,7 @@ pub(crate) fn copper_keepouts(copper: &pcb_model::RouteSolution) -> Vec<Rect> {
 /// for the ones the model names — one subset placement, so both behave alike.
 pub(crate) fn restrict_to_refs(
     problem: &mut PlacementView,
-    board: &IpcBoardSnapshot,
+    board: &BoardSnapshot,
     free: &std::collections::BTreeSet<&str>,
 ) {
     let existing: BTreeMap<&str, &ImportedPart> = board
@@ -2425,7 +2424,7 @@ fn overlaps(a: &Rect, b: &Rect) -> bool {
 /// oversized canvas can be resized to fit instead of shipping empty acreage.
 fn sizing_report(
     problem: &PlacementView,
-    board: &IpcBoardSnapshot,
+    board: &BoardSnapshot,
     result: &PlaceResult,
     legal: bool,
 ) -> Value {
@@ -2507,7 +2506,7 @@ fn sizing_report(
 /// locked footprint is the one thing on a board a tool does not overrule.
 fn placement_subset(
     refs: Option<Vec<String>>,
-    board: &IpcBoardSnapshot,
+    board: &BoardSnapshot,
     replace: bool,
 ) -> std::result::Result<Option<Vec<String>>, Value> {
     let unplaced = kicad_board::seed_row_references(&board.imported);
@@ -2541,7 +2540,7 @@ fn placement_subset(
                 "code": "parts_locked",
                 "placement_applied": false,
                 "locked": locked,
-                "note": "Unlock them in pcbnew, or move them deliberately with move_parts.",
+                "note": "Unlock them in KiCad, or move them deliberately with move_parts.",
             }));
         }
     }
@@ -2615,7 +2614,7 @@ fn subset_is_legal(
 /// caller who passes both means one of them.
 fn subset_selection(
     input: &Value,
-    board: &IpcBoardSnapshot,
+    board: &BoardSnapshot,
 ) -> std::result::Result<(Option<Vec<String>>, Option<Rect>), String> {
     let bbox = crate::selection::parse_bbox(input)?;
     if let Some(bbox) = bbox {
@@ -2637,7 +2636,7 @@ fn subset_selection(
 /// lay out nothing and report a legal placement.
 fn subset_refs(
     input: &Value,
-    board: &IpcBoardSnapshot,
+    board: &BoardSnapshot,
 ) -> std::result::Result<Option<Vec<String>>, String> {
     let Some(value) = input.get("refs") else {
         return Ok(None);
@@ -2662,7 +2661,7 @@ fn subset_refs(
 /// Every named reference must be on this board.
 fn check_references<'a>(
     named: impl Iterator<Item = &'a str>,
-    board: &IpcBoardSnapshot,
+    board: &BoardSnapshot,
     what: &str,
 ) -> std::result::Result<(), String> {
     let known: std::collections::BTreeSet<&str> = board
@@ -2907,15 +2906,14 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .filter(|p| p.locked)
             .map(|p| p.reference.as_str())
             .collect();
-        let moves: Vec<FootprintMove> = result
+        let moves: Vec<FootprintPlacement> = result
             .placements
             .iter()
             .filter(|p| !locked_refs.contains(p.reference.as_str()))
             .filter(|p| refs.is_none() || free.contains(p.reference.as_str()))
-            .map(|p| FootprintMove {
+            .map(|p| FootprintPlacement {
                 reference: p.reference.clone(),
-                x_nm: kicad_ipc::units::mm_to_nm(p.at.x),
-                y_nm: kicad_ipc::units::mm_to_nm(p.at.y),
+                at: p.at,
                 rotation_deg: Some(p.rotation),
             })
             .collect();
@@ -3007,7 +3005,6 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                         return Ok(opened.rollback(ctx, json!({ "error": error.to_string() })));
                     }
                 };
-                ctx.close_kicad_session();
                 if let Err(error) = crate::route::write_board_atomically(&path, updated.as_bytes())
                 {
                     return Ok(opened.rollback(
@@ -3197,32 +3194,19 @@ fn illegal_placement_error(result: &Value) -> String {
     )
 }
 
-/// Write footprint positions to the board: one live IPC commit when the
-/// installed KiCAD supports footprint updates, otherwise the equivalent
-/// offline s-expression edit.
+/// Write footprint positions to the saved board.
 pub(crate) fn write_placement(
     ctx: &AgentRuntime,
-    moves: &[FootprintMove],
+    moves: &[FootprintPlacement],
 ) -> std::result::Result<(), String> {
     let path = ctx.pcb_path();
-    if !ctx.config().kicad.attach_running {
-        return write_placement_offline(ctx, &path, moves);
-    }
-    let live = ctx.kicad().with_session(&path, |session| {
-        session.kicad().move_footprints(moves)?;
-        session.kicad().save()
-    });
-    let Err(live_err) = live else { return Ok(()) };
-    write_placement_offline(ctx, &path, moves)
-        .map_err(|offline| format!("{live_err}; offline placement failed: {offline}"))
+    write_placement_file(&path, moves)
 }
 
-fn write_placement_offline(
-    ctx: &AgentRuntime,
+fn write_placement_file(
     path: &std::path::Path,
-    moves: &[FootprintMove],
+    moves: &[FootprintPlacement],
 ) -> std::result::Result<(), String> {
-    ctx.close_kicad_session();
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("could not read the board: {e}"))?;
     let patched = kicad_board::patch_placements(&text, moves)
@@ -3236,7 +3220,7 @@ mod tests {
     use super::*;
     use geom::Point2;
     use kicad::KicadInstallation;
-    use kicad_board::{ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot};
+    use kicad_board::{BoardSnapshot, ImportedBoard, ImportedPad, ImportedPart};
     use kicad_footprint::{FootprintCatalog, PadTechnology};
     use pcb_model::{RouteSolution, RoutingView, Trace, Via};
 
@@ -3296,7 +3280,7 @@ mod tests {
     fn opto817_fixture(
         count: usize,
         reversed: bool,
-    ) -> (sch_check::model::Design, IpcBoardSnapshot, PlacementView) {
+    ) -> (sch_check::model::Design, BoardSnapshot, PlacementView) {
         let mut design = sch_check::model::Design::default();
         let mut block = sch_check::model::Block::default();
         let mut imported = Vec::new();
@@ -3417,7 +3401,7 @@ mod tests {
             .iter()
             .map(|part| placement_part(part, part.reference.starts_with('U')))
             .collect();
-        let board = IpcBoardSnapshot {
+        let board = BoardSnapshot {
             imported: ImportedBoard {
                 layer_count: 2,
                 bounds,
@@ -4313,7 +4297,7 @@ mod tests {
             fixed_copper: Default::default(),
             nets: None,
         };
-        let board = IpcBoardSnapshot {
+        let board = BoardSnapshot {
             imported: ImportedBoard {
                 layer_count: 2,
                 bounds: problem.bounds,
@@ -4412,7 +4396,7 @@ mod tests {
             fixed_copper: Default::default(),
             nets: None,
         };
-        let board = IpcBoardSnapshot {
+        let board = BoardSnapshot {
             imported: ImportedBoard {
                 layer_count: 2,
                 bounds: problem.bounds,
@@ -4468,7 +4452,7 @@ mod tests {
     }
 
     /// Three parts spread along x, so a window can pick out the middle one.
-    fn spread_board() -> IpcBoardSnapshot {
+    fn spread_board() -> BoardSnapshot {
         let at = |x: f64| Point2::new(x, 10.0);
         let part = |reference: &str, x: f64| ImportedPart {
             side: kicad_board::BoardSide::Front,
@@ -4489,7 +4473,7 @@ mod tests {
             }],
         };
         let bounds = Rect::new(0.0, 0.0, 40.0, 20.0);
-        IpcBoardSnapshot {
+        BoardSnapshot {
             imported: ImportedBoard {
                 layer_count: 2,
                 bounds,

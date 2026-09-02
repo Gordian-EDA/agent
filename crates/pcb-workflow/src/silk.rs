@@ -325,7 +325,7 @@ fn is_silk_warning(violation: &Violation) -> bool {
 
 /// Movable texts implicated by the report.
 ///
-/// References come straight from violation items. KiCad 9 omits `PCB_FIELD`
+/// References come straight from violation items. KiCad may omit `PCB_FIELD`
 /// items other than Reference/Value from DRC reports, so a violation caused by
 /// a generated Function legend surfaces with empty items or only its partner
 /// (e.g. the clipped segment, or the Edge.Cuts outline). Whenever such an
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn unattributed_silk_violations_enqueue_function_legends() {
-        // KiCad 9 reports Function-field collisions with empty items or only
+        // KiCad reports some Function-field collisions with empty items or only
         // the partner item, never the field itself.
         let report = DrcReport {
             violations: vec![

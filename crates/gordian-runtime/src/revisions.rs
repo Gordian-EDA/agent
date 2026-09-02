@@ -5,7 +5,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{SecondsFormat, Utc};
@@ -98,7 +98,6 @@ pub struct Revisions {
     root: PathBuf,
     lock: Mutex<()>,
     turn_baselines: Mutex<Option<BTreeMap<PathBuf, TurnBaseline>>>,
-    board_sessions: Option<Arc<kicad_ipc::SessionManager>>,
 }
 
 impl Revisions {
@@ -109,21 +108,6 @@ impl Revisions {
             project,
             lock: Mutex::new(()),
             turn_baselines: Mutex::new(None),
-            board_sessions: None,
-        }
-    }
-
-    /// Opens a revision store that invalidates `board_sessions` before restoring a board.
-    pub fn with_board_sessions(
-        project: PathBuf,
-        board_sessions: Arc<kicad_ipc::SessionManager>,
-    ) -> Self {
-        Self {
-            root: project.join(".gordian/revisions"),
-            project,
-            lock: Mutex::new(()),
-            turn_baselines: Mutex::new(None),
-            board_sessions: Some(board_sessions),
         }
     }
 
@@ -261,13 +245,9 @@ impl Revisions {
         };
         let manifest = self.read_manifest(id)?;
         let mut staged = Vec::new();
-        let mut restores_board = false;
         for entry in &manifest.files {
             let (_, relative) = self.resolve_path(&entry.path)?;
             let target = self.project.join(&relative);
-            restores_board |= relative
-                .extension()
-                .is_some_and(|extension| extension == "kicad_pcb");
             if entry.existed {
                 let source = self.root.join(id.to_string()).join(&relative);
                 let bytes = fs::read(&source).with_context(|| {
@@ -277,9 +257,6 @@ impl Revisions {
             } else {
                 staged.push((target, None));
             }
-        }
-        if restores_board && let Some(sessions) = &self.board_sessions {
-            sessions.close();
         }
         for (target, contents) in &staged {
             match contents {

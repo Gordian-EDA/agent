@@ -7,7 +7,7 @@
 
 use kicad::sexpr_escape;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use kicad::KicadInstallation;
@@ -59,8 +59,6 @@ struct ToolServices {
     /// Test override: when set, build the footprint catalog from this directory
     /// of `.pretty` libraries instead of the installed KiCAD footprint share dir.
     footprint_dir_override: Option<PathBuf>,
-    /// KiCAD IPC session manager for live board editing.
-    kicad: Arc<kicad_ipc::SessionManager>,
 }
 
 /// Tool execution happens on blocking threads; the context must cross them.
@@ -92,20 +90,8 @@ impl AgentRuntime {
         let project = ProjectContext::for_project(project_dir, sch_path)?;
         ensure_project_files(&env, &project.project_dir, &project.sch_path)?;
         let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-        let pcbnew_path = env.pcbnew_path().to_path_buf();
-        let kicad_major = env.major_version();
-        let services = ToolServices::new(
-            provider,
-            None,
-            config.kicad.attach_running,
-            pcbnew_path,
-            kicad_major,
-            config.kicad.enable_api_config,
-        );
-        let revisions = crate::revisions::Revisions::with_board_sessions(
-            project.project_dir.clone(),
-            Arc::clone(&services.kicad),
-        );
+        let services = ToolServices::new(provider, None);
+        let revisions = crate::revisions::Revisions::for_project(project.project_dir.clone());
         Ok(Self {
             env,
             services,
@@ -146,14 +132,10 @@ impl AgentRuntime {
         let project_dir = tempdir.path().to_path_buf();
         let sch_path = project_dir.join("project.kicad_sch");
         let project = ProjectContext::for_project(project_dir, sch_path).ok()?;
+        ensure_project_files(&env, &project.project_dir, &project.sch_path).ok()?;
         let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-        let pcbnew_path = env.pcbnew_path().to_path_buf();
-        let kicad_major = env.major_version();
-        let services = ToolServices::new(provider, None, false, pcbnew_path, kicad_major, false);
-        let revisions = crate::revisions::Revisions::with_board_sessions(
-            project.project_dir.clone(),
-            Arc::clone(&services.kicad),
-        );
+        let services = ToolServices::new(provider, None);
+        let revisions = crate::revisions::Revisions::for_project(project.project_dir.clone());
         Some(Self {
             env,
             project,
@@ -178,20 +160,8 @@ impl AgentRuntime {
         let sch_path = project_dir.join("project.kicad_sch");
         let project = ProjectContext::for_project(project_dir, sch_path).ok()?;
         let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-        let pcbnew_path = env.pcbnew_path().to_path_buf();
-        let kicad_major = env.major_version();
-        let services = ToolServices::new(
-            provider,
-            Some(footprint_dir),
-            false,
-            pcbnew_path,
-            kicad_major,
-            false,
-        );
-        let revisions = crate::revisions::Revisions::with_board_sessions(
-            project.project_dir.clone(),
-            Arc::clone(&services.kicad),
-        );
+        let services = ToolServices::new(provider, Some(footprint_dir));
+        let revisions = crate::revisions::Revisions::for_project(project.project_dir.clone());
         Some(Self {
             env,
             project,
@@ -217,11 +187,6 @@ impl AgentRuntime {
         &self.project.project_dir
     }
 
-    /// Close the cached live KiCAD session, if one is open.
-    pub fn close_kicad_session(&self) {
-        self.services.kicad.close();
-    }
-
     /// The detected KiCAD environment.
     pub fn env(&self) -> &KicadInstallation {
         &self.env
@@ -245,11 +210,6 @@ impl AgentRuntime {
     /// Starts per-file baseline tracking for a new user turn.
     pub fn begin_turn(&self) -> Result<()> {
         self.revisions.begin_turn()
-    }
-
-    /// The live KiCAD IPC session manager.
-    pub fn kicad(&self) -> &kicad_ipc::SessionManager {
-        &self.services.kicad
     }
 
     /// The typed Gordian config this runtime was built with.
@@ -445,25 +405,12 @@ impl ProjectContext {
 }
 
 impl ToolServices {
-    fn new(
-        provider: SymbolTable,
-        footprint_dir_override: Option<PathBuf>,
-        attach_running_kicad: bool,
-        pcbnew_path: PathBuf,
-        expected_kicad_major: Option<u32>,
-        enable_api_config: bool,
-    ) -> Self {
+    fn new(provider: SymbolTable, footprint_dir_override: Option<PathBuf>) -> Self {
         Self {
             provider,
             index: OnceLock::new(),
             footprint_catalog: OnceLock::new(),
             footprint_dir_override,
-            kicad: Arc::new(kicad_ipc::SessionManager::with_installation(
-                pcbnew_path,
-                expected_kicad_major,
-                attach_running_kicad,
-                enable_api_config,
-            )),
         }
     }
 }

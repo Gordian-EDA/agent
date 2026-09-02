@@ -43,12 +43,12 @@
       "pins": {
         "VCC": "9V",
         "GND": "GND",
-        "R": "9V",
-        "DIS": "N_DIS",
-        "THR": "N_RC",
-        "TR": "N_RC",
-        "CV": "N_CV",
-        "Q": "N_Q"
+        "~{RST}": "9V",
+        "DISCH": "N_DIS",
+        "THRES": "N_RC",
+        "TRIG": "N_RC",
+        "CONT": "N_CV",
+        "OUT": "N_Q"
       }
     },
     {

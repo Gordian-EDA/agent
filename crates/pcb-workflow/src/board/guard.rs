@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 
 use gordian_runtime::AgentRuntime;
 use gordian_runtime::revisions::RevisionId;
-use kicad_board::IpcBoardSnapshot;
+use kicad_board::BoardSnapshot;
 use pcb_model::Finding as DrcViolation;
 use pcb_model::{Point2, Polygon, Violation};
 
@@ -48,7 +48,7 @@ pub(crate) struct Defects {
 impl Defects {
     /// Lint a board snapshot and split its findings into the three kinds the
     /// guard reasons about.
-    pub(crate) fn of(board: &IpcBoardSnapshot) -> (Self, Vec<Fault>) {
+    pub(crate) fn of(board: &BoardSnapshot) -> (Self, Vec<Fault>) {
         // The board's own copper appears twice in a snapshot: once as true
         // geometry in `copper`, and once as the bounding boxes KiCAD hands over
         // as router keep-outs. Lint the geometry; a diagonal trace's bounding
@@ -100,7 +100,7 @@ impl OutlineContainment {
 }
 
 /// Check courtyards, pad copper, tracks and vias against the saved outline.
-pub(crate) fn outline_containment(board: &IpcBoardSnapshot) -> OutlineContainment {
+pub(crate) fn outline_containment(board: &BoardSnapshot) -> OutlineContainment {
     let Some(outline) = board.problem.outline.as_ref() else {
         return OutlineContainment::default();
     };
@@ -109,7 +109,7 @@ pub(crate) fn outline_containment(board: &IpcBoardSnapshot) -> OutlineContainmen
 
 /// Check saved board geometry against a proposed outline.
 pub(crate) fn outline_containment_against(
-    board: &IpcBoardSnapshot,
+    board: &BoardSnapshot,
     outline: &Polygon,
 ) -> OutlineContainment {
     let mut result = OutlineContainment::default();
@@ -315,7 +315,7 @@ pub(crate) struct Guard {
 }
 
 impl Guard {
-    /// Save any live session, snapshot the board, and record its defects.
+    /// Snapshot the board and record its defects.
     ///
     /// The `Err` payload is the mutator's refusal, ready to return: the board
     /// has not been touched.
@@ -331,20 +331,9 @@ impl Guard {
                 "error": format!("{tool}: this project has no board yet — run sync_board first"),
             }));
         }
-        // THE capture call site for every board mutator: one revision per edit.
-        // It is taken BEFORE the live session is saved, so a session's unsaved
-        // work is recoverable too, not overwritten on the way in.
         let revision = ctx.revisions().capture(tool, summary, files).map_err(
             |error| json!({ "error": format!("{tool}: could not capture the board: {error}") }),
         )?;
-        ctx.kicad().save_if_open().map_err(|e| {
-            json!({
-                "error": format!("{tool}: could not save the open KiCAD board first: {e}"),
-                "revision": revision,
-            })
-        })?;
-        // What rollback restores: the board as this mutator found it, which is
-        // the saved state — the session's own edits are not this tool's to undo.
         let original = files
             .iter()
             .map(|file| (file.clone(), std::fs::read_to_string(file).ok()))
@@ -358,11 +347,6 @@ impl Guard {
                 "revision": revision,
             }));
         }
-        // Read the baseline from a fresh session. The save above put the live
-        // board on disk, so the two agree — but a cached pcbnew can still be
-        // serving an older document, and a baseline from one board compared
-        // against a check on another invents defects the edit never caused.
-        ctx.close_kicad_session();
         let before = crate::active_board(ctx)
             .ok()
             .map(|board| Defects::of(&board).0);
@@ -491,8 +475,7 @@ impl Guard {
         })
     }
 
-    fn restore(&self, ctx: &AgentRuntime) -> bool {
-        ctx.close_kicad_session();
+    fn restore(&self, _ctx: &AgentRuntime) -> bool {
         self.original.iter().all(|(path, text)| match text {
             Some(text) => std::fs::write(path, text).is_ok(),
             // The file did not exist before the edit; an edit that created one
@@ -514,7 +497,7 @@ fn merge_into(mut base: Value, extra: Value) -> Value {
 mod tests {
     use super::*;
 
-    fn containment_snapshot(part_x: f64, trace_end: f64) -> IpcBoardSnapshot {
+    fn containment_snapshot(part_x: f64, trace_end: f64) -> BoardSnapshot {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("board.kicad_pcb");
         std::fs::write(

@@ -95,3 +95,41 @@ fn export_pos_produces_csv() {
     let body = std::fs::read_to_string(&written).expect("read pos");
     assert!(!body.trim().is_empty(), "position CSV is empty");
 }
+
+#[test]
+fn refill_zones_can_persist_the_fill_cache() {
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no kicad detected");
+        return;
+    };
+    let (_dir, board) = fixture_board();
+    let mut body = std::fs::read_to_string(&board).expect("read board");
+    assert!(body.ends_with(")\n"));
+    body.truncate(body.len() - 2);
+    body.push_str(
+        "\t(zone\n\
+         \t\t(net 1)\n\
+         \t\t(net_name \"GND\")\n\
+         \t\t(layer \"F.Cu\")\n\
+         \t\t(uuid \"00000000-0000-0000-0000-000000000030\")\n\
+         \t\t(hatch edge 0.5)\n\
+         \t\t(connect_pads (clearance 0.2))\n\
+         \t\t(min_thickness 0.25)\n\
+         \t\t(fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))\n\
+         \t\t(polygon\n\
+         \t\t\t(pts (xy 1 1) (xy 29 1) (xy 29 19) (xy 1 19))\n\
+         \t\t)\n\
+         \t)\n\
+         )\n",
+    );
+    std::fs::write(&board, body).expect("write zoned board");
+
+    env.refill_zones(&board, true)
+        .expect("refill and save board");
+
+    let saved = std::fs::read_to_string(&board).expect("read refilled board");
+    assert!(
+        saved.contains("(filled_polygon"),
+        "saved board did not retain KiCad's zone fill cache"
+    );
+}

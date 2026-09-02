@@ -1048,6 +1048,14 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     ) else {
         return Ok(json!({ "error": "set_fields needs `ref` and `fields`" }));
     };
+    if fields
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("Footprint"))
+    {
+        return Ok(json!({
+            "error": "set_fields does not set Footprint; use assign_footprints so symbol compatibility is validated",
+        }));
+    }
     let mut edit = Edit::open(ctx)?;
     // Address the symbol by UUID: setting `Reference` renames it, and every
     // later field in the same call would then be looking for a part that is
@@ -1056,46 +1064,6 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let units = refs::units(&edit.doc, refdes);
     if units.is_empty() {
         return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
-    }
-    if let Some(footprint) = fields
-        .get("Footprint")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-    {
-        let symbol = units
-            .first()
-            .and_then(|(_, uuid)| edit.doc.symbol(uuid))
-            .map(|symbol| symbol.lib_id.clone())
-            .expect("validated schematic reference has a symbol");
-        if let Some(error) = gordian_runtime::footprint_compat::footprint_input_error(
-            ctx, refdes, &symbol, footprint,
-        )? {
-            return Ok(json!({
-                "ok": false,
-                "code": "invalid_payload",
-                "input_errors": [error],
-            }));
-        }
-        let ignored_pins = edit
-            .before()
-            .no_connect
-            .iter()
-            .filter(|pin| pin.refdes == refdes)
-            .map(|pin| pin.pin.clone())
-            .collect();
-        if let Some(mismatch) = gordian_runtime::footprint_compat::assignment_pin_mismatch_ignoring(
-            ctx,
-            refdes,
-            &symbol,
-            footprint,
-            &ignored_pins,
-        )? {
-            return Ok(json!({
-                "ok": false,
-                "code": "invalid_payload",
-                "footprint_mismatch": [mismatch.payload()],
-            }));
-        }
     }
     let renamed_to = fields.get("Reference").and_then(Value::as_str);
     if let Some(new_refdes) = renamed_to
@@ -1210,20 +1178,60 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .and_then(|(_, uuid)| edit.doc.symbol(uuid))
             .map(|symbol| symbol.lib_id.clone())
             .expect("validated schematic reference has a symbol");
-        let ignored_pins = edit
+        let ignored_pins: std::collections::BTreeSet<String> = edit
             .before()
             .no_connect
             .iter()
             .filter(|pin| pin.refdes == *reference)
             .map(|pin| pin.pin.clone())
             .collect();
-        if let Some(mismatch) = gordian_runtime::footprint_compat::assignment_pin_mismatch_ignoring(
-            ctx,
-            reference,
-            &symbol,
-            footprint,
-            &ignored_pins,
-        )? {
+        let installed = ctx
+            .provider()
+            .symbol(&symbol)
+            .or_else(|| ctx.index().ok()?.symbol(&symbol))
+            .is_some();
+        let mismatch = if installed {
+            gordian_runtime::footprint_compat::assignment_pin_mismatch_ignoring(
+                ctx,
+                reference,
+                &symbol,
+                footprint,
+                &ignored_pins,
+            )?
+        } else {
+            let pin_numbers = placed_pins(&edit.doc)
+                .into_iter()
+                .filter(|pin| pin.refdes == *reference)
+                .map(|pin| pin.number)
+                .collect::<Vec<_>>();
+            if pin_numbers.is_empty() {
+                return Ok(json!({
+                    "error": format!(
+                        "unknown symbol `{symbol}` and its embedded schematic definition has no pins"
+                    ),
+                }));
+            }
+            let verdict = gordian_runtime::footprint_compat::footprint_compatibility_for_pins(
+                ctx,
+                &symbol,
+                pin_numbers.iter().map(String::as_str),
+                footprint,
+            )?;
+            (!verdict.compatible).then_some(
+                gordian_runtime::footprint_compat::FootprintPinMismatch {
+                    reference: reference.clone(),
+                    symbol: symbol.clone(),
+                    footprint: footprint.clone(),
+                    polarity_mismatch: verdict.polarity_mismatch,
+                    missing_pads: verdict.missing_pads,
+                    extra_pins: verdict.extra_pins,
+                    suggestion: None,
+                    suggestion_compatible: false,
+                    symbol_suggestion: None,
+                },
+            )
+        };
+        if let Some(mismatch) = mismatch {
             footprint_mismatch.push(mismatch.payload());
         }
     }

@@ -1,4 +1,4 @@
-//! Adversarial cases for the live-schematic mutators: the edits that slip past
+//! Adversarial cases for schematic mutators: the edits that slip past
 //! the connectivity guard or corrupt the sheet's identity table.
 //!
 //! Skips when no KiCAD is installed: the mutators embed library definitions.
@@ -387,25 +387,29 @@ fn nonexistent_footprints_are_input_errors_with_same_library_repairs() {
     assert!(!listing(&ctx).contains("C1"), "refusal wrote the part");
 
     labelled_resistor(&ctx);
-    for (tool, input) in [
-        (
-            "assign_footprints",
-            json!({"assignments": [{"reference": "R1", "footprint": invented}]}),
-        ),
-        (
-            "set_fields",
-            json!({"ref": "R1", "fields": {"Footprint": invented}}),
-        ),
-    ] {
-        let refused = call(&ctx, tool, input);
-        assert_eq!(refused["code"], "invalid_payload", "{tool}: {refused}");
-        assert!(
-            refused["input_errors"][0]
-                .as_str()
-                .is_some_and(|message| message.contains("Capacitor_SMD:C_1206_3216Metric")),
-            "{tool} gave an unrelated suggestion: {refused}"
-        );
-    }
+    let refused = call(
+        &ctx,
+        "assign_footprints",
+        json!({"assignments": [{"reference": "R1", "footprint": invented}]}),
+    );
+    assert_eq!(refused["code"], "invalid_payload", "{refused}");
+    assert!(
+        refused["input_errors"][0]
+            .as_str()
+            .is_some_and(|message| message.contains("Capacitor_SMD:C_1206_3216Metric")),
+        "assign_footprints gave an unrelated suggestion: {refused}"
+    );
+    let bypass = call(
+        &ctx,
+        "set_fields",
+        json!({"ref": "R1", "fields": {"Footprint": invented}}),
+    );
+    assert!(
+        bypass["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("assign_footprints")),
+        "set_fields must route footprints through assign_footprints: {bypass}"
+    );
 }
 
 #[test]
@@ -463,13 +467,13 @@ fn footprint_mismatch_suggestions_preserve_the_package_family() {
             "ref": "J3",
             "part": "Connector:Micro_SD_Card_Det1",
             "footprint": without_detect_pad,
-            "pins": {"10": "SD_DETECT"}
+            "pins": {"9": "SD_DETECT"}
         }]}),
     );
     assert!(
         refused["footprint_mismatch"][0]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("symbol pin(s) 10 have no footprint pad")),
+            .is_some_and(|message| message.contains("symbol pin(s) 9 have no footprint pad")),
         "missing symbol pin was not explained: {refused}"
     );
     let accepted = call(
@@ -479,7 +483,7 @@ fn footprint_mismatch_suggestions_preserve_the_package_family() {
             "ref": "J3",
             "part": "Connector:Micro_SD_Card_Det1",
             "footprint": without_detect_pad,
-            "pins": {"10": "nc"}
+            "pins": {"9": "nc"}
         }]}),
     );
     assert!(
@@ -489,6 +493,50 @@ fn footprint_mismatch_suggestions_preserve_the_package_family() {
     assert!(
         accepted.get("error").is_none(),
         "placement failed: {accepted}"
+    );
+}
+
+#[test]
+fn footprint_assignment_uses_embedded_pins_for_project_local_symbols() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "Device:R", "ref": "R1"}]}),
+    );
+    assert!(placed.get("error").is_none(), "fixture failed: {placed}");
+    let source = std::fs::read_to_string(ctx.sch_path()).unwrap();
+    let project_local = source.replace("Device:R", "project-local:R");
+    assert_ne!(project_local, source, "fixture did not embed Device:R");
+    std::fs::write(ctx.sch_path(), project_local).unwrap();
+    let footprint = "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal";
+
+    let assigned = call(
+        &ctx,
+        "assign_footprints",
+        json!({"assignments": [{"reference": "R1", "footprint": footprint}]}),
+    );
+
+    assert!(
+        assigned.get("error").is_none(),
+        "embedded symbol assignment failed: {assigned}"
+    );
+    let written = std::fs::read_to_string(ctx.sch_path()).unwrap();
+    assert!(written.contains(&format!("(property \"Footprint\" \"{footprint}\"")));
+
+    let bypass = call(
+        &ctx,
+        "set_fields",
+        json!({"ref": "R1", "fields": {"footprint": footprint}}),
+    );
+    assert!(
+        bypass["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("assign_footprints")),
+        "lowercase footprint bypass was accepted: {bypass}"
     );
 }
 
@@ -653,7 +701,7 @@ fn swap_symbol_maps_differently_numbered_connector_pins_by_name() {
         ("2", "DM_NET"),
         ("3", "DP_NET"),
         ("4", "GND_NET"),
-        ("5", "SHIELD_NET"),
+        ("SH", "SHIELD_NET"),
     ] {
         let labeled = call(
             &ctx,
@@ -671,7 +719,7 @@ fn swap_symbol_maps_differently_numbered_connector_pins_by_name() {
     assert!(result.get("error").is_none(), "swap failed: {result}");
     assert_eq!(
         result["changed"]["mapped_by_name"],
-        json!({"1": "A4", "2": "A7", "3": "A6", "4": "A1", "5": "S1"}),
+        json!({"1": "A4", "2": "A7", "3": "A6", "4": "A1"}),
         "the response must expose every automatic name mapping: {result}"
     );
     assert_eq!(

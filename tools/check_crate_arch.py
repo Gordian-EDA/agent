@@ -141,7 +141,7 @@ def main() -> int:
         )
 
     workflow_dependencies = graph.get("pcb-workflow", set())
-    for required in ("kicad-board", "pcb-engine"):
+    for required in ("kicad", "kicad-board", "pcb-engine"):
         if required not in workflow_dependencies:
             errors.append(f"pcb-workflow must depend on boundary crate {required}")
 

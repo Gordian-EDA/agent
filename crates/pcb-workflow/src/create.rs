@@ -121,29 +121,12 @@ pub(super) fn apply_complexity_default_layer_count(
     }
 }
 
-#[cfg(test)]
-fn write_seed_board(
-    spec: &BoardSeedSpec,
-    ctx: &AgentRuntime,
-) -> std::result::Result<SeededBoard, String> {
-    let catalog = ctx
-        .footprint_catalog()
-        .map_err(|e| format!("footprint catalog unavailable: {e}"))?;
-    write_seed_plan(plan_seed_board(spec, catalog)?, ctx)
-}
-
 /// Emit a resolved plan and replace the project's board file with it.
 pub(super) fn write_seed_plan(
     plan: SeedPlan,
     ctx: &AgentRuntime,
 ) -> std::result::Result<SeededBoard, String> {
     let seeded = emit_seed_plan(plan)?;
-    // Regeneration replaces the document, not merely its on-disk bytes. A
-    // cached pcbnew session otherwise keeps serving the old in-memory board for
-    // the same pathname, so the next tool sees stale bounds and footprints.
-    // Close before overwrite to prevent that process from later saving stale
-    // state back over the fresh seed.
-    ctx.close_kicad_session();
     std::fs::write(ctx.pcb_path(), &seeded.text)
         .map_err(|e| format!("could not write {}: {e}", ctx.pcb_path().display()))?;
     Ok(seeded)
@@ -316,7 +299,7 @@ fn distinct_nets(parts: &[SeedFootprint]) -> usize {
 /// Two corrections, both forced by the parts themselves:
 ///
 /// - KiCad applies a footprint's direct `(clearance ...)` override in addition to its board
-///   netclass. The router only sees the board/netclass clearance through IPC, so seed both with
+///   netclass. The router reads the board/netclass clearance, so seed both with
 ///   the strictest value present in the canonical footprint sources. This keeps router-clean
 ///   copper clean under KiCad DRC without rewriting the library footprint text.
 /// - A clearance wider than a part's own pad gap, or a track wider than the
@@ -599,7 +582,7 @@ impl<'a> SeedBoardWriter<'a> {
 
     /// A dense 817 input bank is an isolation boundary, not merely a repeated component row.
     /// Preserve that boundary in the native board file so KiCad refill, interactive routing,
-    /// and the IPC router all see the same copper-free corridor.  Pads and footprints remain
+    /// and the router all see the same copper-free corridor. Pads and footprints remain
     /// allowed because each optocoupler intentionally bridges the rule area.
     fn push_opto_isolation_corridor(&self, out: &mut String) {
         if self.parts.iter().filter(|part| is_817_family(part)).count() < 8 {
@@ -1648,7 +1631,7 @@ fn parse_net_width_value(net: &str, value: &Value) -> std::result::Result<f64, S
     ))
 }
 
-/// KiCAD 9 built-in (standard-fab) minimums, verified against `kicad-cli pcb drc`:
+/// KiCad built-in standard-fabrication minimums, verified against `kicad-cli pcb drc`:
 /// a via below these trips `via_diameter` / `drill_out_of_range` / `annular_width`.
 const KICAD_MIN_VIA_DIAMETER: f64 = 0.5;
 const KICAD_MIN_VIA_DRILL: f64 = 0.3;
@@ -2302,29 +2285,4 @@ mod tests {
         );
     }
 
-    #[test]
-    #[ignore = "live KiCAD IPC; run through tools/live_kicad_test.sh"]
-    fn seed_replacement_invalidates_same_runtime_live_session() {
-        let Some(ctx) = AgentRuntime::detect_for_test() else {
-            eprintln!("SKIP: KiCad is not installed");
-            return;
-        };
-        let spec = |width, height| BoardSeedSpec {
-            bounds: SeedBounds::Fixed(Rect::new(0.0, 0.0, width, height)),
-            rules: SeedRules::default(),
-            parts: vec![],
-            outline: None,
-        };
-
-        write_seed_board(&spec(20.0, 10.0), &ctx).unwrap();
-        let first = crate::active_board(&ctx).unwrap();
-        assert_eq!(first.imported.bounds, Rect::new(0.0, 0.0, 20.0, 10.0));
-
-        // `first` opened and cached a pcbnew session. Replacing the same path
-        // must force the next snapshot to open the new document, not reuse it.
-        write_seed_board(&spec(40.0, 30.0), &ctx).unwrap();
-        let second = crate::active_board(&ctx).unwrap();
-        assert_eq!(second.imported.bounds, Rect::new(0.0, 0.0, 40.0, 30.0));
-        ctx.close_kicad_session();
-    }
 }

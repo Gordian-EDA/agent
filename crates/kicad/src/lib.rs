@@ -1,8 +1,6 @@
 //! KiCad host integration: installation discovery and typed `kicad-cli`
-//! operations.
-//!
-//! Live editor access remains in `kicad-ipc`; library parsing remains in
-//! `kicad-symbol` and `kicad-footprint`.
+//! operations. Gordian supports KiCad 10 and newer through the command-line
+//! interface and saved design files.
 
 mod cli;
 mod export;

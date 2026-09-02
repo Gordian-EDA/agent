@@ -22,7 +22,7 @@
         "B7": "USB_DM",
         "B8": "nc",
         "B9": "VBUS_RAW",
-        "S1": "GND"
+        "SH": "GND"
       }
     },
     {
@@ -472,7 +472,7 @@
       "footprint": "Connector_Card:micro_SD_Card_Det1",
       "pins": {
         "1": "nc",
-        "10": "GND",
+        "SH": "GND",
         "2": "SD_CS",
         "3": "SD_MOSI",
         "4": "+3V3",

@@ -8,7 +8,7 @@ use pcb_model::{
     Connection, LayerRef, Obstacle, RoutePoint, RouteSolution, RoutingView, Trace, Via, ViaSpan,
 };
 
-use crate::active::{BoardSide, ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot};
+use crate::snapshot::{BoardSide, BoardSnapshot, ImportedBoard, ImportedPad, ImportedPart};
 use crate::patch::{Node, child_nodes, node_head, root_body};
 
 const DEFAULT_MIN_TRACE_WIDTH_MM: f64 = 0.2;
@@ -37,8 +37,8 @@ impl Default for FileRules {
     }
 }
 
-/// Read one saved KiCad board without starting or connecting to pcbnew.
-pub fn read_snapshot(path: &Path) -> Result<IpcBoardSnapshot, String> {
+/// Read one saved KiCad board.
+pub fn read_snapshot(path: &Path) -> Result<BoardSnapshot, String> {
     if !path.exists() {
         return Err("no board exists yet — run sync_board first".to_owned());
     }
@@ -125,7 +125,7 @@ pub fn read_snapshot(path: &Path) -> Result<IpcBoardSnapshot, String> {
         .collect();
     let plane_nets = observed_plane_nets(layer_count, &connections, &copper_zone_layers);
 
-    Ok(IpcBoardSnapshot {
+    Ok(BoardSnapshot {
         problem: RoutingView {
             layer_count,
             min_trace_width: rules.min_trace_width,
@@ -623,10 +623,8 @@ fn polygon_is_convex(polygon: &Polygon) -> bool {
 }
 
 fn quantize_point(point: Point2) -> Point2 {
-    Point2::new(
-        kicad_ipc::units::nm_to_mm(kicad_ipc::units::mm_to_nm(point.x)),
-        kicad_ipc::units::nm_to_mm(kicad_ipc::units::mm_to_nm(point.y)),
-    )
+    let quantize = |value: f64| (value * 1_000_000.0).round() / 1_000_000.0;
+    Point2::new(quantize(point.x), quantize(point.y))
 }
 
 fn board_outline(text: &str, top: &[Node]) -> Result<Polygon, String> {
@@ -1164,31 +1162,4 @@ mod tests {
         assert_eq!(snapshot.problem.net_widths["SIG"], 0.5);
     }
 
-    #[test]
-    #[ignore = "live KiCad IPC comparison; run through tools/live_kicad_test.sh"]
-    fn saved_fixture_matches_live_snapshot_field_for_field() {
-        let Some(env) = kicad::KicadInstallation::detect() else {
-            eprintln!("SKIP: no KiCad installation detected");
-            return;
-        };
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../pcb-workflow/tests/fixtures/two_res.kicad_pcb");
-        let offline = read_snapshot(&path).unwrap();
-        let sessions = kicad_ipc::SessionManager::with_installation(
-            env.pcbnew_path().to_path_buf(),
-            env.major_version(),
-            false,
-            false,
-        );
-        let live = match crate::active::read_live_snapshot(&path, &sessions) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                eprintln!("SKIP: headless pcbnew unavailable: {error}");
-                sessions.close();
-                return;
-            }
-        };
-        sessions.close();
-        assert_eq!(offline, live);
-    }
 }

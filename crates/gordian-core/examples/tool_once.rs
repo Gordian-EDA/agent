@@ -28,12 +28,10 @@ fn main() -> anyhow::Result<()> {
         config.kicad.symbol_dir.as_deref(),
         config.kicad.footprint_dir.as_deref(),
         config.kicad.cli_path.as_deref(),
-        config.kicad.pcbnew_path.as_deref(),
     )
-    .context("no KiCad environment detected")?;
+    .context("KiCad 10 environment not detected")?;
     let ctx = AgentRuntime::for_project_with_config(env, project, config)?;
     let result = run_tool(&tool, input, &ctx).with_context(|| format!("running {tool}"))?;
     println!("{}", serde_json::to_string_pretty(&result)?);
-    ctx.close_kicad_session();
     Ok(())
 }

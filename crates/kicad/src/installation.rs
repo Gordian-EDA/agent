@@ -1,6 +1,7 @@
 //! KiCad installation and library path discovery.
 
 use std::path::{Path, PathBuf};
+use std::io;
 use std::process::Command;
 
 /// Known symbol-library locations, checked in order. The macOS installer's
@@ -29,13 +30,6 @@ const KNOWN_CLI_PATHS: &[&str] = &[
     "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
 ];
 
-/// Known `pcbnew` locations, checked when it is not beside the selected CLI or
-/// on `PATH`.
-const KNOWN_PCBNEW_PATHS: &[&str] = &[
-    "/Applications/KiCad.app/Contents/MacOS/pcbnew",
-    "/Applications/KiCad/KiCad.app/Contents/MacOS/pcbnew",
-];
-
 /// A discovered KiCAD installation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KicadInstallation {
@@ -45,8 +39,6 @@ pub struct KicadInstallation {
     footprint_dir: PathBuf,
     /// Path to the `kicad-cli` executable.
     cli_path: PathBuf,
-    /// Path to the matching PCB editor used for live IPC sessions.
-    pcbnew_path: PathBuf,
     /// Output of `kicad-cli version`, e.g. `10.0.3`.
     cli_version: String,
 }
@@ -57,7 +49,9 @@ impl KicadInstallation {
     ///
     /// Checks known install paths for libraries and `PATH` for `kicad-cli`.
     pub fn detect() -> Option<Self> {
-        Self::detect_with(None, None, None, None)
+        cli_candidates()
+            .into_iter()
+            .find_map(|cli| Self::detect_with(None, None, Some(&cli)).ok())
     }
 
     /// Discover KiCAD using explicit overrides where provided, then known
@@ -66,25 +60,52 @@ impl KicadInstallation {
         symbol_dir: Option<&Path>,
         footprint_dir: Option<&Path>,
         cli_path: Option<&Path>,
-        pcbnew_path: Option<&Path>,
-    ) -> Option<Self> {
-        let symbol_dir = detect_symbol_dir(symbol_dir)?;
-        let footprint_dir = detect_footprint_dir(&symbol_dir, footprint_dir)?;
+    ) -> io::Result<Self> {
         let cli_path = match cli_path {
             Some(path) if path.is_file() => path.to_path_buf(),
-            Some(_) => return None,
-            None => find_in_path("kicad-cli")?,
+            Some(path) => return Err(config_error("kicad.cliPath", path, "is not a file")),
+            None => find_in_path("kicad-cli").ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "KiCad 10 is required; set kicad.cliPath, kicad.symbolDir, and kicad.footprintDir in config.toml",
+                )
+            })?,
         };
-        let cli_version = cli_version(&cli_path)?;
+        let cli_version = cli_version(&cli_path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "kicad.cliPath {} failed `kicad-cli version`: {error}",
+                    cli_path.display()
+                ),
+            )
+        })?;
         if !supported_version(&cli_version) {
-            return None;
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "KiCad 10 or newer is required, but kicad.cliPath {} reports version {cli_version}; set kicad.cliPath, kicad.symbolDir, and kicad.footprintDir to a KiCad 10 installation",
+                    cli_path.display()
+                ),
+            ));
         }
-        let pcbnew_path = detect_pcbnew_path(&cli_path, pcbnew_path)?;
-        Some(Self {
+        let symbol_dir = detect_symbol_dir(&cli_path, symbol_dir).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "KiCad symbol libraries were not found; set kicad.symbolDir to the KiCad 10 symbols directory",
+            )
+        })?;
+        let footprint_dir = detect_footprint_dir(&cli_path, &symbol_dir, footprint_dir)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "KiCad footprint libraries were not found; set kicad.footprintDir to the KiCad 10 footprints directory",
+                )
+            })?;
+        Ok(Self {
             symbol_dir,
             footprint_dir,
             cli_path,
-            pcbnew_path,
             cli_version,
         })
     }
@@ -96,7 +117,6 @@ impl KicadInstallation {
             symbol_dir,
             footprint_dir,
             cli_path: PathBuf::new(),
-            pcbnew_path: PathBuf::new(),
             cli_version: "0".to_string(),
         }
     }
@@ -117,22 +137,23 @@ impl KicadInstallation {
         &self.cli_path
     }
 
-    pub fn pcbnew_path(&self) -> &Path {
-        &self.pcbnew_path
-    }
-
     pub fn version(&self) -> &str {
         &self.cli_version
     }
 }
 
 fn supported_version(version: &str) -> bool {
-    matches!(version_major(version), Some(9 | 10))
+    version_major(version).is_some_and(|major| major >= 10)
 }
 
-fn detect_symbol_dir(configured: Option<&Path>) -> Option<PathBuf> {
+fn detect_symbol_dir(cli_path: &Path, configured: Option<&Path>) -> Option<PathBuf> {
     if let Some(dir) = configured {
         return dir.is_dir().then(|| dir.to_path_buf());
+    }
+    if let Some(sibling) = cli_share_dir(cli_path, "symbols")
+        && sibling.is_dir()
+    {
+        return Some(sibling);
     }
     KNOWN_SYMBOL_DIRS
         .iter()
@@ -140,7 +161,11 @@ fn detect_symbol_dir(configured: Option<&Path>) -> Option<PathBuf> {
         .find(|p| p.is_dir())
 }
 
-fn detect_footprint_dir(symbol_dir: &Path, configured: Option<&Path>) -> Option<PathBuf> {
+fn detect_footprint_dir(
+    cli_path: &Path,
+    symbol_dir: &Path,
+    configured: Option<&Path>,
+) -> Option<PathBuf> {
     if let Some(dir) = configured {
         return dir.is_dir().then(|| dir.to_path_buf());
     }
@@ -148,10 +173,33 @@ fn detect_footprint_dir(symbol_dir: &Path, configured: Option<&Path>) -> Option<
     if sibling.is_dir() {
         return Some(sibling);
     }
+    if let Some(sibling) = cli_share_dir(cli_path, "footprints")
+        && sibling.is_dir()
+    {
+        return Some(sibling);
+    }
     KNOWN_FOOTPRINT_DIRS
         .iter()
         .map(PathBuf::from)
         .find(|p| p.is_dir())
+}
+
+fn cli_share_dir(cli_path: &Path, kind: &str) -> Option<PathBuf> {
+    Some(
+        cli_path
+            .parent()?
+            .parent()?
+            .join("share")
+            .join("kicad")
+            .join(kind),
+    )
+}
+
+fn config_error(key: &str, path: &Path, detail: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("{key} {} {detail}", path.display()),
+    )
 }
 
 fn sibling_footprint_dir(symbol_dir: &Path) -> PathBuf {
@@ -178,31 +226,78 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-fn detect_pcbnew_path(cli_path: &Path, configured: Option<&Path>) -> Option<PathBuf> {
-    if let Some(path) = configured {
-        return path.is_file().then(|| path.to_path_buf());
+fn cli_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(cli) = find_in_path("kicad-cli") {
+        candidates.push(cli);
     }
-    if let Some(sibling) = cli_path.parent().map(|parent| parent.join("pcbnew"))
-        && sibling.is_file()
-    {
-        return Some(sibling);
-    }
-    if let Some(found) = find_in_path("pcbnew") {
-        return Some(found);
-    }
-    KNOWN_PCBNEW_PATHS
-        .iter()
+    let mut local_roots = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .find(|path| path.is_file())
+        .into_iter()
+        .map(|home| home.join(".local"))
+        .collect::<Vec<_>>();
+    if let Ok(current) = std::env::current_dir() {
+        local_roots.extend(current.ancestors().map(|root| root.join(".local")));
+    }
+    local_roots.sort();
+    local_roots.dedup();
+    for local in local_roots {
+        if let Ok(entries) = std::fs::read_dir(local) {
+            let mut app_dirs = entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path().join("AppDir/usr/bin/kicad-cli"))
+                .filter(|path| path.is_file())
+                .collect::<Vec<_>>();
+            app_dirs.sort();
+            app_dirs.reverse();
+            candidates.extend(app_dirs);
+        }
+    }
+    candidates.extend(
+        KNOWN_CLI_PATHS
+            .iter()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file()),
+    );
+    candidates
 }
 
-fn cli_version(cli_path: &Path) -> Option<String> {
-    let output = Command::new(cli_path).arg("version").output().ok()?;
+fn cli_version(cli_path: &Path) -> io::Result<String> {
+    let mut output = None;
+    let mut last_error = None;
+    for _ in 0..3 {
+        match Command::new(cli_path).arg("version").output() {
+            Ok(result) => {
+                output = Some(result);
+                break;
+            }
+            Err(error) => {
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+    let output = output.ok_or_else(|| {
+        last_error.unwrap_or_else(|| io::Error::other("version command did not run"))
+    })?;
     if !output.status.success() {
-        return None;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(io::Error::other(format!(
+            "command exited {}{}",
+            output.status,
+            if stderr.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", stderr.trim())
+            }
+        )));
     }
     let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!version.is_empty()).then_some(version)
+    if version.is_empty() {
+        Err(io::Error::other("command returned an empty version"))
+    } else {
+        Ok(version)
+    }
 }
 
 fn version_major(version: &str) -> Option<u32> {
@@ -222,10 +317,10 @@ mod tests {
     use super::supported_version;
 
     #[test]
-    fn supports_maintained_kicad_versions() {
-        assert!(supported_version("9.0.2+dfsg-1"));
-        assert!(supported_version("9.0.3"));
+    fn supports_kicad_ten_and_newer() {
+        assert!(!supported_version("9.0.2+dfsg-1"));
+        assert!(!supported_version("9.0.3"));
         assert!(supported_version("10.0.5"));
-        assert!(!supported_version("11.0.0"));
+        assert!(supported_version("11.0.0"));
     }
 }

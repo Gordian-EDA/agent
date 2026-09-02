@@ -19,10 +19,8 @@ pcb-engine = { path = "../pcb-engine" }
 kicad-board = { path = "../kicad-board" }
 kicad = { path = "../kicad" }
 kicad-footprint = { path = "../kicad-footprint" }
-kicad-ipc = { path = "../kicad-ipc" }
 pcb-route-mesh = { path = "../pcb-route-mesh" }
 pcb-model = { path = "../pcb-model" }
 pcb-place = { path = "../pcb-place" }
 tempfile.workspace = true
 tracing.workspace = true
-prost-types = "0.13"
