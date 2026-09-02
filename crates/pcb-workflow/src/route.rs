@@ -391,6 +391,23 @@ fn write_board_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         .map_err(|error| error.error)
 }
 
+/// Whether `solution` still carries copper for `net` — the only nets worth
+/// dropping, and what makes the honesty loop below terminate.
+fn has_copper(solution: &RouteSolution, net: &str) -> bool {
+    solution.traces.iter().any(|t| t.connection == net)
+        || solution.vias.iter().any(|v| v.connection == net)
+}
+
+/// Drop copper until the lint is clean, and report what went.
+///
+/// The engine's policy is that a net it cannot route cleanly is reported
+/// unrouted, never shipped as copper that lies. Enforcing it takes a FIXPOINT,
+/// not a fixed number of passes: dropping one net's copper can expose a
+/// violation on another (a trace that only reached its pad through the copper
+/// just removed), and a pass count that runs out leaves violations standing —
+/// which made `route_board` refuse, with the same count every time and nothing
+/// the caller could do about it. Each round drops at least one net that still
+/// has copper, so the loop is bounded by the net count.
 fn make_route_honest_with_report(
     rp: &RoutingView,
     result: &mut RouteResult,
@@ -398,59 +415,32 @@ fn make_route_honest_with_report(
 ) -> (Vec<String>, Vec<DrcViolation>) {
     let mut dropped = Vec::new();
     let mut violations = lint(rp, &result.solution);
-    let disconnected = disconnected_non_plane_nets(&violations, plane_nets);
-    let had_disconnected = !disconnected.is_empty();
-    if had_disconnected {
-        drop_solution_nets(&mut result.solution, &disconnected);
-    }
-    for net in disconnected {
-        append_failed(
-            result,
-            &net,
-            "dropped copper: connectivity oracle reported it unconnected",
-        );
-        dropped.push(net);
-    }
-    if had_disconnected {
-        violations = lint(rp, &result.solution);
-    }
-    let violating: BTreeSet<String> = violations
-        .iter()
-        .flat_map(geometry_violation_nets)
-        .collect();
-    if !violating.is_empty() {
-        result
-            .solution
-            .traces
-            .retain(|trace| !violating.contains(&trace.connection));
-        result
-            .solution
-            .vias
-            .retain(|via| !violating.contains(&via.connection));
-        for net in violating {
-            append_failed(
-                result,
-                &net,
-                "dropped copper: route had geometry DRC violations",
-            );
+    for _ in 0..=rp.connections.len() {
+        let disconnected = disconnected_non_plane_nets(&violations, plane_nets);
+        let violating: BTreeSet<String> = violations
+            .iter()
+            .flat_map(geometry_violation_nets)
+            .collect();
+        let reason = |net: &String| {
+            if violating.contains(net) {
+                "dropped copper: route had geometry DRC violations"
+            } else {
+                "dropped copper: connectivity oracle reported it unconnected"
+            }
+        };
+        let round: Vec<String> = disconnected
+            .union(&violating)
+            .filter(|net| has_copper(&result.solution, net))
+            .cloned()
+            .collect();
+        if round.is_empty() {
+            break;
+        }
+        drop_solution_nets(&mut result.solution, &round.iter().cloned().collect());
+        for net in round {
+            append_failed(result, &net, reason(&net));
             dropped.push(net);
         }
-        violations = lint(rp, &result.solution);
-    }
-    let disconnected_after_geometry = disconnected_non_plane_nets(&violations, plane_nets);
-    let had_disconnected_after_geometry = !disconnected_after_geometry.is_empty();
-    if had_disconnected_after_geometry {
-        drop_solution_nets(&mut result.solution, &disconnected_after_geometry);
-    }
-    for net in disconnected_after_geometry {
-        append_failed(
-            result,
-            &net,
-            "dropped copper: connectivity oracle reported it unconnected after geometry cleanup",
-        );
-        dropped.push(net);
-    }
-    if had_disconnected_after_geometry {
         violations = lint(rp, &result.solution);
     }
     dropped.sort();
@@ -3212,6 +3202,82 @@ mod escape_bottleneck_tests {
         assert_eq!(result.solution.traces.len(), 1);
         assert_eq!(result.solution.vias.len(), 1);
         assert!(result.failed.is_empty());
+    }
+
+    /// The honesty pass must leave NO real violation standing, whatever mix of
+    /// defects the router handed it. A pass that runs out with violations
+    /// remaining makes `route_board` refuse with the same count forever, and no
+    /// `move_parts` or regenerate can clear it.
+    #[test]
+    fn cleanup_leaves_no_real_violation_for_a_mixed_bag_of_defects() {
+        let point = |x: f64, y: f64| pcb_model::RoutePoint {
+            x,
+            y,
+            layer: LayerRef::top(),
+        };
+        let problem = RoutingView {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![
+                pcb_model::Connection {
+                    name: "A".to_string(),
+                    points_to_connect: vec![point(1.0, 1.0), point(5.0, 1.0)],
+                },
+                pcb_model::Connection {
+                    name: "B".to_string(),
+                    points_to_connect: vec![point(1.0, 1.25), point(5.0, 1.25)],
+                },
+                pcb_model::Connection {
+                    name: "C".to_string(),
+                    points_to_connect: vec![point(1.0, 8.0), point(5.0, 8.0)],
+                },
+            ],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 20.0,
+                max_y: 10.0,
+            },
+            clearance: 0.5,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+        let trace = |connection: &str, y: f64, to: f64| Trace {
+            connection: connection.to_string(),
+            layer: LayerRef::top(),
+            width: 0.2,
+            path: vec![Point2 { x: 1.0, y }, Point2 { x: to, y }],
+        };
+        let mut result = RouteResult {
+            engine: "test".to_string(),
+            failed: vec![],
+            solution: RouteSolution {
+                // A and B run 0.25 mm apart under a 0.5 mm rule; C stops short
+                // of its own second terminal.
+                traces: vec![
+                    trace("A", 1.0, 5.0),
+                    trace("B", 1.25, 5.0),
+                    trace("C", 8.0, 3.0),
+                ],
+                vias: vec![],
+            },
+        };
+        let planes = BTreeSet::new();
+
+        let (dropped, remaining) = make_route_honest_with_report(&problem, &mut result, &planes);
+
+        assert_eq!(dropped, vec!["A", "B", "C"]);
+        assert!(result.solution.traces.is_empty());
+        assert_eq!(
+            lint_summary_from_violations(&remaining, &result.failed, &planes).real,
+            0,
+            "cleanup left violations standing: {remaining:?}"
+        );
     }
 
     /// A short involving a plane net used to be exempt from the honesty drop, so

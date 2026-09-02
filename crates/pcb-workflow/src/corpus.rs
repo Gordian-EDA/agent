@@ -170,7 +170,7 @@ pub fn routed_board_text(
     catalog: &FootprintCatalog,
 ) -> std::result::Result<String, String> {
     let spec = super::create::BoardSeedSpec {
-        bounds: board.board_bounds,
+        bounds: super::create::SeedBounds::Fixed(board.board_bounds),
         rules: super::create::SeedRules {
             clearance: board.rules.clearance,
             min_trace_width: board.rules.min_trace_width,

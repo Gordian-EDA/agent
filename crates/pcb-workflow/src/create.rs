@@ -1,7 +1,7 @@
 //! Board-construction tools and shared input parsers.
 
 use kicad::sexpr_escape;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io;
 
@@ -21,9 +21,17 @@ use super::seed::{BoardSeedRules, PourPadConnection, PourSpec};
 
 // ── regenerate_board ──────────────────────────────────────────────────────────────
 
+/// The outline a seed is asked for: an explicit rectangle, or one sized from
+/// the parts themselves.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum SeedBounds {
+    Auto,
+    Fixed(Rect),
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct BoardSeedSpec {
-    pub(super) bounds: Rect,
+    pub(super) bounds: SeedBounds,
     pub(super) rules: SeedRules,
     pub(super) parts: Vec<SeedPart>,
     pub(super) outline: Option<Polygon>,
@@ -187,18 +195,9 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         });
     }
 
-    let bounds = if input.get("bounds").is_some() {
-        match parse_bounds(input.get("bounds")) {
-            Ok(b) => b,
-            Err(e) => return Ok(json!({ "error": e })),
-        }
-    } else {
-        Rect {
-            min_x: 0.0,
-            min_y: 0.0,
-            max_x: 50.0,
-            max_y: 40.0,
-        }
+    let bounds = match parse_seed_bounds(input.get("bounds")) {
+        Ok(b) => b,
+        Err(e) => return Ok(json!({ "error": e })),
     };
     let mut rules = match parse_seed_rules(input.get("rules")) {
         Ok(r) => r,
@@ -241,11 +240,49 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         outline: None,
     };
 
-    let seeded = match write_seed_board(&spec, ctx) {
+    let catalog = match ctx.footprint_catalog() {
+        Ok(catalog) => catalog,
+        Err(e) => return Ok(json!({ "error": format!("footprint catalog unavailable: {e}") })),
+    };
+    let plan = match plan_seed_board(&spec, catalog) {
+        Ok(plan) => plan,
+        Err(msg) => return Ok(json!({ "error": msg })),
+    };
+    let sizing = plan.sizing.clone();
+    let width = plan.bounds.max_x - plan.bounds.min_x;
+    let height = plan.bounds.max_y - plan.bounds.min_y;
+    let bounds_json = json!({
+        "required_bounds": { "width": sizing.required_w, "height": sizing.required_h },
+        "recommended_bounds": { "width": sizing.recommended_w, "height": sizing.recommended_h },
+        "applied_bounds": { "width": width, "height": height },
+        "parts_courtyard_area_mm2": sizing.courtyard_area_mm2,
+    });
+    if plan.bounds_were_explicit && !sizing.fits(width, height) {
+        let mut out = json!({
+            "ok": false,
+            "error": format!(
+                "the requested {width} x {height} mm board is smaller than its own parts require: \
+                 {} mm² of courtyards need at least {} x {} mm to pack legally. Call \
+                 regenerate_board with bounds \
+                 {{\"min_x\":0,\"min_y\":0,\"max_x\":{},\"max_y\":{}}} (recommended, with routing \
+                 room), or omit bounds to size the board automatically. No board was written.",
+                sizing.courtyard_area_mm2,
+                sizing.required_w,
+                sizing.required_h,
+                sizing.recommended_w,
+                sizing.recommended_h,
+            ),
+            "code": "bounds_below_required",
+        });
+        merge(&mut out, bounds_json);
+        return Ok(out);
+    }
+
+    let seeded = match write_seed_plan(plan, ctx) {
         Ok(seeded) => seeded,
         Err(msg) => return Ok(json!({ "error": msg })),
     };
-    Ok(json!({
+    let mut out = json!({
         "ok": true,
         "part_count": part_count,
         "layer_count": seeded.rules.layer_count,
@@ -258,7 +295,15 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         },
         "rules_from_footprints": seeded.rule_notes,
         "note": "board regenerated from the committed schematic file (not F8 sync; existing placement/routing may be replaced) — run place_board, then route_board, then check_board",
-    }))
+    });
+    merge(&mut out, bounds_json);
+    Ok(out)
+}
+
+fn merge(into: &mut Value, from: Value) {
+    if let (Value::Object(target), Value::Object(source)) = (into, from) {
+        target.extend(source);
+    }
 }
 
 fn apply_complexity_default_layer_count(
@@ -274,6 +319,7 @@ fn apply_complexity_default_layer_count(
     }
 }
 
+#[cfg(test)]
 fn write_seed_board(
     spec: &BoardSeedSpec,
     ctx: &AgentRuntime,
@@ -281,7 +327,12 @@ fn write_seed_board(
     let catalog = ctx
         .footprint_catalog()
         .map_err(|e| format!("footprint catalog unavailable: {e}"))?;
-    let seeded = emit_seed_board(spec, catalog)?;
+    write_seed_plan(plan_seed_board(spec, catalog)?, ctx)
+}
+
+/// Emit a resolved plan and replace the project's board file with it.
+fn write_seed_plan(plan: SeedPlan, ctx: &AgentRuntime) -> std::result::Result<SeededBoard, String> {
+    let seeded = emit_seed_plan(plan)?;
     // Regeneration replaces the document, not merely its on-disk bytes. A
     // cached pcbnew session otherwise keeps serving the old in-memory board for
     // the same pathname, so the next tool sees stale bounds and footprints.
@@ -301,6 +352,18 @@ pub(super) struct SeededBoard {
     pub rule_notes: Vec<String>,
 }
 
+/// A seed board resolved but not yet emitted: its parts, the rules it will
+/// carry, the outline it will get, and what the parts required.
+pub(super) struct SeedPlan {
+    parts: Vec<SeedFootprint>,
+    rules: SeedRules,
+    rule_notes: Vec<String>,
+    outline: Option<Polygon>,
+    pub sizing: crate::sizing::BoardSizing,
+    pub bounds: Rect,
+    pub bounds_were_explicit: bool,
+}
+
 /// Synthesize the production seed-board representation without writing it.
 ///
 /// Keeping the emitter independent of [`AgentRuntime`] lets offline validation
@@ -310,9 +373,25 @@ pub(super) fn emit_seed_board(
     spec: &BoardSeedSpec,
     catalog: &FootprintCatalog,
 ) -> std::result::Result<SeededBoard, String> {
+    emit_seed_plan(plan_seed_board(spec, catalog)?)
+}
+
+/// Resolve a seed board: load every footprint, derive the rules its pads
+/// permit, and size the outline from the courtyards when none was given.
+pub(super) fn plan_seed_board(
+    spec: &BoardSeedSpec,
+    catalog: &FootprintCatalog,
+) -> std::result::Result<SeedPlan, String> {
     let mut parts = Vec::with_capacity(spec.parts.len());
-    let mut x = spec.bounds.min_x + 2.0;
-    let y = spec.bounds.min_y + 2.0;
+    let seed_origin = match spec.bounds {
+        SeedBounds::Fixed(bounds) => Point2 {
+            x: bounds.min_x,
+            y: bounds.min_y,
+        },
+        SeedBounds::Auto => Point2 { x: 0.0, y: 0.0 },
+    };
+    let mut x = seed_origin.x + 2.0;
+    let y = seed_origin.y + 2.0;
     for dp in &spec.parts {
         let id = FootprintId::parse(&dp.footprint).map_err(|e| {
             let clause = footprint_suggestion_clause(&catalog.suggest_text(&dp.footprint));
@@ -348,19 +427,84 @@ pub(super) fn emit_seed_board(
         x += 2.54;
     }
     let (effective_rules, rule_notes) = effective_seed_rules(&spec.rules, &parts);
+    let sizing = crate::sizing::size_board(
+        &part_extents(&parts),
+        match spec.bounds {
+            SeedBounds::Fixed(b) => (b.max_x - b.min_x) / (b.max_y - b.min_y).max(0.1),
+            SeedBounds::Auto => 1.0,
+        },
+        crate::sizing::RoutingDemand {
+            clearance: effective_rules.clearance,
+            track_width: effective_rules.min_trace_width,
+            layer_count: effective_rules.layer_count,
+            net_count: distinct_nets(&parts),
+        },
+    );
+    let bounds = match spec.bounds {
+        SeedBounds::Fixed(bounds) => bounds,
+        SeedBounds::Auto => Rect {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: sizing.recommended_w,
+            max_y: sizing.recommended_h,
+        },
+    };
+    Ok(SeedPlan {
+        parts,
+        rules: effective_rules,
+        rule_notes,
+        outline: spec.outline.clone(),
+        sizing,
+        bounds,
+        bounds_were_explicit: matches!(spec.bounds, SeedBounds::Fixed(_)),
+    })
+}
+
+/// Emit the board text for a resolved plan.
+pub(super) fn emit_seed_plan(plan: SeedPlan) -> std::result::Result<SeededBoard, String> {
     let text = SeedBoardWriter::new(
-        &parts,
-        &spec.bounds,
-        &effective_rules,
-        spec.outline.as_ref(),
+        &plan.parts,
+        &plan.bounds,
+        &plan.rules,
+        plan.outline.as_ref(),
     )
     .emit()
     .map_err(|e| format!("board synthesis failed: {e}"))?;
     Ok(SeededBoard {
         text,
-        rules: effective_rules,
-        rule_notes,
+        rules: plan.rules,
+        rule_notes: plan.rule_notes,
     })
+}
+
+/// Each part's courtyard extent, for [`crate::sizing`].
+fn part_extents(parts: &[SeedFootprint]) -> Vec<crate::sizing::PartExtent> {
+    parts
+        .iter()
+        .map(|part| {
+            let courtyard = kicad_footprint::Footprint::parse_str(&part.lib_id, &part.source)
+                .map(|fp| fp.courtyard)
+                .unwrap_or(Rect {
+                    min_x: 0.0,
+                    min_y: 0.0,
+                    max_x: 2.0,
+                    max_y: 2.0,
+                });
+            crate::sizing::PartExtent {
+                w: (courtyard.max_x - courtyard.min_x).max(0.5),
+                h: (courtyard.max_y - courtyard.min_y).max(0.5),
+                edge_seeking: crate::place::is_connector(&part.lib_id, &part.reference),
+            }
+        })
+        .collect()
+}
+
+fn distinct_nets(parts: &[SeedFootprint]) -> usize {
+    parts
+        .iter()
+        .flat_map(|part| part.pad_nets.values())
+        .collect::<BTreeSet<_>>()
+        .len()
 }
 
 /// The rules the board is actually written with, and why they differ from the
@@ -1420,6 +1564,16 @@ fn parse_bounds(v: Option<&Value>) -> std::result::Result<Rect, String> {
 }
 
 /// Parse optional `rules` from snake_case model input.
+/// The outline the caller asked for. Omitted, `null`, or `"auto"` means: size
+/// it from the parts on the netlist.
+fn parse_seed_bounds(v: Option<&Value>) -> std::result::Result<SeedBounds, String> {
+    match v {
+        None | Some(Value::Null) => Ok(SeedBounds::Auto),
+        Some(Value::String(s)) if s.eq_ignore_ascii_case("auto") => Ok(SeedBounds::Auto),
+        other => parse_bounds(other).map(SeedBounds::Fixed),
+    }
+}
+
 fn parse_seed_rules(v: Option<&Value>) -> std::result::Result<SeedRules, String> {
     parse_rules(v).map(|rules| SeedRules::from(&rules))
 }
@@ -2048,12 +2202,12 @@ mod tests {
             locked: None,
         };
         let spec = BoardSeedSpec {
-            bounds: Rect {
+            bounds: SeedBounds::Fixed(Rect {
                 min_x: 0.0,
                 min_y: 0.0,
                 max_x: 20.0,
                 max_y: 10.0,
-            },
+            }),
             rules: SeedRules::default(),
             parts: vec![part("R1", "R"), part("R2", "10k"), part("U1", "NE555P")],
             outline: None,
@@ -2238,7 +2392,7 @@ mod tests {
             return;
         };
         let spec = |width, height| BoardSeedSpec {
-            bounds: Rect::new(0.0, 0.0, width, height),
+            bounds: SeedBounds::Fixed(Rect::new(0.0, 0.0, width, height)),
             rules: SeedRules::default(),
             parts: vec![],
             outline: None,

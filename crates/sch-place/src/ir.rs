@@ -72,7 +72,6 @@ pub struct Cell {
     pub orient: Orient,
 }
 
-
 /// The axis a set of parts is aligned ALONG.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -128,9 +127,7 @@ impl Relation {
             | Relation::RightOf { a, b }
             | Relation::Above { a, b }
             | Relation::Below { a, b } => vec![a.as_str(), b.as_str()],
-            Relation::Group {
-                members, side, ..
-            } => members
+            Relation::Group { members, side, .. } => members
                 .iter()
                 .map(String::as_str)
                 .chain(side.iter().map(|(_, anchor)| anchor.as_str()))

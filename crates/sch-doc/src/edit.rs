@@ -69,7 +69,12 @@ fn rename_generated(symbol: &mut SymbolInst, sheet_path: &str, refdes: &str) {
         None => {
             symbol.fields.insert(
                 "Reference".to_string(),
-                new_field("Reference", refdes, Pose::new(origin.x, origin.y, 0.0), true),
+                new_field(
+                    "Reference",
+                    refdes,
+                    Pose::new(origin.x, origin.y, 0.0),
+                    true,
+                ),
             );
         }
     }
@@ -642,10 +647,7 @@ impl SchDoc {
         if want == now {
             return false;
         }
-        let paper = tagged(
-            "paper",
-            vec![quoted("User"), num(want[0]), num(want[1])],
-        );
+        let paper = tagged("paper", vec![quoted("User"), num(want[0]), num(want[1])]);
         let replaced = self.items_mut().iter_mut().any(|item| match item {
             Item::Other(raw) if crate::sexpr::head(&raw.node) == Some("paper") => {
                 raw.node = paper.clone();

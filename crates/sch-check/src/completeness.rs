@@ -59,17 +59,17 @@ pub fn audit(design: &Design, symbols: &SymbolTable) -> Vec<Gap> {
                 }
             }
         }
-        matched.led_indicator |= circuit_graph::find(
-            &graph,
-            &circuit_graph::library::LED_INDICATOR,
-        )
-        .iter()
-        .any(|found| {
-            block
-                .components
-                .get(&found.anchor)
-                .is_some_and(|component| component.part.to_ascii_uppercase().contains("LED"))
-        });
+        matched.led_indicator |=
+            circuit_graph::find(&graph, &circuit_graph::library::LED_INDICATOR)
+                .iter()
+                .any(|found| {
+                    block
+                        .components
+                        .get(&found.anchor)
+                        .is_some_and(|component| {
+                            component.part.to_ascii_uppercase().contains("LED")
+                        })
+                });
     }
 
     for block in design.blocks.values() {
@@ -344,7 +344,11 @@ fn audit_bus_power_support(
         .filter(|component| !component.dnp)
         .collect();
     let mut rails = BTreeSet::new();
-    for component in components.iter().copied().filter(|component| is_ic(component)) {
+    for component in components
+        .iter()
+        .copied()
+        .filter(|component| is_ic(component))
+    {
         let Some(meta) = symbols.symbol(&component.part) else {
             continue;
         };
@@ -352,9 +356,7 @@ fn audit_bus_power_support(
             resolved_pins(component, &meta)
                 .into_iter()
                 .filter(|pin| {
-                    pin.etype == PinType::PowerInput
-                        && !is_ground(&pin.net)
-                        && is_supply_input(pin)
+                    pin.etype == PinType::PowerInput && !is_ground(&pin.net) && is_supply_input(pin)
                 })
                 .map(|pin| pin.net),
         );
@@ -564,11 +566,7 @@ fn has_series_resistor(net: &str, components: &[&Component]) -> bool {
         .any(|resistor| far_net(resistor, net).is_some_and(|far| !is_power_net(&far) && far != net))
 }
 
-fn has_signal_protection(
-    net: &str,
-    components: &[&Component],
-    symbols: &SymbolTable,
-) -> bool {
+fn has_signal_protection(net: &str, components: &[&Component], symbols: &SymbolTable) -> bool {
     has_series_signal_protection(net, components)
         || has_transient_shunt(net, components, symbols)
         || has_shunt_rc(net, components)
@@ -661,16 +659,14 @@ fn has_shunt_rc(net: &str, components: &[&Component]) -> bool {
         .iter()
         .copied()
         .filter(|component| is_resistor(component) || is_capacitor(component))
-        .filter_map(|component| {
-            far_net(component, net).map(|middle| (component, middle))
-        })
+        .filter_map(|component| far_net(component, net).map(|middle| (component, middle)))
         .any(|(first, middle)| {
             components.iter().copied().any(|second| {
                 (is_resistor(first) && is_capacitor(second)
                     || is_capacitor(first) && is_resistor(second))
                     && far_net(second, &middle).is_some_and(|far| is_ground(&far))
             })
-    })
+        })
 }
 
 fn is_bulk_cap(component: &Component, rail: &str) -> bool {
@@ -1163,10 +1159,7 @@ mod tests {
             ),
             (
                 "F1",
-                component(
-                    "Device:Polyfuse",
-                    &[("1", "VIN_RAW"), ("2", "VIN_PROT")],
-                ),
+                component("Device:Polyfuse", &[("1", "VIN_RAW"), ("2", "VIN_PROT")]),
             ),
             (
                 "D1",

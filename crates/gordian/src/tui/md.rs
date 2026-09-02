@@ -118,7 +118,8 @@ impl Renderer {
             Event::Text(t) => self.push_text(&t),
             Event::Code(t) => {
                 self.ensure_line();
-                self.current.push((t.to_string(), inline_code_style(self.base)));
+                self.current
+                    .push((t.to_string(), inline_code_style(self.base)));
             }
             Event::SoftBreak | Event::HardBreak => {
                 self.flush_line();
@@ -132,8 +133,7 @@ impl Renderer {
             Event::Rule => {
                 self.block_start();
                 self.ensure_line();
-                self.current
-                    .push(("─".repeat(24), theme::RULE));
+                self.current.push(("─".repeat(24), theme::RULE));
                 self.flush_line();
                 self.mark_sep();
             }
@@ -389,7 +389,11 @@ mod tests {
         let bold = l.segments.iter().find(|(t, _)| t == "R1").unwrap();
         assert!(bold.1.add_modifier.contains(Modifier::BOLD));
         let code = l.segments.iter().find(|(t, _)| t == "10k").unwrap();
-        assert_eq!(code.1.fg, Some(theme::INFO), "inline code takes the structural accent");
+        assert_eq!(
+            code.1.fg,
+            Some(theme::INFO),
+            "inline code takes the structural accent"
+        );
     }
 
     #[test]

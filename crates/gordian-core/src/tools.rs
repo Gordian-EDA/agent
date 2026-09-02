@@ -298,19 +298,26 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "regenerate_board".into(),
-            description: "Seed PCB; bounds/rules default safely and clearance/min_trace_width \
-                 are lowered to what the board's own footprints permit (reported in \
-                 design_rules)."
+            description: "Seed PCB. Omit bounds to size the outline from the footprints on \
+                 the netlist; the result reports required_bounds and recommended_bounds. \
+                 clearance/min_trace_width are lowered to what those footprints permit \
+                 (reported in design_rules)."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "bounds": {
-                        "type": "object",
-                        "properties": {
-                            "min_x": { "type": "number" }, "max_x": { "type": "number" },
-                            "min_y": { "type": "number" }, "max_y": { "type": "number" }
-                        }
+                        "description": "Omit (or \"auto\") to size the board from its parts. Bounds smaller than required_bounds are refused before anything is written.",
+                        "oneOf": [
+                            { "type": "string", "enum": ["auto"] },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "min_x": { "type": "number" }, "max_x": { "type": "number" },
+                                    "min_y": { "type": "number" }, "max_y": { "type": "number" }
+                                }
+                            }
+                        ]
                     },
                     "rules": {
                         "type": "object",
