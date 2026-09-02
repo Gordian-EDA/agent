@@ -40,6 +40,60 @@ fn listing(ctx: &AgentRuntime) -> String {
     }
 }
 
+#[test]
+fn place_parts_refuses_a_reference_already_on_the_sheet() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let seeded = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [
+            {"lib_id": "Device:C", "ref": "C1", "value": "1uF"},
+            {"lib_id": "Device:C", "ref": "C2", "value": "1uF", "near": "C1", "side": "right"}
+        ]}),
+    );
+    assert!(seeded.get("error").is_none(), "fixture failed: {seeded}");
+
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [{
+            "ref": "C2",
+            "part": "Device:C",
+            "pins": {"1": "VIN", "2": "GND"}
+        }]}),
+    );
+
+    assert_eq!(result["code"], "invalid_payload");
+    assert_eq!(
+        result["duplicate_refs"],
+        json!([{"ref": "C2", "next_free": "C3"}])
+    );
+}
+
+#[test]
+fn place_parts_reports_an_auto_assigned_reference_as_placed() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [{
+            "part": "Device:R",
+            "value": "10k",
+            "pins": {"1": "VIN", "2": "GND"}
+        }]}),
+    );
+
+    assert!(result.get("error").is_none(), "placement failed: {result}");
+    assert_eq!(result["changed"]["placed"], json!(["R1"]));
+}
+
 /// Renaming a part onto a reference another part already holds must be refused:
 /// two symbols answering to `R2` is a corrupt sheet — `uuid_of` can no longer
 /// resolve it, so every later tool call on `R2` is ambiguous, and KiCAD's own
@@ -287,7 +341,11 @@ fn a_swap_that_makes_a_mapped_pin_a_supply_pin_is_refused() {
     assert!(placed.get("error").is_none(), "fixture failed: {placed}");
     let before = std::fs::read(ctx.sch_path()).unwrap();
 
-    let result = call(&ctx, "swap_symbol", json!({"ref": "J1", "lib_id": "power:GND"}));
+    let result = call(
+        &ctx,
+        "swap_symbol",
+        json!({"ref": "J1", "lib_id": "power:GND"}),
+    );
     let error = result["error"].as_str().unwrap_or_default();
     assert!(
         error.contains("supply pin"),
@@ -324,7 +382,9 @@ fn labelling_a_node_with_a_generated_net_name_is_refused() {
     assert!(joined.get("error").is_none(), "fixture failed: {joined}");
 
     let text = listing(&ctx);
-    let start = text.find("Net-(").expect("an unnamed net gets a generated name");
+    let start = text
+        .find("Net-(")
+        .expect("an unnamed net gets a generated name");
     let generated = &text[start..start + text[start..].find(')').unwrap() + 1];
 
     let result = call(&ctx, "label", json!({"pin": "R3.1", "net": generated}));

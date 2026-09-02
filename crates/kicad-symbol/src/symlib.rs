@@ -51,6 +51,7 @@ struct LibReader {
 struct RawSymbol {
     pins: Vec<PinMeta>,
     extends: Option<String>,
+    reference: Option<String>,
     description: Option<String>,
     datasheet: Option<String>,
     footprint: Option<String>,
@@ -79,6 +80,7 @@ impl LibReader {
                 RawSymbol {
                     pins: own_pins(sym),
                     extends: sym.extends.clone(),
+                    reference: property("Reference"),
                     description: property("Description"),
                     datasheet: property("Datasheet"),
                     footprint: property("Footprint"),
@@ -183,6 +185,7 @@ fn resolve_meta<'a>(
         } else {
             symbol.pins.clone()
         },
+        reference: symbol.reference.clone().or(parent.reference),
         description: symbol.description.clone().or(parent.description),
         datasheet: symbol.datasheet.clone().or(parent.datasheet),
         footprint: symbol.footprint.clone().or(parent.footprint),

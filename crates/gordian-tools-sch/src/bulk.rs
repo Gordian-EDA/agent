@@ -74,11 +74,6 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         Edit::create(ctx, sch_floorplan::live::blank_sheet()?)
     };
-    let refs = payload
-        .parts
-        .iter()
-        .map(|part| part.refdes.clone())
-        .collect::<Vec<_>>();
     let derived: Vec<String> = payload
         .parts
         .iter()
@@ -102,6 +97,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "ok": false,
                 "code": "invalid_payload",
                 "dangling": audit.dangling,
+                "duplicate_refs": audit.duplicate_refs,
                 "did_you_mean": audit.did_you_mean,
                 "unknown_pins": audit.unknown_pins,
                 "note": "each dangling pin names a net that would carry no second pin. \
@@ -116,6 +112,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !report.committed {
         return Ok(refused_place(report));
     }
+    let refs = report.placed.clone();
     let value = edit
         .commit(json!(report), Allow::nothing().parts(refs).creating())
         .context("committing placed parts")?;
