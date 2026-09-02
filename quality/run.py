@@ -1118,7 +1118,10 @@ def findings_for(report):
     findings = []
     if report.get("error"):
         findings.append(("harness", f"runner error: {report['error']}"))
-    board_expected = bool(report.get("board_created") or report.get("pcb_facts"))
+    board_expected = any(
+        key.startswith(("board_parts", "board_outline", "drc_errors", "drc_warnings"))
+        for key in report
+    )
     for name in (
         "sch_facts_error",
         "kicad_netlist_error",
