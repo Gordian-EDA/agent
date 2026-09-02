@@ -37,6 +37,16 @@ pub struct Obstacles<'a> {
     nodes_by_y: HashMap<i64, Vec<(f64, &'a str)>>,
     nodes_by_x: HashMap<i64, Vec<(f64, &'a str)>>,
     bodies: Vec<geom::Rect>,
+    /// Bodies bucketed on a coarse lattice, so a point test looks at the few
+    /// that could possibly contain it rather than at all of them.
+    buckets: HashMap<(i64, i64), Vec<usize>>,
+}
+
+/// Side of one obstacle bucket, in mm.
+const BUCKET: f64 = 8.0;
+
+fn bucket_of(p: Point2) -> (i64, i64) {
+    ((p.x / BUCKET).floor() as i64, (p.y / BUCKET).floor() as i64)
 }
 
 fn q(v: f64) -> i64 {
@@ -107,6 +117,19 @@ impl<'a> Obstacles<'a> {
             .chain(sheet.texts.iter().map(|t| t.rect.inflate(-0.05)))
             .collect();
 
+        let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+        for (index, rect) in (&bodies as &Vec<geom::Rect>).iter().enumerate() {
+            let (lo, hi) = (
+                bucket_of(Point2::new(rect.min_x - GRID, rect.min_y - GRID)),
+                bucket_of(Point2::new(rect.max_x + GRID, rect.max_y + GRID)),
+            );
+            for bx in lo.0..=hi.0 {
+                for by in lo.1..=hi.1 {
+                    buckets.entry((bx, by)).or_default().push(index);
+                }
+            }
+        }
+
         Obstacles {
             sheet,
             horizontal,
@@ -114,6 +137,7 @@ impl<'a> Obstacles<'a> {
             nodes_by_y,
             nodes_by_x,
             bodies,
+            buckets,
         }
     }
 
@@ -136,6 +160,15 @@ impl<'a> Obstacles<'a> {
             self.nodes_by_y.entry(q(p.y)).or_default().push((p.x, net));
             self.nodes_by_x.entry(q(p.x)).or_default().push((p.y, net));
         }
+    }
+
+    /// Whether a point sits inside a body or a text run, allowing half a grid
+    /// step of clearance — the cell test a lattice search needs.
+    pub(crate) fn blocks_point(&self, p: Point2) -> bool {
+        self.buckets.get(&bucket_of(p)).is_some_and(|near| {
+            near.iter()
+                .any(|i| self.bodies[*i].inflate(GRID / 2.0 - 0.05).contains(p))
+        })
     }
 
     pub(crate) fn hits_body(&self, a: Point2, b: Point2) -> bool {
@@ -317,14 +350,26 @@ pub fn maze(
     if (dx - steps(dx) as f64 * GRID).abs() > 1e-6 || (dy - steps(dy) as f64 * GRID).abs() > 1e-6 {
         return None;
     }
-    const MARGIN: i32 = 12;
+    const MARGIN: i32 = 10;
     let (goal_x, goal_y) = (steps(dx), steps(dy));
     let (lo_x, hi_x) = (goal_x.min(0) - MARGIN, goal_x.max(0) + MARGIN);
     let (lo_y, hi_y) = (goal_y.min(0) - MARGIN, goal_y.max(0) + MARGIN);
     let (width, height) = ((hi_x - lo_x + 1) as usize, (hi_y - lo_y + 1) as usize);
     let point = |x: i32, y: i32| Point2::new(from.x + x as f64 * GRID, from.y + y as f64 * GRID);
-    let index =
-        |x: i32, y: i32, d: usize| (((y - lo_y) as usize * width + (x - lo_x) as usize) * 4) + d;
+    let cell_of = |x: i32, y: i32| (y - lo_y) as usize * width + (x - lo_x) as usize;
+    let index = |x: i32, y: i32, d: usize| cell_of(x, y) * 4 + d;
+
+    // Testing every step against every body and every text run is what makes a
+    // lattice search expensive; testing every *cell* once, against rects grown
+    // by half a step, is the same answer for two orders of magnitude less work.
+    let mut solid: Vec<bool> = Vec::with_capacity(width * height);
+    for y in lo_y..=hi_y {
+        for x in lo_x..=hi_x {
+            solid.push(obstacles.blocks_point(point(x, y)));
+        }
+    }
+    solid[cell_of(0, 0)] = false;
+    solid[cell_of(goal_x, goal_y)] = false;
 
     const DIRS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
     let bend = 6.0;
@@ -359,8 +404,11 @@ pub fn maze(
             if nx < lo_x || nx > hi_x || ny < lo_y || ny > hi_y {
                 continue;
             }
+            if solid[cell_of(nx, ny)] {
+                continue;
+            }
             let (a, b) = (point(x, y), point(nx, ny));
-            if obstacles.hits_body(a, b) || obstacles.conflicts(a, b, net) {
+            if obstacles.conflicts(a, b, net) {
                 continue;
             }
             // Only a cell the path actually turns at reads as a connection;

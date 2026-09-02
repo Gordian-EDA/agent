@@ -110,7 +110,15 @@ struct Stub {
 
 /// Peel every wire chain attached to these symbols' pins back to the first
 /// point that holds something else.
-fn retract(sheet: &Sheet, moving: &HashSet<String>) -> (Vec<String>, Vec<Stub>) {
+/// What a retraction leaves behind: the wires to delete, the pieces of a cut
+/// wire to keep, and where each pin now has to reconnect.
+struct Retraction {
+    removed: Vec<String>,
+    kept: Vec<(Point2, Point2)>,
+    stubs: Vec<Stub>,
+}
+
+fn retract(sheet: &Sheet, moving: &HashSet<String>) -> Retraction {
     let own: HashMap<NodeKey, PinId> = sheet
         .pins
         .iter()
@@ -119,7 +127,26 @@ fn retract(sheet: &Sheet, moving: &HashSet<String>) -> (Vec<String>, Vec<Stub>) 
         .collect();
     let mut removed: HashSet<String> = HashSet::new();
     let mut taken: HashSet<usize> = HashSet::new();
+    let mut kept: Vec<(Point2, Point2)> = Vec::new();
     let mut stubs = Vec::new();
+    // A dot or a sheet pin part-way along a wire is a connection the wire is
+    // holding up, so the rubber band stops there and the far half stays drawn.
+    let tapped = |seg: &crate::sheet::WireSeg| {
+        sheet
+            .junctions
+            .iter()
+            .chain(&sheet.sheet_pins)
+            .map(point_of)
+            .find(|p| {
+                let inside =
+                    |v: f64, a: f64, b: f64| v > a.min(b) + geom::EPS && v < a.max(b) - geom::EPS;
+                if seg.horizontal() {
+                    (seg.a.y - p.y).abs() < geom::EPS && inside(p.x, seg.a.x, seg.b.x)
+                } else {
+                    (seg.a.x - p.x).abs() < geom::EPS && inside(p.y, seg.a.y, seg.b.y)
+                }
+            })
+    };
 
     for pin in sheet.pins.iter().filter(|p| moving.contains(&p.owner)) {
         let start = key(pin.at);
@@ -141,11 +168,12 @@ fn retract(sheet: &Sheet, moving: &HashSet<String>) -> (Vec<String>, Vec<Stub>) 
                 }
                 taken.insert(edge);
                 removed.insert(seg.uuid.clone());
-                let next = if key(seg.a) == node {
-                    key(seg.b)
-                } else {
-                    key(seg.a)
-                };
+                let far = if key(seg.a) == node { seg.b } else { seg.a };
+                if let Some(tap) = tapped(seg) {
+                    kept.push((tap, far));
+                    break Anchor::Fixed(tap);
+                }
+                let next = key(far);
                 if let Some(id) = own.get(&next) {
                     break Anchor::OwnPin(id.clone());
                 }
@@ -173,7 +201,11 @@ fn retract(sheet: &Sheet, moving: &HashSet<String>) -> (Vec<String>, Vec<Stub>) 
             });
         }
     }
-    (removed.into_iter().collect(), stubs)
+    Retraction {
+        removed: removed.into_iter().collect(),
+        kept,
+        stubs,
+    }
 }
 
 /// Single-pin symbols welded straight onto a moving pin — power flags, rail
@@ -250,10 +282,17 @@ pub fn drag_many(
         .filter(|p| moving.contains(&p.owner))
         .map(|p| ((p.owner.clone(), p.number.clone()), p.at))
         .collect();
-    let (removed, stubs) = retract(before, &moving);
+    let Retraction {
+        removed,
+        kept,
+        stubs,
+    } = retract(before, &moving);
     let glued = glued_symbols(before, &moving);
 
     doc.remove_drawing(&removed);
+    for (a, b) in &kept {
+        doc.add_wire(*a, *b);
+    }
     for (uuid, to) in &targets {
         doc.move_symbol(uuid, to.at.x, to.at.y)
             .and_then(|()| doc.set_symbol_orientation(uuid, to.rot, to.mirror))
@@ -299,6 +338,8 @@ pub fn drag_many(
             .flat_map(|w| [key(w.a), key(w.b)]),
     );
     touched.extend(old_pins.values().map(|at| key(*at)));
+    // A dot the retraction left sitting on nothing has to be reconsidered too.
+    touched.extend(before.junctions.iter().copied());
 
     let mut after = Sheet::of(doc);
     let (added, dropped) = settle_junctions(doc, &after, &touched);
@@ -647,7 +688,7 @@ fn best_route(
     // worth its cost — that is exactly the case a human solves with a detour and
     // this crate used to solve with a label.
     if best.is_none() {
-        for (target, _) in candidates.iter().take(4) {
+        for (target, _) in candidates.iter().take(2) {
             let Some(path) = route::maze(obstacles, from, out, *target, net) else {
                 continue;
             };
