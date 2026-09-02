@@ -71,8 +71,7 @@ impl WorkflowPhase {
                 "pcb_workflow_phase",
                 phase,
                 parts,
-                nets,
-                elapsed_ms = tracing::field::Empty
+                nets
             ),
             started: std::time::Instant::now(),
         }
@@ -95,8 +94,7 @@ impl Drop for WorkflowPhase {
             .elapsed()
             .as_millis()
             .min(u128::from(u64::MAX)) as u64;
-        self.span.record("elapsed_ms", elapsed_ms);
-        tracing::info!(parent: &self.span, "PCB workflow phase finished");
+        tracing::info!(parent: &self.span, elapsed_ms, "PCB workflow phase finished");
     }
 }
 

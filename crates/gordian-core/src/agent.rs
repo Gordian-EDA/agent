@@ -1050,8 +1050,7 @@ impl<P: Provider> Agent<P> {
                     "tool",
                     name = %call.fn_name,
                     seq,
-                    args_digest,
-                    elapsed_ms = tracing::field::Empty
+                    args_digest
                 );
                 tracing::debug!(parent: &span, args = %call.fn_arguments, "tool payload");
                 schematic_mutator_issued |= is_schematic_mutator(&call.fn_name);
@@ -1199,9 +1198,9 @@ impl<P: Provider> Agent<P> {
                 tracing::debug!(parent: &span, content = %content, "tool result payload");
                 let elapsed_ms = millis(started.elapsed());
                 let revision = result.get("revision").and_then(serde_json::Value::as_u64);
-                span.record("elapsed_ms", elapsed_ms);
                 tracing::info!(
                     parent: &span,
+                    elapsed_ms,
                     revision,
                     "tool finished"
                 );
@@ -1540,8 +1539,7 @@ impl<P: Provider> Agent<P> {
             "tool",
             name,
             seq,
-            args_digest,
-            elapsed_ms = tracing::field::Empty
+            args_digest
         );
         let outcome = into_outcome(
             run_blocking(&self.runtime, name, input.clone())
@@ -1560,8 +1558,7 @@ impl<P: Provider> Agent<P> {
         let parsed = parse_or_null(&content);
         let summary = tool_summary(name, &input, &parsed);
         let elapsed_ms = millis(started.elapsed());
-        span.record("elapsed_ms", elapsed_ms);
-        tracing::info!(parent: &span, "tool finished");
+        tracing::info!(parent: &span, elapsed_ms, "tool finished");
         emit_result_diagnostic(events, name, &parsed);
         emit(
             events,
