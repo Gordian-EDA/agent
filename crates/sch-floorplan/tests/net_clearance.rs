@@ -4,8 +4,10 @@
 //! realised writer, with no kicad netlist round-trip, so a regression is a failing unit
 //! test rather than a refused tool call a whole engine-run later.
 //!
-//! Runs over every `place-parts` fixture in the validation corpus, under both placement
-//! engines. SKIPs without KiCAD.
+//! Runs over every `place-parts` fixture in the validation corpus under the SPINE engine —
+//! the one the agent places with, and the one `floorplan_netlist` (which asserts the same
+//! invariant for free on its own anneal emits) does not exercise. Between the two, both
+//! engines are covered once each. SKIPs without KiCAD.
 
 use std::path::Path;
 
@@ -35,20 +37,8 @@ fn fixtures() -> Vec<String> {
     out
 }
 
-fn engines() -> Vec<(&'static str, Box<dyn PlacementEngine>)> {
-    vec![
-        ("anneal", Box::new(anneal_place::Anneal)),
-        ("spine", Box::new(spine_place::SpinePlace)),
-    ]
-}
-
-/// Realise `name` under `engine` and report every point two nets share.
-fn shorts_of(
-    env: &KicadInstallation,
-    provider: &SymbolTable,
-    name: &str,
-    engine: Box<dyn PlacementEngine>,
-) -> Vec<String> {
+/// Realise `name` and report every point two nets share.
+fn shorts_of(env: &KicadInstallation, provider: &SymbolTable, name: &str) -> Vec<String> {
     let src = std::fs::read_to_string(corpus().join(format!("{name}.place-parts.json"))).unwrap();
     let input: sch_check::PlacePartsInput = serde_json::from_str(&src).unwrap();
     let (design, diags, _) = sch_check::into_design(&input, provider, &Default::default());
@@ -58,6 +48,7 @@ fn shorts_of(
         .clone()
         .map(sch_check::Intent::into_layout_ir)
         .unwrap_or_else(|| floorplan::baseline_ir(&design));
+    let engine: Box<dyn PlacementEngine> = Box::new(spine_place::SpinePlace);
     floorplan::emit_strategy(env, &design, engine, Some(ir))
         .unwrap_or_else(|e| panic!("{name}: {e}"))
         .net_shorts
@@ -83,11 +74,9 @@ fn realised_corpus_sheets_never_share_a_point_between_two_nets() {
         if !only.is_empty() && !only.contains(&name.as_str()) {
             continue;
         }
-        for (engine_name, engine) in engines() {
-            let found = shorts_of(&env, &provider, &name, engine);
-            if !found.is_empty() {
-                offenders.push(format!("{name}/{engine_name}: {found:#?}"));
-            }
+        let found = shorts_of(&env, &provider, &name);
+        if !found.is_empty() {
+            offenders.push(format!("{name}: {found:#?}"));
         }
     }
     assert!(

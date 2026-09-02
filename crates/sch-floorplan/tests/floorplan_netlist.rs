@@ -226,6 +226,15 @@ fn validate_fixture(
         let out = floorplan::emit_strategy(env, &design, engine, Some(ir))
             .unwrap_or_else(|e| panic!("{name}: {e}"));
 
+        // The realiser's own occupancy invariant, read off the finished sheet before the
+        // kicad round-trip: no point may carry two nets. Free here (the emit already ran)
+        // and it names the coordinate, which the netlist comparison below cannot.
+        assert!(
+            out.net_shorts.is_empty(),
+            "{name}: the realised sheet shares points between nets: {:#?}",
+            out.net_shorts
+        );
+
         // Readability invariant (tier-1 only): the reference fixtures emit with ZERO
         // layout warnings (no symbol/text overlap, no value-text smeared onto a
         // neighbour, no wire through a body). This guards the IC-MPN placement, spine
