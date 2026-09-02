@@ -72,3 +72,28 @@ re-place." Quality first; time later via parallel subagents; schematic too.
 - W3 (Opus) Schematic bench/`add_parts` + netlist-drawn `arrange` + `place_parts` as convenience.
 - W4 (codex) Harness: quality-first rubric, multi-turn continuation, phase gallery, human-look judge.
 - Later: idiom tiles; parallel subagents per block for speed.
+
+## Review deltas (fresh-context Opus, 2026-09-02) — adopted
+- FIRST (W0): partial commit + progress on `place_parts` and `sync_board`. `place_parts` never rejects a
+  whole payload: malformed intent entries dropped with warnings; parts whose pins cannot resolve go to
+  the bench and are reported; `dangling` NEVER refuses (bulk.rs:287 contradicts prompts.rs:23); an
+  engine short (`refused_place`) commits connectivity and leaves the symbols on the bench instead of
+  discarding the netlist. `sync_board` syncs compatible parts and stages mismatched ones (sync.rs:359).
+- Delete the three PCB preconditions: `route_board` refusing on any DRC violation (route.rs:500) and
+  while parts are unplaced (route.rs:254); `place_board` refusing when nothing is unplaced (place.rs:2517).
+  Keep `place_board{refs|bbox}` / `route_board{nets|bbox}` signatures (no rename; whole-board = all).
+- Staging = the existing seed row (snapshot.rs:79) + `staged_reason`; staged parts excluded from DRC and
+  gerbers; `check_board` reports `staged: n` as progress. No second `gordian:staged` property.
+- Ratsnest shape, one for `get_board{net}` and `route_board`: `{net, from:{ref,pad,x,y,layer}, to:{…},
+  status: open|routed|blocked, blocker?:{kind: pad|track|via|zone|courtyard, owner_ref, net, layer, at,
+  gap_mm, need_mm}, escapes:[…]}` built on diagnose.rs unrouted_report/obstruction_between.
+- Locks = KiCAD native `locked` + `locked_reason: mechanical|agent|user` (revocable).
+- Revisions carry `{id, tool, refs_touched, label}`; `checkpoint{label}`; every mutator accepts
+  `expect_revision` (optimistic concurrency) → parallel subagents later; `reserve_refs{prefix,count}`;
+  each block gets its own bench rectangle; no tool may depend on in-process session memory.
+- Bench (schematic) = reserved rectangle + `gordian:bench=1`; excluded from check/critic/render; bench
+  pins carry net labels; `export_fab`/done FAIL while non-empty.
+- Workflow: pour GND + fan out vias EARLY (phase 3/4, not last); add explicit layer-count choice and
+  header/GPIO pin-swap back into the schematic as phase-4 levers (the 2×20-header + QFN board fails at
+  the QFN escape otherwise; `escape_bottleneck` already detects it).
+- Cut: `place_parts_pcb` rename; idiom tiles deferred until the first typesetter is honest.
