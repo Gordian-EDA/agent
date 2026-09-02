@@ -21,7 +21,7 @@
 //!   incremental application.
 //! - [`copper`] — copper retraction shared by the board mutators.
 //! - [`rules`] — the design rules the board's own footprints permit.
-//! - [`diagnose`] — actionable payloads for a refused route.
+//! - [`diagnose`] — violations and obstructions in terms a caller can act on.
 //! - [`locks`] — `lock_parts` / `unlock_parts`: the poses no helper moves.
 //! - [`staging`] — the seed row read back as board state: staged, placed, locked.
 //! - [`intent`] — board intent (edges, proximity, groups, zones) → placement
@@ -33,7 +33,7 @@
 //! - [`sizing`] — how big a board its own parts require.
 //! - [`place`] — `get_board`, saved snapshot→`PlacementView`, and `place_board`.
 //! - [`route`] — `route_board` copper write-back + triage.
-//! - [`export`] — `check_board`.
+//! - [`export`] — `check_board`: DRC plus the board's progress.
 //! - [`fab`] — `export_fab`: bundle a routed board into Gerbers/drill/pos/BOM.
 //! - [`render`] — `render_board`.
 //! - [`interactive`] — file-backed board editing (`move_parts`, `route_track`,

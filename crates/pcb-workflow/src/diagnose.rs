@@ -1,11 +1,12 @@
-//! Turning a refused route into something a caller can act on.
+//! Turning a board's defects into something a caller can act on.
 //!
 //! The strict lint already knows everything about a violation — the rule, the
-//! nets, the measured gap against what the board required, and where it is. The
-//! refusal used to publish only a count, so a caller could do nothing but retry
-//! blind. [`route_refusal`] renders the violations themselves: each one named,
+//! nets, the measured gap against what the board required, and where it is.
+//! [`violations_json`] renders those violations themselves: each one named,
 //! attributed to the pads it touches, located in mm, and paired with the fix its
-//! class implies.
+//! class implies. [`obstruction_between`] answers the other half — what stands
+//! between two pads the router could not join — which is what the ratsnest
+//! reports as a blocker.
 
 use std::collections::{BTreeMap, BTreeSet};
 
