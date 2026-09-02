@@ -398,6 +398,32 @@ def severity_counts(report, prefix):
     }
 
 
+# Board tools whose call the flow is measured in. `get_board` is a pure query
+# and does not count against a flow's budget.
+BOARD_TOOLS = {
+    "sync_board", "place_board", "route_board", "check_board", "export_fab",
+    "move_parts", "route_track", "delete_copper", "set_net_width",
+    "update_board_outline", "render_board", "open_board",
+}
+
+
+def transcript_facts(artifacts):
+    """What the agent actually did, read from its own event stream.
+
+    A board that ends DRC-clean can still have been reached through a dozen
+    refused calls and three outline guesses. A rubric can only say so if the
+    calls themselves are measured, so every `tool ->` and every refused
+    `tool <-` becomes a fact."""
+    path = artifacts / "agent.stderr.txt"
+    text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+    calls = re.findall(r"^\s*tool -> (\S+)", text, re.M)
+    return {
+        "tool_calls": calls,
+        "board_tool_calls": [name for name in calls if name in BOARD_TOOLS],
+        "refused_tools": re.findall(r"^\s*tool <- (\S+): error", text, re.M),
+    }
+
+
 def deterministic_facts(project, before_project, artifacts, agent_result):
     schematic = first_schematic(project)
     board = next(iter(sorted(project.glob("*.kicad_pcb"))), None)
@@ -419,6 +445,7 @@ def deterministic_facts(project, before_project, artifacts, agent_result):
         **severity_counts(drc, "drc"),
         "unconnected_items": len(unconnected),
         "fab_files": fab,
+        **transcript_facts(artifacts),
         **sch,
     }
     return facts, detail

@@ -518,7 +518,14 @@ fn route_live_board(
     }))
 }
 
-fn remove_existing_copper_obstacles(problem: &mut RoutingView) {
+/// Drop the board's existing copper from the obstacle list.
+///
+/// KiCAD hands existing tracks and vias over as axis-aligned BOUNDING BOXES, so
+/// a single diagonal trace presents as a rectangle wide enough to swallow a
+/// foreign pad. That is fine as a router keep-out and a lie to anything that
+/// reasons about connectivity — the true geometry is in the solution's own
+/// traces and vias, which is what a caller should lint against.
+pub(crate) fn remove_existing_copper_obstacles(problem: &mut RoutingView) {
     problem
         .obstacles
         .retain(|obstacle| !matches!(obstacle.kind.as_str(), "track" | "via"));

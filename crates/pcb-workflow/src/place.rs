@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use geom::Rect;
+use geom::{Point2, Rect};
 use kicad_footprint::{Footprint, FootprintId, FootprintPad, PadTechnology};
 use kicad_ipc::FootprintMove;
 use pcb_model::{LayerRef, ViaSpan};
@@ -37,7 +37,7 @@ pub(super) fn part_from_footprint_layers(
         .filter(|pad| has_copper(pad))
         .map(|pad| part_pad(pad, net_map, layer_count))
         .collect();
-    let (courtyard_w, courtyard_h) = enclosing_courtyard(footprint);
+    let (courtyard_w, courtyard_h) = crate::sizing::placement_extent(footprint);
     Part {
         reference: reference.to_owned(),
         courtyard_w,
@@ -98,48 +98,6 @@ fn pad_layers(pad: &FootprintPad, layer_count: u32) -> Vec<LayerRef> {
     }
 }
 
-fn enclosing_courtyard(footprint: &Footprint) -> (f64, f64) {
-    let (mut hw, mut hh) = abs_half(&footprint.courtyard);
-    if let Some(pad_bbox) = pad_bbox(&footprint.pads) {
-        let (pw, ph) = abs_half(&pad_bbox);
-        hw = hw.max(pw);
-        hh = hh.max(ph);
-    }
-    (hw * 2.0, hh * 2.0)
-}
-
-fn abs_half(b: &Rect) -> (f64, f64) {
-    (
-        b.min_x.abs().max(b.max_x.abs()),
-        b.min_y.abs().max(b.max_y.abs()),
-    )
-}
-
-fn pad_bbox(pads: &[FootprintPad]) -> Option<Rect> {
-    let mut it = pads.iter();
-    let first = it.next()?;
-    let mut bbox = pad_aabb(first);
-    for pad in it {
-        let p = pad_aabb(pad);
-        bbox.min_x = bbox.min_x.min(p.min_x);
-        bbox.min_y = bbox.min_y.min(p.min_y);
-        bbox.max_x = bbox.max_x.max(p.max_x);
-        bbox.max_y = bbox.max_y.max(p.max_y);
-    }
-    Some(bbox)
-}
-
-fn pad_aabb(pad: &FootprintPad) -> Rect {
-    let half =
-        geom::Point2::new(pad.size.x / 2.0, pad.size.y / 2.0).rotated_half_extents(pad.rotation);
-    Rect::new(
-        pad.at.x - half.x,
-        pad.at.y - half.y,
-        pad.at.x + half.x,
-        pad.at.y + half.y,
-    )
-}
-
 // ── get_board ────────────────────────────────────────────────────────────────
 
 pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -154,7 +112,10 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .map(|(name, &pins)| json!({ "name": name, "pins": pins }))
         .collect();
 
-    let placed = !kicad_board::is_seed_imported_board(&board.imported);
+    // Placed means every part has been laid out. A board can be half laid out —
+    // sync adds a part and it waits in the seed row — so the list is the fact
+    // and the flag is derived from it.
+    let unplaced = kicad_board::seed_row_references(&board.imported);
     let routed = !board.copper.traces.is_empty() || !board.copper.vias.is_empty();
     let parts: Vec<Value> = board
         .imported
@@ -216,7 +177,8 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "net_count": net_pins.len(),
             "nets": nets,
             "keepout_count": board.imported.keepout_count,
-            "placed": placed,
+            "placed": unplaced.is_empty(),
+            "unplaced": unplaced,
             "routed": routed,
         },
     }))
@@ -406,7 +368,7 @@ fn snapshot_net_pin_counts(board: &IpcBoardSnapshot) -> BTreeMap<String, usize> 
 pub(super) fn courtyard_extents(
     board: &IpcBoardSnapshot,
     ctx: &AgentRuntime,
-) -> std::collections::BTreeMap<String, (f64, f64)> {
+) -> std::collections::BTreeMap<String, Rect> {
     // An unreadable catalog leaves the map empty and the caller falls back to
     // pad extents — a weaker guard, but never a wrong one.
     let Ok(catalog) = ctx.footprint_catalog() else {
@@ -419,14 +381,55 @@ pub(super) fn courtyard_extents(
         .filter_map(|part| {
             let id = FootprintId::parse(&part.lib_id).ok()?;
             let footprint = catalog.footprint(&id).ok()?;
-            let (w, h) = enclosing_courtyard(&footprint);
-            let swapped = part.rotation.rem_euclid(180) == 90;
-            Some((
-                part.reference.clone(),
-                if swapped { (h, w) } else { (w, h) },
-            ))
+            Some((part.reference.clone(), placement_envelope(&footprint)))
         })
         .collect()
+}
+
+/// The footprint's courtyard in FOOTPRINT-LOCAL coordinates, widened to hold
+/// its pads — what KiCAD's `courtyards_overlap` rule checks, as a rectangle
+/// relative to the footprint origin.
+///
+/// The rectangle is deliberately asymmetric. A connector's origin is pin 1, not
+/// its body centre, so the symmetric `origin ± max(|min|, |max|)` box is up to
+/// twice too large on the empty side — phantom courtyard that makes a move
+/// which really does clear its neighbour come back refused.
+pub(super) fn placement_envelope(footprint: &Footprint) -> Rect {
+    let courtyard = footprint.courtyard;
+    match crate::sizing::pad_bbox(&footprint.pads) {
+        None => courtyard,
+        Some(pads) => Rect::new(
+            courtyard.min_x.min(pads.min_x),
+            courtyard.min_y.min(pads.min_y),
+            courtyard.max_x.max(pads.max_x),
+            courtyard.max_y.max(pads.max_y),
+        ),
+    }
+}
+
+/// A footprint-local envelope at a part's pose: rotated by its angle, mirrored
+/// in x when the part sits on the back (KiCAD flips a footprint about the y
+/// axis), and translated to the part's origin.
+pub(super) fn courtyard_at(local: Rect, at: Point2, rotation: f64, back: bool) -> Rect {
+    let mirrored = if back {
+        Rect::new(-local.max_x, local.min_y, -local.min_x, local.max_y)
+    } else {
+        local
+    };
+    let corners = [
+        Point2::new(mirrored.min_x, mirrored.min_y),
+        Point2::new(mirrored.max_x, mirrored.min_y),
+        Point2::new(mirrored.max_x, mirrored.max_y),
+        Point2::new(mirrored.min_x, mirrored.max_y),
+    ]
+    .map(|corner| corner.rotate(rotation));
+    let rotated = Rect::bounding(&corners).unwrap_or(mirrored);
+    Rect::new(
+        at.x + rotated.min_x,
+        at.y + rotated.min_y,
+        at.x + rotated.max_x,
+        at.y + rotated.max_y,
+    )
 }
 
 pub(super) fn place_problem_from_snapshot(
@@ -1922,16 +1925,14 @@ fn check_references<'a>(
 /// It is only a refusal when there is nothing left to do: a board with parts
 /// still in the seed row has work outstanding, and `place_board()` does that
 /// work (as a subset placement) instead of complaining.
-fn already_placed_error(replace: bool) -> Option<Value> {
-    (!replace).then(|| {
-        json!({
-            "error": "this board is already placed; every part has a position",
-            "code": "board_already_placed",
-            "placement_applied": false,
-            "note": "Nothing was moved. Adjust individual parts with move_parts, name the ones \
-                     to re-place with {\"refs\": [...]}, or pass {\"replace\": true} to \
-                     deliberately re-place the whole board and lose the current layout.",
-        })
+fn already_placed_error() -> Value {
+    json!({
+        "error": "this board is already placed; every part has a position",
+        "code": "board_already_placed",
+        "placement_applied": false,
+        "note": "Nothing was moved. Adjust individual parts with move_parts, name the ones to \
+                 re-place with {\"refs\": [...]}, or pass {\"replace\": true} to deliberately \
+                 re-place the whole board and lose the current layout.",
     })
 }
 
@@ -1971,15 +1972,9 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let whole_board = refs.is_none() && unplaced.len() == board.imported.parts.len();
     let refs = match refs {
         Some(refs) => Some(refs),
-        None if whole_board => None,
-        None if unplaced.is_empty() => {
-            if let Some(error) = already_placed_error(replace) {
-                return Ok(error);
-            }
-            None
-        }
-        None if replace => None,
-        None => Some(unplaced.clone()),
+        None if whole_board || replace => None,
+        None if unplaced.is_empty() => return Ok(already_placed_error()),
+        None => Some(unplaced),
     };
 
     let mut problem = match place_problem_from_snapshot(&board, ctx) {
@@ -3916,5 +3911,30 @@ mod tests {
             pcb_place::courtyard_margin(problem.clearance),
             &auto_positions,
         ));
+    }
+
+    /// A connector's origin is pin 1, not its body centre. The envelope must
+    /// keep that asymmetry: the symmetric form doubled the short side and
+    /// refused moves that really did clear.
+    #[test]
+    fn an_off_centre_courtyard_keeps_its_asymmetry() {
+        let local = Rect::new(-1.8, -1.8, 1.8, 4.4);
+        let at = Point2::new(10.0, 10.0);
+
+        let unrotated = courtyard_at(local, at, 0.0, false);
+        assert_eq!(unrotated, Rect::new(8.2, 8.2, 11.8, 14.4));
+        assert!(
+            (unrotated.height() - 6.2).abs() < 1e-9,
+            "a symmetric box would make this 8.8 mm tall: {unrotated:?}"
+        );
+
+        // A quarter turn moves the long side onto the other axis, origin and all.
+        let turned = courtyard_at(local, at, 90.0, false);
+        assert!((turned.width() - 6.2).abs() < 1e-9, "{turned:?}");
+        assert!((turned.height() - 3.6).abs() < 1e-9, "{turned:?}");
+
+        // A back-side part is mirrored in x about its origin.
+        let flipped = courtyard_at(Rect::new(-1.0, -1.0, 4.0, 1.0), at, 0.0, true);
+        assert_eq!(flipped, Rect::new(6.0, 9.0, 11.0, 11.0));
     }
 }

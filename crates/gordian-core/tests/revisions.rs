@@ -1,5 +1,7 @@
 //! Unified revision integration through the public tool dispatcher.
 
+mod common;
+
 use gordian_core::AgentRuntime;
 use gordian_core::tools::run_tool;
 use kicad_board::BoardDoc;
@@ -28,6 +30,7 @@ fn position(ctx: &AgentRuntime, reference: &str) -> ([f64; 2], f64) {
 
 #[test]
 fn undo_and_history_span_schematic_and_board_mutators() {
+    let _kicad = common::KicadLock::acquire();
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;

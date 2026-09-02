@@ -45,7 +45,13 @@ impl Defects {
     /// Lint a board snapshot and split its findings into the three kinds the
     /// guard reasons about.
     pub(crate) fn of(board: &IpcBoardSnapshot) -> (Self, Vec<Fault>) {
-        let violations = pcb_drc::lint::lint(&board.problem, &board.copper);
+        // The board's own copper appears twice in a snapshot: once as true
+        // geometry in `copper`, and once as the bounding boxes KiCAD hands over
+        // as router keep-outs. Lint the geometry; a diagonal trace's bounding
+        // box swallows foreign pads and would read as a short that is not there.
+        let mut problem = board.problem.clone();
+        crate::route::remove_existing_copper_obstacles(&mut problem);
+        let violations = pcb_drc::lint::lint(&problem, &board.copper);
         let mut defects = Defects::default();
         let mut geometry = Vec::new();
         for violation in &violations {
@@ -63,7 +69,7 @@ impl Defects {
                 other => geometry.push(other.clone()),
             }
         }
-        let explained = faults(&geometry, &board.problem, &board.imported.parts);
+        let explained = faults(&geometry, &problem, &board.imported.parts);
         for fault in &explained {
             *defects.faults.entry(fault.key.clone()).or_default() += 1;
         }
@@ -149,6 +155,11 @@ impl Guard {
                 "revision": revision,
             })
         })?;
+        // Read the baseline from a fresh session. The save above put the live
+        // board on disk, so the two agree — but a cached pcbnew can still be
+        // serving an older document, and a baseline from one board compared
+        // against a check on another invents defects the edit never caused.
+        ctx.close_kicad_session();
         let before = crate::active_board(ctx)
             .ok()
             .map(|board| Defects::of(&board).0);

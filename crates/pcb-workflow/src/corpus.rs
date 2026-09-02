@@ -80,15 +80,6 @@ pub struct CorpusKeepout {
     pub layers: Vec<LayerRef>,
 }
 
-impl CorpusBoard {
-    pub fn footprint_of(&self, reference: &str) -> &str {
-        self.seed_parts
-            .iter()
-            .find(|p| p.reference == reference)
-            .map_or("", |p| p.footprint.as_str())
-    }
-}
-
 pub fn load_corpus_board(
     path: &Path,
     catalog: &FootprintCatalog,
