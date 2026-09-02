@@ -136,19 +136,28 @@ pub fn unresolvable_footprints(
             let Some(footprint) = component.footprint.as_deref().filter(|f| !f.is_empty()) else {
                 continue;
             };
-            let (malformed, problem, suggestions) = match FootprintId::parse(footprint) {
-                Err(e) => (true, e.to_string(), catalog.suggest_text(footprint)),
+            let (malformed, problem) = match FootprintId::parse(footprint) {
+                Err(_) => (true, catalog.suggest(footprint)),
                 Ok(id) => match catalog.footprint(&id) {
                     Ok(_) => continue,
-                    Err(e) => (false, e.to_string(), catalog.suggest(&id)),
+                    Err(e) if e.is_not_found() => (false, catalog.suggest(footprint)),
+                    Err(e) => {
+                        out.push(UnresolvableFootprint {
+                            malformed: false,
+                            message: format!(
+                                "{reference}: footprint `{footprint}` could not be read: {e}"
+                            ),
+                        });
+                        continue;
+                    }
                 },
             };
             out.push(UnresolvableFootprint {
                 malformed,
                 message: format!(
-                    "{reference}: footprint `{footprint}` {problem}{} — search_footprints for a \
+                    "{reference}: {} — search_footprints for a \
                      real `Library:Name`, then assign_footprints",
-                    crate::tool::footprint_suggestion_clause(&suggestions),
+                    kicad_footprint::unknown_footprint_message(footprint, &problem),
                 ),
             });
         }

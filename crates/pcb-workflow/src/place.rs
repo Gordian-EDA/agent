@@ -2127,7 +2127,12 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             })
             .collect();
         if !moves.is_empty() {
-            let opened = match Guard::open(ctx, "place_board") {
+            let opened = match Guard::open(
+                ctx,
+                "place_board",
+                "Place board footprints",
+                &[ctx.pcb_path()],
+            ) {
                 Ok(opened) => opened,
                 Err(refusal) => return Ok(refusal),
             };

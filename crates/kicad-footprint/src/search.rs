@@ -87,10 +87,6 @@ pub(crate) fn normalize(s: &str) -> String {
     out
 }
 
-/// Backfilled did-you-mean candidates farther than this normalized distance
-/// are noise, not suggestions, and are dropped.
-const SUGGEST_MAX_BACKFILL_DISTANCE: f64 = 0.6;
-
 /// Rank `items` against an already-normalized `needle`, returning the indices
 /// of the best `n`, best first.
 ///
@@ -120,46 +116,103 @@ pub(crate) fn rank<T>(
 /// Rank `items` as did-you-mean suggestions for an unresolved footprint id,
 /// returning the indices of the best `n`, best first.
 ///
-/// Each item scores the better of its full `Lib:Name` text against
-/// `full_needle` and its bare name against `name_needle`, so a right name in
-/// a wrong library still ranks. Non-subsequence candidates backfill by the
-/// best of edit-distance and token-overlap closeness — KiCAD names are
-/// dimension-token heavy, and token overlap keeps `LGA-8_2.5x2.5mm_P0.65mm`
-/// variants together where raw edit distance drifts — but only within
-/// [`SUGGEST_MAX_BACKFILL_DISTANCE`], so a hopeless id yields nothing rather
-/// than arbitrary nearest neighbors.
+/// The most specific query variant that matches anything wins. Its matches are
+/// ranked by `SkimMatcherV2` score, allowing an invented library or package
+/// word to be skipped without introducing a second ranking algorithm. Short
+/// trailing typo prefixes are included as matcher inputs.
 pub(crate) fn rank_suggestions<T>(
     items: &[T],
     full_needle: &str,
-    name_needle: &str,
+    name_needle: Option<&str>,
     n: usize,
     full: impl Fn(&T) -> &str,
     name: impl Fn(&T) -> &str,
     tiebreak: impl Fn(&T) -> &str,
 ) -> Vec<usize> {
-    rank_by(
-        items,
-        n,
-        |m, t| {
-            let by_full = m.fuzzy_match(full(t), full_needle);
-            let by_name = m.fuzzy_match(name(t), name_needle);
-            by_full.max(by_name)
-        },
-        |t| {
-            let lev = |a: &str, b: &str| 1.0 - strsim::normalized_levenshtein(a, b);
-            let d = [
-                lev(full_needle, full(t)),
-                lev(name_needle, name(t)),
-                token_distance(full_needle, full(t)),
-                token_distance(name_needle, name(t)),
-            ]
-            .into_iter()
-            .fold(f64::INFINITY, f64::min);
-            (d <= SUGGEST_MAX_BACKFILL_DISTANCE).then_some(d)
-        },
-        |t| full(t).len(),
-        tiebreak,
-    )
+    let queries = suggestion_queries(full_needle, name_needle);
+    if queries.is_empty() {
+        return Vec::new();
+    }
+    let matcher = SkimMatcherV2::default();
+    for query in queries {
+        let mut scored: Vec<(i64, usize)> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                matcher
+                    .fuzzy_match(full(item), &query)
+                    .max(matcher.fuzzy_match(name(item), &query))
+                    .map(|score| (score, index))
+            })
+            .collect();
+        if scored.is_empty() {
+            continue;
+        }
+        scored.sort_by(|&(left_score, left), &(right_score, right)| {
+            right_score
+                .cmp(&left_score)
+                .then_with(|| full(&items[left]).len().cmp(&full(&items[right]).len()))
+                .then_with(|| tiebreak(&items[left]).cmp(tiebreak(&items[right])))
+        });
+        return scored.into_iter().take(n).map(|(_, index)| index).collect();
+    }
+    Vec::new()
+}
+
+fn suggestion_queries(full_needle: &str, name_needle: Option<&str>) -> Vec<String> {
+    const MIN_QUERY_CHARS: usize = 4;
+    const MAX_TYPO_TRIM: usize = 3;
+
+    let mut seen = HashSet::new();
+    let mut queries = Vec::new();
+    for direct in name_needle.into_iter().flat_map(|name| [full_needle, name]) {
+        insert_trimmed_queries(
+            &mut queries,
+            &mut seen,
+            direct,
+            MAX_TYPO_TRIM,
+            MIN_QUERY_CHARS,
+        );
+    }
+    let tokens: Vec<&str> = full_needle.split_whitespace().collect();
+    for start in 1..tokens.len() {
+        insert_trimmed_queries(
+            &mut queries,
+            &mut seen,
+            &tokens[start..].join(" "),
+            MAX_TYPO_TRIM,
+            MIN_QUERY_CHARS,
+        );
+    }
+    for end in (1..=tokens.len()).rev() {
+        insert_trimmed_queries(
+            &mut queries,
+            &mut seen,
+            &tokens[..end].join(" "),
+            MAX_TYPO_TRIM,
+            MIN_QUERY_CHARS,
+        );
+    }
+    queries
+}
+
+fn insert_trimmed_queries(
+    queries: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    query: &str,
+    max_trim: usize,
+    min_chars: usize,
+) {
+    for trim in 0..=max_trim {
+        let keep = query.chars().count().saturating_sub(trim);
+        if keep < min_chars {
+            break;
+        }
+        let query: String = query.chars().take(keep).collect();
+        if seen.insert(query.clone()) {
+            queries.push(query);
+        }
+    }
 }
 
 /// The shared ranking core: fzf subsequence scores first (higher is better,
@@ -205,25 +258,6 @@ fn rank_by<T>(
     });
     chosen.extend(rest.into_iter().take(n - chosen.len()).map(|(_, i)| i));
     chosen
-}
-
-/// `1 −` the Dice coefficient over the whitespace tokens of two normalized
-/// strings: 0.0 for identical token multisets, 1.0 for disjoint ones.
-fn token_distance(a: &str, b: &str) -> f64 {
-    let ta: Vec<&str> = a.split_whitespace().collect();
-    let mut tb: Vec<&str> = b.split_whitespace().collect();
-    if ta.is_empty() || tb.is_empty() {
-        return 1.0;
-    }
-    let total = ta.len() + tb.len();
-    let mut matched = 0usize;
-    for t in ta {
-        if let Some(pos) = tb.iter().position(|&x| x == t) {
-            tb.swap_remove(pos);
-            matched += 1;
-        }
-    }
-    1.0 - (2.0 * matched as f64) / total as f64
 }
 
 /// The fuzzy score `needle` earns against `text`, if it matches as a

@@ -13,7 +13,7 @@
 //! footprints unless the caller names `bounds`.
 //!
 //! Every run that writes goes through [`crate::board::guard`] like every other
-//! board mutator: snapshot, edit, re-check, then write or roll back.
+//! board mutator: capture a revision, edit, re-check, then write or roll back.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 
 use geom::Rect;
 use gordian_runtime::AgentRuntime;
+use gordian_runtime::revisions::RevisionId;
 use kicad_board::{BoardDoc, BoardFootprint};
 use kicad_footprint::FootprintCatalog;
 use pcb_model::Point2;
@@ -354,7 +355,7 @@ fn seed_parts(parts: &[SchematicPart]) -> Vec<SeedPart> {
 /// Create the board a project does not have yet. Every part is "added", and the
 /// outline is sized from the parts' own courtyards unless the caller names one.
 fn create_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> Value {
-    seed_board(parts, input, None, ctx)
+    seed_board(parts, input, None, None, ctx)
 }
 
 /// Synthesize the board file. `base` is the rule set the caller's `rules`
@@ -364,6 +365,7 @@ fn seed_board(
     parts: &[SchematicPart],
     input: &Value,
     base: Option<SeedRules>,
+    revision: Option<RevisionId>,
     ctx: &AgentRuntime,
 ) -> Value {
     let catalog = match ctx.footprint_catalog() {
@@ -428,9 +430,28 @@ fn seed_board(
         return out;
     }
     let outline = plan.bounds;
+    let revision = match revision.map_or_else(
+        || {
+            ctx.revisions().capture(
+                "sync_board",
+                if rebuilding {
+                    "Rebuild the project board"
+                } else {
+                    "Create the project board"
+                },
+                &[ctx.pcb_path()],
+            )
+        },
+        Ok,
+    ) {
+        Ok(revision) => revision,
+        Err(error) => {
+            return json!({ "error": format!("could not capture the board before sync: {error}") });
+        }
+    };
     let seeded = match write_seed_plan(plan, ctx) {
         Ok(seeded) => seeded,
-        Err(e) => return json!({ "error": e }),
+        Err(e) => return json!({ "error": e, "revision": revision }),
     };
     let mut out = json!({
         "ok": true,
@@ -451,6 +472,7 @@ fn seed_board(
         },
         "rules_from_footprints": seeded.rule_notes,
         "path": ctx.pcb_path().display().to_string(),
+        "revision": revision,
         "next_tool": "place_board",
         "note": "board created from the schematic — run place_board, then route_board, then check_board",
     });
@@ -550,16 +572,22 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
     }
     let delta = diff(parts, &doc.footprints());
     if delta.is_empty() {
-        return json!({
+        let result = json!({
             "ok": true,
             "delta": delta.to_json(),
             "changed": false,
             "note": "the board already matches the schematic; nothing was written. Do NOT run \
                      place_board on a board that is already placed — it would move every part.",
         });
+        return result;
     }
 
-    let gate = match Guard::open(ctx, "sync_board") {
+    let gate = match Guard::open(
+        ctx,
+        "sync_board",
+        "Synchronize the project board",
+        &[ctx.pcb_path()],
+    ) {
         Ok(gate) => gate,
         Err(refusal) => return refusal,
     };
@@ -639,13 +667,23 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
 ///
 /// Clearance, trace width, via size and layer count are the board's fabric, not
 /// its netlist: they cannot be patched into an existing document one node at a
-/// time, and copper routed under the old rules is not honest under the new ones.
 /// So a rules change re-synthesizes the board and restores the placement — the
 /// layout survives, the copper does not, and the model re-routes.
 fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> Value {
+    let revision = match ctx.revisions().capture(
+        "sync_board",
+        "Rebuild the project board",
+        &[ctx.pcb_path()],
+    ) {
+        Ok(revision) => revision,
+        Err(error) => {
+            return json!({ "error": format!("could not capture the board before sync: {error}") });
+        }
+    };
     if let Err(e) = ctx.kicad().save_if_open() {
         return json!({
             "error": format!("could not save the open KiCAD board before rebuilding it: {e}"),
+            "revision": revision,
         });
     }
     let before = match crate::active_board(ctx) {
@@ -680,7 +718,12 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
             rotation_deg: Some(fp.rotation),
         })
         .collect();
-    let gate = match Guard::open(ctx, "sync_board") {
+    let gate = match Guard::open(
+        ctx,
+        "sync_board",
+        "Rebuild the project board",
+        &[ctx.pcb_path()],
+    ) {
         Ok(gate) => gate,
         Err(refusal) => return refusal,
     };
@@ -697,7 +740,13 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
             max_y,
         });
     }
-    let mut result = seed_board(parts, &seed_input, Some(board_rules(&before)), ctx);
+    let mut result = seed_board(
+        parts,
+        &seed_input,
+        Some(board_rules(&before)),
+        Some(revision),
+        ctx,
+    );
     if result.get("ok").and_then(Value::as_bool) != Some(true) {
         return result;
     }

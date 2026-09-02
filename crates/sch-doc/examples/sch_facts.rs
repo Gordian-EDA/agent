@@ -27,7 +27,7 @@ fn main() {
 }
 
 /// Every `.kicad_sch` under `root`, sorted; `root` itself if it is one.
-/// Hidden directories are skipped: `.gordian/` holds undo snapshots and
+/// Hidden directories are skipped: `.gordian/` holds revision history and
 /// renders, not sheets of the design.
 fn sheet_paths(root: &Path) -> Vec<PathBuf> {
     if root.is_file() {

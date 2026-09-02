@@ -534,8 +534,8 @@ pub fn place_parts_input_schema() -> Value {
                         "decouple": {
                             "type": "object",
                             "description":
-                                "Capacitor value -> count. Expands into caps across this part's \
-                                 single VDD*/VCC* and VSS*/GND* nets.",
+                                "Capacitor value -> count. Uses this part's power-input pins and \
+                                 adds at least one cap per distinct supply net to its nearest ground.",
                             "additionalProperties": {"type": "integer", "minimum": 1}
                         }
                     }

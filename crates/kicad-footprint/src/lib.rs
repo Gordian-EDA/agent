@@ -39,3 +39,16 @@ pub use error::{Error, Result};
 pub use id::{FootprintId, LibraryId};
 pub use search::{FootprintSearchHit, SearchQuery};
 pub use types::{CourtyardSource, Footprint, FootprintPad, PadTechnology, PcbEdgeDatum};
+
+/// Format one unknown-footprint diagnostic from ranked catalog suggestions.
+pub fn unknown_footprint_message(text: &str, suggestions: &[FootprintId]) -> String {
+    if suggestions.is_empty() {
+        return format!("unknown footprint '{text}'");
+    }
+    let candidates = suggestions
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("unknown footprint '{text}'; did you mean {candidates}?")
+}

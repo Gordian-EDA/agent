@@ -126,7 +126,13 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let refs = report.placed.clone();
     let value = edit
-        .commit(json!(report), Allow::nothing().parts(refs).creating())
+        .commit(
+            ctx,
+            "place_parts",
+            "Place schematic parts",
+            json!(report),
+            Allow::nothing().parts(refs).creating(),
+        )
         .context("committing placed parts")?;
     if value.get("error").is_some() {
         return Ok(value);
@@ -159,7 +165,7 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         "refused"
     });
-    finish_arrangement(edit, report, ctx)
+    finish_arrangement(edit, report, ctx, "arrange")
 }
 
 pub(crate) fn rewire(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -170,17 +176,27 @@ pub(crate) fn rewire(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let selection = selection(&input)?;
     let mut edit = Edit::open(ctx)?;
     let report = sch_floorplan::live::rewire(ctx.env(), &mut edit.doc, &selection)?;
-    finish_arrangement(edit, report, ctx)
+    finish_arrangement(edit, report, ctx, "rewire")
 }
 
-fn finish_arrangement(edit: Edit, report: ArrangeReport, ctx: &AgentRuntime) -> Result<Value> {
+fn finish_arrangement(
+    edit: Edit,
+    report: ArrangeReport,
+    ctx: &AgentRuntime,
+    tool: &str,
+) -> Result<Value> {
     if !report.committed {
         return Ok(json!({
             "error": "refused: the solver's result changed connectivity; nothing was written",
             "report": report,
         }));
     }
-    let value = edit.commit(json!(report), Allow::nothing())?;
+    let summary = if tool == "arrange" {
+        "Arrange schematic symbols"
+    } else {
+        "Rewire schematic symbols"
+    };
+    let value = edit.commit(ctx, tool, summary, json!(report), Allow::nothing())?;
     if value.get("error").is_some() {
         return Ok(value);
     }

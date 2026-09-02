@@ -59,14 +59,19 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     };
 
-    // The guard saves any live session first, so the file edit lands on the
-    // latest state, and drops the session after a write so later tools reopen
-    // the updated board.
-    let gate = match Guard::open(ctx, "update_board_outline") {
+    // The guard captures the revision and saves any live session first, so the
+    // file edit lands on the latest state, and drops the session after a write
+    // so later tools reopen the updated board.
+    let path = ctx.pcb_path();
+    let gate = match Guard::open(
+        ctx,
+        "update_board_outline",
+        "Update the board outline",
+        std::slice::from_ref(&path),
+    ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
-    let path = ctx.pcb_path();
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("reading board {}", path.display()))?;
     let changed = !edge_cuts_match(&text, &outline)?;

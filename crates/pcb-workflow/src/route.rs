@@ -199,7 +199,12 @@ pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(nets) => nets,
         Err(message) => return Ok(refusal(message)),
     };
-    let gate = match Guard::open(ctx, "route_board") {
+    let gate = match Guard::open(
+        ctx,
+        "route_board",
+        "Route the project board",
+        &[ctx.pcb_path()],
+    ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };

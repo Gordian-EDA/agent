@@ -7,7 +7,7 @@
 
 use kicad::sexpr_escape;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use kicad::KicadInstallation;
@@ -31,6 +31,8 @@ pub struct AgentRuntime {
     project: ProjectContext,
     /// Shared services and caches used by tools.
     services: ToolServices,
+    /// Project-wide schematic and board revision history.
+    revisions: crate::revisions::Revisions,
     /// Keeps a test tempdir alive for the runtime's lifetime; `None` for real runtimes.
     _tempdir: Option<tempfile::TempDir>,
 }
@@ -58,7 +60,7 @@ struct ToolServices {
     /// of `.pretty` libraries instead of the installed KiCAD footprint share dir.
     footprint_dir_override: Option<PathBuf>,
     /// KiCAD IPC session manager for live board editing.
-    kicad: kicad_ipc::SessionManager,
+    kicad: Arc<kicad_ipc::SessionManager>,
 }
 
 /// Tool execution happens on blocking threads; the context must cross them.
@@ -92,16 +94,22 @@ impl AgentRuntime {
         let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
         let pcbnew_path = env.pcbnew_path().to_path_buf();
         let kicad_major = env.major_version();
+        let services = ToolServices::new(
+            provider,
+            None,
+            config.kicad.attach_running,
+            pcbnew_path,
+            kicad_major,
+            config.kicad.enable_api_config,
+        );
+        let revisions = crate::revisions::Revisions::with_board_sessions(
+            project.project_dir.clone(),
+            Arc::clone(&services.kicad),
+        );
         Ok(Self {
             env,
-            services: ToolServices::new(
-                provider,
-                None,
-                config.kicad.attach_running,
-                pcbnew_path,
-                kicad_major,
-                config.kicad.enable_api_config,
-            ),
+            services,
+            revisions,
             project,
             config,
             _tempdir: None,
@@ -141,10 +149,16 @@ impl AgentRuntime {
         let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
         let pcbnew_path = env.pcbnew_path().to_path_buf();
         let kicad_major = env.major_version();
+        let services = ToolServices::new(provider, None, false, pcbnew_path, kicad_major, false);
+        let revisions = crate::revisions::Revisions::with_board_sessions(
+            project.project_dir.clone(),
+            Arc::clone(&services.kicad),
+        );
         Some(Self {
             env,
             project,
-            services: ToolServices::new(provider, None, false, pcbnew_path, kicad_major, false),
+            services,
+            revisions,
             config: GordianConfig::default(),
             _tempdir: Some(tempdir),
         })
@@ -166,17 +180,23 @@ impl AgentRuntime {
         let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
         let pcbnew_path = env.pcbnew_path().to_path_buf();
         let kicad_major = env.major_version();
+        let services = ToolServices::new(
+            provider,
+            Some(footprint_dir),
+            false,
+            pcbnew_path,
+            kicad_major,
+            false,
+        );
+        let revisions = crate::revisions::Revisions::with_board_sessions(
+            project.project_dir.clone(),
+            Arc::clone(&services.kicad),
+        );
         Some(Self {
             env,
             project,
-            services: ToolServices::new(
-                provider,
-                Some(footprint_dir),
-                false,
-                pcbnew_path,
-                kicad_major,
-                false,
-            ),
+            services,
+            revisions,
             config: GordianConfig::default(),
             _tempdir: Some(tempdir),
         })
@@ -215,6 +235,11 @@ impl AgentRuntime {
     /// The project's `.gordian/` persistent state.
     pub fn workspace(&self) -> &crate::workspace::Workspace {
         &self.project.workspace
+    }
+
+    /// The project-wide schematic and board revision store.
+    pub fn revisions(&self) -> &crate::revisions::Revisions {
+        &self.revisions
     }
 
     /// The live KiCAD IPC session manager.
@@ -428,12 +453,12 @@ impl ToolServices {
             index: OnceLock::new(),
             footprint_catalog: OnceLock::new(),
             footprint_dir_override,
-            kicad: kicad_ipc::SessionManager::with_installation(
+            kicad: Arc::new(kicad_ipc::SessionManager::with_installation(
                 pcbnew_path,
                 expected_kicad_major,
                 attach_running_kicad,
                 enable_api_config,
-            ),
+            )),
         }
     }
 }

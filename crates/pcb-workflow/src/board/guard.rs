@@ -23,41 +23,12 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 
 use gordian_runtime::AgentRuntime;
+use gordian_runtime::revisions::RevisionId;
 use kicad_board::IpcBoardSnapshot;
 use pcb_drc::connectivity::Violation;
 use pcb_drc::lint::DrcViolation;
 
 use crate::diagnose::{Fault, FaultKey, faults};
-
-/// Where a board mutator's pre-edit copies live, one per committed edit.
-fn undo_dir(ctx: &AgentRuntime) -> PathBuf {
-    ctx.project_dir().join(".gordian").join("pcb-undo")
-}
-
-/// Snapshot the pre-edit board text and return its revision id.
-///
-/// THE SINGLE CAPTURE CALL SITE for every board mutator: the unified revision
-/// system replaces this body with `revisions::capture(tool, summary, &paths)`.
-pub(crate) fn snapshot(ctx: &AgentRuntime, original: &str) -> std::io::Result<String> {
-    let dir = undo_dir(ctx);
-    std::fs::create_dir_all(&dir)?;
-    let next = 1 + std::fs::read_dir(&dir)?
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            entry
-                .path()
-                .file_stem()?
-                .to_str()?
-                .strip_prefix("pcb-")?
-                .parse::<u32>()
-                .ok()
-        })
-        .max()
-        .unwrap_or(0);
-    let id = format!("pcb-{next}");
-    std::fs::write(dir.join(format!("{id}.kicad_pcb")), original)?;
-    Ok(id)
-}
 
 /// The defects a board carries at one moment.
 #[derive(Debug, Default, Clone)]
@@ -135,7 +106,7 @@ pub(crate) struct Guard {
     tool: &'static str,
     path: PathBuf,
     original: String,
-    revision: String,
+    revision: RevisionId,
     /// `None` when the board could not be read before the edit — the guard then
     /// has no baseline to compare against and must not refuse on a guess.
     before: Option<Defects>,
@@ -146,21 +117,38 @@ impl Guard {
     ///
     /// The `Err` payload is the mutator's refusal, ready to return: the board
     /// has not been touched.
-    pub(crate) fn open(ctx: &AgentRuntime, tool: &'static str) -> Result<Self, Value> {
+    pub(crate) fn open(
+        ctx: &AgentRuntime,
+        tool: &'static str,
+        summary: &str,
+        files: &[PathBuf],
+    ) -> Result<Self, Value> {
         let path = ctx.pcb_path();
         if !path.exists() {
             return Err(json!({
                 "error": format!("{tool}: this project has no board yet — run sync_board first"),
             }));
         }
-        ctx.kicad().save_if_open().map_err(|e| {
-            json!({ "error": format!("{tool}: could not save the open KiCAD board first: {e}") })
-        })?;
-        let original = std::fs::read_to_string(&path)
-            .map_err(|e| json!({ "error": format!("{tool}: could not read the board: {e}") }))?;
-        let revision = snapshot(ctx, &original).map_err(
-            |e| json!({ "error": format!("{tool}: could not snapshot the board: {e}") }),
+        // THE capture call site for every board mutator: one revision per edit.
+        // It is taken BEFORE the live session is saved, so a session's unsaved
+        // work is recoverable too, not overwritten on the way in.
+        let revision = ctx.revisions().capture(tool, summary, files).map_err(
+            |error| json!({ "error": format!("{tool}: could not capture the board: {error}") }),
         )?;
+        ctx.kicad().save_if_open().map_err(|e| {
+            json!({
+                "error": format!("{tool}: could not save the open KiCAD board first: {e}"),
+                "revision": revision,
+            })
+        })?;
+        // What rollback restores: the board as this mutator found it, which is
+        // the saved state — the session's own edits are not this tool's to undo.
+        let original = std::fs::read_to_string(&path).map_err(|e| {
+            json!({
+                "error": format!("{tool}: could not read the board: {e}"),
+                "revision": revision,
+            })
+        })?;
         let before = crate::active_board(ctx)
             .ok()
             .map(|board| Defects::of(&board).0);
@@ -183,11 +171,10 @@ impl Guard {
     /// Check the edited board. Returns `result` stamped with the revision when
     /// the edit kept the board honest, or the refusal after rolling back.
     pub(crate) fn commit(self, ctx: &AgentRuntime, result: Value) -> Value {
-        let stamped = |result: Value, revision: &str| {
-            merge_into(result, json!({ "revision": revision }))
-        };
+        let stamped =
+            |result: Value, revision: RevisionId| merge_into(result, json!({ "revision": revision }));
         let (Some(before), Ok(board)) = (self.before.as_ref(), crate::active_board(ctx)) else {
-            return stamped(result, &self.revision);
+            return stamped(result, self.revision);
         };
         let (after, explained) = Defects::of(&board);
         let Introduced {
@@ -195,7 +182,7 @@ impl Guard {
             faults: introduced,
         } = introduced(before, &after, &explained);
         if shorts.is_empty() && introduced.is_empty() {
-            return stamped(result, &self.revision);
+            return stamped(result, self.revision);
         }
         let shorts: Vec<Value> = shorts
             .iter()

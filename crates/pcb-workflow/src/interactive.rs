@@ -56,7 +56,12 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": err }));
     }
     let retract = retracted_copper(&snapshot, &plan);
-    let gate = match Guard::open(ctx, "move_parts") {
+    let gate = match Guard::open(
+        ctx,
+        "move_parts",
+        "Move board footprints",
+        &[ctx.pcb_path()],
+    ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
@@ -538,7 +543,12 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     ctx.close_kicad_session();
     match prepared {
         Ok((problem, solution, request, layer_names)) => {
-            let gate = match Guard::open(ctx, "route_track") {
+            let gate = match Guard::open(
+                ctx,
+                "route_track",
+                "Route one board connection",
+                &[ctx.pcb_path()],
+            ) {
                 Ok(gate) => gate,
                 Err(refusal) => return Ok(refusal),
             };
@@ -557,23 +567,29 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// Delete live-board track/via copper near a click point.
 pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
-    let gate = match Guard::open(ctx, "delete_copper") {
+    let snapshot = match crate::active_board(ctx) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
+    let request = match parse_delete_copper_request(&input, snapshot.layer_names.len() as u32) {
+        Ok(request) => request,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
+    let gate = match Guard::open(
+        ctx,
+        "delete_copper",
+        "Delete board copper",
+        std::slice::from_ref(&path),
+    ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
     match ctx.kicad().with_session(&path, |session| {
-        let snapshot = session.kicad().board_snapshot()?;
-        let request = match parse_delete_copper_request(&input, snapshot.layer_names.len() as u32) {
-            Ok(request) => request,
-            Err(err) => return Ok(Err(err)),
-        };
-        let hits = session
+        session
             .kicad()
-            .delete_copper_near(&request, &snapshot.layer_names)?;
-        Ok(Ok(delete_copper_output(&request, &hits)))
+            .delete_copper_near(&request, &snapshot.layer_names)
     }) {
-        Ok(Ok(out)) => Ok(gate.commit(ctx, out)),
-        Ok(Err(err)) => Ok(gate.rollback(ctx, json!({ "error": err }))),
+        Ok(hits) => Ok(gate.commit(ctx, delete_copper_output(&request, &hits))),
         Err(e) => Ok(gate.rollback(ctx, json!({ "error": e.to_string() }))),
     }
 }
@@ -608,7 +624,13 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "name must be non-empty and not Default" }));
     }
     let path = ctx.pcb_path();
-    let gate = match Guard::open(ctx, "set_net_width") {
+    let project_path = ctx.sch_path().with_extension("kicad_pro");
+    let gate = match Guard::open(
+        ctx,
+        "set_net_width",
+        "Set a board net class",
+        &[path.clone(), project_path.clone()],
+    ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
@@ -638,7 +660,6 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }))),
         Err(live_error) => {
             ctx.close_kicad_session();
-            let project_path = ctx.sch_path().with_extension("kicad_pro");
             let update = kicad_board::NetClassUpdate {
                 name: name.clone(),
                 width,

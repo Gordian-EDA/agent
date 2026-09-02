@@ -7,7 +7,7 @@
 //! silently rewire the board while doing something else.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use gordian_runtime::AgentRuntime;
@@ -147,16 +147,9 @@ fn pins_that_moved(
         .collect()
 }
 
-/// Where rolled-back-able copies of the schematic live, one per committed edit.
-fn undo_dir(ctx: &AgentRuntime) -> PathBuf {
-    ctx.project_dir().join(".gordian").join("sch-undo")
-}
-
 /// An open, guarded edit of the project schematic.
 pub(crate) struct Edit {
     path: PathBuf,
-    undo_dir: PathBuf,
-    original: String,
     before: Netlist,
     rollback: SnapshotId,
     pub doc: SchDoc,
@@ -175,8 +168,6 @@ impl Edit {
         let rollback = doc.snapshot();
         Ok(Edit {
             path,
-            undo_dir: undo_dir(ctx),
-            original,
             warnings: before.warnings.clone(),
             before,
             rollback,
@@ -190,8 +181,6 @@ impl Edit {
         let rollback = doc.snapshot();
         Edit {
             path: ctx.sch_path().to_path_buf(),
-            undo_dir: undo_dir(ctx),
-            original: String::new(),
             warnings: before.warnings.clone(),
             before,
             rollback,
@@ -215,7 +204,14 @@ impl Edit {
 
     /// Write the edit if its net delta stays within `allow`, else restore and
     /// report what it would have done.
-    pub fn commit(mut self, changed: Value, allow: Allow) -> Result<Value> {
+    pub fn commit(
+        mut self,
+        ctx: &AgentRuntime,
+        tool: &str,
+        summary: &str,
+        changed: Value,
+        allow: Allow,
+    ) -> Result<Value> {
         let after = connect::extract(&self.doc);
         let delta = Netlist::diff(&self.before, &after);
         let moved = pins_that_moved(&delta, &self.before, &after);
@@ -229,7 +225,9 @@ impl Edit {
                 "net_delta": delta_json(&delta),
             }));
         }
-        let snapshot = self.stash()?;
+        let revision = ctx
+            .revisions()
+            .capture(tool, summary, &[self.path.clone()])?;
         self.doc
             .write(&self.path)
             .with_context(|| format!("writing {}", self.path.display()))?;
@@ -237,62 +235,9 @@ impl Edit {
             "changed": changed,
             "net_delta": delta_json(&delta),
             "warnings": self.warnings,
-            "snapshot": snapshot,
+            "revision": revision,
         }))
     }
-
-    /// Save the pre-edit text under a fresh id so `undo` can come back to it.
-    fn stash(&self) -> Result<String> {
-        std::fs::create_dir_all(&self.undo_dir)
-            .with_context(|| format!("creating {}", self.undo_dir.display()))?;
-        let next = 1 + std::fs::read_dir(&self.undo_dir)?
-            .filter_map(|entry| entry.ok())
-            .filter_map(|entry| stash_index(&entry.path()))
-            .max()
-            .unwrap_or(0);
-        let id = format!("sch-{next}");
-        std::fs::write(
-            self.undo_dir.join(format!("{id}.kicad_sch")),
-            &self.original,
-        )?;
-        Ok(id)
-    }
-}
-
-/// The ordinal in a `sch-<n>.kicad_sch` stash filename.
-fn stash_index(path: &Path) -> Option<u32> {
-    path.file_stem()?
-        .to_str()?
-        .strip_prefix("sch-")?
-        .parse()
-        .ok()
-}
-
-/// Restore the schematic to a state a previous mutator stashed.
-pub fn undo(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let Some(id) = input.get("snapshot").and_then(Value::as_str) else {
-        return Ok(json!({ "error": "undo needs the `snapshot` id a mutator returned" }));
-    };
-    let stash = undo_dir(ctx).join(format!("{id}.kicad_sch"));
-    if !stash.is_file() {
-        return Ok(json!({ "error": format!("no snapshot `{id}`") }));
-    }
-    let before = Edit::open(ctx).map(|e| e.before).unwrap_or_default();
-    let restored = std::fs::read(&stash)?;
-    if restored.is_empty() {
-        match std::fs::remove_file(ctx.sch_path()) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    } else {
-        std::fs::write(ctx.sch_path(), restored)?;
-    }
-    let after = Edit::open(ctx).map(|e| e.before).unwrap_or_default();
-    Ok(json!({
-        "changed": format!("the schematic is now back to {id}; the request is still open"),
-        "net_delta": delta_json(&Netlist::diff(&before, &after)),
-    }))
 }
 
 /// Where new symbol definitions come from.
