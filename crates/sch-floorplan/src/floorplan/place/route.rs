@@ -33,6 +33,7 @@ pub(crate) fn wire(
     flag_points: &mut BTreeMap<String, ([f64; 2], f64)>,
     fan_risers: bool,
 ) -> io::Result<()> {
+    w.set_weld_guard(fan_risers);
     let refdes_of = |i: usize| items[i].refdes.clone();
     // Auto-distributing a spread rail into local power symbols only applies to LARGER
     // boards (`pins > FAST_PINS`). Every reference/snapshot fixture (≤34 pins) keeps
@@ -1437,33 +1438,30 @@ pub(crate) fn emit_rail(
     } else {
         Vec::new()
     };
-    let plan = |y: f64, lanes: &[(f64, f64, f64, String)]| {
-        let attaches = plan_rail_attaches(net, eps, y, riser_offsets, bodies, foreign_pins, lanes);
+    let plan = |y: f64| {
+        let attaches =
+            plan_rail_attaches(net, eps, y, riser_offsets, bodies, foreign_pins, used_lanes);
         let span = (
             attaches.iter().copied().fold(f64::MAX, f64::min),
             attaches.iter().copied().fold(f64::MIN, f64::max),
         );
         (attaches, span)
     };
+    // The NEAREST row the trunk can own: the assigned one, then rows stepping OUTWARD from
+    // the parts a lane at a time. Everything is on the 50-mil grid, so "shares no point
+    // with another net" already means a full grid step of air. A rail with nowhere to go
+    // gives up the trunk for distributed local power symbols.
     let outward = if band == Band::Top { -1.0 } else { 1.0 };
-    // The assigned row stands whenever it is electrically clear, so an untroubled rail is
-    // drawn exactly where the level assignment put it. Only a row that touches another net
-    // is searched away from, and then a full grid step of air is preferred over a bare
-    // miss. A rail with nowhere to go gives up the trunk for local power symbols.
-    let (assigned, assigned_span) = plan(rail_y, used_lanes);
-    let assigned_ok = trunk_clear(net, rail_y, assigned_span, 0.0, foreign_pins, &foreign_wires);
-    let Some((rail_y, attaches)) = assigned_ok
-        .then_some((rail_y, assigned))
-        .or_else(|| {
-            [RAIL_LANE, 0.0].into_iter().find_map(|clearance| {
-                (1..=8)
-                    .map(|k| rail_y + outward * k as f64 * RAIL_LANE)
-                    .find_map(|y| {
-                        let (attaches, span) = plan(y, used_lanes);
-                        trunk_clear(net, y, span, clearance, foreign_pins, &foreign_wires)
-                            .then_some((y, attaches))
-                    })
-            })
+    let Some((rail_y, attaches, (span_lo, span_hi))) = std::iter::once(rail_y)
+        .chain((1..=8).map(|k| rail_y + outward * k as f64 * RAIL_LANE))
+        .enumerate()
+        .find_map(|(step, y)| {
+            let (attaches, span) = plan(y);
+            let clear = trunk_clear(net, y, span, foreign_pins, &foreign_wires)
+                // The assigned row is where the level assignment put the rail, bodies and
+                // all; only a row we moved to has to earn its way past them.
+                && (step == 0 || !trunk_hits_body(y, span, power_keepouts));
+            clear.then_some((y, attaches, span))
         })
     else {
         return emit_local_power(env, w, net, eps, flag, power_keepouts);
@@ -1473,8 +1471,6 @@ pub(crate) fn emit_rail(
             used_lanes.push((ax, ep[1].min(rail_y), ep[1].max(rail_y), net.to_string()));
         }
     }
-    let span_lo = attaches.iter().copied().fold(f64::MAX, f64::min);
-    let span_hi = attaches.iter().copied().fold(f64::MIN, f64::max);
     w.add_wire_on_net([span_lo, rail_y], [span_hi, rail_y], net);
     for ((ep, _dir), &ax) in eps.iter().zip(&attaches) {
         if (ax - ep[0]).abs() > EPS {
@@ -1521,27 +1517,38 @@ fn foreign_rows(w: &SchematicWriter, net: &str) -> Vec<(f64, f64, f64)> {
     out
 }
 
-/// Would a trunk on row `rail_y` spanning `span` keep `clearance` from every foreign pin
-/// and every foreign horizontal run? `clearance = 0` is the electrical bar (no contact);
-/// a grid step is the readable one.
+/// Does a trunk on row `rail_y` spanning `span` share no point with another net — no
+/// foreign pin tip on it, no foreign run along it, no foreign wire end on it?
 fn trunk_clear(
     net: &str,
     rail_y: f64,
     span: (f64, f64),
-    clearance: f64,
     foreign_pins: &[([f64; 2], String)],
     foreign_runs: &[(f64, f64, f64)],
 ) -> bool {
     let (lo, hi) = span;
-    let overlaps_x = |a: f64, b: f64| a <= hi + clearance + EPS && b >= lo - clearance - EPS;
+    let overlaps_x = |a: f64, b: f64| a <= hi + EPS && b >= lo - EPS;
     !foreign_pins
         .iter()
         .any(|(p, pin_net)| {
-            pin_net != net && (p[1] - rail_y).abs() <= clearance + EPS && overlaps_x(p[0], p[0])
+            pin_net != net && (p[1] - rail_y).abs() < EPS && overlaps_x(p[0], p[0])
         })
         && !foreign_runs
             .iter()
-            .any(|&(y, x_lo, x_hi)| (y - rail_y).abs() <= clearance + EPS && overlaps_x(x_lo, x_hi))
+            .any(|&(y, x_lo, x_hi)| (y - rail_y).abs() < EPS && overlaps_x(x_lo, x_hi))
+}
+
+/// Would a trunk on row `rail_y` spanning `span` be drawn through a symbol body? The row
+/// search can step a rail well past its band, and a trunk sliced through a module reads
+/// as a defect even where it shorts nothing.
+fn trunk_hits_body(rail_y: f64, span: (f64, f64), bodies: &[Rect]) -> bool {
+    let (lo, hi) = span;
+    bodies.iter().any(|b| {
+        rail_y > b.min_y + EPS
+            && rail_y < b.max_y - EPS
+            && lo < b.max_x - EPS
+            && hi > b.min_x + EPS
+    })
 }
 
 /// Where each pin attaches to a trunk on row `rail_y`.
@@ -1823,22 +1830,31 @@ mod tests {
             attaches.iter().copied().fold(f64::MAX, f64::min),
             attaches.iter().copied().fold(f64::MIN, f64::max),
         );
-        assert!(!trunk_clear("GND", 45.72, span, 0.0, &foreign, &[]));
-        assert!(trunk_clear("GND", 45.72 + 2.0 * RAIL_LANE, span, 0.0, &foreign, &[]));
+        assert!(!trunk_clear("GND", 45.72, span, &foreign, &[]));
+        assert!(trunk_clear("GND", 45.72 + RAIL_LANE, span, &foreign, &[]));
         // A foreign pin OUTSIDE the span never blocks the row.
         let aside = vec![([90.0, 45.72], "SIG".to_string())];
-        assert!(trunk_clear("GND", 45.72, span, 0.0, &aside, &[]));
+        assert!(trunk_clear("GND", 45.72, span, &aside, &[]));
     }
 
-    /// A trunk laid along another rail's trunk merges the two nets outright.
+    /// A trunk laid along another rail's trunk merges the two nets outright; ending on a
+    /// foreign riser does too, which is why a vertical contributes its endpoints.
     #[test]
     fn a_trunk_row_occupied_by_a_foreign_run_is_rejected() {
         let span = (20.32, 60.96);
         let runs = vec![(45.72, 30.0, 50.0)];
-        assert!(!trunk_clear("GND", 45.72, span, 0.0, &[], &runs));
-        assert!(trunk_clear("GND", 45.72 + RAIL_LANE, span, 0.0, &[], &runs));
-        // The readable bar wants a full grid step of air, not merely no contact.
-        assert!(!trunk_clear("GND", 45.72 + RAIL_LANE, span, RAIL_LANE, &[], &runs));
+        assert!(!trunk_clear("GND", 45.72, span, &[], &runs));
+        assert!(trunk_clear("GND", 45.72 + RAIL_LANE, span, &[], &runs));
+    }
+
+    /// A row the search stepped out to must not slice a symbol body in half.
+    #[test]
+    fn a_searched_row_through_a_body_is_rejected() {
+        let body = Rect::new(30.0, 40.0, 50.0, 60.0);
+        assert!(trunk_hits_body(50.0, (20.32, 60.96), &[body]));
+        assert!(!trunk_hits_body(70.0, (20.32, 60.96), &[body]));
+        // A trunk that stops short of the body never reaches it.
+        assert!(!trunk_hits_body(50.0, (0.0, 20.0), &[body]));
     }
 
     /// A rail's own terminals sit on its lead-out and riser by construction; only

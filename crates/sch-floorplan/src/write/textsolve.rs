@@ -42,7 +42,7 @@ impl SchematicWriter {
     ///
     /// The pass only processes labels with `stub.is_some()` and clears `stub` to
     /// `None` on any that retract; a *surviving* stub keeps its `Some(..)`, its
-    /// emitted wire is `add_wire`-deduped, and that wire is registered **on the
+    /// emitted wire is endpoint-deduped, and that wire is registered **on the
     /// stub's own net**, so a re-run reads it as a deliberate same-net join (not
     /// a foreign segment) and the survivor survives again. A second call is
     /// therefore a no-op. This lets a caller run it early (e.g. to lint the
@@ -68,8 +68,6 @@ impl SchematicWriter {
         // Sentinel "net" for no-connect anchors: a stub on a no-connect pin is
         // still a wrong attachment, so treat it as a foreign net.
         const NC: &str = "\0no_connect";
-        // Sentinel net for the pre-existing power wires (all power-net, never a
-        // signal net — any signal touch is therefore foreign).
 
         let bits = |p: Point2| {
             let p = GRID_50_MIL.snap_point(p);

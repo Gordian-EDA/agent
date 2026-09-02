@@ -232,9 +232,9 @@ pub struct SchematicWriter {
     pub(super) labels: Vec<PinLabel>,
     /// `(no_connect)` markers at intentionally-unconnected pin endpoints.
     pub(super) no_connects: Vec<NoConnect>,
-    /// Wire segments added via `add_wire`, sorted by `uuid_key` at `finish`.
+    /// Wire segments added via `add_wire_on_net`, sorted by `uuid_key` at `finish`.
     pub(super) wires: Vec<Wire>,
-    /// Junction dots added via `add_junction`, sorted by `uuid_key` at `finish`.
+    /// Junction dots added via `add_junction_on_net`, sorted by `uuid_key` at `finish`.
     pub(super) junctions: Vec<Junction>,
     pub(super) texts: Vec<SheetText>,
     pub(super) rects: Vec<SheetRect>,
@@ -252,6 +252,11 @@ pub struct SchematicWriter {
     /// extend past the symbol bodies). Off for direct-writer and fixed-coordinate paths,
     /// which place content at fixed absolute coordinates.
     pub(super) frame: bool,
+    /// When set, a junction dot is refused where a FOREIGN net's wire already runs — a
+    /// dot welds everything through it, so on a shipped sheet the realiser must never be
+    /// the thing that merges two nets. A finalize-only repair, like the riser fan: the
+    /// per-move scorer leaves it off so its cost landscape stays the geometry alone.
+    pub(super) weld_guard: bool,
 }
 
 impl SchematicWriter {

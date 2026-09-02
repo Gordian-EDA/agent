@@ -330,21 +330,22 @@ impl SchematicWriter {
     /// Add a junction dot where `net`'s own wires meet. Deduplicated by position.
     ///
     /// A junction welds *everything* passing through it, so a dot is only ever
-    /// legitimate on one net: it is refused where a foreign net's wire already
-    /// runs, which would turn a mere crossing into a short. Refusing the dot does
-    /// not make such a point safe — the geometry itself is the defect, and
-    /// [`crate::floorplan::place::net_conflicts`] reports it — but nothing this
-    /// pass draws may be the thing that welds two nets.
+    /// legitimate on one net. Under [`Self::set_weld_guard`] a dot is refused where a
+    /// foreign net's wire already runs, which would turn a mere crossing into a short.
+    /// Refusing the dot does not make such a point safe — the geometry itself is the
+    /// defect, and [`crate::floorplan::place::net_conflicts`] reports it — but nothing
+    /// the shipped sheet draws may be the thing that welds two nets.
     pub fn add_junction_on_net(&mut self, at: impl Into<Point2>, net: &str) {
         let at = GRID_50_MIL.snap_point(at.into());
         let uuid_key = format!("{}:{}", at.x, at.y);
         if self.junctions.iter().any(|j| j.uuid_key == uuid_key) {
             return;
         }
-        if self
-            .wires
-            .iter()
-            .any(|w| w.net != net && Segment::new(w.a, w.b).contains_point(at))
+        if self.weld_guard
+            && self
+                .wires
+                .iter()
+                .any(|w| w.net != net && Segment::new(w.a, w.b).contains_point(at))
         {
             return;
         }
@@ -353,6 +354,12 @@ impl SchematicWriter {
             uuid_key,
             net: net.to_string(),
         });
+    }
+
+    /// Refuse junction dots that would weld two nets (see [`Self::add_junction_on_net`]).
+    /// Finalize-only, so the per-move placement scorer is never perturbed by the repair.
+    pub fn set_weld_guard(&mut self, on: bool) {
+        self.weld_guard = on;
     }
 
     /// Set the sheet title (rendered in the drawing frame's title block).
@@ -604,8 +611,7 @@ impl SchematicWriter {
     /// exactly ON the solid boundary (open-interval checks let wires depart
     /// from them) while the glyph stays protected. Points carry the same
     /// foreign-anchor model as `retract_colliding_stubs` (power origins,
-    /// no-connects, label anchors); wire segments carry their net (the power
-    /// sentinel for unattributed stubs/risers).
+    /// no-connects, label anchors); wire segments carry the net they were drawn for.
     pub fn route_scene(&self) -> sch_model::route::RouteScene {
         const NC: &str = "\0no_connect";
         let mut scene = sch_model::route::RouteScene {

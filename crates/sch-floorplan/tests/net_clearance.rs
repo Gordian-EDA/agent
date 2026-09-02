@@ -83,7 +83,7 @@ fn realised_corpus_sheets_never_share_a_point_between_two_nets() {
         if !only.is_empty() && !only.contains(&name.as_str()) {
             continue;
         }
-        for (engine, engine_name) in engines().into_iter().map(|(n, e)| (e, n)) {
+        for (engine_name, engine) in engines() {
             let found = shorts_of(&env, &provider, &name, engine);
             if !found.is_empty() {
                 offenders.push(format!("{name}/{engine_name}: {found:#?}"));

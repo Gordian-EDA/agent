@@ -5,6 +5,10 @@
 //! only while no point is shared by two nets. This module reads that property back off a
 //! finished [`SchematicWriter`] and names the offending pairs, so a short is a failing
 //! assertion here rather than a refused `place_parts` a whole engine-run later.
+//!
+//! The question is only "do two NETS meet". A wire drawn onto a no-connect pin is a
+//! separate defect (KiCAD reports it as `no_connect_connected`) with no second net to
+//! name, and belongs to the ERC gate rather than here.
 
 use std::collections::BTreeSet;
 
@@ -86,7 +90,12 @@ pub fn net_conflicts(
     inc: &Incidence,
 ) -> Vec<NetConflict> {
     let terminals = terminals(env, w, items, inc);
-    let wires = w.wires_with_nets();
+    // Every wire the realiser draws carries its net, so the occupancy model is total.
+    let wires: Vec<(Segment, String)> = w
+        .wires_with_nets()
+        .into_iter()
+        .filter_map(|seg| Some((seg.segment, seg.net?)))
+        .collect();
     let junctions = w.junction_positions();
     let mut found: BTreeSet<NetConflict> = BTreeSet::new();
     let mut note = |a: &str, b: &str, at: Point2, kind: ConflictKind| {
@@ -111,27 +120,22 @@ pub fn net_conflicts(
         }
     }
     for (p, net) in &terminals {
-        for wire in &wires {
-            let Some(wnet) = wire.net.as_deref() else {
-                continue;
-            };
-            if wnet != net && wire.segment.contains_point(*p) {
+        for (seg, wnet) in &wires {
+            if wnet != net && seg.contains_point(*p) {
                 note(net, wnet, *p, ConflictKind::TerminalOnWire);
             }
         }
     }
     for i in 0..wires.len() {
         for j in (i + 1)..wires.len() {
-            let (Some(a), Some(b)) = (wires[i].net.as_deref(), wires[j].net.as_deref()) else {
-                continue;
-            };
+            let (s, a) = &wires[i];
+            let (t, b) = &wires[j];
             if a == b {
                 continue;
             }
-            let (s, t) = (wires[i].segment, wires[j].segment);
-            if s.axis_aligned_collinear_overlap(t) {
+            if s.axis_aligned_collinear_overlap(*t) {
                 note(a, b, s.a, ConflictKind::Overlap);
-            } else if let Some(p) = touching_point(s, t) {
+            } else if let Some(p) = touching_point(*s, *t) {
                 note(a, b, p, ConflictKind::WireTouch);
             }
         }
@@ -140,8 +144,8 @@ pub fn net_conflicts(
         let at = Point2::from(*jp);
         let nets: BTreeSet<&str> = wires
             .iter()
-            .filter(|wire| wire.segment.contains_point(at))
-            .filter_map(|wire| wire.net.as_deref())
+            .filter(|(seg, _)| seg.contains_point(at))
+            .map(|(_, net)| net.as_str())
             .collect();
         let mut nets = nets.into_iter();
         if let (Some(a), Some(b)) = (nets.next(), nets.next()) {
