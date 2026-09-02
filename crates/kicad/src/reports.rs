@@ -36,6 +36,16 @@ pub struct ViolationItem {
     /// UUID of the offending object, if any.
     #[serde(default)]
     pub uuid: Option<String>,
+    /// Location in the report's native coordinate system.
+    #[serde(default)]
+    pub pos: Option<ReportPosition>,
+}
+
+/// A location emitted by KiCad's JSON reports.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct ReportPosition {
+    pub x: f64,
+    pub y: f64,
 }
 
 impl ErcReport {
@@ -162,6 +172,8 @@ mod tests {
             dangling.items[0].uuid.as_deref(),
             Some("11111111-0000-4000-8000-000000000001")
         );
+        let position = dangling.items[0].pos.expect("reported position");
+        assert_eq!((position.x, position.y), (0.5, 0.5));
     }
 
     const DRC_JSON: &str = r#"{

@@ -142,8 +142,17 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "check_schematic",
-            "Lint + electrical rules + KiCAD ERC over the live file. `completeness.gaps` lists advisory missing support circuitry; resolve it when the request implies a complete powered/interface design, but never expand a deliberately minimal or focused edit.",
-            json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            "Lint + electrical rules + KiCAD ERC over the live file. Every finding names its severity, rule code, objects, nets, location, and fix. Compact results show forty findings; pass `detail: true` to get all. Completeness findings are advisory: resolve them when the request implies a complete powered/interface design, but never expand a deliberately minimal or focused edit.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "detail": {
+                        "type": "boolean",
+                        "description": "Return every finding instead of the compact forty-finding view."
+                    }
+                },
+                "additionalProperties": false
+            }),
         ),
         (
             "add_symbols",

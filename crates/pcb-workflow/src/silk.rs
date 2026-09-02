@@ -481,6 +481,7 @@ mod tests {
                 .map(|description| ViolationItem {
                     description: (*description).to_owned(),
                     uuid: None,
+                    pos: None,
                 })
                 .collect(),
         }
