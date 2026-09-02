@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use geom::{Point2, Rect};
-use sch_doc::{Item, PlacedPin, SchDoc, connect};
+use sch_doc::{Item, LabelKind, PlacedPin, SchDoc, connect};
 
 /// Connection points are compared at 1 µm, matching the extractor's own
 /// quantisation — float dust must never split a node here either.
@@ -88,6 +88,9 @@ pub struct Sheet {
     pub sheet_pins: HashSet<NodeKey>,
     /// Local/global/hierarchical label anchors, by node.
     pub label_names: HashMap<NodeKey, String>,
+    /// Of those, the ones whose scope is this sheet alone — the only names this
+    /// crate may rewrite, since a global or hierarchical one speaks elsewhere.
+    pub local_labels: HashSet<NodeKey>,
 }
 
 /// KiCAD's default 1.27 mm text: roughly 0.72 mm of advance per glyph.
@@ -133,6 +136,7 @@ impl Sheet {
         let mut junctions = HashSet::new();
         let mut sheet_pins = HashSet::new();
         let mut label_names = HashMap::new();
+        let mut local_labels = HashSet::new();
         let mut texts = Vec::new();
         for item in doc.items() {
             match item {
@@ -159,6 +163,9 @@ impl Sheet {
                 Item::Label(l) => {
                     fixtures.insert(key(l.at.point()));
                     label_names.insert(key(l.at.point()), l.text.clone());
+                    if l.kind == LabelKind::Local {
+                        local_labels.insert(key(l.at.point()));
+                    }
                     texts.push(TextBox {
                         rect: label_extent(&l.text, l.at.point(), l.at.rot),
                     });
@@ -224,6 +231,7 @@ impl Sheet {
             junctions,
             sheet_pins,
             label_names,
+            local_labels,
         }
     }
 

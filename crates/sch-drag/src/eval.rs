@@ -207,8 +207,10 @@ pub fn spacing(sheet: &Sheet) -> (usize, usize) {
 /// what a two-ended connection drawn as a name looks like.
 pub fn substitute_labels(sheet: &Sheet) -> usize {
     let mut uses: HashMap<&str, usize> = HashMap::new();
-    for name in sheet.label_names.values() {
-        *uses.entry(name.as_str()).or_default() += 1;
+    for (node, name) in &sheet.label_names {
+        if sheet.local_labels.contains(node) {
+            *uses.entry(name.as_str()).or_default() += 1;
+        }
     }
     uses.values().filter(|n| **n == 2).count()
 }

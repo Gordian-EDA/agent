@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use geom::Point2;
-use sch_doc::SchDoc;
+use sch_doc::{LabelKind, SchDoc};
 
 use crate::drag::{DragError, partition, settle_junctions};
 use crate::route::{self, Obstacles};
@@ -31,6 +31,9 @@ pub struct Substitute {
 pub fn substitutes(sheet: &Sheet) -> Vec<Substitute> {
     let mut anchors: HashMap<&str, Vec<NodeKey>> = HashMap::new();
     for (node, name) in &sheet.label_names {
+        if !sheet.local_labels.contains(node) {
+            continue;
+        }
         anchors.entry(name.as_str()).or_default().push(*node);
     }
     let mut found: Vec<Substitute> = anchors
@@ -90,7 +93,7 @@ pub fn promote(
 
     let labels: Vec<String> = doc
         .labels()
-        .filter(|l| l.text == substitute.name)
+        .filter(|l| l.kind == LabelKind::Local && l.text == substitute.name)
         .map(|l| l.uuid.clone())
         .collect();
     doc.remove_drawing(&labels);
