@@ -28,7 +28,7 @@ use gordian_runtime::AgentRuntime;
 use gordian_runtime::revisions::RevisionId;
 use kicad_board::{BoardDoc, BoardFootprint};
 use kicad_footprint::FootprintCatalog;
-use pcb_drc::connectivity::Violation;
+use pcb_model::Violation;
 use pcb_model::Point2;
 use pcb_place::{LockedAt, PlacementHints};
 
@@ -1017,7 +1017,7 @@ fn place_added(added: &[String], ctx: &AgentRuntime) -> std::result::Result<Vec<
 
 /// Pairs of nets the board's copper electrically merges.
 fn shorts(board: &kicad_board::IpcBoardSnapshot) -> BTreeSet<(String, String)> {
-    pcb_drc::connectivity::check(&board.problem, &board.copper)
+    pcb_engine::connectivity(&board.problem, &board.copper)
         .into_iter()
         .filter_map(|violation| match violation {
             Violation::CrossNetMerge { a, b } => Some((a, b)),

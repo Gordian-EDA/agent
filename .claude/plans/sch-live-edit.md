@@ -112,3 +112,8 @@ violations or write; invariant = copper connectivity ⊆ schematic netlist; (4) 
 (5) unified revisions + `check_board` (DRC + unconnected pairs + netlist consistency) as the
 completion signal; (6) delete the `PcbEngine` monolith, the destructive regenerate path, and
 `run_pcb_finish_pipeline` (hidden orchestrator) — the model orchestrates with tools.
+
+## Queued (user, 2026-09-02): routing aesthetics
+Auto-route works but is "kinda ugly": next router lane — fewer bends/meanders, 45° escapes,
+straight pad exits, via minimisation, no wandering around obstacles when a channel exists;
+judged by `tools/pcb_critic.py` before/after on the PCB corpus with DRC 0 kept.
