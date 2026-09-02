@@ -1,1 +1,1 @@
-Create a tiny routed 3.3 V I²C temperature-sensor breakout PCB with a real sensor, a four-pin VCC/GND/SDA/SCL header, SDA/SCL pull-ups, local decoupling, and an address-selection solder jumper when supported. Apply, place, route, check, and render.
+Create a tiny routed 3.3 V I²C temperature-sensor breakout PCB with a real sensor, a four-pin VCC/GND/SDA/SCL header, SDA/SCL pull-ups, local decoupling, and an address-selection solder jumper when supported. Apply, place, route, check, render, and export fabrication files.

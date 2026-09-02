@@ -1999,6 +1999,11 @@ def main():
         or report.get("judge", {}).get("error")
         or report.get("critic_schematic", {}).get("error")
         or report.get("critic_pcb", {}).get("error")
+        or any(
+            verdict.get("error")
+            and not verdict["error"].startswith(f"no {kind} render")
+            for kind, verdict in report.get("human_look", {}).items()
+        )
         for report in reports
     )
     raise SystemExit(1 if broken else 0)
