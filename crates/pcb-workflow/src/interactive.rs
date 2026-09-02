@@ -2075,7 +2075,7 @@ mod tests {
     /// `route_board`'s `unrouted` report hands back `"U1.3"`-style pad handles;
     /// a repair is only copy-paste if `route_track` takes them as they are.
     #[test]
-    fn route_track_takes_the_pad_handles_the_unrouted_report_hands_back() {
+    fn route_track_takes_the_pad_handles_the_ratsnest_hands_back() {
         let parts = vec![ImportedPart {
             reference: "U1".to_owned(),
             lib_id: "Package_TO_SOT_SMD:SOT-23-5".to_owned(),
