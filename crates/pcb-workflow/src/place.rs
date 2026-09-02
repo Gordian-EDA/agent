@@ -1617,6 +1617,62 @@ fn align_817_field_connector_datums(problem: &mut PlacementView, hints: &Placeme
     }
 }
 
+/// A connector is only useful if a cable can reach it. The placer edge-seeks
+/// them, but a crowded board can still strand one in the interior — and a legal
+/// placement says nothing about that, so the caller never learns why the render
+/// looks wrong. Names each connector left more than its own width from any edge,
+/// with the `move_parts` call that seats it.
+fn connectors_off_edge(
+    problem: &PlacementView,
+    imported: &[kicad_board::ImportedPart],
+    result: &pcb_place::PlaceResult,
+) -> Vec<Value> {
+    let placed: std::collections::BTreeMap<&str, _> = result
+        .placements
+        .iter()
+        .map(|placement| (placement.reference.as_str(), placement))
+        .collect();
+    let mut out = Vec::new();
+    for part in &problem.parts {
+        let lib_id = imported
+            .iter()
+            .find(|p| p.reference == part.reference)
+            .map_or("", |p| p.lib_id.as_str());
+        if !is_connector(lib_id, &part.reference) {
+            continue;
+        }
+        let Some(placement) = placed.get(part.reference.as_str()) else {
+            continue;
+        };
+        let half = pcb_place::rotated_courtyard_half(part, placement.rotation);
+        let rect = Rect::from_center_half(placement.at, half);
+        let gaps = [
+            ("left", rect.min_x - problem.bounds.min_x),
+            ("right", problem.bounds.max_x - rect.max_x),
+            ("top", rect.min_y - problem.bounds.min_y),
+            ("bottom", problem.bounds.max_y - rect.max_y),
+        ];
+        let (edge, gap) = gaps
+            .into_iter()
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("four edges");
+        // Its own width of clear board behind it means it is not on the rim.
+        if gap <= rect.width().min(rect.height()) {
+            continue;
+        }
+        out.push(json!({
+            "reference": part.reference,
+            "nearest_edge": edge,
+            "gap_to_edge_mm": (gap * 10.0).round() / 10.0,
+            "fix": format!(
+                "move_parts {{\"moves\":[{{\"reference\":\"{}\",\"edge\":\"{edge}\",\"gap\":0.5}}]}}",
+                part.reference
+            ),
+        }));
+    }
+    out
+}
+
 /// The board this placement's parts require, in [`crate::sizing`]'s terms — the
 /// same law `regenerate_board` sizes an auto board with, so both tools quote one
 /// pair of numbers.
@@ -1909,25 +1965,24 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     }
 
-    // On a failed placement, give the agent a CONCRETE minimum board size so it can
-    // retry deterministically instead of guessing. Estimate from the parts' total
-    // courtyard area (with packing + routing overhead) and the largest single part.
+    // On a failed placement, give the agent a CONCRETE board size so it can retry
+    // deterministically instead of guessing — in the one vocabulary
+    // `regenerate_board` also uses, grown past the outline that just failed so a
+    // retry can never propose it again. `suggested_min_bounds_mm` carries the
+    // same recommendation under the name the auto-resize path already reads.
     let mut extra = json!({});
     if !result.legal {
-        let estimate = placement_size_estimate(&problem, 0.0, 0.0, false);
         let cw = (problem.bounds.max_x - problem.bounds.min_x).max(0.1);
         let ch = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
-        // The same two numbers `regenerate_board` publishes, so a caller reading
-        // either tool sees one board-size story.
         let sizing =
             board_sizing(&problem, &board.imported.parts, &board.problem).grown_past(cw, ch);
         extra = json!({
             "overlap_pairs": placement_overlap_pairs(&problem, &result),
-            "parts_courtyard_area_mm2": (estimate.total_area * 10.0).round() / 10.0,
+            "parts_courtyard_area_mm2": sizing.courtyard_area_mm2,
             "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
-            "suggested_min_bounds_mm": { "w": estimate.width.ceil(), "h": estimate.height.ceil() },
             "required_bounds": { "width": sizing.required_w, "height": sizing.required_h },
             "recommended_bounds": { "width": sizing.recommended_w, "height": sizing.recommended_h },
+            "suggested_min_bounds_mm": { "w": sizing.recommended_w, "h": sizing.recommended_h },
         });
     } else {
         // A legal placement on an oversized canvas reads as wasted board: report
@@ -1971,6 +2026,7 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
                 "fit_bounds_mm": { "w": fresh.width.ceil(), "h": fresh.height.ceil() },
                 "canvas_utilization_percent": (utilization * 100.0).round().min(100.0),
+                "connectors_off_edge": connectors_off_edge(&problem, &board.imported.parts, &result),
             });
         }
     }
@@ -3297,6 +3353,59 @@ mod tests {
     /// SOT-23-5 LDO and seven 0603 passives. `regenerate_board` sizes a board
     /// like this before anything is placed, and the size it picks must place
     /// legally on the FIRST call — otherwise the caller is back to guessing.
+    /// A legal placement says nothing about whether a cable can reach the
+    /// connectors. One stranded in the interior is the single most common
+    /// complaint about these boards, and the caller never learns of it.
+    #[test]
+    fn a_connector_stranded_in_the_board_interior_is_named_with_its_fix() {
+        let part = |reference: &str| Part {
+            reference: reference.to_string(),
+            courtyard_w: 3.0,
+            courtyard_h: 3.0,
+            pads: vec![],
+            edge_datum: None,
+            locked: None,
+        };
+        let problem = PlacementView {
+            bounds: Rect::new(0.0, 0.0, 40.0, 40.0),
+            clearance: 0.15,
+            layer_count: 2,
+            min_trace_width: 0.15,
+            parts: vec![part("J1"), part("J2"), part("R1")],
+            keepouts: vec![],
+            outline: None,
+        };
+        let at = |reference: &str, x: f64, y: f64| pcb_place::Placement {
+            reference: reference.to_string(),
+            at: Point2::new(x, y),
+            rotation: 0.0,
+        };
+        let result = pcb_place::PlaceResult {
+            // J1 sits on the left edge; J2 is stranded mid-board; R1 is not a
+            // connector and is never asked to seek an edge.
+            placements: vec![
+                at("J1", 2.0, 20.0),
+                at("J2", 20.0, 20.0),
+                at("R1", 30.0, 30.0),
+            ],
+            legal: true,
+            report: pcb_place::PlaceReport::default(),
+        };
+
+        let off = connectors_off_edge(&problem, &[], &result);
+
+        assert_eq!(off.len(), 1, "{off:?}");
+        assert_eq!(off[0]["reference"], "J2");
+        assert_eq!(off[0]["gap_to_edge_mm"], 18.5);
+        assert!(
+            off[0]["fix"]
+                .as_str()
+                .unwrap()
+                .contains("\"reference\":\"J2\""),
+            "{off:?}"
+        );
+    }
+
     #[test]
     fn an_auto_sized_nine_part_board_places_legally_on_the_first_try() {
         let part = |reference: &str, w: f64, h: f64| Part {
