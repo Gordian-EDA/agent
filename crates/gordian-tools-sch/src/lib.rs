@@ -19,6 +19,7 @@
 
 mod bulk;
 mod check;
+mod diff;
 mod edit;
 mod place;
 mod query;
@@ -69,7 +70,13 @@ pub fn handles(name: &str) -> bool {
 }
 
 fn tool_names() -> Vec<&'static str> {
-    let mut names = vec!["read_schematic", "get_symbol", "get_net", "check_schematic"];
+    let mut names = vec![
+        "read_schematic",
+        "diff_schematic",
+        "get_symbol",
+        "get_net",
+        "check_schematic",
+    ];
     names.extend(MUTATORS);
     names
 }
@@ -116,6 +123,25 @@ pub fn tool_defs() -> Vec<Tool> {
                                 "description": "Only symbols inside [x1,y1,x2,y2] mm." },
                     "detail": { "type": "string", "enum": ["compact", "full"],
                                 "description": "full adds footprints and uuids." }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        (
+            "diff_schematic",
+            "Compare the live schematic with a captured revision, defaulting to this turn's first pre-write revision. Reports added and removed symbols, moved poses, changed fields, swapped library IDs, partition-aware net delta, and wire/label count changes as compact text; pass detail: true for structured JSON.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "revision": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Captured project revision; defaults to the turn baseline."
+                    },
+                    "detail": {
+                        "type": "boolean",
+                        "description": "Return structured JSON instead of aligned plain text."
+                    }
                 },
                 "additionalProperties": false
             }),
@@ -411,6 +437,7 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "arrange" => bulk::arrange(input, ctx),
         "rewire" => bulk::rewire(input, ctx),
         "read_schematic" => query::read_schematic(input, ctx),
+        "diff_schematic" => diff::diff_schematic(input, ctx),
         "get_symbol" => query::get_symbol(input, ctx),
         "get_net" => query::get_net(input, ctx),
         "check_schematic" => check::check_schematic(input, ctx),

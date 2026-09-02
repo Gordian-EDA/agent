@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use gordian_runtime::AgentRuntime;
+use gordian_runtime::revisions::{RevisionId, TurnBaseline};
 use sch_doc::{NetDelta, Netlist, PinRef, SchDoc, SnapshotId, SymbolSource, connect};
 use serde_json::{Value, json};
 
@@ -243,6 +244,20 @@ impl Edit {
 /// Where new symbol definitions come from.
 pub(crate) fn symbol_source(ctx: &AgentRuntime) -> SymbolSource {
     SymbolSource::new(ctx.env().symbol_dir().to_path_buf())
+}
+
+/// Resolve an explicit schematic revision or this turn's first pre-write state.
+pub(crate) fn comparison_revision(
+    ctx: &AgentRuntime,
+    revision: Option<RevisionId>,
+) -> Result<Option<TurnBaseline>> {
+    match revision {
+        Some(revision) => ctx
+            .revisions()
+            .file_at_revision(revision, ctx.sch_path())
+            .map(Some),
+        None => ctx.revisions().turn_baseline(ctx.sch_path()),
+    }
 }
 
 /// The net delta as the model reads it: only the parts that are non-empty.

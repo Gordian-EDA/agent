@@ -566,7 +566,7 @@ fn classify_findings(findings: &mut [Finding], baseline: &[Finding]) {
 pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let detail = input.get("detail").and_then(Value::as_bool) == Some(true);
     let mut inspection = inspect_schematic(ctx.sch_path(), ctx)?;
-    let baseline = ctx.revisions().turn_baseline(ctx.sch_path())?;
+    let baseline = crate::session::comparison_revision(ctx, None)?;
     let baseline_revision = baseline.as_ref().map(|baseline| baseline.revision);
     let baseline_inspection = baseline
         .as_ref()
