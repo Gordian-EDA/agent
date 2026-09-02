@@ -1847,6 +1847,50 @@ mod tests {
         assert!(trunk_clear("GND", 45.72 + RAIL_LANE, span, &[], &runs));
     }
 
+    /// End to end: the rail is emitted and NOTHING it draws may touch the foreign pin.
+    /// Before the row search this failed — the trunk was drawn at the assigned row
+    /// whatever sat on it, and the finalize wire-split then welded the two nets.
+    #[test]
+    fn an_emitted_rail_never_draws_over_a_foreign_pin() {
+        let Some(env) = KicadInstallation::detect() else {
+            eprintln!("SKIP: no KiCAD environment detected");
+            return;
+        };
+        let eps = [
+            ([20.32, 40.64], Dir::South),
+            ([40.64, 40.64], Dir::South),
+            ([60.96, 40.64], Dir::South),
+        ];
+        let foreign = [([40.64, 45.72], "SIG".to_string())];
+        let mut w = SchematicWriter::new();
+        w.set_weld_guard(true);
+        emit_rail(
+            &env,
+            &mut w,
+            "GND",
+            &eps,
+            Band::Bottom,
+            Some(45.72),
+            None,
+            &BTreeMap::new(),
+            &[],
+            &foreign,
+            &[],
+            true,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let pin = ::geom::Point2::from(foreign[0].0);
+        for seg in w.wires_with_nets() {
+            assert!(
+                !seg.segment.contains_point(pin),
+                "the rail was drawn onto the foreign SIG pin: {:?} -> {:?}",
+                seg.segment.a,
+                seg.segment.b
+            );
+        }
+    }
+
     /// A row the search stepped out to must not slice a symbol body in half.
     #[test]
     fn a_searched_row_through_a_body_is_rejected() {
