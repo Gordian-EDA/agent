@@ -16,8 +16,11 @@
 //!        a dominant-IC board gets the textbook radial layout (IC centred,
 //!        decoupling caps + series resistors ringed in IC-pad order, connectors
 //!        on the edges). Overlap-free by construction.
-//!   2. OPTIMIZE              — force seed → anneal → legalize.
-//!   3. post-pass: corner seating for mounting holes (corner_seek).
+//!   2. OPTIMIZE              — force seed → anneal → legalize → polish, with a
+//!        same-kind alignment snap so rows and columns land exactly.
+//!   3. FRAME (either path)   — centre the placement by rigid translation, then
+//!        seat the edge-seeking parts on their edges.
+//!   4. post-pass: corner seating for mounting holes (corner_seek).
 //! ```
 //!
 //! ## Module layout
@@ -31,15 +34,19 @@
 //! - [`force`]   — the force-directed seed + the cap-to-anchor-ring snap.
 //! - [`cost`]    — the SA cost the annealer minimizes (and the oracle selects on);
 //!   re-exports the kernel HPWL.
+//! - [`align`]   — the discrete row/column snap the continuous cost cannot land on.
+//! - [`frame`]   — whole-board centring and edge seating, over any placement.
 //! - [`anneal`]  — the SA driver + its deterministic `SaRng`.
 //! - [`legalize`] — the legalizer driver; re-exports the kernel legality check.
 //! - [`route`]   — the concrete placement pipeline.
 //!
 //! The framework contract comes from `pcb-model`; shared geometry comes from `geom`.
 
+mod align;
 mod anneal;
 mod cost;
 mod force;
+mod frame;
 mod geometry;
 mod hints;
 mod legalize;
