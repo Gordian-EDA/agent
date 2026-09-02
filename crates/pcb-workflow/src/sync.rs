@@ -591,7 +591,7 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         Ok(text) => text,
         Err(e) => return json!({ "error": format!("could not read the board: {e}") }),
     };
-    let mut doc = match BoardDoc::parse(original.clone()) {
+    let mut doc = match board_doc_for_sync(original.clone()) {
         Ok(doc) => doc,
         Err(e) => return json!({ "error": format!("could not read the board document: {e}") }),
     };
@@ -695,6 +695,68 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
                  rest alone.",
     });
     gate.commit(ctx, result)
+}
+
+/// Open an existing board for netlist edits, seeding the empty net table that
+/// KiCad omits from empty and direct-named-net serial forms.
+fn board_doc_for_sync(mut text: String) -> std::result::Result<BoardDoc, String> {
+    let doc = BoardDoc::parse(text.clone())?;
+    if !doc.net_codes().is_empty() || has_top_level_net(&text) {
+        return Ok(doc);
+    }
+    let root = text
+        .find("(kicad_pcb")
+        .ok_or_else(|| "not a kicad_pcb document".to_owned())?;
+    let end = kicad_board::sexpr_end(&text, root)
+        .ok_or_else(|| "unbalanced kicad_pcb document".to_owned())?;
+    let close = text[..end - 1]
+        .rfind('\n')
+        .map_or(end - 1, |newline| newline + 1);
+    text.insert_str(close, "\t(net 0 \"\")\n");
+    BoardDoc::parse(text)
+}
+
+fn has_top_level_net(text: &str) -> bool {
+    let Some(root) = text.find("(kicad_pcb") else {
+        return false;
+    };
+    let Some(end) = kicad_board::sexpr_end(text, root) else {
+        return false;
+    };
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (offset, character) in text[root..end].char_indices() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => quoted = true,
+            '(' => {
+                if depth == 1 {
+                    let child = text[root + offset + 1..end].trim_start();
+                    if child
+                        .strip_prefix("net")
+                        .and_then(|tail| tail.chars().next())
+                        .is_some_and(|next| next.is_whitespace() || next == ')')
+                    {
+                        return true;
+                    }
+                }
+                depth += 1;
+            }
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Rebuild the board under new rules or a new outline, keeping every part where
@@ -1187,6 +1249,81 @@ mod tests {
                 from: Some("SENSE".into()),
                 to: None,
             }]
+        );
+    }
+
+    #[test]
+    fn local_board_move_seed_gains_its_schematic_net_table_offline() {
+        let board = "(kicad_pcb\n\t(version 20240108)\n\t(layers\n\t\t(0 \"F.Cu\" signal)\n\t\t(31 \"B.Cu\" signal)\n\t\t(44 \"Edge.Cuts\" user)\n\t)\n\t(gr_rect (start 0 0) (end 30 20) (layer \"Edge.Cuts\"))\n)\n";
+        let mut doc = board_doc_for_sync(board.to_owned()).unwrap();
+        let schematic = divider_schematic();
+        let wanted = schematic
+            .iter()
+            .flat_map(|part| part.pad_nets.values().map(String::as_str))
+            .collect::<BTreeSet<_>>();
+
+        let codes = doc.ensure_nets(wanted).unwrap();
+        assert_eq!(
+            codes.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["GND".to_owned(), "SENSE".to_owned(), "VIN".to_owned(),])
+        );
+        assert!(doc.text().contains("\n\t(net 0 \"\")"));
+        assert_eq!(doc.text().matches("\n\t(net ").count(), 4);
+    }
+
+    #[test]
+    fn an_existing_empty_net_anchor_is_not_duplicated() {
+        let board = "(kicad_pcb\n\t(net 0 \"\")\n)\n";
+        let doc = board_doc_for_sync(board.to_owned()).unwrap();
+        assert_eq!(doc.text(), board);
+    }
+
+    #[test]
+    fn local_board_move_seed_syncs_through_the_offline_board_path() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: KiCad is not installed");
+            return;
+        };
+        let mut schematic = include_str!("../../kicad/tests/fixtures/rc_pair.kicad_sch")
+            .replace("(project \"fixture\"", "(project \"project\"");
+        for label in ["VIN", "VOUT"] {
+            let start = schematic.find(&format!("(label \"{label}\"")).unwrap();
+            let end = kicad_board::sexpr_end(&schematic, start).unwrap();
+            schematic.replace_range(start..end, "");
+        }
+        schematic = schematic.replace(
+            "\t(sheet_instances",
+            "\t(no_connect (at 50 46.19) (uuid \"66666666-0000-4000-8000-000000000001\"))\n\
+             \t(no_connect (at 70 46.19) (uuid \"66666666-0000-4000-8000-000000000002\"))\n\
+             \t(sheet_instances",
+        );
+        std::fs::write(ctx.sch_path(), schematic).unwrap();
+        std::fs::write(
+            ctx.pcb_path(),
+            r#"(kicad_pcb
+ (version 20240108)
+ (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+ (gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts"))
+)"#,
+        )
+        .unwrap();
+
+        let synced = sync_board(json!({}), &ctx).unwrap();
+        assert_eq!(synced["ok"], json!(true), "{synced:#}");
+        assert_eq!(synced["changed"], json!(true), "{synced:#}");
+        let board = kicad_board::read_snapshot(&ctx.pcb_path()).unwrap();
+        assert_eq!(
+            board
+                .imported
+                .parts
+                .iter()
+                .map(|part| part.reference.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["C1", "R1"]),
+        );
+        assert!(
+            !board.problem.connections.is_empty(),
+            "the schematic nets were added to the initially empty table"
         );
     }
 }

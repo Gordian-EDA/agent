@@ -26,7 +26,7 @@ use gordian_runtime::AgentRuntime;
 use gordian_runtime::revisions::RevisionId;
 use kicad_board::IpcBoardSnapshot;
 use pcb_model::Finding as DrcViolation;
-use pcb_model::Violation;
+use pcb_model::{Point2, Polygon, Violation};
 
 use crate::diagnose::{Fault, FaultKey, faults};
 
@@ -39,6 +39,10 @@ pub(crate) struct Defects {
     faults: BTreeMap<FaultKey, usize>,
     /// Connections whose copper does not join all their pads.
     unrouted: BTreeSet<String>,
+    /// Footprint courtyards that cross the physical board outline.
+    outside_outline: BTreeMap<String, String>,
+    /// Routed copper items that do not clear the physical board outline.
+    copper_outside_outline: BTreeSet<String>,
 }
 
 impl Defects {
@@ -73,8 +77,184 @@ impl Defects {
         for fault in &explained {
             *defects.faults.entry(fault.key.clone()).or_default() += 1;
         }
+        let containment = outline_containment(board);
+        defects.outside_outline = containment.outside_outline_keys;
+        defects.copper_outside_outline = containment.copper_outside_keys;
         (defects, explained)
     }
+}
+
+/// Physical geometry that crosses a board outline.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct OutlineContainment {
+    pub(crate) outside_outline: BTreeSet<String>,
+    pub(crate) copper_outside_outline: usize,
+    outside_outline_keys: BTreeMap<String, String>,
+    copper_outside_keys: BTreeSet<String>,
+}
+
+impl OutlineContainment {
+    pub(crate) fn is_clear(&self) -> bool {
+        self.outside_outline.is_empty() && self.copper_outside_keys.is_empty()
+    }
+}
+
+/// Check courtyards, pad copper, tracks and vias against the saved outline.
+pub(crate) fn outline_containment(board: &IpcBoardSnapshot) -> OutlineContainment {
+    let Some(outline) = board.problem.outline.as_ref() else {
+        return OutlineContainment::default();
+    };
+    outline_containment_against(board, outline)
+}
+
+/// Check saved board geometry against a proposed outline.
+pub(crate) fn outline_containment_against(
+    board: &IpcBoardSnapshot,
+    outline: &Polygon,
+) -> OutlineContainment {
+    let mut result = OutlineContainment::default();
+    let outline_key = outline
+        .points()
+        .iter()
+        .map(|point| format!("{:016x}:{:016x}", point.x.to_bits(), point.y.to_bits()))
+        .collect::<Vec<_>>()
+        .join("/");
+    for part in &board.imported.parts {
+        if let Some(local) = part.courtyard {
+            let courtyard = crate::place::courtyard_at(
+                local,
+                part.at,
+                f64::from(part.rotation),
+                part.side == kicad_board::BoardSide::Back,
+            );
+            if !rect_inside_outline(courtyard, outline) {
+                result.outside_outline.insert(part.reference.clone());
+                result.outside_outline_keys.insert(
+                    format!(
+                        "{outline_key}|courtyard|{}|{:016x}:{:016x}:{:016x}:{:016x}",
+                        part.reference,
+                        courtyard.min_x.to_bits(),
+                        courtyard.min_y.to_bits(),
+                        courtyard.max_x.to_bits(),
+                        courtyard.max_y.to_bits(),
+                    ),
+                    part.reference.clone(),
+                );
+            }
+        }
+    }
+
+    let edge_clear = crate::sizing::EDGE_CLEAR_MM;
+    for (index, obstacle) in board
+        .problem
+        .obstacles
+        .iter()
+        .filter(|obstacle| obstacle.kind.starts_with("pad:") || obstacle.kind == "zone")
+        .enumerate()
+    {
+        let bounds = geom::Rect::from_center_half(
+            obstacle.center,
+            (obstacle.width / 2.0, obstacle.height / 2.0),
+        );
+        let required = if obstacle.kind.starts_with("pad:") {
+            bounds.inflate(edge_clear)
+        } else {
+            bounds
+        };
+        if !rect_inside_outline(required, outline) {
+            result.copper_outside_keys.insert(format!(
+                "{outline_key}|obstacle|{index}|{}|{:016x}:{:016x}:{:016x}:{:016x}",
+                obstacle.kind,
+                bounds.min_x.to_bits(),
+                bounds.min_y.to_bits(),
+                bounds.max_x.to_bits(),
+                bounds.max_y.to_bits(),
+            ));
+        }
+    }
+    for (trace_index, trace) in board.copper.traces.iter().enumerate() {
+        let required = edge_clear + trace.width / 2.0;
+        for (segment_index, points) in trace.path.windows(2).enumerate() {
+            let segment = geom::Segment::new(points[0], points[1]);
+            if !outline.contains_point(points[0])
+                || !outline.contains_point(points[1])
+                || outline.segment_dist_to_edge(segment) + geom::EPS < required
+            {
+                result.copper_outside_keys.insert(format!(
+                    "{outline_key}|trace|{trace_index}|{segment_index}|{}|{:016x}:{:016x}:{:016x}:{:016x}:{:016x}",
+                    trace.connection,
+                    points[0].x.to_bits(),
+                    points[0].y.to_bits(),
+                    points[1].x.to_bits(),
+                    points[1].y.to_bits(),
+                    trace.width.to_bits(),
+                ));
+            }
+        }
+    }
+    for (index, via) in board.copper.vias.iter().enumerate() {
+        let required = edge_clear + via.diameter / 2.0;
+        if !outline.contains_point(via.at) || outline.dist_to_edge(via.at) + geom::EPS < required {
+            result.copper_outside_keys.insert(format!(
+                "{outline_key}|via|{index}|{}|{:016x}:{:016x}:{:016x}",
+                via.connection,
+                via.at.x.to_bits(),
+                via.at.y.to_bits(),
+                via.diameter.to_bits(),
+            ));
+        }
+    }
+    result.copper_outside_outline = result.copper_outside_keys.len();
+    result
+}
+
+fn rect_inside_outline(rect: geom::Rect, outline: &Polygon) -> bool {
+    let corners_inside = [
+        Point2::new(rect.min_x, rect.min_y),
+        Point2::new(rect.max_x, rect.min_y),
+        Point2::new(rect.max_x, rect.max_y),
+        Point2::new(rect.min_x, rect.max_y),
+    ]
+    .into_iter()
+    .all(|point| outline.contains_point(point));
+    corners_inside
+        && !outline
+            .edges()
+            .any(|edge| segment_hits_rect_interior(edge, rect))
+}
+
+fn segment_hits_rect_interior(segment: geom::Segment, rect: geom::Rect) -> bool {
+    let inner = geom::Rect::new(
+        rect.min_x + geom::EPS,
+        rect.min_y + geom::EPS,
+        rect.max_x - geom::EPS,
+        rect.max_y - geom::EPS,
+    );
+    if inner.min_x >= inner.max_x || inner.min_y >= inner.max_y {
+        return false;
+    }
+    let direction = Point2::new(segment.b.x - segment.a.x, segment.b.y - segment.a.y);
+    let mut enter = 0.0_f64;
+    let mut exit = 1.0_f64;
+    for (origin, delta, low, high) in [
+        (segment.a.x, direction.x, inner.min_x, inner.max_x),
+        (segment.a.y, direction.y, inner.min_y, inner.max_y),
+    ] {
+        if delta.abs() <= f64::EPSILON {
+            if origin < low || origin > high {
+                return false;
+            }
+            continue;
+        }
+        let first = (low - origin) / delta;
+        let second = (high - origin) / delta;
+        enter = enter.max(first.min(second));
+        exit = exit.min(first.max(second));
+        if enter > exit {
+            return false;
+        }
+    }
+    exit >= 0.0 && enter <= 1.0
 }
 
 /// What an edit added to a board's defects. Everything the board already
@@ -83,6 +263,8 @@ impl Defects {
 struct Introduced<'a> {
     shorts: Vec<&'a (String, String)>,
     faults: Vec<&'a Fault>,
+    outside_outline: Vec<&'a String>,
+    copper_outside_outline: Vec<&'a String>,
 }
 
 fn introduced<'a>(
@@ -102,6 +284,16 @@ fn introduced<'a>(
                 }
                 _ => true,
             })
+            .collect(),
+        outside_outline: after
+            .outside_outline
+            .iter()
+            .filter(|(key, _)| !before.outside_outline.contains_key(*key))
+            .map(|(_, reference)| reference)
+            .collect(),
+        copper_outside_outline: after
+            .copper_outside_outline
+            .difference(&before.copper_outside_outline)
             .collect(),
     }
 }
@@ -232,8 +424,14 @@ impl Guard {
         let Introduced {
             shorts,
             faults: introduced,
+            outside_outline,
+            copper_outside_outline,
         } = introduced(before, &after, &explained);
-        if shorts.is_empty() && introduced.is_empty() {
+        if shorts.is_empty()
+            && introduced.is_empty()
+            && outside_outline.is_empty()
+            && copper_outside_outline.is_empty()
+        {
             self.phase.facts(None, None, Some(0));
             return stamped(result, self.revision);
         }
@@ -244,7 +442,9 @@ impl Guard {
 
         let restored = self.restore(ctx);
         let tool = self.tool;
-        let headline = if shorts.is_empty() {
+        let headline = if !outside_outline.is_empty() || !copper_outside_outline.is_empty() {
+            format!("{tool} refused: the edit moved board geometry outside the outline")
+        } else if shorts.is_empty() {
             format!(
                 "{tool} refused: the edit introduced {} design-rule violation(s) the board did \
                  not have",
@@ -256,8 +456,16 @@ impl Guard {
                 shorts.len()
             )
         };
-        self.phase
-            .facts(None, None, Some(shorts.len() + introduced.len()));
+        self.phase.facts(
+            None,
+            None,
+            Some(
+                shorts.len()
+                    + introduced.len()
+                    + outside_outline.len()
+                    + usize::from(!copper_outside_outline.is_empty()),
+            ),
+        );
         tracing::info!(tool, reason = %headline, revision = %self.revision, "board guard refusal");
         json!({
             "ok": false,
@@ -265,6 +473,8 @@ impl Guard {
             "code": "board_guard_refused",
             "shorts": shorts,
             "violations": introduced.iter().map(|fault| fault.json.clone()).collect::<Vec<_>>(),
+            "outside_outline": outside_outline,
+            "copper_outside_outline": !copper_outside_outline.is_empty(),
             // Honest, not blocking: what the board still has left to route. A
             // net here is a to-do, and it is reported so the caller can tell it
             // apart from the defects above.
@@ -304,6 +514,27 @@ fn merge_into(mut base: Value, extra: Value) -> Value {
 mod tests {
     use super::*;
 
+    fn containment_snapshot(part_x: f64, trace_end: f64) -> IpcBoardSnapshot {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("board.kicad_pcb");
+        std::fs::write(
+            &path,
+            format!(
+                r#"(kicad_pcb
+ (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (44 "Edge.Cuts" user))
+ (net 0 "") (net 1 "SIG")
+ (gr_rect (start 0 0) (end 10 10) (layer "Edge.Cuts"))
+ (footprint "Test:Pad" (layer "F.Cu") (at {part_x} 5)
+   (property "Reference" "R1")
+   (fp_rect (start -1 -1) (end 1 1) (layer "F.CrtYd"))
+   (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "SIG")))
+ (segment (start 2 2) (end {trace_end} 2) (width 0.2) (layer "F.Cu") (net 1)))"#,
+            ),
+        )
+        .unwrap();
+        kicad_board::read_snapshot(&path).unwrap()
+    }
+
     fn short(a: &str, b: &str) -> (String, String) {
         (a.to_owned(), b.to_owned())
     }
@@ -324,6 +555,8 @@ mod tests {
             shorts: shorts.iter().cloned().collect(),
             faults: counts,
             unrouted: BTreeSet::new(),
+            outside_outline: BTreeMap::new(),
+            copper_outside_outline: BTreeSet::new(),
         }
     }
 
@@ -361,5 +594,99 @@ mod tests {
         let two = [moved.clone(), moved.clone()];
         let after_two = defects(&[], &two);
         assert_eq!(introduced(&before, &after_two, &two).faults.len(), 1);
+    }
+
+    #[test]
+    fn outline_containment_names_courtyards_and_copper_separately() {
+        assert!(outline_containment(&containment_snapshot(5.0, 8.0)).is_clear());
+
+        let outside = outline_containment(&containment_snapshot(9.5, 9.8));
+        assert_eq!(outside.outside_outline, BTreeSet::from(["R1".to_owned()]));
+        assert!(outside.copper_outside_outline >= 2, "{outside:?}");
+    }
+
+    #[test]
+    fn newly_outside_geometry_is_a_guard_defect() {
+        let before = defects(&[], &[]);
+        let mut after = defects(&[], &[]);
+        after
+            .outside_outline
+            .insert("R1:moved".to_owned(), "R1".to_owned());
+        after.copper_outside_outline.insert("via:old-outline".to_owned());
+
+        let added = introduced(&before, &after, &[]);
+        assert_eq!(added.outside_outline, [&"R1".to_owned()]);
+        assert_eq!(
+            added.copper_outside_outline,
+            [&"via:old-outline".to_owned()]
+        );
+
+        let mut before = defects(&[], &[]);
+        before.copper_outside_outline.insert("trace:before".to_owned());
+        let mut after = defects(&[], &[]);
+        after.copper_outside_outline.insert("trace:after".to_owned());
+        assert_eq!(
+            introduced(&before, &after, &[]).copper_outside_outline,
+            [&"trace:after".to_owned()],
+            "an equal-count replacement is still newly outside geometry"
+        );
+
+        let mut before = defects(&[], &[]);
+        before
+            .outside_outline
+            .insert("R1:before".to_owned(), "R1".to_owned());
+        let mut after = defects(&[], &[]);
+        after
+            .outside_outline
+            .insert("R1:after".to_owned(), "R1".to_owned());
+        assert_eq!(
+            introduced(&before, &after, &[]).outside_outline,
+            [&"R1".to_owned()],
+            "moving the same reference farther out is still a new defect"
+        );
+    }
+
+    #[test]
+    fn a_concave_outline_notch_cannot_cross_a_rectangle() {
+        let outline = Polygon::new(vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(10.0, 0.0),
+            Point2::new(10.0, 10.0),
+            Point2::new(6.0, 10.0),
+            Point2::new(6.0, 4.0),
+            Point2::new(4.0, 4.0),
+            Point2::new(4.0, 10.0),
+            Point2::new(0.0, 10.0),
+        ])
+        .unwrap();
+        let across_notch = geom::Rect::new(3.0, 3.0, 7.0, 5.0);
+
+        assert!(
+            [
+                Point2::new(3.0, 3.0),
+                Point2::new(7.0, 3.0),
+                Point2::new(7.0, 5.0),
+                Point2::new(3.0, 5.0),
+            ]
+            .into_iter()
+            .all(|corner| outline.contains_point(corner)),
+            "the regression requires all four corners to look valid"
+        );
+        assert!(!rect_inside_outline(across_notch, &outline));
+
+        let diagonal = Polygon::new(vec![
+            Point2::new(-10.0, -10.0),
+            Point2::new(20.0, -10.0),
+            Point2::new(20.0, 20.0),
+            Point2::new(-10.0, 20.0),
+            Point2::new(-10.0, 6.0),
+            Point2::new(11.0, 5.0),
+            Point2::new(-10.0, 4.0),
+        ])
+        .unwrap();
+        assert!(!rect_inside_outline(
+            geom::Rect::new(0.0, 0.0, 10.0, 10.0),
+            &diagonal,
+        ));
     }
 }

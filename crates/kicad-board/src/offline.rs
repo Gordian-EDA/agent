@@ -103,7 +103,7 @@ pub fn read_snapshot(path: &Path) -> Result<IpcBoardSnapshot, String> {
         copper_layers: &mut copper_zone_layers,
     };
     for zone in top.iter().filter(|node| node_head(&text, node) == "zone") {
-        read_zone(&text, zone, &layer_names, &outline, &mut zones);
+        read_zone(&text, zone, &nets, &layer_names, &outline, &mut zones);
     }
 
     let bounds = outline.bbox();
@@ -295,11 +295,7 @@ fn read_pad(
     let net = if pad_type == "np_thru_hole" || !has_explicit_copper(text, &children) {
         None
     } else {
-        children
-            .iter()
-            .find(|child| node_head(text, child) == "net")
-            .and_then(|child| node_atoms(text, child).get(2).cloned())
-            .filter(|name| !name.is_empty())
+        child_net_name(text, &children, &BTreeMap::new())
     };
     Some(ParsedPad {
         number,
@@ -378,11 +374,7 @@ fn read_trace(
         path.push(mid);
     }
     path.push(end);
-    let code = child_number(text, &children, "net")? as i32;
-    let connection = nets.get(&code)?.clone();
-    if connection.is_empty() {
-        return None;
-    }
+    let connection = child_net_name(text, &children, nets)?;
     let layer = child_text(text, &children, "layer")?;
     Some(Trace {
         connection,
@@ -404,12 +396,7 @@ fn read_track_obstacle(
     let width = child_number(text, &children, "width").unwrap_or(0.0);
     let bounds = Rect::from_points(start, end).inflate(width / 2.0);
     let layer = child_text(text, &children, "layer")?;
-    let connected_to = child_number(text, &children, "net")
-        .and_then(|code| nets.get(&(code as i32)))
-        .filter(|name| !name.is_empty())
-        .cloned()
-        .into_iter()
-        .collect();
+    let connected_to = child_net_name(text, &children, nets).into_iter().collect();
     Some(Obstacle {
         kind: "track".to_owned(),
         layers: vec![layer_ref(&layer, layer_names)],
@@ -431,11 +418,7 @@ fn read_via(
 ) -> Option<Via> {
     let children = child_nodes(text, node.start + 1, node.end - 1);
     let at = child_point(text, &children, "at")?;
-    let code = child_number(text, &children, "net")? as i32;
-    let connection = nets.get(&code)?.clone();
-    if connection.is_empty() {
-        return None;
-    }
+    let connection = child_net_name(text, &children, nets)?;
     let named_layers = child_atoms(text, &children, "layers");
     let indices: Vec<u32> = named_layers
         .iter()
@@ -480,12 +463,7 @@ fn read_via_obstacle(
         (Some(from), Some(to)) => (from.min(to), from.max(to)),
         _ => (0, layer_names.len().saturating_sub(1)),
     };
-    let connected_to = child_number(text, &children, "net")
-        .and_then(|code| nets.get(&(code as i32)))
-        .filter(|name| !name.is_empty())
-        .cloned()
-        .into_iter()
-        .collect();
+    let connected_to = child_net_name(text, &children, nets).into_iter().collect();
     Some(Obstacle {
         kind: "via".to_owned(),
         layers: layer_names[from..=to]
@@ -509,6 +487,7 @@ struct ZoneSnapshot<'a> {
 fn read_zone(
     text: &str,
     node: &Node,
+    nets: &BTreeMap<i32, String>,
     layer_names: &[String],
     outline: &Polygon,
     snapshot: &mut ZoneSnapshot<'_>,
@@ -521,7 +500,9 @@ fn read_zone(
         return;
     };
     let points = polygon_points(text, polygon);
-    if let Some(net) = child_text(text, &children, "net_name").filter(|net| !net.is_empty())
+    if let Some(net) = child_text(text, &children, "net_name")
+        .filter(|net| !net.is_empty())
+        .or_else(|| child_net_name(text, &children, nets))
         && zone_covers_board(&points, outline)
     {
         for layer in zone_layers(text, &children, layer_names) {
@@ -858,6 +839,23 @@ fn child_text(text: &str, children: &[Node], head: &str) -> Option<String> {
         .and_then(|node| node_atoms(text, node).get(1).cloned())
 }
 
+fn child_net_name(text: &str, children: &[Node], nets: &BTreeMap<i32, String>) -> Option<String> {
+    let atoms = children
+        .iter()
+        .find(|node| node_head(text, node) == "net")
+        .map(|node| node_atoms(text, node))?;
+    let name = match atoms.as_slice() {
+        [_, code, name, ..] if code.parse::<i32>().is_ok() => name.clone(),
+        [_, code_or_name, ..] => code_or_name
+            .parse::<i32>()
+            .ok()
+            .and_then(|code| nets.get(&code).cloned())
+            .unwrap_or_else(|| code_or_name.clone()),
+        _ => return None,
+    };
+    (!name.is_empty()).then_some(name)
+}
+
 fn child_atoms(text: &str, children: &[Node], head: &str) -> Vec<String> {
     children
         .iter()
@@ -1023,6 +1021,57 @@ mod tests {
         assert_eq!(snapshot.problem.connections.len(), 2);
         assert_eq!(snapshot.problem.bounds, Rect::new(0.0, 0.0, 30.0, 20.0));
         assert_eq!(snapshot.problem.obstacles.len(), 4);
+    }
+
+    #[test]
+    fn reads_an_outline_only_board_as_an_empty_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("board.kicad_pcb");
+        std::fs::write(
+            &path,
+            r#"(kicad_pcb
+ (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (44 "Edge.Cuts" user))
+ (gr_rect (start 0 0) (end 10 10) (layer "Edge.Cuts")))"#,
+        )
+        .unwrap();
+
+        let snapshot = read_snapshot(&path).unwrap();
+        assert!(snapshot.imported.parts.is_empty());
+        assert!(snapshot.problem.connections.is_empty());
+        assert!(snapshot.copper.traces.is_empty());
+        assert!(snapshot.copper.vias.is_empty());
+    }
+
+    #[test]
+    fn reads_direct_named_nets_without_a_top_level_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("board.kicad_pcb");
+        std::fs::write(
+            &path,
+            r#"(kicad_pcb
+ (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (44 "Edge.Cuts" user))
+ (gr_rect (start 0 0) (end 10 10) (layer "Edge.Cuts"))
+ (footprint "Test:Pad" (layer "F.Cu") (at 2 2)
+   (property "Reference" "J1")
+   (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net "SIG")))
+ (footprint "Test:Pad" (layer "F.Cu") (at 8 8)
+   (property "Reference" "J2")
+   (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net "SIG")))
+ (segment (start 2 2) (end 5 5) (width 0.25) (layer "F.Cu") (net "SIG"))
+ (via (at 5 5) (size 0.7) (drill 0.35) (layers "F.Cu" "B.Cu") (net "SIG"))
+ (segment (start 5 5) (end 8 8) (width 0.25) (layer "B.Cu") (net "SIG")))"#,
+        )
+        .unwrap();
+
+        let snapshot = read_snapshot(&path).unwrap();
+        assert_eq!(snapshot.problem.connections.len(), 1);
+        assert_eq!(snapshot.problem.connections[0].name, "SIG");
+        assert_eq!(
+            snapshot.imported.parts[0].pads[0].net.as_deref(),
+            Some("SIG")
+        );
+        assert_eq!(snapshot.copper.traces.len(), 2);
+        assert_eq!(snapshot.copper.vias.len(), 1);
     }
 
     #[test]
