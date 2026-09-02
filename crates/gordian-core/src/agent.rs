@@ -87,11 +87,17 @@ struct MeteredUsage {
 }
 
 impl MeteredUsage {
-    fn add_request(&mut self, request: u64) {
+    fn add_request(&mut self, request: u64, started: Instant) {
         self.provider_requests = self.provider_requests.saturating_add(1);
         self.requests.push(RequestUsage {
             request,
-            ..RequestUsage::default()
+            input: 0,
+            output: 0,
+            cache_write: 0,
+            cache_read: 0,
+            latency_ms: 0,
+            started,
+            completed: false,
         });
     }
 
@@ -109,6 +115,8 @@ impl MeteredUsage {
                 cache_write,
                 cache_read,
                 latency_ms: millis(started.elapsed()),
+                started,
+                completed: true,
             };
         }
     }
@@ -116,11 +124,21 @@ impl MeteredUsage {
     fn add_failed(&mut self, request: u64, started: Instant) {
         if let Some(usage) = self.requests.iter_mut().find(|usage| usage.request == request) {
             usage.latency_ms = millis(started.elapsed());
+            usage.completed = true;
+        }
+    }
+
+    fn finish_unreported(&mut self) {
+        for usage in &mut self.requests {
+            if !usage.completed {
+                usage.latency_ms = millis(usage.started.elapsed());
+                usage.completed = true;
+            }
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RequestUsage {
     request: u64,
     input: u64,
@@ -128,6 +146,8 @@ struct RequestUsage {
     cache_write: u64,
     cache_read: u64,
     latency_ms: u64,
+    started: Instant,
+    completed: bool,
 }
 
 fn millis(duration: Duration) -> u64 {
@@ -150,7 +170,9 @@ impl<P> MeteredProvider<P> {
     }
 
     fn take_usage(&self) -> MeteredUsage {
-        std::mem::take(&mut *self.pending.lock().expect("usage meter poisoned"))
+        let mut pending = self.pending.lock().expect("usage meter poisoned");
+        pending.finish_unreported();
+        std::mem::take(&mut *pending)
     }
 }
 
@@ -175,7 +197,7 @@ impl<P: Provider> Provider for MeteredProvider<P> {
         self.pending
             .lock()
             .expect("usage meter poisoned")
-            .add_request(request);
+            .add_request(request, started);
         match self.inner.complete(system, messages, tools).await {
             Ok(end) => {
                 self.pending
@@ -205,7 +227,7 @@ impl<P: Provider> Provider for MeteredProvider<P> {
         self.pending
             .lock()
             .expect("usage meter poisoned")
-            .add_request(request);
+            .add_request(request, started);
         let pending = Arc::clone(&self.pending);
         let stream = match self.inner.stream(system, messages, tools).await {
             Ok(stream) => stream,
