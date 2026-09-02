@@ -26,7 +26,7 @@ For an existing schematic: `read_schematic()`, perform only the requested mutato
 
 Create wires only with `connect` or `rewire`; never provide wire coordinates. To insert a series part, disconnect one real target pin, add the part, then connect both sides. Mutators return a pre-write `revision`; `undo({revision?})` restores one and `history` lists them.
 
-Every fitted non-power part needs a footprint before PCB work. Render to verify visuals; a clean `check_schematic` starts the board.
+Every fitted non-power part needs a footprint before PCB work. `check_schematic` classifies findings against the turn-start revision: fix introduced errors, but leave pre-existing findings alone unless asked. Only introduced errors block completion. Render to verify visuals; a passing `check_schematic` starts the board.
 
 # PCB
 A request for a board, PCB, layout, gerbers or a complete "design" continues here once `check_schematic` is clean; "schematic only" stops there.

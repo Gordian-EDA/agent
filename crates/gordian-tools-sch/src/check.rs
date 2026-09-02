@@ -1,9 +1,10 @@
 //! `check_schematic`: the symbol-aware lints, deterministic electrical rules,
 //! completeness audit, and KiCad ERC over the live file.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use gordian_runtime::AgentRuntime;
 use indexmap::IndexMap;
 use sch_check::model::{Block, Component, Design, NetAttrs, PinTarget};
@@ -82,6 +83,7 @@ pub(crate) fn design(doc: &SchDoc, netlist: &Netlist) -> Design {
 
 #[derive(Clone, Serialize)]
 struct Finding {
+    classification: &'static str,
     severity: String,
     source: &'static str,
     code: String,
@@ -308,6 +310,7 @@ fn diagnostic_finding(
     let (refs, nets, at) = locator.locate(&message, [], []);
     let message = strip_subject_prefix(message, &refs, &nets);
     Finding {
+        classification: "introduced",
         severity: severity.to_string(),
         source,
         code: diagnostic.code.to_string(),
@@ -341,6 +344,7 @@ fn erc_finding(locator: &FindingLocator<'_>, violation: &kicad::Violation) -> Fi
         .find_map(|item| item.pos)
         .map(|position| round_point(position.x, position.y));
     Finding {
+        classification: "introduced",
         severity: violation.severity.clone(),
         source: "kicad_erc",
         code: violation.kind.clone(),
@@ -369,10 +373,15 @@ fn add_rendered_findings(report: &mut Value, findings: &[Finding], detail: bool)
     } else {
         findings.len()
     };
-    let mut lines = findings[..shown]
+    let introduced = findings
         .iter()
-        .map(Finding::line)
-        .collect::<Vec<_>>();
+        .filter(|finding| finding.classification == "introduced")
+        .count();
+    let pre_existing = findings.len() - introduced;
+    let mut lines = vec![format!(
+        "{introduced} introduced, {pre_existing} pre-existing"
+    )];
+    lines.extend(findings[..shown].iter().map(Finding::line));
     let omitted = findings.len() - shown;
     if omitted > 0 {
         lines.push(format!(
@@ -393,10 +402,18 @@ fn add_rendered_findings(report: &mut Value, findings: &[Finding], detail: bool)
     );
 }
 
-/// Lint, electrically check, and run KiCad ERC over the live schematic.
-pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let detail = input.get("detail").and_then(Value::as_bool) == Some(true);
-    let (doc, netlist) = crate::session::Edit::read(ctx)?;
+struct Inspection {
+    netlist: Netlist,
+    gaps: Vec<sch_check::completeness::Gap>,
+    findings: Vec<Finding>,
+    local_errors: usize,
+    local_warnings: usize,
+    erc: std::result::Result<kicad::ErcReport, String>,
+}
+
+fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
+    let doc = SchDoc::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let netlist = sch_doc::connect::extract(&doc);
     let design = design(&doc, &netlist);
     let locator = FindingLocator::new(&doc, &netlist);
     let gaps = sch_check::completeness::audit(&design, ctx.provider());
@@ -424,16 +441,10 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let diagnostic = if problem.malformed {
             sch_check::Diagnostic::error("footprint-id", problem.message)
         } else {
-            // The id is well-formed; this install just has no such library. A
-            // hand-authored sheet carrying its own footprint library is not the
-            // editing agent's defect to fix.
             sch_check::Diagnostic::warning("footprint-unknown", problem.message)
         };
         findings.push(diagnostic_finding(&locator, &diagnostic, "footprint"));
     }
-    // A symbol whose pins no pad on its footprint carries cannot be seeded onto a
-    // board. `sync_board` refuses it, so the schematic gate must say so first
-    // rather than letting the PCB stage discover it.
     for mismatch in gordian_runtime::footprint_compat::design_pin_mismatches(ctx, &design)? {
         let diagnostic = sch_check::Diagnostic::error(
             "footprint-pins",
@@ -463,6 +474,7 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let (message, fix) = message_and_fix(warning, None, "extractor");
         let (refs, nets, at) = locator.locate(&message, [], []);
         findings.push(Finding {
+            classification: "introduced",
             severity: "warning".to_string(),
             source: "extractor",
             code: "extractor".to_string(),
@@ -483,6 +495,7 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         );
         let (refs, nets, at) = locator.locate(&message, refs, nets);
         findings.push(Finding {
+            classification: "introduced",
             severity: "warning".to_string(),
             source: "completeness",
             code: gap.kind.clone(),
@@ -503,30 +516,114 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .filter(|finding| finding.source != "completeness" && finding.severity == "warning")
         .count();
+    let erc = ctx
+        .env()
+        .erc(path)
+        .map_err(|error| format!("running ERC: {error}"));
+    if let Ok(erc) = &erc {
+        findings.extend(
+            erc.violations
+                .iter()
+                .map(|violation| erc_finding(&locator, violation)),
+        );
+    }
+    Ok(Inspection {
+        netlist,
+        gaps,
+        findings,
+        local_errors,
+        local_warnings,
+        erc,
+    })
+}
+
+fn finding_key(finding: &Finding) -> (String, Vec<String>, Vec<String>) {
+    (
+        finding.code.clone(),
+        finding.refs.clone(),
+        finding.nets.clone(),
+    )
+}
+
+fn classify_findings(findings: &mut [Finding], baseline: &[Finding]) {
+    let mut available = BTreeMap::new();
+    for finding in baseline {
+        *available.entry(finding_key(finding)).or_insert(0usize) += 1;
+    }
+    for finding in findings {
+        let count = available.entry(finding_key(finding)).or_default();
+        if *count > 0 {
+            finding.classification = "pre_existing";
+            *count -= 1;
+        }
+    }
+}
+
+/// Lint and run ERC, classifying findings against this turn's first snapshot.
+///
+/// `ok` and `erc_clean` consider introduced errors only; inherited errors do
+/// not block completion of an otherwise clean focused edit.
+pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let detail = input.get("detail").and_then(Value::as_bool) == Some(true);
+    let mut inspection = inspect_schematic(ctx.sch_path(), ctx)?;
+    let baseline = ctx.revisions().turn_baseline(ctx.sch_path())?;
+    let baseline_revision = baseline.as_ref().map(|baseline| baseline.revision);
+    let baseline_inspection = baseline
+        .as_ref()
+        .and_then(|baseline| baseline.path.as_deref())
+        .map(|path| inspect_schematic(path, ctx))
+        .transpose()?;
+    if let Some(baseline) = &baseline_inspection {
+        classify_findings(&mut inspection.findings, &baseline.findings);
+    }
+    inspection.findings.sort_by_key(|finding| {
+        (
+            finding.classification != "introduced",
+            finding.severity != "error",
+        )
+    });
+    let introduced = inspection
+        .findings
+        .iter()
+        .filter(|finding| finding.classification == "introduced")
+        .count();
+    let pre_existing = inspection.findings.len() - introduced;
+    let introduced_errors = inspection
+        .findings
+        .iter()
+        .filter(|finding| finding.classification == "introduced" && finding.severity == "error")
+        .count();
+    let introduced_erc_errors = inspection
+        .findings
+        .iter()
+        .filter(|finding| {
+            finding.classification == "introduced"
+                && finding.source == "kicad_erc"
+                && finding.severity == "error"
+        })
+        .count();
     let mut report = json!({
-        "ok": local_errors == 0,
+        "ok": introduced_errors == 0,
+        "baseline_revision": baseline_revision,
+        "introduced": introduced,
+        "pre_existing": pre_existing,
         "detail": detail,
         "checks": {
-            "errors": local_errors,
-            "warnings": local_warnings,
+            "errors": inspection.local_errors,
+            "warnings": inspection.local_warnings,
         },
-        "extractor_warnings": netlist.warnings,
-        "unconnected_pins": netlist.unconnected.iter().map(crate::refs::label).collect::<Vec<_>>(),
+        "extractor_warnings": inspection.netlist.warnings,
+        "unconnected_pins": inspection.netlist.unconnected.iter().map(crate::refs::label).collect::<Vec<_>>(),
         "completeness": {
-            "warnings": gaps.len(),
-            "gaps": gaps,
+            "warnings": inspection.gaps.len(),
+            "gaps": inspection.gaps,
         },
     });
 
-    match ctx.env().erc(ctx.sch_path()) {
+    match &inspection.erc {
         Ok(erc) => {
             let errors = erc.error_count();
             let warnings = erc.warning_count();
-            findings.extend(
-                erc.violations
-                    .iter()
-                    .map(|violation| erc_finding(&locator, violation)),
-            );
             report["errors"] = json!(errors);
             report["warnings"] = json!(warnings);
             report["erc"] = json!({
@@ -534,11 +631,13 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "warnings": warnings,
                 "findings": erc.violations.len(),
             });
-            report["erc_clean"] = json!(errors == 0);
-            if errors > 0 {
-                report["ok"] = json!(false);
-            } else if local_errors == 0 {
-                report["message"] = if gaps.is_empty() {
+            report["erc_clean"] = json!(introduced_erc_errors == 0);
+            if introduced_errors == 0 {
+                report["message"] = if pre_existing > 0 {
+                    json!(format!(
+                        "no introduced errors; {pre_existing} pre-existing finding(s) remain"
+                    ))
+                } else if inspection.gaps.is_empty() {
                     json!(
                         "schematic is clean and complete by deterministic rules; placement is final"
                     )
@@ -550,15 +649,104 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Err(error) => {
             report["ok"] = json!(false);
             report["erc_clean"] = json!(false);
-            report["erc"] = json!({ "error": format!("running ERC: {error}") });
+            report["erc"] = json!({ "error": error });
         }
     }
-    findings.sort_by_key(|finding| finding.severity != "error");
     report["finding_counts"] = json!({
-        "errors": findings.iter().filter(|finding| finding.severity == "error").count(),
-        "warnings": findings.iter().filter(|finding| finding.severity == "warning").count(),
-        "exclusions": findings.iter().filter(|finding| finding.severity == "exclusion").count(),
+        "errors": inspection.findings.iter().filter(|finding| finding.severity == "error").count(),
+        "warnings": inspection.findings.iter().filter(|finding| finding.severity == "warning").count(),
+        "exclusions": inspection.findings.iter().filter(|finding| finding.severity == "exclusion").count(),
+        "introduced": introduced,
+        "pre_existing": pre_existing,
+        "introduced_errors": introduced_errors,
     });
-    add_rendered_findings(&mut report, &findings, detail);
+    add_rendered_findings(&mut report, &inspection.findings, detail);
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn warning(code: &str, reference: &str, at: [f64; 2]) -> Finding {
+        Finding {
+            classification: "introduced",
+            severity: "warning".to_owned(),
+            source: "test",
+            code: code.to_owned(),
+            message: "warning".to_owned(),
+            refs: vec![reference.to_owned()],
+            nets: vec!["NET".to_owned()],
+            at: Some(at),
+            fix: "fix".to_owned(),
+            advisory: true,
+        }
+    }
+
+    #[test]
+    fn edit_classifies_one_introduced_and_two_pre_existing_warnings() {
+        let baseline = vec![
+            warning("first", "R1", [1.0, 1.0]),
+            warning("second", "R2", [2.0, 2.0]),
+        ];
+        let mut current = vec![
+            warning("first", "R1", [10.0, 10.0]),
+            warning("second", "R2", [2.0, 2.0]),
+            warning("third", "R3", [3.0, 3.0]),
+        ];
+
+        classify_findings(&mut current, &baseline);
+
+        assert_eq!(
+            current
+                .iter()
+                .filter(|finding| finding.classification == "introduced")
+                .count(),
+            1
+        );
+        assert_eq!(
+            current
+                .iter()
+                .filter(|finding| finding.classification == "pre_existing")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn undo_to_baseline_has_no_introduced_warnings() {
+        let baseline = vec![
+            warning("first", "R1", [1.0, 1.0]),
+            warning("second", "R2", [2.0, 2.0]),
+        ];
+        let mut restored = vec![
+            warning("first", "R1", [1.0, 1.0]),
+            warning("second", "R2", [2.0, 2.0]),
+        ];
+
+        classify_findings(&mut restored, &baseline);
+
+        assert!(
+            restored
+                .iter()
+                .all(|finding| finding.classification == "pre_existing")
+        );
+    }
+
+    #[test]
+    fn fresh_sheet_without_baseline_has_only_introduced_warnings() {
+        let mut findings = vec![
+            warning("first", "R1", [1.0, 1.0]),
+            warning("second", "R2", [2.0, 2.0]),
+            warning("third", "R3", [3.0, 3.0]),
+        ];
+
+        classify_findings(&mut findings, &[]);
+
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.classification == "introduced")
+        );
+    }
 }

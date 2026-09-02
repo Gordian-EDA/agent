@@ -44,7 +44,7 @@ const MAX_FAILED_ROUTE_RETRIES: usize = 3;
 
 const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 
-const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. Fix errors. If completeness.gaps is nonempty and this request calls for a complete powered/interface design, add exactly the listed support circuitry and check again. Those warnings are advisory for deliberately minimal designs and focused edits; do not add unrelated parts. Finish once ERC is clean and every applicable gap is resolved.";
+const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. Fix introduced errors and leave pre-existing findings alone. If completeness.gaps is nonempty and this request calls for a complete powered/interface design, add exactly the listed support circuitry and check again. Those warnings are advisory for deliberately minimal designs and focused edits; do not add unrelated parts. Finish once introduced ERC errors are clean and every applicable gap is resolved.";
 
 const UNCHANGED_SCHEMATIC_NUDGE: &str = "the schematic is unchanged since the turn began (your edits were undone or refused); the request is not satisfied — either complete it (e.g. `set_fields` when no compatible symbol exists) or state plainly that it cannot be done and why";
 
@@ -2483,12 +2483,15 @@ async fn check_schematic_review(ctx: &Arc<AgentRuntime>) -> ReviewOutcome {
         };
     }
     let mut defects = value
-        .get("diagnostics")
+        .get("findings")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
+        .filter(|finding| {
+            finding.get("classification").and_then(Value::as_str) == Some("introduced")
+                && finding.get("severity").and_then(Value::as_str) == Some("error")
+        })
+        .map(|finding| finding.to_string())
         .collect::<Vec<_>>();
     defects.extend(
         value
@@ -2730,24 +2733,12 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             format!("{files} file(s) in {dir}")
         }
         "check_schematic" => {
-            let erc_errors = result
-                .pointer("/erc/errors")
+            let introduced = result
+                .get("introduced")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            let erc_warnings = result
-                .pointer("/erc/warnings")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let check_errors = result
-                .pointer("/checks/errors")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let check_warnings = result
-                .pointer("/checks/warnings")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let completeness = result
-                .pointer("/completeness/warnings")
+            let pre_existing = result
+                .get("pre_existing")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             let first = result
@@ -2755,7 +2746,10 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .find(|finding| finding.get("severity").and_then(Value::as_str) == Some("error"))
+                .find(|finding| {
+                    finding.get("classification").and_then(Value::as_str) == Some("introduced")
+                        && finding.get("severity").and_then(Value::as_str) == Some("error")
+                })
                 .and_then(|finding| {
                     let code = finding.get("code")?.as_str()?;
                     let references = finding
@@ -2780,10 +2774,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                     )
                 })
                 .unwrap_or_default();
-            format!(
-                "{erc_errors} ERC errors, {erc_warnings} ERC warnings; {check_errors} other errors, \
-                 {check_warnings} other warnings, {completeness} completeness gaps{first}"
-            )
+            format!("{introduced} introduced, {pre_existing} pre-existing{first}")
         }
         "place_parts" => {
             let gaps = result
@@ -3135,9 +3126,8 @@ mod tests {
         );
     }
 
-    /// `check_schematic` answers `ok: false` about the sheet it inspected; a
-    /// summary reading "refused" makes a report look like a tool that declined
-    /// to run, and hides the counts that say what to fix.
+    /// `check_schematic` reports the turn-relative counts rather than looking
+    /// like a tool that declined to run.
     #[test]
     fn a_failing_check_reports_its_counts_rather_than_a_refusal() {
         let result = json!({
@@ -3147,7 +3137,10 @@ mod tests {
             "erc": {"errors": 3, "warnings": 7},
             "checks": {"errors": 1, "warnings": 2},
             "completeness": {"warnings": 2},
+            "introduced": 1,
+            "pre_existing": 11,
             "findings": [{
+                "classification": "introduced",
                 "severity": "error",
                 "code": "power_pin_not_driven",
                 "message": "no driver on net VCC",
@@ -3157,8 +3150,8 @@ mod tests {
 
         assert_eq!(
             tool_summary("check_schematic", &json!({}), &result),
-            "3 ERC errors, 7 ERC warnings; 1 other errors, 2 other warnings, 2 completeness gaps \
-             — first blocking finding: power_pin_not_driven at U1.8: no driver on net VCC"
+            "1 introduced, 11 pre-existing — first blocking finding: power_pin_not_driven at \
+             U1.8: no driver on net VCC"
         );
     }
 
