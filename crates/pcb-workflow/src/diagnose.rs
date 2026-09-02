@@ -102,7 +102,7 @@ fn clearance_suggestion(gap: f64, required: f64, subject: &str) -> String {
         format!(
             "{subject} only leaves {gap:.3} mm here, below the board's {required:.2} mm clearance. \
              Either move the parts apart (move_parts / place_board), or if this pitch is inherent \
-             to the footprint regenerate_board with {{\"rules\":{{\"clearance\":{relaxed:.2}}}}}"
+             to the footprint sync_board with {{\"rules\":{{\"clearance\":{relaxed:.2}}}}}"
         )
     } else {
         format!("{subject} overlaps foreign copper; move the parts apart and route again")
@@ -181,7 +181,7 @@ fn explain(violation: &DrcViolation, problem: &RoutingView, parts: &[ImportedPar
                 required: Some(*required),
                 detail: format!("via on {connection} sits {gap:.3} mm from {other}"),
                 suggestion: format!(
-                    "{} — or shrink the via with regenerate_board \
+                    "{} — or shrink the via with sync_board \
                      {{\"rules\":{{\"via_diameter\":…, \"via_drill\":…}}}}",
                     clearance_suggestion(*gap, *required, "this via")
                 ),
@@ -204,7 +204,7 @@ fn explain(violation: &DrcViolation, problem: &RoutingView, parts: &[ImportedPar
                  {required:.3} mm minimum"
             ),
             suggestion: format!(
-                "lower the rule to match the copper: regenerate_board \
+                "lower the rule to match the copper: sync_board \
                  {{\"rules\":{{\"min_trace_width\":{:.2}}}}}",
                 (width * 100.0).floor() / 100.0
             ),
@@ -223,7 +223,7 @@ fn explain(violation: &DrcViolation, problem: &RoutingView, parts: &[ImportedPar
             detail: format!("copper on {connection} runs {overshoot:.3} mm past the board edge"),
             suggestion: format!(
                 "a part sits on or over the outline — move it inward with move_parts, or grow the \
-                 board with regenerate_board bounds (currently {:.1} x {:.1} mm)",
+                 board with update_board_outline (currently {:.1} x {:.1} mm)",
                 problem.bounds.max_x - problem.bounds.min_x,
                 problem.bounds.max_y - problem.bounds.min_y
             ),
@@ -249,7 +249,7 @@ fn explain(violation: &DrcViolation, problem: &RoutingView, parts: &[ImportedPar
                     .to_owned()
             } else {
                 format!(
-                    "give the board the layers the route needs: regenerate_board \
+                    "give the board the layers the route needs: sync_board \
                      {{\"rules\":{{\"layer_count\":{}}}}}",
                     (layer_count + 2).min(8)
                 )
@@ -271,7 +271,7 @@ fn explain(violation: &DrcViolation, problem: &RoutingView, parts: &[ImportedPar
                 "via on {connection} is {diameter:.3} mm, under the board's {required:.3} mm minimum"
             ),
             suggestion: format!(
-                "regenerate_board {{\"rules\":{{\"via_diameter\":{diameter:.2}, \
+                "sync_board {{\"rules\":{{\"via_diameter\":{diameter:.2}, \
                  \"via_drill\":{:.2}}}}} if the fabricator allows it",
                 (diameter * 0.5 * 100.0).floor() / 100.0
             ),
@@ -299,7 +299,7 @@ fn explain(violation: &DrcViolation, problem: &RoutingView, parts: &[ImportedPar
                 suggestion: format!(
                     "no legal escape was found for {where_pad}: move that part away from its \
                      neighbours or the board edge with move_parts, or give the router room with \
-                     regenerate_board bounds"
+                     update_board_outline bounds"
                 ),
             }
         }
@@ -492,7 +492,7 @@ fn unrouted_suggestion(
         ),
         None => format!(
             "no channel was found between {} and {}: move those two parts closer with move_parts, \
-             give the router another copper layer with regenerate_board \
+             give the router another copper layer with sync_board \
              {{\"rules\":{{\"layer_count\":4}}}}, or lay it by hand with route_track \
              {{\"net\":\"{net}\",\"from\":{},\"to\":{}}}",
             from.pad,

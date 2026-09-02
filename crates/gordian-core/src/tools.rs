@@ -16,7 +16,7 @@
 //! in by [`tool_defs`] / [`run_tool`]. This module keeps what is left: symbol
 //! discovery (`search_symbols` / `get_symbol_info`), `project_info` and
 //! `render_schematic`; `pcb-workflow` covers the footprint
-//! search/info, `regenerate_board`, and the place/route/export/interactive flow.
+//! search/info, `sync_board`, and the place/route/export/interactive flow.
 //!
 //! ## Symbol-index caching
 //!
@@ -246,7 +246,7 @@ pub fn tool_defs() -> Vec<Tool> {
         Def {
             name: "set_net_width".into(),
             description:
-                "Set one existing board net's net-class width; prefer regeneration rules pre-route."
+                "Set one existing board net's net-class width; prefer sync rules pre-route."
                     .into(),
             input_schema: json!({
                 "type": "object",
@@ -293,9 +293,11 @@ pub fn tool_defs() -> Vec<Tool> {
             }),
         },
         Def {
-            name: "regenerate_board".into(),
-            description: "Seed PCB. Omit bounds to size the outline from the footprints on \
-                 the netlist; the result reports required_bounds and recommended_bounds. \
+            name: "sync_board".into(),
+            description: "Sync the PCB to the schematic: creates the board when absent, \
+                 else applies only the delta and keeps placement and copper. bounds/rules \
+                 apply on creation only; omit bounds to size the outline from the footprints \
+                 (the result reports required_bounds and recommended_bounds). \
                  clearance/min_trace_width are lowered to what those footprints permit \
                  (reported in design_rules)."
                 .into(),
@@ -363,11 +365,16 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "place_board".into(),
-            description: "Auto-place PCB; groups steer regions, grids, surrounds, and edges."
+            description: "Auto-place a newly created PCB; groups steer regions, grids, \
+                 surrounds, and edges. Refuses an already-placed board unless replace:true."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "replace": {
+                        "type": "boolean",
+                        "description": "Re-place an already-placed board, losing its layout."
+                    },
                     "groups": {
                         "type": "array",
                         "items": {
@@ -460,7 +467,7 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "render_schematic" => render_schematic(ctx),
         "search_footprints" => pcb_workflow::search_footprints(input, ctx),
         "get_footprint_info" => pcb_workflow::get_footprint_info(input, ctx),
-        "regenerate_board" => pcb_workflow::regenerate_board(input, ctx),
+        "sync_board" => pcb_workflow::sync_board(input, ctx),
         "get_board" => pcb_workflow::get_board(input, ctx),
         "place_board" => pcb_workflow::place_board(input, ctx),
         "route_board" => pcb_workflow::route_board(input, ctx),

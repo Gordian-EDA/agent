@@ -1,6 +1,6 @@
 //! Interactive IPC board editing.
 //!
-//! Once the engine has seeded a board (regenerate_board → place_board → route_board),
+//! Once the engine has seeded a board (sync_board → place_board → route_board),
 //! `open_board` launches or inspects the live KiCAD session and the geometry
 //! tools edit the REAL board over IPC. This is where the LLM directly controls
 //! geometry (the engine is the assist that produced the starting point).
@@ -22,6 +22,8 @@ use gordian_runtime::AgentRuntime;
 use gordian_runtime::tool::require_str;
 
 use kicad_board::{ImportedPart, IpcBoardSnapshot};
+
+use crate::copper::RetractedCopper;
 
 fn ipc_err(e: kicad_ipc::Error) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
@@ -56,7 +58,12 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Err(err) = crate::place::write_placement(ctx, &plan.ipc_moves) {
         return Ok(json!({ "error": format!("move_parts could not write the board: {err}") }));
     }
-    if let Err(err) = write_retained_copper(ctx, &snapshot, &retract) {
+    if let Err(err) = crate::copper::write_retained(
+        ctx,
+        snapshot.problem.layer_count,
+        &snapshot.layer_names,
+        &retract,
+    ) {
         return Ok(json!({
             "error": format!("move_parts moved the parts but could not retract their copper: {err}"),
         }));
@@ -66,101 +73,13 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
 /// Copper the move invalidates: every net with a trace ending on a pad that
 /// moved, retracted whole so no stub is left hanging.
-#[derive(Debug, Default, Clone)]
-struct RetractedCopper {
-    retained: RouteSolution,
-    nets: BTreeSet<String>,
-    count: usize,
-}
-
 fn retracted_copper(snapshot: &IpcBoardSnapshot, plan: &MovePlan) -> RetractedCopper {
-    let moved: BTreeSet<&str> = plan
+    let moved = plan
         .positions
         .iter()
-        .map(|position| position.reference.as_str())
-        .collect();
-    let pads: Vec<Rect> = snapshot
-        .problem
-        .obstacles
-        .iter()
-        .filter(|obstacle| {
-            obstacle
-                .kind
-                .strip_prefix("pad:")
-                .is_some_and(|reference| moved.contains(reference))
-        })
-        .map(|obstacle| {
-            Rect::new(
-                obstacle.center.x - obstacle.width / 2.0,
-                obstacle.center.y - obstacle.height / 2.0,
-                obstacle.center.x + obstacle.width / 2.0,
-                obstacle.center.y + obstacle.height / 2.0,
-            )
-        })
-        .collect();
-    let touches_moved_pad = |trace: &Trace| {
-        trace
-            .path
-            .iter()
-            .any(|point| pads.iter().any(|pad| pad.contains(*point)))
-    };
-    // A net whose copper is only PARTLY removed is left with a stub hanging off
-    // nothing — KiCAD reports it as `track_dangling`, and the board fails DRC
-    // with no unrouted net to explain it. So the unit of retraction is the net:
-    // once a move invalidates any of its copper, all of it goes and the net is
-    // named for re-routing.
-    let nets: BTreeSet<String> = snapshot
-        .copper
-        .traces
-        .iter()
-        .filter(|trace| touches_moved_pad(trace))
-        .map(|trace| trace.connection.clone())
-        .collect();
-    let (dropped, kept): (Vec<_>, Vec<_>) = snapshot
-        .copper
-        .traces
-        .iter()
-        .cloned()
-        .partition(|trace| nets.contains(&trace.connection));
-    RetractedCopper {
-        count: dropped.len(),
-        retained: RouteSolution {
-            traces: kept,
-            vias: snapshot
-                .copper
-                .vias
-                .iter()
-                .filter(|via| !nets.contains(&via.connection))
-                .cloned()
-                .collect(),
-        },
-        nets,
-    }
-}
-
-fn write_retained_copper(
-    ctx: &AgentRuntime,
-    snapshot: &IpcBoardSnapshot,
-    retract: &RetractedCopper,
-) -> std::result::Result<(), String> {
-    if retract.count == 0 {
-        return Ok(());
-    }
-    ctx.close_kicad_session();
-    let path = ctx.pcb_path();
-    let text =
-        std::fs::read_to_string(&path).map_err(|err| format!("could not read the board: {err}"))?;
-    let (stripped, _, _) = kicad_board::strip_copper(&text)?;
-    let replacement = kicad_board::append_copper(
-        &stripped,
-        &retract.retained,
-        snapshot.problem.layer_count,
-        &snapshot.layer_names,
-    )?;
-    // The same atomic replace the route path uses: an interrupted move must not
-    // leave a half-written board.
-    super::route::write_board_atomically(&path, replacement.as_bytes())
-        .map_err(|err| format!("could not write the board: {err}"))
+        .map(|position| position.reference.as_str());
+    let pads = crate::copper::pad_extents(&snapshot.problem, moved);
+    crate::copper::retract(&snapshot.copper, &pads, &BTreeSet::new())
 }
 
 /// Reject a move that would land a part on top of another one: the courtyards

@@ -11,16 +11,20 @@
 //! snapshot and save it through IPC; headless operations use `kicad-board`'s
 //! atomic file-edit fallback and invalidate any stale live session.
 //!
-//! `regenerate_board` synthesizes the initial `.kicad_pcb` file. Active
-//! placement, routing, rendering, and `get_board` read the live IPC board.
+//! `sync_board` writes the `.kicad_pcb`: it creates the file when absent and
+//! otherwise applies only the schematic delta. Active placement, routing,
+//! rendering, and `get_board` read the live IPC board.
 //!
 //! ## Tool families (one module each)
 //!
 //! - [`seed`] — board-construction rule/extra input types.
 //! - [`footprints`] — footprint discovery + assignment: `search_footprints`,
 //!   `get_footprint_info`.
-//! - [`create`] — board construction + input parsing: `regenerate_board`,
+//! - [`create`] — board synthesis + input parsing: the seed-board writer,
 //!   rules and bounds parsing.
+//! - [`sync`] — `sync_board`: the schematic↔board netlist diff and its
+//!   incremental application.
+//! - [`copper`] — copper retraction shared by the board mutators.
 //! - [`rules`] — the design rules the board's own footprints permit.
 //! - [`diagnose`] — actionable payloads for a refused route.
 //! - [`sizing`] — how big a board its own parts require.
@@ -32,6 +36,7 @@
 //! - [`interactive`] — live IPC board editing (`open_board`, `move_parts`,
 //!   `route_track`, `delete_copper`, `set_net_width`).
 
+mod copper;
 pub mod corpus;
 mod create;
 mod diagnose;
@@ -47,13 +52,13 @@ mod rules;
 mod seed;
 mod silk;
 mod sizing;
+mod sync;
 
 pub(crate) fn fmt_num(v: f64) -> String {
     let v = if v == 0.0 { 0.0 } else { v };
     format!("{v}")
 }
 
-pub use create::regenerate_board;
 pub use export::check_board;
 pub use fab::export_fab;
 pub use footprints::{get_footprint_info, search_footprints};
@@ -65,6 +70,7 @@ pub use place::{get_board, place_board};
 pub use render::render_board;
 pub use route::route_board;
 pub use seed::{BoardSeedRules, PourSpec};
+pub use sync::sync_board;
 
 fn active_board(
     ctx: &gordian_runtime::AgentRuntime,

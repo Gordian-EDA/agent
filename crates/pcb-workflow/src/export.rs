@@ -137,7 +137,7 @@ pub(super) fn materialize_zones_for_drc(
 pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
     if !path.exists() {
-        return Ok(json!({ "error": "no board exists yet — run regenerate_board first" }));
+        return Ok(json!({ "error": "no board exists yet — run sync_board first" }));
     }
     let mut note_prefix = if ctx.kicad().is_open() {
         match crate::save_active_board(ctx) {
@@ -253,9 +253,9 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             format!("{note_prefix}KiCAD DRC reported issues; inspect violations/unconnected counts.")
         },
         "next": if gate.is_ok() {
-            "DRC gate passed; finish the task. Do not regenerate, replace, or reroute this unchanged board. reported_findings may include tolerated non-copper warnings; blocking_findings is authoritative."
+            "DRC gate passed; finish the task. Do not resync, replace, or reroute this unchanged board. reported_findings may include tolerated non-copper warnings; blocking_findings is authoritative."
         } else {
-            "Fix the top blocking violations/unconnected items, then call check_board again. Do not regenerate blindly."
+            "Fix the top blocking violations/unconnected items, then call check_board again. Do not resync blindly."
         },
     }))
 }

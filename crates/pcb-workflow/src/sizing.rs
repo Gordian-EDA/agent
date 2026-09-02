@@ -1,9 +1,9 @@
 //! How big a board its own parts require.
 //!
-//! One law, used twice: `regenerate_board` sizes the outline BEFORE anything is
+//! One law, used twice: `sync_board` sizes the outline BEFORE anything is
 //! placed, and `place_board` quotes the same numbers when a pack fails. A board
 //! that is too small is only discovered at placement otherwise, which costs the
-//! caller a regenerate/place round-trip per guess.
+//! caller a sync/place round-trip per guess.
 //!
 //! Two answers come out of it:
 //!

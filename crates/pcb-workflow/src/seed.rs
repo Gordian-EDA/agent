@@ -1,4 +1,4 @@
-//! Board-construction input types used by `regenerate_board`.
+//! Board-construction input types used by `sync_board`.
 
 use serde::{Deserialize, Serialize};
 

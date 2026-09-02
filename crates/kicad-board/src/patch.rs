@@ -33,8 +33,14 @@ pub(crate) fn child_nodes(text: &str, body_start: usize, body_end: usize) -> Vec
         match bytes[i] {
             b'"' if !in_str => in_str = true,
             b'"' if in_str => {
-                // KiCAD escapes quotes as \"; skip escaped.
-                if i == 0 || bytes[i - 1] != b'\\' {
+                // KiCAD escapes quotes as \". A quote closes the string only
+                // when an EVEN number of backslashes precede it — `"C:\\"` ends
+                // there, and mis-reading it de-syncs the rest of the document.
+                let mut slashes = 0usize;
+                while i > slashes && bytes[i - 1 - slashes] == b'\\' {
+                    slashes += 1;
+                }
+                if slashes.is_multiple_of(2) {
                     in_str = false;
                 }
             }
@@ -197,7 +203,7 @@ pub fn board_file_plane_nets(text: &str) -> Result<BTreeMap<String, u32>, String
     Ok(planes)
 }
 
-fn quoted_field<'a>(block: &'a str, head: &str) -> Option<&'a str> {
+pub(crate) fn quoted_field<'a>(block: &'a str, head: &str) -> Option<&'a str> {
     let prefix = format!("({head} \"");
     let rest = block.split_once(&prefix)?.1;
     Some(rest.split_once('"')?.0)
@@ -588,7 +594,7 @@ fn rotate_child_angles(
     }
 }
 
-fn apply_edits(text: &str, mut edits: Vec<(usize, usize, String)>) -> String {
+pub(crate) fn apply_edits(text: &str, mut edits: Vec<(usize, usize, String)>) -> String {
     edits.sort_by_key(|e| e.0);
     let mut out = String::with_capacity(text.len() + 256);
     let mut pos = 0usize;
@@ -647,7 +653,7 @@ pub fn strip_copper(text: &str) -> Result<(String, usize, usize), String> {
     Ok((apply_edits(text, edits), tracks, vias))
 }
 
-fn line_start(text: &str, pos: usize) -> usize {
+pub(crate) fn line_start(text: &str, pos: usize) -> usize {
     text[..pos]
         .rfind('\n')
         .map(|nl| {

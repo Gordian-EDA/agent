@@ -3548,7 +3548,7 @@ mod escape_bottleneck_tests {
     /// The honesty pass must leave NO real violation standing, whatever mix of
     /// defects the router handed it. A pass that runs out with violations
     /// remaining makes `route_board` refuse with the same count forever, and no
-    /// `move_parts` or regenerate can clear it.
+    /// `move_parts` or a re-sync can clear it.
     #[test]
     fn cleanup_leaves_no_real_violation_for_a_mixed_bag_of_defects() {
         let point = |x: f64, y: f64| pcb_model::RoutePoint {

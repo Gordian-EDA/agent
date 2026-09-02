@@ -865,6 +865,7 @@ dependencies = [
  "gordian-tools-sch",
  "indexmap 2.14.0",
  "kicad",
+ "kicad-board",
  "pcb-workflow",
  "prost",
  "prost-types",
@@ -1420,6 +1421,7 @@ name = "kicad-board"
 version = "0.1.0"
 dependencies = [
  "geom",
+ "kicad",
  "kicad-ipc",
  "pcb-model",
  "serde_json",

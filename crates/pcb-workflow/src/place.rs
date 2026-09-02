@@ -1508,7 +1508,7 @@ fn undersized_817_result(problem: &PlacementView, required: Opto817Requirements)
             "h": estimate.height.ceil(),
         },
         "parts_courtyard_area_mm2": (estimate.total_area * 10.0).round() / 10.0,
-        "note": "placement is NOT legal, so no footprint positions were written and the board remains at its previous positions. The verified 817 isolation bank requires one continuous single-row barrier; regenerate_board with at least suggested_min_bounds_mm, then run place_board once.",
+        "note": "placement is NOT legal, so no footprint positions were written and the board remains at its previous positions. The verified 817 isolation bank requires one continuous single-row barrier; update_board_outline with at least suggested_min_bounds_mm, then run place_board once.",
     });
     out["error"] = Value::String(illegal_placement_error(&out));
     out
@@ -1676,7 +1676,7 @@ fn connectors_off_edge(
 }
 
 /// The board this placement's parts require, in [`crate::sizing`]'s terms — the
-/// same law `regenerate_board` sizes an auto board with, so both tools quote one
+/// same law `sync_board` sizes an auto board with, so both tools quote one
 /// pair of numbers.
 fn board_sizing(
     problem: &PlacementView,
@@ -1791,8 +1791,25 @@ fn placement_existing_copper_error(tracks: usize, vias: usize) -> Option<Value> 
     })
 }
 
+/// Automatic placement moves EVERY unlocked part, so running it on a board that
+/// already has a layout throws that layout away — the exact loss `sync_board`
+/// exists to prevent. A board still at its seed row has no layout to lose, and a
+/// caller who means it says so.
+fn already_placed_error(board: &IpcBoardSnapshot, replace: bool) -> Option<Value> {
+    (!replace && !kicad_board::is_seed_imported_board(&board.imported)).then(|| {
+        json!({
+            "error": "this board is already placed; automatic placement would move every part",
+            "code": "board_already_placed",
+            "placement_applied": false,
+            "note": "Nothing was moved. Adjust individual parts with move_parts, or pass \
+                     {\"replace\": true} to deliberately re-place the whole board and lose the \
+                     current layout.",
+        })
+    })
+}
+
 #[tracing::instrument(skip_all, fields(project = %ctx.project_dir().display()))]
-pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let board = match crate::active_board(ctx) {
         Ok(board) => board,
         Err(live_err) => return Ok(json!({ "error": live_err })),
@@ -1800,6 +1817,16 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Some(error) =
         placement_existing_copper_error(board.copper.traces.len(), board.copper.vias.len())
     {
+        return Ok(error);
+    }
+    let replace = input
+        .get("replace")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if let Some(object) = input.as_object_mut() {
+        object.remove("replace");
+    }
+    if let Some(error) = already_placed_error(&board, replace) {
         return Ok(error);
     }
 
@@ -1959,7 +1986,7 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     "note": format!(
                         "{ic_ref} has {} decoupling caps the placer scattered. Render the board \
                          and, if the cluster is still poor, use `move_parts` for deliberate live \
-                         refinement rather than regenerating unchanged.",
+                         refinement rather than resyncing unchanged.",
                         caps.len()
                     ),
                 }));
@@ -1969,7 +1996,7 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
     // On a failed placement, give the agent a CONCRETE board size so it can retry
     // deterministically instead of guessing — in the one vocabulary
-    // `regenerate_board` also uses, grown past the outline that just failed so a
+    // `sync_board` also uses, grown past the outline that just failed so a
     // retry can never propose it again. `suggested_min_bounds_mm` carries the
     // same recommendation under the name the auto-resize path already reads.
     let mut extra = json!({});
@@ -1988,7 +2015,7 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         });
     } else {
         // A legal placement on an oversized canvas reads as wasted board: report
-        // the tight courtyard envelope so callers can regenerate at fit_bounds_mm
+        // the tight courtyard envelope so callers can resize to fit_bounds_mm
         // and re-place instead of shipping empty acreage.
         let by_ref: std::collections::BTreeMap<&str, _> = result
             .placements
@@ -2045,8 +2072,8 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
              Call route_board next, or render_board to see it."
         } else {
             "placement is NOT legal, so no footprint positions were written and the board remains at \
-             its previous (usually regeneration-seed) positions. To keep the requested board size, \
-             choose smaller appropriate footprints; otherwise regenerate_board with bounds at least \
+             its previous (usually sync-seed) positions. To keep the requested board size, \
+             choose smaller appropriate footprints; otherwise update_board_outline with bounds at least \
              suggested_min_bounds_mm, then run place_board once."
         },
     });
@@ -2095,10 +2122,10 @@ fn illegal_placement_error(result: &Value) -> String {
          {courtyard:.0} mm² of part courtyards, and packing plus routing needs roughly twice the \
          courtyard area). This board requires at least {required_w} x {required_h} mm; \
          {recommended_w} x {recommended_h} mm is recommended (it leaves routing room). Call \
-         regenerate_board with \
-         bounds {{\"min_x\":0,\"min_y\":0,\"max_x\":{recommended_w},\"max_y\":{recommended_h}}} \
-         — or omit bounds to size it automatically — then place_board once. Choosing smaller \
-         footprints is the other way to keep the current board size."
+         update_board_outline with \
+         bounds {{\"min_x\":0,\"min_y\":0,\"max_x\":{recommended_w},\"max_y\":{recommended_h}}}, \
+         then place_board once. Choosing smaller footprints is the other way to keep the current \
+         board size."
     )
 }
 
@@ -3358,7 +3385,7 @@ mod tests {
     }
 
     /// The nine-part board from the failure report: a USB-C receptacle, a
-    /// SOT-23-5 LDO and seven 0603 passives. `regenerate_board` sizes a board
+    /// SOT-23-5 LDO and seven 0603 passives. `sync_board` sizes a board
     /// like this before anything is placed, and the size it picks must place
     /// legally on the FIRST call — otherwise the caller is back to guessing.
     /// A legal placement says nothing about whether a cable can reach the

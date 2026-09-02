@@ -33,7 +33,7 @@ pub fn export_fab(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !board.is_file() {
         return Ok(json!({
             "error": format!(
-                "no routed board at {} — run regenerate_board → place_board → route_board → check_board first, \
+                "no routed board at {} — run sync_board → place_board → route_board → check_board first, \
                  then export_fab (it bundles the saved .kicad_pcb)",
                 board.display()
             ),

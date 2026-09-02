@@ -8,6 +8,7 @@ description = "KiCad PCB persistence: live IPC snapshots, domain conversion, and
 
 [dependencies]
 geom = { path = "../geom" }
+kicad = { path = "../kicad" }
 kicad-ipc = { path = "../kicad-ipc" }
 pcb-model = { path = "../pcb-model" }
 serde_json.workspace = true

@@ -5,8 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io;
 
-use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use geom::Rect;
 use kicad_footprint::{FootprintCatalog, FootprintId};
@@ -18,7 +17,7 @@ use gordian_runtime::tool::footprint_suggestion_clause;
 use super::fmt_num;
 use super::seed::{BoardSeedRules, PourPadConnection, PourSpec};
 
-// ── regenerate_board ──────────────────────────────────────────────────────────────
+// ── board synthesis ───────────────────────────────────────────────────────────────
 
 /// The outline a seed is asked for: an explicit rectangle, or one sized from
 /// the parts themselves.
@@ -103,209 +102,13 @@ fn resolve_pour_layer(layer: &str, layer_count: u32) -> Option<(u32, String)> {
     }
 }
 
-/// `regenerate_board` — seed the PCB from KiCAD's own schematic netlist export.
-///
-/// Footprints must already be assigned in the live schematic. Missing footprints are
-/// a hard error: the agent assigns them before regenerating the board again.
-///
-/// The schematic gate is exactly `check_schematic`'s: ERC errors block, ERC warnings do
-/// not. One policy, so a schematic the agent was told is finished is one the board can
-/// be seeded from.
-pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    if !ctx.sch_path().exists() {
-        return Ok(json!({
-            "error": "no .kicad_sch yet — create the schematic with place_parts first"
-        }));
-    }
-    let netlist = match ctx.env().netlist(ctx.sch_path()) {
-        Ok(netlist) => netlist,
-        Err(e) => {
-            return Ok(json!({ "error": format!("could not export the schematic netlist: {e}") }));
-        }
-    };
-    let erc = match ctx.env().erc(ctx.sch_path()) {
-        Ok(report) => report,
-        Err(e) => {
-            return Ok(
-                json!({ "error": format!("could not run ERC before regenerating the board: {e}") }),
-            );
-        }
-    };
-    if erc.error_count() > 0 {
-        let violations: Vec<Value> = erc
-            .violations
-            .iter()
-            .filter(|v| v.severity == "error")
-            .map(|v| {
-                json!({
-                    "type": v.kind,
-                    "description": v.description,
-                })
-            })
-            .collect();
-        return Ok(json!({
-            "ok": false,
-            "error": format!(
-                "schematic ERC has {} error(s); fix the live schematic before regenerate_board",
-                erc.error_count()
-            ),
-            "erc": {
-                "errors": erc.error_count(),
-                "warnings": erc.warning_count(),
-                "violations": violations,
-            },
-        }));
-    }
-    let mut pad_nets_by_ref: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    for net in &netlist.nets {
-        if net.name.is_empty() {
-            continue;
-        }
-        for (reference, pin) in &net.nodes {
-            if reference.is_empty() || pin.is_empty() {
-                continue;
-            }
-            pad_nets_by_ref
-                .entry(reference.clone())
-                .or_default()
-                .insert(pin.clone(), net.name.clone());
-        }
-    }
-
-    let mut parts = Vec::with_capacity(netlist.components.len());
-    let mut missing_footprints = Vec::new();
-    for component in &netlist.components {
-        let footprint = component
-            .properties
-            .get("Footprint")
-            .cloned()
-            .unwrap_or_default();
-        if footprint.is_empty() {
-            missing_footprints.push(component.reference.clone());
-        }
-        parts.push(SeedPart {
-            reference: component.reference.clone(),
-            value: Some(component.value.clone()),
-            footprint,
-            pad_nets: pad_nets_by_ref
-                .remove(&component.reference)
-                .unwrap_or_default(),
-            locked: None,
-        });
-    }
-
-    let bounds = match parse_seed_bounds(input.get("bounds")) {
-        Ok(b) => b,
-        Err(e) => return Ok(json!({ "error": e })),
-    };
-    let mut rules = match parse_seed_rules(input.get("rules")) {
-        Ok(r) => r,
-        Err(msg) => return Ok(json!({ "error": msg })),
-    };
-
-    let part_count = parts.len();
-    apply_complexity_default_layer_count(&mut rules, input.get("rules"), part_count);
-
-    if !missing_footprints.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "part_count": part_count,
-            "missing_footprints": missing_footprints,
-            "next_tool": "assign_footprints",
-            "next": "call assign_footprints({assignments:[{reference, footprint}, ...]}), then regenerate_board again",
-            "note": "some live schematic symbols have no footprint field — do not retry regenerate_board until footprints are assigned",
-        }));
-    }
-
-    let footprint_pin_mismatches =
-        gordian_runtime::footprint_compat::netlist_pin_mismatches(ctx, &netlist)?;
-    if !footprint_pin_mismatches.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "error": "schematic symbol and assigned footprint have incompatible numbered pins/pads",
-            "footprint_pin_mismatches": footprint_pin_mismatches,
-            "next_tool": "swap_symbol",
-            "next": "make the two agree: swap_symbol to a part whose pin numbers are the footprint's pad numbers, or assign_footprints a package whose pads match the pins — then regenerate_board again",
-            "note": "Every named electrical pad must match a symbol pin and every symbol pin must have a physical pad. Unnumbered mechanical pads and repeated pads with a valid shared number are allowed.",
-        }));
-    }
-
-    add_default_power_pours(&mut rules, &parts);
-
-    let spec = BoardSeedSpec {
-        bounds,
-        rules,
-        parts,
-        outline: None,
-    };
-
-    let catalog = match ctx.footprint_catalog() {
-        Ok(catalog) => catalog,
-        Err(e) => return Ok(json!({ "error": format!("footprint catalog unavailable: {e}") })),
-    };
-    let plan = match plan_seed_board(&spec, catalog) {
-        Ok(plan) => plan,
-        Err(msg) => return Ok(json!({ "error": msg })),
-    };
-    let sizing = plan.sizing.clone();
-    let width = plan.bounds.max_x - plan.bounds.min_x;
-    let height = plan.bounds.max_y - plan.bounds.min_y;
-    let bounds_json = json!({
-        "required_bounds": { "width": sizing.required_w, "height": sizing.required_h },
-        "recommended_bounds": { "width": sizing.recommended_w, "height": sizing.recommended_h },
-        "applied_bounds": { "width": width, "height": height },
-        "parts_courtyard_area_mm2": sizing.courtyard_area_mm2,
-    });
-    if plan.bounds_were_explicit && !sizing.fits(width, height) {
-        let mut out = json!({
-            "ok": false,
-            "error": format!(
-                "the requested {width} x {height} mm board is smaller than its own parts require: \
-                 {} mm² of courtyards need at least {} x {} mm to pack legally. Call \
-                 regenerate_board with bounds \
-                 {{\"min_x\":0,\"min_y\":0,\"max_x\":{},\"max_y\":{}}} (recommended, with routing \
-                 room), or omit bounds to size the board automatically. No board was written.",
-                sizing.courtyard_area_mm2,
-                sizing.required_w,
-                sizing.required_h,
-                sizing.recommended_w,
-                sizing.recommended_h,
-            ),
-            "code": "bounds_below_required",
-        });
-        merge(&mut out, bounds_json);
-        return Ok(out);
-    }
-
-    let seeded = match write_seed_plan(plan, ctx) {
-        Ok(seeded) => seeded,
-        Err(msg) => return Ok(json!({ "error": msg })),
-    };
-    let mut out = json!({
-        "ok": true,
-        "part_count": part_count,
-        "layer_count": seeded.rules.layer_count,
-        "path": ctx.pcb_path().display().to_string(),
-        "design_rules": {
-            "clearance": seeded.rules.clearance,
-            "min_trace_width": seeded.rules.min_trace_width,
-            "via_diameter": seeded.rules.via_diameter,
-            "via_drill": seeded.rules.via_drill,
-        },
-        "rules_from_footprints": seeded.rule_notes,
-        "note": "board regenerated from the committed schematic file (not F8 sync; existing placement/routing may be replaced) — run place_board, then route_board, then check_board",
-    });
-    merge(&mut out, bounds_json);
-    Ok(out)
-}
-
-fn merge(into: &mut Value, from: Value) {
+pub(super) fn merge(into: &mut Value, from: Value) {
     if let (Value::Object(target), Value::Object(source)) = (into, from) {
         target.extend(source);
     }
 }
 
-fn apply_complexity_default_layer_count(
+pub(super) fn apply_complexity_default_layer_count(
     rules: &mut SeedRules,
     input: Option<&Value>,
     part_count: usize,
@@ -330,7 +133,10 @@ fn write_seed_board(
 }
 
 /// Emit a resolved plan and replace the project's board file with it.
-fn write_seed_plan(plan: SeedPlan, ctx: &AgentRuntime) -> std::result::Result<SeededBoard, String> {
+pub(super) fn write_seed_plan(
+    plan: SeedPlan,
+    ctx: &AgentRuntime,
+) -> std::result::Result<SeededBoard, String> {
     let seeded = emit_seed_plan(plan)?;
     // Regeneration replaces the document, not merely its on-disk bytes. A
     // cached pcbnew session otherwise keeps serving the old in-memory board for
@@ -545,7 +351,7 @@ fn effective_seed_rules(
     (effective, notes)
 }
 
-fn add_default_power_pours(rules: &mut SeedRules, parts: &[SeedPart]) {
+pub(super) fn add_default_power_pours(rules: &mut SeedRules, parts: &[SeedPart]) {
     if !rules.pours.is_empty() || rules.layer_count < 6 {
         return;
     }
@@ -965,6 +771,46 @@ impl<'a> SeedBoardWriter<'a> {
     fn emit_footprint(&self, part: &SeedFootprint) -> io::Result<String> {
         emit_seed_footprint(part, &self.net_codes)
     }
+}
+
+/// Synthesize one board `(footprint …)` block for a part at a known pose.
+///
+/// The same emitter the seed writer uses, reachable for an incremental sync: a
+/// part joining an existing board gets byte-identical treatment to one the board
+/// was seeded with.
+pub(super) fn emit_board_footprint(
+    part: &SeedPart,
+    at: Point2,
+    rotation: f64,
+    locked: bool,
+    catalog: &FootprintCatalog,
+    net_codes: &BTreeMap<String, i32>,
+) -> std::result::Result<String, String> {
+    let id = FootprintId::parse(&part.footprint).map_err(|e| {
+        let clause = footprint_suggestion_clause(&catalog.suggest_text(&part.footprint));
+        format!(
+            "part {}: invalid footprint id `{}`: {e}{clause}",
+            part.reference, part.footprint
+        )
+    })?;
+    let source = catalog.source(&id).map_err(|e| {
+        let clause = footprint_suggestion_clause(&catalog.suggest(&id));
+        format!(
+            "part {}: footprint `{}` is not usable: {e}{clause}",
+            part.reference, part.footprint
+        )
+    })?;
+    let seed = SeedFootprint {
+        reference: part.reference.clone(),
+        value: part.value.clone(),
+        lib_id: part.footprint.clone(),
+        source,
+        pad_nets: part.pad_nets.clone(),
+        at,
+        rotation,
+        locked,
+    };
+    emit_seed_footprint(&seed, net_codes).map_err(|e| format!("part {}: {e}", part.reference))
 }
 
 fn is_817_family(part: &SeedFootprint) -> bool {
@@ -1568,7 +1414,7 @@ fn parse_bounds(v: Option<&Value>) -> std::result::Result<Rect, String> {
 /// Parse optional `rules` from snake_case model input.
 /// The outline the caller asked for. Omitted, `null`, or `"auto"` means: size
 /// it from the parts on the netlist.
-fn parse_seed_bounds(v: Option<&Value>) -> std::result::Result<SeedBounds, String> {
+pub(super) fn parse_seed_bounds(v: Option<&Value>) -> std::result::Result<SeedBounds, String> {
     match v {
         None | Some(Value::Null) => Ok(SeedBounds::Auto),
         Some(Value::String(s)) if s.eq_ignore_ascii_case("auto") => Ok(SeedBounds::Auto),
@@ -1576,8 +1422,57 @@ fn parse_seed_bounds(v: Option<&Value>) -> std::result::Result<SeedBounds, Strin
     }
 }
 
-fn parse_seed_rules(v: Option<&Value>) -> std::result::Result<SeedRules, String> {
-    parse_rules(v).map(|rules| SeedRules::from(&rules))
+/// Overlay the caller's `rules` on a starting point rather than on the defaults.
+///
+/// A board being rebuilt keeps every rule the caller did not name: asking for
+/// four layers must not silently reset the clearance a dense board was built
+/// with.
+pub(super) fn parse_seed_rules_over(
+    base: SeedRules,
+    v: Option<&Value>,
+) -> std::result::Result<SeedRules, String> {
+    let parsed = SeedRules::from(&parse_rules(v)?);
+    let named = |key: &str| {
+        v.and_then(Value::as_object)
+            .is_some_and(|object| object.contains_key(key))
+    };
+    Ok(SeedRules {
+        clearance: if named("clearance") {
+            parsed.clearance
+        } else {
+            base.clearance
+        },
+        min_trace_width: if named("min_trace_width") {
+            parsed.min_trace_width
+        } else {
+            base.min_trace_width
+        },
+        via_diameter: if named("via_diameter") {
+            parsed.via_diameter
+        } else {
+            base.via_diameter
+        },
+        via_drill: if named("via_drill") {
+            parsed.via_drill
+        } else {
+            base.via_drill
+        },
+        layer_count: if named("layer_count") {
+            parsed.layer_count
+        } else {
+            base.layer_count
+        },
+        net_widths: if named("net_widths") {
+            parsed.net_widths
+        } else {
+            base.net_widths
+        },
+        pours: if named("pours") {
+            parsed.pours
+        } else {
+            base.pours
+        },
+    })
 }
 
 fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String> {
@@ -1753,6 +1648,11 @@ const KICAD_MIN_ANNULAR: f64 = 0.1;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The overlay applied to the defaults, which is what a fresh board gets.
+    fn parse_seed_rules(v: Option<&Value>) -> std::result::Result<SeedRules, String> {
+        parse_seed_rules_over(SeedRules::default(), v)
+    }
 
     #[test]
     fn parse_seed_rules_accepts_plain_and_object_net_widths() {
