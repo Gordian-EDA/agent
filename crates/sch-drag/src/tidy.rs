@@ -20,6 +20,7 @@ use sch_doc::{Mirror, SchDoc};
 
 use crate::drag::{DragError, Placement, drag_many};
 use crate::eval::{Metrics, Weights, measure};
+use crate::promote::{Substitute, promote, substitutes};
 use crate::route::snap;
 use crate::sheet::Sheet;
 
@@ -64,8 +65,16 @@ impl TidyReport {
     }
 }
 
-/// One step of the search: everything it moves, and where to.
-type Step = Vec<(String, Placement)>;
+/// One step of the search.
+#[derive(Debug, Clone)]
+enum Step {
+    /// Everything it moves, and where to.
+    Drag(Vec<(String, Placement)>),
+    /// A pair of labels to replace with the wire they stand for.
+    Promote(Substitute),
+}
+
+type Moves = Vec<(String, Placement)>;
 
 const NUDGES: [(f64, f64); 8] = [
     (2.54, 0.0),
@@ -88,6 +97,7 @@ struct Board<'a> {
     movable: &'a [String],
     poses: HashMap<String, Placement>,
     bodies: HashMap<String, Rect>,
+    substitutes: Vec<Substitute>,
     bounds: Rect,
 }
 
@@ -115,9 +125,9 @@ impl Board<'_> {
     }
 
     /// Whether a step can be ruled out on geometry alone.
-    fn obstructed(&self, step: &Step) -> bool {
-        let moving: Vec<&String> = step.iter().map(|(id, _)| id).collect();
-        step.iter().any(|(id, to)| match self.body_after(id, *to) {
+    fn obstructed(&self, moves: &Moves) -> bool {
+        let moving: Vec<&String> = moves.iter().map(|(id, _)| id).collect();
+        moves.iter().any(|(id, to)| match self.body_after(id, *to) {
             None => true,
             Some(rect) => {
                 !self.bounds.contains_rect_eps(&rect, 0.0)
@@ -168,7 +178,7 @@ impl Board<'_> {
 
 /// Line one of a symbol's pins up with a pin it shares a net with — the move
 /// that turns a dog-leg into a straight wire.
-fn alignment(board: &Board, rng: &mut fastrand::Rng, id: &str, here: Placement) -> Option<Step> {
+fn alignment(board: &Board, rng: &mut fastrand::Rng, id: &str, here: Placement) -> Option<Moves> {
     let mine: Vec<Point2> = board.sheet.pins_of(id).map(|p| p.at).collect();
     let pin = *board.choose(rng, &mine)?;
     let net = board.sheet.net_at(pin)?;
@@ -190,7 +200,7 @@ fn alignment(board: &Board, rng: &mut fastrand::Rng, id: &str, here: Placement) 
 
 /// Put a part beside one of its net partners, which is where it belongs and
 /// where a nudge would take a hundred steps to reach.
-fn teleport(board: &Board, rng: &mut fastrand::Rng, id: &str, here: Placement) -> Option<Step> {
+fn teleport(board: &Board, rng: &mut fastrand::Rng, id: &str, here: Placement) -> Option<Moves> {
     let nets: Vec<&str> = board
         .sheet
         .pins_of(id)
@@ -216,7 +226,7 @@ fn teleport(board: &Board, rng: &mut fastrand::Rng, id: &str, here: Placement) -
 
 /// Bring a part onto the column or row its identical twins already share.
 /// Random nudges never find a bank; this is the move that draws one.
-fn bank_snap(board: &Board, rng: &mut fastrand::Rng, id: &str, here: Placement) -> Option<Step> {
+fn bank_snap(board: &Board, rng: &mut fastrand::Rng, id: &str, here: Placement) -> Option<Moves> {
     let lib = &board.sheet.bodies.iter().find(|b| b.uuid == id)?.lib_id;
     let twins: Vec<Point2> = board
         .sheet
@@ -234,7 +244,7 @@ fn bank_snap(board: &Board, rng: &mut fastrand::Rng, id: &str, here: Placement) 
     Some(vec![(id.to_string(), Placement { at, ..here })])
 }
 
-fn carry_block(board: &Board, rng: &mut fastrand::Rng, id: &str) -> Option<Step> {
+fn carry_block(board: &Board, rng: &mut fastrand::Rng, id: &str) -> Option<Moves> {
     let (dx, dy) = NUDGES[rng.usize(..NUDGES.len())];
     Some(
         board
@@ -255,9 +265,16 @@ fn carry_block(board: &Board, rng: &mut fastrand::Rng, id: &str) -> Option<Step>
 }
 
 fn propose(board: &Board, rng: &mut fastrand::Rng) -> Option<Step> {
+    // A label pair a person would have wired is worth undoing before anything
+    // else, and there are never many of them.
+    if rng.u32(0..100) < 8
+        && let Some(substitute) = board.choose(rng, &board.substitutes)
+    {
+        return Some(Step::Promote(substitute.clone()));
+    }
     let id = board.choose(rng, board.movable)?.clone();
     let here = *board.poses.get(&id)?;
-    match rng.u32(0..100) {
+    let moves = match rng.u32(0..100) {
         0..25 => {
             let (dx, dy) = NUDGES[rng.usize(..NUDGES.len())];
             let at = Point2::new(snap(here.at.x + dx), snap(here.at.y + dy));
@@ -297,7 +314,8 @@ fn propose(board: &Board, rng: &mut fastrand::Rng) -> Option<Step> {
         70..82 => teleport(board, rng, &id, here),
         82..92 => carry_block(board, rng, &id),
         _ => bank_snap(board, rng, &id, here),
-    }
+    }?;
+    (!moves.is_empty() && !board.obstructed(&moves)).then_some(Step::Drag(moves))
 }
 
 fn page_bounds(doc: &SchDoc) -> Rect {
@@ -318,6 +336,7 @@ fn board_of<'a>(doc: &SchDoc, sheet: &'a Sheet, movable: &'a [String], bounds: R
             .iter()
             .map(|b| (b.uuid.clone(), b.rect))
             .collect(),
+        substitutes: substitutes(sheet),
         bounds,
     }
 }
@@ -363,17 +382,29 @@ pub fn tidy(doc: &mut SchDoc, movable: &[String], options: &TidyOptions) -> Tidy
 
         let board = board_of(&current, &sheet, movable, bounds);
         let Some(step) = propose(&board, &mut rng) else {
-            continue;
-        };
-        if step.is_empty() || board.obstructed(&step) {
             report.blocked += 1;
             continue;
-        }
+        };
         report.proposed += 1;
 
         let mut trial = current.clone();
-        let trial_sheet = match drag_many(&mut trial, &step, &sheet) {
-            Ok((_, after)) => after,
+        let outcome = match &step {
+            // A drag that has to reach for a label has not carried the
+            // connection, it has renamed it. The search is here to draw wires.
+            Step::Drag(moves) => {
+                drag_many(&mut trial, moves, &sheet).and_then(|(report, after)| {
+                    match report.labels_added {
+                        0 => Ok(after),
+                        n => Err(DragError::Disconnection(n)),
+                    }
+                })
+            }
+            Step::Promote(substitute) => {
+                promote(&mut trial, substitute, &sheet).map(|_| Sheet::of(&trial))
+            }
+        };
+        let trial_sheet = match outcome {
+            Ok(after) => after,
             Err(DragError::Truthfulness(_) | DragError::Disconnection(_)) => {
                 report.refused += 1;
                 continue;

@@ -367,7 +367,11 @@ pub fn drag_many(
 /// a dot the author put somewhere else is their decision, not this crate's.
 ///
 /// Returns how many were added and removed.
-fn settle_junctions(doc: &mut SchDoc, sheet: &Sheet, touched: &HashSet<NodeKey>) -> (usize, usize) {
+pub(crate) fn settle_junctions(
+    doc: &mut SchDoc,
+    sheet: &Sheet,
+    touched: &HashSet<NodeKey>,
+) -> (usize, usize) {
     let stray: Vec<String> = doc
         .items()
         .iter()

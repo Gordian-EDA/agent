@@ -9,7 +9,9 @@
 //!   connections, and *rolls itself back* if the netlist would change;
 //! - [`eval::measure`] says how clean a sheet is, in millimetres of equivalent
 //!   wire, off one pass over its geometry;
-//! - [`tidy`] searches over drags for the cleanest sheet it can reach in a
+//! - [`promote`] turns a pair of local labels back into the wire they stand
+//!   for, wherever a person would have drawn one;
+//! - [`tidy`] searches over both for the cleanest sheet it can reach in a
 //!   budget, never accepting one that is not truthful.
 //!
 //! Nothing here plans a layout from scratch: the input is a placed sheet — from
@@ -18,11 +20,13 @@
 
 pub mod drag;
 pub mod eval;
+pub mod promote;
 pub mod route;
 pub mod sheet;
 pub mod tidy;
 
 pub use drag::{DragError, DragReport, Placement, drag};
 pub use eval::{Metrics, Weights, measure};
+pub use promote::{Substitute, promote, substitutes};
 pub use sheet::Sheet;
 pub use tidy::{TidyReport, tidy};
