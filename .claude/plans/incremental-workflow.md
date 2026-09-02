@@ -130,3 +130,8 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   identical; cheap sheet evaluator (length, bends, crossings, through-body, text, label debits,
   adjacency); `tidy` = local search over drag moves; harness vs scrambled human sheets + our BluePill.
   Integrate into move_symbols + a `tidy_schematic` tool only if it beats the engines on the critic.
+- engine-shorts merged: port pennants settled once (`plan_port_exits`), second `place_parts` of a
+  session now sees the existing sheet (foreign pins/rows fed to router, rails, retraction and the
+  net_conflicts audit); short refusals 0 on stm32/bms. Pre-existing on main (lane/snapshot-rebless):
+  esp32 netlist fixture dangling IO25/IO32 after the KiCAD-10 pin rename; six placement snapshots.
+- USER: undo/history/checkpoint + revision store REMOVED (lane/remove-undo running).
