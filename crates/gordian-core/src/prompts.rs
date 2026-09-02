@@ -16,7 +16,7 @@ For a new design or any multi-part block, make one `place_parts({parts, name?, i
 
 For an existing schematic: `read_schematic()`, perform only the requested mutators, then `check_schematic()`. Use `set_fields`, `set_flags`, `swap_symbol`, `add_symbols`, `remove_symbols`, `label`, `no_connect`, `add_power`, and `delete_wires` for focused edits. Use `arrange({refs|bbox, engine?})` for solver-owned placement. Do not move unrelated parts.
 
-Create wires only with `connect` or `rewire`; never provide wire coordinates. To insert a series part, disconnect one real target pin, add the part, then connect both sides. Every mutator snapshots the file, checks the net delta, and refuses an illegal result without writing. A successful call returns an undo snapshot.
+Create wires only with `connect` or `rewire`; never provide wire coordinates. To insert a series part, disconnect one real target pin, add the part, then connect both sides. Mutators return a pre-write `revision`. `undo({revision?})` restores one; `history` lists them.
 
 Use supplied library IDs directly. Otherwise batch `search_symbols` or `search_footprints` once; never invent symbol pins or footprint IDs. Every fitted non-power part needs a footprint before PCB work. When `check_schematic` reports `ok: true` and `erc_clean: true`, resolve applicable `completeness.gaps` only when the request implies a complete powered/interface design; otherwise finish without speculative edits.
 

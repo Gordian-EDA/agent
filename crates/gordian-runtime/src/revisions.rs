@@ -22,6 +22,11 @@ pub const RETENTION: usize = 50;
 pub struct RevisionId(u64);
 
 impl RevisionId {
+    /// Creates a revision identifier from its numeric form.
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+
     /// Returns the numeric identifier stored in the revision directory name.
     pub fn get(self) -> u64 {
         self.0
@@ -242,6 +247,23 @@ impl Revisions {
             .take(limit)
             .map(|id| self.read_manifest(id))
             .collect()
+    }
+
+    /// Returns one manifest, or the latest manifest when `id` is absent.
+    pub fn manifest(&self, id: Option<RevisionId>) -> Result<RevisionManifest> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow!("revision store lock poisoned"))?;
+        let id = match id {
+            Some(id) => id,
+            None => self
+                .revision_ids()?
+                .into_iter()
+                .next_back()
+                .ok_or_else(|| anyhow!("no revisions available"))?,
+        };
+        self.read_manifest(id)
     }
 
     fn resolve_path(&self, requested: &Path) -> Result<(PathBuf, PathBuf)> {

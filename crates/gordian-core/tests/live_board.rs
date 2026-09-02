@@ -88,10 +88,6 @@ fn sync_board_creates_then_edits_a_board_without_disturbing_it() {
     let again = tool(&ctx, "sync_board", json!({}));
     assert_eq!(again["changed"], json!(false), "{again:#}");
     assert_eq!(std::fs::read_to_string(ctx.pcb_path()).unwrap(), seeded);
-    assert!(
-        !ctx.project_dir().join(".gordian/pcb-undo").exists(),
-        "a no-op sync snapshots nothing"
-    );
 
     tool(&ctx, "place_board", json!({}));
     tool(&ctx, "route_board", json!({}));

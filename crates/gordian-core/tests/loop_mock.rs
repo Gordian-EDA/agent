@@ -94,7 +94,7 @@ async fn undone_turn_gets_one_explicit_second_chance() {
             "set_fields",
             json!({"ref": "R1", "fields": {"Value": "47k"}}),
         ),
-        tool_call("undo", "undo", json!({"snapshot": "sch-2"})),
+        tool_call("undo", "undo", json!({"revision": 2})),
         tool_call("undo-check", "check_schematic", json!({})),
         final_text("done"),
         tool_call(
