@@ -1245,8 +1245,25 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let landed = pin.at;
         mapped.push((pin.number.clone(), net.clone(), *was_at, landed));
     }
+    // Dragging is keyed on coordinates, so a point where this part's pin met another
+    // part's pin carries wires from BOTH nets and moving it rewires the foreign one.
+    // The guard then refuses an edit the caller cannot restate — seven of the repair
+    // refusals in the campaign rerun were this. Such points are left alone; the pass
+    // below names the net at the pin instead, which is what that fallback is for.
+    let shared: std::collections::HashSet<String> = {
+        let all = placed_pins(&edit.doc);
+        old_pins
+            .iter()
+            .filter(|old| {
+                all.iter()
+                    .any(|other| other.refdes != *refdes && other.at.near_eq(old.at, geom::EPS))
+            })
+            .map(|old| old.number.clone())
+            .collect()
+    };
     let moves: Vec<(Point2, Point2)> = mapped
         .iter()
+        .filter(|(number, _, _, _)| !shared.contains(number))
         .map(|(_, _, was_at, landed)| (*was_at, *landed))
         .collect();
     edit.doc.move_attached_many(&moves);

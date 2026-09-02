@@ -538,3 +538,36 @@ fn place_parts_accepts_the_engine_its_own_refusal_recommends() {
         "{unknown}"
     );
 }
+
+#[test]
+fn connect_puts_one_pin_on_a_named_net() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let seeded = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {"ref": "R1", "part": "Device:R", "value": "10k", "pins": {"1": "VCC", "2": "GND"}},
+            {"ref": "R2", "part": "Device:R", "value": "10k", "pins": {"1": "VCC", "2": "GND"}}
+        ]}),
+    );
+    assert!(seeded.get("error").is_none(), "fixture failed: {seeded}");
+
+    // "Put this pin on that net" is a connect the model actually writes. It used to
+    // come back as an argument complaint, costing a request every time; it now names
+    // the net at that pin, which is what it was asking for.
+    let result = call(&ctx, "connect", json!({"from": "R1.1", "net": "VCC"}));
+    let error = result["error"].as_str().unwrap_or_default();
+    assert!(
+        !error.contains("needs `from` and `to`"),
+        "one end plus a net is a real request, not a malformed call: {result}"
+    );
+    assert!(result.get("error").is_none(), "{result}");
+
+    // A genuinely malformed call still says what is missing, and now says both forms.
+    let bad = call(&ctx, "connect", json!({"from": "R1.1"}));
+    let message = bad["error"].as_str().unwrap_or_default();
+    assert!(message.contains("`net`"), "{bad}");
+}

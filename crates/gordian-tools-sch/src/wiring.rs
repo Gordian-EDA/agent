@@ -159,10 +159,24 @@ pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
 /// Route a connection between two ends of the sheet.
 fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    // One end and a net is not a malformed `connect`; it is "put this pin on that
+    // net", which is what `label` does. Answering it with an argument complaint cost
+    // the campaign runs a request every time they asked.
+    if input.get("to").is_none()
+        && let Some(pin) = input.get("from").and_then(Value::as_str)
+        && let Some(net) = input.get("net").and_then(Value::as_str)
+    {
+        return label_tool(json!({ "pin": pin, "net": net }), ctx);
+    }
     let mut edit = Edit::open(ctx)?;
     let (from, to) = match (input.get("from"), input.get("to")) {
         (Some(from), Some(to)) => (from, to),
-        _ => return Ok(json!({ "error": "connect needs `from` and `to`" })),
+        _ => {
+            return Ok(json!({
+                "error": "connect needs `from` and `to` (two pins), or `from` and `net` to \
+                          put one pin on a named net"
+            }));
+        }
     };
     let from = match refs::target(&edit.doc, from) {
         Ok(target) => target,

@@ -297,7 +297,7 @@ pub fn tool_defs() -> Vec<Tool> {
         (
             "connect",
             "Join two ends — a pin like \"R1.1\" / \"U1.VDD\", or a point [x,y] — or every pair in \
-             `pairs` at once. For series insertion, delete the old wire then join both sides in one \
+             `pairs` at once. Give `from` and `net` with no `to` to put one pin on a named net. For series insertion, delete the old wire then join both sides in one \
              `pairs` call. The route is solved around the existing \
              drawing and junctions are added for you; if nothing fits, both ends are named with \
              `net` instead and the result says so. Never draw wires by coordinate.",
