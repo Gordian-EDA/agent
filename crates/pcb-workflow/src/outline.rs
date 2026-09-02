@@ -21,10 +21,7 @@ use super::create::req_num;
 /// - `outline`: `[[x,y], ...]` arbitrary closed polygon in mm.
 /// - `fit`: re-place an unrouted board on its compact rule-derived frame.
 pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let fit = input
-        .get("fit")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    let fit = input.get("fit").and_then(Value::as_bool).unwrap_or(false)
         || input
             .get("fit_to_geometry")
             .and_then(Value::as_bool)
@@ -167,6 +164,34 @@ fn refit_existing_board(ctx: &AgentRuntime) -> Result<Value> {
         return Ok(gate.rollback(
             ctx,
             json!({ "error": format!("could not write compact placement: {error}") }),
+        ));
+    }
+    let proposed = Polygon::new(vec![
+        Point2::new(plan.to.min_x, plan.to.min_y),
+        Point2::new(plan.to.max_x, plan.to.min_y),
+        Point2::new(plan.to.max_x, plan.to.max_y),
+        Point2::new(plan.to.min_x, plan.to.max_y),
+    ])
+    .expect("a refit rectangle is a polygon");
+    let realised = match crate::active_board(ctx) {
+        Ok(realised) => realised,
+        Err(error) => {
+            return Ok(gate.rollback(
+                ctx,
+                json!({ "error": format!("could not verify fitted placement: {error}") }),
+            ));
+        }
+    };
+    let containment = crate::board::guard::outline_containment_against(&realised, &proposed);
+    if !containment.is_clear() {
+        return Ok(gate.rollback(
+            ctx,
+            json!({
+                "error": "the compact outline did not contain the realised placement; the previous outline was kept",
+                "code": "outline_refit_outside",
+                "outside_outline": containment.outside_outline,
+                "copper_outside_outline": containment.copper_outside_outline > 0,
+            }),
         ));
     }
     let placed = std::fs::read_to_string(&path)
@@ -578,11 +603,18 @@ mod tests {
     #[test]
     fn managed_rectangle_round_trips_and_rejects_coordinate_edits() {
         let original = Rect::new(2.0, 3.0, 12.0, 13.0);
-        let board = format!("(kicad_pcb{})", edge_cut_sexpr(&Outline::Rect(original), true));
+        let board = format!(
+            "(kicad_pcb{})",
+            edge_cut_sexpr(&Outline::Rect(original), true)
+        );
 
         assert_eq!(managed_outline_bounds(&board).unwrap(), original);
         let changed = board.replacen("(end 12 13)", "(end 12.5 13)", 1);
-        assert!(managed_outline_bounds(&changed).unwrap_err().contains("hand-edited"));
+        assert!(
+            managed_outline_bounds(&changed)
+                .unwrap_err()
+                .contains("hand-edited")
+        );
     }
 
     #[test]
@@ -592,6 +624,10 @@ mod tests {
             (gr_line (start 10 0) (end 0 0) (layer "Edge.Cuts") (uuid "b"))
         )"#;
 
-        assert!(managed_outline_bounds(board).unwrap_err().contains("user-drawn"));
+        assert!(
+            managed_outline_bounds(board)
+                .unwrap_err()
+                .contains("user-drawn")
+        );
     }
 }

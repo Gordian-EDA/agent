@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use geom::{Point2, Rect};
+use geom::{Point2, Polygon, Rect};
 use kicad_footprint::{Footprint, FootprintId, FootprintPad, PadTechnology};
 use kicad_ipc::FootprintMove;
 use pcb_model::{LayerRef, Trace, Via, ViaSpan};
@@ -1951,8 +1951,7 @@ pub(crate) fn plan_outline_refit(
     });
     let courtyard_gap = pcb_place::courtyard_margin(problem.clearance);
     let span = |values: &[f64]| {
-        values.iter().sum::<f64>()
-            + values.len().saturating_sub(1) as f64 * courtyard_gap
+        values.iter().sum::<f64>() + values.len().saturating_sub(1) as f64 * courtyard_gap
     };
     let mut width = core.width() + headroom.west + headroom.east;
     let mut height = core.height() + headroom.north + headroom.south;
@@ -1973,20 +1972,24 @@ pub(crate) fn plan_outline_refit(
     width = width.max(hard.required_w);
     height = height.max(hard.required_h);
     for keepout in &problem.keepouts {
-        width = width.max(2.0 * (keepout.min_x - center.x).abs());
-        width = width.max(2.0 * (keepout.max_x - center.x).abs());
-        height = height.max(2.0 * (keepout.min_y - center.y).abs());
-        height = height.max(2.0 * (keepout.max_y - center.y).abs());
+        if keepout.min_x < from.min_x - geom::EPS || keepout.min_y < from.min_y - geom::EPS {
+            return None;
+        }
+        width = width.max(keepout.max_x - from.min_x);
+        height = height.max(keepout.max_y - from.min_y);
     }
     for copper in copper_keepouts(&routing.fixed_copper) {
-        width = width.max(2.0 * (copper.min_x - center.x).abs() + 2.0 * EDGE_CLEAR_MM);
-        width = width.max(2.0 * (copper.max_x - center.x).abs() + 2.0 * EDGE_CLEAR_MM);
-        height = height.max(2.0 * (copper.min_y - center.y).abs() + 2.0 * EDGE_CLEAR_MM);
-        height = height.max(2.0 * (copper.max_y - center.y).abs() + 2.0 * EDGE_CLEAR_MM);
+        if copper.min_x < from.min_x + EDGE_CLEAR_MM - geom::EPS
+            || copper.min_y < from.min_y + EDGE_CLEAR_MM - geom::EPS
+        {
+            return None;
+        }
+        width = width.max(copper.max_x - from.min_x + EDGE_CLEAR_MM);
+        height = height.max(copper.max_y - from.min_y + EDGE_CLEAR_MM);
     }
     let width = width.ceil().max(1.0).min(from.width());
     let height = height.ceil().max(1.0).min(from.height());
-    let candidate = Rect::from_center_half(center, (width / 2.0, height / 2.0));
+    let candidate = refit_rect(from, width, height);
     let mut compact = problem.clone();
     compact.bounds = candidate;
     let candidate_result = pcb_engine::place_tuned(&compact, hints);
@@ -1994,11 +1997,8 @@ pub(crate) fn plan_outline_refit(
         (candidate, candidate_result)
     } else {
         let mut low = (width, height);
-        let mut high = (
-            from.width().ceil().max(low.0),
-            from.height().ceil().max(low.1),
-        );
-        compact.bounds = Rect::from_center_half(center, (high.0 / 2.0, high.1 / 2.0));
+        let mut high = (from.width(), from.height());
+        compact.bounds = refit_rect(from, high.0, high.1);
         let mut best = if high == (from.width(), from.height()) {
             result.clone()
         } else {
@@ -2015,7 +2015,7 @@ pub(crate) fn plan_outline_refit(
             if middle == low || middle == high {
                 break;
             }
-            compact.bounds = Rect::from_center_half(center, (middle.0 / 2.0, middle.1 / 2.0));
+            compact.bounds = refit_rect(from, middle.0, middle.1);
             let trial = pcb_engine::place_tuned(&compact, hints);
             if trial.legal {
                 high = middle;
@@ -2024,11 +2024,11 @@ pub(crate) fn plan_outline_refit(
                 low = middle;
             }
         }
-        (
-            Rect::from_center_half(center, (high.0 / 2.0, high.1 / 2.0)),
-            best,
-        )
+        (refit_rect(from, high.0, high.1), best)
     };
+    if !refit_geometry_is_contained(problem, imported, routing, &compact_result, &to) {
+        return None;
+    }
     Some(OutlineRefitPlan {
         result: compact_result,
         from,
@@ -2036,6 +2036,73 @@ pub(crate) fn plan_outline_refit(
         headroom,
         edge_net_counts,
     })
+}
+
+fn refit_rect(from: Rect, width: f64, height: f64) -> Rect {
+    Rect::new(
+        from.min_x,
+        from.min_y,
+        from.min_x + width,
+        from.min_y + height,
+    )
+}
+
+fn refit_geometry_is_contained(
+    problem: &PlacementView,
+    imported: &[ImportedPart],
+    routing: &pcb_model::RoutingView,
+    result: &PlaceResult,
+    bounds: &Rect,
+) -> bool {
+    let placed: BTreeMap<&str, &Placement> = result
+        .placements
+        .iter()
+        .map(|placement| (placement.reference.as_str(), placement))
+        .collect();
+    let courtyards_fit = problem.parts.iter().all(|part| {
+        let Some(placement) = placed.get(part.reference.as_str()) else {
+            return false;
+        };
+        let actual = imported
+            .iter()
+            .find(|imported| imported.reference == part.reference)
+            .and_then(|imported| {
+                imported.courtyard.map(|local| {
+                    courtyard_at(
+                        local,
+                        placement.at,
+                        placement.rotation,
+                        imported.side == kicad_board::BoardSide::Back,
+                    )
+                })
+            })
+            .unwrap_or_else(|| {
+                Rect::from_center_half(
+                    placement.at,
+                    pcb_place::rotated_courtyard_half(part, placement.rotation),
+                )
+            });
+        bounds.contains_rect_eps(&actual, geom::EPS)
+    });
+    courtyards_fit
+        && problem
+            .keepouts
+            .iter()
+            .all(|keepout| bounds.contains_rect_eps(keepout, geom::EPS))
+        && routing
+            .obstacles
+            .iter()
+            .filter(|obstacle| obstacle.kind == "zone")
+            .map(|obstacle| {
+                Rect::from_center_half(
+                    obstacle.center,
+                    (obstacle.width / 2.0, obstacle.height / 2.0),
+                )
+            })
+            .all(|keepout| bounds.contains_rect_eps(&keepout, geom::EPS))
+        && copper_keepouts(&routing.fixed_copper)
+            .iter()
+            .all(|copper| bounds.contains_rect_eps(&copper.inflate(EDGE_CLEAR_MM), geom::EPS))
 }
 
 fn seated_edge_parts(
@@ -2078,9 +2145,7 @@ fn seated_edge_parts(
 fn nearest_rect_edge(bounds: &Rect, rect: &Rect) -> Edge {
     [Edge::W, Edge::E, Edge::N, Edge::S]
         .into_iter()
-        .min_by(|a, b| {
-            rect_edge_gap(bounds, rect, *a).total_cmp(&rect_edge_gap(bounds, rect, *b))
-        })
+        .min_by(|a, b| rect_edge_gap(bounds, rect, *a).total_cmp(&rect_edge_gap(bounds, rect, *b)))
         .expect("four board edges")
 }
 
@@ -2820,19 +2885,12 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
             let mut routing = board.problem.clone();
             routing.fixed_copper = board.copper.clone();
-            let Some(plan) = plan_outline_refit(
-                &problem,
-                &board.imported.parts,
-                &routing,
-                &hints,
-                &result,
-            ) else {
-                return Ok(json!({
-                    "error": "the first placement was legal, but no compact rule-derived outline could preserve legal placement"
-                }));
-            };
-            result = plan.result.clone();
-            outline_refit = Some(plan);
+            if let Some(plan) =
+                plan_outline_refit(&problem, &board.imported.parts, &routing, &hints, &result)
+            {
+                result = plan.result.clone();
+                outline_refit = Some(plan);
+            }
         }
         let locked_refs: std::collections::BTreeSet<&str> = board
             .imported
@@ -2875,8 +2933,11 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 // never needs to treat that copper as an obstacle: it is going.
                 let moved = moves.iter().map(|m| m.reference.as_str());
                 let pads = crate::copper::pad_extents(&board.problem, moved);
-                let retract =
-                    crate::copper::retract(&board.copper, &pads, &std::collections::BTreeSet::new());
+                let retract = crate::copper::retract(
+                    &board.copper,
+                    &pads,
+                    &std::collections::BTreeSet::new(),
+                );
                 if retract.count > 0
                     && let Err(e) = crate::copper::write_retained(
                         ctx,
@@ -2894,6 +2955,35 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
             if let Some(plan) = &outline_refit {
                 let path = ctx.pcb_path();
+                let proposed = Polygon::new(vec![
+                    Point2::new(plan.to.min_x, plan.to.min_y),
+                    Point2::new(plan.to.max_x, plan.to.min_y),
+                    Point2::new(plan.to.max_x, plan.to.max_y),
+                    Point2::new(plan.to.min_x, plan.to.max_y),
+                ])
+                .expect("a refit rectangle is a polygon");
+                let realised = match crate::active_board(ctx) {
+                    Ok(realised) => realised,
+                    Err(error) => {
+                        return Ok(opened.rollback(
+                            ctx,
+                            json!({ "error": format!("could not verify fitted placement: {error}") }),
+                        ));
+                    }
+                };
+                let containment =
+                    crate::board::guard::outline_containment_against(&realised, &proposed);
+                if !containment.is_clear() {
+                    return Ok(opened.rollback(
+                        ctx,
+                        json!({
+                            "error": "the compact outline did not contain the realised placement; the previous outline was kept",
+                            "code": "outline_refit_outside",
+                            "outside_outline": containment.outside_outline,
+                            "copper_outside_outline": containment.copper_outside_outline > 0,
+                        }),
+                    ));
+                }
                 let placed = match std::fs::read_to_string(&path) {
                     Ok(placed) => placed,
                     Err(error) => {
@@ -2910,7 +3000,8 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     }
                 };
                 ctx.close_kicad_session();
-                if let Err(error) = crate::route::write_board_atomically(&path, updated.as_bytes()) {
+                if let Err(error) = crate::route::write_board_atomically(&path, updated.as_bytes())
+                {
                     return Ok(opened.rollback(
                         ctx,
                         json!({ "error": format!("could not write fitted outline: {error}") }),
@@ -4822,5 +4913,103 @@ mod tests {
         // A back-side part is mirrored in x about its origin.
         let flipped = courtyard_at(Rect::new(-1.0, -1.0, 4.0, 1.0), at, 0.0, true);
         assert_eq!(flipped, Rect::new(6.0, 9.0, 11.0, 11.0));
+    }
+
+    #[test]
+    fn fitted_rectangle_contains_courtyards_keepouts_and_copper_headroom() {
+        let bounds = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let problem = PlacementView {
+            bounds,
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            parts: vec![Part {
+                reference: "R1".to_owned(),
+                courtyard_w: 2.0,
+                courtyard_h: 1.0,
+                pads: vec![],
+                edge_datum: None,
+                locked: None,
+            }],
+            keepouts: vec![Rect::new(2.0, 2.0, 3.0, 3.0)],
+            outline: None,
+        };
+        let imported = vec![ImportedPart {
+            reference: "R1".to_owned(),
+            lib_id: "Test:R".to_owned(),
+            at: Point2::new(5.0, 5.0),
+            rotation: 0,
+            side: kicad_board::BoardSide::Front,
+            locked: false,
+            courtyard: Some(Rect::new(-1.0, -0.5, 1.0, 0.5)),
+            pads: vec![],
+        }];
+        let result = PlaceResult {
+            placements: vec![Placement {
+                reference: "R1".to_owned(),
+                at: Point2::new(5.0, 5.0),
+                rotation: 0.0,
+            }],
+            legal: true,
+            report: Default::default(),
+        };
+        let routing = RoutingView {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![pcb_model::Obstacle {
+                kind: "zone".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: Point2::new(9.5, 7.0),
+                width: 1.0,
+                height: 1.0,
+                connected_to: vec![],
+            }],
+            connections: vec![],
+            bounds,
+            clearance: 0.2,
+            via_diameter: 1.0,
+            via_drill: 0.5,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+            fixed_copper: RouteSolution {
+                traces: vec![Trace {
+                    connection: "SIG".to_owned(),
+                    layer: LayerRef::top(),
+                    width: 0.5,
+                    path: vec![Point2::new(1.0, 1.0), Point2::new(9.0, 1.0)],
+                }],
+                vias: vec![Via {
+                    connection: "SIG".to_owned(),
+                    at: Point2::new(9.0, 5.0),
+                    diameter: 1.0,
+                    drill: 0.5,
+                    span: ViaSpan::Through,
+                }],
+            },
+            nets: None,
+        };
+
+        assert!(refit_geometry_is_contained(
+            &problem, &imported, &routing, &result, &bounds,
+        ));
+        assert!(!refit_geometry_is_contained(
+            &problem,
+            &imported,
+            &routing,
+            &result,
+            &Rect::new(0.0, 0.0, 9.9, 10.0),
+        ));
+
+        let mut keepout_only = routing.clone();
+        keepout_only.fixed_copper = RouteSolution::default();
+        assert!(!refit_geometry_is_contained(
+            &problem,
+            &imported,
+            &keepout_only,
+            &result,
+            &Rect::new(0.0, 0.0, 9.4, 10.0),
+        ));
     }
 }

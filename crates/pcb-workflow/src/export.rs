@@ -443,6 +443,21 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .filter(|finding| !is_zone_self_unconnected(finding.violation))
         .copied()
         .collect::<Vec<_>>();
+    let board = match crate::active_board(ctx) {
+        Ok(board) => board,
+        Err(error) => {
+            return Ok(json!({
+                "ok": false,
+                "drc_clean": false,
+                "error": format!("could not verify board outline containment: {error}"),
+                "code": "outline_containment_unavailable",
+                "blocking_findings": 1,
+            }));
+        }
+    };
+    let containment = crate::board::guard::outline_containment(&board);
+    let outline_blocking =
+        containment.outside_outline.len() + usize::from(containment.copper_outside_outline > 0);
     let introduced_copper = violations
         .iter()
         .filter(|finding| {
@@ -455,14 +470,16 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .count();
     let pre_existing_copper = gate.copper_violations - introduced_copper;
     let pre_existing_unconnected = gate.meaningful_unconnected - introduced_unconnected;
-    let blocking_findings = introduced_copper + introduced_unconnected;
-    let blocking_findings_absolute = gate.copper_violations + gate.meaningful_unconnected;
+    let blocking_findings = introduced_copper + introduced_unconnected + outline_blocking;
+    let blocking_findings_absolute =
+        gate.copper_violations + gate.meaningful_unconnected + outline_blocking;
     let introduced = violations
         .iter()
         .chain(&unconnected_findings)
         .filter(|finding| finding.classification == "introduced")
         .count();
-    let reported_findings = report.violations.len() + report.unconnected_items.len();
+    let reported_findings =
+        report.violations.len() + report.unconnected_items.len() + outline_blocking;
     let pre_existing = reported_findings - introduced;
     let introduced_silk_warnings = violations
         .iter()
@@ -481,37 +498,51 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // A part left in the seed row is not a DRC finding — KiCAD has no rule for
     // "never laid out" — but it is exactly what the next `place_board({refs})`
     // call must name, so the completion signal has to say it.
-    let board = crate::active_board(ctx).ok();
-    let unplaced = board
-        .as_ref()
-        .map(|board| kicad_board::seed_row_references(&board.imported))
-        .unwrap_or_default();
+    let unplaced = kicad_board::seed_row_references(&board.imported);
     let unconnected = if meaningful_unconnected.is_empty() {
         Vec::new()
     } else {
-        let parts = board
-            .as_ref()
-            .map(|board| board.imported.parts.clone())
-            .unwrap_or_default();
-        classified_unconnected(&parts, &meaningful_unconnected)
+        classified_unconnected(&board.imported.parts, &meaningful_unconnected)
     };
-    let islands = board
-        .as_ref()
-        .map(|board| {
-            isolated_copper(
-                &board.imported.parts,
-                meaningful_unconnected
-                    .iter()
-                    .map(|finding| finding.violation),
-            )
-        })
-        .unwrap_or_default();
-    let findings = violations
+    let islands = isolated_copper(
+        &board.imported.parts,
+        meaningful_unconnected
+            .iter()
+            .map(|finding| finding.violation),
+    );
+    let mut findings = violations
         .iter()
         .chain(&unconnected_findings)
         .copied()
         .map(classified_finding)
         .collect::<Vec<_>>();
+    if !containment.outside_outline.is_empty() {
+        findings.push(json!({
+            "classification": "absolute",
+            "code": "outside_outline",
+            "type": "outside_outline",
+            "severity": "error",
+            "description": "footprint courtyards cross the physical board outline",
+            "refs": containment.outside_outline,
+            "nets": [],
+            "items": [],
+        }));
+    }
+    if containment.copper_outside_outline > 0 {
+        findings.push(json!({
+            "classification": "absolute",
+            "code": "copper_outside_outline",
+            "type": "copper_outside_outline",
+            "severity": "error",
+            "description": format!(
+                "{} copper item(s) cross or do not clear the physical board outline",
+                containment.copper_outside_outline,
+            ),
+            "refs": [],
+            "nets": [],
+            "items": [],
+        }));
+    }
     let mut diagnostics = vec![format!(
         "{introduced} introduced, {pre_existing} pre-existing"
     )];
@@ -523,6 +554,23 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .copied()
             .map(classified_line),
     );
+    if !containment.outside_outline.is_empty() {
+        diagnostics.push(format!(
+            "blocking error[outside_outline] {}",
+            containment
+                .outside_outline
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if containment.copper_outside_outline > 0 {
+        diagnostics.push(format!(
+            "blocking error[copper_outside_outline] {} copper item(s)",
+            containment.copper_outside_outline
+        ));
+    }
     let text = diagnostics.join("\n");
     Ok(json!({
         "ok": blocking_findings == 0,
@@ -549,6 +597,8 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "introduced_unconnected_items": introduced_unconnected,
         "pre_existing_unconnected_items": pre_existing_unconnected,
         "ignored_zone_self_unconnected": gate.ignored_zone_self_unconnected,
+        "outside_outline": containment.outside_outline,
+        "copper_outside_outline": containment.copper_outside_outline > 0,
         "findings": findings,
         "diagnostics": diagnostics,
         "text": text,
@@ -574,7 +624,7 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "note": if blocking_findings == 0 {
             format!("{note_prefix}No introduced blocking DRC findings; {pre_existing} pre-existing finding(s) and {silk_warnings} absolute silkscreen warning(s) remain.")
         } else {
-            format!("{note_prefix}KiCAD DRC reported {blocking_findings} introduced blocking finding(s); inspect the introduced violations/unconnected pairs first.")
+            format!("{note_prefix}Board checks reported {blocking_findings} blocking finding(s); inspect the introduced DRC findings and absolute outline containment first.")
         },
         "next": if !unplaced.is_empty() {
             format!(

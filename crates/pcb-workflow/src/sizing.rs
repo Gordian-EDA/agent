@@ -113,7 +113,7 @@ pub(crate) struct RoutingDemand {
 const PACKING_FACTOR: f64 = 2.0;
 
 /// Copper must keep this far from the board edge, so every part is inset by it.
-const EDGE_CLEAR_MM: f64 = 0.5;
+pub(crate) const EDGE_CLEAR_MM: f64 = 0.5;
 
 /// Routing rules and per-edge channel demand for a placed-board outline fit.
 #[derive(Debug, Clone, Copy, PartialEq)]
