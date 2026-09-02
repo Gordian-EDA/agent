@@ -1,13 +1,11 @@
 //! Rasterize a `kicad-cli`-exported SVG into a PNG the LLM can see.
 //!
-//! Pure-Rust via `resvg` — no system rasterizer needed. KiCAD plots text as
-//! stroked polylines, so an empty fontdb renders correctly. The long edge is
-//! normally capped at `max_px`. Schematics use a 2400 px readability floor:
-//! KiCad's 0.254 mm wire strokes otherwise rasterize below one pixel on a large
-//! custom sheet and disappear while their junction dots remain visible.
+//! Pure-Rust via `resvg` — no system rasterizer needed. KiCAD plots its text as
+//! stroked polylines; system fonts render Gordian's coordinate labels.
 
 use std::fmt::Write as _;
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use kicad::KicadInstallation;
@@ -390,23 +388,41 @@ fn fmt_axis_label(value: f64) -> String {
     }
 }
 
-/// Render a committed `.kicad_sch` to PNG bytes — the image
-/// the in-loop vision LAYOUT critic looks at. Exports the schematic to an SVG in a
-/// throwaway temp dir, then rasterizes it. Errors propagate so the caller can
-/// degrade to a netlist-only review (the layout pass is best-effort).
-pub fn schematic_png(env: &KicadInstallation, sch: &Path, max_px: u32) -> Result<Vec<u8>> {
+/// Export a committed `.kicad_sch` to a wire-readable SVG without its drawing sheet.
+pub fn schematic_svg(env: &KicadInstallation, sch: &Path) -> Result<String> {
     let tmp = tempfile::tempdir().context("temp dir for schematic SVG export")?;
     let svg_path = env
         // The in-loop critic needs circuit detail, not the drawing sheet.
         .export_svg_opts(sch, tmp.path(), true)
         .context("exporting schematic SVG")?;
     let svg = std::fs::read_to_string(&svg_path).context("reading exported SVG")?;
-    let svg = thicken_schematic_wires(&svg);
-    // `--exclude-drawing-sheet` removes the border but KiCad retains the full
-    // page viewBox. At 1600 px its standard wire stroke is just under one pixel
-    // and resvg drops many horizontal/vertical wires. 2400 px is the smallest
-    // size at which the production OpenMyo fixture remains reliably legible.
-    svg_to_png(&svg, max_px.max(2400))
+    Ok(thicken_schematic_wires(&svg))
+}
+
+/// Crop an SVG view box to physical coordinates while preserving its drawing coordinates.
+pub fn crop_svg(svg: &str, bounds: RenderBounds) -> String {
+    if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+        return svg.to_owned();
+    }
+    let Some((viewbox_start, viewbox_end, _)) = find_viewbox(svg) else {
+        return svg.to_owned();
+    };
+    let mut out = String::with_capacity(svg.len() + 64);
+    out.push_str(&svg[..viewbox_start]);
+    write!(
+        out,
+        "viewBox=\"{:.4} {:.4} {:.4} {:.4}\"",
+        bounds.min_x,
+        bounds.min_y,
+        bounds.width(),
+        bounds.height(),
+    )
+    .unwrap();
+    out.push_str(&svg[viewbox_end..]);
+    let Some(out) = replace_root_dimension(&out, "width", bounds.width()) else {
+        return svg.to_owned();
+    };
+    replace_root_dimension(&out, "height", bounds.height()).unwrap_or_else(|| svg.to_owned())
 }
 
 /// KiCad exports default schematic wires as 0.1524 mm green strokes. Resvg can
@@ -446,7 +462,10 @@ fn thicken_schematic_wires(svg: &str) -> String {
 
 /// Render `svg` to PNG bytes, scaling so the long edge is `max_px` pixels.
 pub fn svg_to_png(svg: &str, max_px: u32) -> Result<Vec<u8>> {
-    let opt = resvg::usvg::Options::default();
+    let opt = resvg::usvg::Options {
+        fontdb: render_fontdb().clone(),
+        ..Default::default()
+    };
     let tree = resvg::usvg::Tree::from_str(svg, &opt).context("parsing SVG")?;
     let size = tree.size();
     let scale = max_px as f32 / size.width().max(size.height());
@@ -462,6 +481,15 @@ pub fn svg_to_png(svg: &str, max_px: u32) -> Result<Vec<u8>> {
         &mut pixmap.as_mut(),
     );
     pixmap.encode_png().context("encoding PNG")
+}
+
+fn render_fontdb() -> &'static Arc<resvg::usvg::fontdb::Database> {
+    static FONT_DB: OnceLock<Arc<resvg::usvg::fontdb::Database>> = OnceLock::new();
+    FONT_DB.get_or_init(|| {
+        let mut database = resvg::usvg::fontdb::Database::new();
+        database.load_system_fonts();
+        Arc::new(database)
+    })
 }
 
 #[cfg(test)]
