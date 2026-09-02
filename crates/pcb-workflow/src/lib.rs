@@ -29,6 +29,7 @@
 //! - [`interactive`] — live IPC board editing (`open_board`, `move_parts`,
 //!   `route_track`, `delete_copper`, `set_net_width`).
 
+mod copper;
 pub mod corpus;
 mod create;
 mod export;
