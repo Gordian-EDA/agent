@@ -299,6 +299,7 @@ fn route_live_board(
             (view, kept)
         }
     };
+    let kept_counts = (kept.traces.len(), kept.vias.len());
     let (router_problem, terminal_escapes) = prepare_wide_terminal_escapes(&solve_view);
     let (routing_subproblem, reserved_wide_routes) = reserve_wide_multi_pin_routes(&router_problem);
     let routed = route_with_engine(&routing_subproblem);
@@ -403,9 +404,16 @@ fn route_live_board(
         "pruned_dangling_spurs": pruned_spurs,
         "dropped_failed_net_copper": dropped_failed,
         "dropped_violating_nets": dropped,
+        // What this call actually replaced. A scoped route rewrites only the
+        // named nets' copper, so reporting the whole board's would say it threw
+        // away work it in fact kept.
         "cleared_existing_copper": {
-            "traces": existing.0,
-            "vias": existing.1,
+            "traces": existing.0 - kept_counts.0,
+            "vias": existing.1 - kept_counts.1,
+        },
+        "kept_existing_copper": {
+            "traces": kept_counts.0,
+            "vias": kept_counts.1,
         },
         "congestion": congestion,
         "escape_bottleneck": escape,
