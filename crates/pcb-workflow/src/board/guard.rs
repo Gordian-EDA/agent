@@ -110,6 +110,7 @@ fn introduced<'a>(
 /// defects the board already carried.
 pub(crate) struct Guard {
     tool: &'static str,
+    phase: crate::WorkflowPhase,
     /// Every file the mutator declared, with the bytes it had. A rollback puts
     /// all of them back: `set_net_width` writes the project's net classes as
     /// well as the board, and restoring one without the other leaves the two
@@ -175,6 +176,7 @@ impl Guard {
             .map(|board| Defects::of(&board).0);
         Ok(Self {
             tool,
+            phase: crate::WorkflowPhase::start("guard", 0, 0),
             original,
             revision,
             before,
@@ -189,6 +191,8 @@ impl Guard {
     /// Put the board back as it was and return `error` with the revision on it.
     /// For an edit that failed on its own terms, before the guard's check.
     pub(crate) fn rollback(self, ctx: &AgentRuntime, error: Value) -> Value {
+        self.phase.facts(None, None, Some(1));
+        tracing::info!(tool = self.tool, reason = %error, revision = %self.revision, "board guard rollback");
         let restored = self.restore(ctx);
         merge_into(
             error,
@@ -203,6 +207,7 @@ impl Guard {
             merge_into(result, json!({ "revision": revision }))
         };
         let Some(before) = self.before.as_ref() else {
+            self.phase.facts(None, None, Some(0));
             return stamped(result, self.revision);
         };
         // A board that cannot be read AFTER the edit is the one case rollback
@@ -211,6 +216,8 @@ impl Guard {
             Ok(board) => board,
             Err(error) => {
                 let tool = self.tool;
+                self.phase.facts(None, None, Some(1));
+                tracing::info!(tool, reason = %error, revision = %self.revision, "board guard refusal");
                 let restored = self.restore(ctx);
                 return json!({
                     "ok": false,
@@ -227,6 +234,7 @@ impl Guard {
             faults: introduced,
         } = introduced(before, &after, &explained);
         if shorts.is_empty() && introduced.is_empty() {
+            self.phase.facts(None, None, Some(0));
             return stamped(result, self.revision);
         }
         let shorts: Vec<Value> = shorts
@@ -248,6 +256,9 @@ impl Guard {
                 shorts.len()
             )
         };
+        self.phase
+            .facts(None, None, Some(shorts.len() + introduced.len()));
+        tracing::info!(tool, reason = %headline, revision = %self.revision, "board guard refusal");
         json!({
             "ok": false,
             "error": headline,

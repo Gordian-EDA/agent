@@ -27,7 +27,7 @@
 //! written until the gate passes, so overrunning is always safe to refuse.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use geom::{Point2, Rect};
 use kicad::KicadInstallation;
@@ -297,7 +297,7 @@ pub fn place_parts(
 ) -> Result<PlaceReport> {
     let deadlines = Deadlines::of(budget);
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    let before = connect::extract(doc);
+    let before = live_phase("lower", input.parts.len(), 0, || connect::extract(doc));
     let existing = ExistingSheet {
         net_pins: before
             .nets
@@ -309,7 +309,16 @@ pub fn place_parts(
             .map(|symbol| symbol.refdes().to_string())
             .collect(),
     };
-    let (added, diags, audit) = sch_check::into_design(input, &provider, &existing);
+    let (added, diags, audit) = live_phase("audit", input.parts.len(), before.nets.len(), || {
+        sch_check::into_design(input, &provider, &existing)
+    });
+    tracing::info!(
+        dangling = audit.dangling.len(),
+        duplicate_refs = audit.duplicate_refs.len(),
+        unknown_pins = audit.unknown_pins.len(),
+        diagnostics = diags.0.len(),
+        "schematic payload audited"
+    );
     if !audit.is_valid() {
         return Err(Error::InvalidPayload(audit));
     }
@@ -349,18 +358,20 @@ pub fn place_parts(
     }
     let held = seated_items(doc, &before);
 
-    let out = region_arrange(
-        RegionProblem::new(
-            env,
-            &design,
-            movable.clone(),
-            held,
-            obstacles(doc, &[]),
-            ir,
-            engine,
+    let out = live_phase("place", movable.len(), design.nets.len(), || {
+        region_arrange(
+            RegionProblem::new(
+                env,
+                &design,
+                movable.clone(),
+                held,
+                obstacles(doc, &[]),
+                ir,
+                engine,
+            )
+            .by(deadlines.search),
         )
-        .by(deadlines.search),
-    );
+    });
     // The only point where refusing is worth it: the search is done but the sheet is
     // not drawn, so nothing is thrown away that realising and gating would not cost
     // again. Past here a truthful placement always commits — a finished sheet is worth
@@ -371,22 +382,25 @@ pub fn place_parts(
     }
     let placed = posed(movable, &out.poses);
     let inc = incidence(&placed);
-    let writer = crate::realize::realize_block(
-        env,
-        &design,
-        &placed,
-        &inc,
-        &out.ir,
-        crate::realize::Draw {
-            title: design.name.as_deref(),
-            frame: fresh,
-            driven: &driven_nets(doc, &before),
-        },
-    )?;
-    let warnings = writer.layout_warnings();
-    crate::realize::graft(doc, writer)?;
+    let warnings = live_phase("realise", placed.len(), inc.len(), || -> Result<_> {
+        let writer = crate::realize::realize_block(
+            env,
+            &design,
+            &placed,
+            &inc,
+            &out.ir,
+            crate::realize::Draw {
+                title: design.name.as_deref(),
+                frame: fresh,
+                driven: &driven_nets(doc, &before),
+            },
+        )?;
+        let warnings = writer.layout_warnings();
+        crate::realize::graft(doc, writer)?;
+        Ok(warnings)
+    })?;
 
-    let mut mismatch = verify(doc, &design);
+    let mut mismatch = live_phase("verify", placed.len(), inc.len(), || verify(doc, &design));
     mismatch.disturbed = disturbed(&before, &connect::extract(doc));
     let committed = mismatch.is_empty();
     if !committed {
@@ -400,6 +414,25 @@ pub fn place_parts(
         mismatch,
         committed,
     })
+}
+
+fn live_phase<T>(phase: &'static str, parts: usize, nets: usize, run: impl FnOnce() -> T) -> T {
+    let span = tracing::info_span!(
+        "sch_floorplan_phase",
+        phase,
+        parts,
+        nets,
+        elapsed_ms = tracing::field::Empty
+    );
+    let started = Instant::now();
+    let result = span.in_scope(run);
+    let elapsed_ms = started
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+    span.record("elapsed_ms", elapsed_ms);
+    tracing::info!(parent: &span, elapsed_ms, "schematic engine phase finished");
+    result
 }
 
 /// Re-place `selection` among the parts around it, redrawing only its own wiring,

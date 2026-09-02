@@ -231,25 +231,39 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(parts) => parts,
         Err(refusal) => return Ok(refusal),
     };
+    let net_count = parts
+        .iter()
+        .flat_map(|part| part.pad_nets.values())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let phase = crate::WorkflowPhase::start("sync", parts.len(), net_count);
     if let Err(error) = crate::intent::parse(&input) {
         return Ok(json!({ "error": error }));
     }
-    if !ctx.pcb_path().exists() {
-        return Ok(create_board(&parts, &input, ctx));
-    }
-    // Intent is the shape of a board being built. On a board that already
-    // exists sync has nothing to apply it to — pours are a `rules` change and
-    // layout is placement's — so say where each half belongs rather than drop
-    // it silently.
-    if input.get("intent").is_some() {
-        return Ok(json!({
+    let result = if !ctx.pcb_path().exists() {
+        create_board(&parts, &input, ctx)
+    } else if input.get("intent").is_some() {
+        json!({
             "error": "sync_board takes `intent` only when it creates the board. On an existing \
                       board pass the layout half to place_board({intent}) and any zones as \
                       rules {\"pours\": [{\"net\": …, \"layer\": …}]}.",
             "code": "intent_after_creation",
-        }));
-    }
-    Ok(update_board(&parts, &input, ctx))
+        })
+    } else {
+        update_board(&parts, &input, ctx)
+    };
+    phase.facts(
+        result
+            .get("retracted_tracks")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize),
+        result
+            .get("nets_to_reroute")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        result.get("violations").and_then(Value::as_array).map(Vec::len),
+    );
+    Ok(result)
 }
 
 /// The schematic's parts and nets, or the refusal that says why the board
