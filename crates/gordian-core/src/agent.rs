@@ -46,6 +46,8 @@ const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 
 const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. Fix introduced errors and leave pre-existing findings alone. If completeness.gaps is nonempty and this request calls for a complete powered/interface design, add exactly the listed support circuitry and check again. Those warnings are advisory for deliberately minimal designs and focused edits; do not add unrelated parts. Finish once introduced ERC errors are clean and every applicable gap is resolved.";
 
+const DIFF_SCHEMATIC_NUDGE: &str = "Run diff_schematic now against the default turn baseline. Verify only the requested symbols, fields, poses, wiring counts, and net partitions changed. Use the connectivity/unconnected report already returned for new or swapped parts; do not re-read the whole schematic. Then run check_schematic if the latest edit has not passed it.";
+
 const UNCHANGED_SCHEMATIC_NUDGE: &str = "the schematic is unchanged since the turn began (your edits were undone or refused); the request is not satisfied — either complete it (e.g. `set_fields` when no compatible symbol exists) or state plainly that it cannot be done and why";
 
 /// Base hard ceiling on provider invocations within one agent subturn. This is
@@ -914,6 +916,7 @@ impl<P: Provider> Agent<P> {
 
         let schematic_hash_at_turn_start =
             gordian_tools_sch::schematic_content_hash(&self.runtime)?;
+        let diff_required = schematic_hash_at_turn_start.is_some();
 
         let budgets = TurnBudgets::for_intent(authoritative_intent);
         let pcb_work_requested = request_requires_pcb_work(authoritative_intent);
@@ -922,6 +925,8 @@ impl<P: Provider> Agent<P> {
         let mut schematic_mutator_issued = false;
         let mut schematic_mutated = false;
         let mut schematic_check_complete = false;
+        let mut schematic_diff_complete = !diff_required;
+        let mut diff_nudges_left = 2usize;
         let mut unchanged_schematic_feedback_sent = false;
         let mut successful_place_parts = 0usize;
         let mut check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
@@ -1127,6 +1132,11 @@ impl<P: Provider> Agent<P> {
                         .push(ChatMessage::user(UNCHANGED_SCHEMATIC_NUDGE));
                     continue;
                 }
+                if schematic_mutated && !schematic_diff_complete && diff_nudges_left > 0 {
+                    diff_nudges_left -= 1;
+                    self.history.push(ChatMessage::user(DIFF_SCHEMATIC_NUDGE));
+                    continue;
+                }
                 if schematic_mutated && !schematic_check_complete && check_nudges_left > 0 {
                     check_nudges_left -= 1;
                     self.history.push(ChatMessage::user(CHECK_SCHEMATIC_NUDGE));
@@ -1274,6 +1284,8 @@ impl<P: Provider> Agent<P> {
                 if dispatched && schematic_mutation_succeeded(&call.fn_name, &parsed) {
                     applied = true;
                     schematic_mutated = true;
+                    schematic_diff_complete = !diff_required;
+                    diff_nudges_left = 2;
                     if call.fn_name == "place_parts" {
                         successful_place_parts += 1;
                     }
@@ -1287,6 +1299,9 @@ impl<P: Provider> Agent<P> {
                     if schematic_mutated {
                         schematic_check_complete = complete;
                     }
+                }
+                if dispatched && call.fn_name == "diff_schematic" && parsed.get("error").is_none() {
+                    schematic_diff_complete = true;
                 }
 
                 if dispatched {
