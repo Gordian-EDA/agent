@@ -128,3 +128,14 @@ set to define: sch-create-large→PCB, create-hard-pcb, bms-10s (46 parts), esp3
 in the same session — "What did you struggle with in the current toolset during this task?
 List concrete tool gaps, confusing results, missing information, and what would have made it
 faster." — and records the answer as `self_diagnosis` in result.json and the findings file.
+
+## Queued (user, 2026-09-02): local place/route + algorithm quality
+Tools: `place_board{refs?|bbox?}` and `route_board{nets?|bbox?}` are LOCAL by default —
+only the selection moves / only copper inside the box (plus nets crossing it) is ripped and
+re-routed; everything outside is frozen/fixed copper. Whole-board = "select all".
+Algorithms (leaf crates, judged by `tools/pcb_critic.py` on the campaign set, DRC 0 kept):
+placer — region placement with locked neighbours + edge/keep_near/group intent as
+constraints, courtyard-true packing, connector-on-edge, decoupling adjacency; router —
+aesthetics (45° escapes, minimal bends, no meanders, via minimisation, bus-like parallel
+runs), region rip-up/re-route, honest partial results. Baseline critic before, target ≥9.
+Starts after `lane/board-guard` merges.
