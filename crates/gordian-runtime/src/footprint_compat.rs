@@ -158,7 +158,11 @@ pub fn search_compatible_footprints(
     let text_hits = catalog.search(SearchQuery::new(&search_text).limit(TEXT_POOL));
     let matcher = SkimMatcherV2::default().ignore_case();
     let mut libraries = Vec::new();
-    let explicit_family = FootprintId::parse(&search_text).ok();
+    let explicit_family = FootprintId::parse(&search_text).ok().filter(|preferred| {
+        catalog
+            .libraries()
+            .any(|library| library.id() == preferred.library())
+    });
     if let Some(preferred) = &explicit_family {
         libraries.push(preferred.library().clone());
     }
