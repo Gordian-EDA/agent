@@ -2422,13 +2422,19 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
     match name {
         "search_symbols" | "search_footprints" => search_summary(input, result),
         "get_symbol_info" => {
-            let lib = input.get("lib_id").and_then(Value::as_str).unwrap_or("");
-            let n = result
-                .get("pins")
-                .and_then(Value::as_array)
-                .map(Vec::len)
-                .unwrap_or(0);
-            format!("{lib} → {n} pins")
+            let one = |value: &Value| {
+                let lib = value.get("lib_id").and_then(Value::as_str).unwrap_or("");
+                let n = value
+                    .get("pins")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                format!("{lib} → {n} pins")
+            };
+            match result.get("symbols").and_then(Value::as_array) {
+                Some(symbols) => symbols.iter().map(one).collect::<Vec<_>>().join(", "),
+                None => one(result),
+            }
         }
         "get_footprint_info" => {
             let lib = result
