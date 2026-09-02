@@ -53,11 +53,11 @@ fn renders_fixture_with_visual_facts() {
     ctx.begin_turn().unwrap();
     let revision = ctx
         .revisions()
-        .capture(
+        .capture(gordian_runtime::revisions::Capture::new(
             "test_edit",
             "capture visual baseline",
             &[ctx.sch_path().to_path_buf()],
-        )
+        ))
         .unwrap();
     let unchanged = tools::run_tool("render_schematic", json!({}), &ctx).expect("second render");
     let visual = unchanged["visual"].as_object().unwrap();

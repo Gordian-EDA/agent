@@ -6,6 +6,7 @@ pub mod config;
 pub mod footprint_compat;
 pub mod logging;
 pub mod platform;
+pub mod refdes;
 pub mod render;
 pub mod revisions;
 pub mod runtime;

@@ -520,13 +520,8 @@ pub fn unresolved_footprint_suggestions(
     match catalog.footprint(&id) {
         Ok(_) => Ok(None),
         Err(_) => {
-            let same_library = best_same_library_footprint(
-                ctx,
-                symbol_id,
-                footprint,
-                &BTreeSet::new(),
-                None,
-            )?;
+            let same_library =
+                best_same_library_footprint(ctx, symbol_id, footprint, &BTreeSet::new(), None)?;
             let mut suggestions = same_library.into_iter().collect::<Vec<_>>();
             suggestions.extend(
                 catalog

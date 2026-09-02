@@ -47,6 +47,19 @@ impl BoardIntent {
             .collect()
     }
 
+    /// The references the caller pinned to a board edge. A connector or
+    /// mounting hole there is a physical fixing, so placing it earns a
+    /// `mechanical` lock.
+    pub(crate) fn edge_references(&self) -> BTreeSet<&str> {
+        self.hints
+            .groups
+            .iter()
+            .filter(|group| group.edge.is_some())
+            .flat_map(|group| group.members.iter())
+            .map(String::as_str)
+            .collect()
+    }
+
     /// Fold this intent's placement half into hints the caller already has.
     pub(crate) fn merge_into(self, hints: &mut PlacementHints) {
         hints.groups.extend(self.hints.groups);

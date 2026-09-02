@@ -64,9 +64,8 @@ const UNCHANGED_SCHEMATIC_NUDGE: &str = "the schematic is unchanged since the tu
 /// out of *requests* is a bug, and running out of *time* is the real limit.
 const MAX_PROVIDER_REQUESTS_PER_TURN: usize = 56;
 
-/// Wall time one agent subturn may take. The north-star promise is a finished
-/// schematic and PCB in under five minutes, so that is the bound enforced here —
-/// a turn that has spent it is stopped no matter how many requests remain.
+/// Wall time one agent turn may take before it hands back a resumable partial
+/// state, regardless of how many requests remain.
 /// 270 s, not 300: the harness measures the whole run and the agent is not the only
 /// thing in it — rendering, ERC and the facts pass cost ~30 s after the last request.
 const TURN_WALL_CLOCK: Duration = Duration::from_secs(270);
@@ -75,28 +74,28 @@ const TURN_WALL_CLOCK: Duration = Duration::from_secs(270);
 const WRAP_UP_AT_ELAPSED: f64 = 0.75;
 
 /// Share of the request budget held back for the wrap-up. A turn that runs into
-/// its ceiling aborts with the schematic in whatever state the last edit left
-/// it, which is the worst outcome available; the model cannot see the budget, so
-/// it is told once, while there is still room to land a correction and a final
-/// check. Relative to the ceiling so raising one raises the other.
+/// its ceiling should preserve a checked phase boundary. The model cannot see
+/// the budget, so it is told once while there is still room to land a correction,
+/// render, and final check. Relative to the ceiling so raising one raises the
+/// other.
 fn wrap_up_reserve(ceiling: usize) -> usize {
     (ceiling / 8).max(4)
 }
 
 fn wrap_up_nudge(remaining: usize) -> String {
     format!(
-        "Budget warning: {remaining} model requests remain in this turn, after which it aborts \
-         and the work is reported incomplete. Stop exploring. Land at most one more corrective \
-         edit, run check_schematic, and then answer with your final summary. Do not repeat a call \
-         that has already failed with the same arguments. Answer with prose ONLY — a response \
-         that still carries tool calls spends another request."
+        "Turn budget warning: {remaining} model requests remain before this turn hands its legal \
+         partial state back for continuation. Land at most one more corrective edit, render and \
+         check the current phase, then answer with `## Partial state` and `## Next steps`. Do not \
+         repeat a failed call without changing its arguments or the project first. Answer with \
+         prose ONLY — a response that still carries tool calls spends another request."
     )
 }
 
 fn out_of_time_nudge() -> String {
-    "Time limit: most of this turn's wall-clock budget is spent. Do not start anything new. \
-     Land the single most valuable step still outstanding — a clean check, or the board if the \
-     schematic is already clean — and then answer with your final summary."
+    "Most of this turn's wall-clock budget is spent. Finish the current small phase, render and \
+     check it, then hand the legal partial files back with `## Partial state` and `## Next steps`. \
+     Name the exact next phase and tool calls so the next turn can continue."
         .to_string()
 }
 
@@ -457,7 +456,6 @@ fn tool_defs_for_phase(
     discovery_rounds_used: &HashMap<String, usize>,
     discovery_rounds_allowed: usize,
     revision_reads_used: &HashSet<String>,
-    schematic_check_complete: bool,
 ) -> Vec<Tool> {
     tool_defs()
         .into_iter()
@@ -480,14 +478,6 @@ fn tool_defs_for_phase(
         // a result already present in history; dispatch retains the same guard
         // for stale calls returned by a provider.
         .filter(|tool| !revision_reads_used.contains(tool.name.as_str()))
-        // A clean explicit check is the schematic completion boundary. Rendering
-        // may still be required by the request, but no schematic writer remains
-        // available for a speculative tidy pass after the verified result.
-        .filter(|tool| {
-            !schematic_check_complete
-                || (!is_schematic_mutator(tool.name.as_str())
-                    && tool.name.as_str() != "check_schematic")
-        })
         .filter(|tool| match phase {
             ToolPhase::BoardActive => true,
             ToolPhase::BoardSeed => {
@@ -670,8 +660,8 @@ pub enum StopReason {
         elapsed: Duration,
     },
     /// A non-cancellable project mutation timed out. Further mutations in the
-    /// same subturn are unsafe, so the loop reported the incomplete state
-    /// without spending more provider requests on impossible recovery.
+    /// same subturn are unsafe, so the loop reports a resumable handoff without
+    /// spending more provider requests on impossible same-turn recovery.
     MutationTimedOut,
     /// The model stopped, but required end-to-end artifact checks did not pass.
     QualityGateFailed {
@@ -715,9 +705,9 @@ pub struct Agent<P: Provider = GenaiProvider> {
     tool_phase: ToolPhase,
     /// When the user's turn began, and what it has already spent. A turn is one
     /// or more subturns — the model's own work plus each review round — and the
-    /// five-minute promise is made about all of them together, so the clock and
-    /// the request ceiling belong to the turn, not to whichever subturn is
-    /// running. `None` until a turn starts one.
+    /// per-turn budget covers all of them together, so the clock and request
+    /// ceiling belong to the turn, not to whichever subturn is running. `None`
+    /// until a turn starts one.
     turn_budget: Option<TurnClock>,
     tool_seq: AtomicU64,
 }
@@ -952,13 +942,16 @@ impl<P: Provider> Agent<P> {
         let mut last_clean_schematic: Option<gordian_runtime::revisions::RevisionId> = None;
         let mut pcb_recovery = PcbRecoveryState::default();
         let mut pcb_quality = PcbQualityState::default();
+        let mut progress = TurnProgress::from_project(&self.runtime);
 
         loop {
             if provider_requests >= budgets.provider_requests {
                 let rolled_back = restore_last_clean_schematic(&self.runtime, last_clean_schematic);
-                let mut final_text = provider_limit_final_text(
-                    None,
-                    applied,
+                progress.refresh_files(&self.runtime);
+                let mut final_text = progress.handoff(
+                    &format!(
+                        "Per-turn request budget reached after {provider_requests} model requests and {tool_calls_made} tool calls."
+                    ),
                     tool_calls_made,
                     last_tool_status.as_deref(),
                 );
@@ -975,9 +968,12 @@ impl<P: Provider> Agent<P> {
             }
             if started.elapsed() >= TURN_WALL_CLOCK {
                 let rolled_back = restore_last_clean_schematic(&self.runtime, last_clean_schematic);
-                let mut final_text = time_limit_final_text(
-                    started.elapsed(),
-                    applied,
+                progress.refresh_files(&self.runtime);
+                let mut final_text = progress.handoff(
+                    &format!(
+                        "Per-turn wall-clock budget reached after {}s and {tool_calls_made} tool calls.",
+                        started.elapsed().as_secs()
+                    ),
                     tool_calls_made,
                     last_tool_status.as_deref(),
                 );
@@ -993,12 +989,9 @@ impl<P: Provider> Agent<P> {
                 });
             }
             let remaining = budgets.provider_requests - provider_requests;
-            // Telling a turn that has produced nothing to stop and summarise gets
-            // exactly that: two campaign cases answered "it cannot be completed in
-            // this session" with no schematic on disk, having spent under a third of
-            // their requests. A wrap-up is advice about how to land work, so it is
-            // only advice once there is work to land; before that the hard bounds are
-            // the only thing that should stop the turn.
+            // A wrap-up is advice about how to land work, so send it only once
+            // there is a partial state to preserve. Before that, the bounds alone
+            // end the turn and produce a structured continuation handoff.
             let out_of_time = applied
                 && started.elapsed().as_secs_f64()
                     >= TURN_WALL_CLOCK.as_secs_f64() * WRAP_UP_AT_ELAPSED;
@@ -1036,7 +1029,6 @@ impl<P: Provider> Agent<P> {
                 &discovery_rounds_used,
                 budgets.discovery_rounds_per_subturn,
                 &revision_reads_used,
-                schematic_check_complete,
             );
             if request_supplies_multiple_library_ids(authoritative_intent)
                 && !self.runtime.sch_path().exists()
@@ -1073,12 +1065,18 @@ impl<P: Provider> Agent<P> {
                     StreamCompletion::MissingEnd { text } => {
                         stream_transport_available = false;
                         if provider_requests >= budgets.provider_requests {
-                            let final_text = provider_limit_final_text(
-                                (!text.trim().is_empty()).then_some(text.as_str()),
-                                applied,
+                            progress.refresh_files(&self.runtime);
+                            let mut final_text = progress.handoff(
+                                &format!(
+                                    "Per-turn request budget reached after {provider_requests} model requests and {tool_calls_made} tool calls."
+                                ),
                                 tool_calls_made,
                                 last_tool_status.as_deref(),
                             );
+                            if !text.trim().is_empty() {
+                                final_text.push_str("\n\nLast partial model response: ");
+                                final_text.push_str(text.trim());
+                            }
                             emit(events, AgentEvent::AssistantText(final_text.clone()));
                             return Ok(TurnOutcome {
                                 applied,
@@ -1178,7 +1176,6 @@ impl<P: Provider> Agent<P> {
 
             let mut responses = Vec::with_capacity(tool_calls.len());
             let mut result_images = Vec::new();
-            let mut pcb_finish_completed = false;
             let mut discovery_seen = HashSet::new();
             for call in &tool_calls {
                 tool_calls_made += 1;
@@ -1217,8 +1214,6 @@ impl<P: Provider> Agent<P> {
                         .is_some_and(|revision| {
                             call.fn_name == "read_schematic" || *revision == tool_state_revision
                         });
-                let mutation_after_clean =
-                    schematic_check_complete && is_schematic_mutator(&call.fn_name);
                 let mutation_blocked = timed_out_mutation_name(&timed_out_tool_calls).is_some()
                     && effect == ToolEffect::Mutating;
 
@@ -1255,17 +1250,6 @@ impl<P: Provider> Agent<P> {
                         None,
                         false,
                     )
-                } else if mutation_after_clean {
-                    (
-                        json!({
-                            "error": "schematic already passed its completion check",
-                            "note": "finish the request; do not revise a clean schematic speculatively"
-                        })
-                        .to_string(),
-                        Vec::new(),
-                        None,
-                        false,
-                    )
                 } else if mutation_blocked {
                     (
                         json!({
@@ -1289,6 +1273,7 @@ impl<P: Provider> Agent<P> {
                         .await
                 };
                 let parsed = parse_or_null(&content);
+                progress.observe(&call.fn_name, &parsed);
                 if tool_result_is_timeout(&parsed) {
                     timed_out_tool_calls.push((
                         call.fn_name.clone(),
@@ -1349,9 +1334,12 @@ impl<P: Provider> Agent<P> {
                         .runtime
                         .revisions()
                         .capture(
-                            "checkpoint",
-                            "last schematic that checked clean",
-                            &[self.runtime.sch_path().to_path_buf()],
+                            gordian_runtime::revisions::Capture::new(
+                                "checkpoint",
+                                "last schematic that checked clean",
+                                &[self.runtime.sch_path().to_path_buf()],
+                            )
+                            .label("last clean schematic"),
                         )
                         .ok()
                         .or(last_clean_schematic);
@@ -1390,25 +1378,6 @@ impl<P: Provider> Agent<P> {
                     },
                 );
 
-                if dispatched && should_auto_finish_pcb(pcb_work_requested, &call.fn_name, &parsed)
-                {
-                    let pipeline = self
-                        .run_pcb_finish_pipeline(authoritative_intent, &mut pcb_recovery, events)
-                        .await;
-                    tool_calls_made += pipeline.stages.len();
-                    for stage in &pipeline.stages {
-                        let result = parse_or_null(&stage.content);
-                        pcb_quality.observe(stage.name, &result);
-                        result_images.extend(stage.images.iter().cloned().map(ContentPart::Binary));
-                    }
-                    let mut result = parse_or_null(&content);
-                    if let Some(object) = result.as_object_mut() {
-                        object.insert("automatic_pcb_finish".into(), pipeline.report());
-                        content = result.to_string();
-                    }
-                    pcb_finish_completed = pipeline.completed;
-                }
-
                 responses.push(ToolResponse::new(call.call_id.clone(), content));
                 result_images.extend(images.into_iter().map(ContentPart::Binary));
             }
@@ -1423,20 +1392,12 @@ impl<P: Provider> Agent<P> {
             }
             prune_stale_tool_results(&mut self.history);
 
-            if pcb_finish_completed {
-                let final_text = "PCB placement, routing, DRC, renders, and fabrication export completed successfully.".to_string();
-                emit(events, AgentEvent::AssistantText(final_text.clone()));
-                return Ok(TurnOutcome {
-                    applied,
-                    final_text,
-                    tool_calls_made,
-                    stop_reason: StopReason::Completed,
-                });
-            }
             if let Some(tool) = timed_out_mutation_name(&timed_out_tool_calls) {
-                let final_text = mutation_timeout_final_text(
-                    tool,
-                    applied,
+                progress.refresh_files(&self.runtime);
+                let final_text = progress.handoff(
+                    &format!(
+                        "`{tool}` exceeded its operation deadline and may still be settling; no more mutations are safe in this turn."
+                    ),
                     tool_calls_made,
                     last_tool_status.as_deref(),
                 );
@@ -1513,227 +1474,6 @@ impl<P: Provider> Agent<P> {
         Ok(outcome)
     }
 
-    async fn run_pcb_finish_pipeline(
-        &self,
-        intent: &str,
-        pcb_recovery: &mut PcbRecoveryState,
-        events: Events<'_>,
-    ) -> PcbFinishRun {
-        let mut stages = Vec::new();
-        let mut placement_retries = 0usize;
-        loop {
-            let stage = self
-                .run_pcb_finish_stage("place_board", json!({}), pcb_recovery, events)
-                .await;
-            let parsed = parse_or_null(&stage.content);
-            let succeeded = pcb_finish_stage_succeeded(stage.name, &parsed);
-            let resize = placement_resize_bounds(&parsed);
-            stages.push(stage);
-            if succeeded {
-                break;
-            }
-            let Some(bounds) = resize.filter(|_| placement_retries < 3) else {
-                return PcbFinishRun {
-                    completed: false,
-                    stages,
-                };
-            };
-            let resized = self
-                .run_pcb_finish_stage(
-                    "update_board_outline",
-                    json!({"bounds": bounds}),
-                    pcb_recovery,
-                    events,
-                )
-                .await;
-            let resized_ok = board_tool_succeeded(&parse_or_null(&resized.content));
-            stages.push(resized);
-            if !resized_ok {
-                return PcbFinishRun {
-                    completed: false,
-                    stages,
-                };
-            }
-            placement_retries += 1;
-        }
-
-        for name in ["route_board", "check_board", "render_board"] {
-            let stage = self
-                .run_pcb_finish_stage(name, json!({}), pcb_recovery, events)
-                .await;
-            let succeeded = pcb_finish_stage_succeeded(stage.name, &parse_or_null(&stage.content));
-            stages.push(stage);
-            if !succeeded {
-                break;
-            }
-        }
-        if stages.last().is_some_and(|stage| {
-            stage.name == "render_board"
-                && pcb_finish_stage_succeeded(stage.name, &parse_or_null(&stage.content))
-        }) {
-            // The visual review is advice, not an oracle: DRC already decided the
-            // board is manufacturable, so its defects ride along in the report for
-            // the model to act on instead of withholding the deliverable.
-            let review = self
-                .run_pcb_visual_review_stage(intent, stages.last().expect("render stage"), events)
-                .await;
-            stages.push(review);
-            let export = self
-                .run_pcb_finish_stage("export_fab", json!({}), pcb_recovery, events)
-                .await;
-            stages.push(export);
-        }
-        let completed = stages.last().is_some_and(|stage| {
-            stage.name == "export_fab"
-                && pcb_finish_stage_succeeded(stage.name, &parse_or_null(&stage.content))
-        });
-        PcbFinishRun { completed, stages }
-    }
-
-    async fn run_pcb_visual_review_stage(
-        &self,
-        intent: &str,
-        render: &PcbFinishStage,
-        events: Events<'_>,
-    ) -> PcbFinishStage {
-        const NAME: &str = "review_board";
-        let seq = self.next_tool_seq();
-        let started = Instant::now();
-        let args = json!({});
-        emit(
-            events,
-            AgentEvent::ToolStarted {
-                name: NAME.to_string(),
-                args: args.clone(),
-                seq,
-            },
-        );
-        let value = if !self.runtime.config().review.layout {
-            json!({
-                "ok": true,
-                "skipped": true,
-                "reason": "visual layout review is disabled by configuration",
-            })
-        } else if !self.client.vision() {
-            json!({
-                "ok": true,
-                "skipped": true,
-                "reason": "the configured provider does not accept image input",
-            })
-        } else if render.images.len() != 1 {
-            json!({
-                "ok": false,
-                "error": format!(
-                    "render_board produced {} usable overview images; expected exactly one",
-                    render.images.len()
-                ),
-            })
-        } else {
-            match review_layout_board(
-                &self.client,
-                intent,
-                render.images[0].clone(),
-                &self.runtime.config().review,
-            )
-            .await
-            {
-                Ok((score, defects)) if defects.is_empty() => json!({
-                    "ok": true,
-                    "score": score,
-                    "defects": defects,
-                }),
-                Ok((score, defects)) => json!({
-                    "ok": false,
-                    "code": "pcb_visual_review_defects",
-                    "score": score,
-                    "defects": defects,
-                    "error": "PCB visual review found actionable layout defects",
-                }),
-                // A critic that could not produce a verdict is unavailable, not a
-                // finding: DRC already gates the board, so the turn continues.
-                Err(error) => json!({
-                    "ok": true,
-                    "skipped": true,
-                    "reason": format!("visual layout review unavailable: {error}"),
-                }),
-            }
-        };
-        let elapsed_ms = millis(started.elapsed());
-        emit_result_diagnostic(events, NAME, &value);
-        emit(
-            events,
-            AgentEvent::ToolFinished {
-                name: NAME.to_string(),
-                summary: tool_summary(NAME, &args, &value),
-                image_path: None,
-                elapsed_ms,
-                revision: value.get("revision").and_then(Value::as_u64),
-                result: value.clone(),
-            },
-        );
-        PcbFinishStage {
-            name: NAME,
-            content: value.to_string(),
-            images: Vec::new(),
-        }
-    }
-
-    async fn run_pcb_finish_stage(
-        &self,
-        name: &'static str,
-        input: Value,
-        pcb_recovery: &mut PcbRecoveryState,
-        events: Events<'_>,
-    ) -> PcbFinishStage {
-        let seq = self.next_tool_seq();
-        let started = Instant::now();
-        emit(
-            events,
-            AgentEvent::ToolStarted {
-                name: name.to_string(),
-                args: input.clone(),
-                seq,
-            },
-        );
-        let args_digest = value_digest(&input);
-        let span = tracing::info_span!("tool", name, seq, args_digest);
-        let outcome = into_outcome(
-            run_blocking(&self.runtime, name, input.clone())
-                .instrument(span.clone())
-                .await,
-        );
-        let mut content = tool_result_text(&outcome.value);
-        let parsed = parse_or_null(&content);
-        if pcb_recovery.observe_tool_result(name, &parsed, true) {
-            content = add_route_retry_guidance(
-                &content,
-                pcb_recovery.failed_route_attempts,
-                pcb_recovery.retry_note(),
-            );
-        }
-        let parsed = parse_or_null(&content);
-        let summary = tool_summary(name, &input, &parsed);
-        let elapsed_ms = millis(started.elapsed());
-        tracing::info!(parent: &span, elapsed_ms, "tool finished");
-        emit_result_diagnostic(events, name, &parsed);
-        emit(
-            events,
-            AgentEvent::ToolFinished {
-                name: name.to_string(),
-                summary,
-                image_path: outcome.image_path.clone(),
-                elapsed_ms,
-                revision: parsed.get("revision").and_then(Value::as_u64),
-                result: parsed,
-            },
-        );
-        PcbFinishStage {
-            name,
-            content,
-            images: outcome.images,
-        }
-    }
-
     async fn run_tool_call(&self, call: &ToolCall) -> (String, Vec<Binary>, Option<String>, bool) {
         let outcome = run_kicad_tool(&self.runtime, call).await;
         (
@@ -1783,32 +1523,194 @@ fn emit_result_diagnostic(events: Events<'_>, name: &str, result: &Value) {
     );
 }
 
-/// Preserve a useful, honest outcome when a tool-only cycle reaches the hard
-/// request ceiling. Tool-call-only assistant messages legitimately contain no
-/// prose, so returning `last_assistant_text` verbatim could leave the UI blank.
-/// This fallback costs no additional provider request.
-fn provider_limit_final_text(
-    partial_assistant_text: Option<&str>,
-    applied: bool,
-    tool_calls_made: usize,
-    last_tool_status: Option<&str>,
-) -> String {
-    let committed = if applied {
-        " A schematic was committed, but the requested end-to-end workflow may be incomplete."
-    } else {
-        " No schematic commit was completed."
-    };
-    let last_tool = last_tool_status
-        .map(|status| format!(" Last tool result: {status}."))
-        .unwrap_or_default();
-    let mut report = format!(
-        "Stopped after the model exhausted the per-turn request safety limit ({tool_calls_made} tool calls).{committed}{last_tool}"
-    );
-    if let Some(partial) = partial_assistant_text {
-        report.push_str(" Last partial model response: ");
-        report.push_str(partial.trim());
+#[derive(Default)]
+struct TurnProgress {
+    schematic_parts: Option<usize>,
+    board_parts: Option<(usize, usize)>,
+    erc: Option<(u64, u64)>,
+    board_exists: bool,
+    routed: Option<(u64, u64)>,
+    drc: Option<String>,
+    blocker: Option<String>,
+}
+
+impl TurnProgress {
+    fn from_project(runtime: &AgentRuntime) -> Self {
+        let mut progress = Self::default();
+        progress.refresh_files(runtime);
+        progress
     }
-    report
+
+    fn refresh_files(&mut self, runtime: &AgentRuntime) {
+        self.schematic_parts = read_schematic_part_count(runtime);
+        self.board_exists = runtime.pcb_path().exists();
+        self.board_parts = self
+            .board_exists
+            .then(|| run_tool("get_board", json!({}), runtime).ok())
+            .flatten()
+            .and_then(|board| board_placement_counts(&board));
+        if !self.board_exists {
+            self.board_parts = None;
+            self.routed = None;
+            self.drc = None;
+        }
+    }
+
+    fn observe(&mut self, name: &str, value: &Value) {
+        match name {
+            "check_schematic" => {
+                self.erc = value
+                    .get("errors")
+                    .and_then(Value::as_u64)
+                    .zip(value.get("warnings").and_then(Value::as_u64));
+            }
+            "sync_board" | "get_board" | "place_board" => {
+                self.board_exists |= value.get("error").is_none() && name == "sync_board";
+                if let Some(counts) = board_placement_counts(value) {
+                    self.board_parts = Some(counts);
+                }
+            }
+            "route_board" => {
+                self.routed = value
+                    .get("routed_connection_count")
+                    .and_then(Value::as_u64)
+                    .zip(value.get("total_connection_count").and_then(Value::as_u64));
+            }
+            "check_board" => {
+                let blocking = value.get("blocking_findings").and_then(Value::as_u64);
+                let unconnected = value.get("unconnected_items").and_then(Value::as_u64);
+                self.drc = if check_board_is_clean(value) {
+                    Some("clean".to_string())
+                } else {
+                    blocking.map(|blocking| {
+                        format!(
+                            "{blocking} blocking finding(s), {} unconnected item(s)",
+                            unconnected.unwrap_or(0)
+                        )
+                    })
+                };
+            }
+            _ => {}
+        }
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            self.blocker = Some(format!("`{name}`: {error}"));
+        } else if value.get("ok").and_then(Value::as_bool) == Some(false) {
+            self.blocker = value
+                .get("note")
+                .and_then(Value::as_str)
+                .map(|note| format!("`{name}`: {note}"));
+        }
+    }
+
+    fn handoff(
+        &self,
+        boundary: &str,
+        _tool_calls_made: usize,
+        last_tool_status: Option<&str>,
+    ) -> String {
+        let parts = self.board_parts.map_or_else(
+            || {
+                self.schematic_parts
+                    .map_or_else(|| "unknown".to_string(), |parts| format!("{parts}/{parts}"))
+            },
+            |(placed, total)| format!("{placed}/{total}"),
+        );
+        let erc = self.erc.map_or_else(
+            || "not checked this turn".to_string(),
+            |(errors, warnings)| format!("{errors} error(s), {warnings} warning(s)"),
+        );
+        let routed = self.routed.map_or_else(
+            || "not measured this turn".to_string(),
+            |(routed, total)| format!("{routed}/{total}"),
+        );
+        let drc = self.drc.as_deref().unwrap_or("not checked this turn");
+        let blocker = self
+            .blocker
+            .as_deref()
+            .or(last_tool_status)
+            .unwrap_or("none recorded; inspect the files before the next edit");
+        let (phase, calls) = self.next_phase();
+        format!(
+            "## Partial state\n\
+             - Turn boundary: {boundary}\n\
+             - Parts placed: {parts}\n\
+             - ERC: {erc}\n\
+             - Board: {}\n\
+             - Routed: {routed}\n\
+             - DRC: {drc}\n\
+             - Blocked: {blocker}\n\n\
+             ## Next steps\n\
+             - Phase: {phase}\n\
+             - Tool calls: {calls}\n\
+             - Continue from the project files in a new turn; the per-turn clock and request budget reset.",
+            if self.board_exists { "yes" } else { "no" }
+        )
+    }
+
+    fn next_phase(&self) -> (&'static str, &'static str) {
+        if self.schematic_parts.is_none() {
+            return (
+                "Schematic phase 1 — power entry",
+                "`project_info({})`, `search_symbols({queries:[...]})`, `place_parts({parts:[...]})`, `render_schematic({})`, `check_schematic({})`",
+            );
+        }
+        if self.erc.is_none_or(|(errors, _)| errors > 0) {
+            return (
+                "Current schematic block — inspect or repair before advancing",
+                "`read_schematic({})`, a targeted schematic mutator, `render_schematic({})`, `check_schematic({})`",
+            );
+        }
+        if !self.board_exists {
+            return (
+                "Board phase 1 — choose layers, create the outline, and place connectors/mechanical parts",
+                "`sync_board({rules:{layer_count:...},intent:...})`, `place_board({refs:[...],intent:...})`, `render_board({})`, `check_board({})`",
+            );
+        }
+        if self
+            .board_parts
+            .is_some_and(|(placed, total)| placed < total)
+        {
+            return (
+                "Next unfinished board placement phase — connectors/mechanical, big ICs, satellites, then remaining parts",
+                "`get_board({})`, `place_board({refs:[...],intent:...})`, `render_board({})`, `check_board({})`",
+            );
+        }
+        if self.routed.is_some_and(|(routed, total)| routed < total) {
+            return (
+                "Board phase 5 or 6 — route the next blocked critical or remaining net batch",
+                "`get_board({net:\"...\"})`, make one concrete fix if blocked, `route_board({nets:[...]})`, `render_board({})`, `check_board({})`",
+            );
+        }
+        if self.drc.as_deref() == Some("clean") {
+            return (
+                "Board phase 8 — fabrication export",
+                "`render_board({})`, `check_board({})`, then `export_fab({})` only if the check remains clean",
+            );
+        }
+        (
+            "Board phase 7 — DRC and routing-progress loop",
+            "`get_board({include_copper:true})`, `check_board({})`, fix named blockers, `route_board({nets:[...]})`, `refill_zones({})`, `render_board({})`, `check_board({})`",
+        )
+    }
+}
+
+fn read_schematic_part_count(runtime: &AgentRuntime) -> Option<usize> {
+    let schematic = gordian_tools_sch::run("read_schematic", json!({}), runtime)?.ok()?;
+    let header = schematic.as_str()?.lines().next()?;
+    header
+        .split_once(" — ")?
+        .1
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn board_placement_counts(value: &Value) -> Option<(usize, usize)> {
+    let summary = value.get("summary").unwrap_or(value);
+    let total = summary.get("part_count")?.as_u64()? as usize;
+    let unplaced = summary.get("unplaced")?.as_array()?.len();
+    Some((total.saturating_sub(unplaced), total))
 }
 
 /// Hand a cut-off turn back its last clean schematic rather than a half-finished edit.
@@ -1835,45 +1737,6 @@ fn restore_last_clean_schematic(
     ))
 }
 
-fn time_limit_final_text(
-    elapsed: Duration,
-    applied: bool,
-    tool_calls_made: usize,
-    last_tool_status: Option<&str>,
-) -> String {
-    let committed = if applied {
-        " A schematic was committed, but the requested end-to-end workflow may be incomplete."
-    } else {
-        " No schematic commit was completed."
-    };
-    let last_tool = last_tool_status
-        .map(|status| format!(" Last tool result: {status}."))
-        .unwrap_or_default();
-    format!(
-        "Stopped after the turn spent its {}s wall-clock budget ({tool_calls_made} tool calls).{committed}{last_tool}",
-        elapsed.as_secs()
-    )
-}
-
-fn mutation_timeout_final_text(
-    tool: &str,
-    applied: bool,
-    tool_calls_made: usize,
-    last_tool_status: Option<&str>,
-) -> String {
-    let committed = if applied {
-        " A schematic was committed earlier, but the requested end-to-end workflow is incomplete."
-    } else {
-        " No schematic commit was completed."
-    };
-    let last_tool = last_tool_status
-        .map(|status| format!(" Last tool result: {status}."))
-        .unwrap_or_default();
-    format!(
-        "Stopped after `{tool}` timed out ({tool_calls_made} tool calls). The operation may still be finishing in the background, so further project mutations are unsafe in this turn.{committed}{last_tool} Start a new turn to inspect the settled project state before retrying a changed operation."
-    )
-}
-
 fn schematic_mutation_succeeded(name: &str, value: &Value) -> bool {
     is_schematic_mutator(name) && value.get("error").is_none() && value.get("changed").is_some()
 }
@@ -1897,76 +1760,6 @@ fn parse_or_null(result_json: &str) -> Value {
     serde_json::from_str(result_json).unwrap_or(Value::Null)
 }
 
-/// A board mutator reports success as `ok: true` with no error and nothing
-/// deferred.
-fn board_tool_succeeded(value: &Value) -> bool {
-    value.get("ok").and_then(Value::as_bool) == Some(true)
-        && value.get("error").is_none()
-        && value.get("executed").and_then(Value::as_bool) != Some(false)
-}
-
-fn should_auto_finish_pcb(pcb_only_stage: bool, name: &str, value: &Value) -> bool {
-    pcb_only_stage && name == "sync_board" && board_tool_succeeded(value)
-}
-
-fn placement_resize_bounds(value: &Value) -> Option<Value> {
-    if value.get("legal").and_then(Value::as_bool) == Some(true) {
-        return None;
-    }
-    let suggested = value.get("suggested_min_bounds_mm")?;
-    let width = suggested.get("w")?.as_f64()?;
-    let height = suggested.get("h")?.as_f64()?;
-    (width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0)
-        .then(|| json!([0.0, 0.0, width, height]))
-}
-
-fn pcb_finish_stage_succeeded(name: &str, value: &Value) -> bool {
-    if value.get("error").is_some() || value.get("executed").and_then(Value::as_bool) == Some(false)
-    {
-        return false;
-    }
-    match name {
-        "place_board" => value.get("legal").and_then(Value::as_bool) == Some(true),
-        "route_board" => value
-            .get("failed")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty),
-        "check_board" => check_board_is_clean(value),
-        "render_board" | "review_board" | "export_fab" => {
-            value.get("ok").and_then(Value::as_bool) == Some(true)
-        }
-        _ => false,
-    }
-}
-
-struct PcbFinishStage {
-    name: &'static str,
-    content: String,
-    images: Vec<Binary>,
-}
-
-struct PcbFinishRun {
-    completed: bool,
-    stages: Vec<PcbFinishStage>,
-}
-
-impl PcbFinishRun {
-    fn report(&self) -> Value {
-        json!({
-            "completed": self.completed,
-            "stages": self.stages.iter().map(|stage| json!({
-                "tool": stage.name,
-                "result": parse_or_null(&stage.content),
-            })).collect::<Vec<_>>(),
-            "note": if self.completed {
-                "The deterministic PCB finish pipeline completed without another provider request."
-            } else {
-                "The deterministic PCB finish pipeline stopped at the first unsuccessful stage; inspect that stage result before recovery."
-            },
-        })
-    }
-}
-
 fn route_result_is_retry_failure(value: &Value) -> bool {
     if value.get("error").is_some() {
         return true;
@@ -1982,7 +1775,6 @@ struct PcbQualityState {
     attempted: bool,
     checked: bool,
     rendered: bool,
-    reviewed: bool,
     exported: bool,
 }
 
@@ -1991,37 +1783,31 @@ impl PcbQualityState {
         self.attempted = true;
         self.checked = false;
         self.rendered = false;
-        self.reviewed = false;
         self.exported = false;
     }
 
     fn observe(&mut self, name: &str, value: &Value) {
-        if is_pcb_stage_tool(name) || name == "review_board" {
+        if is_pcb_stage_tool(name) {
             self.attempted = true;
         }
         match name {
             "check_board" => {
                 self.checked = check_board_is_clean(value);
                 self.rendered = false;
-                self.reviewed = false;
                 self.exported = false;
             }
             "render_board" if self.checked => {
-                self.rendered = pcb_finish_stage_succeeded(name, value);
-                self.reviewed = false;
-            }
-            "review_board" if self.checked && self.rendered => {
-                self.reviewed = visual_review_ran(value);
+                self.rendered = value.get("ok").and_then(Value::as_bool) == Some(true);
             }
             "export_fab" if self.checked => {
-                self.exported = pcb_finish_stage_succeeded(name, value);
+                self.exported = value.get("ok").and_then(Value::as_bool) == Some(true);
             }
             _ => {}
         }
     }
 
     fn accepted(&self, fabrication_required: bool) -> bool {
-        self.checked && self.rendered && self.reviewed && (!fabrication_required || self.exported)
+        self.checked && self.rendered && (!fabrication_required || self.exported)
     }
 
     fn missing(&self, fabrication_required: bool) -> Vec<&'static str> {
@@ -2032,22 +1818,11 @@ impl PcbQualityState {
         if !self.rendered {
             missing.push("current render_board");
         }
-        if !self.reviewed {
-            missing.push("current visual board review");
-        }
         if fabrication_required && !self.exported {
             missing.push("successful export_fab");
         }
         missing
     }
-}
-
-/// Whether a `review_board` result is a verdict on the current render. DRC is
-/// the pass/fail oracle; the visual critic's defects are advice, so a verdict
-/// with defects still satisfies the turn's review step. Only a review that
-/// could not run at all leaves it unmet.
-fn visual_review_ran(value: &Value) -> bool {
-    value.get("score").is_some() || value.get("skipped").and_then(Value::as_bool) == Some(true)
 }
 
 fn pcb_quality_invalidated_by(name: &str) -> bool {
@@ -2607,22 +2382,6 @@ async fn check_schematic_review(ctx: &Arc<AgentRuntime>) -> ReviewOutcome {
         score: 0.0,
         defects,
     }
-}
-
-async fn review_layout_board(
-    reviewer: &dyn Provider,
-    intent: &str,
-    image: Binary,
-    config: &gordian_runtime::config::ReviewConfig,
-) -> Result<(f64, Vec<String>)> {
-    let (score, defects) =
-        crate::review_kicad::review_board(reviewer, intent, image, config).await?;
-    if score <= 0.0 && defects.is_empty() {
-        return Err(anyhow::anyhow!(
-            "PCB visual reviewer returned no usable verdict"
-        ));
-    }
-    Ok((score, defects))
 }
 
 /// Turn a tool's `Result<Value>` into a [`ToolOutcome`]: a tool error becomes a
@@ -3214,6 +2973,88 @@ fn pop_n(history: &mut Vec<ChatMessage>, turn_starts: &mut Vec<usize>, k: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompts::system_prompt;
+    use crate::testing::ScriptedClient;
+
+    #[tokio::test]
+    async fn expired_wall_clock_returns_structured_handoff() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCAD detected");
+            return;
+        };
+        let mut agent = Agent::new(ScriptedClient::new(Vec::new()), ctx, system_prompt());
+        agent.turn_budget = Some(TurnClock {
+            started: std::time::Instant::now() - TURN_WALL_CLOCK,
+            provider_requests: 0,
+        });
+
+        let outcome = agent
+            .run_agent_subturn("continue", "continue", None)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome.stop_reason, StopReason::TimeLimit { .. }));
+        assert!(outcome.final_text.starts_with("## Partial state\n"));
+        assert!(outcome.final_text.contains("\n## Next steps\n"));
+        assert!(outcome.final_text.contains("Per-turn wall-clock budget"));
+        assert!(!outcome.final_text.contains("cannot be completed"));
+    }
+
+    #[test]
+    fn wall_clock_stop_yields_structured_handoff() {
+        let mut progress = TurnProgress {
+            schematic_parts: Some(18),
+            board_parts: Some((18, 18)),
+            erc: Some((0, 2)),
+            board_exists: true,
+            routed: Some((23, 41)),
+            drc: Some("3 blocking finding(s), 2 unconnected item(s)".to_string()),
+            blocker: Some("`route_board`: crystal net blocked by U1 courtyard".to_string()),
+        };
+        progress.observe(
+            "route_board",
+            &json!({
+                "routed_connection_count": 24,
+                "total_connection_count": 41
+            }),
+        );
+
+        let handoff = progress.handoff(
+            "Per-turn wall-clock budget reached after 270s and 19 tool calls.",
+            19,
+            None,
+        );
+
+        assert!(handoff.starts_with("## Partial state\n"), "{handoff}");
+        assert!(handoff.contains("- Parts placed: 18/18"), "{handoff}");
+        assert!(
+            handoff.contains("- ERC: 0 error(s), 2 warning(s)"),
+            "{handoff}"
+        );
+        assert!(handoff.contains("- Board: yes"), "{handoff}");
+        assert!(handoff.contains("- Routed: 24/41"), "{handoff}");
+        assert!(handoff.contains("- DRC: 3 blocking"), "{handoff}");
+        assert!(handoff.contains("\n## Next steps\n"), "{handoff}");
+        assert!(handoff.contains("`route_board({nets:[...]})`"), "{handoff}");
+        assert!(handoff.contains("per-turn clock and request budget reset"));
+        assert!(!handoff.contains("cannot be completed"));
+    }
+
+    #[test]
+    fn clean_phase_check_keeps_schematic_mutators_available() {
+        let defs = tool_defs_for_phase(
+            ToolPhase::Schematic,
+            &HashMap::new(),
+            MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
+            &HashSet::new(),
+        );
+
+        assert!(defs.iter().any(|tool| tool.name.as_str() == "place_parts"));
+        assert!(
+            defs.iter()
+                .any(|tool| tool.name.as_str() == "check_schematic")
+        );
+    }
 
     #[test]
     fn dangling_never_headlines_a_refusal() {

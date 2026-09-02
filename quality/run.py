@@ -746,7 +746,8 @@ def demo_instance_count(path, kind):
     return len(re.findall(pattern, text, re.M))
 
 
-def closest_demo(kind, target_count):
+def closest_demos(kind, target_count):
+    """KiCad demos ordered from the closest part count outwards."""
     suffix = ".kicad_sch" if kind == "schematic" else ".kicad_pcb"
     candidates = []
     if KICAD_DEMOS.is_dir():
@@ -758,17 +759,27 @@ def closest_demo(kind, target_count):
                 )
     if not candidates:
         raise RuntimeError(f"no KiCad demo {kind} references found under {KICAD_DEMOS}")
-    _, _, count, _, path = min(candidates)
-    return path, count
+    return [(path, count) for _, _, count, _, path in sorted(candidates)]
 
 
 def reference_render(kind, target_count):
-    """Render and cache the closest-size KiCad demo using configured KiCad 10."""
-    source, count = closest_demo(kind, target_count)
+    """Render and cache the closest usable KiCad 10 demo."""
+    errors = []
+    for source, count in closest_demos(kind, target_count):
+        try:
+            return render_reference_candidate(kind, source, count)
+        except Exception as error:
+            errors.append(f"{source}: {error}")
+    detail = "; ".join(errors)
+    raise RuntimeError(f"no renderable KiCad demo {kind} reference: {detail}")
+
+
+def render_reference_candidate(kind, source, count):
+    """Render one demo, raising so reference_render can try the next closest."""
     digest = hashlib.sha256(str(source).encode()).hexdigest()[:10]
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", source.stem).strip("-")
     REFERENCES.mkdir(parents=True, exist_ok=True)
-    render_style = "" if kind == "schematic" else "-plot"
+    render_style = "" if kind == "schematic" else "-svgplot"
     png = REFERENCES / f"{kind}-{count}-{stem}-{digest}{render_style}.png"
     svg = REFERENCES / f"{kind}-{count}-{stem}-{digest}.svg"
     if not png.is_file():
@@ -812,14 +823,28 @@ def reference_render(kind, target_count):
                 shutil.copy2(export / "reference.png", png)
         else:
             with tempfile.TemporaryDirectory(prefix="gordian-quality-reference-") as temporary:
-                project = Path(temporary)
-                shutil.copy2(source, project / "design.kicad_pcb")
-                rendered = capture_render(project, "render_board", project / "reference.png")
-                if not rendered.get("path"):
-                    raise RuntimeError(
-                        f"KiCad demo PCB render failed: {rendered.get('error', 'no image')}"
-                    )
-                shutil.copy2(rendered["path"], png)
+                export = Path(temporary) / "reference.svg"
+                result = command(
+                    [
+                        kicad_cli(), "pcb", "export", "svg", "--output", str(export),
+                        "--layers", "F.Cu,F.Silkscreen,Edge.Cuts", "--mode-single",
+                        "--fit-page-to-board", "--exclude-drawing-sheet", str(source),
+                    ],
+                    timeout=180,
+                    check=False,
+                )
+                if result.returncode or not export.is_file():
+                    detail = (result.stderr or result.stdout).strip()
+                    raise RuntimeError(f"KiCad demo PCB SVG render failed: {detail}")
+                shutil.copy2(export, svg)
+                command(
+                    [
+                        "magick", "-density", "300", str(export), "-background", "white",
+                        "-alpha", "remove", "-alpha", "off", "-resize", "1600x900>",
+                        str(png),
+                    ],
+                    timeout=180,
+                )
     return {"path": str(png), "source": str(source), "part_count": count}
 
 
@@ -1614,6 +1639,9 @@ def run_case(case, output_root, max_turns):
     facts["pcb_critic_score"] = report["critic_pcb"].get("score")
     facts["human_look_schematic_score"] = human_look["schematic"].get("score")
     facts["human_look_pcb_score"] = human_look["pcb"].get("score")
+    for kind in ("schematic", "pcb"):
+        reference = human_look[kind].get("reference", {})
+        facts[f"human_look_{kind}_reference"] = reference.get("source")
     report.update(facts)
     outcome = evaluate_checks(checks, facts)
     report["checks"] = outcome
@@ -1797,8 +1825,9 @@ def write_case_findings(run_dir, report):
             f"Score: {verdict.get('score', '-')} / 10",
             "",
         ])
-        if verdict.get("reference"):
-            lines.append(f"Reference: `{verdict['reference']['source']}`")
+        reference = report.get(f"human_look_{kind}_reference")
+        if reference:
+            lines.append(f"Reference (`human_look_{kind}_reference`): `{reference}`")
             lines.append("")
         for issue in verdict.get("worst_three", []):
             lines.append(f"- Worst: {issue}")

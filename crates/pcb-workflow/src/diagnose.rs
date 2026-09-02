@@ -1,11 +1,12 @@
-//! Turning a refused route into something a caller can act on.
+//! Turning a board's defects into something a caller can act on.
 //!
 //! The strict lint already knows everything about a violation — the rule, the
-//! nets, the measured gap against what the board required, and where it is. The
-//! refusal used to publish only a count, so a caller could do nothing but retry
-//! blind. [`route_refusal`] renders the violations themselves: each one named,
+//! nets, the measured gap against what the board required, and where it is.
+//! [`violations_json`] renders those violations themselves: each one named,
 //! attributed to the pads it touches, located in mm, and paired with the fix its
-//! class implies.
+//! class implies. [`obstruction_between`] answers the other half — what stands
+//! between two pads the router could not join — which is what the ratsnest
+//! reports as a blocker.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,10 +19,6 @@ use serde_json::{Value, json};
 /// How far from a violation's reported point a pad may sit and still be named as
 /// the item involved. Pads are millimetre-scale, so a hit past this is noise.
 const PAD_ATTRIBUTION_RADIUS_MM: f64 = 1.5;
-
-/// The most violations spelled out in the headline; the full list stays in the
-/// `violations` array.
-const HEADLINE_VIOLATIONS: usize = 3;
 
 /// One violation, explained.
 struct Explained {
@@ -47,15 +44,6 @@ impl Explained {
             "detail": self.detail,
             "suggestion": self.suggestion,
         })
-    }
-
-    /// The one-line form used in the refusal headline.
-    fn headline(&self) -> String {
-        let where_at = self
-            .at
-            .map(|p| format!(" at ({:.2}, {:.2}) mm", p.x, p.y))
-            .unwrap_or_default();
-        format!("{}{where_at} — {}", self.detail, self.suggestion)
     }
 }
 
@@ -368,19 +356,52 @@ fn explain(violation: &DrcViolation, problem: &RoutingView, parts: &[ImportedPar
 // ── unrouted nets ────────────────────────────────────────────────────────────
 
 /// A terminal of a net, named the way a caller can act on it.
-struct Terminal {
-    pad: String,
+pub(crate) struct Terminal {
+    /// `U1.3`, or the `[x, y]` literal `route_track` also accepts when no pad
+    /// sits on the point.
+    pub(crate) pad: String,
+    /// The footprint owning the pad, when there is one.
+    pub(crate) reference: Option<String>,
     at: Point2,
     layer: String,
 }
 
 impl Terminal {
-    fn to_json(&self) -> Value {
-        json!({ "pad": self.pad, "at": [round2(self.at.x), round2(self.at.y)], "layer": self.layer })
+    /// The ratsnest endpoint shape: the part, the pad, where it is, and on what.
+    ///
+    /// A point with no pad on it has no part and no pad number — only a
+    /// coordinate — and saying so beats splitting a `[x, y]` literal on its
+    /// decimal point.
+    pub(crate) fn to_endpoint_json(&self) -> Value {
+        json!({
+            "ref": self.reference,
+            "pad": self.reference.is_some().then(|| {
+                self.pad
+                    .rsplit_once('.')
+                    .map_or(self.pad.as_str(), |(_, pad)| pad)
+            }),
+            "x": round2(self.at.x),
+            "y": round2(self.at.y),
+            "layer": self.layer,
+        })
+    }
+
+    /// The endpoint as `route_track` input: a pad handle is a JSON string, a
+    /// bare coordinate a JSON array. Quote only the former.
+    pub(crate) fn to_literal(&self) -> String {
+        if self.reference.is_some() {
+            format!("\"{}\"", self.pad)
+        } else {
+            self.pad.clone()
+        }
     }
 }
 
-fn terminals_of(problem: &RoutingView, parts: &[ImportedPart], net: &str) -> Vec<Terminal> {
+pub(crate) fn terminals_of(
+    problem: &RoutingView,
+    parts: &[ImportedPart],
+    net: &str,
+) -> Vec<Terminal> {
     problem
         .connections
         .iter()
@@ -390,14 +411,16 @@ fn terminals_of(problem: &RoutingView, parts: &[ImportedPart], net: &str) -> Vec
                 .iter()
                 .map(|point| {
                     let at = point.point();
+                    // No pad on this point means no handle, so hand back the
+                    // coordinate form `route_track` also accepts rather than a
+                    // label it would reject.
+                    let handle = pads_at(parts, at).first().cloned();
                     Terminal {
-                        // No pad on this point means no handle, so hand back the
-                        // coordinate form `route_track` also accepts rather than
-                        // a label it would reject.
-                        pad: pads_at(parts, at)
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| format!("[{:.3}, {:.3}]", at.x, at.y)),
+                        reference: handle
+                            .as_ref()
+                            .and_then(|pad| pad.split_once('.'))
+                            .map(|(reference, _)| reference.to_owned()),
+                        pad: handle.unwrap_or_else(|| format!("[{:.3}, {:.3}]", at.x, at.y)),
                         at,
                         layer: point.layer.0.clone(),
                     }
@@ -412,13 +435,54 @@ fn terminals_of(problem: &RoutingView, parts: &[ImportedPart], net: &str) -> Vec
 ///
 /// This is board state, not a guess at the router's search: if a pad or keepout
 /// sits on the direct path, that is what a caller must move.
-fn obstruction_between(
+/// The thing standing between two terminals, in the terms a caller acts on.
+pub(crate) struct Obstruction {
+    /// `pad`, `track`, `via`, `zone`, or `courtyard` for a keep-out.
+    pub(crate) kind: &'static str,
+    /// The footprint that would have to move, when the blocker belongs to one.
+    pub(crate) owner_ref: Option<String>,
+    pub(crate) net: Option<String>,
+    pub(crate) layer: Option<String>,
+    pub(crate) at: Point2,
+    pub(crate) gap_mm: f64,
+    pub(crate) need_mm: f64,
+}
+
+impl Obstruction {
+    /// The ratsnest `blocker` shape.
+    pub(crate) fn to_blocker_json(&self) -> Value {
+        json!({
+            "kind": self.kind,
+            "owner_ref": self.owner_ref,
+            "net": self.net,
+            "layer": self.layer,
+            "at": [round2(self.at.x), round2(self.at.y)],
+            "gap_mm": round3(self.gap_mm),
+            "need_mm": round3(self.need_mm),
+        })
+    }
+}
+
+/// Which of the five blocker kinds an obstacle is. Anything the board does not
+/// name as copper is a placement keep-out, which on a KiCad board is a
+/// courtyard.
+fn obstacle_kind(kind: &str) -> &'static str {
+    match kind {
+        _ if kind.starts_with("pad:") => "pad",
+        "track" | "route-trace" => "track",
+        "via" | "route-via" => "via",
+        "zone" => "zone",
+        _ => "courtyard",
+    }
+}
+
+pub(crate) fn obstruction_between(
     problem: &RoutingView,
     parts: &[ImportedPart],
     net: &str,
     from: &Terminal,
     to: &Terminal,
-) -> Option<Value> {
+) -> Option<Obstruction> {
     let path = geom::Segment::new(from.at, to.at);
     // The two ends sit ON their own pads, whose neighbours are inches from the
     // line by construction. Naming one of those would tell the caller to move
@@ -458,18 +522,20 @@ fn obstruction_between(
         }
     }
     let (gap, obstacle) = best?;
-    let (what, blocker) = obstacle_label(parts, obstacle);
-    Some(json!({
-        "what": what,
-        "blocker": blocker,
-        "at": [round2(obstacle.center.x), round2(obstacle.center.y)],
-        "gap_mm": round3(gap.max(0.0)),
-        "detail": format!(
-            "the direct path is crossed by {what} at ({:.2}, {:.2}) mm, {:.3} mm from the line \
-             (the board needs {:.2} mm)",
-            obstacle.center.x, obstacle.center.y, gap.max(0.0), problem.clearance
-        ),
-    }))
+    let (_, owner_ref) = obstacle_label(parts, obstacle);
+    Some(Obstruction {
+        kind: obstacle_kind(&obstacle.kind),
+        owner_ref,
+        net: obstacle.connected_to.first().cloned(),
+        layer: obstacle
+            .layers
+            .first()
+            .map(|layer| layer.0.clone())
+            .or_else(|| Some(from.layer.clone())),
+        at: obstacle.center,
+        gap_mm: gap.max(0.0),
+        need_mm: problem.clearance,
+    })
 }
 
 /// Name an obstacle the way a caller can act on it, and the part (if any) that
@@ -504,103 +570,6 @@ fn obstacle_label(
         (kind, None) => format!("an unowned {kind} keepout"),
     };
     (what, None)
-}
-
-/// What a caller should do about one unrouted net.
-/// A pad handle is a JSON string; a bare coordinate is a JSON array. Quote only
-/// the former, so the suggestion is valid `route_track` input either way.
-fn endpoint_literal(terminal: &Terminal) -> String {
-    if terminal.pad.starts_with('[') {
-        terminal.pad.clone()
-    } else {
-        format!("\"{}\"", terminal.pad)
-    }
-}
-
-fn unrouted_suggestion(
-    net: &str,
-    from: &Terminal,
-    to: &Terminal,
-    obstruction: &Option<Value>,
-) -> String {
-    match obstruction
-        .as_ref()
-        .and_then(|o| o.get("blocker"))
-        .and_then(Value::as_str)
-    {
-        Some(blocker) => format!(
-            "move_parts to shift {blocker} off the line between {} and {}, then \
-             route_board {{\"nets\":[\"{net}\"]}} — or lay it by hand with \
-             route_track {{\"net\":\"{net}\",\"from\":\"{}\",\"to\":\"{}\"}}",
-            from.pad, to.pad, from.pad, to.pad
-        ),
-        None => format!(
-            "no channel was found between {} and {}: move those two parts closer with move_parts, \
-             give the router another copper layer with sync_board \
-             {{\"rules\":{{\"layer_count\":4}}}}, or lay it by hand with route_track \
-             {{\"net\":\"{net}\",\"from\":{},\"to\":{}}}",
-            from.pad,
-            to.pad,
-            endpoint_literal(from),
-            endpoint_literal(to)
-        ),
-    }
-}
-
-/// Every net this route left without copper, said in pads, coordinates and the
-/// obstacle that stopped it.
-/// `scope` is the net subset this `route_board` call was asked to route, if it
-/// was given one: a net outside it lost its copper before this call, and saying
-/// so keeps the caller from chasing an obstacle that is not the reason.
-pub(crate) fn unrouted_report(
-    problem: &RoutingView,
-    parts: &[ImportedPart],
-    failed: &[pcb_model::FailedNet],
-    layer_names: &[String],
-    scope: Option<&BTreeSet<String>>,
-) -> Vec<Value> {
-    let mut reasons: std::collections::BTreeMap<&str, Vec<&str>> =
-        std::collections::BTreeMap::new();
-    for record in failed {
-        if record.connection.is_empty() {
-            continue;
-        }
-        reasons
-            .entry(record.connection.as_str())
-            .or_default()
-            .push(record.reason.as_str());
-    }
-    reasons
-        .into_iter()
-        .map(|(net, reasons)| {
-            let terminals = terminals_of(problem, parts, net);
-            let from = terminals.first();
-            let to = terminals.get(1).or(from);
-            let obstruction = match (from, to) {
-                (Some(a), Some(b)) => obstruction_between(problem, parts, net, a, b),
-                _ => None,
-            };
-            let in_scope = scope.is_none_or(|scope| scope.contains(net));
-            json!({
-                "net": net,
-                "in_scope": in_scope,
-                "from": from.map(Terminal::to_json),
-                "to": to.map(Terminal::to_json),
-                "terminals": terminals.iter().map(Terminal::to_json).collect::<Vec<_>>(),
-                "layer_attempts": layer_names,
-                "reason": reasons.join("; "),
-                "obstruction": obstruction,
-                "suggestion": match (from, to) {
-                    (Some(a), Some(b)) if in_scope => unrouted_suggestion(net, a, b, &obstruction),
-                    (Some(_), Some(_)) => format!(
-                        "this call did not route {net}, and it had no complete copper to keep — \
-                         add it to route_board {{\"nets\":[…]}} or route the whole board"
-                    ),
-                    _ => format!("net {net} has fewer than two terminals on this board"),
-                },
-            })
-        })
-        .collect()
 }
 
 /// Read a `refdes.pad` handle out of one KiCAD DRC item description.
@@ -677,67 +646,19 @@ fn net_list<'a>(first: impl IntoIterator<Item = &'a str>, rest: &[String]) -> Ve
     nets.into_iter().collect()
 }
 
-/// The refusal payload for a route whose copper failed the strict lint.
-///
-/// Names every violation (rule, nets, pads, location, measured against
-/// required) with the fix its class implies, and reports how much of the board
-/// did route so partial progress is visible.
-pub(crate) fn route_refusal(
+/// Every real violation the router left standing, each named, attributed to
+/// the pads it touches, located in mm, and paired with the fix its class
+/// implies.
+pub(crate) fn violations_json(
     violations: &[DrcViolation],
     problem: &RoutingView,
     parts: &[ImportedPart],
-    failed_connections: &[String],
-) -> Value {
-    let explained: Vec<Explained> = violations
+) -> Vec<Value> {
+    violations
         .iter()
-        .map(|v| explain(v, problem, parts))
-        .collect();
-    let total = problem.connections.len();
-    let violating: BTreeSet<String> = explained
-        .iter()
-        .flat_map(|e| e.nets.iter().cloned())
-        .collect();
-    // A net named in a violation has no clean copper either, so it may not be
-    // counted as routed just because the router did not report it failed.
-    let unclean: BTreeSet<&str> = failed_connections
-        .iter()
-        .map(String::as_str)
-        .chain(violating.iter().map(String::as_str))
-        .filter(|net| problem.connections.iter().any(|c| c.name == *net))
-        .collect();
-    let routed = total.saturating_sub(unclean.len());
-    let violating_nets: Vec<String> = violating.into_iter().collect();
-
-    let headline = explained
-        .iter()
-        .take(HEADLINE_VIOLATIONS)
-        .map(Explained::headline)
-        .collect::<Vec<_>>()
-        .join("; ");
-    let more = explained.len().saturating_sub(HEADLINE_VIOLATIONS);
-    let tail = if more > 0 {
-        format!(" (+{more} more in `violations`)")
-    } else {
-        String::new()
-    };
-    let error = format!(
-        "route not written: {} DRC violation(s) in the copper the router produced, so the live \
-         KiCAD board was left untouched. {routed} of {total} net(s) had clean copper. \
-         {headline}{tail}",
-        explained.len()
-    );
-
-    json!({
-        "error": error,
-        "violation_count": explained.len(),
-        "violations": explained.iter().map(Explained::to_json).collect::<Vec<_>>(),
-        "violating_nets": violating_nets,
-        "routed_connection_count": routed,
-        "total_connection_count": total,
-        "failed_connections": failed_connections,
-    })
+        .map(|violation| explain(violation, problem, parts).to_json())
+        .collect()
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,6 +690,7 @@ mod tests {
                     drill: None,
                 })
                 .collect(),
+            properties: Default::default(),
         }
     }
 
@@ -807,84 +729,6 @@ mod tests {
 
     /// A net the router could not finish must come back as two pads, the thing
     /// standing between them, and a repair the caller can paste back.
-    #[test]
-    fn an_unrouted_net_names_its_pads_the_blocking_part_and_the_repair() {
-        let parts = vec![
-            part("U1", &[("3", 10.0, 10.0)]),
-            part("J1", &[("1", 20.0, 10.0)]),
-            part("C3", &[("1", 15.0, 10.0)]),
-        ];
-        let mut problem = problem();
-        // C3's pad sits squarely on the line between U1.3 and J1.1.
-        problem.obstacles.push(pcb_model::Obstacle {
-            kind: "pad:C3".to_owned(),
-            layers: vec![LayerRef::top()],
-            center: Point2 { x: 15.0, y: 10.0 },
-            width: 0.9,
-            height: 1.0,
-            connected_to: vec!["GND".to_owned()],
-        });
-        let failed = vec![pcb_model::FailedNet {
-            connection: "VOUT".to_owned(),
-            reason: "no grid path from point 1 to the routed tree (congestion or enclosure)"
-                .to_owned(),
-        }];
-
-        let report = unrouted_report(
-            &problem,
-            &parts,
-            &failed,
-            &["F.Cu".to_owned(), "B.Cu".to_owned()],
-            None,
-        );
-
-        assert_eq!(report.len(), 1);
-        let net = &report[0];
-        assert_eq!(net["net"], "VOUT");
-        assert_eq!(net["from"]["pad"], "U1.3");
-        assert_eq!(net["from"]["at"], json!([10.0, 10.0]));
-        assert_eq!(net["to"]["pad"], "J1.1");
-        assert_eq!(net["layer_attempts"], json!(["F.Cu", "B.Cu"]));
-        assert!(
-            net["reason"].as_str().unwrap().contains("no grid path"),
-            "{net}"
-        );
-        assert_eq!(net["obstruction"]["blocker"], "C3");
-        assert_eq!(net["obstruction"]["what"], "C3.1 (net GND)");
-        let suggestion = net["suggestion"].as_str().unwrap();
-        assert!(suggestion.contains("shift C3 off the line"), "{suggestion}");
-        assert!(
-            suggestion.contains("route_board {\"nets\":[\"VOUT\"]}"),
-            "{suggestion}"
-        );
-        assert!(
-            suggestion.contains("\"from\":\"U1.3\",\"to\":\"J1.1\""),
-            "{suggestion}"
-        );
-    }
-
-    /// With nothing on the direct line, the advice is about channels and layers,
-    /// not about moving an innocent part.
-    #[test]
-    fn an_unrouted_net_with_a_clear_line_advises_channels_not_a_blocker() {
-        let parts = vec![
-            part("U1", &[("3", 10.0, 10.0)]),
-            part("J1", &[("1", 20.0, 10.0)]),
-        ];
-        let failed = vec![pcb_model::FailedNet {
-            connection: "VOUT".to_owned(),
-            reason: "channel router found no clean preferred-direction route".to_owned(),
-        }];
-
-        let report = unrouted_report(&problem(), &parts, &failed, &["F.Cu".to_owned()], None);
-
-        assert_eq!(report[0]["obstruction"], Value::Null);
-        let suggestion = report[0]["suggestion"].as_str().unwrap();
-        assert!(suggestion.contains("no channel was found"), "{suggestion}");
-        assert!(suggestion.contains("layer_count"), "{suggestion}");
-    }
-
-    /// KiCAD reports unconnected items as prose. A caller needs the pad pair.
     #[test]
     fn unconnected_items_come_back_as_the_pad_pair_they_are() {
         let parts = vec![
@@ -956,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn clearance_refusal_names_pads_measurement_and_a_relaxed_rule() {
+    fn a_clearance_violation_names_pads_its_measurement_and_a_relaxed_rule() {
         let parts = vec![part("U1", &[("3", 10.0, 10.0), ("4", 10.65, 10.0)])];
         let violations = vec![DrcViolation::ClearanceTraceObstacle {
             connection: "VOUT".to_owned(),
@@ -966,67 +810,57 @@ mod tests {
             required: 0.2,
             at: Point2 { x: 10.0, y: 10.0 },
         }];
-        let out = route_refusal(&violations, &problem(), &parts, &["VOUT".to_owned()]);
-        let error = out["error"].as_str().unwrap();
-        assert!(error.contains("0.150 mm"), "{error}");
-        assert!(error.contains("(10.00, 10.00) mm"), "{error}");
-        assert!(error.contains("\"clearance\":0.15"), "{error}");
-        assert!(error.contains("0 of 1 net(s) had clean copper"), "{error}");
-        let v = &out["violations"][0];
-        assert_eq!(v["rule"], "clearance (track to pad)");
-        assert_eq!(v["items"][0], "U1.3");
-        assert_eq!(v["measured_mm"], 0.15);
-        assert_eq!(v["required_mm"], 0.2);
-        assert_eq!(out["violating_nets"], json!(["GND", "VOUT"]));
-    }
 
-    #[test]
-    fn unrouted_refusal_points_at_the_pad_that_could_not_escape() {
-        let parts = vec![part("J1", &[("1", 20.0, 10.0)])];
-        let violations = vec![DrcViolation::Connectivity {
-            violation: ConnViolation::Unconnected {
-                connection: "VOUT".to_owned(),
-                point_index: 1,
-            },
-        }];
-        let out = route_refusal(&violations, &problem(), &parts, &[]);
-        let error = out["error"].as_str().unwrap();
-        assert!(error.contains("net VOUT never reaches J1.1"), "{error}");
-        assert!(error.contains("0 of 1 net(s) had clean copper"), "{error}");
-        assert_eq!(out["violations"][0]["items"][0], "J1.1");
-    }
+        let reported = violations_json(&violations, &problem(), &parts);
 
-    #[test]
-    fn short_refusal_names_both_nets() {
-        let violations = vec![DrcViolation::Connectivity {
-            violation: ConnViolation::CrossNetMerge {
-                a: "NETA".to_owned(),
-                b: "NETB".to_owned(),
-            },
-        }];
-        let out = route_refusal(&violations, &problem(), &[], &[]);
-        let error = out["error"].as_str().unwrap();
-        assert!(error.contains("copper shorts NETA to NETB"), "{error}");
-        assert_eq!(out["violations"][0]["rule"], "short");
-    }
-
-    #[test]
-    fn headline_truncates_but_the_array_keeps_every_violation() {
-        let violations: Vec<DrcViolation> = (0..5)
-            .map(|i| DrcViolation::TraceWidthBelowMin {
-                connection: format!("N{i}"),
-                layer: "F.Cu".to_owned(),
-                width: 0.1,
-                required: 0.2,
-            })
-            .collect();
-        let out = route_refusal(&violations, &problem(), &[], &[]);
+        assert_eq!(reported.len(), 1);
+        assert_eq!(reported[0]["rule"], "clearance (track to pad)");
+        assert_eq!(reported[0]["items"][0], "U1.3");
+        assert_eq!(reported[0]["measured_mm"], 0.15);
+        assert_eq!(reported[0]["required_mm"], 0.2);
+        assert_eq!(reported[0]["nets"], json!(["GND", "VOUT"]));
         assert!(
-            out["error"].as_str().unwrap().contains("(+2 more"),
+            reported[0]["suggestion"]
+                .as_str()
+                .unwrap()
+                .contains("\"clearance\":0.15"),
             "{}",
-            out["error"]
+            reported[0]["suggestion"]
         );
-        assert_eq!(out["violations"].as_array().unwrap().len(), 5);
-        assert_eq!(out["violation_count"], 5);
+    }
+
+    #[test]
+    fn an_unreachable_pad_and_a_short_are_both_named() {
+        let parts = vec![part("J1", &[("1", 20.0, 10.0)])];
+        let unreachable = violations_json(
+            &[DrcViolation::Connectivity {
+                violation: ConnViolation::Unconnected {
+                    connection: "VOUT".to_owned(),
+                    point_index: 1,
+                },
+            }],
+            &problem(),
+            &parts,
+        );
+        assert_eq!(unreachable[0]["items"][0], "J1.1");
+        assert!(
+            unreachable[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("net VOUT never reaches J1.1")
+        );
+
+        let short = violations_json(
+            &[DrcViolation::Connectivity {
+                violation: ConnViolation::CrossNetMerge {
+                    a: "NETA".to_owned(),
+                    b: "NETB".to_owned(),
+                },
+            }],
+            &problem(),
+            &[],
+        );
+        assert_eq!(short[0]["rule"], "short");
+        assert_eq!(short[0]["nets"], json!(["NETA", "NETB"]));
     }
 }

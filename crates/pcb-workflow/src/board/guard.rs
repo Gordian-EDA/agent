@@ -298,6 +298,76 @@ fn introduced<'a>(
     }
 }
 
+/// What a mutator declares before it writes: who it is, which files it may
+/// touch, which references it acts on, and the revision the caller believed the
+/// board was at.
+pub(crate) struct Edit<'a> {
+    pub(crate) tool: &'static str,
+    pub(crate) summary: &'a str,
+    pub(crate) files: &'a [PathBuf],
+    pub(crate) refs: Vec<String>,
+    /// The caller's `expect_revision`: when it is not the board's current
+    /// revision, someone else wrote since and this edit is refused instead of
+    /// silently landing on top of theirs.
+    pub(crate) expect_revision: Option<RevisionId>,
+}
+
+impl<'a> Edit<'a> {
+    pub(crate) fn new(tool: &'static str, summary: &'a str, files: &'a [PathBuf]) -> Self {
+        Self {
+            tool,
+            summary,
+            files,
+            refs: Vec::new(),
+            expect_revision: None,
+        }
+    }
+
+    pub(crate) fn refs(mut self, refs: impl IntoIterator<Item = String>) -> Self {
+        self.refs = refs.into_iter().collect();
+        self
+    }
+
+    /// Read `expect_revision` off a tool's own input.
+    pub(crate) fn expecting(self, input: &Value) -> Self {
+        self.expect(expected_revision(input))
+    }
+
+    /// Carry a token a caller already read off its input.
+    pub(crate) fn expect(mut self, expected: Option<RevisionId>) -> Self {
+        self.expect_revision = expected;
+        self
+    }
+}
+
+/// The `expect_revision` a tool input carries, if any.
+pub(crate) fn expected_revision(input: &Value) -> Option<RevisionId> {
+    input
+        .get("expect_revision")
+        .and_then(Value::as_u64)
+        .map(RevisionId::new)
+}
+
+/// The refusal a stale `expect_revision` earns: the current revision and what
+/// the writer that took it touched, so the caller can re-read and retry.
+fn conflict_refusal(ctx: &AgentRuntime, tool: &'static str, expected: RevisionId) -> Option<Value> {
+    let current = ctx.revisions().conflict(expected).ok()??;
+    Some(json!({
+        "error": format!(
+            "{tool} expected revision {expected}, but the project is at revision {} \
+             (written by {}); nothing was written",
+            current.id, current.tool
+        ),
+        "code": "revision_conflict",
+        "expected_revision": expected,
+        "current_revision": current.id,
+        "current_tool": current.tool,
+        "refs_touched": current.refs_touched,
+        "note": "Re-read the board (get_board / check_board) and retry against the current \
+                 revision, or drop expect_revision to write regardless.",
+    }))
+}
+
 /// A board mutation in flight: the pre-edit file, its revision snapshot, and the
 /// defects the board already carried.
 pub(crate) struct Guard {
@@ -319,21 +389,31 @@ impl Guard {
     ///
     /// The `Err` payload is the mutator's refusal, ready to return: the board
     /// has not been touched.
-    pub(crate) fn open(
-        ctx: &AgentRuntime,
-        tool: &'static str,
-        summary: &str,
-        files: &[PathBuf],
-    ) -> Result<Self, Value> {
+    pub(crate) fn open(ctx: &AgentRuntime, edit: Edit<'_>) -> Result<Self, Value> {
+        let Edit {
+            tool,
+            summary,
+            files,
+            refs,
+            expect_revision,
+        } = edit;
         let path = ctx.pcb_path();
         if !path.exists() {
             return Err(json!({
                 "error": format!("{tool}: this project has no board yet — run sync_board first"),
             }));
         }
-        let revision = ctx.revisions().capture(tool, summary, files).map_err(
-            |error| json!({ "error": format!("{tool}: could not capture the board: {error}") }),
-        )?;
+        if let Some(expected) = expect_revision
+            && let Some(refusal) = conflict_refusal(ctx, tool, expected)
+        {
+            return Err(refusal);
+        }
+        let revision = ctx
+            .revisions()
+            .capture(gordian_runtime::revisions::Capture::new(tool, summary, files).refs(refs))
+            .map_err(
+                |error| json!({ "error": format!("{tool}: could not capture the board: {error}") }),
+            )?;
         let original = files
             .iter()
             .map(|file| (file.clone(), std::fs::read_to_string(file).ok()))

@@ -21,15 +21,19 @@
 //!   incremental application.
 //! - [`copper`] — copper retraction shared by the board mutators.
 //! - [`rules`] — the design rules the board's own footprints permit.
-//! - [`diagnose`] — actionable payloads for a refused route.
+//! - [`diagnose`] — violations and obstructions in terms a caller can act on.
+//! - [`locks`] — `lock_parts` / `unlock_parts`: the poses no helper moves.
+//! - [`staging`] — the seed row read back as board state: staged, placed, locked.
 //! - [`intent`] — board intent (edges, proximity, groups, zones) → placement
 //!   constraints. The model states intent; solvers own coordinates.
+//! - [`ratsnest`] — the one connectivity shape `get_board` and `route_board`
+//!   both answer with: endpoints, status, blocker, escapes.
 //! - [`selection`] — `bbox` board-window selection, lowered to the `refs` /
 //!   `nets` subsets the local tools take.
 //! - [`sizing`] — how big a board its own parts require.
 //! - [`place`] — `get_board`, saved snapshot→`PlacementView`, and `place_board`.
 //! - [`route`] — `route_board` copper write-back + triage.
-//! - [`export`] — `check_board`.
+//! - [`export`] — `check_board`: DRC plus the board's progress.
 //! - [`fab`] — `export_fab`: bundle a routed board into Gerbers/drill/pos/BOM.
 //! - [`render`] — `render_board`.
 //! - [`interactive`] — file-backed board editing (`move_parts`, `route_track`,
@@ -45,8 +49,10 @@ mod fab;
 mod footprints;
 mod intent;
 mod interactive;
+mod locks;
 mod outline;
 mod place;
+mod ratsnest;
 mod render;
 mod route;
 mod rules;
@@ -54,6 +60,7 @@ mod seed;
 mod selection;
 mod silk;
 mod sizing;
+mod staging;
 mod sync;
 
 pub(crate) struct WorkflowPhase {
@@ -95,6 +102,7 @@ pub use export::{check_board, refill_zones};
 pub use fab::export_fab;
 pub use footprints::{get_footprint_info, search_footprints};
 pub use interactive::{delete_copper, move_parts, route_track, set_net_width};
+pub use locks::{lock_parts, unlock_parts};
 pub use outline::update_board_outline;
 pub use place::{get_board, place_board};
 pub use render::render_board;
@@ -102,8 +110,20 @@ pub use route::route_board;
 pub use seed::{BoardSeedRules, PourSpec};
 pub use sync::sync_board;
 
-fn active_board(
-    ctx: &gordian_runtime::AgentRuntime,
-) -> Result<kicad_board::BoardSnapshot, String> {
+/// The references the saved board carries, or nothing when there is no board.
+pub fn board_references(ctx: &gordian_runtime::AgentRuntime) -> Vec<String> {
+    active_board(ctx)
+        .map(|board| {
+            board
+                .imported
+                .parts
+                .into_iter()
+                .map(|part| part.reference)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn active_board(ctx: &gordian_runtime::AgentRuntime) -> Result<kicad_board::BoardSnapshot, String> {
     kicad_board::read_snapshot(&ctx.pcb_path())
 }

@@ -105,3 +105,28 @@ re-place." Quality first; time later via parallel subagents; schematic too.
 - Running: W1 PCB partial state (Opus), W2 workflow phases + handoff (codex), engine-shorts (Opus),
   bluepill-erc (Opus). Next: W3 schematic bench + netlist-drawn arrange + place_parts partial commit
   (after bluepill merges); then a full campaign under the new rubric.
+- W2 merged: phased prompt (schematic blocks; board phases with explicit layer count, early GND pour,
+  blocked-net-only rerouting, pin-swap lever), `## Partial state`/`## Next steps` handoff at every
+  budget stop, `--input -` multi-turn continuation, `phase-render:` lines; auto-finish-PCB stages
+  deleted (the model owns the loop). Observed: led-driver now DRC 0 + 17 fab files; stm32 48 parts
+  ERC 2 then a clean handoff at 270 s (blocked by `place_parts` "disturbed existing GND" → W3/W0).
+- W1 merged: staging = seed row (`staged_reason`), the three preconditions deleted, one ratsnest shape
+  (`open|routed|blocked` + blocker geometry) shared by get_board/check_board/route_board, native locks
+  + `locked_reason`, revisions `{tool, refs_touched, label}` + `checkpoint` + `expect_revision` +
+  `reserve_refs`, `sync_board` stages footprint-mismatched parts. Quality: local-board-move 10,
+  replace-pcb-component 9, finish-existing-pcb 7/7; led-driver fails only on schematic looks.
+  Open: `next_refdes` must consult the `reserve_refs` store (W3); human-look PCB reference board fails
+  to render (harness fix).
+- Harness reference fallback merged (PCB ref: demos/microwave; sch ref: sallen_key). First honest
+  human-look PCB verdict on the LED driver: 4/10 — "reference designators scattered far from their
+  footprints", oversized outline, silkscreen alignment → queue a PCB-looks lane (silk placement next
+  to footprints, outline refit, alignment) after W3.
+- Comparison data (user's ~/sch-agent, NOT ported — "idiom cells are kinda cheating"): BluePill 49 symbols
+  ERC 0 in minutes; audio 68 symbols ERC 0 in 138 s / 3 builds; BMS 90 symbols in 147 s but 14
+  power_pin_not_driven + 1 pin_to_pin, and the render is rows of isolated label-chains (no circuit
+  topology drawn). Quality bar kept: titled blocks, notes, pin-map design JSON, 2–5 build loop.
+- EXPERIMENT lane/sch-drag (Opus, user idea): KiCAD-style drag as the primitive — move/rotate/mirror a
+  symbol, carry its connections as clean orthogonal re-draws of only the attached segments, netlist
+  identical; cheap sheet evaluator (length, bends, crossings, through-body, text, label debits,
+  adjacency); `tidy` = local search over drag moves; harness vs scrambled human sheets + our BluePill.
+  Integrate into move_symbols + a `tidy_schematic` tool only if it beats the engines on the critic.

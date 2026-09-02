@@ -22,7 +22,7 @@ use pcb_route_mesh::pipeline::RoutePassReport;
 
 use gordian_runtime::AgentRuntime;
 
-use crate::board::guard::Guard;
+use crate::board::guard::{Edit, Guard};
 
 // ── route_board ──────────────────────────────────────────────────────────────
 
@@ -210,14 +210,9 @@ pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Err(error) = crate::selection::check_one_selector(&input, "nets") {
         return Ok(refusal(error));
     }
-    if let Some(refusal) = unplaced_refusal(ctx) {
-        return Ok(refusal);
-    }
     let gate = match Guard::open(
         ctx,
-        "route_board",
-        "Route the project board",
-        &[ctx.pcb_path()],
+        Edit::new("route_board", "Route the project board", &[ctx.pcb_path()]).expecting(&input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
@@ -246,25 +241,6 @@ pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// A recoverable routing failure, as the JSON payload the caller receives.
 fn refusal(message: impl Into<String>) -> Value {
     json!({ "error": message.into() })
-}
-
-/// Routing a board whose parts are still in the seed row produces a row of
-/// failed nets and no copper — an expensive way to be told to place the board.
-/// Say so before anything is written.
-fn unplaced_refusal(ctx: &AgentRuntime) -> Option<Value> {
-    let unplaced = kicad_board::seed_row_references(&crate::active_board(ctx).ok()?.imported);
-    (!unplaced.is_empty()).then(|| {
-        json!({
-            "error": format!(
-                "{} part(s) are still unplaced ({}) — run place_board first; nothing was written",
-                unplaced.len(),
-                unplaced.join(", "),
-            ),
-            "code": "board_not_placed",
-            "unplaced": unplaced,
-            "next_tool": "place_board",
-        })
-    })
 }
 
 /// The copper layers the committed route actually carries signal on.
@@ -316,17 +292,34 @@ fn requested_nets(input: &Value) -> std::result::Result<Option<BTreeSet<String>>
     Ok(Some(nets))
 }
 
+/// The nets that reach a part still in the staging row.
+fn nets_reaching_staged(
+    board: &kicad_board::BoardSnapshot,
+    staged: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    if staged.is_empty() {
+        return BTreeSet::new();
+    }
+    board
+        .imported
+        .parts
+        .iter()
+        .filter(|part| staged.contains(&part.reference))
+        .flat_map(|part| part.pads.iter().filter_map(|pad| pad.net.clone()))
+        .collect()
+}
+
 fn route_live_board(
     ctx: &AgentRuntime,
     nets: Option<BTreeSet<String>>,
     bbox: Option<geom::Rect>,
 ) -> std::result::Result<Value, Value> {
     let board = crate::active_board(ctx).map_err(refusal)?;
-    if is_seed_placement(&board.imported.bounds, &board.imported.parts) {
-        return Err(refusal(
-            "board has only the initial seed-row footprint positions — run place_board before route_board",
-        ));
-    }
+    // A partially placed board routes what it can. The nets that reach a part
+    // still in the staging row are the exception: copper drawn into the seed
+    // row would have to be ripped again the moment the part is placed, so those
+    // nets are left alone and reported as open with the part to place.
+    let staged = crate::staging::staged_references(&board);
 
     // A window selects nets; from here on a local route is the `nets` route, so
     // one code path rips, re-routes and reports.
@@ -350,11 +343,26 @@ fn route_live_board(
                     .filter(|net| routable.contains(net.as_str()))
                     .collect();
             if selected.is_empty() {
-                return Err(refusal(format!(
-                    "no routable net has a pad or copper inside that box \
-                     ({:.2},{:.2})-({:.2},{:.2}); check_board lists what is unrouted",
-                    bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y
-                )));
+                // An empty window is a legal question with an empty answer, not
+                // a mistake: nothing was selected, so nothing was written.
+                return Ok(json!({
+                    "ok": true,
+                    "routed": "0/0",
+                    "routed_connection_count": 0,
+                    "total_connection_count": 0,
+                    "ratsnest": [],
+                    "blocked": [],
+                    "bbox": {
+                        "min_x": bbox.min_x, "min_y": bbox.min_y,
+                        "max_x": bbox.max_x, "max_y": bbox.max_y,
+                    },
+                    "note": format!(
+                        "no routable net has a pad or copper inside ({:.2},{:.2})-({:.2},{:.2}), \
+                         so nothing was routed and nothing was written; check_board lists what \
+                         is still open",
+                        bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y
+                    ),
+                }));
             }
             Some(selected)
         }
@@ -414,6 +422,15 @@ fn route_live_board(
             (view, kept)
         }
     };
+    // A net with a terminal on a staged part leaves the router's problem: its
+    // pads are in the seed row, not where they will be, so any copper drawn to
+    // them is copper the next place_board would rip out again.
+    let staged_nets = nets_reaching_staged(&board, &staged);
+    let mut solve_view = solve_view;
+    solve_view
+        .connections
+        .retain(|connection| !staged_nets.contains(&connection.name));
+    let solve_view = solve_view;
     let kept_counts = (kept.traces.len(), kept.vias.len());
     // The nets whose copper this call promised to leave alone.
     let kept_nets: BTreeSet<String> = kept
@@ -499,15 +516,15 @@ fn route_live_board(
         }));
     }
     let split = lint_summary_from_violations(&final_violations, &result.failed, &plane_nets);
-    if split.real > 0 {
-        let failure_summary = failed_route_summary(&result.failed);
-        return Err(crate::diagnose::route_refusal(
-            &real_violations(&final_violations, &result.failed, &plane_nets),
-            &rp,
-            &board.imported.parts,
-            &failure_summary.connections,
-        ));
-    }
+    // A violation that survives the honesty fixpoint is not this route's to
+    // undo: every net it could drop is dropped, so what is left is placement
+    // geometry the board already carried. Routing what it can is the work; the
+    // guard still refuses anything this edit itself introduced.
+    let standing_violations = crate::diagnose::violations_json(
+        &real_violations(&final_violations, &result.failed, &plane_nets),
+        &rp,
+        &board.imported.parts,
+    );
 
     replace_route_atomically(ctx, &rp, &result.solution, &board.layer_names, existing)
         .map_err(|e| refusal(format!("could not write route to the board: {e}")))?;
@@ -535,8 +552,6 @@ fn route_live_board(
         },
     );
     let m = result.solution.metrics();
-    let total_connections = board.problem.connections.len();
-    let routed_connections = total_connections.saturating_sub(failure_summary.connection_count);
     // Every net's terminals (so an out-of-scope net can still be named by its
     // pads) over the obstacles the router actually faced (so the copper this
     // call kept can be named as the thing in the way).
@@ -544,19 +559,26 @@ fn route_live_board(
         obstacles: solve_view.obstacles.clone(),
         ..rp.clone()
     };
-    let unrouted = crate::diagnose::unrouted_report(
-        &report_view,
-        &board.imported.parts,
-        &result.failed,
-        &board.layer_names,
-        nets.as_ref(),
-    );
+    // The ratsnest is the connectivity the FILE carries after this write, so it
+    // is read back from disk. A board that cannot be re-read is a board whose
+    // result cannot be trusted, and the guard is owed the chance to restore it.
+    let written = crate::active_board(ctx).map_err(|error| {
+        refusal(format!(
+            "the route was written but the board could not be read back: {error}"
+        ))
+    })?;
+    let ratsnest = crate::ratsnest::build(&written, &report_view, &result.failed, None);
     Ok(json!({
         "router": result.engine,
-        "routed": format!("{routed_connections}/{total_connections}"),
-        "routed_connection_count": routed_connections,
-        "total_connection_count": total_connections,
-        "unrouted": unrouted,
+        // One denominator for the whole tool surface: what the board's own
+        // copper joins, exactly as check_board and get_board count it.
+        "routed": format!("{}/{}", ratsnest.routed, ratsnest.total),
+        "routed_connection_count": ratsnest.routed,
+        "total_connection_count": ratsnest.total,
+        "ratsnest": ratsnest.entries,
+        "blocked": ratsnest.blocked(),
+        "staged_nets": staged_nets.iter().collect::<Vec<_>>(),
+        "standing_violations": standing_violations,
         "scope": match &nets {
             Some(nets) => json!(nets.iter().collect::<Vec<_>>()),
             None => json!("whole board"),
@@ -607,9 +629,10 @@ fn route_live_board(
             "routed and saved the KiCAD board cleanly".to_owned()
         } else {
             format!(
-                "saved the KiCAD board with {routed_connections} of {total_connections} net(s) \
-                 routed; the rest carry no copper — see `unrouted` for the pads, the obstacle and \
-                 the repair for each"
+                "saved the KiCAD board with {} of {} net(s) routed; the rest carry no copper — \
+                 see `ratsnest` for each one's pads, its status, what is in the way and the \
+                 calls that would free it",
+                ratsnest.routed, ratsnest.total
             )
         },
     }))
@@ -633,7 +656,7 @@ fn validate_written_plane_routes(
     }
     let path = ctx.pcb_path();
     crate::export::materialize_zones_for_drc(&path, ctx.env())
-    .map_err(|error| refusal(format!("could not refill routed copper zones: {error}")))?;
+        .map_err(|error| refusal(format!("could not refill routed copper zones: {error}")))?;
     let report = ctx
         .env()
         .drc(&path)
@@ -646,8 +669,7 @@ fn validate_written_plane_routes(
     let fallback = route_rejected_planes(solve_view, result, &rejected);
     replace_route_atomically(ctx, full_view, &result.solution, layer_names, (1, 0))
         .map_err(|error| refusal(format!("could not replace rejected plane fanout: {error}")))?;
-    crate::export::materialize_zones_for_drc(&path, ctx.env())
-    .map_err(|error| {
+    crate::export::materialize_zones_for_drc(&path, ctx.env()).map_err(|error| {
         refusal(format!(
             "could not refill zones after plane fallback: {error}"
         ))
@@ -2416,28 +2438,6 @@ pub(super) fn write_route_file(
     kicad_board::append_copper_file(&ctx.pcb_path(), solution, rp.layer_count, layer_names)
 }
 
-fn is_seed_placement(bounds: &pcb_model::Rect, parts: &[ImportedPart]) -> bool {
-    if parts.is_empty() {
-        return false;
-    }
-    let mut coords: Vec<_> = parts
-        .iter()
-        .map(|p| (p.at.x, p.at.y, p.rotation as f64))
-        .collect();
-    coords.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-    });
-    coords.iter().enumerate().all(|(idx, (x, y, rotation))| {
-        let expected_x = bounds.min_x + 2.0 + 2.54 * idx as f64;
-        let expected_y = bounds.min_y + 2.0;
-        (x - expected_x).abs() < geom::EPS
-            && (y - expected_y).abs() < geom::EPS
-            && rotation.abs() < geom::EPS
-    })
-}
-
 #[cfg(test)]
 mod escape_bottleneck_tests {
     use super::*;
@@ -2464,6 +2464,7 @@ mod escape_bottleneck_tests {
                     drill: None,
                 })
                 .collect(),
+            properties: Default::default(),
         }
     }
     fn failed(nets: &[&str]) -> Vec<FailedNet> {
@@ -3968,25 +3969,6 @@ mod escape_bottleneck_tests {
         assert_eq!(split.real, 0, "{remaining:?}");
         assert_eq!(split.expected_gaps, 1);
         assert_eq!(result.solution.traces.len(), 1, "the routed net is kept");
-
-        let report = crate::diagnose::unrouted_report(
-            &problem,
-            &[],
-            &result.failed,
-            &["F.Cu".to_string()],
-            Some(&BTreeSet::from(["ROUTED".to_string()])),
-        );
-        assert_eq!(report.len(), 1);
-        assert_eq!(report[0]["net"], "OUT_OF_SCOPE");
-        assert_eq!(report[0]["in_scope"], false);
-        assert!(
-            report[0]["suggestion"]
-                .as_str()
-                .unwrap()
-                .contains("did not route OUT_OF_SCOPE"),
-            "{}",
-            report[0]["suggestion"]
-        );
     }
 
     /// `route_board{nets}` is the repair loop after a `move_parts`, so the

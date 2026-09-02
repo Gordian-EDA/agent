@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use kicad_footprint::{FootprintCatalog, FootprintId};
 use kicad_board::FootprintPlacement;
+use kicad_footprint::{FootprintCatalog, FootprintId};
 use pcb_model::{
     Edge, GroupHint, LayerRef, LockedAt, Obstacle, Placement, PlacementHints, PlacementView,
     Point2, Polygon, Rect, RouteSolution, RoutingView,

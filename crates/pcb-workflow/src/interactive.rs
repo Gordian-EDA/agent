@@ -16,7 +16,7 @@ use gordian_runtime::tool::require_str;
 
 use kicad_board::{BoardSnapshot, FootprintPlacement, ImportedPart};
 
-use crate::board::guard::Guard;
+use crate::board::guard::{Edit, Guard};
 use crate::copper::RetractedCopper;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -62,15 +62,24 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(plan) => plan,
         Err(err) => return Ok(json!({ "error": err })),
     };
+    let locked = crate::locks::locked_among(
+        &snapshot,
+        plan.positions
+            .iter()
+            .map(|position| position.reference.as_str()),
+    );
+    if !locked.is_empty() {
+        return Ok(crate::locks::locked_refusal("move_parts", &locked));
+    }
     if let Some(refusal) = overlap_error(&board, &plan, snapshot.problem.clearance) {
         return Ok(refusal);
     }
     let retract = retracted_copper(&snapshot, &plan);
     let gate = match Guard::open(
         ctx,
-        "move_parts",
-        "Move board footprints",
-        &[ctx.pcb_path()],
+        Edit::new("move_parts", "Move board footprints", &[ctx.pcb_path()])
+            .refs(plan.positions.iter().map(|p| p.reference.clone()))
+            .expecting(&input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
@@ -577,15 +586,17 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok((problem, solution, request, layer_names)) => {
             let gate = match Guard::open(
                 ctx,
-                "route_track",
-                "Route one board connection",
-                &[ctx.pcb_path()],
+                Edit::new(
+                    "route_track",
+                    "Route one board connection",
+                    &[ctx.pcb_path()],
+                )
+                .expecting(&input),
             ) {
                 Ok(gate) => gate,
                 Err(refusal) => return Ok(refusal),
             };
-            if let Err(err) =
-                super::route::write_route_file(ctx, &problem, &solution, &layer_names)
+            if let Err(err) = super::route::write_route_file(ctx, &problem, &solution, &layer_names)
             {
                 let error =
                     json!({ "error": format!("route_track could not write copper: {err}") });
@@ -610,9 +621,12 @@ pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let gate = match Guard::open(
         ctx,
-        "delete_copper",
-        "Delete board copper",
-        std::slice::from_ref(&path),
+        Edit::new(
+            "delete_copper",
+            "Delete board copper",
+            std::slice::from_ref(&path),
+        )
+        .expecting(&input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
@@ -656,9 +670,12 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let project_path = ctx.sch_path().with_extension("kicad_pro");
     let gate = match Guard::open(
         ctx,
-        "set_net_width",
-        "Set a board net class",
-        &[path.clone(), project_path.clone()],
+        Edit::new(
+            "set_net_width",
+            "Set a board net class",
+            &[path.clone(), project_path.clone()],
+        )
+        .expecting(&input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
@@ -1586,6 +1603,7 @@ mod tests {
                     locked: false,
                     courtyard: None,
                     pads: vec![],
+                    properties: Default::default(),
                 }],
                 placement_keepouts: vec![],
                 keepout_count: 0,
@@ -2057,7 +2075,7 @@ mod tests {
     /// `route_board`'s `unrouted` report hands back `"U1.3"`-style pad handles;
     /// a repair is only copy-paste if `route_track` takes them as they are.
     #[test]
-    fn route_track_takes_the_pad_handles_the_unrouted_report_hands_back() {
+    fn route_track_takes_the_pad_handles_the_ratsnest_hands_back() {
         let parts = vec![ImportedPart {
             reference: "U1".to_owned(),
             lib_id: "Package_TO_SOT_SMD:SOT-23-5".to_owned(),
@@ -2086,6 +2104,7 @@ mod tests {
                     drill: None,
                 },
             ],
+            properties: Default::default(),
         }];
         let problem = route_problem(vec![]);
 
