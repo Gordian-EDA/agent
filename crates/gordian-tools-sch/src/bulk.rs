@@ -8,7 +8,7 @@ use sch_model::engine::PlacementEngine;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::session::{Allow, Edit};
+use crate::session::{Allow, Edit, attach_connectivity};
 
 /// Every accepted shape of an `intent.relations` entry, with an example of each.
 ///
@@ -202,6 +202,8 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(value);
     }
     value["placement"] = placement;
+    let refs = report.placed.join(" ");
+    attach_connectivity(&mut value, ctx, report.placed, &format!("PLACED  {refs}"))?;
     with_check(value, ctx).context("checking placed parts")
 }
 

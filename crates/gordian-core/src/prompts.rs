@@ -22,7 +22,7 @@ A refusal lists EVERY fault at once; fix them all before retrying. `place_parts`
 
 `dangling` pins are reported, not fatal: the parts are placed and the net has one end. Close each with a `connect`, or declare real board I/O in `intent.ports`. Write `"@R1.2"` as a net to join whatever net that pin is on; KiCAD's own `Net-(...)` names fork the net if reused. Resolve `completeness.gaps` for a complete powered/interface design with one follow-up `place_parts` of only the missing parts; gaps are advisory for deliberately minimal designs and focused edits.
 
-For an existing schematic: `read_schematic()`, perform only the requested mutators, then `check_schematic()`. `set_fields`, `set_flags`, `swap_symbol`, `add_symbols`, `remove_symbols`, `label`, `no_connect`, `add_power`, `delete_wires` edit; `arrange({refs|bbox})` re-places. Do not move unrelated parts.
+For an existing schematic: `read_schematic()` once, perform only the requested mutators, use their returned `connectivity`/`unconnected` report for every new or swapped part, then `diff_schematic()` instead of re-reading to verify the exact edit, then `check_schematic()`. `set_fields`, `set_flags`, `swap_symbol`, `add_symbols`, `remove_symbols`, `label`, `no_connect`, `add_power`, `delete_wires` edit; `arrange({refs|bbox})` re-places. Do not move unrelated parts.
 
 Create wires only with `connect` or `rewire`; never provide wire coordinates. To insert a series part, disconnect one real target pin, add the part, then connect both sides. Mutators return a pre-write `revision`; `undo({revision?})` restores one and `history` lists them.
 

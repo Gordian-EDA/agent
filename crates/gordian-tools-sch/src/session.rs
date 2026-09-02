@@ -6,13 +6,15 @@
 //! *named*. Anything else is rolled back and reported — a tool may never
 //! silently rewire the board while doing something else.
 
-use std::collections::BTreeSet;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use gordian_runtime::AgentRuntime;
 use gordian_runtime::revisions::{RevisionId, TurnBaseline};
-use sch_doc::{NetDelta, Netlist, PinRef, SchDoc, SnapshotId, SymbolSource, connect};
+use sch_doc::{NetDelta, Netlist, PinRef, SchDoc, SnapshotId, SymbolSource, connect, placed_pins};
 use serde_json::{Value, json};
 
 /// The nets and parts a call declared it was about to touch.
@@ -260,6 +262,106 @@ pub(crate) fn comparison_revision(
     }
 }
 
+/// Extractor-derived connectivity for the parts one mutator touched.
+pub(crate) struct ConnectivityReport {
+    refs: Vec<String>,
+    pub lines: Vec<String>,
+    pub unconnected: Vec<String>,
+}
+
+fn pin_order(left: &str, right: &str) -> Ordering {
+    match (left.parse::<u64>(), right.parse::<u64>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        _ => left.cmp(right),
+    }
+}
+
+/// Read the written schematic and report the realized nets of selected parts.
+pub(crate) fn connectivity_report(
+    ctx: &AgentRuntime,
+    refs: impl IntoIterator<Item = impl Into<String>>,
+) -> Result<ConnectivityReport> {
+    let (doc, netlist) = Edit::read(ctx)?;
+    let refs: BTreeSet<String> = refs.into_iter().map(Into::into).collect();
+    let mut pins: BTreeMap<String, Vec<_>> = BTreeMap::new();
+    for pin in placed_pins(&doc) {
+        if refs.contains(&pin.refdes) {
+            pins.entry(pin.refdes.clone()).or_default().push(pin);
+        }
+    }
+    let mut lines = Vec::new();
+    let mut unconnected = Vec::new();
+    for reference in &refs {
+        let part_pins = pins.entry(reference.clone()).or_default();
+        part_pins.sort_by(|left, right| {
+            left.unit
+                .cmp(&right.unit)
+                .then_with(|| pin_order(&left.number, &right.number))
+        });
+        let mut connected = Vec::new();
+        for pin in part_pins {
+            match crate::refs::net_of(&netlist, reference, &pin.number) {
+                Some(net) => connected.push(format!("{}={net}", pin.number)),
+                None => unconnected.push(format!("{reference}.{}", pin.number)),
+            }
+        }
+        lines.push(if connected.is_empty() {
+            format!("{reference}:")
+        } else {
+            format!("{reference}: {}", connected.join(" "))
+        });
+    }
+    unconnected.sort();
+    unconnected.dedup();
+    Ok(ConnectivityReport {
+        refs: refs.into_iter().collect(),
+        lines,
+        unconnected,
+    })
+}
+
+/// Add structured and compact realized connectivity to a successful result.
+pub(crate) fn attach_connectivity(
+    value: &mut Value,
+    ctx: &AgentRuntime,
+    refs: impl IntoIterator<Item = impl Into<String>>,
+    summary: &str,
+) -> Result<()> {
+    let report = connectivity_report(ctx, refs)?;
+    value["connectivity"] = json!(report.lines);
+    value["unconnected"] = json!(report.unconnected);
+    value["text"] = json!(compact_connectivity(&report, summary));
+    Ok(())
+}
+
+fn compact_connectivity(report: &ConnectivityReport, summary: &str) -> String {
+    let shown = report.lines.len().min(40);
+    let shown_refs: BTreeSet<&str> = report.refs[..shown].iter().map(String::as_str).collect();
+    let shown_unconnected = report
+        .unconnected
+        .iter()
+        .filter(|pin| {
+            pin.rsplit_once('.')
+                .is_some_and(|(reference, _)| shown_refs.contains(reference))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut text = format!("{summary}\nCONNECTIVITY\n");
+    for line in &report.lines[..shown] {
+        writeln!(text, "{line}").expect("writing to a string cannot fail");
+    }
+    if report.lines.len() > shown {
+        writeln!(text, "+{} more", report.lines.len() - shown)
+            .expect("writing to a string cannot fail");
+    }
+    if !shown_unconnected.is_empty() {
+        writeln!(text, "UNCONNECTED  {}", shown_unconnected.join(" "))
+            .expect("writing to a string cannot fail");
+    }
+    text.truncate(text.trim_end().len());
+    text
+}
+
 /// The net delta as the model reads it: only the parts that are non-empty.
 pub(crate) fn delta_json(delta: &NetDelta) -> Value {
     let pins = |list: &[sch_doc::PinRef]| -> Vec<String> {
@@ -303,6 +405,25 @@ mod tests {
     /// A pin that changed connection state, and the net it changed against.
     fn moved(refdes: &str, number: &str, net: Option<&str>) -> (PinRef, Option<String>) {
         (pin(refdes, number), net.map(str::to_string))
+    }
+
+    #[test]
+    fn compact_connectivity_stops_after_forty_parts() {
+        let refs = (1..=42)
+            .map(|number| format!("R{number}"))
+            .collect::<Vec<_>>();
+        let report = ConnectivityReport {
+            lines: refs
+                .iter()
+                .map(|reference| format!("{reference}: 1=VCC"))
+                .collect(),
+            refs,
+            unconnected: Vec::new(),
+        };
+        let text = compact_connectivity(&report, "PLACED");
+        assert!(text.contains("R40: 1=VCC"), "{text}");
+        assert!(!text.contains("R41: 1=VCC"), "{text}");
+        assert!(text.ends_with("+2 more"), "{text}");
     }
 
     /// A move or a field edit claims to be inert, so any net change refuses.

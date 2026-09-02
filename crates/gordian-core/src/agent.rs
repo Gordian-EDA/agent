@@ -606,7 +606,7 @@ fn coalesced_discovery_call(call: &ToolCall, calls: &[ToolCall]) -> Option<ToolC
 }
 
 fn is_revision_scoped_read(name: &str) -> bool {
-    matches!(name, "project_info" | "render_schematic")
+    matches!(name, "project_info" | "diff_schematic" | "render_schematic")
 }
 
 /// Best-effort emit: a closed receiver (UI gone) is ignored.
@@ -2788,6 +2788,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             format!("{lib} → {n} pads")
         }
         "read_schematic" => "read the schematic".to_string(),
+        "diff_schematic" => "compared the live schematic with its revision baseline".to_string(),
         "export_fab" => {
             let files = result
                 .get("file_count")

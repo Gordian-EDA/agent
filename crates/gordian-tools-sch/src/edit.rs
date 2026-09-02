@@ -525,13 +525,26 @@ pub fn add_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             Err(error) => return Ok(json!({ "error": error, "placed": placed })),
         }
     }
-    edit.commit(
+    let refs = placed
+        .iter()
+        .filter_map(|part| part["ref"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let mut result = edit.commit(
         ctx,
         "add_symbols",
         "Add schematic symbols",
         json!({ "placed": placed }),
         allow,
-    )
+    )?;
+    if result.get("error").is_none() {
+        crate::session::attach_connectivity(
+            &mut result,
+            ctx,
+            refs.clone(),
+            &format!("ADDED  {}", refs.join(" ")),
+        )?;
+    }
+    Ok(result)
 }
 
 /// Remove parts, together with the stubs and labels that only served them.
@@ -1307,6 +1320,13 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     )?;
     if result.get("error").is_some() {
         result["suggestion"] = suggestion;
+    } else {
+        crate::session::attach_connectivity(
+            &mut result,
+            ctx,
+            [refdes],
+            &format!("SWAPPED  {refdes} → {lib_id}"),
+        )?;
     }
     Ok(result)
 }
