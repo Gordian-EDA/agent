@@ -7,6 +7,7 @@ use sch_floorplan::live::{ArrangeReport, PlaceReport, PlacementBudget, Selection
 use sch_model::engine::PlacementEngine;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::time::Duration;
 
 use crate::session::{Allow, Edit};
 
@@ -125,8 +126,16 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut report = None;
     // The last attempt's timing, reported on the result whether it committed or not.
     let mut placement = json!(null);
+    // The ladder shares ONE budget: a second engine only gets what the first left,
+    // so three attempts can never stack past the tool's timeout.
+    let ladder_started = std::time::Instant::now();
+    let ladder_budget = PlacementBudget::new(sheet_parts).budget;
     for kind in engines_to_try(requested) {
-        let (budget, engine) = budgeted(ctx, sheet_parts, Some(kind));
+        let remaining = ladder_budget.saturating_sub(ladder_started.elapsed());
+        if remaining < Duration::from_secs(5) {
+            break;
+        }
+        let (budget, engine) = budgeted_within(ctx, remaining, sheet_parts, Some(kind));
         let timing = Timing::start("place_parts", &budget, engine.name());
         match sch_floorplan::live::place_parts(
             ctx.env(),
@@ -473,7 +482,17 @@ fn budgeted(
     parts: usize,
     engine: Option<PlacementEngineKind>,
 ) -> (PlacementBudget, Box<dyn PlacementEngine>) {
-    let budget = PlacementBudget::new(parts);
+    budgeted_within(ctx, PlacementBudget::new(parts).budget, parts, engine)
+}
+
+/// A budget clipped to `remaining` — what a later rung of the engine ladder gets.
+fn budgeted_within(
+    ctx: &AgentRuntime,
+    remaining: Duration,
+    parts: usize,
+    engine: Option<PlacementEngineKind>,
+) -> (PlacementBudget, Box<dyn PlacementEngine>) {
+    let budget = PlacementBudget::within(remaining, parts);
     let engine = budget.engine(engine.or(ctx.config().engines.schematic_placer));
     (budget, placement_engine(engine))
 }

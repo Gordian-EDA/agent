@@ -19,7 +19,7 @@ mod seam;
 
 pub use config::{DEFAULT_MAX_TOKENS, LlmConfig, LlmConfigError, LlmReasoningEffort};
 
-pub use provider::{GenaiProvider, completed_text, token_usage};
+pub use provider::{GenaiProvider, completed_text, is_transient, token_usage};
 pub use seam::{EventStream, Provider, drain_stream};
 
 // The genai types the rest of the crate speaks. Re-exported so callers build on

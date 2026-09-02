@@ -187,10 +187,17 @@ impl Provider for GenaiProvider {
             req = req.with_tools(tools.to_vec());
         }
         let opts = self.chat_options();
-        let resp = self
-            .client
-            .exec_chat(self.model.as_str(), req, Some(&opts))
-            .await?;
+        let resp = with_retries("complete", || {
+            let req = req.clone();
+            let opts = opts.clone();
+            async move {
+                self.client
+                    .exec_chat(self.model.as_str(), req, Some(&opts))
+                    .await
+                    .map_err(anyhow::Error::from)
+            }
+        })
+        .await?;
         Ok(StreamEnd {
             captured_usage: Some(resp.usage),
             captured_stop_reason: resp.stop_reason,
@@ -217,14 +224,68 @@ impl Provider for GenaiProvider {
         // assembled tool calls + usage off the terminal End event (the reply text
         // arrives live as Chunk events, so no need to capture content).
         let opts = self.chat_options();
-        let resp = self
-            .client
-            .exec_chat_stream(self.model.as_str(), req, Some(&opts))
-            .await?;
+        let resp = with_retries("stream", || {
+            let req = req.clone();
+            let opts = opts.clone();
+            async move {
+                self.client
+                    .exec_chat_stream(self.model.as_str(), req, Some(&opts))
+                    .await
+                    .map_err(anyhow::Error::from)
+            }
+        })
+        .await?;
         Ok(resp
             .stream
             .map(|ev| ev.map_err(anyhow::Error::from))
             .boxed())
+    }
+}
+
+/// Gateway hiccups worth a second try: 5xx/429 responses, connection resets and
+/// timeouts. Anything else (auth, a bad request, a refused model) is final.
+pub fn is_transient(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    [
+        "502",
+        "503",
+        "504",
+        "429",
+        "bad gateway",
+        "gateway time",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection closed",
+        "broken pipe",
+        "temporarily unavailable",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+/// Backoff for attempt `n` (0-based): 1 s, 3 s, 8 s.
+fn backoff(attempt: usize) -> std::time::Duration {
+    std::time::Duration::from_secs([1, 3, 8][attempt.min(2)])
+}
+
+/// Run `op` up to four times while it fails transiently.
+async fn with_retries<T, F, Fut>(what: &str, mut op: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut attempt = 0usize;
+    loop {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(error) if attempt < 3 && is_transient(&error) => {
+                tracing::warn!(attempt, error = %error, "{what}: transient provider error, retrying");
+                tokio::time::sleep(backoff(attempt)).await;
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 

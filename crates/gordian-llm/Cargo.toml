@@ -13,6 +13,8 @@ futures.workspace = true
 genai = "=0.7.0-beta.6"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+tracing.workspace = true
+tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

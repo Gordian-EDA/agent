@@ -947,8 +947,7 @@ impl<P: Provider> Agent<P> {
 
         loop {
             if provider_requests >= budgets.provider_requests {
-                let rolled_back =
-                    restore_last_clean_schematic(&self.runtime, last_clean_schematic);
+                let rolled_back = restore_last_clean_schematic(&self.runtime, last_clean_schematic);
                 let mut final_text = provider_limit_final_text(
                     None,
                     applied,
@@ -967,8 +966,7 @@ impl<P: Provider> Agent<P> {
                 });
             }
             if started.elapsed() >= TURN_WALL_CLOCK {
-                let rolled_back =
-                    restore_last_clean_schematic(&self.runtime, last_clean_schematic);
+                let rolled_back = restore_last_clean_schematic(&self.runtime, last_clean_schematic);
                 let mut final_text = time_limit_final_text(
                     started.elapsed(),
                     applied,
@@ -1046,7 +1044,21 @@ impl<P: Provider> Agent<P> {
                     }
                     Err(error) => return Err(error),
                 };
-                match stream_completion(stream, events).await? {
+                let completion = match stream_completion(stream, events).await {
+                    Ok(completion) => completion,
+                    // A stream that dies mid-way (a gateway 502 after the headers) is
+                    // as retriable as one that never opened.
+                    Err(error)
+                        if provider_error_retries_left > 0 && gordian_llm::is_transient(&error) =>
+                    {
+                        provider_error_retries_left -= 1;
+                        tracing::warn!(error = %error, "provider stream failed mid-way; retrying");
+                        self.emit_pending_usage(events);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                match completion {
                     StreamCompletion::End { text, end } => (text, end),
                     StreamCompletion::MissingEnd { text } => {
                         stream_transport_available = false;
