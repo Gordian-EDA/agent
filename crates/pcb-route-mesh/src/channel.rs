@@ -20,6 +20,12 @@ use pcb_model::{
 };
 use std::collections::BTreeSet;
 
+/// The production rule set. This module is test-only scaffolding, so it names
+/// the oracle directly instead of taking it injected.
+use pcb_model::Drc as _;
+
+static DRC: pcb_drc::StandardDrc = pcb_drc::StandardDrc;
+
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "channel";
 const CHANNEL_MAX_CONNECTIONS: usize = 6;
@@ -211,8 +217,8 @@ fn route_two_pin(
     let mut candidates: Vec<(RouteSolution, (usize, u64, u64, usize))> = Vec::new();
     for mut candidate in two_pin_candidates(problem, solution, conn) {
         let validation = problem_with_connections_and_extra(problem, routed, idx);
-        crate::via_cleanup::normalize_redundant_vias(&validation, &mut candidate);
-        if !pcb_drc::lint::lint(&validation, &candidate).is_empty() {
+        crate::via_cleanup::normalize_redundant_vias(&DRC, &validation, &mut candidate);
+        if !DRC.check(&validation, &candidate).is_empty() {
             continue;
         }
         let key = solution_tree_key(problem, solution, &candidate);
@@ -294,7 +300,7 @@ fn route_multi_pin_from_root(
         remaining.remove(&to);
     }
 
-    pcb_drc::lint::lint(validation, &candidate)
+    DRC.check(validation, &candidate)
         .is_empty()
         .then_some(candidate)
 }
@@ -519,9 +525,9 @@ fn trace_length_um(trace: &Trace) -> u64 {
 }
 
 fn geometry_clean(problem: &RoutingView, solution: &RouteSolution) -> bool {
-    pcb_drc::lint::lint(problem, solution)
+    DRC.check(problem, solution)
         .iter()
-        .all(|v| matches!(v, pcb_drc::lint::DrcViolation::Connectivity { .. }))
+        .all(|v| matches!(v, pcb_model::Finding::Connectivity { .. }))
 }
 
 fn segment_layer(a: Point2, b: Point2, horizontal: &LayerRef, vertical: &LayerRef) -> LayerRef {
@@ -550,7 +556,7 @@ fn preferred_layers(problem: &RoutingView) -> Option<(LayerRef, LayerRef)> {
 }
 
 fn signal_layers(problem: &RoutingView) -> Vec<(u32, LayerRef)> {
-    let planes: BTreeSet<u32> = pcb_route_grid::router::plane_layers(problem.layer_count as usize)
+    let planes: BTreeSet<u32> = pcb_model::plane_layers(problem.layer_count)
         .into_iter()
         .collect();
     (0..problem.layer_count)
@@ -674,9 +680,9 @@ fn problem_with_connections_and_extra(
 }
 
 fn reconcile(problem: &RoutingView, solution: &mut RouteSolution, failed: &mut Vec<FailedNet>) {
-    crate::via_cleanup::normalize_redundant_vias(problem, solution);
-    let mut dropped = pcb_drc::lint::drop_violating_copper(problem, solution);
-    dropped.extend(pcb_drc::lint::drop_unconnected_copper(problem, solution));
+    crate::via_cleanup::normalize_redundant_vias(&DRC, problem, solution);
+    let mut dropped = DRC.drop_violating_copper(problem, solution);
+    dropped.extend(DRC.drop_unconnected_copper(problem, solution));
     let known: BTreeSet<String> = failed.iter().map(|f| f.connection.clone()).collect();
     let mut seen = BTreeSet::new();
     failed.extend(
@@ -817,7 +823,7 @@ mod tests {
 
         assert!(result.failed.is_empty(), "{:?}", result.failed);
         assert_eq!(result.engine, ENGINE);
-        assert!(pcb_drc::lint::lint(&p, &result.solution).is_empty());
+        assert!(DRC.check(&p, &result.solution).is_empty());
         assert!(
             result
                 .solution
@@ -850,7 +856,7 @@ mod tests {
 
         assert!(result.failed.is_empty(), "{:?}", result.failed);
         assert_eq!(result.engine, ENGINE);
-        assert!(pcb_drc::lint::lint(&p, &result.solution).is_empty());
+        assert!(DRC.check(&p, &result.solution).is_empty());
         assert!(
             result
                 .solution
@@ -980,6 +986,6 @@ mod tests {
             "channel should choose the L-bend away from the tight keepout margin: {:?}",
             selected.traces
         );
-        assert!(pcb_drc::lint::lint(&p, &selected).is_empty());
+        assert!(DRC.check(&p, &selected).is_empty());
     }
 }

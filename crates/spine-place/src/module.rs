@@ -14,9 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use circuit_graph::netclass::is_connector_like as is_connector_like_part;
 use geom::Point2;
-use sch_place::ir::Orient;
-use sch_place::item::PinSide;
-use sch_place::item::{Incidence, Item};
+use sch_model::ir::Orient;
+use sch_model::item::PinSide;
+use sch_model::item::{Incidence, Item};
 
 use crate::chain::{ChainRole, NodeKind, Reduced};
 use crate::net::NetClass;
@@ -75,7 +75,7 @@ pub(crate) fn orient_for(item: &Item, first_net: &str, dir: Orient) -> f64 {
             Orient::Right => Orient::Left,
         }
     };
-    sch_floorplan::engine_support::orient_angle(&item.geom, want)
+    sch_model::idiom::orient_angle(&item.geom, want)
 }
 
 /// World offset of `pin` (by number) for an item rotated to `angle`, relative
@@ -112,7 +112,7 @@ pub(crate) fn half_size(item: &Item, angle: f64) -> Point2 {
 pub(crate) fn placed_rect(items: &[Item], s: &SatPlace) -> geom::Rect {
     let mut tmp = items[s.item].clone();
     tmp.angle = s.angle;
-    sch_floorplan::engine_support::item_rect(&tmp, [s.offset.x, s.offset.y])
+    sch_model::geometry::item_rect(&tmp, [s.offset.x, s.offset.y])
 }
 
 /// How one consumed chain hangs off its module.
@@ -639,7 +639,7 @@ pub fn form_modules(
         st.claims
             .entry(mi)
             .or_default()
-            .push(sch_floorplan::engine_support::item_rect(
+            .push(sch_model::geometry::item_rect(
                 &items[a],
                 [0.0, 0.0],
             ));
@@ -796,7 +796,7 @@ fn place_bridges(items: &[Item], g: &Reduced, attach: &[Attach], st: &mut FormSt
             // Feedback across the body (op-amp out → in): a HORIZONTAL run
             // ABOVE the anchor, wires looping over the top — a vertical column
             // would drag its approach wire straight through the package.
-            let anchor_rect = sch_floorplan::engine_support::item_rect(&items[*anchor], [0.0, 0.0]);
+            let anchor_rect = sch_model::geometry::item_rect(&items[*anchor], [0.0, 0.0]);
             let (parts, nets) = (c.parts.clone(), c.nets.clone());
             let build = |at: Point2| -> Vec<SatPlace> {
                 let mut x = at.x;
@@ -1854,7 +1854,7 @@ fn recompute_envelopes(items: &[Item], st: &mut FormState) {
     // neighbour bodies (mcp1703).
     const WIRE_MARGIN: f64 = 3.81;
     for (mi, m) in st.form.modules.iter_mut().enumerate() {
-        let anchor_rect = sch_floorplan::engine_support::item_rect(&items[m.anchor], [0.0, 0.0]);
+        let anchor_rect = sch_model::geometry::item_rect(&items[m.anchor], [0.0, 0.0]);
         m.env_min.x = anchor_rect.min_x;
         m.env_min.y = anchor_rect.min_y;
         m.env_max.x = anchor_rect.max_x;

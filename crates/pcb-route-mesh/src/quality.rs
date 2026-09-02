@@ -1,10 +1,16 @@
 use pcb_model::{RouteQuality, RouteResult, RouteSolution, RoutingView, Trace};
 
+/// The production rule set. This module is test-only scaffolding, so it names
+/// the oracle directly instead of taking it injected.
+use pcb_model::Drc as _;
+
+static DRC: pcb_drc::StandardDrc = pcb_drc::StandardDrc;
+
 pub(crate) fn route_quality(problem: &RoutingView, result: &RouteResult) -> RouteQuality {
     RouteQuality::of(
         problem,
         result,
-        pcb_route_grid::router::geometry_violations(problem, &result.solution),
+        DRC.geometry_violations(problem, &result.solution),
     )
 }
 

@@ -21,7 +21,7 @@ impl SchematicWriter {
     /// subtracted (KiCAD's page origin is the top-left); the floorplan
     /// normalizes content to a small positive margin already.
     fn content_extent(&self) -> Option<[f64; 2]> {
-        use crate::label::text_width;
+        use sch_model::text::text_width;
         const PAGE_MARGIN: f64 = 12.7;
         let mut max_x = f64::MIN;
         let mut max_y = f64::MIN;

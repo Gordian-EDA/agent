@@ -46,51 +46,8 @@
 //! between single-net copper are still reported.
 
 use geom::EPS;
-use pcb_model::{LayerRef, RouteSolution, RoutingView};
-use serde::Serialize;
+use pcb_model::{LayerRef, RouteSolution, RoutingView, Violation};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-
-/// A connectivity defect in a [`RouteSolution`] relative to its problem.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum Violation {
-    /// A connection's point #`point_index` is not joined to its point #0 by the
-    /// emitted copper. (Connections with fewer than 2 points pass trivially.)
-    Unconnected {
-        /// Connection name.
-        connection: String,
-        /// Index into the connection's `points_to_connect` that is stranded.
-        point_index: usize,
-    },
-    /// Copper from connections `a` and `b` is electrically shorted. Names are
-    /// normalized so `a < b`; one violation is reported per unordered pair.
-    CrossNetMerge {
-        /// First connection name (the lexicographically smaller).
-        a: String,
-        /// Second connection name.
-        b: String,
-    },
-}
-
-impl fmt::Display for Violation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Violation::Unconnected {
-                connection,
-                point_index,
-            } => write!(
-                f,
-                "connection \"{connection}\": point {point_index} is not connected to point 0 \
-                 by the emitted copper",
-            ),
-            Violation::CrossNetMerge { a, b } => write!(
-                f,
-                "cross-net short: connections \"{a}\" and \"{b}\" are electrically merged",
-            ),
-        }
-    }
-}
 
 /// Check that `solution`'s copper connects every connection's points and merges
 /// no two distinct connections. Returns violations in deterministic order

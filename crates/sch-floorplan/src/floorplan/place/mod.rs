@@ -3,39 +3,23 @@
 //! verbatim):
 //!
 //! - [`emit`] — gather + grid seed + engine orchestration + `SchematicWriter` assembly.
-//! - [`idioms`] — idiom align passes and anchor-block helpers.
-//! - [`relation`] — the author's RELATIONAL intent: violation counts + the projection
-//!   that seeds a search inside the constraint set.
-//! - [`refine`] — the overlap relaxers (`decongest`/`normalize`/keepout passes) the emit
-//!   finalize and the engines drive.
 //! - [`score`] — the routed `count_*` crossing/merge/short terms + the geometry primitives
 //!   the [`measure`] library reads off a built sheet.
-//! - [`problem`] — the neutral [`SchematicPlaceProblem`]: gathered items, connectivity,
-//!   route/build/measure helpers.
-//! - [`measure`] — [`RawMetrics`] (the weight-free 18 terms) + the [`PlacementEngine`]
-//!   trait an engine implements. A measurement-based engine CALLS this because IT chose
-//!   measurement; the OBJECTIVE (the weights) and the SEARCH live in the engine crates,
-//!   not here.
+//! - [`measure`] — the routed-sheet realiser and the [`sch_model::engine::CandidateEvaluator`]
+//!   it implements: the oracle an engine crate asks what a candidate would cost. The
+//!   OBJECTIVE (the weights) and the SEARCH live in the engine crates, not here.
 //! - [`route`] — the orthogonal elbow router + power-rail riser planning.
 //!
 //! Realizing a sheet is heavy + non-algorithmic (how to draw and measure), so it lives
 //! here as a shared library; the cost weights and the search are engine-owned method.
 
 mod emit;
-mod idioms;
 mod measure;
-mod problem;
-mod refine;
-mod relation;
 mod route;
 mod score;
 
 pub use emit::*;
-pub use idioms::*;
 pub use measure::*;
-pub use problem::SchematicPlaceProblem;
-pub use refine::*;
-pub use relation::*;
 pub use score::*;
 // `route` is the orthogonal router — every item is crate-internal (none was `pub`
 // pre-split), so re-export it crate-visibly, not publicly.
@@ -44,11 +28,11 @@ pub(crate) use route::*;
 #[cfg(test)]
 mod grid_tests {
     use super::*;
-    use crate::wire::DrawnSegment;
+    use sch_model::route::DrawnSegment;
     use geom::{Dir, Rect};
     use indexmap::IndexMap;
     use sch_check::model::{Block, Component, Design, LayoutGrid};
-    use sch_place::ir::Side;
+    use sch_model::ir::Side;
 
     fn cells(names: &[&str]) -> Vec<Option<String>> {
         names
@@ -183,7 +167,7 @@ mod grid_tests {
 
     #[test]
     fn forced_single_port_wire_requires_the_original_clear_short_stub() {
-        let clear = crate::wire::RouteScene {
+        let clear = sch_model::route::RouteScene {
             solids: Vec::new(),
             points: Vec::new(),
             segments: Vec::new(),
@@ -202,7 +186,7 @@ mod grid_tests {
             &clear,
         ));
 
-        let blocked = crate::wire::RouteScene {
+        let blocked = sch_model::route::RouteScene {
             solids: vec![Rect::new(10.5, 9.0, 12.0, 11.0)],
             points: Vec::new(),
             segments: Vec::new(),

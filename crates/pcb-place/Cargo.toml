@@ -12,6 +12,4 @@ geom = { path = "../geom" }
 pcb-model = { path = "../pcb-model" }
 
 [dev-dependencies]
-pcb-drc = { path = "../pcb-drc" }
-pcb-route-grid = { path = "../pcb-route-grid" }
 serde_json.workspace = true

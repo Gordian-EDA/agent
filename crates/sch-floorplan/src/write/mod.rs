@@ -52,7 +52,7 @@ mod textsolve;
 
 // Re-export the public surface VERBATIM so external `crate::write::…` paths
 // resolve unchanged across the split.
-pub use build::{pin_end0, pin_endpoint, quantize_dir};
+pub use build::{pin_end0, quantize_dir};
 pub use emit::{escape_sexpr_string, fmt_coord};
 
 /// Stable key identifying *this* schematic sheet for root-uuid derivation.
@@ -272,7 +272,7 @@ pub(super) fn field_anchors(inst: &Instance) -> (TextPos, TextPos) {
 }
 
 /// Bbox of a rendered field text line: bottom-anchored, 1.6 mm tall, width
-/// per [`crate::label::text_width`], extending per its justification.
+/// per [`sch_model::text::text_width`], extending per its justification.
 pub(super) fn field_box(at: impl Into<Point2>, j: Justify, width: f64) -> Rect {
     let at = at.into();
     match j {

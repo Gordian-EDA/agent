@@ -11,8 +11,8 @@
 //! boundary. Slice-2 pathing (Task 2) routes nets over this graph,
 //! congestion-costed.
 //!
-//! This module is deliberately independent of [`pcb_route_grid::grid`] / [`pcb_route_grid::astar`]
-//! / [`pcb_route_grid::router`]: the slice-1 fallback path stays untouched and
+//! This module is deliberately independent of [`pcb_grid::grid`] / [`pcb_grid::astar`]
+//! / the grid router: the slice-1 fallback path stays untouched and
 //! always-correct. The mesh shares only the [`RoutingView`] model and the
 //! obstacle/net-attribution convention (a net's own pads never block it).
 //!
@@ -290,7 +290,7 @@ pub fn max_depth(bounds: &Rect, track_pitch: f64) -> u32 {
 }
 
 /// Connection name → dense index (connections order), first-wins (matches
-/// [`pcb_route_grid::grid`]).
+/// [`pcb_grid::grid`]).
 fn name_index(problem: &RoutingView) -> BTreeMap<String, usize> {
     let mut m = BTreeMap::new();
     for (i, c) in problem.connections.iter().enumerate() {

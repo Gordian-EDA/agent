@@ -8,7 +8,8 @@
 
 use crate::ctx::{CopperGeom, CopperItem};
 use crate::rules::geom::{EPS, share_owner};
-use crate::{DrcCtx, Finding, Rule};
+use crate::{DrcCtx, Rule};
+use pcb_model::Finding;
 use pcb_model::LayerRef;
 
 /// Flags any foreign copper pair whose edges are closer than `problem.clearance`.

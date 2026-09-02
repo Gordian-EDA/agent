@@ -9,7 +9,8 @@
 //!    appends a custom rule with no edit to the in-house set, and its findings
 //!    land last (after the standard ones).
 
-use pcb_drc::{DrcCtx, DrcSuite, Finding, Rule};
+use pcb_drc::{DrcCtx, DrcSuite, Rule};
+use pcb_model::Finding;
 use pcb_model::{
     Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteSolution, RoutingView, Trace,
 };

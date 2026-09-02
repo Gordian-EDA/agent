@@ -965,7 +965,7 @@ fn route_leg(
     let grid_to = snapped_route_point(&exact_problem, to);
     let grid_problem =
         single_connection_problem(base, net, width, grid_from, from_layer, grid_to, to_layer);
-    let result = pcb_route_grid::router::route_grid(&grid_problem);
+    let result = pcb_engine::route_grid(&grid_problem);
     if !result.failed.is_empty() {
         let reasons = result
             .failed
@@ -982,7 +982,7 @@ fn route_leg(
 }
 
 fn snapped_route_point(problem: &RoutingView, point: Point2) -> Point2 {
-    let pitch = pcb_route_grid::grid::grid_pitch(problem);
+    let pitch = problem.grid_pitch();
     Point2::new(
         route_cell_center(problem.bounds.min_x, point.x, pitch),
         route_cell_center(problem.bounds.min_y, point.y, pitch),
@@ -1037,7 +1037,7 @@ fn extend_solution(dst: &mut RouteSolution, src: RouteSolution) {
 }
 
 fn add_manual_terminal_stubs(problem: &RoutingView, solution: &mut RouteSolution) {
-    let pitch = pcb_route_grid::grid::grid_pitch(problem);
+    let pitch = problem.grid_pitch();
     for conn in &problem.connections {
         let width = problem.net_width(&conn.name);
         for point in &conn.points_to_connect {
@@ -1073,14 +1073,14 @@ fn validate_manual_solution(
         .first()
         .map(|connection| connection.name.as_str())
         .unwrap_or_default();
-    let baseline = pcb_drc::lint::lint(
+    let baseline = pcb_engine::check(
         problem,
         &RouteSolution {
             traces: Vec::new(),
             vias: Vec::new(),
         },
     );
-    let violations = pcb_drc::lint::lint(problem, solution);
+    let violations = pcb_engine::check(problem, solution);
     let mut baseline_counts = BTreeMap::<String, usize>::new();
     for violation in baseline {
         let key = serde_json::to_string(&violation).unwrap_or_else(|_| format!("{violation:?}"));
@@ -1096,8 +1096,8 @@ fn validate_manual_solution(
         // cross-net merge still has no baseline match and is rejected below.
         if matches!(
             &violation,
-            pcb_drc::DrcViolation::Connectivity {
-                violation: pcb_drc::connectivity::Violation::Unconnected { connection, .. }
+            pcb_model::Finding::Connectivity {
+                violation: pcb_model::Violation::Unconnected { connection, .. }
             } if connection == target_net
         ) {
             introduced.push(violation);
@@ -1666,7 +1666,7 @@ mod tests {
         let (routed_problem, solution) = manual_route_solution(&problem, &request).unwrap();
 
         assert!(
-            pcb_drc::lint::lint(&routed_problem, &solution).is_empty(),
+            pcb_engine::check(&routed_problem, &solution).is_empty(),
             "manual route must validate cleanly"
         );
         assert!(
@@ -1696,7 +1696,7 @@ mod tests {
         let (routed_problem, solution) = manual_route_solution(&problem, &request).unwrap();
 
         assert!(
-            pcb_drc::lint::lint(&routed_problem, &solution).is_empty(),
+            pcb_engine::check(&routed_problem, &solution).is_empty(),
             "explicit-via route must validate cleanly"
         );
         let via = solution
@@ -1726,7 +1726,7 @@ mod tests {
 
         let (routed_problem, solution) = manual_route_solution(&problem, &request).unwrap();
 
-        assert!(pcb_drc::lint::lint(&routed_problem, &solution).is_empty());
+        assert!(pcb_engine::check(&routed_problem, &solution).is_empty());
         assert!(solution.traces.is_empty());
         assert_eq!(solution.vias.len(), 1);
         assert_eq!(solution.vias[0].span, ViaSpan::Through);
@@ -1808,12 +1808,12 @@ mod tests {
             vias: Vec::new(),
         };
         assert!(
-            pcb_drc::lint::lint(&problem, &empty)
+            pcb_engine::check(&problem, &empty)
                 .iter()
                 .any(|finding| matches!(
                     finding,
-                    pcb_drc::DrcViolation::Connectivity {
-                        violation: pcb_drc::connectivity::Violation::CrossNetMerge { .. }
+                    pcb_model::Finding::Connectivity {
+                        violation: pcb_model::Violation::CrossNetMerge { .. }
                     }
                 ))
         );

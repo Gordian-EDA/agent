@@ -1,7 +1,8 @@
 //! `TraceWidthRule` — a trace narrower than the board's `min_trace_width`.
 
 use crate::rules::geom::EPS;
-use crate::{DrcCtx, Finding, Rule};
+use crate::{DrcCtx, Rule};
+use pcb_model::Finding;
 
 /// Flags any solution trace whose width is below `problem.min_trace_width`.
 pub struct TraceWidthRule;

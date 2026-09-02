@@ -9,6 +9,7 @@
 #[allow(dead_code)]
 pub(crate) mod channel;
 pub mod copper;
+pub mod deps;
 pub mod crossing;
 pub mod detail;
 #[cfg(test)]

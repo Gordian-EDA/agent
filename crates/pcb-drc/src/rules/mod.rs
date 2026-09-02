@@ -1,7 +1,7 @@
 //! The in-house DRC rule set.
 //!
 //! One [`Rule`](crate::Rule) per module. [`standard_rules`] returns them in the
-//! canonical reporting order — the exact order the former hardcoded `lint()`
+//! canonical reporting order — the exact order the standard suite
 //! produced, so the suite's findings are byte-identical.
 
 mod geom;

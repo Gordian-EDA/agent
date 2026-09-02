@@ -94,7 +94,7 @@ fn a_two_pin_part_keeps_its_pin_order_in_every_pose() {
 /// The same claim one level up: a 2-pin part authored with each [`Orient`], mirrored
 /// or not, placed by the shipping engine, must draw the pin->net map it was given.
 ///
-/// [`Orient`]: sch_place::ir::Orient
+/// [`Orient`]: sch_model::ir::Orient
 #[test]
 fn placing_a_two_pin_part_honours_every_authored_orientation() {
     let Some(env) = detect() else { return };

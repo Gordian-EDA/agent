@@ -16,16 +16,18 @@
 //! position and compose it into each member's own pose, then decode back to KiCAD's
 //! `(angle, mirror)`.
 
+use sch_model::engine::CandidateEvaluator;
+
 use std::collections::BTreeMap;
 
-use sch_place::place::{Deadline, expired};
+use sch_model::place::{Deadline, expired};
 
 use geom::Point2;
-use sch_place::ir::LayoutIr;
-use sch_place::item::{Incidence, Item};
+use sch_model::ir::LayoutIr;
+use sch_model::item::{Incidence, Item};
 
-use sch_floorplan::contract::RoutedEvaluator;
-use sch_floorplan::engine_support::{build_anchor_blocks, decongest};
+use sch_model::idiom::build_anchor_blocks;
+use sch_model::refine::decongest;
 
 use crate::eval::{restore, save, score};
 
@@ -162,7 +164,7 @@ fn candidate_poses(it: &Item) -> Vec<(f64, bool)> {
 /// list entered with time left can still run out partway. Stopping keeps the poses
 /// already accepted — each was kept only because it strictly improved.
 pub(crate) fn search_hub_poses(
-    eval: &RoutedEvaluator,
+    eval: &dyn CandidateEvaluator,
     items: &mut [Item],
     inc: &Incidence,
     ir: &LayoutIr,

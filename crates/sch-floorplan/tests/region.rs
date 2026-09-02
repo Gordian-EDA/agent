@@ -5,11 +5,11 @@
 use geom::{Point2, Rect};
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
-use sch_floorplan::contract::SchematicPlaceProblem;
-use sch_floorplan::engine_support::item_rect;
+use sch_model::place::PlaceOptions;
+use sch_model::geometry::item_rect;
 use sch_floorplan::floorplan;
 use sch_floorplan::region::{RegionProblem, arrange};
-use sch_place::item::Item;
+use sch_model::item::Item;
 
 const SHEET: &str = r#"{
   "parts": [
@@ -34,7 +34,8 @@ fn gathered(env: &KicadInstallation) -> (sch_check::Design, Vec<Item>) {
     let input: sch_check::PlacePartsInput = serde_json::from_str(SHEET).unwrap();
     let (design, diagnostics, _) = sch_check::into_design(&input, &provider, &Default::default());
     assert!(!diagnostics.has_errors(), "{:#?}", diagnostics);
-    let problem = SchematicPlaceProblem::from_design(env, &design).unwrap();
+    let problem =
+        sch_floorplan::floorplan::place_problem(env, &design, None, PlaceOptions::default()).unwrap();
     (design, problem.items)
 }
 

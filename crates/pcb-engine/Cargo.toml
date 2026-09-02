@@ -7,6 +7,8 @@ repository.workspace = true
 description = "Production policy facade for independently invoked PCB placement and routing."
 
 [dependencies]
+pcb-drc = { path = "../pcb-drc" }
 pcb-model = { path = "../pcb-model" }
+pcb-route-grid = { path = "../pcb-route-grid" }
 pcb-place = { path = "../pcb-place" }
 pcb-route-mesh = { path = "../pcb-route-mesh" }

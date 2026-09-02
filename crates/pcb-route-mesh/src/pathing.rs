@@ -1,6 +1,6 @@
 //! Congestion-costed global pathing with negotiated rip-up & reroute.
 //!
-//! Slice 2's global routing stage. Where the slice-1 grid router ([`pcb_route_grid::router`])
+//! Slice 2's global routing stage. Where the slice-1 grid router (the grid router)
 //! commits each net's copper greedily — and so walls off later nets on congested
 //! boards — this stage routes every net as a coarse *cell path* over the
 //! [`CapacityMesh`] and then negotiates: nets that overload a shared boundary pay
@@ -10,7 +10,7 @@
 //! cell paths into copper; this stage only proves a feasible coarse assignment
 //! exists and reports congestion when it does not.
 //!
-//! This module is deliberately independent of [`pcb_route_grid::grid`] / [`pcb_route_grid::astar`]:
+//! This module is deliberately independent of [`pcb_grid::grid`] / [`pcb_grid::astar`]:
 //! it shares only the [`RoutingView`] model, the [`CapacityMesh`], and
 //! [`FailedNet`] (the cross-stage failure type). The always-correct slice-1
 //! fallback stays untouched.
@@ -1189,7 +1189,7 @@ fn build_via_allowed(
 ) -> Vec<Vec<bool>> {
     let obstacles = ViaClearanceObstacles::build(problem, layer_count);
     let clearance = problem.clearance + problem.via_diameter / 2.0;
-    let pitch = pcb_route_grid::grid::grid_pitch(problem);
+    let pitch = problem.grid_pitch();
     (0..problem.connections.len())
         .map(|conn| {
             mesh.leaves
@@ -1326,7 +1326,7 @@ fn victim_pressure(
 }
 
 /// Connection indices in routing order: ascending bounding-box half-perimeter,
-/// ties by name. The slice-1 order ([`pcb_route_grid::router`]), reproduced so pathing
+/// ties by name. The slice-1 order (the grid router), reproduced so pathing
 /// does not depend on the router's internals.
 fn net_order(problem: &RoutingView) -> Vec<usize> {
     let mut order: Vec<usize> = (0..problem.connections.len()).collect();

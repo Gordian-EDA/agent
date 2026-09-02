@@ -6,7 +6,8 @@
 //! model drops the span/type), so it's the one rule that knows micro-vs-through.
 
 use crate::rules::geom::EPS;
-use crate::{DrcCtx, Finding, Rule};
+use crate::{DrcCtx, Rule};
+use pcb_model::Finding;
 use pcb_model::ViaSpan;
 
 /// KiCAD's relaxed minimum diameter for a true MICRO via (laser, adjacent-layer).

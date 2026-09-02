@@ -3,9 +3,10 @@
 //!
 //! This makes the suite the single one-stop report: geometry findings first
 //! (the earlier rules), then connectivity defects folded in last, exactly as the
-//! former hardcoded `lint()` produced them.
+//! standard suite reports them.
 
-use crate::{DrcCtx, Finding, Rule, connectivity};
+use crate::{DrcCtx, Rule, connectivity};
+use pcb_model::Finding;
 
 /// Runs the connectivity oracle and wraps each [`connectivity::Violation`] in a
 /// [`Finding::Connectivity`].

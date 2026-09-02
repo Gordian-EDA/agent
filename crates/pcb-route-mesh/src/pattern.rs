@@ -26,6 +26,12 @@ use pcb_model::{
 };
 use std::collections::BTreeSet;
 
+/// The production rule set. This module is test-only scaffolding, so it names
+/// the oracle directly instead of taking it injected.
+use pcb_model::Drc as _;
+
+static DRC: pcb_drc::StandardDrc = pcb_drc::StandardDrc;
+
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "pattern";
 const PATTERN_BEAM_WIDTH: usize = 8;
@@ -106,7 +112,7 @@ pub fn route_pattern(problem: &RoutingView) -> RouteResult {
         let q = RouteQuality::of(
             problem,
             &result,
-            pcb_route_grid::router::geometry_violations(problem, &result.solution),
+            DRC.geometry_violations(problem, &result.solution),
         );
         best = match best.take() {
             None => Some((result, q)),
@@ -454,8 +460,8 @@ fn isolated_candidates(
             if result.solution.traces.is_empty() && result.solution.vias.is_empty() {
                 continue;
             }
-            crate::via_cleanup::normalize_redundant_vias(&subproblem, &mut result.solution);
-            if pcb_drc::lint::lint(&subproblem, &result.solution).is_empty()
+            crate::via_cleanup::normalize_redundant_vias(&DRC, &subproblem, &mut result.solution);
+            if DRC.check(&subproblem, &result.solution).is_empty()
                 && seen.insert(solution_candidate_key(&result.solution))
             {
                 net_candidates.push(result.solution);
@@ -552,7 +558,7 @@ fn add_synthetic_same_layer_candidates(
             }],
             vias: vec![],
         };
-        if !pcb_drc::lint::lint(subproblem, &solution).is_empty() {
+        if !DRC.check(subproblem, &solution).is_empty() {
             continue;
         }
         if seen.insert(solution_candidate_key(&solution)) {
@@ -761,9 +767,9 @@ fn route_one_net_candidates(
         let mut candidate = solution.clone();
         candidate.traces.extend(route.traces.clone());
         candidate.vias.extend(route.vias.clone());
-        crate::via_cleanup::normalize_redundant_vias(&validation_problem, &mut candidate);
+        crate::via_cleanup::normalize_redundant_vias(&DRC, &validation_problem, &mut candidate);
 
-        let findings = pcb_drc::lint::lint(&validation_problem, &candidate);
+        let findings = DRC.check(&validation_problem, &candidate);
         if !findings.is_empty() {
             continue;
         }
@@ -992,7 +998,7 @@ mod tests {
         assert!(r.failed.is_empty(), "{:?}", r.failed);
         assert_eq!(r.solution.traces.len(), 3);
         assert_eq!(r.solution.vias.len(), 3);
-        assert!(pcb_drc::lint::lint(&p, &r.solution).is_empty());
+        assert!(DRC.check(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1187,7 +1193,7 @@ mod tests {
             let subproblem = problem_with_connections(&p, &[idx]);
             assert!(routes.iter().all(|solution| {
                 (!solution.traces.is_empty() || !solution.vias.is_empty())
-                    && pcb_drc::lint::lint(&subproblem, solution).is_empty()
+                    && DRC.check(&subproblem, solution).is_empty()
             }));
         }
     }
@@ -1297,7 +1303,7 @@ mod tests {
         assert!(
             channel_candidates[0].iter().any(|solution| {
                 solution.traces.len() >= 2
-                    && pcb_drc::lint::lint(&problem_with_connections(&p, &[0]), solution).is_empty()
+                    && DRC.check(&problem_with_connections(&p, &[0]), solution).is_empty()
             }),
             "channel router should add a clean multi-pin preferred-direction tree: {:?}",
             channel_candidates[0]
@@ -1340,7 +1346,7 @@ mod tests {
             "pattern should select A's longer synthetic detour when the straight route blocks B: {:?}",
             r.solution.traces
         );
-        assert!(pcb_drc::lint::lint(&p, &r.solution).is_empty());
+        assert!(DRC.check(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1393,7 +1399,7 @@ mod tests {
                 .any(|t| t.connection == "A" && t.path.iter().any(|p| (p.y - 14.0).abs() < 1e-9)),
             "beam should retain the longer A candidate because it lets B route"
         );
-        assert!(pcb_drc::lint::lint(&p, &r.solution).is_empty());
+        assert!(DRC.check(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1510,7 +1516,7 @@ mod tests {
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].vias.len(), 1);
-        assert!(pcb_drc::lint::lint(&p, &selected[0]).is_empty());
+        assert!(DRC.check(&p, &selected[0]).is_empty());
     }
 
     #[test]
@@ -1557,7 +1563,7 @@ mod tests {
             "failed-net retry should route B first, forcing A onto its longer clean detour: {:?}",
             r.solution.traces
         );
-        assert!(pcb_drc::lint::lint(&p, &r.solution).is_empty());
+        assert!(DRC.check(&p, &r.solution).is_empty());
     }
 
     #[test]

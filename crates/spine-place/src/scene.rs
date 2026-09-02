@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 
 use geom::Point2;
-use sch_place::ir::Orient;
-use sch_place::item::Item;
+use sch_model::ir::Orient;
+use sch_model::item::Item;
 
 use crate::chain::{Chain, ChainRole, NodeKind, Reduced};
 use crate::module::{ModuleForm, SatPlace, orient_for, pin_offset};

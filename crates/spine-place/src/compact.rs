@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use geom::Rect;
-use sch_place::item::{Incidence, Item};
+use sch_model::item::{Incidence, Item};
 
 use crate::net::NetClass;
 use crate::snap;
@@ -67,7 +67,7 @@ fn obstacle(
     classes: &BTreeMap<String, NetClass>,
     labeled: &std::collections::BTreeSet<String>,
 ) -> Rect {
-    let mut r = sch_floorplan::engine_support::item_rect(item, item.at);
+    let mut r = sch_model::geometry::item_rect(item, item.at);
     for (num, _name, net) in &item.pins {
         let Some(net) = net else { continue };
         let Some(pg) = item.geom.pins.iter().find(|p| &p.number == num) else {

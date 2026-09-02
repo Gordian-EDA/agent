@@ -14,7 +14,7 @@
 //! orders, each holding the leaf's terminals (pad points, boundary entry/exit
 //! points, via sites) with mm positions and layers — exactly what the per-cell
 //! router ([`crate::detail`], Task 2) iterates over. It is deliberately
-//! independent of [`pcb_route_grid::grid`] / [`pcb_route_grid::astar`]; it consumes the public
+//! independent of [`pcb_grid::grid`] / [`pcb_grid::astar`]; it consumes the public
 //! [`CapacityMesh`] / [`GlobalPlan`] API and the [`RoutingView`] obstacle model.
 //!
 //! ## Algorithm
@@ -61,7 +61,7 @@ use crate::pathing::GlobalPlan;
 use geom::{BoundaryAxis, STRICT_EPS, SharedBoundary};
 use pcb_model::Rect;
 use pcb_model::{LayerRef, Point2, RoutingView};
-use pcb_route_grid::grid::grid_pitch;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -323,7 +323,7 @@ pub fn assign_crossings(
     let via_radius = problem.via_diameter / 2.0;
     let via_clearance = problem.clearance + via_radius;
     let via_site_spacing = problem.via_diameter + problem.clearance;
-    let detail_pitch = grid_pitch(problem);
+    let detail_pitch = problem.grid_pitch();
     let detailed_route_pitch = detail_pitch / 2.0;
     let snap_disp = detailed_route_pitch * std::f64::consts::SQRT_2 / 2.0;
     let via_crossing_spacing =
@@ -1146,7 +1146,7 @@ mod tests {
     }
 
     fn via_crossing_spacing(problem: &RoutingView) -> f64 {
-        let detailed_route_pitch = grid_pitch(problem) / 2.0;
+        let detailed_route_pitch = problem.grid_pitch() / 2.0;
         let snap_disp = detailed_route_pitch * std::f64::consts::SQRT_2 / 2.0;
         problem.via_diameter / 2.0 + problem.clearance + problem.min_trace_width / 2.0 + snap_disp
     }
@@ -1434,7 +1434,7 @@ mod tests {
             via_clearance,
             via_site_spacing,
             via_crossing_spacing,
-            grid_pitch(&p),
+            p.grid_pitch(),
         )
         .expect("a clear via site exists in the corner");
         assert!(
@@ -1478,7 +1478,7 @@ mod tests {
             via_clearance,
             via_site_spacing,
             via_crossing_spacing,
-            grid_pitch(&p),
+            p.grid_pitch(),
         )
         .expect("a second clear via site exists");
 
@@ -1521,7 +1521,7 @@ mod tests {
             via_clearance,
             via_site_spacing,
             via_crossing_spacing,
-            grid_pitch(&p),
+            p.grid_pitch(),
         )
         .expect("a via site clear of the foreign crossing exists");
 
@@ -1564,7 +1564,7 @@ mod tests {
             via_clearance,
             via_site_spacing,
             via_crossing_spacing,
-            grid_pitch(&p),
+            p.grid_pitch(),
         )
         .expect("fallback should still return a static-copper-clear via site");
 
@@ -1609,7 +1609,7 @@ mod tests {
             via_clearance,
             via_site_spacing,
             via_crossing_spacing,
-            grid_pitch(&p),
+            p.grid_pitch(),
         )
         .expect("fallback should still find a static-clear site");
 

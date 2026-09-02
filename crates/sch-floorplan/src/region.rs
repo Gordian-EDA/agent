@@ -22,12 +22,15 @@ use geom::{EPS, Point2, Rect};
 
 use kicad::KicadInstallation;
 use sch_check::Design;
-use sch_place::ir::LayoutIr;
-use sch_place::item::{Incidence, Item};
-use sch_place::place::{Deadline, PlaceOptions, PlaceResult};
+use sch_model::ir::LayoutIr;
+use sch_model::item::{Incidence, Item};
+use sch_model::engine::CandidateEvaluator;
+use sch_model::place::{Deadline, PlaceOptions, PlaceResult};
 
-use crate::contract::{PlacementEngine, RoutedEvaluator, RoutedSheetRealizer};
-use crate::floorplan::place::{SchematicPlaceProblem, incidence, item_rect};
+use sch_model::engine::{PlacementEngine, SchematicPlaceProblem};
+
+use crate::floorplan::place::{RoutedEvaluator, RoutedSheetRealizer, incidence, resolve_pin_flow};
+use sch_model::geometry::item_rect;
 
 /// Step of the legalisation walk (100 mil — two schematic grid steps).
 const WALK: f64 = 2.0 * geom::GRID_50_MIL.pitch();
@@ -199,14 +202,21 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
         it.preseeded = true;
     }
 
+    let pin_flow = resolve_pin_flow(env, &all);
     let mut place = SchematicPlaceProblem {
         items: all,
         inc: incidence,
-        seed: crate::floorplan::place::SEARCH_SEED,
+        ir,
+        pin_flow,
+        seed: sch_model::refine::SEARCH_SEED,
         options,
         deadline,
     };
-    let out = engine.place(env, design, &mut place, Some(ir));
+    let out = {
+        let (inc, intent) = (place.inc.clone(), place.ir.clone());
+        let realizer = RoutedSheetRealizer::new(env, &inc, &intent);
+        engine.place(&mut place, &RoutedEvaluator::new(realizer, design))
+    };
 
     // Undo the engines' whole-sheet `normalize` translation so the caller gets poses in
     // its own frame, then restore the neighbours bit-for-bit.
@@ -230,7 +240,7 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
 
     let result = {
         let realizer = RoutedSheetRealizer::new(env, &place.inc, &out.ir);
-        let eval = RoutedEvaluator::new(&realizer);
+        let eval = RoutedEvaluator::new(realizer, design);
         PlaceResult {
             engine: out.result.engine,
             truthfulness_breaks: eval.truthfulness_breaks(&place.items),

@@ -6,20 +6,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use geom::Point2;
-use kicad::KicadInstallation;
-use kicad_symbol::SymbolTable;
-use kicad_symbol::{PinDir as SymPinDir, SymbolMeta, find_pin};
-use sch_check::model::Design;
 
-use sch_floorplan::contract::{
-    PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
+use sch_model::cells::{apply_cells_with_gaps, assign_cells};
+use sch_model::geometry::body_overlap_count;
+use sch_model::refine::{decongest, normalize};
+use sch_model::relation::{relation_viol, repair_relations};
+use sch_model::engine::{
+    CandidateEvaluator, PinFlow, PlacementEngine, PlacementOutput, SchematicPlaceProblem,
 };
-use sch_floorplan::engine_support::{
-    apply_cells_with_gaps, assign_cells, body_overlap_count, decongest, normalize, relation_viol,
-    repair_relations,
-};
-use sch_place::ir::LayoutIr;
-use sch_place::place::PlaceResult;
+use sch_model::ir::LayoutIr;
+use sch_model::place::PlaceResult;
 
 use crate::chain::contract;
 use crate::module::form_modules;
@@ -41,15 +37,13 @@ impl PlacementEngine for SpinePlace {
 
     fn place(
         &self,
-        env: &KicadInstallation,
-        design: &Design,
         problem: &mut SchematicPlaceProblem,
-        ir: Option<LayoutIr>,
+        eval: &dyn CandidateEvaluator,
     ) -> PlacementOutput {
         // Authored cells and grids are input to this engine, not a reason to
         // silently substitute a sibling engine. Engine selection remains a
         // caller-owned decision.
-        let ir = ir.unwrap_or_else(|| sch_floorplan::floorplan::infer_ir(env, design));
+        let ir = problem.ir.clone();
         // A PRESEEDED item carries a LIVE pose its caller owns (the region adapter's fixed
         // neighbours) and keeps it; the IR's idiom clusters are only pinned, and are still
         // seeded from their cells below.
@@ -67,7 +61,7 @@ impl PlacementEngine for SpinePlace {
         // realized as labels reserving their full names — breaking the
         // reserve→spread→label fixpoint (designed into form_modules, wired
         // here). Keep whichever pass measures better.
-        let out1 = self.place_pass(env, design, problem, ir.clone(), None, &preseeded);
+        let out1 = self.place_pass(problem, eval, ir.clone(), None, &preseeded);
         if out1.result.warnings == 0 || out1.result.engine != "spine" {
             return out1;
         }
@@ -77,7 +71,7 @@ impl PlacementEngine for SpinePlace {
             return out1;
         }
         let items1: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
-        let out2 = self.place_pass(env, design, problem, ir, Some(labeled), &preseeded);
+        let out2 = self.place_pass(problem, eval, ir, Some(labeled), &preseeded);
         let key = |o: &PlacementOutput| {
             (
                 o.result.truthfulness_breaks,
@@ -114,9 +108,8 @@ impl PlacementEngine for SpinePlace {
 impl SpinePlace {
     fn place_pass(
         &self,
-        env: &KicadInstallation,
-        _design: &Design,
         problem: &mut SchematicPlaceProblem,
+        eval: &dyn CandidateEvaluator,
         ir: LayoutIr,
         labeled: Option<std::collections::BTreeSet<String>>,
         preseeded: &[Option<(Point2, f64)>],
@@ -141,7 +134,7 @@ impl SpinePlace {
                 &mut canonical,
                 &cells,
                 FROZEN_IDIOM_COLUMN_GAP,
-                sch_floorplan::engine_support::ROW_GAP,
+                sch_model::geometry::ROW_GAP,
             );
             normalize(&mut canonical);
             let poses = canonical
@@ -155,7 +148,7 @@ impl SpinePlace {
                 .map(|(item, live)| live.or_else(|| poses.get(&item.refdes).copied()))
                 .collect::<Vec<_>>()
         };
-        let seat_frozen = |items: &mut [sch_place::item::Item]| {
+        let seat_frozen = |items: &mut [sch_model::item::Item]| {
             for (item, pose) in items.iter_mut().zip(&canonical_frozen) {
                 if let Some((at, angle)) = pose {
                     item.at = *at;
@@ -188,7 +181,7 @@ impl SpinePlace {
         });
 
         // ── Modules + scene + ordering + coordinates.
-        let dirs = pin_dirs(env, problem);
+        let dirs = pin_dirs(problem);
         let problem_inc = problem.inc.clone();
         let port_nets: BTreeSet<String> = ir.ports.keys().cloned().collect();
         let form = form_modules(
@@ -257,8 +250,6 @@ impl SpinePlace {
         // One full placement variant: arrange (folded or not), commit, orphan
         // sweep, safety passes, truthfulness self-check with collinearity
         // stagger. Returns the metrics the fold A/B decides on.
-        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
-        let eval = RoutedEvaluator::new(&realizer);
         // Bundle-freed nodes: every wired chain of the node rides a BUNDLE (>=4
         // parallel nets between one item pair — always realized as labels), so
         // the node is effectively free for shelf packing, whatever its spans.
@@ -310,13 +301,13 @@ impl SpinePlace {
                 .collect()
         };
 
-        let run_variant = |items: &mut Vec<sch_place::item::Item>,
+        let run_variant = |items: &mut Vec<sch_model::item::Item>,
                            v: crate::order::Variants|
          -> usize {
             let origins = arrange(items, &g, &scene, &dirs, v, &bundle_free);
             let mut placed = vec![false; items.len()];
             let commit =
-                |origins: &[Point2], items: &mut [sch_place::item::Item], placed: &mut [bool]| {
+                |origins: &[Point2], items: &mut [sch_model::item::Item], placed: &mut [bool]| {
                     for (sn, node) in scene.nodes.iter().enumerate() {
                         for p in &node.places {
                             items[p.item].at =
@@ -387,8 +378,8 @@ impl SpinePlace {
         // Shape-weighted sheet area (cm², landscape-1.4 target): the tie-break
         // that lets a page-shaped layout beat an equally-clean BANNER — raw
         // area always prefers the banner and shape never wins.
-        let sheet_area = |items: &[sch_place::item::Item]| -> i64 {
-            use sch_floorplan::engine_support::item_rect;
+        let sheet_area = |items: &[sch_model::item::Item]| -> i64 {
+            use sch_model::geometry::item_rect;
             let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
             for it in items {
                 let r = item_rect(it, it.at);
@@ -408,7 +399,7 @@ impl SpinePlace {
         // keep on `b <= a` else restore. Returns whether the variant stuck.
         let dbg = problem.options.debug_timing;
         let mut breaks = run_variant(&mut problem.items, crate::order::Variants::default());
-        let measure = |items: &Vec<sch_place::item::Item>, brk: usize, with_area: bool| {
+        let measure = |items: &Vec<sch_model::item::Item>, brk: usize, with_area: bool| {
             let x = eval.crossings(items);
             (
                 brk,
@@ -427,13 +418,13 @@ impl SpinePlace {
         // twice. Out of time, a pass is simply not attempted — every one is strictly
         // additive, so skipping costs polish and nothing else.
         let deadline = problem.deadline;
-        let ab_gate = |items: &mut Vec<sch_place::item::Item>,
+        let ab_gate = |items: &mut Vec<sch_model::item::Item>,
                        breaks: &mut usize,
                        name: &str,
                        with_area: bool,
-                       apply: &mut dyn FnMut(&mut Vec<sch_place::item::Item>) -> usize|
+                       apply: &mut dyn FnMut(&mut Vec<sch_model::item::Item>) -> usize|
          -> bool {
-            if sch_place::place::expired(deadline) {
+            if sch_model::place::expired(deadline) {
                 return false;
             }
             let before: Vec<_> = items.iter().map(|it| (it.at, it.angle)).collect();
@@ -612,7 +603,7 @@ impl SpinePlace {
 
         let overlaps = body_overlap_count(&problem.items);
         if overlaps > 0 && problem.options.debug_timing {
-            use sch_floorplan::engine_support::item_rect;
+            use sch_model::geometry::item_rect;
             for i in 0..problem.items.len() {
                 for j in (i + 1)..problem.items.len() {
                     let (a, b) = (&problem.items[i], &problem.items[j]);
@@ -641,17 +632,8 @@ impl SpinePlace {
         }
         let crossings = eval.crossings(&problem.items);
         let warnings = eval.warnings(&problem.items);
-        if warnings > 0
-            && problem.options.debug_timing
-            && let Ok(mut w) = realizer.realize_writer(
-                None,
-                &problem.items,
-                sch_floorplan::contract::RouteRealization::ShippedSheet,
-            )
-        {
-            w.set_frame(true);
-            w.prepare();
-            for msg in w.layout_warnings() {
+        if warnings > 0 && problem.options.debug_timing {
+            for msg in eval.warning_messages(&problem.items) {
                 tracing::warn!("[spine] {msg}");
             }
         }
@@ -668,35 +650,18 @@ impl SpinePlace {
     }
 }
 
-/// (item, pin) → flow direction, from the symbol library's electrical types.
-fn pin_dirs(
-    env: &KicadInstallation,
-    problem: &SchematicPlaceProblem,
-) -> BTreeMap<(usize, String), PinDir> {
-    let table = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    let mut meta_cache: BTreeMap<String, Option<SymbolMeta>> = BTreeMap::new();
-    let mut dirs = BTreeMap::new();
-    for (i, it) in problem.items.iter().enumerate() {
-        let meta = meta_cache
-            .entry(it.part.clone())
-            .or_insert_with(|| table.symbol(&it.part));
-        let Some(meta) = meta else { continue };
-        for (num, _name, net) in &it.pins {
-            if net.is_none() {
-                continue;
-            }
-            let Some(pm) = find_pin(&meta.pins, num) else {
-                continue;
+/// `(item, pin)` → flow direction, lifted from the problem's precomputed pin flows.
+fn pin_dirs(problem: &SchematicPlaceProblem) -> BTreeMap<(usize, String), PinDir> {
+    problem
+        .pin_flow
+        .iter()
+        .map(|((i, num), flow)| {
+            let dir = match flow {
+                PinFlow::Source => PinDir::Source,
+                PinFlow::Sink => PinDir::Sink,
             };
-            let dir = match pm.dir {
-                SymPinDir::Out => Some(PinDir::Source),
-                SymPinDir::In => Some(PinDir::Sink),
-                _ => None,
-            };
-            if let Some(dir) = dir {
-                dirs.insert((i, num.clone()), dir);
-            }
-        }
-    }
-    dirs
+            ((*i, num.clone()), dir)
+        })
+        .collect()
 }
+

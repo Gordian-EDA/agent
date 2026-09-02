@@ -1630,3 +1630,58 @@ pub(crate) fn polish_rotations(
         }
     }
 }
+
+/// The deterministic seed placement, with no optimization: every part on the
+/// initial grid, every locked part at its locked pose, then legalized.
+///
+/// What a placer returns when its budget is already spent — a valid, honestly
+/// reported, merely unoptimized board rather than a panic or a partial result.
+pub fn place_as_given(problem: &PlacementView) -> PlaceResult {
+    let nets = derive_nets(problem);
+    let margin = courtyard_margin(problem.clearance);
+    let rotations: Vec<f64> = problem
+        .parts
+        .iter()
+        .map(|p| p.locked.as_ref().map_or(0.0, |l| l.rotation))
+        .collect();
+    let half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &r)| rotated_courtyard_half(p, r))
+        .collect();
+    let copper_bbox: Vec<Rect> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &r)| rotated_copper_bbox(p, r))
+        .collect();
+
+    let mut pos = initial_grid(problem, &half);
+    for (i, part) in problem.parts.iter().enumerate() {
+        if let Some(locked) = &part.locked {
+            pos[i] = locked.at;
+        }
+    }
+    let stats = legalize(problem, &half, &copper_bbox, margin, &mut pos);
+
+    PlaceResult {
+        placements: problem
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(i, part)| Placement {
+                reference: part.reference.clone(),
+                at: pos[i],
+                rotation: rotations[i],
+            })
+            .collect(),
+        legal: is_legal(problem, &half, &copper_bbox, margin, &pos),
+        report: PlaceReport {
+            overlaps_resolved: stats.overlaps_resolved,
+            out_of_bounds_clamps: stats.out_of_bounds_clamps,
+            hpwl: compute_hpwl_with_rotations(problem, &nets, &pos, &rotations),
+            layout_cost: 0.0,
+        },
+    }
+}

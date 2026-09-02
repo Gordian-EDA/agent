@@ -8,10 +8,11 @@ use geom::{Point2, Rect};
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
-use sch_floorplan::contract::{PlacementEngine, SchematicPlaceProblem};
-use sch_floorplan::engine_support::{relation_group_spread, relation_viol, repair_relations};
-use sch_place::ir::{Axis, LayoutIr, Relation, Side};
-use sch_place::item::Item;
+use sch_model::engine::{PlacementEngine, SchematicPlaceProblem};
+use sch_model::place::PlaceOptions;
+use sch_model::relation::{relation_group_spread, relation_viol, repair_relations};
+use sch_model::ir::{Axis, LayoutIr, Relation, Side};
+use sch_model::item::Item;
 
 // ---------------------------------------------------------------------------
 // Synthetic parts — a 2-pin passive's geometry is all the relation math reads.
@@ -353,13 +354,31 @@ const CHAIN: &str = r#"
 ]}
 "#;
 
-fn chain_problem(env: &KicadInstallation) -> (sch_check::Design, SchematicPlaceProblem) {
+fn chain_problem(
+    env: &KicadInstallation,
+    intent: LayoutIr,
+) -> (sch_check::Design, SchematicPlaceProblem) {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let input: sch_check::PlacePartsInput = serde_json::from_str(CHAIN).unwrap();
     let (design, diagnostics, _) = sch_check::into_design(&input, &provider, &Default::default());
     assert!(!diagnostics.has_errors(), "{:#?}", diagnostics);
-    let problem = SchematicPlaceProblem::from_design(env, &design).unwrap();
+    let problem =
+        sch_floorplan::floorplan::place_problem(env, &design, Some(intent), PlaceOptions::default())
+            .unwrap();
     (design, problem)
+}
+
+/// Run `engine` over `problem` against the real routed evaluator.
+fn run(
+    env: &KicadInstallation,
+    design: &sch_check::Design,
+    problem: &mut SchematicPlaceProblem,
+    engine: &dyn PlacementEngine,
+) -> sch_model::engine::PlacementOutput {
+    use sch_floorplan::floorplan::place::{RoutedEvaluator, RoutedSheetRealizer};
+    let (inc, ir) = (problem.inc.clone(), problem.ir.clone());
+    let realizer = RoutedSheetRealizer::new(env, &inc, &ir);
+    engine.place(problem, &RoutedEvaluator::new(realizer, design))
 }
 
 /// The series chain's connectivity pulls R1→R2→R3 left-to-right; the author asks for the
@@ -369,7 +388,7 @@ fn engine_honours_reversed_order(engine: &dyn PlacementEngine) {
         eprintln!("SKIP: no KiCad environment detected");
         return;
     };
-    let (design, mut problem) = chain_problem(&env);
+    let (design, mut problem) = chain_problem(&env, LayoutIr::default());
     let mut intent = sch_floorplan::floorplan::infer_ir(&env, &design);
     intent.relations = vec![
         Relation::LeftOf {
@@ -381,7 +400,8 @@ fn engine_honours_reversed_order(engine: &dyn PlacementEngine) {
             b: "R1".into(),
         },
     ];
-    let out = engine.place(&env, &design, &mut problem, Some(intent.clone()));
+    problem.ir = intent.clone();
+    let out = run(&env, &design, &mut problem, engine);
     assert_eq!(
         relation_viol(&problem.items, &intent),
         0,
@@ -414,13 +434,14 @@ fn anneal_stacks_an_authored_column() {
         eprintln!("SKIP: no KiCad environment detected");
         return;
     };
-    let (design, mut problem) = chain_problem(&env);
+    let (design, mut problem) = chain_problem(&env, LayoutIr::default());
     let mut intent = sch_floorplan::floorplan::infer_ir(&env, &design);
     intent.relations = vec![Relation::Align {
         members: vec!["R1".into(), "R2".into(), "R3".into()],
         axis: Axis::Vertical,
     }];
-    let out = anneal_place::Anneal.place(&env, &design, &mut problem, Some(intent.clone()));
+    problem.ir = intent.clone();
+    let out = run(&env, &design, &mut problem, &anneal_place::Anneal);
     assert_eq!(relation_viol(&problem.items, &intent), 0);
     assert_eq!(out.result.truthfulness_breaks, 0);
 }

@@ -19,6 +19,12 @@ use pcb_model::{
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
+/// The production rule set. This module is test-only scaffolding, so it names
+/// the oracle directly instead of taking it injected.
+use pcb_model::Drc as _;
+
+static DRC: pcb_drc::StandardDrc = pcb_drc::StandardDrc;
+
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "direct";
 const PROXIMITY_LENGTH_TIE_BUCKET_UM: u64 = 5_000;
@@ -939,12 +945,12 @@ fn direct_candidate_is_geometry_clean(
     if exhausted {
         return false;
     }
-    for violation in pcb_drc::lint::lint(problem, solution) {
+    for violation in DRC.check(problem, solution) {
         match violation {
-            pcb_drc::lint::DrcViolation::Connectivity {
-                violation: pcb_drc::connectivity::Violation::CrossNetMerge { ref a, ref b },
+            pcb_model::Finding::Connectivity {
+                violation: pcb_model::Violation::CrossNetMerge { ref a, ref b },
             } if a == connection || b == connection => return false,
-            pcb_drc::lint::DrcViolation::Connectivity { .. } => {}
+            pcb_model::Finding::Connectivity { .. } => {}
             _ => return false,
         }
     }
@@ -958,9 +964,9 @@ fn same_layer(points: &[pcb_model::RoutePoint]) -> bool {
 }
 
 fn reconcile(problem: &RoutingView, solution: &mut RouteSolution, failed: &mut Vec<FailedNet>) {
-    crate::via_cleanup::normalize_redundant_vias(problem, solution);
-    let mut dropped = pcb_drc::lint::drop_violating_copper(problem, solution);
-    dropped.extend(pcb_drc::lint::drop_unconnected_copper(problem, solution));
+    crate::via_cleanup::normalize_redundant_vias(&DRC, problem, solution);
+    let mut dropped = DRC.drop_violating_copper(problem, solution);
+    dropped.extend(DRC.drop_unconnected_copper(problem, solution));
 
     let known: BTreeSet<String> = failed.iter().map(|f| f.connection.clone()).collect();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -1302,7 +1308,7 @@ mod tests {
         assert!(r.failed.is_empty(), "{:?}", r.failed);
         assert_eq!(r.solution.traces.len(), 1);
         assert_eq!(r.solution.vias.len(), 0);
-        assert!(pcb_drc::lint::lint(&p, &r.solution).is_empty());
+        assert!(DRC.check(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1323,7 +1329,7 @@ mod tests {
             "obstacle route should use a dogleg: {:?}",
             r.solution.traces[0].path
         );
-        assert!(pcb_drc::lint::lint(&p, &r.solution).is_empty());
+        assert!(DRC.check(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1387,7 +1393,7 @@ mod tests {
             short_first.solution.metrics().wirelength,
             "the portfolio should not stop at the first clean direct route"
         );
-        assert!(pcb_drc::lint::lint(&p, &r.solution).is_empty());
+        assert!(DRC.check(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1434,7 +1440,7 @@ mod tests {
             trace.path
         );
         solution.traces.push(trace);
-        assert!(pcb_drc::lint::lint(&p, &solution).is_empty());
+        assert!(DRC.check(&p, &solution).is_empty());
     }
 
     #[test]
@@ -1467,7 +1473,7 @@ mod tests {
             "alternating channel should require a multi-bend route: {:?}",
             r.solution.traces[0].path
         );
-        assert!(pcb_drc::lint::lint(&p, &r.solution).is_empty());
+        assert!(DRC.check(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1517,7 +1523,7 @@ mod tests {
         assert!(r.failed.is_empty(), "{:?}", r.failed);
         assert_eq!(r.solution.traces.len(), 3);
         assert_eq!(r.solution.vias.len(), 0);
-        assert!(pcb_drc::lint::lint(&p, &r.solution).is_empty());
+        assert!(DRC.check(&p, &r.solution).is_empty());
     }
 
     #[test]
@@ -1544,7 +1550,7 @@ mod tests {
             "nearest-tree route should avoid the 24mm fixed-root star: {:?}",
             r.solution
         );
-        assert!(pcb_drc::lint::lint(&p, &r.solution).is_empty());
+        assert!(DRC.check(&p, &r.solution).is_empty());
     }
 
     #[test]

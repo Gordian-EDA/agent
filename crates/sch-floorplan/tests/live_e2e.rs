@@ -32,7 +32,7 @@ use kicad_symbol::SymbolTable;
 use sch_check::model::Design;
 use sch_check::place_parts::PlacePartsInput;
 use sch_doc::{SchDoc, connect};
-use sch_floorplan::contract::PlacementEngine;
+use sch_model::engine::PlacementEngine;
 use sch_floorplan::live::{self, Selection};
 
 /// The engine the agent ships with, so the gates measure what actually runs.

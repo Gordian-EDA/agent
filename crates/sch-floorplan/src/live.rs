@@ -36,14 +36,15 @@ use kicad_symbol::geometry::SymbolGeometry;
 use sch_check::model::{Block, Component, Design, PinTarget};
 use sch_check::{Diagnostics, ExistingSheet, PayloadAudit, PlacePartsInput};
 use sch_doc::{Netlist, SchDoc, connect};
-use sch_place::ir::LayoutIr;
-use sch_place::item::Item;
-use sch_place::place::{Deadline, PlacementEngineKind};
-use sch_place::result::IdiomReport;
+use sch_model::ir::LayoutIr;
+use sch_model::item::Item;
+use sch_model::place::{Deadline, PlaceOptions, PlacementEngineKind};
+use sch_model::result::IdiomReport;
 use serde::{Deserialize, Serialize};
 
-use crate::contract::{PlacementEngine, SchematicPlaceProblem};
-use crate::floorplan::place::{incidence, item_rect};
+use sch_model::engine::PlacementEngine;
+use crate::floorplan::place::incidence;
+use sch_model::geometry::item_rect;
 use crate::region::{RegionProblem, arrange as region_arrange};
 
 /// Block name the parts already on the sheet are lifted into. Prefixed so it cannot
@@ -171,7 +172,7 @@ impl Deadlines {
     }
 
     fn out_of_time(&self) -> bool {
-        sch_place::place::expired(self.hard)
+        sch_model::place::expired(self.hard)
     }
 }
 
@@ -341,7 +342,8 @@ pub fn place_parts(
         apply_intent(&mut ir, intent.into_layout_ir());
     }
 
-    let movable = SchematicPlaceProblem::from_design(env, &design)?.items;
+    let movable = crate::floorplan::place_problem(env, &design, Some(ir.clone()), PlaceOptions::default())?
+        .items;
     if movable.is_empty() {
         return Err(Error::Nothing);
     }
@@ -584,7 +586,7 @@ fn selection_drawing(doc: &SchDoc, owned: &[Rect], held: &[Item]) -> BTreeSet<St
         held.iter()
             .flat_map(|it| {
                 it.geom.pins.iter().filter(|p| p.unit == it.unit).map(|p| {
-                    coord(crate::write::pin_endpoint(p, it.at, it.angle, it.mirror).into())
+                    coord(sch_model::geometry::pin_endpoint(p, it.at, it.angle, it.mirror).into())
                 })
             })
             .collect();
@@ -819,7 +821,7 @@ fn obstacles(doc: &SchDoc, owned: &[Rect]) -> Vec<Rect> {
         }
     }
     for label in doc.labels() {
-        let width = crate::label::text_width(&label.text);
+        let width = sch_model::text::text_width(&label.text);
         let at = label.at.point();
         out.push(Rect::new(at.x, at.y - 1.6, at.x + width, at.y + 1.6));
     }

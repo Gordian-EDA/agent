@@ -47,7 +47,7 @@ use kiutils_sexpr::{Atom, Node, parse_one};
 /// upward); the pin line extends `length` mm from there along `angle`
 /// (degrees). The schematic-space endpoint is computed by the writer after
 /// applying the instance's position/rotation/mirror.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PinGeom {
     /// Pin number (e.g. `"1"`, `"2"`, `"A3"`).
     pub number: String,
@@ -68,7 +68,7 @@ pub struct PinGeom {
 }
 
 /// Geometry plus the embeddable `(lib_symbols)` definition for one symbol.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SymbolGeometry {
     /// Fully-qualified `Lib:Name` identifier.
     pub lib_id: String,

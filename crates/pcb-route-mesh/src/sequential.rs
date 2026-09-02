@@ -18,7 +18,12 @@ use crate::quality::{keep_route_candidate as keep_candidate, route_quality};
 use pcb_model::{
     FailedNet, RouteQuality, RouteResult, RouteSolution, RoutingCapabilities, RoutingView,
 };
-use pcb_route_grid::router::route_grid;
+
+/// The production rule set. This module is test-only scaffolding, so it names
+/// the oracle directly instead of taking it injected.
+use pcb_model::Drc as _;
+
+static DRC: pcb_drc::StandardDrc = pcb_drc::StandardDrc;
 
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "sequential-grid";
@@ -121,7 +126,7 @@ fn route_order_once(problem: &RoutingView, order: &[usize]) -> RouteResult {
         }
 
         let subproblem = problem_with_single_connection_and_copper(problem, idx, &solution);
-        let candidate = route_grid(&subproblem);
+        let candidate = pcb_route_grid::router::route_grid(&DRC, &subproblem);
         if !candidate.failed.is_empty() {
             failed.push(FailedNet {
                 connection: conn.name.clone(),
@@ -134,8 +139,8 @@ fn route_order_once(problem: &RoutingView, order: &[usize]) -> RouteResult {
         combined.traces.extend(candidate.solution.traces);
         combined.vias.extend(candidate.solution.vias);
         let validation = problem_with_connections(problem, &routed, idx);
-        crate::via_cleanup::normalize_redundant_vias(&validation, &mut combined);
-        if !pcb_drc::lint::lint(&validation, &combined).is_empty() {
+        crate::via_cleanup::normalize_redundant_vias(&DRC, &validation, &mut combined);
+        if !DRC.check(&validation, &combined).is_empty() {
             failed.push(FailedNet {
                 connection: conn.name.clone(),
                 reason: "sequential grid route conflicted with accepted copper".to_owned(),
@@ -772,7 +777,7 @@ mod tests {
             result.failed
         );
         assert!(
-            pcb_drc::lint::lint(&p, &result.solution).is_empty(),
+            DRC.check(&p, &result.solution).is_empty(),
             "accepted sequential copper must be DRC-clean"
         );
     }

@@ -12,7 +12,7 @@
 //!
 //! Each job routes on a [`RouteGrid::build_window`] over the leaf rect inflated
 //! by **one track pitch** and clamped to the board bounds, at the shared detailed
-//! pitch ([`grid::grid_pitch`]). The inflation lets a route hug — and reach
+//! pitch ([`pcb_model::RoutingView::grid_pitch`]). The inflation lets a route hug — and reach
 //! crossing points that sit exactly on — the leaf boundary. Window edges that are
 //! not board edges are routable; the route still cannot leave the window because
 //! out-of-window cells read as blocked. See [`RouteGrid::build_window`] for the
@@ -50,9 +50,9 @@ use crate::heuristics::{
 };
 use crate::mesh::{CapacityMesh, LeafId};
 use pcb_model::Rect;
-use pcb_model::{FailedNet, LayerRef, Point2, RouteSolution, RoutingView, Trace, Via, ViaSpan};
-use pcb_route_grid::astar::{self, AStarCosts, DIAG_COST, State};
-use pcb_route_grid::grid::{self, Cell, RouteGrid};
+use pcb_model::{Drc, FailedNet, LayerRef, Point2, RouteSolution, RoutingView, Trace, Via, ViaSpan};
+use pcb_grid::astar::{self, AStarCosts, DIAG_COST, State};
+use pcb_grid::grid::{Cell, RouteGrid};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -146,25 +146,28 @@ pub struct DetailPassDiagnostic {
 /// `plan` over `mesh`/`problem`. Never panics; per-net cell failures are
 /// collected in [`CellRouteResult::failed`].
 pub fn route_cells(
+    drc: &dyn Drc,
     problem: &RoutingView,
     mesh: &CapacityMesh,
     assignment: &CrossingAssignment,
 ) -> CellRouteResult {
-    route_cells_impl(problem, mesh, assignment, None)
+    route_cells_impl(drc, problem, mesh, assignment, None)
 }
 
 /// As [`route_cells`], plus pre-finisher retry candidate diagnostics for tooling.
 pub fn route_cells_with_diagnostics(
+    drc: &dyn Drc,
     problem: &RoutingView,
     mesh: &CapacityMesh,
     assignment: &CrossingAssignment,
 ) -> (CellRouteResult, Vec<DetailPassDiagnostic>) {
     let mut diagnostics = Vec::new();
-    let result = route_cells_impl(problem, mesh, assignment, Some(&mut diagnostics));
+    let result = route_cells_impl(drc, problem, mesh, assignment, Some(&mut diagnostics));
     (result, diagnostics)
 }
 
 fn route_cells_impl(
+    drc: &dyn Drc,
     problem: &RoutingView,
     mesh: &CapacityMesh,
     assignment: &CrossingAssignment,
@@ -177,7 +180,7 @@ fn route_cells_impl(
     // point sits to the ideal centreline, so the grid-snap distortion the exact-
     // geometry lint measures at dense crossings shrinks (here to ≤ a quarter of the
     // design pitch). Slice-1 keeps the design pitch and is untouched.
-    let pitch = grid::grid_pitch(problem) / 2.0;
+    let pitch = problem.grid_pitch() / 2.0;
     // Exact-geometry clearance halo: the legal centre-to-centre spacing between a
     // foreign trace and this net's copper is `min_trace_width + clearance` (mm,
     // Euclidean). The detailed router blocks foreign cells strictly inside that
@@ -230,7 +233,7 @@ fn route_cells_impl(
         via_halo,
         costs,
     );
-    let mut best_key = cell_route_candidate_key(problem, &cell_routes, &failed);
+    let mut best_key = cell_route_candidate_key(drc, problem, &cell_routes, &failed);
     let mut best_idx = 0usize;
     record_detail_pass_diagnostic(
         &mut diagnostics,
@@ -260,7 +263,7 @@ fn route_cells_impl(
                 costs,
             );
             let candidate_key =
-                cell_route_candidate_key(problem, &candidate_routes, &candidate_failed);
+                cell_route_candidate_key(drc, problem, &candidate_routes, &candidate_failed);
             record_detail_pass_diagnostic(
                 &mut diagnostics,
                 idx,
@@ -865,6 +868,7 @@ fn keep_cell_route_candidate(
 }
 
 fn cell_route_candidate_key(
+    drc: &dyn Drc,
     problem: &RoutingView,
     routes: &[CellRoute],
     failures: &[FailedNet],
@@ -875,7 +879,7 @@ fn cell_route_candidate_key(
         .collect();
     let solution = cell_routes_to_solution(problem, routes, &failed_names);
     DetailPassCandidateKey {
-        geometry: pcb_route_grid::router::geometry_violations(problem, &solution),
+        geometry: drc.geometry_violations(problem, &solution),
         fail_count: failures.len(),
         failed_pad_weight: pcb_model::failed_pad_weight(problem, failures),
     }
@@ -1362,7 +1366,7 @@ fn mark_path_capsule(grid: &mut RouteGrid, path: &[State], conn: usize, halo: f6
 /// Re-route one failed net on the shared full-board `grid` — the hotspot finisher
 /// (slice 3, Task 3.5).
 ///
-/// Mirrors the slice-1 per-net tree routing ([`pcb_route_grid::router::route`]) on the
+/// Mirrors the slice-1 per-net tree routing (the grid router) on the
 /// detailed stage's fine grid with the diagonal-safe swept-clearance capsule
 /// ([`mark_segment_capsule`]): route point 0 seeds a routed tree; each further
 /// `points_to_connect` (and, when `waypoints` is non-empty, each wall-gap waypoint
@@ -2179,7 +2183,7 @@ fn route_point_cell(grid: &RouteGrid, pt: &pcb_model::RoutePoint, layer_count: u
 
 /// Connection name → slice-1 global net rank (ascending bounding-box
 /// half-perimeter, ties by name). Lower rank routes first. Matches
-/// [`pcb_route_grid::router`]'s `net_order` so the per-cell order is consistent with the
+/// the grid router's `net_order` so the per-cell order is consistent with the
 /// full-board router.
 fn net_rank(problem: &RoutingView) -> BTreeMap<String, usize> {
     let mut order: Vec<usize> = (0..problem.connections.len()).collect();
@@ -2217,6 +2221,20 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
 
 #[cfg(test)]
 mod tests {
+    use pcb_drc::StandardDrc;
+    use pcb_model::Drc as _;
+    use pcb_route_grid::router::{GridRouter, GridSinglePassRouter};
+
+    const DRC: StandardDrc = StandardDrc;
+    const GRID: GridRouter<'static> = GridRouter::new(&DRC);
+    const GRID_SEED: GridSinglePassRouter<'static> = GridSinglePassRouter::new(&DRC);
+    /// The production leaves, wired together for the pipeline under test.
+    const DEPS: crate::deps::MeshDeps<'static> = crate::deps::MeshDeps {
+        drc: &DRC,
+        grid: &GRID,
+        grid_seed: &GRID_SEED,
+        budget: pcb_model::Budget::unlimited(),
+    };
     use super::*;
     use crate::crossing::assign_crossings;
     use crate::pathing::global_route;
@@ -2292,7 +2310,7 @@ mod tests {
         let mesh = CapacityMesh::build(p);
         let plan = global_route(p).plan;
         let a = assign_crossings(p, &mesh, &plan);
-        let r = route_cells(p, &mesh, &a);
+        let r = route_cells(&DRC, p, &mesh, &a);
         (mesh, r)
     }
 
@@ -2644,8 +2662,8 @@ mod tests {
                 reason: "test".to_owned(),
             }]
         };
-        let bus_failed = cell_route_candidate_key(&p, &[], &failed("BUS"));
-        let sig_failed = cell_route_candidate_key(&p, &[], &failed("SIG"));
+        let bus_failed = cell_route_candidate_key(&DRC, &p, &[], &failed("BUS"));
+        let sig_failed = cell_route_candidate_key(&DRC, &p, &[], &failed("SIG"));
 
         assert!(
             keep_cell_route_candidate(sig_failed, 1, bus_failed, 0),
@@ -2691,8 +2709,8 @@ mod tests {
             connection: "B".to_owned(),
             reason: "test".to_owned(),
         }];
-        let geometry_bad = cell_route_candidate_key(&p, &geometry_bad_routes, &[]);
-        let clean = cell_route_candidate_key(&p, &[], &clean_with_failure);
+        let geometry_bad = cell_route_candidate_key(&DRC, &p, &geometry_bad_routes, &[]);
+        let clean = cell_route_candidate_key(&DRC, &p, &[], &clean_with_failure);
 
         assert!(
             !keep_cell_route_candidate(geometry_bad, 1, clean, 0),
@@ -2769,7 +2787,7 @@ mod tests {
             &mesh,
             &assignment,
             &[0, 1],
-            grid::grid_pitch(&p),
+            p.grid_pitch(),
             p.layer_count as usize,
             p.min_trace_width + p.clearance,
             p.min_trace_width + p.clearance,
@@ -2861,7 +2879,7 @@ mod tests {
             &mesh,
             &assignment,
             &[0, 1],
-            grid::grid_pitch(&p),
+            p.grid_pitch(),
             p.layer_count as usize,
             p.min_trace_width + p.clearance,
             p.min_trace_width + p.clearance,
@@ -3416,7 +3434,7 @@ mod tests {
     #[test]
     fn finisher_routes_octilinearly() {
         let p = load("congested.json");
-        let r = crate::pipeline::route_detailed(&p);
+        let r = crate::pipeline::route_detailed(&DEPS, &p);
         assert!(
             r.failed.len() <= p.connections.len(),
             "finisher produced a sane result"
@@ -3435,7 +3453,7 @@ mod tests {
         let mesh = CapacityMesh::build(&p);
         let plan = global_route(&p).plan;
         let a = assign_crossings(&p, &mesh, &plan);
-        let r = route_cells(&p, &mesh, &a);
+        let r = route_cells(&DRC, &p, &mesh, &a);
         assert!(
             r.is_clean(),
             "quad must route clean through the finisher: {:?}",
@@ -3466,8 +3484,8 @@ mod tests {
         );
         // The whole detailed solution (per-cell + finisher copper) lints CLEAN: the
         // capsule MARK kept the diagonal finisher runs the full clearance apart.
-        let r = crate::pipeline::route_detailed(&p);
-        let vs = pcb_drc::lint::lint(&p, &r.solution);
+        let r = crate::pipeline::route_detailed(&DEPS, &p);
+        let vs = DRC.check(&p, &r.solution);
         assert!(
             vs.is_empty(),
             "finisher diagonals must lint clean, got {vs:?}"
@@ -3481,8 +3499,8 @@ mod tests {
         let mesh = CapacityMesh::build(&p);
         let plan = global_route(&p).plan;
         let a = assign_crossings(&p, &mesh, &plan);
-        let r1 = route_cells(&p, &mesh, &a);
-        let r2 = route_cells(&p, &mesh, &a);
+        let r1 = route_cells(&DRC, &p, &mesh, &a);
+        let r2 = route_cells(&DRC, &p, &mesh, &a);
         let j1 = serde_json::to_string(&r1).unwrap();
         let j2 = serde_json::to_string(&r2).unwrap();
         assert_eq!(j1, j2, "two cell routings must serialize byte-equal");
@@ -3495,8 +3513,8 @@ mod tests {
         let plan = global_route(&p).plan;
         let a = assign_crossings(&p, &mesh, &plan);
 
-        let plain = route_cells(&p, &mesh, &a);
-        let (diagnosed, diagnostics) = route_cells_with_diagnostics(&p, &mesh, &a);
+        let plain = route_cells(&DRC, &p, &mesh, &a);
+        let (diagnosed, diagnostics) = route_cells_with_diagnostics(&DRC, &p, &mesh, &a);
 
         assert_eq!(diagnosed, plain);
         assert!(
@@ -3526,7 +3544,7 @@ mod tests {
         let mesh = CapacityMesh::build(&p);
         let plan = global_route(&p).plan;
         let a = assign_crossings(&p, &mesh, &plan);
-        let r = route_cells(&p, &mesh, &a);
+        let r = route_cells(&DRC, &p, &mesh, &a);
         assert!(
             r.is_clean(),
             "led-r must route cell-by-cell: {:?}",
@@ -3563,7 +3581,7 @@ mod tests {
         let mesh = CapacityMesh::build(&p);
         let plan = global_route(&p).plan;
         let a = assign_crossings(&p, &mesh, &plan);
-        let r = route_cells(&p, &mesh, &a);
+        let r = route_cells(&DRC, &p, &mesh, &a);
         // The detailed router routes on a finer lattice than the design pitch
         // (`grid_pitch/2`), so a *non*-terminal interior point of a multi-crossing
         // net can sit within a fraction of the design pitch of *another* of the
@@ -3573,7 +3591,7 @@ mod tests {
         // pitch so only an endpoint genuinely snapped to a crossing is asserted
         // exact (a quarter of the detailed pitch — below the cell-centre spacing, so
         // a foreign interior cell-centre never trips it).
-        let pitch = grid::grid_pitch(&p) / 2.0;
+        let pitch = p.grid_pitch() / 2.0;
         let near = pitch / 4.0;
         for cr in &r.cell_routes {
             for t in &cr.traces {

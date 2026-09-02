@@ -21,7 +21,7 @@
 //! sharing the dominant rail in one row so a shared trunk replaces their distributed power
 //! glyphs. Full-dataset validation: 13/40 liftable boards de-sprawl, 0 regressions.
 //!
-//! Relational intent ([`sch_place::ir::Relation`]) arrives already satisfied from the anneal
+//! Relational intent ([`sch_model::ir::Relation`]) arrives already satisfied from the anneal
 //! baseline; pose, de-sprawl, and the rail relayout are relation-blind rigid moves, so each
 //! gate below refuses a result that breaks one.
 //!
@@ -34,16 +34,14 @@ mod pose;
 
 const DEBUG_DIAGNOSTICS: bool = false;
 
-use kicad::KicadInstallation;
-use sch_check::model::Design;
-use sch_place::ir::LayoutIr;
-use sch_place::item::Item;
-use sch_place::place::{Crossings, PlaceResult};
-
-use sch_floorplan::contract::{
-    PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
+use sch_model::item::Item;
+use sch_model::engine::{
+    CandidateEvaluator, PlacementEngine, PlacementOutput, SchematicPlaceProblem,
 };
-use sch_floorplan::engine_support::{FAST_PINS, relation_viol};
+use sch_model::place::{Crossings, PlaceResult};
+
+use sch_model::refine::FAST_PINS;
+use sch_model::relation::relation_viol;
 
 /// Cluster-pose placement: the SA's leaf seating + a strictly-additive rigid hub-pose search.
 pub struct ClusterPlace;
@@ -55,10 +53,8 @@ impl PlacementEngine for ClusterPlace {
 
     fn place(
         &self,
-        env: &KicadInstallation,
-        design: &Design,
         problem: &mut SchematicPlaceProblem,
-        ir: Option<LayoutIr>,
+        eval: &dyn CandidateEvaluator,
     ) -> PlacementOutput {
         // The routed annealer has a fixed multi-start budget of thousands of full
         // route/text-solve evaluations.  On tiny, simple sheets that setup cost can
@@ -73,14 +69,14 @@ impl PlacementEngine for ClusterPlace {
                 .iter()
                 .map(|item| (item.part.as_str(), item.geom.pins.len())),
         ) {
-            let mut out = spine_place::SpinePlace.place(env, design, problem, ir);
+            let mut out = spine_place::SpinePlace.place(problem, eval);
             out.result.engine = self.name().to_owned();
             return out;
         }
         // 1. Baseline placement: the SA's own best (its strong leaf search + the
         //    route-aware refinement). The pose lever is layered ON TOP so it is isolated —
         //    where pose finds nothing the result is byte-identical to the SA.
-        let mut out = anneal_place::Anneal.place(env, design, problem, ir);
+        let mut out = anneal_place::Anneal.place(problem, eval);
         // The pose search + density sweep + gate each realize the sheet several times; on a
         // huge board (hundreds of parts) that text-solve cost dominates and can time out, for a
         // de-sprawl the floorplanner rarely lands there anyway. Ship the (already-computed)
@@ -91,15 +87,13 @@ impl PlacementEngine for ClusterPlace {
         if problem.items.is_empty() || problem.items.len() > 70 || problem.out_of_time() {
             return out;
         }
-        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir);
-        let eval = RoutedEvaluator::new(&realizer);
         // The SA's RENDERED sprawl (post text-solve + orphan label-columns), captured BEFORE
         // pose, is the baseline the de-sprawl floorplanner must beat outright — measured the
         // same way as the candidate so the comparison is apples-to-apples (a pose move that
         // spreads an IC can't lower the bar either).
         let n = problem.items.len();
         let (sa_crossings, sa_warnings, baseline_rendered) =
-            match eval.shipped(design, &problem.items) {
+            match eval.shipped(&problem.items) {
                 Some((cr, w, r)) => (cr.total(), w, compact::rendered_sprawl(&r, n)),
                 None => (usize::MAX, usize::MAX, f64::MAX),
             };
@@ -116,7 +110,7 @@ impl PlacementEngine for ClusterPlace {
         //    (the common case) the whole search is wasted realizes — skip it.
         if sa_crossings > 0 && !problem.out_of_time() {
             pose::search_hub_poses(
-                &eval,
+                eval,
                 &mut problem.items,
                 &problem.inc,
                 &out.ir,
@@ -128,8 +122,7 @@ impl PlacementEngine for ClusterPlace {
         //    sprawl measures without regressing warnings/crossings — else it reverts.
         if !problem.out_of_time() {
             compact::compact_clusters(
-                &eval,
-                design,
+                eval,
                 &mut problem.items,
                 &problem.inc,
                 &out.ir,
@@ -147,7 +140,7 @@ impl PlacementEngine for ClusterPlace {
         //    the SHIPPED result and fall back to the SA snapshot unless pose/compact earned its
         //    keep: a real crossing cut, no new warnings, and no sprawl bloat.
         let (final_crossings, final_warnings, final_rendered) =
-            match eval.shipped(design, &problem.items) {
+            match eval.shipped(&problem.items) {
                 Some((cr, w, r)) => (cr.total(), w, compact::rendered_sprawl(&r, n)),
                 None => (usize::MAX, usize::MAX, f64::MAX),
             };
@@ -178,7 +171,7 @@ impl PlacementEngine for ClusterPlace {
         //    new warnings or crossings — a colliding trunk reverts. Gate measures via a fresh
         //    realizer that carries `rail_force`; anneal never sets it ⇒ references unaffected.
         let cur = (!problem.out_of_time())
-            .then(|| eval.shipped(design, &problem.items))
+            .then(|| eval.shipped(&problem.items))
             .flatten()
             .map(|(cr, w, r)| (cr.total(), w, compact::rendered_sprawl(&r, n)));
         // `eval`/`realizer` borrow `out.ir`; their last use is the shipped measurement above,
@@ -188,10 +181,9 @@ impl PlacementEngine for ClusterPlace {
             if let Some(rail) = compact::rail_relayout(&mut problem.items, &problem.inc, &out.ir) {
                 let mut ir_rail = out.ir.clone();
                 ir_rail.rail_force.insert(rail);
-                let rz = RoutedSheetRealizer::new(env, &problem.inc, &ir_rail);
-                let ev = RoutedEvaluator::new(&rz);
-                let got = ev
-                    .shipped(design, &problem.items)
+                let got = eval
+                    .with_ir(&ir_rail)
+                    .shipped(&problem.items)
                     .map(|(cr, w, r)| (cr.total(), w, compact::rendered_sprawl(&r, n)));
                 let keep = rail_candidate_wins((cur_x, cur_w, cur_spr), got)
                     && relation_viol(&problem.items, &ir_rail) <= baseline_relation;
@@ -210,9 +202,11 @@ impl PlacementEngine for ClusterPlace {
                 crate::eval::restore(&mut problem.items, &pre);
             }
         }
-        let final_realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir);
-        let final_eval = RoutedEvaluator::new(&final_realizer);
-        out.result = report(self.name(), &problem.items, &final_eval);
+        out.result = report(
+            self.name(),
+            &problem.items,
+            eval.with_ir(&out.ir).as_ref(),
+        );
         out
     }
 }
@@ -353,7 +347,7 @@ fn rail_candidate_wins(
 }
 
 /// Measure the FINAL placement for the diagnostic [`PlaceResult`].
-fn report(engine: &str, items: &[Item], eval: &RoutedEvaluator) -> PlaceResult {
+fn report(engine: &str, items: &[Item], eval: &dyn CandidateEvaluator) -> PlaceResult {
     if items.is_empty() {
         return PlaceResult {
             engine: engine.to_string(),

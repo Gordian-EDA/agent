@@ -10,7 +10,8 @@
 //! same-net pad is intentional via-in-pad and skipped).
 
 use crate::rules::geom::EPS;
-use crate::{DrcCtx, Finding, Rule};
+use crate::{DrcCtx, Rule};
+use pcb_model::Finding;
 
 /// KiCAD's drill-edge (hole) clearance, mm.
 const HOLE_CLEAR: f64 = 0.25;

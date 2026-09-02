@@ -218,7 +218,7 @@ fn validate_fixture(
             .unwrap_or_else(|| floorplan::baseline_ir(&design));
         // `SCH_ENGINE=spine` runs the same oracle over the spine engine; the
         // default stays anneal so existing runs are untouched.
-        let engine: Box<dyn sch_floorplan::contract::PlacementEngine> =
+        let engine: Box<dyn sch_model::engine::PlacementEngine> =
             match std::env::var("SCH_ENGINE").as_deref() {
                 Ok("spine") => Box::new(spine_place::SpinePlace),
                 _ => Box::new(anneal_place::Anneal),

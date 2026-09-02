@@ -10,11 +10,11 @@ use super::infer::{
 };
 use super::*;
 use circuit_graph::netclass::{is_connector_like, is_ground};
-use sch_place::item::PinSide;
-use sch_place::item::{Incidence, Item};
+use sch_model::item::PinSide;
+use sch_model::item::{Incidence, Item};
 
 /// A circuit idiom recognized purely from connectivity + symbol pin geometry.
-/// `infer_ir` turns it into an [`sch_place::result::IdiomReport`] for the LLM. A FROZEN
+/// `infer_ir` turns it into an [`sch_model::result::IdiomReport`] for the LLM. A FROZEN
 /// idiom also seeds its cells into `place` and pins its members; a REPORT-ONLY idiom
 /// (`!freeze`) lets the members flow through normal placement and is instead tidied by
 /// an mm post-pass in `emit` (e.g. a GPIO LED's resistor snapped below it).

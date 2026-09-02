@@ -4,11 +4,12 @@
 
 use std::io;
 
+use sch_model::geometry::pin_endpoint;
 use geom::{GRID_50_MIL, Point2, Rect, Segment};
 use kicad::KicadInstallation;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
 
-use crate::wire::{DrawnSegment, NetSegment};
+use sch_model::route::{DrawnSegment, NetSegment};
 
 use super::{
     Dir, Instance, Junction, NoConnect, PinLabel, SchematicWriter, SheetRect, SheetText, Stub, Wire,
@@ -591,10 +592,10 @@ impl SchematicWriter {
     /// foreign-anchor model as `retract_colliding_stubs` (power origins,
     /// no-connects, label anchors); wire segments carry their net (the power
     /// sentinel for unattributed stubs/risers).
-    pub fn route_scene(&self) -> crate::wire::RouteScene {
+    pub fn route_scene(&self) -> sch_model::route::RouteScene {
         const NC: &str = "\0no_connect";
         const PWR: &str = "\0power_wire";
-        let mut scene = crate::wire::RouteScene {
+        let mut scene = sch_model::route::RouteScene {
             solids: Vec::new(),
             points: Vec::new(),
             segments: Vec::new(),
@@ -681,7 +682,7 @@ impl SchematicWriter {
             .iter()
             .filter(|l| l.global)
             .map(|l| {
-                let w = crate::label::text_width(&l.net) + 2.54;
+                let w = sch_model::text::text_width(&l.net) + 2.54;
                 Rect::new(l.at[0] - w, l.at[1] - 2.0, l.at[0] + w, l.at[1] + 2.0)
             })
             .collect()
@@ -987,49 +988,6 @@ pub fn quantize_dir(pin_angle: f64, inst_angle: f64, mirror: bool) -> Dir {
     }
 }
 
-/// Compute the sheet-space connection endpoint of a pin on a placed instance.
-///
-/// ## What "connection endpoint" means
-///
-/// In a `.kicad_sym`, a pin's `(at x y angle)` is the pin's **connection point**
-/// — the tip where wires/labels attach — and the pin line extends `length` mm
-/// *into the symbol body* along `angle`. So the connection point is exactly the
-/// pin's local `at`; no `length` projection is applied (projecting by `length`
-/// would land inside the body, off the connection). E.g. Device:R pin 1 at local
-/// `(0, 3.81)` maps to sheet `(inst_x, inst_y - 3.81)`.
-///
-/// ## The transform (symbol space → sheet space)
-///
-/// KiCAD symbol Y grows **upward**; the schematic sheet Y grows **downward**. A
-/// placed instance applies, in order: a rotation by the instance `angle`, the
-/// Y-flip into sheet space, the optional `(mirror y)`, then a translation to the
-/// instance position. Concretely, for a local point `(lx, ly)`:
-///
-/// 1. **Rotate** by the instance angle θ (KiCAD rotates counter-clockwise in
-///    symbol space): `(lx·cosθ − ly·sinθ, lx·sinθ + ly·cosθ)`.
-/// 2. **Y-flip**: `(rx, −ry)` — the sheet-space offset.
-/// 3. **Mirror** (`(mirror y)`): negate the SHEET x. It comes after the rotation,
-///    not before it: negating the local x instead agrees at 0°/180° but is the
-///    point-reflection of the truth at 90°/270°, which transposes a 2-pin part's
-///    two pins and wires each to the other's net.
-/// 4. **Translate**: `sheet = (inst_x + ox, inst_y + oy)`.
-///
-/// At θ = 0 with no mirror this reduces to `(inst_x + lx, inst_y − ly)`, the
-/// spike's proven form. Angles are restricted to 0/90/180/270 in practice, so
-/// the sin/cos are exact (±1, 0) and the result stays on the grid; we still snap
-/// to absorb floating-point dust.
-pub fn pin_endpoint(
-    pin: &PinGeom,
-    inst_at: impl Into<Point2>,
-    inst_angle: f64,
-    mirror: bool,
-) -> [f64; 2] {
-    let inst_at = inst_at.into();
-    let off = pin.at.transform_offset(inst_angle, mirror);
-    GRID_50_MIL
-        .snap_point(Point2::new(inst_at.x + off[0], inst_at.y + off[1]))
-        .into()
-}
 
 #[cfg(test)]
 mod tests {

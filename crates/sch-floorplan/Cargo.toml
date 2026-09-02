@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The engine-agnostic schematic placement core: gather, IR inference, cost scoring, the scaffold (refine/polish/idiom-gather) the placement engines drive, the premium SA search, and the routed writer assembly."
+description = "Schematic layout composition root: infer, place, route, text-solve and write a live .kicad_sch."
 
 [dependencies]
-sch-place = { path = "../sch-place" }
+sch-model = { path = "../sch-model" }
 sch-doc = { path = "../sch-doc" }
 sch-check = { path = "../sch-check" }
 circuit-graph = { path = "../circuit-graph" }
