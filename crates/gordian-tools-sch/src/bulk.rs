@@ -7,6 +7,7 @@ use sch_floorplan::live::{ArrangeReport, PlaceReport, PlacementBudget, Selection
 use sch_model::engine::PlacementEngine;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
 
 use crate::session::{Allow, Edit};
@@ -137,13 +138,19 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         let (budget, engine) = budgeted_within(ctx, remaining, sheet_parts, Some(kind));
         let timing = Timing::start("place_parts", &budget, engine.name());
-        match sch_floorplan::live::place_parts(
+        let attempt = guarded_place_parts(
             ctx.env(),
             &mut edit.doc,
             &payload,
             engine.as_ref(),
             Some(budget),
-        ) {
+        )?;
+        let GuardedPlacement::Completed(result) = attempt else {
+            timing.done("panicked");
+            tried.push(engine.name());
+            continue;
+        };
+        match *result {
             Ok(placed) => {
                 let elapsed_ms = timing.done(if placed.committed {
                     "committed"
@@ -190,7 +197,12 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let report = match report {
         Some(report) => report,
-        None => return Err(anyhow!("no placement engine ran")),
+        None => {
+            return Ok(json!({
+                "error": "no placement engine completed",
+                "engines_tried": tried,
+            }));
+        }
     };
     if !report.committed {
         return Ok(refused_place(report, &payload, &tried));
@@ -211,7 +223,42 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(value);
     }
     value["placement"] = placement;
+    value["engines_tried"] = json!(tried);
     with_check(value, ctx).context("checking placed parts")
+}
+
+enum GuardedPlacement {
+    Completed(Box<sch_floorplan::live::Result<PlaceReport>>),
+    Panicked,
+}
+
+fn guarded_place_parts(
+    env: &kicad::KicadInstallation,
+    doc: &mut sch_doc::SchDoc,
+    payload: &sch_check::PlacePartsInput,
+    engine: &dyn PlacementEngine,
+    budget: Option<PlacementBudget>,
+) -> Result<GuardedPlacement> {
+    let snapshot = doc.snapshot();
+    match catch_unwind(AssertUnwindSafe(|| {
+        sch_floorplan::live::place_parts(env, doc, payload, engine, budget)
+    })) {
+        Ok(result) => Ok(GuardedPlacement::Completed(Box::new(result))),
+        Err(panic) => {
+            let message = panic
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("non-string panic payload");
+            tracing::error!(
+                engine = engine.name(),
+                panic = message,
+                "placement engine panicked"
+            );
+            doc.restore(snapshot)?;
+            Ok(GuardedPlacement::Panicked)
+        }
+    }
 }
 
 pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -495,4 +542,65 @@ fn budgeted_within(
     let budget = PlacementBudget::within(remaining, parts);
     let engine = budget.engine(engine.or(ctx.config().engines.schematic_placer));
     (budget, placement_engine(engine))
+}
+
+#[cfg(test)]
+mod tests {
+    use sch_model::engine::{CandidateEvaluator, PlacementOutput, SchematicPlaceProblem};
+    use serde_json::json;
+
+    use super::*;
+
+    struct PanicEngine;
+
+    impl PlacementEngine for PanicEngine {
+        fn name(&self) -> &'static str {
+            "panic-stub"
+        }
+
+        fn place(
+            &self,
+            _problem: &mut SchematicPlaceProblem,
+            _eval: &dyn CandidateEvaluator,
+        ) -> PlacementOutput {
+            panic!("stub placement panic")
+        }
+    }
+
+    #[test]
+    fn panicking_engine_restores_the_document_and_falls_through() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCAD detected");
+            return;
+        };
+        let payload: sch_check::PlacePartsInput = serde_json::from_value(json!({
+            "parts": [
+                {"ref": "R1", "part": "Device:R", "pins": {"1": "VCC", "2": "MID"}},
+                {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "GND"}}
+            ]
+        }))
+        .unwrap();
+        let mut doc = sch_floorplan::live::blank_sheet().unwrap();
+        let before = doc.to_text();
+        let mut tried = Vec::new();
+
+        match guarded_place_parts(ctx.env(), &mut doc, &payload, &PanicEngine, None).unwrap() {
+            GuardedPlacement::Panicked => tried.push(PanicEngine.name()),
+            GuardedPlacement::Completed(_) => panic!("panic stub unexpectedly completed"),
+        }
+        assert_eq!(doc.to_text(), before);
+
+        let fallback = spine_place::SpinePlace;
+        let report =
+            match guarded_place_parts(ctx.env(), &mut doc, &payload, &fallback, None).unwrap() {
+                GuardedPlacement::Completed(result) => {
+                    tried.push(fallback.name());
+                    (*result).unwrap()
+                }
+                GuardedPlacement::Panicked => panic!("fallback engine panicked"),
+            };
+
+        assert!(report.committed, "fallback placement was refused");
+        assert_eq!(tried, ["panic-stub", "spine"]);
+    }
 }
