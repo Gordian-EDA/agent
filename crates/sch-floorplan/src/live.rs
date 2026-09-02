@@ -616,6 +616,11 @@ fn seated_items(doc: &SchDoc, netlist: &Netlist) -> Vec<Item> {
         .collect()
 }
 
+/// Lift the placed parts in a live document into the engine's geometry scene.
+pub fn scene_items(doc: &SchDoc) -> Vec<Item> {
+    seated_items(doc, &connect::extract(doc))
+}
+
 /// Whether a placed symbol is furniture rather than a part: a power-rail terminal or
 /// any other hidden-reference symbol the realiser draws for itself.
 fn placement_ignores(symbol: &sch_doc::SymbolInst) -> bool {

@@ -96,6 +96,8 @@ pub struct Field {
     pub value: String,
     pub at: Option<Pose>,
     pub hidden: bool,
+    /// Text size from the field's effects, in millimetres.
+    pub font_size: [f64; 2],
     /// The `(property …)` node this was decoded from, so effects, fonts and
     /// justification survive a value change.
     node: Node,
@@ -114,12 +116,23 @@ impl Field {
         let at = child(node, "at").map(decode_pose);
         let hidden = sexpr::flag_present(node, "hide")
             || child(node, "effects").is_some_and(|e| sexpr::flag_present(e, "hide"));
+        let font_size = child(node, "effects")
+            .and_then(|effects| child(effects, "font"))
+            .and_then(|font| child(font, "size"))
+            .and_then(|size| {
+                Some([
+                    sexpr::number(items(size).get(1)?)?,
+                    sexpr::number(items(size).get(2)?)?,
+                ])
+            })
+            .unwrap_or([1.27, 1.27]);
         Some((
             name,
             Field {
                 value,
                 at,
                 hidden,
+                font_size,
                 node: node.clone(),
             },
         ))
@@ -130,6 +143,7 @@ impl Field {
             value: value.to_string(),
             at: Some(at),
             hidden,
+            font_size: [1.27, 1.27],
             node: property_node(name, value, at, hidden),
         }
     }
