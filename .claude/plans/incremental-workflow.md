@@ -105,3 +105,8 @@ re-place." Quality first; time later via parallel subagents; schematic too.
 - Running: W1 PCB partial state (Opus), W2 workflow phases + handoff (codex), engine-shorts (Opus),
   bluepill-erc (Opus). Next: W3 schematic bench + netlist-drawn arrange + place_parts partial commit
   (after bluepill merges); then a full campaign under the new rubric.
+- W2 merged: phased prompt (schematic blocks; board phases with explicit layer count, early GND pour,
+  blocked-net-only rerouting, pin-swap lever), `## Partial state`/`## Next steps` handoff at every
+  budget stop, `--input -` multi-turn continuation, `phase-render:` lines; auto-finish-PCB stages
+  deleted (the model owns the loop). Observed: led-driver now DRC 0 + 17 fab files; stm32 48 parts
+  ERC 2 then a clean handoff at 270 s (blocked by `place_parts` "disturbed existing GND" → W3/W0).
