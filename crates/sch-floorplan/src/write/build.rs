@@ -15,6 +15,15 @@ use super::{
     Dir, Instance, Junction, NoConnect, PinLabel, SchematicWriter, SheetRect, SheetText, Stub, Wire,
 };
 
+/// A sheet point as an exact, comparable key (µm), so two endpoints that coincide
+/// compare equal without a float epsilon.
+pub fn point_key(at: Point2) -> (i64, i64) {
+    (
+        (at.x * 1000.0).round() as i64,
+        (at.y * 1000.0).round() as i64,
+    )
+}
+
 impl SchematicWriter {
     /// Place one symbol instance.
     ///
@@ -468,6 +477,30 @@ impl SchematicWriter {
             .collect())
     }
 
+    /// Reserve the endpoints of every `(refdes, pin)` the design put on a NET, so no
+    /// later no-connect marker can claim one.
+    ///
+    /// A marker declares a POINT unconnected, not a pin. Symbols stack their duplicate
+    /// power pins on ONE endpoint (an ESP32's four GNDs, a USB-C receptacle's two
+    /// VBUS), so a pin the payload never mentioned — auto-no-connected by the kernel —
+    /// can share its point with a pin that is wired. Marking it severs the point for
+    /// KiCAD's netlister and the rail comes back as islands: an OPEN, invisible on the
+    /// rendered sheet.
+    ///
+    /// Call once, before any [`Self::add_no_connect`].
+    pub fn declare_connected<'a>(
+        &mut self,
+        env: &KicadInstallation,
+        pins: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> io::Result<()> {
+        for (refdes, pin) in pins {
+            for at in self.pin_endpoints(env, refdes, pin)? {
+                self.connected.insert(point_key(at));
+            }
+        }
+        Ok(())
+    }
+
     /// Place a `(no_connect)` marker at the endpoint(s) of one pin.
     ///
     /// This is the dual of [`Self::add_pin_label`] for *intentionally*
@@ -484,6 +517,9 @@ impl SchematicWriter {
     ///
     /// Returns an error if `refdes` was never placed, if its geometry cannot be
     /// loaded, or if no pin matches `pin` by number or name.
+    ///
+    /// A marker is refused on a point [`Self::declare_connected`] reserved — see
+    /// that method for why.
     pub fn add_no_connect(
         &mut self,
         env: &KicadInstallation,
@@ -492,6 +528,9 @@ impl SchematicWriter {
     ) -> io::Result<()> {
         let endpoints = self.pin_endpoints(env, refdes, pin)?;
         for (idx, at) in endpoints.into_iter().enumerate() {
+            if self.connected.contains(&point_key(at)) {
+                continue;
+            }
             self.no_connects.push(NoConnect {
                 at,
                 uuid_key: format!("{refdes}:{pin}:{idx}"),
@@ -547,7 +586,7 @@ impl SchematicWriter {
     /// position/orientation/mirror into a grid-snapped sheet point. Shared by
     /// label, no-connect, and power-flag emission so they always agree on where a
     /// pin's connection point lands.
-    fn pin_endpoints(
+    pub fn pin_endpoints(
         &self,
         env: &KicadInstallation,
         refdes: &str,

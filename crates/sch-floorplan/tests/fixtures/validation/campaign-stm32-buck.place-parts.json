@@ -1,0 +1,689 @@
+{
+  "parts": [
+    {
+      "ref": "U1",
+      "part": "MCU_ST_STM32F4:STM32F405RGTx",
+      "footprint": "Package_QFP:LQFP-64_10x10mm_P0.5mm",
+      "pins": {
+        "BOOT0": "BOOT0",
+        "NRST": "NRST",
+        "PA0": "GPIO_PA0",
+        "PA1": "GPIO_PA1",
+        "PA11": "USB_DP_MCU",
+        "PA12": "USB_DM_MCU",
+        "PA13": "SWDIO",
+        "PA14": "SWCLK",
+        "PA2": "GPIO_PA2",
+        "PA3": "GPIO_PA3",
+        "PA4": "GPIO_PA4",
+        "PA5": "GPIO_PA5",
+        "PA6": "GPIO_PA6",
+        "PA7": "GPIO_PA7",
+        "PB0": "GPIO_PB0",
+        "PB1": "GPIO_PB1",
+        "PB10": "GPIO_PB10",
+        "PB11": "GPIO_PB11",
+        "PB12": "GPIO_PB12",
+        "PB13": "GPIO_PB13",
+        "PB14": "GPIO_PB14",
+        "PB15": "GPIO_PB15",
+        "PB2": "GPIO_PB2",
+        "PB3": "SWO",
+        "PB4": "PB4_ACTIVITY",
+        "PB8": "I2C_SCL",
+        "PB9": "I2C_SDA",
+        "PC0": "GPIO_PC0",
+        "PC1": "VBUS_SENSE",
+        "PC10": "nc",
+        "PC11": "nc",
+        "PC12": "nc",
+        "PC13": "nc",
+        "PC14": "nc",
+        "PC15": "nc",
+        "PC2": "nc",
+        "PC3": "nc",
+        "PC4": "nc",
+        "PC5": "nc",
+        "PC6": "nc",
+        "PC7": "nc",
+        "PC8": "nc",
+        "PC9": "nc",
+        "PD2": "nc",
+        "PH0": "OSC_IN",
+        "PH1": "OSC_OUT",
+        "VBAT": "3V3",
+        "VCAP_1": "VCAP1",
+        "VCAP_2": "VCAP2",
+        "VDD": "3V3",
+        "VDDA": "VDDA",
+        "VSS": "GND",
+        "VSSA": "GND"
+      },
+      "decouple": {
+        "100nF": 4
+      }
+    },
+    {
+      "ref": "F1",
+      "part": "Device:Polyfuse",
+      "value": "2A",
+      "footprint": "Fuse:Fuse_1206_3216Metric",
+      "pins": {
+        "1": "VBUS",
+        "2": "5V_FUSED"
+      }
+    },
+    {
+      "ref": "D1",
+      "part": "Device:D_TVS",
+      "value": "SMBJ5.0A",
+      "footprint": "Diode_SMD:D_SMA",
+      "pins": {
+        "1": "5V_FUSED",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "U2",
+      "part": "Regulator_Switching:TPS54302",
+      "value": "TPS54302",
+      "footprint": "Package_TO_SOT_SMD:SOT-23-6",
+      "pins": {
+        "1": "BOOT",
+        "2": "5V_FUSED",
+        "3": "EN",
+        "4": "GND",
+        "5": "SW",
+        "6": "VFB"
+      }
+    },
+    {
+      "ref": "L1",
+      "part": "Device:L",
+      "value": "4.7uH shielded",
+      "footprint": "Inductor_SMD:L_Bourns_SRP5030T",
+      "pins": {
+        "1": "SW",
+        "2": "3V3"
+      }
+    },
+    {
+      "ref": "C1",
+      "part": "Device:C",
+      "value": "10uF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "5V_FUSED",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C2",
+      "part": "Device:C",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "5V_FUSED",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C3",
+      "part": "Device:C",
+      "value": "100nF bootstrap",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "BOOT",
+        "2": "SW"
+      }
+    },
+    {
+      "ref": "C4",
+      "part": "Device:C",
+      "value": "22uF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C5",
+      "part": "Device:C",
+      "value": "22uF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R1",
+      "part": "Device:R",
+      "value": "100k EN pullup",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "5V_FUSED",
+        "2": "EN"
+      }
+    },
+    {
+      "ref": "R2",
+      "part": "Device:R",
+      "value": "100k FB top",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "3V3",
+        "2": "VFB"
+      }
+    },
+    {
+      "ref": "R3",
+      "part": "Device:R",
+      "value": "22.1k FB bottom",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "VFB",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C6",
+      "part": "Device:C",
+      "value": "4.7uF MCU bulk",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "FB1",
+      "part": "Device:FerriteBead",
+      "value": "VDDA bead",
+      "footprint": "Inductor_SMD:L_0603_1608Metric",
+      "pins": {
+        "1": "3V3",
+        "2": "VDDA"
+      }
+    },
+    {
+      "ref": "C7",
+      "part": "Device:C",
+      "value": "100nF VDDA",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "VDDA",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C8",
+      "part": "Device:C",
+      "value": "1uF VDDA",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "VDDA",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C13",
+      "part": "Device:C",
+      "value": "100nF VBAT",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C14",
+      "part": "Device:C",
+      "value": "2.2uF VCAP1 low ESR",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "VCAP1",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C15",
+      "part": "Device:C",
+      "value": "2.2uF VCAP2 low ESR",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "VCAP2",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R15",
+      "part": "Device:R",
+      "value": "10k NRST pullup",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "3V3",
+        "2": "NRST"
+      }
+    },
+    {
+      "ref": "C16",
+      "part": "Device:C",
+      "value": "100nF NRST",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "NRST",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "SW1",
+      "part": "Switch:SW_SPST",
+      "value": "RESET TL3342",
+      "footprint": "Button_Switch_SMD:SW_SPST_TL3342",
+      "pins": {
+        "1": "NRST",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R17",
+      "part": "Device:R",
+      "value": "100k BOOT pulldown",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "BOOT0",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "JP1",
+      "part": "Connector_Generic:Conn_01x02",
+      "value": "BOOT0 JUMPER",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+      "pins": {
+        "1": "BOOT0",
+        "2": "3V3"
+      }
+    },
+    {
+      "ref": "Y1",
+      "part": "Device:Crystal_GND24",
+      "value": "8MHz",
+      "footprint": "Crystal:Crystal_SMD_3225-4Pin_3.2x2.5mm",
+      "pins": {
+        "1": "OSC_IN",
+        "2": "GND",
+        "3": "OSC_OUT",
+        "4": "GND"
+      }
+    },
+    {
+      "ref": "C26",
+      "part": "Device:C",
+      "value": "18pF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "OSC_IN",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C27",
+      "part": "Device:C",
+      "value": "18pF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "OSC_OUT",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "J1",
+      "part": "Connector:USB_C_Receptacle_USB2.0_16P",
+      "value": "USB-C",
+      "footprint": "Connector_USB:USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal",
+      "pins": {
+        "A1": "GND",
+        "A4": "VBUS",
+        "A5": "CC1",
+        "A6": "USB_DP",
+        "A7": "USB_DM",
+        "B1": "GND",
+        "B5": "CC2",
+        "B6": "USB_DP",
+        "B7": "USB_DM",
+        "B9": "VBUS",
+        "S1": "GND"
+      }
+    },
+    {
+      "ref": "R5",
+      "part": "Device:R",
+      "value": "5.1k CC1",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "CC1",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R6",
+      "part": "Device:R",
+      "value": "5.1k CC2",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "CC2",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "U3",
+      "part": "Power_Protection:USBLC6-2SC6",
+      "value": "USB ESD",
+      "footprint": "Package_TO_SOT_SMD:SOT-23-6",
+      "pins": {
+        "1": "USB_DP",
+        "2": "GND",
+        "3": "USB_DM",
+        "4": "USB_DM_PROT",
+        "5": "VBUS",
+        "6": "USB_DP_PROT"
+      }
+    },
+    {
+      "ref": "R7",
+      "part": "Device:R",
+      "value": "22R D+",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "USB_DP_PROT",
+        "2": "USB_DP_MCU"
+      }
+    },
+    {
+      "ref": "R8",
+      "part": "Device:R",
+      "value": "22R D-",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "USB_DM_PROT",
+        "2": "USB_DM_MCU"
+      }
+    },
+    {
+      "ref": "R9",
+      "part": "Device:R",
+      "value": "100k VBUS sense top",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "VBUS",
+        "2": "VBUS_SENSE"
+      }
+    },
+    {
+      "ref": "R10",
+      "part": "Device:R",
+      "value": "33k VBUS sense bottom",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "VBUS_SENSE",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R11",
+      "part": "Device:R",
+      "value": "4.7k I2C SCL",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "3V3",
+        "2": "I2C_SCL"
+      }
+    },
+    {
+      "ref": "R12",
+      "part": "Device:R",
+      "value": "4.7k I2C SDA",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "3V3",
+        "2": "I2C_SDA"
+      }
+    },
+    {
+      "ref": "D2",
+      "part": "Device:LED",
+      "value": "RED POWER",
+      "footprint": "LED_SMD:LED_0603_1608Metric",
+      "pins": {
+        "1": "3V3_LED",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R13",
+      "part": "Device:R",
+      "value": "1k power LED",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "3V3",
+        "2": "3V3_LED"
+      }
+    },
+    {
+      "ref": "D3",
+      "part": "Device:LED",
+      "value": "GREEN ACTIVITY",
+      "footprint": "LED_SMD:LED_0603_1608Metric",
+      "pins": {
+        "1": "ACT_LED",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R14",
+      "part": "Device:R",
+      "value": "1k activity LED",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "PB4_ACTIVITY",
+        "2": "ACT_LED"
+      }
+    },
+    {
+      "ref": "J2",
+      "part": "Connector_Generic:Conn_02x05_Odd_Even",
+      "value": "SWD 10-pin",
+      "footprint": "Connector_PinHeader_1.27mm:PinHeader_2x05_P1.27mm_Vertical",
+      "pins": {
+        "1": "3V3",
+        "10": "GND",
+        "2": "SWDIO",
+        "3": "GND",
+        "4": "SWCLK",
+        "5": "GND",
+        "6": "SWO",
+        "7": "GND",
+        "8": "NRST",
+        "9": "GND"
+      }
+    },
+    {
+      "ref": "J3",
+      "part": "Connector_Generic:Conn_01x06",
+      "value": "GPIO A",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+      "pins": {
+        "1": "GPIO_PA0",
+        "2": "GPIO_PA1",
+        "3": "GPIO_PA2",
+        "4": "GPIO_PA3",
+        "5": "3V3",
+        "6": "GND"
+      }
+    },
+    {
+      "ref": "J4",
+      "part": "Connector_Generic:Conn_01x06",
+      "value": "GPIO B",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+      "pins": {
+        "1": "GPIO_PA4",
+        "2": "GPIO_PA5",
+        "3": "GPIO_PA6",
+        "4": "GPIO_PA7",
+        "5": "GPIO_PB0",
+        "6": "GND"
+      }
+    },
+    {
+      "ref": "J5",
+      "part": "Connector_Generic:Conn_01x06",
+      "value": "GPIO C",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+      "pins": {
+        "1": "GPIO_PB1",
+        "2": "GPIO_PB2",
+        "3": "GPIO_PB10",
+        "4": "GPIO_PB11",
+        "5": "GPIO_PB12",
+        "6": "GND"
+      }
+    },
+    {
+      "ref": "J6",
+      "part": "Connector_Generic:Conn_01x06",
+      "value": "GPIO D",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+      "pins": {
+        "1": "GPIO_PB13",
+        "2": "GPIO_PB14",
+        "3": "GPIO_PB15",
+        "4": "GPIO_PC0",
+        "5": "VBUS_SENSE",
+        "6": "GND"
+      }
+    }
+  ],
+  "name": "USB STM32F405 Controller",
+  "block": "main",
+  "intent": {
+    "flow": "lr",
+    "rails": {
+      "3V3": "top",
+      "GND": "bottom"
+    },
+    "ports": {
+      "NRST": "right",
+      "SWCLK": "right",
+      "SWDIO": "right",
+      "USB_DM": "left",
+      "USB_DP": "left",
+      "VBUS": "left"
+    },
+    "relations": [
+      {
+        "kind": "group",
+        "name": "power",
+        "members": [
+          "F1",
+          "D1",
+          "U2",
+          "L1",
+          "C1",
+          "C2",
+          "C3",
+          "C4",
+          "C5",
+          "R1",
+          "R2",
+          "R3"
+        ],
+        "side": [
+          "left",
+          "F1"
+        ]
+      },
+      {
+        "kind": "group",
+        "name": "mcu",
+        "members": [
+          "U1",
+          "C6",
+          "FB1",
+          "C7",
+          "C8",
+          "C9",
+          "C10",
+          "C11",
+          "C12",
+          "C13",
+          "C14",
+          "C15",
+          "C16",
+          "C17",
+          "SW1"
+        ],
+        "side": [
+          "right",
+          "U1"
+        ]
+      },
+      {
+        "kind": "group",
+        "name": "usb",
+        "members": [
+          "J1",
+          "U3",
+          "R5",
+          "R6",
+          "R7",
+          "R8",
+          "R9",
+          "R10"
+        ],
+        "side": [
+          "left",
+          "J1"
+        ]
+      },
+      {
+        "kind": "group",
+        "name": "debug",
+        "members": [
+          "Y1",
+          "C26",
+          "C27",
+          "J2",
+          "JP1"
+        ],
+        "side": [
+          "right",
+          "J2"
+        ]
+      },
+      {
+        "kind": "group",
+        "name": "gpio",
+        "members": [
+          "J3",
+          "J4",
+          "J5",
+          "J6",
+          "R11",
+          "R12",
+          "D2",
+          "D3",
+          "R13",
+          "R14"
+        ],
+        "side": [
+          "right",
+          "J3"
+        ]
+      }
+    ]
+  }
+}

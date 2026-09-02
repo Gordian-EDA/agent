@@ -41,7 +41,7 @@
 //! - [`emit`] — the S-expression serialization: `finish`, the `render_*`
 //!   helpers, `escape_sexpr_string`, and coordinate formatting.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{Dir, Point2, Rect};
 use kicad_symbol::geometry::PinGeom;
@@ -52,7 +52,7 @@ mod textsolve;
 
 // Re-export the public surface VERBATIM so external `crate::write::…` paths
 // resolve unchanged across the split.
-pub use build::{pin_end0, quantize_dir};
+pub use build::{pin_end0, point_key, quantize_dir};
 pub use emit::{escape_sexpr_string, fmt_coord};
 
 /// Stable key identifying *this* schematic sheet for root-uuid derivation.
@@ -261,6 +261,12 @@ pub struct SchematicWriter {
     /// the thing that merges two nets. A finalize-only repair, like the riser fan: the
     /// per-move scorer leaves it off so its cost landscape stays the geometry alone.
     pub(super) weld_guard: bool,
+    /// Points occupied by a pin the design put on a NET. A no-connect marker there is
+    /// refused: symbols stack their duplicate power pins on one endpoint (an ESP32's
+    /// four GNDs, a USB-C receptacle's two VBUS), so an unmentioned pin can share its
+    /// point with a wired one — and a marker severs that point for KiCAD's netlister,
+    /// splitting the rail into islands.
+    pub(super) connected: BTreeSet<(i64, i64)>,
 }
 
 impl SchematicWriter {

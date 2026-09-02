@@ -52,6 +52,11 @@ const CHALLENGE_FIXTURES: &[&str] = &[
     "idiom-stm32",                 // distributed local grounds (≥2 GND symbols) + idioms
     "stm32f4-buck",                // 75 parts: buck regulator + STM32, dense 2-pin passives
     "openmyo-emg",                 // analog EMG front-end, dense 2-pin passives
+    // The two campaign whole-sheet payloads that `place_parts` refused with
+    // `scattered GND` (+ `VBUS`): ~50 parts around a USB-C receptacle and an
+    // ESP32/STM32 whose duplicate power pins STACK on one endpoint.
+    "campaign-esp32-sensor-node",
+    "campaign-stm32-buck",
 ];
 
 fn doc(name: &str, ext: &str) -> std::path::PathBuf {
@@ -233,6 +238,14 @@ fn validate_fixture(
             out.net_shorts.is_empty(),
             "{name}: the realised sheet shares points between nets: {:#?}",
             out.net_shorts
+        );
+
+        // ...and the OPEN half of the same invariant: an authored net that comes back
+        // in pieces is the `scattered GND` refusal, reported here at emission time.
+        assert!(
+            out.net_opens.is_empty(),
+            "{name}: the realised sheet leaves authored nets in islands: {:#?}",
+            out.net_opens
         );
 
         // Readability invariant (tier-1 only): the reference fixtures emit with ZERO
