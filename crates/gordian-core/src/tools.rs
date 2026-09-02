@@ -300,7 +300,8 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "delete_copper".into(),
-            description: "Delete nearby track/via; filter by kind, net, or layer.".into(),
+            description: "Delete track/via copper by click, or remove a net globally or inside a bbox."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -312,6 +313,17 @@ pub fn tool_defs() -> Vec<Tool> {
                         "description": "Point [x,y] mm."
                     },
                     "radius": { "type": "number", "description": "mm; default 0.4." },
+                    "bbox": {
+                        "type": "object",
+                        "properties": {
+                            "min_x": { "type": "number" },
+                            "min_y": { "type": "number" },
+                            "max_x": { "type": "number" },
+                            "max_y": { "type": "number" }
+                        },
+                        "required": ["min_x", "min_y", "max_x", "max_y"],
+                        "description": "Delete matching net copper intersecting this board-space box."
+                    },
                     "kinds": {
                         "type": "array",
                         "items": { "type": "string", "enum": ["track", "via"] },
@@ -320,8 +332,7 @@ pub fn tool_defs() -> Vec<Tool> {
                     "net": { "type": "string" },
                     "layer": { "type": "string" },
                     "all": { "type": "boolean", "description": "All matches; default nearest." }
-                },
-                "required": ["at"]
+                }
             }),
         },
         Def {

@@ -606,7 +606,7 @@ pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(snapshot) => snapshot,
         Err(error) => return Ok(json!({ "error": error })),
     };
-    let request = match parse_delete_copper_request(&input, snapshot.layer_names.len() as u32) {
+    let selection = match parse_delete_copper_request(&input, snapshot.layer_names.len() as u32) {
         Ok(request) => request,
         Err(error) => return Ok(json!({ "error": error })),
     };
@@ -619,19 +619,19 @@ pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
-    let deleted = if ctx.config().kicad.attach_running {
+    let deleted = if ctx.config().kicad.attach_running && selection.bbox.is_none() {
         ctx.kicad()
             .with_session(&path, |session| {
                 session
                     .kicad()
-                    .delete_copper_near(&request, &snapshot.layer_names)
+                    .delete_copper_near(&selection.request, &snapshot.layer_names)
             })
             .map_err(|error| error.to_string())
     } else {
-        delete_copper_offline(ctx, &snapshot, &request)
+        delete_copper_offline(ctx, &snapshot, &selection)
     };
     match deleted {
-        Ok(hits) => Ok(gate.commit(ctx, delete_copper_output(&request, &hits))),
+        Ok(hits) => Ok(gate.commit(ctx, delete_copper_output(&selection, &hits))),
         Err(error) => Ok(gate.rollback(ctx, json!({ "error": error }))),
     }
 }
@@ -770,7 +770,7 @@ fn net_width_output(
 fn delete_copper_offline(
     ctx: &AgentRuntime,
     snapshot: &IpcBoardSnapshot,
-    request: &CopperDeleteRequest,
+    selection: &DeleteCopperSelection,
 ) -> std::result::Result<Vec<CopperHit>, String> {
     #[derive(Clone, Copy)]
     enum Selected {
@@ -778,6 +778,7 @@ fn delete_copper_offline(
         Via(usize),
     }
 
+    let request = &selection.request;
     let layer_count = snapshot.problem.layer_count;
     let mut matches = Vec::<(Selected, CopperHit)>::new();
     if request.kinds.contains(&CopperKind::Track) {
@@ -793,6 +794,12 @@ fn delete_copper_offline(
                 continue;
             }
             for pair in trace.path.windows(2) {
+                if selection
+                    .bbox
+                    .is_some_and(|bbox| !trace_segment_hits_bbox(trace, pair, &bbox))
+                {
+                    continue;
+                }
                 let distance = (geom::Segment::new(pair[0], pair[1]).dist_to_point(request.at)
                     - trace.width / 2.0)
                     .max(0.0);
@@ -831,6 +838,12 @@ fn delete_copper_offline(
             if request.layer.is_some_and(|layer| !indices.contains(&layer)) {
                 continue;
             }
+            if selection
+                .bbox
+                .is_some_and(|bbox| !via_hits_bbox(via, &bbox))
+            {
+                continue;
+            }
             matches.push((
                 Selected::Via(index),
                 CopperHit {
@@ -849,7 +862,9 @@ fn delete_copper_offline(
             ));
         }
     }
-    matches.retain(|(_, hit)| hit.distance <= request.radius + geom::EPS);
+    if selection.bbox.is_none() {
+        matches.retain(|(_, hit)| hit.distance <= request.radius + geom::EPS);
+    }
     matches.sort_by(|a, b| {
         a.1.distance
             .total_cmp(&b.1.distance)
@@ -907,6 +922,14 @@ fn delete_copper_offline(
     crate::route::write_board_atomically(&path, updated.as_bytes())
         .map_err(|error| format!("could not replace the board: {error}"))?;
     Ok(matches.into_iter().map(|(_, hit)| hit).collect())
+}
+
+fn trace_segment_hits_bbox(trace: &Trace, pair: &[Point2], bbox: &Rect) -> bool {
+    geom::Segment::new(pair[0], pair[1]).dist_to_rect(bbox) <= trace.width / 2.0 + geom::EPS
+}
+
+fn via_hits_bbox(via: &Via, bbox: &Rect) -> bool {
+    bbox.dist_to_point(via.at) <= via.diameter / 2.0 + geom::EPS
 }
 
 fn write_net_width_offline(
@@ -1349,12 +1372,25 @@ fn route_track_output(
     })
 }
 
+#[derive(Debug, Clone)]
+struct DeleteCopperSelection {
+    request: CopperDeleteRequest,
+    bbox: Option<Rect>,
+}
+
 fn parse_delete_copper_request(
     input: &Value,
     layer_count: u32,
-) -> std::result::Result<CopperDeleteRequest, String> {
+) -> std::result::Result<DeleteCopperSelection, String> {
     let ctx = "delete_copper";
-    let at = parse_point(input, "at", ctx)?;
+    let at = input
+        .get("at")
+        .map(|_| parse_point(input, "at", ctx))
+        .transpose()?;
+    let bbox = crate::selection::parse_bbox(input)?;
+    if at.is_some() && bbox.is_some() {
+        return Err("delete_copper accepts either `at` or `bbox`, not both".to_owned());
+    }
     let radius = optional_num(input, "radius", ctx)?.unwrap_or(0.4);
     if radius < 0.0 {
         return Err("delete_copper `radius` must be non-negative".to_owned());
@@ -1365,6 +1401,9 @@ fn parse_delete_copper_request(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
+    if at.is_none() && net.is_none() {
+        return Err("delete_copper needs `at`, or a `net` with optional `bbox`".to_owned());
+    }
     let layer = input
         .get("layer")
         .and_then(Value::as_str)
@@ -1376,14 +1415,19 @@ fn parse_delete_copper_request(
             })
         })
         .transpose()?;
-    let all = input.get("all").and_then(Value::as_bool).unwrap_or(false);
-    Ok(CopperDeleteRequest {
-        at,
-        radius,
-        kinds,
-        net,
-        layer,
-        all,
+    let all = at.is_none() || input.get("all").and_then(Value::as_bool).unwrap_or(false);
+    Ok(DeleteCopperSelection {
+        request: CopperDeleteRequest {
+            at: at
+                .or_else(|| bbox.map(|bbox| bbox.center()))
+                .unwrap_or_else(|| Point2::new(0.0, 0.0)),
+            radius,
+            kinds,
+            net,
+            layer,
+            all,
+        },
+        bbox,
     })
 }
 
@@ -1417,12 +1461,15 @@ fn parse_copper_kinds(input: &Value) -> std::result::Result<BTreeSet<CopperKind>
     Ok(out)
 }
 
-fn delete_copper_output(request: &CopperDeleteRequest, hits: &[CopperHit]) -> Value {
+fn delete_copper_output(selection: &DeleteCopperSelection, hits: &[CopperHit]) -> Value {
+    let request = &selection.request;
     let matches: Vec<Value> = hits.iter().map(copper_hit_json).collect();
     json!({
         "ok": true,
         "deleted": hits.len(),
         "all": request.all,
+        "net": request.net,
+        "bbox": selection.bbox,
         "matches": matches,
     })
 }
@@ -2136,6 +2183,61 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("no pad U1.9 on this board"), "{err}");
+    }
+
+    #[test]
+    fn delete_copper_accepts_net_wide_and_bounded_selection() {
+        let whole = parse_delete_copper_request(&json!({ "net": "GND" }), 2).unwrap();
+        assert_eq!(whole.request.net.as_deref(), Some("GND"));
+        assert!(whole.request.all);
+        assert!(whole.bbox.is_none());
+
+        let bounded = parse_delete_copper_request(
+            &json!({
+                "net": "GND",
+                "bbox": { "min_x": 4.0, "min_y": 4.0, "max_x": 6.0, "max_y": 6.0 }
+            }),
+            2,
+        )
+        .unwrap();
+        assert_eq!(bounded.bbox, Some(Rect::new(4.0, 4.0, 6.0, 6.0)));
+        assert!(parse_delete_copper_request(&json!({}), 2).is_err());
+        assert!(
+            parse_delete_copper_request(
+                &json!({
+                    "at": [5.0, 5.0],
+                    "bbox": { "min_x": 4.0, "min_y": 4.0, "max_x": 6.0, "max_y": 6.0 }
+                }),
+                2,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn bounded_copper_selection_hits_crossing_tracks_and_touching_vias() {
+        let bbox = Rect::new(4.0, 4.0, 6.0, 6.0);
+        let crossing = Trace {
+            connection: "GND".to_owned(),
+            layer: LayerRef::top(),
+            width: 0.2,
+            path: vec![Point2::new(2.0, 5.0), Point2::new(8.0, 5.0)],
+        };
+        let outside = Trace {
+            path: vec![Point2::new(2.0, 2.0), Point2::new(8.0, 2.0)],
+            ..crossing.clone()
+        };
+        let touching = Via {
+            connection: "GND".to_owned(),
+            at: Point2::new(6.3, 5.0),
+            diameter: 0.6,
+            drill: 0.3,
+            span: ViaSpan::Through,
+        };
+
+        assert!(trace_segment_hits_bbox(&crossing, &crossing.path, &bbox));
+        assert!(!trace_segment_hits_bbox(&outside, &outside.path, &bbox));
+        assert!(via_hits_bbox(&touching, &bbox));
     }
 
     #[test]
