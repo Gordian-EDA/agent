@@ -631,6 +631,15 @@ pub fn form_modules(
         });
     }
 
+    attach.retain(|at| {
+        let anchor = match at {
+            Attach::Ladder { anchor, .. }
+            | Attach::Bridge { anchor, .. }
+            | Attach::Tail { anchor, .. } => anchor,
+        };
+        st.mod_of_anchor.contains_key(anchor)
+    });
+
     // Claimed placement rects per module (anchor rect seeded), so every leg,
     // bridge, and bank cap lands in genuinely free space — the st.claims use the
     // FULL text-inclusive rect, which is what the overlap wall measures.
@@ -639,10 +648,7 @@ pub fn form_modules(
         st.claims
             .entry(mi)
             .or_default()
-            .push(sch_model::geometry::item_rect(
-                &items[a],
-                [0.0, 0.0],
-            ));
+            .push(sch_model::geometry::item_rect(&items[a], [0.0, 0.0]));
     }
 
     // Pins that a consumed chain will WIRE to (no label there).
@@ -784,7 +790,9 @@ fn place_bridges(items: &[Item], g: &Reduced, attach: &[Attach], st: &mut FormSt
             continue;
         };
         let c = &g.chains[*chain];
-        let mi = st.mod_of_anchor[anchor];
+        let Some(&mi) = st.mod_of_anchor.get(anchor) else {
+            continue;
+        };
         let pa = pin_offset(&items[*anchor], pin_a, 0.0);
         let pb = pin_offset(&items[*anchor], pin_b, 0.0);
         let (sa, sb) = (pin_side_of(*anchor, pin_a), pin_side_of(*anchor, pin_b));
@@ -1191,7 +1199,9 @@ fn place_ladders<'a>(
             continue;
         }
         let c = &g.chains[*chain];
-        let mi = st.mod_of_anchor[anchor];
+        let Some(&mi) = st.mod_of_anchor.get(anchor) else {
+            continue;
+        };
         let (mut parts, mut nets) = (c.parts.clone(), c.nets.clone());
         if !a_near {
             parts.reverse();
@@ -1305,13 +1315,14 @@ fn chain_tails(
             {
                 continue;
             }
-            let (near_t, far_t) = if st.tail_home.contains_key(&c.a.net) {
-                (&c.a, &c.b)
-            } else if st.tail_home.contains_key(&c.b.net) {
-                (&c.b, &c.a)
-            } else {
-                continue;
-            };
+            let (near_t, far_t, &(mi, home, outward)) =
+                if let Some(home) = st.tail_home.get(&c.a.net) {
+                    (&c.a, &c.b, home)
+                } else if let Some(home) = st.tail_home.get(&c.b.net) {
+                    (&c.b, &c.a, home)
+                } else {
+                    continue;
+                };
             if !matches!(&g.nodes[near_t.node], NodeKind::Junction(_)) {
                 continue;
             }
@@ -1339,7 +1350,6 @@ fn chain_tails(
             if far_flow {
                 continue;
             }
-            let &(mi, home, outward) = &st.tail_home[&near_t.net];
             let part = c.parts[0];
             let item = &items[part];
             let dir = if outward < 0.0 {
@@ -1632,10 +1642,10 @@ fn place_adopted_stubs(
         });
     }
     // Never-adoptable 2-pin stub modules are straps too.
-    for &a in st.mod_of_anchor.keys() {
+    for (&a, &mi) in &st.mod_of_anchor {
         if items[a].geom.pins.len() <= 2
             && !is_connector_like_part(&items[a].part)
-            && st.form.modules[st.mod_of_anchor[&a]].sats.is_empty()
+            && st.form.modules[mi].sats.is_empty()
         {
             st.form.strap_items.insert(a);
         }
@@ -1760,19 +1770,20 @@ fn place_banks(
         };
         let target = anchors
             .iter()
-            .filter(|a| supply_pins.contains_key(&(**a, supply.clone())))
-            .max_by_key(|a| {
-                let demand = supply_pins[&(**a, supply.clone())];
-                let done = served.get(&(**a, supply.clone())).copied().unwrap_or(0);
-                (demand.saturating_sub(done), usize::MAX - **a)
+            .filter_map(|&anchor| {
+                let key = (anchor, supply.clone());
+                let demand = supply_pins.get(&key).copied()?;
+                let done = served.get(&key).copied().unwrap_or(0);
+                Some((anchor, demand.saturating_sub(done)))
             })
-            .copied();
+            .max_by_key(|(anchor, unmet)| (*unmet, usize::MAX - *anchor))
+            .map(|(anchor, _)| anchor);
         let Some(anchor) = target else { continue };
+        let Some(&module) = st.mod_of_anchor.get(&anchor) else {
+            continue;
+        };
         *served.entry((anchor, supply.clone())).or_default() += 1;
-        bank_of
-            .entry(st.mod_of_anchor[&anchor])
-            .or_default()
-            .push(ci);
+        bank_of.entry(module).or_default().push(ci);
     }
 
     /// Human bank pitch: 9 grid columns (value text clears the neighbour's
