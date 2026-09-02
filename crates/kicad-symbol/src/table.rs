@@ -80,15 +80,18 @@ impl SymbolTable {
         let mut t = Self::mock();
         for id in ["Device:R", "Device:C", "Device:L"] {
             t.mock_add(id, vec![("1", "~", Passive, 1), ("2", "~", Passive, 1)]);
+            t.inline.get_mut(id).unwrap().reference = Some(id[7..].to_string());
         }
         t.mock_add(
             "Device:D",
             vec![("1", "K", Passive, 1), ("2", "A", Passive, 1)],
         );
+        t.inline.get_mut("Device:D").unwrap().reference = Some("D".into());
         t.mock_add(
             "Device:LED",
             vec![("1", "K", Passive, 1), ("2", "A", Passive, 1)],
         );
+        t.inline.get_mut("Device:LED").unwrap().reference = Some("D".into());
         for (id, net) in [
             ("power:GND", "GND"),
             ("power:VCC", "VCC"),
@@ -98,6 +101,7 @@ impl SymbolTable {
             ("power:VBUS", "VBUS"),
         ] {
             t.mock_add(id, vec![("1", net, PowerInput, 1)]);
+            t.inline.get_mut(id).unwrap().reference = Some("#PWR".into());
         }
         t
     }

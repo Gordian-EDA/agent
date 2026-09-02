@@ -36,6 +36,8 @@ pub struct PinMeta {
 #[derive(Debug, Clone, Default)]
 pub struct SymbolMeta {
     pub pins: Vec<PinMeta>,
+    /// Default reference prefix from the library symbol's `Reference` field.
+    pub reference: Option<String>,
     /// Human-readable KiCad library description, often including decisive
     /// electrical ratings such as current, voltage, or package.
     pub description: Option<String>,

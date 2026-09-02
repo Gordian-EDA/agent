@@ -43,9 +43,9 @@ pub struct PlacePartsInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PartSpec {
-    /// Refdes, e.g. `U1`.
-    #[serde(rename = "ref")]
-    pub refdes: RefDes,
+    /// Refdes, e.g. `U1`; omitted to allocate from the library prefix.
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub refdes: Option<RefDes>,
     /// Placement region this part joins, when the sheet has more than one.
     /// Defaults to the payload's `block`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,8 +70,22 @@ pub struct PartSpec {
     pub decouple: IndexMap<String, u32>,
 }
 
-/// Existing named nets and the number of live sheet pins already on each one.
-pub type ExistingNetPins = BTreeMap<String, usize>;
+/// Live-sheet facts needed to audit a placement payload.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExistingSheet {
+    /// Existing named nets and the number of live sheet pins on each one.
+    pub net_pins: BTreeMap<String, usize>,
+    /// Reference designators already present on the sheet.
+    pub refs: BTreeSet<RefDes>,
+}
+
+/// An explicit reference designator that is already occupied.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DuplicateRef {
+    #[serde(rename = "ref")]
+    pub refdes: RefDes,
+    pub next_free: RefDes,
+}
 
 /// A new pin whose named net would have no other pin after placement.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -92,6 +106,7 @@ pub struct DanglingPin {
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct PayloadAudit {
     pub dangling: Vec<DanglingPin>,
+    pub duplicate_refs: Vec<DuplicateRef>,
     pub did_you_mean: BTreeMap<NetName, NetName>,
     pub unknown_pins: Vec<String>,
 }
@@ -99,7 +114,7 @@ pub struct PayloadAudit {
 impl PayloadAudit {
     /// Whether the payload may proceed to placement.
     pub fn is_valid(&self) -> bool {
-        self.dangling.is_empty() && self.unknown_pins.is_empty()
+        self.dangling.is_empty() && self.duplicate_refs.is_empty() && self.unknown_pins.is_empty()
     }
 }
 
@@ -152,14 +167,16 @@ pub const DEFAULT_BLOCK: &str = "main";
 /// against the symbol table, `decouple` expanded into [`Origin::Synthesized`]
 /// caps, unconnected signal pins marked no-connect, net attributes derived.
 ///
-/// Diagnostics carry what makes the input un-buildable — an unknown part or
-/// pin, a duplicate refdes. The payload audit separately reports new pins whose
-/// nets would have no other pin across the payload and existing sheet.
+/// Diagnostics carry unknown parts and pins. The payload audit reports duplicate
+/// references and new pins whose nets would have no other pin across the payload
+/// and existing sheet.
 pub fn into_design(
     input: &PlacePartsInput,
     provider: &SymbolTable,
-    existing: &ExistingNetPins,
+    existing: &ExistingSheet,
 ) -> (Design, Diagnostics, PayloadAudit) {
+    let mut input = input.clone();
+    let duplicate_refs = resolve_references(&mut input, provider, &existing.refs);
     let mut diags = Diagnostics::default();
     let mut design = Design {
         name: input.name.clone(),
@@ -167,13 +184,23 @@ pub fn into_design(
     };
     let default_block = input.block.as_deref().unwrap_or(DEFAULT_BLOCK);
     for spec in &input.parts {
+        let Some(refdes) = spec.refdes.as_ref() else {
+            diags.push(Diagnostic::error(
+                "missing-reference-prefix",
+                format!(
+                    "`{}` has no library Reference field from which to assign a designator",
+                    spec.part
+                ),
+            ));
+            continue;
+        };
         let name = spec.block.as_deref().unwrap_or(default_block);
-        let comp = component(spec, provider, &mut diags);
+        let comp = component(spec, refdes, provider, &mut diags);
         let block = design.blocks.entry(name.to_string()).or_default();
-        if block.components.insert(spec.refdes.clone(), comp).is_some() {
+        if block.components.insert(refdes.clone(), comp).is_some() {
             diags.push(Diagnostic::error(
                 "duplicate-ref",
-                format!("`{}` is declared twice — one of them is lost", spec.refdes),
+                format!("`{refdes}` is declared twice — one of them is lost"),
             ));
         }
     }
@@ -191,22 +218,79 @@ pub fn into_design(
             )),
         }
     }
-    expand_decouple(input, default_block, &mut design, provider, &mut diags);
+    expand_decouple(&input, default_block, &mut design, provider, &mut diags);
     decouple::renumber(&mut design);
     pins::mark_unused_no_connect(&mut design, provider);
     nets::derive_attrs(&mut design);
-    let audit = audit_payload(input, &design, provider, existing, &diags);
+    let mut audit = audit_payload(&input, &design, provider, existing, &diags);
+    audit.duplicate_refs = duplicate_refs;
     (design, diags, audit)
+}
+
+fn resolve_references(
+    input: &mut PlacePartsInput,
+    provider: &SymbolTable,
+    existing: &BTreeSet<RefDes>,
+) -> Vec<DuplicateRef> {
+    let mut occupied = existing.clone();
+    let mut counts = BTreeMap::<RefDes, usize>::new();
+    for refdes in input.parts.iter().filter_map(|part| part.refdes.as_ref()) {
+        *counts.entry(refdes.clone()).or_default() += 1;
+        occupied.insert(refdes.clone());
+    }
+
+    for part in &mut input.parts {
+        if part.refdes.is_some() {
+            continue;
+        }
+        let Some(reference) = provider
+            .symbol(&part.part)
+            .and_then(|symbol| symbol.reference)
+        else {
+            continue;
+        };
+        let prefix = reference.trim_end_matches(['?', '*']);
+        if prefix.is_empty() {
+            continue;
+        }
+        let refdes = next_free_ref(prefix, &occupied);
+        occupied.insert(refdes.clone());
+        part.refdes = Some(refdes);
+    }
+
+    counts
+        .into_iter()
+        .filter(|(refdes, count)| *count > 1 || existing.contains(refdes))
+        .map(|(refdes, _)| DuplicateRef {
+            next_free: next_free_ref(refdes_prefix(&refdes), &occupied),
+            refdes,
+        })
+        .collect()
+}
+
+fn refdes_prefix(refdes: &str) -> &str {
+    refdes.trim_end_matches(|ch: char| ch.is_ascii_digit())
+}
+
+fn next_free_ref(prefix: &str, occupied: &BTreeSet<RefDes>) -> RefDes {
+    let mut number = 1;
+    loop {
+        let candidate = format!("{prefix}{number}");
+        if !occupied.contains(&candidate) {
+            return candidate;
+        }
+        number += 1;
+    }
 }
 
 fn audit_payload(
     input: &PlacePartsInput,
     design: &Design,
     provider: &SymbolTable,
-    existing: &ExistingNetPins,
+    existing: &ExistingSheet,
     lowering: &Diagnostics,
 ) -> PayloadAudit {
-    let mut pin_counts = existing.clone();
+    let mut pin_counts = existing.net_pins.clone();
     for component in design
         .blocks
         .values()
@@ -225,6 +309,9 @@ fn audit_payload(
 
     let mut audit = PayloadAudit::default();
     for spec in &input.parts {
+        let Some(refdes) = spec.refdes.as_ref() else {
+            continue;
+        };
         let Some(meta) = provider.symbol(&spec.part) else {
             continue;
         };
@@ -242,15 +329,15 @@ fn audit_payload(
             let pins_on_net = pin_counts.get(net).copied().unwrap_or_default();
             if pins_on_net < 2 {
                 audit.dangling.push(DanglingPin {
-                    refdes: spec.refdes.clone(),
+                    refdes: refdes.clone(),
                     pin: pin.clone(),
                     net: net.clone(),
                     pins_on_net,
-                    on_sheet: existing.contains_key(net),
+                    on_sheet: existing.net_pins.contains_key(net),
                 });
-                if !existing.contains_key(net)
+                if !existing.net_pins.contains_key(net)
                     && let Some(candidate) =
-                        closest_net_name(net, existing.keys().map(String::as_str))
+                        closest_net_name(net, existing.net_pins.keys().map(String::as_str))
                 {
                     audit.did_you_mean.insert(net.clone(), candidate);
                 }
@@ -304,7 +391,12 @@ pub fn closest_net_name<'a>(
         .map(|(_, candidate)| candidate.to_string())
 }
 
-fn component(spec: &PartSpec, provider: &SymbolTable, diags: &mut Diagnostics) -> Component {
+fn component(
+    spec: &PartSpec,
+    refdes: &str,
+    provider: &SymbolTable,
+    diags: &mut Diagnostics,
+) -> Component {
     let mut comp = Component {
         part: spec.part.clone(),
         value: spec.value.clone(),
@@ -314,7 +406,7 @@ fn component(spec: &PartSpec, provider: &SymbolTable, diags: &mut Diagnostics) -
         ..Default::default()
     };
     let Some(meta) = provider.symbol(&spec.part) else {
-        diags.push(authored::unknown_part(&spec.refdes, &spec.part, provider));
+        diags.push(authored::unknown_part(refdes, &spec.part, provider));
         for (key, net) in &spec.pins {
             comp.pins.insert(key.clone(), target(net));
         }
@@ -330,14 +422,14 @@ fn component(spec: &PartSpec, provider: &SymbolTable, diags: &mut Diagnostics) -
             .map(|p| p.number.clone())
             .collect();
         if numbers.is_empty() {
-            diags.push(authored::unknown_pin(&spec.refdes, &spec.part, &meta, key));
+            diags.push(authored::unknown_pin(refdes, &spec.part, &meta, key));
             continue;
         }
         for number in numbers {
             if let Some(prev) = claimed.insert(number.clone(), key)
                 && prev != key
             {
-                diags.push(authored::pin_conflict(&spec.refdes, &number, prev, key));
+                diags.push(authored::pin_conflict(refdes, &number, prev, key));
             }
             comp.pins.insert(number, target(net));
         }
@@ -364,11 +456,14 @@ fn expand_decouple(
         if spec.decouple.is_empty() {
             continue;
         }
+        let Some(refdes) = spec.refdes.as_ref() else {
+            continue;
+        };
         let block = spec.block.as_deref().unwrap_or(default_block);
-        let comp = &design.blocks[block].components[&spec.refdes];
-        match decouple::rails(&spec.refdes, comp, provider) {
+        let comp = &design.blocks[block].components[refdes];
+        match decouple::rails(refdes, comp, provider) {
             Ok(rails) => {
-                let caps = decouple::expand(&spec.refdes, &spec.decouple, &rails);
+                let caps = decouple::expand(refdes, &spec.decouple, &rails);
                 let block = design.blocks.get_mut(block).unwrap();
                 for (key, cap) in caps {
                     block.components.insert(key, cap);
@@ -393,10 +488,13 @@ pub fn place_parts_input_schema() -> Value {
                 "description": "Parts to create, with their connectivity. No coordinates, no wires.",
                 "items": {
                     "type": "object",
-                    "required": ["ref", "part"],
+                    "required": ["part"],
                     "additionalProperties": false,
                     "properties": {
-                        "ref": {"type": "string", "description": "Refdes, e.g. U1."},
+                        "ref": {
+                            "type": "string",
+                            "description": "Optional refdes, e.g. U1. Omit to assign the lowest unused designator from the symbol library."
+                        },
                         "part": {"type": "string", "description": "KiCAD lib_id, e.g. Device:R."},
                         "block": {
                             "type": "string",
@@ -415,8 +513,9 @@ pub fn place_parts_input_schema() -> Value {
                             "description":
                                 "Pin name or number -> net name, or \"nc\" for an explicit no-connect. \
                                  A name shared by several physical pins connects all of them; every \
-                                 signal pin left out becomes a no-connect. Every named net must land \
-                                 on at least two pins across these parts and the existing sheet.",
+                                 signal pin left out becomes a no-connect. Every named signal net must \
+                                 land on at least two pins across these parts and the existing sheet; \
+                                 power rails and nets declared under intent.ports may be terminal.",
                             "additionalProperties": {"type": "string"}
                         },
                         "decouple": {

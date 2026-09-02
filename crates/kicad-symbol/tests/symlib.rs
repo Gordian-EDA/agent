@@ -75,6 +75,7 @@ fn symbol_properties_surface_electrical_ratings_and_inherit() {
 	(version 20231120)
 	(generator "test")
 	(symbol "Base"
+		(property "Reference" "U" (at 0 0 0))
 		(property "Footprint" "Package:SOT-23-5" (at 0 0 0))
 		(property "Datasheet" "https://example.test/ldo.pdf" (at 0 0 0))
 		(property "Description" "400mA fixed LDO" (at 0 0 0))
@@ -97,6 +98,7 @@ fn symbol_properties_surface_electrical_ratings_and_inherit() {
     let meta = t.symbol("ratings:Fixed3V3").unwrap();
 
     assert_eq!(meta.description.as_deref(), Some("400mA fixed 3.3V LDO"));
+    assert_eq!(meta.reference.as_deref(), Some("U"));
     assert_eq!(
         meta.datasheet.as_deref(),
         Some("https://example.test/ldo.pdf")

@@ -2342,6 +2342,19 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 ))
             })
             .or_else(|| {
+                result
+                    .get("duplicate_refs")
+                    .and_then(Value::as_array)
+                    .and_then(|items| items.first())
+                    .and_then(|item| {
+                        Some(format!(
+                            "{} is already used; use {}",
+                            item.get("ref")?.as_str()?,
+                            item.get("next_free")?.as_str()?
+                        ))
+                    })
+            })
+            .or_else(|| {
                 ["unknown_pins", "nets"].iter().find_map(|key| {
                     result
                         .get(key)
@@ -2702,6 +2715,23 @@ mod tests {
         assert_eq!(
             tool_summary("place_parts", &json!({}), &result),
             "refused: invalid_payload — D1.K on LED_K is dangling (no net LED_K on the sheet)"
+        );
+    }
+
+    #[test]
+    fn duplicate_reference_summary_names_the_available_designator() {
+        let result = json!({
+            "ok": false,
+            "code": "invalid_payload",
+            "dangling": [],
+            "duplicate_refs": [{"ref": "C2", "next_free": "C3"}],
+            "did_you_mean": {},
+            "unknown_pins": []
+        });
+
+        assert_eq!(
+            tool_summary("place_parts", &json!({}), &result),
+            "refused: invalid_payload — C2 is already used; use C3"
         );
     }
 

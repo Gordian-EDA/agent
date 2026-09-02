@@ -2,7 +2,7 @@
 
 use sch_check::model::{Origin, PinTarget};
 use sch_check::place_parts::{
-    DEFAULT_BLOCK, ExistingNetPins, PlacePartsInput, into_design, place_parts_input_schema,
+    DEFAULT_BLOCK, ExistingSheet, PlacePartsInput, into_design, place_parts_input_schema,
 };
 use sch_check::{PinType, SymbolTable};
 
@@ -152,10 +152,13 @@ fn an_unknown_pin_is_reported_with_a_suggestion() {
     assert_eq!(d.suggestion.as_deref(), Some("PA9"));
 }
 
-fn live_power_nets() -> ExistingNetPins {
-    [("+3V3".to_string(), 1), ("GND".to_string(), 1)]
-        .into_iter()
-        .collect()
+fn live_power_nets() -> ExistingSheet {
+    ExistingSheet {
+        net_pins: [("+3V3".to_string(), 1), ("GND".to_string(), 1)]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    }
 }
 
 #[test]
@@ -278,7 +281,7 @@ fn ambiguous_decouple_rails_are_reported() {
 fn schema_describes_the_accepted_shape() {
     let schema = place_parts_input_schema();
     let item = &schema["properties"]["parts"]["items"];
-    assert_eq!(item["required"], serde_json::json!(["ref", "part"]));
+    assert_eq!(item["required"], serde_json::json!(["part"]));
     for key in [
         "ref",
         "part",
@@ -323,13 +326,58 @@ fn a_duplicate_refdes_is_an_error() {
         r#"{"parts": [{"ref": "R1", "part": "Device:R"}, {"ref": "R1", "part": "Device:C"}]}"#,
     )
     .unwrap();
-    let (design, diags, _) = into_design(&input, &provider(), &Default::default());
+    let (design, diags, audit) = into_design(&input, &provider(), &Default::default());
     assert!(diags.0.iter().any(|d| d.code == "duplicate-ref"));
+    assert_eq!(
+        audit.duplicate_refs,
+        [sch_check::DuplicateRef {
+            refdes: "R1".into(),
+            next_free: "R2".into(),
+        }]
+    );
     // The last declaration wins; the diagnostic says the other one is lost.
     assert_eq!(
         design.blocks[DEFAULT_BLOCK].components["R1"].part,
         "Device:C"
     );
+}
+
+#[test]
+fn an_existing_reference_is_refused_with_the_next_free_designator() {
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "C2", "part": "Device:C", "pins": {"1": "VIN", "2": "GND"}}]}"#,
+    )
+    .unwrap();
+    let existing = ExistingSheet {
+        refs: ["C1".to_string(), "C2".to_string()].into_iter().collect(),
+        ..Default::default()
+    };
+    let (_, _, audit) = into_design(&input, &provider(), &existing);
+
+    assert!(!audit.is_valid());
+    assert_eq!(
+        audit.duplicate_refs,
+        [sch_check::DuplicateRef {
+            refdes: "C2".into(),
+            next_free: "C3".into(),
+        }]
+    );
+}
+
+#[test]
+fn an_omitted_reference_uses_the_library_prefix_and_first_gap() {
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"part": "Device:R", "pins": {"1": "VIN", "2": "GND"}}]}"#,
+    )
+    .unwrap();
+    let existing = ExistingSheet {
+        refs: ["R1".to_string(), "R3".to_string()].into_iter().collect(),
+        ..Default::default()
+    };
+    let (design, _, audit) = into_design(&input, &provider(), &existing);
+
+    assert!(audit.is_valid(), "{audit:?}");
+    assert!(design.blocks[DEFAULT_BLOCK].components.contains_key("R2"));
 }
 
 #[test]

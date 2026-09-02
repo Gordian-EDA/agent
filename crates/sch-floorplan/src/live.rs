@@ -28,7 +28,7 @@ use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::SymbolGeometry;
 use sch_check::model::{Block, Component, Design, PinTarget};
-use sch_check::{Diagnostics, ExistingNetPins, PayloadAudit, PlacePartsInput};
+use sch_check::{Diagnostics, ExistingSheet, PayloadAudit, PlacePartsInput};
 use sch_doc::{Netlist, SchDoc, connect};
 use sch_place::ir::LayoutIr;
 use sch_place::item::Item;
@@ -157,11 +157,17 @@ pub fn place_parts(
 ) -> Result<PlaceReport> {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let before = connect::extract(doc);
-    let existing = before
-        .nets
-        .iter()
-        .map(|net| (net.name.clone(), net.pins.len()))
-        .collect::<ExistingNetPins>();
+    let existing = ExistingSheet {
+        net_pins: before
+            .nets
+            .iter()
+            .map(|net| (net.name.clone(), net.pins.len()))
+            .collect(),
+        refs: doc
+            .symbols()
+            .map(|symbol| symbol.refdes().to_string())
+            .collect(),
+    };
     let (added, diags, audit) = sch_check::into_design(input, &provider, &existing);
     if !audit.is_valid() {
         return Err(Error::InvalidPayload(audit));
