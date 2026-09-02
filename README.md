@@ -132,15 +132,37 @@ VLM-judged suite under `quality/` runs natural-language create/edit/replace case
 
 ```sh
 python3 quality/run.py --list
-python3 quality/run.py create-hard-pcb
+python3 quality/run.py --question "is the board production-ready?" --max-turns 4 create-hard-pcb
+python3 quality/run.py --suite schematic --output quality/runs/schematic
 ```
 
 The runner uses the same `llm.endpoint`, `llm.apiKey`, and `llm.model` from the
 platform Gordian config as normal agent runs; it does not maintain separate
-quality credentials.
+quality credentials. KiCad checks and reference renders use only `KICAD_CLI` or
+`kicad.cliPath` from `~/.config/gordian/config.toml`, and reject anything other
+than KiCad 10.
 
-Each run records KiCAD ERC/DRC facts, before/after renders, the agent transcript,
-and a judge verdict containing only `score` and `issues` under `quality/runs/`.
+Cases are graded on their final files, not speed. Create cases require the
+requested part count and clean ERC; PCB create and campaign cases additionally
+require clean DRC, zero unconnected items, fabrication files, schematic and PCB
+critic scores of at least 8, and human-look scores of at least 8. `agent_seconds`
+and total `elapsed_seconds` remain recorded facts. Edit and replacement cases
+keep their exact moved/lost/added and connectivity checks. Rubric assertions use
+`expect: fact OP JSON` or `expect: len(fact) OP JSON`.
+
+If the agent's final reply says its wall-clock or request budget ended the turn
+and required files or clean checks are missing, the runner sends
+`continue from the current state: ...` through `--input -`. It repeats up to
+`--max-turns` (default 4) and grades only the accumulated final state. Every turn
+records seconds, provider requests, tool calls, refusals, loop smells, and a
+self-diagnosis in `result.json` under `turns[]`.
+
+Each turn also produces `artifacts/phase-N-schematic.png` and/or
+`artifacts/phase-N-pcb.png`. `artifacts/gallery.html` shows the phases side by
+side with tool-call and ERC/DRC captions, and `findings.md` links the gallery.
+The final human-look judge compares each available render with the closest-size
+human-authored KiCad demo, rendered by KiCad 10 and cached under
+`quality/references/`.
 
 PCB changes should be exercised through the same schematic-derived and current-board tools the
 agent uses; avoid privileged JSON-only board construction paths in tests.

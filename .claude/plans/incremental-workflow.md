@@ -97,3 +97,11 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   header/GPIO pin-swap back into the schematic as phase-4 levers (the 2×20-header + QFN board fails at
   the QFN escape otherwise; `escape_bottleneck` already detects it).
 - Cut: `place_parts_pcb` rename; idiom tiles deferred until the first typesetter is honest.
+
+## Status 2026-09-02 (evening)
+- Merged: place-accept (pin aliases, non-blocking footprints, lenient intent, shared footprint policy;
+  refusals 9/11→3/10 stm32, 12/15→2/6 esp32), W4 harness (quality-first gates, `--max-turns`
+  continuation, `turns[]`, gallery.html, human-look judge vs KiCAD demos — small cases score 4–5/10).
+- Running: W1 PCB partial state (Opus), W2 workflow phases + handoff (codex), engine-shorts (Opus),
+  bluepill-erc (Opus). Next: W3 schematic bench + netlist-drawn arrange + place_parts partial commit
+  (after bluepill merges); then a full campaign under the new rubric.

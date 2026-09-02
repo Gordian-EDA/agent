@@ -56,6 +56,7 @@ impl SymbolTable {
             .map(|(number, name, etype, unit)| PinMeta {
                 number: number.into(),
                 name: name.into(),
+                alternates: Vec::new(),
                 etype,
                 dir: match etype {
                     PinType::PowerInput | PinType::PowerOutput => PinDir::Power,
@@ -174,6 +175,7 @@ fn global_label_meta() -> SymbolMeta {
         pins: vec![PinMeta {
             number: "1".into(),
             name: "~".into(),
+            alternates: Vec::new(),
             etype: PinType::Passive,
             dir: PinDir::Passive,
             unit: 1,

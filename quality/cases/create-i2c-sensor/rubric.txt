@@ -1,1 +1,7 @@
 The selected real sensor must be wired according to its pin functions. Both I²C lines need pull-ups, power needs local decoupling, the connector pinout must be complete, and any address pin must have an intentional valid state.
+expect: agent_exit == 0
+expect: schematic_created == true
+expect: part_count >= 5
+expect: erc_errors == 0
+expect: schematic_critic_score >= 8
+expect: human_look_schematic_score >= 8
