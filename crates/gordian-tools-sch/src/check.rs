@@ -378,7 +378,7 @@ impl FixPlanner {
                 || (message.contains("reversed") && message.contains("led"))
             {
                 self.polarity(finding)
-            } else if code.contains("footprint") || message.contains("missing footprint") {
+            } else if is_assignable_footprint(&code, &message) {
                 self.footprint(finding, ctx)
             } else if is_connection_finding(&code, &message) {
                 self.connection(finding)
@@ -413,12 +413,7 @@ impl FixPlanner {
                     candidates
                         .iter()
                         .copied()
-                        .find(|pin| {
-                            contains_name(&finding.message, &pin.name)
-                                || pin.id.rsplit_once('.').is_some_and(|(_, number)| {
-                                    contains_name(&finding.message, number)
-                                })
-                        })
+                        .find(|pin| pin.name != "~" && contains_name(&finding.message, &pin.name))
                         .or_else(|| {
                             let loose = candidates
                                 .iter()
@@ -529,6 +524,11 @@ impl FixPlanner {
                     .min_by(|left, right| left.id.cmp(&right.id))
             })
             .or_else(|| self.nearest_loose(from))?;
+        let (from, to) = if from.unconnected && to.unconnected && from.id > to.id {
+            (to, from)
+        } else {
+            (from, to)
+        };
         Some((
             ToolFix {
                 tool: "connect",
@@ -605,11 +605,20 @@ impl FixPlanner {
             .map(|reference| reference.split('.').next().unwrap_or(reference))
             .find(|reference| self.parts.contains_key(*reference))?;
         let footprint = self
-            .default_footprints
-            .get(reference)
-            .cloned()
-            .or_else(|| conventional_footprint(&self.parts[reference]).map(str::to_string))
+            .suggested_footprint(&finding.message)
             .filter(|footprint| catalog_has(ctx, footprint))
+            .map(str::to_owned)
+            .or_else(|| {
+                self.default_footprints
+                    .get(reference)
+                    .cloned()
+                    .filter(|footprint| catalog_has(ctx, footprint))
+            })
+            .or_else(|| {
+                conventional_footprint(&self.parts[reference])
+                    .filter(|footprint| catalog_has(ctx, footprint))
+                    .map(str::to_owned)
+            })
             .or_else(|| {
                 let query = format!("{} {}", self.parts[reference], finding.message);
                 ctx.footprint_catalog()
@@ -623,6 +632,15 @@ impl FixPlanner {
             &footprint,
             &self.parts[reference],
         ))
+    }
+
+    fn suggested_footprint<'a>(&self, message: &'a str) -> Option<&'a str> {
+        message
+            .split_once("did you mean ")
+            .map(|(_, candidates)| candidates)
+            .and_then(|candidates| candidates.split([',', '?']).next())
+            .map(str::trim)
+            .filter(|candidate| candidate.contains(':'))
     }
 
     fn library_no_connect(&self, finding: &Finding) -> Option<(ToolFix, String)> {
@@ -671,6 +689,13 @@ fn is_output_conflict(code: &str, message: &str) -> bool {
         || code.contains("output-to-output")
         || message.contains("conflicting drivers")
         || message.contains("multiple outputs")
+}
+
+fn is_assignable_footprint(code: &str, message: &str) -> bool {
+    matches!(
+        code,
+        "footprint-unknown" | "footprint-id" | "missing-footprint"
+    ) || message.contains("missing footprint")
 }
 
 fn is_power_input(etype: &str) -> bool {
