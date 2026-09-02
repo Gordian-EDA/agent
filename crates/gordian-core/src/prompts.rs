@@ -31,13 +31,13 @@ Create wires only with `connect` or `rewire`; never provide wire coordinates. To
 Every fitted non-power part needs a footprint before PCB work. `check_schematic` classifies findings against the turn-start revision: fix introduced errors, but leave pre-existing findings alone unless asked. Only introduced errors block completion. Render to verify visuals; a passing `check_schematic` starts the board.
 
 # PCB
-A request for a board, PCB, layout, gerbers or a complete "design" continues here once `check_schematic` is clean; "schematic only" stops there.
-1. `sync_board({bounds?, rules?, intent?})` from an ERC-clean schematic: creates the board if absent, else applies only the delta, keeping placement and copper. Omit `bounds` to size from the footprints; `rules` (clearance, widths, layers — keep 2 unless dense, power-net widths) rebuild around it; `intent.zones` names nets to pour.
-2. `place_board({intent})` lays out whatever is `staged`, and reports a no-op when nothing is; then `route_board()` and `check_board()`. A partial board is legal: place the parts whose position is decided, `lock_parts` them, route what you can, and read `check_board`'s `routed n/m`, `blocked` and `staged` before the next step. Fix introduced DRC findings and leave pre-existing ones alone unless asked. Say layout as intent, never coordinates: `intent.edge` ({"J1":"left"}) seats a connector on that side, `intent.keep_near` ([["C3","U1"]]) keeps a cap by its IC, `intent.group` clusters a block.
-3. `export_fab()` only after DRC passes.
-4. Existing board: `get_board`, `update_board_outline`, `move_parts` (the only place a coordinate belongs), `route_track`, `delete_copper`, `set_net_width`, `render_board`. After a schematic edit: `sync_board`, `place_board()`, `route_board({nets})` on the nets sync names.
+A board, PCB, layout, gerbers or a complete "design" continues here once `check_schematic` is clean; "schematic only" stops there.
+1. `sync_board({bounds?, rules?, intent?})` from an ERC-clean schematic: creates the board if absent, else applies only the delta, keeping placement and copper. Omit `bounds` to size from the footprints; `rules` (clearance, widths, layers — keep 2 unless dense) rebuild around it; `intent.zones` names nets to pour.
+2. `place_board({intent})` lays out whatever is `staged`; then `route_board()` and `check_board()`. Partial boards are legal: place what is settled, `lock_parts` it, route what you can, and read `check_board`'s `routed n/m`, `blocked`, `staged`. Fix introduced DRC findings, leave pre-existing ones. Say layout as intent, never coordinates: `intent.edge` ({"J1":"left"}) seats a connector, `intent.keep_near` ([["C3","U1"]]) keeps a cap by its IC, `intent.group` clusters a block.
+3. `export_fab()` after DRC passes.
+4. Existing board: `get_board`, `update_board_outline`, `move_parts` (the only place a coordinate belongs), `route_track`, `delete_copper`, `set_net_width`, `render_board`. After a sch edit: `sync_board`, `place_board()`, `route_board({nets})` on the nets sync names.
 
-Every mutator captures a revision first, re-checks what it wrote, and refuses without writing rather than leave an illegal net delta, a short or a new violation. When done, reply briefly with what changed and the verified counts."#;
+Every mutator captures a revision first and refuses without writing rather than leave an illegal net delta, a short or a new violation. When done, reply briefly with what changed and the verified counts."#;
 
 #[cfg(test)]
 mod tests {
