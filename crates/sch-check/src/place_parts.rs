@@ -451,7 +451,7 @@ fn component(
 }
 
 fn target(net: &str) -> PinTarget {
-    if net.eq_ignore_ascii_case("nc") {
+    if is_no_connect_name(net) {
         PinTarget::NoConnect
     } else {
         PinTarget::Net(net.to_string())
@@ -614,13 +614,17 @@ pub fn place_parts_input_schema() -> Value {
 
 #[cfg(test)]
 mod no_connect_names {
+    use crate::PinTarget;
+
     #[test]
-    fn conventional_no_connect_names_are_recognised() {
+    fn conventional_no_connect_names_lower_to_no_connects() {
         for name in ["nc", "NC", "NC_RTS", "nc_cts", "NC3", "N/C"] {
             assert!(super::is_no_connect_name(name), "{name}");
+            assert_eq!(super::target(name), PinTarget::NoConnect, "{name}");
         }
         for name in ["NCS", "SYNC", "ENC1", "GND", "NC_"] {
             assert!(!super::is_no_connect_name(name), "{name}");
+            assert_eq!(super::target(name), PinTarget::Net(name.into()), "{name}");
         }
     }
 }
