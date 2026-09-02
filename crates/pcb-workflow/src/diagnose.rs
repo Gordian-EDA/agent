@@ -7,7 +7,7 @@
 //! attributed to the pads it touches, located in mm, and paired with the fix its
 //! class implies.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use kicad_board::ImportedPart;
 use pcb_model::Finding as DrcViolation;
@@ -609,7 +609,10 @@ pub(crate) fn unrouted_report(
 /// own part list is what turns that back into a handle a caller can pass
 /// straight to `route_track`, so only a reference the board really carries and a
 /// pad that part really has is ever reported.
-fn pad_handle(parts: &[ImportedPart], description: &str) -> Option<(String, Point2)> {
+pub(crate) fn pad_handle(
+    parts: &[ImportedPart],
+    description: &str,
+) -> Option<(String, String, Point2)> {
     let words: Vec<&str> = description
         .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
         .filter(|w| !w.is_empty())
@@ -622,51 +625,42 @@ fn pad_handle(parts: &[ImportedPart], description: &str) -> Option<(String, Poin
         .iter()
         .find(|part| words.iter().any(|w| *w == part.reference))?;
     let pad = part.pads.iter().find(|p| p.number == *pad_number)?;
-    Some((format!("{}.{}", part.reference, pad.number), pad.at))
+    Some((
+        format!("{}.{}", part.reference, pad.number),
+        pad.net.clone()?,
+        pad.at,
+    ))
 }
 
-/// KiCAD's unconnected findings as the pad pairs they are.
-///
-/// A bare count tells a caller nothing; the two pads that should be joined tell
-/// it exactly which `route_track` or `route_board{nets}` call to make.
-pub(crate) fn unconnected_pairs<'a>(
+/// Resolve one KiCad unconnected finding to two verified same-net board pads.
+pub(crate) fn unconnected_pair(
     parts: &[ImportedPart],
-    violations: impl IntoIterator<Item = &'a kicad::Violation>,
-) -> Vec<Value> {
-    violations
-        .into_iter()
-        .map(|violation| {
-            let handles: Vec<(String, Point2)> = violation
-                .items
-                .iter()
-                .filter_map(|item| pad_handle(parts, &item.description))
-                .collect();
-            let endpoint = |index: usize| {
-                handles
-                    .get(index)
-                    .map(|(pad, at)| json!({ "pad": pad, "at": [round2(at.x), round2(at.y)] }))
-            };
-            let net = violation
-                .description
-                .split(['[', ']'])
-                .nth(1)
-                .map(str::to_owned);
-            json!({
-                "net": net,
-                "from": endpoint(0),
-                "to": endpoint(1),
-                "description": violation.description,
-                "suggestion": match (handles.first(), handles.get(1)) {
-                    (Some((from, _)), Some((to, _))) => format!(
-                        "join them: route_board {{\"nets\":[{}]}}, or route_track \
-                         {{\"net\":…,\"from\":\"{from}\",\"to\":\"{to}\"}}",
-                        net.as_deref().map_or("…".to_owned(), |n| format!("\"{n}\"")),
-                    ),
-                    _ => "run route_board again, or inspect the board render".to_owned(),
-                },
-            })
-        })
-        .collect()
+    violation: &kicad::Violation,
+) -> Option<Value> {
+    let handles = violation
+        .items
+        .iter()
+        .filter_map(|item| pad_handle(parts, &item.description));
+    let mut by_net: BTreeMap<String, Vec<(String, Point2)>> = BTreeMap::new();
+    for (pad, net, at) in handles {
+        by_net.entry(net).or_default().push((pad, at));
+    }
+    let (net, handles) = by_net.into_iter().find(|(_, handles)| handles.len() >= 2)?;
+    let endpoint = |index: usize| {
+        let (pad, at) = &handles[index];
+        json!({ "pad": pad, "at": [round2(at.x), round2(at.y)] })
+    };
+    Some(json!({
+        "net": net,
+        "from": endpoint(0),
+        "to": endpoint(1),
+        "description": violation.description,
+        "suggestion": format!(
+            "join them: route_board {{\"nets\":[\"{net}\"]}}, or route_track \
+             {{\"net\":\"{net}\",\"from\":\"{}\",\"to\":\"{}\"}}",
+            handles[0].0, handles[1].0,
+        ),
+    }))
 }
 
 fn owners_label(owners: &[String]) -> String {
@@ -751,6 +745,10 @@ mod tests {
     use pcb_model::{Connection, LayerRef, Rect, RoutePoint};
 
     fn part(reference: &str, pads: &[(&str, f64, f64)]) -> ImportedPart {
+        part_on_net(reference, pads, None)
+    }
+
+    fn part_on_net(reference: &str, pads: &[(&str, f64, f64)], net: Option<&str>) -> ImportedPart {
         ImportedPart {
             reference: reference.to_owned(),
             lib_id: "Package_TO_SOT_SMD:SOT-23-5".to_owned(),
@@ -763,7 +761,7 @@ mod tests {
                 .iter()
                 .map(|(number, x, y)| ImportedPad {
                     number: (*number).to_owned(),
-                    net: None,
+                    net: net.map(str::to_owned),
                     at: Point2 { x: *x, y: *y },
                     layers: vec![LayerRef::top()],
                     shape: "rect".to_owned(),
@@ -890,13 +888,13 @@ mod tests {
     #[test]
     fn unconnected_items_come_back_as_the_pad_pair_they_are() {
         let parts = vec![
-            part("U1", &[("3", 10.0, 10.0)]),
-            part("J1", &[("1", 20.0, 10.0)]),
+            part_on_net("U1", &[("3", 10.0, 10.0)], Some("VOUT")),
+            part_on_net("J1", &[("1", 20.0, 10.0)], Some("VOUT")),
         ];
         let violation = kicad::Violation {
             severity: "error".to_owned(),
             kind: "unconnected_items".to_owned(),
-            description: "Missing connection between items [VOUT]".to_owned(),
+            description: "Missing connection between items".to_owned(),
             items: vec![
                 kicad::ViolationItem {
                     description: "Pad 3 of U1 on F.Cu".to_owned(),
@@ -911,13 +909,13 @@ mod tests {
             ],
         };
 
-        let pairs = unconnected_pairs(&parts, &[violation]);
+        let pair = unconnected_pair(&parts, &violation).unwrap();
 
-        assert_eq!(pairs[0]["net"], "VOUT");
-        assert_eq!(pairs[0]["from"]["pad"], "U1.3");
-        assert_eq!(pairs[0]["to"]["pad"], "J1.1");
-        assert_eq!(pairs[0]["to"]["at"], json!([20.0, 10.0]));
-        let suggestion = pairs[0]["suggestion"].as_str().unwrap();
+        assert_eq!(pair["net"], "VOUT");
+        assert_eq!(pair["from"]["pad"], "U1.3");
+        assert_eq!(pair["to"]["pad"], "J1.1");
+        assert_eq!(pair["to"]["at"], json!([20.0, 10.0]));
+        let suggestion = pair["suggestion"].as_str().unwrap();
         assert!(
             suggestion.contains("route_board {\"nets\":[\"VOUT\"]}"),
             "{suggestion}"
@@ -926,6 +924,35 @@ mod tests {
             suggestion.contains("\"from\":\"U1.3\",\"to\":\"J1.1\""),
             "{suggestion}"
         );
+    }
+
+    /// A malformed multi-item report must never turn unrelated nets into a
+    /// suggested point-to-point repair.
+    #[test]
+    fn unconnected_pairs_never_cross_nets() {
+        let parts = vec![
+            part_on_net("LED1", &[("2", 10.0, 10.0)], Some("/OP2_OUT")),
+            part_on_net("U3", &[("1", 20.0, 10.0)], Some("GND")),
+        ];
+        let violation = kicad::Violation {
+            severity: "error".to_owned(),
+            kind: "unconnected_items".to_owned(),
+            description: "Missing connection between items [/OP2_OUT]".to_owned(),
+            items: vec![
+                kicad::ViolationItem {
+                    description: "Pad 2 [/OP2_OUT] of LED1 on F.Cu".to_owned(),
+                    uuid: None,
+                    pos: None,
+                },
+                kicad::ViolationItem {
+                    description: "Pad 1 [GND] of U3 on F.Cu".to_owned(),
+                    uuid: None,
+                    pos: None,
+                },
+            ],
+        };
+
+        assert!(unconnected_pair(&parts, &violation).is_none());
     }
 
     #[test]

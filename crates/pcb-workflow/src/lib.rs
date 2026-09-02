@@ -97,7 +97,7 @@ pub(crate) fn fmt_num(v: f64) -> String {
     format!("{v}")
 }
 
-pub use export::check_board;
+pub use export::{check_board, refill_zones};
 pub use fab::export_fab;
 pub use footprints::{get_footprint_info, search_footprints};
 pub use interactive::{

@@ -757,8 +757,31 @@ fn with_plane_fanout(
         return route(deps, problem);
     };
     let mut run = route(deps, &sub);
-    run.result.solution.traces.extend(fanout.traces);
-    run.result.solution.vias.extend(fanout.vias);
+    let failed = run
+        .result
+        .failed
+        .iter()
+        .map(|failure| failure.connection.as_str())
+        .collect::<BTreeSet<_>>();
+    run.result.solution.traces.extend(
+        fanout
+            .traces
+            .into_iter()
+            .filter(|trace| !failed.contains(trace.connection.as_str())),
+    );
+    run.result.solution.vias.extend(
+        fanout
+            .vias
+            .into_iter()
+            .filter(|via| !failed.contains(via.connection.as_str())),
+    );
+    postroute_cleanup(deps, problem, &mut run.result.solution);
+    reconcile_connectivity(
+        deps,
+        problem,
+        &mut run.result.solution,
+        &mut run.result.failed,
+    );
     run
 }
 
@@ -2704,6 +2727,42 @@ mod tests {
             sub.connections[0].points_to_connect[1].point(),
             fanout.vias[0].at
         );
+    }
+
+    #[test]
+    fn failed_plane_fallback_drops_the_whole_provisional_fanout() {
+        let mut p = simple_two_point_problem();
+        p.layer_count = 4;
+        p.plane_nets.insert("N".to_owned(), 1);
+        p.obstacles = p.connections[0]
+            .points_to_connect
+            .iter()
+            .map(|point| pcb_model::Obstacle {
+                kind: "pad".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: point.point(),
+                width: 1.0,
+                height: 1.0,
+                connected_to: vec!["N".to_owned()],
+            })
+            .collect();
+
+        let run = with_plane_fanout(&DEPS, &p, |_, _| TunedRouteRun {
+            result: RouteResult {
+                solution: RouteSolution::default(),
+                failed: vec![FailedNet {
+                    connection: "N".to_owned(),
+                    reason: "fallback failed".to_owned(),
+                }],
+                engine: "test".to_owned(),
+            },
+            passes: Vec::new(),
+            global: None,
+        });
+
+        assert!(run.result.solution.traces.is_empty());
+        assert!(run.result.solution.vias.is_empty());
+        assert_eq!(run.result.failed[0].connection, "N");
     }
 
     #[test]

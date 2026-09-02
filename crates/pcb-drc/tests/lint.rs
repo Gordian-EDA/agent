@@ -197,6 +197,32 @@ use pcb_model::{Drc, Finding, Violation};
         ));
     }
 
+    #[test]
+    fn unverified_zone_does_not_hide_a_dangling_stitch_via() {
+        let mut zone = pad(&["GND"], (50.0, 50.0), 100.0, 100.0, &["bottom"]);
+        zone.kind = "zone".to_owned();
+        let p = problem(
+            vec![conn("GND", &[(10.0, 10.0, "top")])],
+            vec![pad(&["GND"], (10.0, 10.0), 1.0, 1.0, &["top"]), zone],
+        );
+        let s = RouteSolution {
+            traces: Vec::new(),
+            vias: vec![via("GND", (10.0, 10.0))],
+        };
+
+        let dangling = StandardDrc
+            .check(&p, &s)
+            .into_iter()
+            .filter(|finding| matches!(finding, Finding::DanglingEnd { .. }))
+            .collect::<Vec<_>>();
+
+        assert_eq!(dangling.len(), 1, "got {dangling:?}");
+        assert!(matches!(
+            &dangling[0],
+            Finding::DanglingEnd { net, layer, .. } if net == "GND" && layer == "bottom"
+        ));
+    }
+
     // ── per-variant triggers ────────────────────────────────────────────────
 
     #[test]

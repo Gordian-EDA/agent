@@ -58,25 +58,19 @@ fn lint_summary(
     lint_summary_from_violations(&violations, failed, plane_nets)
 }
 
-/// An `Unconnected` is an EXPECTED gap (not an engine bug) when:
-///  - the net was already reported failed (an honest finisher/global drop), OR
-///  - the net is a copper PLANE net. A plane net is NOT trace-routed — it was
-///    removed from the routed connections and its pins connect through the full-board
-///    plane (emitted at export) plus a per-pad stitching via; any pad whose via
-///    couldn't be placed is already reported as a failed stitch. So the trace-
-///    connectivity oracle, which sees the stitch vias but not the plane copper,
-///    reads every stitched plane pad as "unconnected" — a false signal. KiCAD DRC
-///    (which has the plane) is the authority on real plane connectivity.
+/// An `Unconnected` is expected only when the net was already reported failed.
+/// The connectivity oracle models declared planes, so a plane gap that survives
+/// that model is a real unstitchable pad and its entire provisional fanout goes.
 fn is_expected_gap(
     v: &DrcViolation,
     failed_nets: &BTreeSet<&str>,
-    plane_nets: &BTreeSet<String>,
+    _plane_nets: &BTreeSet<String>,
 ) -> bool {
     matches!(
         v,
         DrcViolation::Connectivity {
             violation: ConnViolation::Unconnected { connection, .. },
-        } if failed_nets.contains(connection.as_str()) || plane_nets.contains(connection)
+        } if failed_nets.contains(connection.as_str())
     )
 }
 
@@ -517,6 +511,13 @@ fn route_live_board(
 
     replace_route_atomically(ctx, &rp, &result.solution, &board.layer_names, existing)
         .map_err(|e| refusal(format!("could not write route to the board: {e}")))?;
+    let fallback_plane_nets = validate_written_plane_routes(
+        ctx,
+        &solve_view,
+        &rp,
+        &board.layer_names,
+        &mut result,
+    )?;
 
     // A connection can acquire more than one failure reason as the route is
     // cleaned up (for example, an initial router miss followed by an honest
@@ -583,6 +584,13 @@ fn route_live_board(
         "pruned_dangling_spurs": pruned_spurs,
         "dropped_failed_net_copper": dropped_failed,
         "dropped_violating_nets": dropped,
+        "plane_pads": plane_pad_report(
+            &board.imported.parts,
+            &rp,
+            &result.solution,
+            &fallback_plane_nets,
+        ),
+        "plane_track_fallback": fallback_plane_nets,
         // What this call actually replaced. A scoped route rewrites only the
         // named nets' copper, so reporting the whole board's would say it threw
         // away work it in fact kept.
@@ -610,6 +618,187 @@ fn route_live_board(
             )
         },
     }))
+}
+
+fn validate_written_plane_routes(
+    ctx: &AgentRuntime,
+    solve_view: &RoutingView,
+    full_view: &RoutingView,
+    layer_names: &[String],
+    result: &mut RouteResult,
+) -> std::result::Result<BTreeSet<String>, Value> {
+    let routed_planes = solve_view
+        .connections
+        .iter()
+        .filter(|connection| full_view.plane_nets.contains_key(&connection.name))
+        .map(|connection| connection.name.clone())
+        .collect::<BTreeSet<_>>();
+    if routed_planes.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let path = ctx.pcb_path();
+    crate::export::materialize_zones_for_drc(
+        &path,
+        ctx.env(),
+        ctx.kicad(),
+        ctx.config().kicad.attach_running,
+    )
+    .map_err(|error| refusal(format!("could not refill routed copper zones: {error}")))?;
+    let report = ctx
+        .env()
+        .drc(&path)
+        .map_err(|error| refusal(format!("could not validate routed copper zones: {error}")))?;
+    let rejected = physical_plane_defects(&report, routed_planes.iter());
+    if rejected.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    let fallback = route_rejected_planes(solve_view, result, &rejected);
+    replace_route_atomically(ctx, full_view, &result.solution, layer_names, (1, 0))
+        .map_err(|error| refusal(format!("could not replace rejected plane fanout: {error}")))?;
+    crate::export::materialize_zones_for_drc(
+        &path,
+        ctx.env(),
+        ctx.kicad(),
+        ctx.config().kicad.attach_running,
+    )
+    .map_err(|error| refusal(format!("could not refill zones after plane fallback: {error}")))?;
+    let report = ctx.env().drc(&path).map_err(|error| {
+        refusal(format!(
+            "could not validate track-routed plane fallback: {error}"
+        ))
+    })?;
+    let remaining = physical_plane_defects(&report, rejected.iter());
+    if !remaining.is_empty() {
+        return Err(json!({
+            "error": format!(
+                "route_board could not prove connectivity for plane net(s) {} after refill and track fallback; no route was kept",
+                remaining.iter().cloned().collect::<Vec<_>>().join(", ")
+            ),
+            "code": "plane_connectivity_unproven",
+            "nets": remaining,
+        }));
+    }
+    Ok(fallback)
+}
+
+fn physical_plane_defects<'a>(
+    report: &kicad::DrcReport,
+    plane_nets: impl IntoIterator<Item = &'a String>,
+) -> BTreeSet<String> {
+    let planes = plane_nets.into_iter().cloned().collect::<BTreeSet<_>>();
+    report
+        .unconnected_items
+        .iter()
+        .chain(
+            report
+                .violations
+                .iter()
+                .filter(|violation| !crate::export::is_non_copper(violation)),
+        )
+        .flat_map(|violation| {
+            violation.items.iter().flat_map(|item| {
+                item.description
+                    .split('[')
+                    .skip(1)
+                    .filter_map(|tail| tail.split_once(']').map(|(net, _)| net.to_owned()))
+            })
+        })
+        .filter(|net| planes.contains(net))
+        .collect()
+}
+
+fn route_rejected_planes(
+    solve_view: &RoutingView,
+    result: &mut RouteResult,
+    rejected: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    drop_solution_nets(&mut result.solution, rejected);
+    result
+        .failed
+        .retain(|failure| !rejected.contains(&failure.connection));
+    let mut fallback_view = solve_view.clone();
+    fallback_view
+        .connections
+        .retain(|connection| rejected.contains(&connection.name));
+    fallback_view
+        .plane_nets
+        .retain(|net, _| !rejected.contains(net));
+    let fixed_obstacles = copper_obstacles(&fallback_view, &result.solution);
+    fallback_view
+        .obstacles
+        .extend(fixed_obstacles);
+    let fallback = route_with_engine(&fallback_view).result;
+    let failed = fallback
+        .failed
+        .iter()
+        .map(|failure| failure.connection.clone())
+        .collect::<BTreeSet<_>>();
+    result.solution.traces.extend(
+        fallback
+            .solution
+            .traces
+            .into_iter()
+            .filter(|trace| !failed.contains(&trace.connection)),
+    );
+    result.solution.vias.extend(
+        fallback
+            .solution
+            .vias
+            .into_iter()
+            .filter(|via| !failed.contains(&via.connection)),
+    );
+    for net in rejected {
+        if failed.contains(net) {
+            append_failed(
+                result,
+                net,
+                "zone refill did not connect the fanout, and ordinary track fallback failed",
+            );
+        }
+    }
+    rejected.difference(&failed).cloned().collect()
+}
+
+fn plane_pad_report(
+    parts: &[ImportedPart],
+    problem: &RoutingView,
+    solution: &RouteSolution,
+    fallback: &BTreeSet<String>,
+) -> Vec<Value> {
+    parts
+        .iter()
+        .flat_map(|part| {
+            part.pads.iter().filter_map(move |pad| {
+                let net = pad.net.as_deref()?;
+                if !problem.plane_nets.contains_key(net) {
+                    return None;
+                }
+                let via_pour = !fallback.contains(net)
+                    && solution.vias.iter().any(|via| {
+                        via.connection == net
+                            && (via.at.dist(pad.at) <= via.diameter / 2.0 + geom::EPS
+                                || solution.traces.iter().any(|trace| {
+                                    trace.connection == net
+                                        && trace.path.first().is_some_and(|at| {
+                                            at.dist(pad.at)
+                                                <= pad.size.x.max(pad.size.y) / 2.0 + geom::EPS
+                                        })
+                                        && trace.path.last().is_some_and(|at| {
+                                            at.dist(via.at)
+                                                <= via.diameter / 2.0 + geom::EPS
+                                        })
+                                }))
+                    });
+                Some(json!({
+                    "pad": format!("{}.{}", part.reference, pad.number),
+                    "net": net,
+                    "at": [pad.at.x, pad.at.y],
+                    "via_pour": via_pour,
+                }))
+            })
+        })
+        .collect()
 }
 
 /// Drop the board's existing copper from the obstacle list.
@@ -750,6 +939,13 @@ fn make_route_honest_with_report(
         }
         violations = lint(rp, &result.solution);
     }
+    for net in defective_nets(&violations, plane_nets) {
+        append_failed(
+            result,
+            &net,
+            "connectivity oracle reported no complete copper for this net",
+        );
+    }
     dropped.sort();
     dropped.dedup();
     (dropped, violations)
@@ -766,8 +962,7 @@ fn make_route_honest(
 
 /// The nets whose copper the connectivity oracle says must go.
 ///
-/// An `Unconnected` plane net is expected — a plane joins its pads through
-/// copper this solution does not carry. A SHORT is a defect on any net, but the
+/// A SHORT is a defect on any net, but the
 /// copper that must go is the non-plane side wherever there is one: dropping a
 /// plane's stitch vias to clear another net's stray trace would take the whole
 /// plane's connectivity with it. Only when every side of a short is a plane net
@@ -778,7 +973,7 @@ fn defective_nets(violations: &[DrcViolation], plane_nets: &BTreeSet<String>) ->
         match violation {
             DrcViolation::Connectivity {
                 violation: ConnViolation::Unconnected { connection, .. },
-            } if !plane_nets.contains(connection) => {
+            } => {
                 defective.insert(connection.clone());
             }
             DrcViolation::Connectivity {
@@ -3634,6 +3829,12 @@ mod escape_bottleneck_tests {
                     diameter: 0.6,
                     drill: 0.3,
                     span: pcb_model::ViaSpan::Through,
+                }, Via {
+                    connection: "GND".to_string(),
+                    at: Point2 { x: 4.13, y: 1.13 },
+                    diameter: 0.6,
+                    drill: 0.3,
+                    span: pcb_model::ViaSpan::Through,
                 }],
             },
         };
@@ -3642,8 +3843,88 @@ mod escape_bottleneck_tests {
         assert_eq!(prune_dangling_spurs_if_safe(&problem, &mut result), 0);
         assert!(make_route_honest(&problem, &mut result, &planes).is_empty());
         assert_eq!(result.solution.traces.len(), 1);
-        assert_eq!(result.solution.vias.len(), 1);
+        assert_eq!(result.solution.vias.len(), 2);
         assert!(result.failed.is_empty());
+    }
+
+    #[test]
+    fn incomplete_plane_fanout_is_dropped_as_a_whole_net() {
+        let problem = bottom_plane_problem();
+        let mut result = RouteResult {
+            engine: "plane-fanout".to_owned(),
+            failed: Vec::new(),
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "GND".to_owned(),
+                    layer: LayerRef::top(),
+                    width: 0.2,
+                    path: vec![Point2::new(1.13, 1.13), Point2::new(1.5, 1.5)],
+                }],
+                vias: vec![Via {
+                    connection: "GND".to_owned(),
+                    at: Point2::new(1.5, 1.5),
+                    diameter: 0.6,
+                    drill: 0.3,
+                    span: ViaSpan::Through,
+                }],
+            },
+        };
+        let planes = BTreeSet::from(["GND".to_owned()]);
+
+        assert_eq!(make_route_honest(&problem, &mut result, &planes), ["GND"]);
+        assert!(result.solution.traces.is_empty());
+        assert!(result.solution.vias.is_empty());
+        assert_eq!(result.failed[0].connection, "GND");
+    }
+
+    #[test]
+    fn physical_plane_check_attributes_only_named_plane_findings() {
+        let finding = |net: &str| kicad::Violation {
+            severity: "error".to_owned(),
+            kind: "unconnected_items".to_owned(),
+            description: "Missing connection between items".to_owned(),
+            items: vec![kicad::ViolationItem {
+                description: format!("Via [{net}] on F.Cu - B.Cu"),
+                uuid: None,
+                pos: None,
+            }],
+        };
+        let report = kicad::DrcReport {
+            violations: Vec::new(),
+            unconnected_items: vec![finding("GND"), finding("SIG")],
+        };
+
+        assert_eq!(
+            physical_plane_defects(&report, [&"GND".to_owned()]),
+            BTreeSet::from(["GND".to_owned()])
+        );
+    }
+
+    #[test]
+    fn rejected_plane_is_rebuilt_as_an_ordinary_track_net() {
+        let problem = bottom_plane_problem();
+        let mut result = RouteResult {
+            engine: "plane-fanout".to_owned(),
+            failed: Vec::new(),
+            solution: RouteSolution {
+                traces: Vec::new(),
+                vias: vec![Via {
+                    connection: "GND".to_owned(),
+                    at: Point2::new(1.13, 1.13),
+                    diameter: 0.6,
+                    drill: 0.3,
+                    span: ViaSpan::Through,
+                }],
+            },
+        };
+        let rejected = BTreeSet::from(["GND".to_owned()]);
+
+        let fallback = route_rejected_planes(&problem, &mut result, &rejected);
+
+        assert_eq!(fallback, rejected);
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert!(result.solution.traces.iter().any(|trace| trace.connection == "GND"));
+        assert!(result.solution.vias.is_empty());
     }
 
     /// A net this call was not asked to route, and which has no copper, is a

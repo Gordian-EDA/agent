@@ -520,6 +520,7 @@ fn is_pcb_stage_tool(name: &str) -> bool {
         "sync_board"
             | "place_board"
             | "route_board"
+            | "refill_zones"
             | "check_board"
             | "export_fab"
             | "open_board"
@@ -2056,6 +2057,7 @@ fn pcb_quality_invalidated_by(name: &str) -> bool {
         "sync_board"
             | "place_board"
             | "route_board"
+            | "refill_zones"
             | "move_parts"
             | "route_track"
             | "delete_copper"
@@ -2374,6 +2376,7 @@ fn tool_effect(name: &str) -> ToolEffect {
         "sync_board"
         | "place_board"
         | "route_board"
+        | "refill_zones"
         | "open_board"
         | "move_parts"
         | "route_track"
@@ -2524,6 +2527,7 @@ fn is_kicad_session_tool(name: &str) -> bool {
         "sync_board"
             | "place_board"
             | "route_board"
+            | "refill_zones"
             | "check_board"
             | "export_fab"
             | "open_board"
@@ -2547,8 +2551,8 @@ fn tool_timeout(name: &str) -> Duration {
         // backstop for a hang, not the mechanism.
         name if enforces_own_deadline(name) => PlacementBudget::DEFAULT + DEADLINE_MARGIN,
         // KiCAD IPC/CLI paths can legitimately take longer on first launch.
-        "sync_board" | "place_board" | "route_board" | "check_board" | "export_fab"
-        | "open_board" => Duration::from_secs(180),
+        "sync_board" | "place_board" | "route_board" | "refill_zones" | "check_board"
+        | "export_fab" | "open_board" => Duration::from_secs(180),
         _ => Duration::from_secs(90),
     }
 }

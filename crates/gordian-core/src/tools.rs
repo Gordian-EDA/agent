@@ -300,7 +300,8 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "delete_copper".into(),
-            description: "Delete nearby track/via; filter by kind, net, or layer.".into(),
+            description: "Delete track/via copper by click, or remove a net globally or inside a bbox."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -312,6 +313,17 @@ pub fn tool_defs() -> Vec<Tool> {
                         "description": "Point [x,y] mm."
                     },
                     "radius": { "type": "number", "description": "mm; default 0.4." },
+                    "bbox": {
+                        "type": "object",
+                        "properties": {
+                            "min_x": { "type": "number" },
+                            "min_y": { "type": "number" },
+                            "max_x": { "type": "number" },
+                            "max_y": { "type": "number" }
+                        },
+                        "required": ["min_x", "min_y", "max_x", "max_y"],
+                        "description": "Delete matching net copper intersecting this board-space box."
+                    },
                     "kinds": {
                         "type": "array",
                         "items": { "type": "string", "enum": ["track", "via"] },
@@ -320,8 +332,7 @@ pub fn tool_defs() -> Vec<Tool> {
                     "net": { "type": "string" },
                     "layer": { "type": "string" },
                     "all": { "type": "boolean", "description": "All matches; default nearest." }
-                },
-                "required": ["at"]
+                }
             }),
         },
         Def {
@@ -430,7 +441,8 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "get_board".into(),
-            description: "Return board; net adds pad centers, include_copper adds copper.".into(),
+            description: "Inspect the board; net returns its pads, tracks, vias, coordinates, and endpoint touches."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -547,6 +559,12 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         Def {
+            name: "refill_zones".into(),
+            description: "Refill every copper zone in KiCad and persist the filled board before checking connectivity."
+                .into(),
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        Def {
             name: "export_fab".into(),
             description: "Export fabrication files to <project>/fab after clean check_board."
                 .into(),
@@ -564,6 +582,7 @@ pub fn tool_defs() -> Vec<Tool> {
                     | "move_parts"
                     | "route_track"
                     | "delete_copper"
+                    | "refill_zones"
                     | "set_net_width"
                     | "update_board_outline"
             ) {
@@ -602,6 +621,7 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "place_board" => pcb_workflow::place_board(input, ctx),
         "route_board" => pcb_workflow::route_board(input, ctx),
         "check_board" => pcb_workflow::check_board(input, ctx),
+        "refill_zones" => pcb_workflow::refill_zones(input, ctx),
         "export_fab" => pcb_workflow::export_fab(input, ctx),
         "open_board" => pcb_workflow::open_board(input, ctx),
         "move_parts" => pcb_workflow::move_parts(input, ctx),
