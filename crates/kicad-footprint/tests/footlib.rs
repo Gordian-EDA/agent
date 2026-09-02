@@ -201,7 +201,7 @@ fn pinheader_1x02_two_thru_hole_pads_with_drill() {
     assert!(
         fp.pads
             .iter()
-            .all(|p| p.copper_layers().iter().any(|l| l == "*.Cu"))
+            .all(|p| p.copper_layers().any(|l| l == "*.Cu"))
     );
     // Pads on a 2.54 mm pitch along +y.
     assert!(fp.pads.iter().any(|p| close(p.at.y, 0.0)));
