@@ -267,6 +267,9 @@ impl Shell {
                         StopReason::ProviderRequestLimit { requests } => {
                             TurnEndReason::ProviderRequestLimit { requests }
                         }
+                        StopReason::TimeLimit { elapsed } => TurnEndReason::TimeLimit {
+                            elapsed_secs: elapsed.as_secs(),
+                        },
                         StopReason::MutationTimedOut => TurnEndReason::MutationTimedOut,
                         StopReason::QualityGateFailed { failures } => {
                             TurnEndReason::QualityGateFailed { failures }

@@ -10,6 +10,17 @@ use serde_json::{Value, json};
 
 use crate::session::{Allow, Edit};
 
+/// Every accepted shape of an `intent.relations` entry, with an example of each.
+///
+/// Serde can only report the first malformed field and says nothing about what it
+/// wanted, so a caller who mis-shapes a relation has to guess. Relations are the
+/// field that is actually guessed wrong, so the refusal carries the whole grammar.
+const RELATION_SHAPES: &str = "each entry is an object tagged by `kind`: \
+     {\"kind\":\"left_of\",\"a\":\"R1\",\"b\":\"U1\"} (also right_of, above, below); \
+     {\"kind\":\"group\",\"name\":\"leds\",\"members\":[\"R3\",\"D1\"],\"side\":\"right\",\"anchor\":\"U1\"} \
+     (`side` alone is fine; [\"right\",\"U1\"] and {\"side\":\"right\",\"anchor\":\"U1\"} also parse); \
+     {\"kind\":\"align\",\"members\":[\"C1\",\"C2\"],\"axis\":\"horizontal\"}";
+
 /// Deserialize a tool's arguments, naming the field that was wrong.
 ///
 /// Serde's own message says what is malformed but not where; without the path a caller
@@ -17,7 +28,12 @@ use crate::session::{Allow, Edit};
 fn typed<T: serde::de::DeserializeOwned>(input: Value, tool: &str) -> Result<T> {
     serde_path_to_error::deserialize(input).map_err(|e| {
         let path = e.path().to_string();
-        anyhow!("invalid {tool} input at `{path}`: {}", e.into_inner())
+        let help = if path.contains("relations") {
+            format!(" — {RELATION_SHAPES}")
+        } else {
+            String::new()
+        };
+        anyhow!("invalid {tool} input at `{path}`: {}{help}", e.into_inner())
     })
 }
 
@@ -63,7 +79,7 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
 }
 
 pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let payload: sch_check::PlacePartsInput = typed(input, "place_parts")?;
+    let mut payload: sch_check::PlacePartsInput = typed(input, "place_parts")?;
     // The exact payload is what reproduces a placement; nothing else in the log does.
     tracing::debug!(
         payload = %serde_json::to_string(&payload).unwrap_or_default(),
@@ -73,6 +89,10 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Edit::open(ctx).context("opening the existing schematic")?
     } else {
         Edit::create(ctx, sch_floorplan::live::blank_sheet()?)
+    };
+    let minted = match resolve_pin_net_refs(&mut payload, &mut edit)? {
+        Ok(minted) => minted,
+        Err(error) => return Ok(error),
     };
     let derived: Vec<String> = payload
         .parts
@@ -85,44 +105,74 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !derived.is_empty() {
         return Ok(json!({ "ok": false, "code": "derived_net_name", "nets": derived }));
     }
-    let (budget, engine) = budgeted(ctx, edit.doc.symbols().count() + payload.parts.len(), None);
-    let timing = Timing::start("place_parts", &budget, engine.name());
-    let report = match sch_floorplan::live::place_parts(
-        ctx.env(),
-        &mut edit.doc,
-        &payload,
-        engine.as_ref(),
-        Some(budget),
-    ) {
-        Ok(report) => report,
-        Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
-            timing.done("overran");
-            return Ok(json!({ "error": error.to_string() }));
+    let requested = match payload.engine.as_deref().map(engine_named) {
+        Some(Some(kind)) => Some(kind),
+        Some(None) => {
+            return Ok(json!({
+                "error": format!(
+                    "unknown engine `{}`; use \"anneal\", \"spine\" or \"cluster\"",
+                    payload.engine.clone().unwrap_or_default()
+                ),
+            }));
         }
+        None => None,
+    };
+    let sheet_parts = edit.doc.symbols().count() + payload.parts.len();
+    // A mismatch restores the document, so trying another engine costs only time.
+    // The engines fail on different sheets, and the model has no way to tell which
+    // will work — leaving it to guess turned one campaign case into a dead end.
+    let mut tried = Vec::new();
+    let mut report = None;
+    for kind in engines_to_try(requested) {
+        let (budget, engine) = budgeted(ctx, sheet_parts, Some(kind));
+        let timing = Timing::start("place_parts", &budget, engine.name());
+        match sch_floorplan::live::place_parts(
+            ctx.env(),
+            &mut edit.doc,
+            &payload,
+            engine.as_ref(),
+            Some(budget),
+        ) {
+            Ok(placed) => {
+                timing.done(if placed.committed { "committed" } else { "refused" });
+                tried.push(engine.name());
+                let committed = placed.committed;
+                report = Some(placed);
+                if committed {
+                    break;
+                }
+            }
+            Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
+                timing.done("overran");
+                return Ok(json!({ "error": error.to_string() }));
+            }
         Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
             return Ok(json!({
                 "ok": false,
                 "code": "invalid_payload",
-                "dangling": audit.dangling,
+                "input_errors": audit.input_errors,
                 "duplicate_refs": audit.duplicate_refs,
-                "did_you_mean": audit.did_you_mean,
                 "unknown_pins": audit.unknown_pins,
-                "note": "each dangling pin names a net that would carry no second pin. \
-                         `on_sheet: false` means the sheet has no such net — name a net the \
-                         payload or the sheet already carries, or declare the pin that joins it \
-                         in this same call. Re-read the schematic before retrying if an earlier \
-                         edit emptied the net.",
+                "dangling": audit.dangling,
+                "did_you_mean": audit.did_you_mean,
+                "unreliable_nets": audit.unreliable_nets,
+                "note": "this lists EVERY fault in the payload — fix them all before retrying. \
+                         `place_parts` appends to the sheet, so resubmit only the parts named \
+                         here, not the whole payload. `input_errors` are unresolvable lib_ids \
+                         and pin conflicts; `duplicate_refs` give the next free refdes; \
+                         `unknown_pins` name a key the symbol does not have. `dangling` pins are \
+                         NOT fatal on their own — they are listed so you can finish them.",
             }));
         }
-        Err(error) => return Err(error.into()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let report = match report {
+        Some(report) => report,
+        None => return Err(anyhow!("no placement engine ran")),
     };
-    timing.done(if report.committed {
-        "committed"
-    } else {
-        "refused"
-    });
     if !report.committed {
-        return Ok(refused_place(report));
+        return Ok(refused_place(report, &payload, &tried));
     }
     let refs = report.placed.clone();
     let value = edit
@@ -131,7 +181,9 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "place_parts",
             "Place schematic parts",
             json!(report),
-            Allow::nothing().parts(refs).creating(),
+            // Naming a previously auto-named net renames it; that is the point of an
+            // `@ref.pin` target, so the guard is told rather than surprised.
+            Allow::nothing().parts(refs).joining_nets(minted).creating(),
         )
         .context("committing placed parts")?;
     if value.get("error").is_some() {
@@ -203,7 +255,97 @@ fn finish_arrangement(
     with_check(value, ctx)
 }
 
-fn refused_place(report: PlaceReport) -> Value {
+/// Rewrite every `"@R1.2"` pin target to a real net name, labelling the referenced
+/// pin first when its net has only a KiCAD-generated name.
+///
+/// This is what makes a net reachable that has no name of its own: the model can
+/// say "join whatever P3 pin 1 is on" instead of guessing at `Net-(P3-Pad1)`,
+/// which is regenerated from the net's own pins and forks it if written as a label.
+#[allow(clippy::type_complexity)]
+fn resolve_pin_net_refs(
+    payload: &mut sch_check::PlacePartsInput,
+    edit: &mut Edit,
+) -> Result<std::result::Result<Vec<String>, Value>> {
+    let specs: std::collections::BTreeSet<String> = payload
+        .parts
+        .iter()
+        .flat_map(|part| part.pins.values())
+        .filter(|net| net.starts_with(crate::refs::NET_OF_PIN))
+        .cloned()
+        .collect();
+    if specs.is_empty() {
+        return Ok(Ok(Vec::new()));
+    }
+    let mut minted = Vec::new();
+    let mut resolved = std::collections::BTreeMap::new();
+    for spec in specs {
+        match crate::refs::net_of_pin(&edit.doc, edit.before(), &spec) {
+            Ok(found) => {
+                if let crate::refs::PinNet::Mint {
+                    refdes,
+                    number,
+                    net,
+                } = &found
+                    && let Ok(pin) = crate::refs::pin(&edit.doc, &format!("{refdes}.{number}"))
+                {
+                    edit.doc
+                        .add_label(sch_doc::LabelKind::Local, net, crate::wiring::pose(pin.at));
+                    minted.push(net.clone());
+                    if let Some(was) =
+                        crate::refs::net_of(edit.before(), refdes, number).map(str::to_string)
+                    {
+                        minted.push(was);
+                    }
+                }
+                resolved.insert(spec, found.net().to_string());
+            }
+            Err(error) => {
+                return Ok(Err(json!({
+                    "ok": false,
+                    "code": "unknown_pin_net_ref",
+                    "error": format!("{spec}: {error}"),
+                })));
+            }
+        }
+    }
+    for part in &mut payload.parts {
+        for net in part.pins.values_mut() {
+            if let Some(found) = resolved.get(net.as_str()) {
+                *net = found.clone();
+            }
+        }
+    }
+    Ok(Ok(minted))
+}
+
+/// The engine a payload named, if it named a real one.
+fn engine_named(name: &str) -> Option<PlacementEngineKind> {
+    match name {
+        "anneal" => Some(PlacementEngineKind::Anneal),
+        "spine" => Some(PlacementEngineKind::Spine),
+        "cluster" => Some(PlacementEngineKind::Cluster),
+        _ => None,
+    }
+}
+
+/// The engines to attempt, in order: the one asked for, else the sheet's default
+/// followed by the others as fallbacks.
+fn engines_to_try(requested: Option<PlacementEngineKind>) -> Vec<PlacementEngineKind> {
+    if let Some(kind) = requested {
+        return vec![kind];
+    }
+    vec![
+        PlacementEngineKind::Spine,
+        PlacementEngineKind::Cluster,
+        PlacementEngineKind::Anneal,
+    ]
+}
+
+fn refused_place(
+    report: PlaceReport,
+    payload: &sch_check::PlacePartsInput,
+    tried: &[&str],
+) -> Value {
     let m = &report.mismatch;
     let mut why = Vec::new();
     if !m.shorted.is_empty() {
@@ -216,11 +358,31 @@ fn refused_place(report: PlaceReport) -> Value {
     if !m.disturbed.is_empty() {
         why.push(format!("disturbed existing {}", m.disturbed.join(", ")));
     }
+    let mut blocks: std::collections::BTreeMap<&str, usize> = Default::default();
+    for part in &payload.parts {
+        let block = part
+            .block
+            .as_deref()
+            .or(payload.block.as_deref())
+            .unwrap_or(sch_check::place_parts::DEFAULT_BLOCK);
+        *blocks.entry(block).or_default() += 1;
+    }
+    let split: Vec<String> = blocks
+        .iter()
+        .map(|(name, count)| format!("{name} ({count} parts)"))
+        .collect();
     json!({
         "error": format!(
-            "refused: the placed result does not match the requested connectivity ({}); nothing was written. This is a placement-engine failure, not a payload error — retrying the same payload will not help; report it and try `engine: \"anneal\"` or a smaller block",
-            why.join("; ")
+            "refused: the placed result does not match the requested connectivity ({}); nothing \
+             was written. This is a placement-engine failure, not a payload error — {} already \
+             tried it. Send one payload per block instead ({}); a smaller block is what has \
+             recovered this every time.",
+            why.join("; "),
+            tried.join(", then "),
+            split.join(", ")
         ),
+        "engines_tried": tried,
+        "split_into": split,
         "report": report,
     })
 }

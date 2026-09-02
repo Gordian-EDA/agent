@@ -192,8 +192,97 @@ pub(crate) fn derived_name_refusal(netlist: &Netlist, net: &str) -> Option<Strin
     Some(format!(
         "refused: `{net}` is the name KiCAD generates for an unnamed net ({pins}), not a label \
          anything can join — naming a new node `{net}` forks it and renames the original to \
-         `{net}_1`. Name that net first with `label({{pin: \"{first}\", net: \"…\"}})` and use the \
-         name you gave it, or connect straight to one of its pins.",
+         `{net}_1`. Write \"@{first}\" to join that pin's net whatever it is called, or name the \
+         net first with `label({{pin: \"{first}\", net: \"…\"}})` and use the name you gave it.",
         first = auto.pins.first().map(label).unwrap_or_default()
     ))
+}
+
+/// Prefix that turns a pin reference into a *net* reference: `"@P3.1"` means
+/// "whatever net P3 pin 1 is on".
+pub(crate) const NET_OF_PIN: char = '@';
+
+/// A stable label for the net at `refdes.number`, minted when KiCAD's own name
+/// for it is generated and therefore unusable as an identity.
+fn minted_net_name(refdes: &str, number: &str) -> String {
+    let sanitize = |s: &str| {
+        s.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect::<String>()
+    };
+    format!("N_{}_{}", sanitize(refdes), sanitize(number))
+}
+
+/// What `"@R1.2"` resolves to: the net that pin already carries, or a name to give it.
+pub(crate) enum PinNet {
+    /// The pin sits on a net that already has a usable name.
+    Named(String),
+    /// The pin's net has no usable name; label the pin with this to mint one.
+    Mint {
+        refdes: String,
+        number: String,
+        net: String,
+    },
+}
+
+impl PinNet {
+    pub fn net(&self) -> &str {
+        match self {
+            PinNet::Named(net) => net,
+            PinNet::Mint { net, .. } => net,
+        }
+    }
+}
+
+/// Resolve a `"@<ref>.<pin>"` net reference against the sheet.
+///
+/// A generated name like `Net-(P3-Pad1)` is not an identity a caller can join —
+/// it is recomputed from the net's own pins — so there was no way to say "connect
+/// to whatever P3 pin 1 is on". This is that way. When the net has no usable name
+/// the caller labels the pin with [`PinNet::Mint`]'s name first, which makes the
+/// identity real before anything joins it.
+pub(crate) fn net_of_pin(
+    doc: &SchDoc,
+    netlist: &Netlist,
+    spec: &str,
+) -> Result<PinNet, String> {
+    let spec = spec.strip_prefix(NET_OF_PIN).unwrap_or(spec);
+    let pin = pin(doc, spec)?;
+    let usable = netlist.nets.iter().find(|net| {
+        net.source != sch_doc::NetSource::Auto
+            && net
+                .pins
+                .iter()
+                .any(|p| p.refdes == pin.refdes && p.pin == pin.number)
+    });
+    Ok(match usable {
+        Some(net) => PinNet::Named(net.name.clone()),
+        None => PinNet::Mint {
+            net: minted_net_name(&pin.refdes, &pin.number),
+            refdes: pin.refdes,
+            number: pin.number,
+        },
+    })
+}
+
+/// Resolve `net` when it is written as `"@R1.2"`, else return it unchanged.
+///
+/// Unlike the `place_parts` path this never mints a name: a caller naming a net
+/// here is already giving it an identity, so joining an unnamed one is a no-op
+/// it should be told about rather than have guessed for it.
+pub(crate) fn net_of_pin_name(
+    doc: &SchDoc,
+    netlist: &Netlist,
+    net: &str,
+) -> Result<String, String> {
+    if !net.starts_with(NET_OF_PIN) {
+        return Ok(net.to_string());
+    }
+    match net_of_pin(doc, netlist, net)? {
+        PinNet::Named(found) => Ok(found),
+        PinNet::Mint { refdes, number, .. } => Err(format!(
+            "`{net}` names no existing net: {refdes}.{number} is not on a named net yet. \
+             Label it first, or connect straight to the pin."
+        )),
+    }
 }

@@ -11,7 +11,7 @@ use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
 use sch_model::engine::{PlacementEngine, SchematicPlaceProblem};
 use sch_model::place::PlaceOptions;
 use sch_model::relation::{relation_group_spread, relation_viol, repair_relations};
-use sch_model::ir::{Axis, LayoutIr, Relation, Side};
+use sch_model::ir::{Axis, GroupSide, LayoutIr, Relation, Side};
 use sch_model::item::Item;
 
 // ---------------------------------------------------------------------------
@@ -129,7 +129,8 @@ fn group_counts_foreign_intruders_and_wrong_side_members() {
     let left_of_u1 = Relation::Group {
         name: "input".into(),
         members: vec!["R1".into(), "R2".into()],
-        side: Some((Side::Left, "U1".into())),
+        side: Some(GroupSide::Anchored(Side::Left, "U1".into())),
+        anchor: None,
     };
     assert_eq!(relation_viol(&cohesive, &ir(vec![left_of_u1.clone()])), 0);
 
@@ -191,6 +192,7 @@ fn group_spread_measures_only_group_members() {
             name: "g".into(),
             members: vec!["R1".into(), "R2".into()],
             side: None,
+        anchor: None,
         }]),
     );
     let wide = relation_group_spread(
@@ -199,6 +201,7 @@ fn group_spread_measures_only_group_members() {
             name: "g".into(),
             members: vec!["R1".into(), "R3".into()],
             side: None,
+        anchor: None,
         }]),
     );
     assert!(tight < wide, "{tight} !< {wide}");
@@ -332,7 +335,8 @@ fn repair_moves_a_group_onto_the_named_side_of_its_anchor() {
     let intent = ir(vec![Relation::Group {
         name: "input".into(),
         members: vec!["R1".into(), "R2".into()],
-        side: Some((Side::Left, "U1".into())),
+        side: Some(GroupSide::Anchored(Side::Left, "U1".into())),
+        anchor: None,
     }]);
     repair_relations(&mut items, &intent);
     assert_eq!(relation_viol(&items, &intent), 0);

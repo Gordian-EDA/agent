@@ -11,11 +11,18 @@ use crate::{PinMeta, SymbolMeta, SymbolTable};
 /// `VDD`); a number covers exactly one. Empty when the key names nothing.
 pub fn resolve<'a>(meta: &'a SymbolMeta, key: &str) -> Vec<&'a PinMeta> {
     let by_number: Vec<&PinMeta> = meta.pins.iter().filter(|p| p.number == key).collect();
-    if by_number.is_empty() {
-        meta.pins.iter().filter(|p| p.name == key).collect()
-    } else {
-        by_number
+    if !by_number.is_empty() {
+        return by_number;
     }
+    if is_unnamed(key) {
+        return Vec::new(); // `~` is the absence of a name, not a name every unnamed pin shares
+    }
+    meta.pins.iter().filter(|p| p.name == key).collect()
+}
+
+/// KiCAD writes an unnamed pin's name as `~`. It is not a name a caller can use.
+pub fn is_unnamed(name: &str) -> bool {
+    name.is_empty() || name == "~"
 }
 
 /// The pin name or number closest to an unresolvable `key`, for a "did you
@@ -24,6 +31,7 @@ pub fn nearest<'a>(meta: &'a SymbolMeta, key: &str) -> Option<&'a str> {
     meta.pins
         .iter()
         .flat_map(|p| [p.name.as_str(), p.number.as_str()])
+        .filter(|n| !is_unnamed(n))
         .map(|n| (strsim::levenshtein(key, n), n))
         .filter(|(d, _)| *d <= 2)
         .min_by_key(|(d, _)| *d)

@@ -144,7 +144,7 @@ async fn unchanged_tool_cycles_reach_the_provider_request_limit() {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
-    let script = (0..32)
+    let script = (0..56)
         .map(|index| tool_call(&format!("read-{index}"), "project_info", json!({})))
         .collect();
     let (client, seen) = ScriptedClient::recording(script);
@@ -157,8 +157,42 @@ async fn unchanged_tool_cycles_reach_the_provider_request_limit() {
 
     assert_eq!(
         outcome.stop_reason,
-        StopReason::ProviderRequestLimit { requests: 32 }
+        StopReason::ProviderRequestLimit { requests: 56 }
     );
-    assert_eq!(outcome.tool_calls_made, 32);
-    assert_eq!(seen.lock().unwrap().len(), 32);
+    assert_eq!(outcome.tool_calls_made, 56);
+    assert_eq!(seen.lock().unwrap().len(), 56);
+}
+
+/// The request ceiling belongs to the whole turn, not to whichever subturn is
+/// running. A turn is the model's own work plus every review round, and the
+/// five-minute promise is made about all of them together — a per-subturn budget
+/// silently multiplied by the number of review rounds.
+#[tokio::test]
+async fn the_request_ceiling_spans_a_whole_reviewed_turn() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let mut script = vec![place_two_resistors()];
+    script.extend(
+        (0..80).map(|index| tool_call(&format!("read-{index}"), "project_info", json!({}))),
+    );
+    let (client, seen) = ScriptedClient::recording(script);
+    let mut agent = Agent::new(client, ctx, system_prompt());
+
+    let outcome = agent
+        .run_turn_reviewed("create a divider", "create a divider", None, 2)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(outcome.stop_reason, StopReason::ProviderRequestLimit { .. }),
+        "{:?}",
+        outcome.stop_reason
+    );
+    let spent = seen.lock().unwrap().len();
+    assert!(
+        spent <= 56,
+        "a reviewed turn spent {spent} requests against a ceiling of 56"
+    );
 }

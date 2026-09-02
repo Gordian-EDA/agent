@@ -101,12 +101,16 @@ pub enum Axis {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Relation {
     /// `a` sits strictly left of `b`.
+    #[serde(alias = "left")]
     LeftOf { a: String, b: String },
     /// `a` sits strictly right of `b`.
+    #[serde(alias = "right")]
     RightOf { a: String, b: String },
     /// `a` sits strictly above `b` (smaller `y`).
+    #[serde(alias = "above_of", alias = "top")]
     Above { a: String, b: String },
     /// `a` sits strictly below `b`.
+    #[serde(alias = "below_of", alias = "bottom")]
     Below { a: String, b: String },
     /// `members` are placed as one cohesive cluster — packed together with nothing
     /// foreign between them — optionally on `side` of the `anchor` refdes.
@@ -114,10 +118,52 @@ pub enum Relation {
         name: String,
         members: Vec<String>,
         #[serde(default)]
-        side: Option<(Side, String)>,
+        side: Option<GroupSide>,
+        /// Anchor written as a sibling of a bare `side` rather than inside it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor: Option<String>,
     },
     /// `members` share one row (`Horizontal`) or column (`Vertical`).
     Align { members: Vec<String>, axis: Axis },
+}
+
+/// Where a [`Relation::Group`] sits, optionally relative to an anchor part.
+///
+/// Written either positionally (`["left", "U1"]`), by name
+/// (`{"side": "left", "anchor": "U1"}`), or as a bare edge (`"left"`) when the
+/// group has no anchor to hang off. All three round-trip to the positional form
+/// when an anchor is present.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GroupSide {
+    Anchored(Side, String),
+    Named { side: Side, anchor: String },
+    Edge(Side),
+}
+
+impl GroupSide {
+    /// The edge, and the anchor refdes when one was named.
+    pub fn parts(&self) -> (Side, Option<&str>) {
+        match self {
+            GroupSide::Anchored(side, anchor) => (*side, Some(anchor.as_str())),
+            GroupSide::Named { side, anchor } => (*side, Some(anchor.as_str())),
+            GroupSide::Edge(side) => (*side, None),
+        }
+    }
+}
+
+/// The edge and anchor a `group` asked for, however the two were written: nested
+/// inside `side`, or `side` and `anchor` as siblings.
+pub fn group_placement<'a>(
+    side: Option<&'a GroupSide>,
+    anchor: Option<&'a str>,
+) -> Option<(Side, Option<&'a str>)> {
+    let (edge, nested) = side?.parts();
+    Some((edge, nested.or(anchor)))
+}
+
+fn group_anchor<'a>(side: Option<&'a GroupSide>, anchor: Option<&'a str>) -> Option<&'a str> {
+    group_placement(side, anchor).and_then(|(_, anchor)| anchor)
 }
 
 impl Relation {
@@ -129,11 +175,14 @@ impl Relation {
             | Relation::Above { a, b }
             | Relation::Below { a, b } => vec![a.as_str(), b.as_str()],
             Relation::Group {
-                members, side, ..
+                members,
+                side,
+                anchor,
+                ..
             } => members
                 .iter()
                 .map(String::as_str)
-                .chain(side.iter().map(|(_, anchor)| anchor.as_str()))
+                .chain(group_anchor(side.as_ref(), anchor.as_deref()))
                 .collect(),
             Relation::Align { members, .. } => members.iter().map(String::as_str).collect(),
         }
@@ -224,5 +273,69 @@ impl LayoutIr {
     /// fixture sidecar).
     pub fn from_json(s: &str) -> serde_json::Result<LayoutIr> {
         serde_json::from_str(s)
+    }
+}
+
+#[cfg(test)]
+mod group_side_tests {
+    use super::*;
+
+    #[test]
+    fn a_group_side_is_accepted_in_all_three_written_forms() {
+        let positional: GroupSide = serde_json::from_str(r#"["left","U1"]"#).unwrap();
+        let named: GroupSide =
+            serde_json::from_str(r#"{"side":"left","anchor":"U1"}"#).unwrap();
+        assert_eq!(positional.parts(), (Side::Left, Some("U1")));
+        assert_eq!(named.parts(), (Side::Left, Some("U1")));
+
+        // The bare edge is what two of four campaign agents actually wrote.
+        let bare: GroupSide = serde_json::from_str(r#""top""#).unwrap();
+        assert_eq!(bare.parts(), (Side::Top, None));
+    }
+
+    #[test]
+    fn a_group_relation_deserializes_with_a_bare_side() {
+        let rel: Relation = serde_json::from_str(
+            r#"{"kind":"group","name":"power","members":["J1","F1"],"side":"left"}"#,
+        )
+        .unwrap();
+        assert_eq!(rel.refdes(), vec!["J1", "F1"]);
+    }
+}
+
+#[cfg(test)]
+mod relation_input_tests {
+    use super::*;
+
+    #[test]
+    fn a_group_accepts_side_and_anchor_as_siblings() {
+        let rel: Relation = serde_json::from_str(
+            r#"{"kind":"group","name":"leds","members":["R3","D1"],
+                "side":"right","anchor":"U1"}"#,
+        )
+        .unwrap();
+        let Relation::Group { side, anchor, .. } = &rel else {
+            panic!("expected a group");
+        };
+        assert_eq!(
+            group_placement(side.as_ref(), anchor.as_deref()),
+            Some((Side::Right, Some("U1")))
+        );
+        assert!(rel.refdes().contains(&"U1"));
+    }
+
+    #[test]
+    fn a_bare_edge_kind_is_an_alias_of_its_ordering_relation() {
+        for (written, expected) in [
+            (r#"{"kind":"left","a":"R1","b":"U1"}"#, "left_of"),
+            (r#"{"kind":"right","a":"R1","b":"U1"}"#, "right_of"),
+            (r#"{"kind":"top","a":"R1","b":"U1"}"#, "above"),
+            (r#"{"kind":"bottom","a":"R1","b":"U1"}"#, "below"),
+        ] {
+            let rel: Relation = serde_json::from_str(written).unwrap();
+            let round = serde_json::to_value(&rel).unwrap();
+            assert_eq!(round["kind"], expected, "{written}");
+            assert_eq!(rel.refdes(), vec!["R1", "U1"]);
+        }
     }
 }

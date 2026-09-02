@@ -326,7 +326,8 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "label",
-            "Name the net at one pin. Two pins carrying the same local label are connected.",
+            "Name the net at one pin. Two pins carrying the same local label are connected. \
+             `net` may be \"@R1.2\" to reuse whatever net that pin is on.",
             json!({
                 "type": "object",
                 "properties": {

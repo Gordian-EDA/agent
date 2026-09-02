@@ -240,10 +240,12 @@ fn swap_symbol_maps_differently_numbered_connector_pins_by_name() {
     );
 }
 
-/// A partial name match is not permission to discard the remaining old pin.
-/// The refusal returns all of the information needed to construct a retry.
+/// An old pin with no net is not connectivity, so a narrowing swap may drop it —
+/// refusing over unwired pins made every narrowing swap impossible. The drop is
+/// reported, and the pins the new symbol brings are marked no-connect rather than
+/// left bare for ERC to fault.
 #[test]
-fn swap_symbol_refusal_suggests_pin_map_and_unmatched_pins() {
+fn swap_symbol_drops_an_unwired_pin_and_marks_what_it_gains() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -254,6 +256,44 @@ fn swap_symbol_refusal_suggests_pin_map_and_unmatched_pins() {
         json!({"parts": [{"lib_id": "Connector:USB_B_Micro", "ref": "J1"}]}),
     );
     assert!(placed.get("error").is_none(), "fixture failed: {placed}");
+
+    let result = call(
+        &ctx,
+        "swap_symbol",
+        json!({"ref": "J1", "lib_id": "Connector:USB_C_Plug_USB2.0"}),
+    );
+    assert!(result.get("error").is_none(), "swap must succeed: {result}");
+    assert_eq!(
+        result["changed"]["dropped_pins"],
+        json!(["4"]),
+        "the dropped unwired pin must be reported: {result}"
+    );
+    let warnings = serde_json::to_string(&result["warnings"]).unwrap();
+    assert!(
+        warnings.contains("marked no-connect"),
+        "gained pins must be no-connected, not left for ERC: {warnings}"
+    );
+}
+
+/// A pin that carries a net still blocks the swap: dropping it would delete a
+/// branch, which is what the guard is for.
+#[test]
+fn swap_symbol_refuses_when_a_wired_pin_has_no_counterpart() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let seeded = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {"ref": "J1", "part": "Connector:USB_B_Micro",
+             "pins": {"1": "VBUS", "2": "USB_DM", "3": "USB_DP", "4": "USB_ID", "5": "GND"}},
+            {"ref": "R1", "part": "Device:R", "value": "10k",
+             "pins": {"1": "USB_ID", "2": "GND"}}
+        ]}),
+    );
+    assert!(seeded.get("error").is_none(), "fixture failed: {seeded}");
     let before = std::fs::read(ctx.sch_path()).unwrap();
 
     let result = call(
@@ -261,35 +301,43 @@ fn swap_symbol_refusal_suggests_pin_map_and_unmatched_pins() {
         "swap_symbol",
         json!({"ref": "J1", "lib_id": "Connector:USB_C_Plug_USB2.0"}),
     );
-    assert!(result.get("error").is_some(), "swap must refuse: {result}");
-    assert_eq!(
-        result["suggestion"]["pin_map"],
-        json!({"1": "A4", "2": "A7", "3": "A6", "5": "A1", "6": "S1"}),
-        "the inferred mappings must be copyable into the next call: {result}"
-    );
-    assert_eq!(
-        result["suggestion"]["old_pins_without_counterpart"],
-        json!([{"number": "4", "name": "ID", "type": "passive"}]),
-        "the unmatched old pin needs structured details: {result}"
-    );
-    let unassigned = result["suggestion"]["new_symbol_unassigned_pins"]
-        .as_array()
-        .expect("new unassigned pins array");
-    for (number, name, pin_type) in [
-        ("A5", "CC", "bidirectional"),
-        ("B5", "VCONN", "bidirectional"),
-    ] {
-        assert!(
-            unassigned.iter().any(|pin| {
-                pin["number"] == number && pin["name"] == name && pin["type"] == pin_type
-            }),
-            "missing unassigned pin {number} ({name}, {pin_type}): {result}"
-        );
-    }
+    let error = result["error"].as_str().unwrap_or_default();
+    assert!(error.contains("carry nets"), "{result}");
+    assert!(error.contains('4'), "the wired pin must be named: {result}");
     assert_eq!(
         std::fs::read(ctx.sch_path()).unwrap(),
         before,
         "a refused swap must not write the schematic"
+    );
+}
+
+/// A `pin_map` target the new symbol does not have is a bad map, and must be
+/// reported as one rather than as the old pin having "no counterpart".
+#[test]
+fn swap_symbol_names_a_pin_map_target_that_does_not_exist() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "Connector:USB_B_Micro", "ref": "J1"}]}),
+    );
+    assert!(placed.get("error").is_none(), "fixture failed: {placed}");
+
+    let result = call(
+        &ctx,
+        "swap_symbol",
+        json!({"ref": "J1", "lib_id": "Connector:USB_C_Plug_USB2.0",
+               "pin_map": {"4": "NOT_A_PIN"}}),
+    );
+    let error = result["error"].as_str().unwrap_or_default();
+    assert!(error.contains("NOT_A_PIN"), "{result}");
+    assert!(error.contains("pin_map"), "{result}");
+    assert!(
+        result["new_pins"].as_array().is_some_and(|p| !p.is_empty()),
+        "the refusal must list the pins that do exist: {result}"
     );
 }
 
@@ -397,4 +445,90 @@ fn labelling_a_node_with_a_generated_net_name_is_refused() {
         !listing(&ctx).contains(&format!("{generated}_1")),
         "the original net was forked anyway"
     );
+}
+
+#[test]
+fn place_parts_joins_a_net_named_only_by_a_pin_reference() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    // P3's pins land on nets KiCAD names itself, so there is no text a later call
+    // could write to join them. `@P3.1` is how the caller says which net it means.
+    let seeded = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {"ref": "P3", "part": "Device:R", "value": "10k", "pins": {"1": "RAW", "2": "GND"}},
+            {"ref": "R9", "part": "Device:R", "value": "1k", "pins": {"1": "RAW", "2": "GND"}}
+        ]}),
+    );
+    assert!(seeded.get("error").is_none(), "fixture failed: {seeded}");
+
+    let joined = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {"ref": "C7", "part": "Device:C", "value": "100nF",
+             "pins": {"1": "@P3.1", "2": "GND"}}
+        ]}),
+    );
+    assert!(joined.get("error").is_none(), "{joined}");
+    assert_ne!(joined["code"], "invalid_payload", "{joined}");
+
+    // C7 pin 1 must now share a net with P3 pin 1 — not sit on a second one.
+    let nets = call(&ctx, "get_net", json!({"name": "N_P3_1"}));
+    let text = serde_json::to_string(&nets).unwrap();
+    assert!(text.contains("C7") && text.contains("P3"), "not one net: {text}");
+}
+
+#[test]
+fn place_parts_explains_the_relation_shapes_when_one_is_malformed() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let error = gordian_tools_sch::run(
+        "place_parts",
+        json!({"parts": [{"ref": "R1", "part": "Device:R", "pins": {"1": "A", "2": "B"}}],
+               "intent": {"relations": [["R1", "U1", "left"]]}}),
+        &ctx,
+    )
+    .expect("place_parts is a schematic tool")
+    .expect_err("a malformed relation must be refused");
+    let message = format!("{error:#}");
+
+    assert!(message.contains("relations"), "{message}");
+    assert!(message.contains("\"kind\":\"left_of\""), "{message}");
+    assert!(message.contains("\"kind\":\"group\""), "{message}");
+    assert!(message.contains("\"kind\":\"align\""), "{message}");
+}
+
+#[test]
+fn place_parts_accepts_the_engine_its_own_refusal_recommends() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    // The placement-failure refusal names an engine override as the way out, so
+    // the payload has to accept one; `deny_unknown_fields` used to reject it.
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({"engine": "anneal", "parts": [
+            {"ref": "R1", "part": "Device:R", "value": "10k", "pins": {"1": "A", "2": "B"}},
+            {"ref": "R2", "part": "Device:R", "value": "10k", "pins": {"1": "A", "2": "B"}}
+        ]}),
+    );
+    assert!(result.get("error").is_none(), "{result}");
+
+    let unknown = call(
+        &ctx,
+        "place_parts",
+        json!({"engine": "nonsense", "parts": [
+            {"ref": "R3", "part": "Device:R", "pins": {"1": "A", "2": "B"}}
+        ]}),
+    );
+    let message = unknown["error"].as_str().unwrap_or_default();
+    assert!(message.contains("nonsense") && message.contains("anneal"), "{unknown}");
 }

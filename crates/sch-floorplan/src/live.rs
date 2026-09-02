@@ -34,7 +34,7 @@ use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::SymbolGeometry;
 use sch_check::model::{Block, Component, Design, PinTarget};
-use sch_check::{Diagnostics, ExistingSheet, PayloadAudit, PlacePartsInput};
+use sch_check::{ExistingSheet, PayloadAudit, PlacePartsInput};
 use sch_doc::{Netlist, SchDoc, connect};
 use sch_model::ir::LayoutIr;
 use sch_model::item::Item;
@@ -187,15 +187,13 @@ pub enum Error {
     Nothing,
     #[error("selection matched no symbol")]
     EmptySelection,
-    #[error("input is not buildable: {0}")]
-    Input(String),
     #[error(
         "placement exceeded its budget of {seconds}s ({parts} parts on the sheet) — nothing \
          was written; retry with a smaller block, or split the sheet"
     )]
     Budget { seconds: u64, parts: usize },
     #[error("invalid payload")]
-    InvalidPayload(PayloadAudit),
+    InvalidPayload(Box<PayloadAudit>),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -229,6 +227,12 @@ pub struct PlaceReport {
     pub warnings: Vec<String>,
     /// Circuit idioms the engine recognized and co-placed.
     pub idioms: Vec<IdiomReport>,
+    /// Pins whose net carries no second pin — placed, but unfinished.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dangling: Vec<sch_check::place_parts::DanglingPin>,
+    /// Dangling net → the existing net whose name it most resembles.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub did_you_mean: BTreeMap<String, String>,
     /// Empty when the edit stands; otherwise the document was restored.
     pub mismatch: Mismatch,
     pub committed: bool,
@@ -309,12 +313,18 @@ pub fn place_parts(
             .map(|symbol| symbol.refdes().to_string())
             .collect(),
     };
-    let (added, diags, audit) = sch_check::into_design(input, &provider, &existing);
-    if !audit.is_valid() {
-        return Err(Error::InvalidPayload(audit));
-    }
-    if diags.has_errors() {
-        return Err(Error::Input(diagnostic_summary(&diags)));
+    let (added, diags, mut audit) = sch_check::into_design(input, &provider, &existing);
+    // One refusal reports every payload fault. Reporting the audit and the lowering
+    // diagnostics in sequence made each layer mask the next, so a payload with a bad
+    // lib_id and a bad net name cost two full resubmissions to discover.
+    if !audit.is_valid() || diags.has_errors() {
+        audit.input_errors = diags
+            .0
+            .iter()
+            .filter(|d| d.severity == sch_check::Severity::Error)
+            .map(|d| format!("{}: {}", d.code, d.message))
+            .collect();
+        return Err(Error::InvalidPayload(Box::new(audit)));
     }
     let new_refs: BTreeSet<String> = added
         .blocks
@@ -341,6 +351,16 @@ pub fn place_parts(
     if let Some(intent) = input.intent.clone() {
         apply_intent(&mut ir, intent.into_layout_ir());
     }
+    // An unfinished single-pin net must not take the port convenience: a global label
+    // reads as deliberate board I/O and silences KiCAD's own ERC, hiding the very gap
+    // the audit just reported. Only a net the payload declared in `intent.ports` keeps it.
+    let declared: BTreeSet<&str> = input
+        .intent
+        .iter()
+        .flat_map(|intent| intent.ports.keys().map(String::as_str))
+        .collect();
+    ir.ports
+        .retain(|net, _| declared.contains(net.as_str()) || !audit.dangling_nets().contains(net));
 
     let movable = crate::floorplan::place_problem(env, &design, Some(ir.clone()), PlaceOptions::default())?
         .items;
@@ -397,6 +417,8 @@ pub fn place_parts(
         nets: inc.keys().cloned().collect(),
         warnings,
         idioms: out.ir.idioms,
+        dangling: audit.dangling,
+        did_you_mean: audit.did_you_mean.into_iter().collect(),
         mismatch,
         committed,
     })
@@ -941,15 +963,6 @@ fn disturbed(before: &Netlist, after: &Netlist) -> Vec<String> {
     out
 }
 
-fn diagnostic_summary(diags: &Diagnostics) -> String {
-    diags
-        .0
-        .iter()
-        .filter(|d| d.severity == sch_check::Severity::Error)
-        .map(|d| format!("{}: {}", d.code, d.message))
-        .collect::<Vec<_>>()
-        .join("; ")
-}
 
 #[cfg(test)]
 mod tests {

@@ -67,6 +67,9 @@ struct PinMappingPlan {
     assignments: Vec<PinAssignment>,
     old_without_counterpart: Vec<usize>,
     new_unassigned: Vec<usize>,
+    /// `pin_map` entries whose target is not a pin of the new symbol, as
+    /// `(old pin, requested target)`.
+    unknown_targets: Vec<(String, String)>,
 }
 
 fn assign_pin(
@@ -137,6 +140,7 @@ fn pin_mapping_plan(
     requested: Option<&serde_json::Map<String, Value>>,
 ) -> PinMappingPlan {
     let mut assignments = Vec::new();
+    let mut unknown_targets = Vec::new();
     let mut claimed_old = vec![false; old_pins.len()];
     let mut taken_new = vec![false; new_pins.len()];
 
@@ -147,7 +151,6 @@ fn pin_mapping_plan(
         let Some(wanted) = wanted else {
             continue;
         };
-        claimed_old[old_index] = true;
         let target = new_pins
             .iter()
             .enumerate()
@@ -158,15 +161,18 @@ fn pin_mapping_plan(
                     .enumerate()
                     .find(|(index, pin)| !taken_new[*index] && pin_names_match(&pin.name, wanted))
             });
-        if let Some((new_index, _)) = target {
-            assign_pin(
+        match target {
+            Some((new_index, _)) => assign_pin(
                 &mut assignments,
                 &mut claimed_old,
                 &mut taken_new,
                 old_index,
                 new_index,
                 PinMatchKind::Explicit,
-            );
+            ),
+            // Leaving the pin unclaimed lets the number and name passes still find it,
+            // and records the real fault: the map named a pin the new symbol lacks.
+            None => unknown_targets.push((old.number.clone(), wanted.to_string())),
         }
     }
 
@@ -226,6 +232,7 @@ fn pin_mapping_plan(
             .filter_map(|(index, taken)| (!taken).then_some(index))
             .collect(),
         assignments,
+        unknown_targets,
     }
 }
 
@@ -1132,9 +1139,36 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         input.get("pin_map").and_then(Value::as_object),
     );
     let suggestion = swap_suggestion(&plan, &old_pins, &new_pins);
-    if !plan.old_without_counterpart.is_empty() {
-        let unmatched = plan
-            .old_without_counterpart
+    if !plan.unknown_targets.is_empty() {
+        let named = plan
+            .unknown_targets
+            .iter()
+            .map(|(from, to)| format!("`{to}` (for {refdes}.{from})"))
+            .collect::<Vec<_>>();
+        return Ok(json!({
+            "error": format!(
+                "refused: pin_map names {} , which {lib_id} does not have; nothing was written",
+                named.join(", ")
+            ),
+            "new_pins": new_pins
+                .iter()
+                .map(|pin| pin.number.clone())
+                .collect::<Vec<_>>(),
+        }));
+    }
+    // Only a pin carrying a net can be lost by a swap. Refusing over unwired pins
+    // made every narrowing swap impossible — the case that had an agent cycle
+    // through five connector symbols and never find the one that fits.
+    let wired: std::collections::HashSet<&str> =
+        before.iter().map(|(number, _, _)| number.as_str()).collect();
+    let orphaned: Vec<usize> = plan
+        .old_without_counterpart
+        .iter()
+        .copied()
+        .filter(|index| wired.contains(old_pins[*index].number.as_str()))
+        .collect();
+    if !orphaned.is_empty() {
+        let unmatched = orphaned
             .iter()
             .map(|index| match old_pins[*index].name.as_str() {
                 "" | "~" => old_pins[*index].number.clone(),
@@ -1143,7 +1177,9 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .collect::<Vec<_>>();
         return Ok(json!({
             "error": format!(
-                "refused: {lib_id} has no counterpart for {refdes} pin(s) {}; nothing was written",
+                "refused: {lib_id} has no counterpart for {refdes} pin(s) {}, which carry nets; \
+                 nothing was written. Unwired pins would have been dropped silently; name a \
+                 target for these in `pin_map`, or disconnect them first",
                 unmatched.join(", ")
             ),
             "suggestion": suggestion,
@@ -1228,6 +1264,25 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "these pins could not reach their old net through wires, so it was named at \
              them instead: {}",
             restored.join(" ")
+        ));
+    }
+    // A wider replacement arrives with pins nothing drives. Left bare they are ERC
+    // errors the swap itself manufactured, so mark them no-connect the way
+    // `place_parts` marks any signal pin it was given no net for.
+    let mut no_connected = Vec::new();
+    for index in &plan.new_unassigned {
+        let pin = &new_pins[*index];
+        if pin.etype == "power_in" {
+            continue;
+        }
+        edit.doc.add_no_connect(pin.at);
+        no_connected.push(pin.number.clone());
+    }
+    if !no_connected.is_empty() {
+        edit.warn(format!(
+            "{lib_id} has pins {refdes} did not: {} marked no-connect. Wire any that the \
+             design needs",
+            no_connected.join(", ")
         ));
     }
     dropped.retain(|number| {

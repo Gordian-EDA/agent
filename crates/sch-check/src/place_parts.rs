@@ -37,6 +37,10 @@ pub struct PlacePartsInput {
     pub layout: BTreeMap<BlockName, LayoutGrid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<Intent>,
+    /// Placement engine override. The refusal a placement-engine failure returns
+    /// names this as the way out, so it has to exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
 }
 
 /// One part and its pin connections.
@@ -62,7 +66,8 @@ pub struct PartSpec {
     pub props: IndexMap<String, String>,
     /// Pin name or number → net name, or `"nc"` for an explicit no-connect. Pin
     /// numbers are unique across a multi-unit symbol's units, so this one map
-    /// reaches every unit.
+    /// reaches every unit. A value of `"@R1.2"` means the net that pin already
+    /// carries, whatever it is called.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub pins: IndexMap<String, String>,
     /// Decoupling sugar: cap value → count, expanded across this part's rails.
@@ -80,7 +85,7 @@ pub struct ExistingSheet {
 }
 
 /// An explicit reference designator that is already occupied.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DuplicateRef {
     #[serde(rename = "ref")]
     pub refdes: RefDes,
@@ -88,7 +93,7 @@ pub struct DuplicateRef {
 }
 
 /// A new pin whose named net would have no other pin after placement.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DanglingPin {
     #[serde(rename = "ref")]
     pub refdes: RefDes,
@@ -103,18 +108,43 @@ pub struct DanglingPin {
 }
 
 /// Findings that make a bulk-create payload electrically incomplete.
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PayloadAudit {
     pub dangling: Vec<DanglingPin>,
     pub duplicate_refs: Vec<DuplicateRef>,
     pub did_you_mean: BTreeMap<NetName, NetName>,
     pub unknown_pins: Vec<String>,
+    /// Lowering errors — unknown lib_ids, pin conflicts, missing prefixes —
+    /// reported alongside the audit so one refusal names every fault.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_errors: Vec<String>,
+    /// Nets whose pin count could not be trusted because a part naming them was
+    /// dropped for a missing reference prefix. Their dangling reports may clear
+    /// on their own once the lib_id is fixed.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unreliable_nets: BTreeSet<NetName>,
 }
 
 impl PayloadAudit {
     /// Whether the payload may proceed to placement.
+    ///
+    /// Dangling pins do not block it. A net with one pin is unfinished work, not a
+    /// malformed payload: the placement commits and [`crate::lint`]'s
+    /// `single-pin-net` error — which `place_parts` returns in the same response —
+    /// is what holds the board back until it is closed. Refusing a whole 50-part
+    /// payload for it only forces the caller to resend everything.
     pub fn is_valid(&self) -> bool {
-        self.dangling.is_empty() && self.duplicate_refs.is_empty() && self.unknown_pins.is_empty()
+        self.duplicate_refs.is_empty() && self.unknown_pins.is_empty()
+    }
+
+    /// Whether anything at all is worth telling the caller about.
+    pub fn is_clean(&self) -> bool {
+        self.is_valid() && self.dangling.is_empty() && self.input_errors.is_empty()
+    }
+
+    /// Nets that would carry a single pin — reported, never fatal.
+    pub fn dangling_nets(&self) -> BTreeSet<NetName> {
+        self.dangling.iter().map(|d| d.net.clone()).collect()
     }
 }
 
@@ -320,7 +350,17 @@ fn audit_payload(
         }
     }
 
-    let mut audit = PayloadAudit::default();
+    let mut audit = PayloadAudit {
+        // A part dropped for want of a reference prefix takes its pins' net counts with
+        // it, so its nets' dangling verdicts are guesses until its lib_id is fixed.
+        unreliable_nets: input
+            .parts
+            .iter()
+            .filter(|spec| spec.refdes.is_none())
+            .flat_map(|spec| spec.pins.values().cloned())
+            .collect(),
+        ..PayloadAudit::default()
+    };
     for spec in &input.parts {
         let Some(refdes) = spec.refdes.as_ref() else {
             continue;
@@ -490,6 +530,55 @@ fn expand_decouple(
 /// JSON Schema for the tool's `input_schema`. Deliberately terse: the LLM needs
 /// the shape and the rules that are not obvious (`"nc"`, that a pin key may be a
 /// name or a number, and that anything left out is a no-connect).
+/// The `intent.relations` schema: every accepted entry shape, with an example.
+///
+/// Split out because the whole payload schema is one `json!` literal and the
+/// macro's recursion limit is real; it also keeps the grammar in one readable place.
+fn relations_schema() -> Value {
+    json!({
+                        "type": "array",
+                        "description":
+                            "Relative placement. `b` and `anchor` may name a part already \
+                             on the sheet. Example: \
+                             {\"kind\":\"group\",\"name\":\"leds\",\"members\":[\"R3\",\"D1\"],\
+                             \"side\":\"right\",\"anchor\":\"U1\"}",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["left_of", "right_of", "above", "below",
+                                             "group", "align"]
+                                },
+                                "a": {"type": "string"},
+                                "b": {"type": "string"},
+                                "name": {"type": "string"},
+                                "members": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1
+                                },
+                                "side": {
+                                    "description":
+                                        "An edge, or an [edge, anchor] pair, or \
+                                         {side, anchor}.",
+                                    "anyOf": [
+                                        {"type": "string",
+                                         "enum": ["left", "right", "top", "bottom"]},
+                                        {"type": "array", "minItems": 2, "maxItems": 2},
+                                        {"type": "object"}
+                                    ]
+                                },
+                                "anchor": {"type": "string"},
+                                "axis": {
+                                    "type": "string",
+                                    "enum": ["horizontal", "vertical"]
+                                }
+                            },
+                            "required": ["kind"]
+                        }})
+}
+
 pub fn place_parts_input_schema() -> Value {
     json!({
         "type": "object",
@@ -528,7 +617,9 @@ pub fn place_parts_input_schema() -> Value {
                                  A name shared by several physical pins connects all of them; every \
                                  signal pin left out becomes a no-connect. Every named signal net must \
                                  land on at least two pins across these parts and the existing sheet; \
-                                 power rails and nets declared under intent.ports may be terminal.",
+                                 power rails and nets declared under intent.ports may be terminal. \
+                                 Write \"@R1.2\" to join whatever net that existing pin is on, which \
+                                 is the only way to reach a net KiCAD named for itself.",
                             "additionalProperties": {"type": "string"}
                         },
                         "decouple": {
@@ -561,6 +652,13 @@ pub fn place_parts_input_schema() -> Value {
                         "items": {"type": ["string", "null"]}
                     }
                 }
+            },
+            "engine": {
+                "type": "string",
+                "enum": ["anneal", "spine", "cluster"],
+                "description":
+                    "Placement engine override. Only worth setting after a placement-engine \
+                     failure; the default is chosen from the sheet's size."
             },
             "intent": {
                 "type": "object",
@@ -596,16 +694,7 @@ pub fn place_parts_input_schema() -> Value {
                         "description": "Refdes to flip left-to-right.",
                         "items": {"type": "string"}
                     },
-                    "relations": {
-                        "type": "array",
-                        "description":
-                            "Relative placement. Each entry is tagged by \"kind\": \
-                             left_of|right_of|above|below with {a, b}; \
-                             group with {name, members, side: [edge, anchor]}; \
-                             align with {members, axis}. `b` and `anchor` may name a \
-                             part that is already on the sheet.",
-                        "items": {"type": "object"}
-                    }
+                    "relations": relations_schema()
                 }
             }
         }

@@ -84,20 +84,22 @@ pub fn tool_defs() -> Vec<Tool> {
     let defs = vec![
         Def {
             name: "search_symbols".into(),
-            description: "Find symbol `Lib:Name`; batch 4 queries. Common parts are built in."
+            description: "Find symbol `Lib:Name`; batch up to 10 queries in one call. The \
+                 best hit for each query comes back with its full pin list and default \
+                 footprint inline, so get_symbol_info is only needed for a hit further down."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "minLength": 1 },
-                    "limit": { "type": "integer", "minimum": 1 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 25 },
                     "queries": {
-                        "type": "array", "minItems": 1, "maxItems": 4,
+                        "type": "array", "minItems": 1, "maxItems": 10,
                         "items": {
                             "type": "object",
                             "properties": {
                                 "query": { "type": "string", "minLength": 1 },
-                                "limit": { "type": "integer", "minimum": 1 }
+                                "limit": { "type": "integer", "minimum": 1, "maximum": 25 }
                             },
                             "required": ["query"],
                             "additionalProperties": false
@@ -110,13 +112,20 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "get_symbol_info".into(),
-            description: "Return symbol ratings, datasheet, footprint, and pins.".into(),
+            description: "Return symbol ratings, datasheet, footprint, and pins. Pass \
+                 `lib_ids` to look up several symbols in one call."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "lib_id": { "type": "string", "description": "E.g. Device:R." }
+                    "lib_id": { "type": "string", "description": "E.g. Device:R." },
+                    "lib_ids": {
+                        "type": "array", "minItems": 1, "maxItems": 12,
+                        "items": { "type": "string", "minLength": 1 },
+                        "description": "Look up this whole list in one call."
+                    }
                 },
-                "required": ["lib_id"]
+                "anyOf": [{ "required": ["lib_id"] }, { "required": ["lib_ids"] }]
             }),
         },
         Def {
@@ -159,14 +168,14 @@ pub fn tool_defs() -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "minLength": 1 },
-                    "limit": { "type": "integer", "minimum": 1 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 25 },
                     "queries": {
-                        "type": "array", "minItems": 1, "maxItems": 4,
+                        "type": "array", "minItems": 1, "maxItems": 10,
                         "items": {
                             "type": "object",
                             "properties": {
                                 "query": { "type": "string", "minLength": 1 },
-                                "limit": { "type": "integer", "minimum": 1 }
+                                "limit": { "type": "integer", "minimum": 1, "maximum": 25 }
                             },
                             "required": ["query"],
                             "additionalProperties": false
@@ -575,13 +584,41 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
 // ── 1. search_symbols ──────────────────────────────────────────────────────
 
+/// Searches one `search_symbols` call may batch. A 50-part design needs pin
+/// names for a dozen distinct symbols; at four per call that alone cost three
+/// provider requests before any part could be placed.
+const MAX_BATCHED_QUERIES: usize = 10;
+
+/// Symbols one `get_symbol_info` call may look up.
+const MAX_BATCHED_SYMBOLS: usize = 12;
+
+/// A symbol's pins, one compact entry per pin. `unit` is carried only for
+/// multi-unit symbols, where it is the only way to tell the units apart.
+fn pin_digest(meta: &sch_check::SymbolMeta) -> Vec<Value> {
+    let multi_unit = meta.pins.iter().any(|p| p.unit > 1);
+    meta.pins
+        .iter()
+        .map(|p| {
+            let mut pin = json!({
+                "number": p.number,
+                "name": p.name,
+                "type": pin_type_str(p.etype),
+            });
+            if multi_unit {
+                pin["unit"] = json!(p.unit);
+            }
+            pin
+        })
+        .collect()
+}
+
 fn search_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Some(queries) = input.get("queries") {
         let queries = queries
             .as_array()
             .ok_or_else(|| anyhow!("`queries` must be an array"))?;
-        if queries.is_empty() || queries.len() > 4 {
-            bail!("`queries` must contain 1 to 4 searches");
+        if queries.is_empty() || queries.len() > MAX_BATCHED_QUERIES {
+            bail!("`queries` must contain 1 to {MAX_BATCHED_QUERIES} searches");
         }
         let mut results = Vec::with_capacity(queries.len());
         for item in queries {
@@ -619,12 +656,26 @@ fn search_symbols_one(query: &str, limit: usize, ctx: &AgentRuntime) -> Result<V
         }));
     }
 
-    let hits: Vec<Value> = ctx
+    let mut hits: Vec<Value> = ctx
         .index()?
         .search(query, limit)
         .into_iter()
         .map(|h| json!({ "lib_id": h.lib_id, "pin_count": h.pin_count }))
         .collect();
+
+    // The best hit carries its pins and default footprint, so the common case —
+    // "find this part, then write its pin map" — is one request instead of two.
+    if let Some(top) = hits.first_mut()
+        && let Some(lib_id) = top["lib_id"].as_str().map(str::to_string)
+        && let Some(meta) = ctx
+            .provider()
+            .symbol(&lib_id)
+            .or_else(|| ctx.index().ok()?.symbol(&lib_id))
+    {
+        top["pins"] = json!(pin_digest(&meta));
+        top["default_footprint"] = json!(meta.footprint);
+        top["description"] = json!(meta.description);
+    }
 
     Ok(json!({ "hits": hits }))
 }
@@ -704,26 +755,36 @@ fn contains_bounded_number(haystack: &str, needle: &str) -> bool {
 // ── 2. get_symbol_info ─────────────────────────────────────────────────────
 
 fn get_symbol_info(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    if let Some(ids) = input.get("lib_ids") {
+        let ids = ids
+            .as_array()
+            .ok_or_else(|| anyhow!("`lib_ids` must be an array"))?;
+        if ids.is_empty() || ids.len() > MAX_BATCHED_SYMBOLS {
+            bail!("`lib_ids` must contain 1 to {MAX_BATCHED_SYMBOLS} symbols");
+        }
+        let symbols: Result<Vec<Value>> = ids
+            .iter()
+            .map(|id| {
+                let id = id
+                    .as_str()
+                    .ok_or_else(|| anyhow!("each `lib_ids` entry must be a string"))?;
+                get_symbol_info_one(id, ctx)
+            })
+            .collect();
+        return Ok(json!({ "symbols": symbols? }));
+    }
     let lib_id = require_str(&input, "lib_id")?;
+    get_symbol_info_one(&lib_id, ctx)
+}
 
+fn get_symbol_info_one(lib_id: &str, ctx: &AgentRuntime) -> Result<Value> {
     match ctx
         .provider()
-        .symbol(&lib_id)
-        .or_else(|| ctx.index().ok()?.symbol(&lib_id))
+        .symbol(lib_id)
+        .or_else(|| ctx.index().ok()?.symbol(lib_id))
     {
         Some(meta) => {
-            let pins: Vec<Value> = meta
-                .pins
-                .iter()
-                .map(|p| {
-                    json!({
-                        "number": p.number,
-                        "name": p.name,
-                        "type": pin_type_str(p.etype),
-                        "unit": p.unit,
-                    })
-                })
-                .collect();
+            let pins = pin_digest(&meta);
             Ok(json!({
                 "lib_id": lib_id,
                 "description": meta.description,
@@ -734,7 +795,7 @@ fn get_symbol_info(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }))
         }
         None => {
-            let suggestions = ctx.provider().suggest(&lib_id);
+            let suggestions = ctx.provider().suggest(lib_id);
             Ok(json!({
                 "error": format!("unknown symbol `{lib_id}`"),
                 "suggestions": suggestions,

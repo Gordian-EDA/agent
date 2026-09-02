@@ -74,3 +74,40 @@ fn sub_unit_blocks_are_not_indexed() {
         "sub-unit block leaked into the index: {hits:?}"
     );
 }
+
+/// A model searches with a description, not a lib_id. No symbol name contains
+/// "barrel jack horizontal" as a subsequence, so whole-needle subsequence scoring
+/// finds nothing and the query must still land on the right family.
+#[test]
+fn a_descriptive_query_finds_the_family_it_describes() {
+    let Some(dir) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let idx = SymbolIndex::build(dir.symbol_dir()).unwrap();
+    for (query, wanted) in [
+        ("barrel jack horizontal", "Connector:Barrel_Jack"),
+        ("audio jack 3.5 switch CUI", "Connector_Audio:AudioJack3_SwitchT"),
+        ("micro SD card socket det", "Connector:Micro_SD_Card_Det1"),
+    ] {
+        let hits = idx.search(query, 5);
+        assert!(
+            hits.iter().any(|h| h.lib_id == wanted),
+            "`{query}` did not surface {wanted}: {hits:?}"
+        );
+    }
+}
+
+/// A footprint identifier written where a lib_id belongs matches nothing, and
+/// saying nothing beats offering the least-bad edit-distance neighbour out of
+/// twenty thousand — which sent one agent chasing a part that never existed.
+#[test]
+fn a_footprint_name_yields_no_confident_symbol_suggestion() {
+    let Some(dir) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let idx = SymbolIndex::build(dir.symbol_dir()).unwrap();
+    let hits = idx.search("Connector_PinHeader_1x11_P2.54mm_Vertical", 5);
+    assert!(hits.is_empty(), "expected no guess, got {hits:?}");
+}

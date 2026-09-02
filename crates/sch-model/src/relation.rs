@@ -132,7 +132,12 @@ pub fn relation_viol(items: &[Item], ir: &LayoutIr) -> usize {
                     viol += 1;
                 }
             }
-            Relation::Group { members, side, .. } => {
+            Relation::Group {
+                members,
+                side,
+                anchor,
+                ..
+            } => {
                 let set: BTreeSet<&str> = members.iter().map(String::as_str).collect();
                 if let Some(bbox) = members_bbox(items, &set) {
                     viol += items
@@ -140,10 +145,11 @@ pub fn relation_viol(items: &[Item], ir: &LayoutIr) -> usize {
                         .filter(|it| !set.contains(it.refdes.as_str()) && bbox.contains(it.at))
                         .count();
                 }
-                if let Some((side, anchor)) = side
-                    && let Some(pa) = pos.get(anchor.as_str())
+                if let Some((side, Some(anchor))) =
+                    crate::ir::group_placement(side.as_ref(), anchor.as_deref())
+                    && let Some(pa) = pos.get(anchor)
                 {
-                    let (ix, sign) = side_axis(*side);
+                    let (ix, sign) = side_axis(side);
                     viol += members
                         .iter()
                         .filter_map(|m| pos.get(m.as_str()))
@@ -206,17 +212,23 @@ fn repair_group_sides(items: &mut [Item], ir: &LayoutIr) {
     for rel in &ir.relations {
         let Relation::Group {
             members,
-            side: Some((side, anchor)),
+            side,
+            anchor,
             ..
         } = rel
         else {
             continue;
         };
-        let pos = centroids(items);
-        let Some(pa) = pos.get(anchor.as_str()).copied() else {
+        let Some((side, Some(anchor))) =
+            crate::ir::group_placement(side.as_ref(), anchor.as_deref())
+        else {
             continue;
         };
-        let (ix, sign) = side_axis(*side);
+        let pos = centroids(items);
+        let Some(pa) = pos.get(anchor).copied() else {
+            continue;
+        };
+        let (ix, sign) = side_axis(side);
         let anchor_half = half_extent(items, anchor, ix);
         let mut delta: f64 = 0.0;
         for m in members {

@@ -182,7 +182,7 @@ fn live_power_nets() -> ExistingSheet {
 }
 
 #[test]
-fn a_dangling_led_cathode_is_refused_with_the_pin() {
+fn a_dangling_led_cathode_is_reported_but_not_fatal() {
     let input: PlacePartsInput = serde_json::from_str(
         r#"{"parts": [{"ref": "D1", "part": "Device:LED",
              "pins": {"A": "+3V3", "K": "LED_K"}}]}"#,
@@ -190,7 +190,8 @@ fn a_dangling_led_cathode_is_refused_with_the_pin() {
     .unwrap();
     let (_, _, audit) = into_design(&input, &provider(), &live_power_nets());
 
-    assert!(!audit.is_valid());
+    assert!(audit.is_valid(), "a dangling pin must not refuse the payload");
+    assert!(!audit.is_clean());
     assert_eq!(audit.dangling.len(), 1);
     assert_eq!(audit.dangling[0].refdes, "D1");
     assert_eq!(audit.dangling[0].pin, "K");
@@ -209,14 +210,14 @@ fn a_divider_between_power_rails_is_accepted() {
 }
 
 #[test]
-fn a_single_pin_signal_is_refused() {
+fn a_single_pin_signal_is_reported_but_not_fatal() {
     let input: PlacePartsInput = serde_json::from_str(
         r#"{"parts": [{"ref": "R1", "part": "Device:R", "pins": {"1": "SIG_A"}}]}"#,
     )
     .unwrap();
     let (_, _, audit) = into_design(&input, &provider(), &Default::default());
 
-    assert!(!audit.is_valid());
+    assert!(audit.is_valid(), "a dangling pin must not refuse the payload");
     assert_eq!(audit.dangling.len(), 1);
     assert_eq!(audit.dangling[0].net, "SIG_A");
 }
@@ -498,4 +499,48 @@ fn engine_internal_intent_fields_are_rejected() {
         serde_json::from_str::<PlacePartsInput>(r#"{"parts": [], "intent": {"frozen": ["U1"]}}"#)
             .unwrap_err();
     assert!(err.to_string().contains("frozen"), "{err}");
+}
+
+#[test]
+fn one_refusal_names_every_fault_in_the_payload() {
+    // A bad lib_id, a duplicate refdes and a dangling pin used to cost three
+    // separate round trips because each validation layer masked the next.
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [
+             {"ref": "R1", "part": "Device:R", "pins": {"1": "+3V3", "2": "GND"}},
+             {"ref": "R1", "part": "Device:R", "pins": {"1": "+3V3", "2": "GND"}},
+             {"ref": "U9", "part": "Nope:NotAThing", "pins": {"1": "GND"}},
+             {"ref": "R7", "part": "Device:R", "pins": {"1": "SIG_A", "2": "GND"}}]}"#,
+    )
+    .unwrap();
+    let (_, diags, audit) = into_design(&input, &provider(), &live_power_nets());
+
+    assert!(!audit.is_valid(), "a duplicate refdes is still fatal");
+    assert_eq!(audit.duplicate_refs.len(), 1);
+    assert_eq!(audit.duplicate_refs[0].refdes, "R1");
+    assert_eq!(audit.dangling.len(), 1, "{:?}", audit.dangling);
+    assert_eq!(audit.dangling[0].net, "SIG_A");
+    assert!(
+        diags.0.iter().any(|d| d.code == "unknown-part"),
+        "the unknown lib_id is found in the same pass, not a later one"
+    );
+}
+
+#[test]
+fn a_footprint_written_as_a_lib_id_says_so() {
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "J1",
+             "part": "Connector_PinHeader_2.54mm:PinHeader_1x11_P2.54mm_Vertical",
+             "pins": {"1": "GND", "2": "+3V3"}}]}"#,
+    )
+    .unwrap();
+    let (_, diags, _) = into_design(&input, &provider(), &live_power_nets());
+
+    let message = diags
+        .0
+        .iter()
+        .find(|d| d.code == "unknown-part")
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    assert!(message.contains("FOOTPRINT"), "{message}");
 }

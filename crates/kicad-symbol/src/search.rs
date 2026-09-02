@@ -199,6 +199,38 @@ fn discover_libraries(symbol_dir: &Path) -> io::Result<Vec<SymbolLibrary>> {
     Ok(libs)
 }
 
+
+/// Share of a multi-word query's words a candidate must match to qualify.
+const MIN_TOKEN_COVERAGE: f64 = 0.5;
+
+/// How well `candidate` answers `needle`, or `None` if it does not.
+///
+/// Skim scores a needle only when the whole of it is a subsequence of the
+/// candidate, which is right for one word and wrong for a description: no symbol
+/// name contains "barrel jack horizontal" in order, so every descriptive query
+/// scored `None` and fell through to the edit-distance backfill. Scoring the
+/// words separately and requiring most of them to land keeps the fzf behaviour
+/// for a single token while letting a phrase degrade to its best coverage.
+fn score(matcher: &SkimMatcherV2, candidate: &str, needle: &str, tokens: &[&str]) -> Option<i64> {
+    if let Some(whole) = matcher.fuzzy_match(candidate, needle) {
+        return Some(whole);
+    }
+    if tokens.len() < 2 {
+        return None;
+    }
+    let hits: Vec<i64> = tokens
+        .iter()
+        .filter_map(|token| matcher.fuzzy_match(candidate, token))
+        .collect();
+    let coverage = hits.len() as f64 / tokens.len() as f64;
+    if coverage < MIN_TOKEN_COVERAGE {
+        return None;
+    }
+    // Scale by coverage so a candidate matching every word outranks one matching
+    // half, and keep it under any whole-needle score.
+    Some((hits.iter().sum::<i64>() as f64 * coverage) as i64 / 2)
+}
+
 /// Rank `entries` against an already-normalized `needle`, returning the indices
 /// of the best `n`, best first.
 ///
@@ -208,14 +240,15 @@ fn discover_libraries(symbol_dir: &Path) -> io::Result<Vec<SymbolLibrary>> {
 /// — e.g. the query has a transposition — the remainder is backfilled by edit
 /// distance, so the caller is never starved of candidates. Ordering is
 /// deterministic: fuzzy ties break on shorter normalized text then `lib_id`;
-/// backfill ties break on `lib_id`.
+/// backfill ties break on `lib_id`. Only a single-word needle is backfilled.
 fn rank(entries: &[Entry], needle: &str, n: usize) -> Vec<usize> {
     let matcher = SkimMatcherV2::default();
+    let tokens: Vec<&str> = needle.split_whitespace().collect();
 
     let mut fuzzy: Vec<(i64, usize)> = entries
         .iter()
         .enumerate()
-        .filter_map(|(i, e)| matcher.fuzzy_match(&e.normalized, needle).map(|s| (s, i)))
+        .filter_map(|(i, e)| score(&matcher, &e.normalized, needle, &tokens).map(|s| (s, i)))
         .collect();
     fuzzy.sort_by(|&(sa, ia), &(sb, ib)| {
         sb.cmp(&sa)
@@ -233,7 +266,15 @@ fn rank(entries: &[Entry], needle: &str, n: usize) -> Vec<usize> {
         return chosen;
     }
 
-    // Backfill: never starve the agent of candidates on a typo / non-subsequence.
+    // Backfill by edit distance recovers a TYPO — one word that nearly spells one
+    // symbol. It cannot answer a phrase: a footprint name written where a lib_id
+    // belongs matched nothing above and would come back with the least-bad neighbour
+    // out of twenty thousand, which reads as an answer and sent one agent chasing a
+    // part that never existed. Distance cannot tell the two apart (both sit near
+    // 0.5); token count can, and a phrase has already had its coverage pass.
+    if tokens.len() > 1 {
+        return chosen;
+    }
     let taken: std::collections::HashSet<usize> = chosen.iter().copied().collect();
     let mut rest: Vec<(f64, usize)> = entries
         .iter()
@@ -251,7 +292,8 @@ fn rank(entries: &[Entry], needle: &str, n: usize) -> Vec<usize> {
             .expect("distances are finite")
             .then_with(|| entries[ia].lib_id.cmp(&entries[ib].lib_id))
     });
-    chosen.extend(rest.into_iter().take(n - chosen.len()).map(|(_, i)| i));
+    let want = n - chosen.len();
+    chosen.extend(rest.into_iter().take(want).map(|(_, i)| i));
     chosen
 }
 

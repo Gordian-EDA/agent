@@ -78,6 +78,7 @@ pub enum TurnEndReason {
     Completed,
     /// The model kept requesting tools until the safety ceiling was reached.
     ProviderRequestLimit { requests: usize },
+    TimeLimit { elapsed_secs: u64 },
     /// A project mutation timed out and may still be running in the background.
     MutationTimedOut,
     /// Required artifact checks or independent review still have findings.
