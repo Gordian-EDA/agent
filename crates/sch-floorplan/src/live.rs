@@ -143,6 +143,9 @@ impl Phase {
 }
 
 impl PlacementBudget {
+    /// Largest default call budget, used by the outer agent timeout.
+    pub const DEFAULT: Duration = Duration::from_secs(45);
+
     /// The measured wall-clock envelope for a call leaving `parts` on the sheet.
     pub fn new(parts: usize) -> Self {
         let seconds = match parts {
