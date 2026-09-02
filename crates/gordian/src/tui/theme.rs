@@ -80,7 +80,7 @@ pub const QUOTE_GUTTER: Style = fg(FAINT);
 pub const RULE: Style = fg(BORDER);
 pub const RULE_FOCUS: Style = fg(ACC);
 
-/// A render-preview link row in the transcript — underlined teal so it reads
+/// An inline render-preview link in a tool row — underlined teal so it reads
 /// as clickable (a click opens the PNG in the system viewer).
 pub const LINK: Style = fg(INFO).add_modifier(Modifier::UNDERLINED);
 

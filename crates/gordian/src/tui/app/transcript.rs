@@ -192,22 +192,26 @@ impl App {
                 // marker glyph is the renderer's job — the text carries none, or
                 // the card would show a double arrow.
                 let placeholder = format!("{name}(…) running…");
-                if let Some(slot) = self
+                let tool_entry = if let Some((index, slot)) = self
                     .transcript
                     .iter_mut()
+                    .enumerate()
                     .rev()
-                    .find(|e| e.speaker == Speaker::Tool && e.text == placeholder)
+                    .find(|(_, e)| e.speaker == Speaker::Tool && e.text == placeholder)
                 {
                     slot.text = format!("{name} → {summary}");
+                    index
                 } else {
+                    let index = self.transcript.len();
                     self.transcript
                         .push(Entry::tool(format!("{name} → {summary}")));
-                }
+                    index
+                };
                 self.active_work = None;
-                // A render tool returned a PNG: post an inline preview right after
-                // the collapsed card.
-                if let Some(path) = image_path {
-                    self.push_image(path, name);
+                if matches!(name.as_str(), "render_board" | "render_schematic")
+                    && let Some(path) = image_path
+                {
+                    self.push_image(tool_entry, path);
                 }
             }
             AgentEvent::Usage {
@@ -276,15 +280,12 @@ impl App {
         }
     }
 
-    /// Post an inline image preview pinned just after the current transcript
-    /// tail, so the renderer interleaves it in scroll order.
-    pub(super) fn push_image(&mut self, path: impl Into<String>, caption: impl Into<String>) {
-        let after = self.transcript.len();
-        self.images.push(ImageCell::new(after, path, caption));
+    /// Attach a render preview to the tool entry that produced it.
+    fn push_image(&mut self, tool_entry: usize, path: impl Into<String>) {
+        self.images.push(ImageCell::new(tool_entry, path));
     }
 
-    /// The path of the most recently posted render preview, if any — what
-    /// `/preview` re-displays.
+    /// The path of the most recently posted render preview, if any.
     pub fn latest_render_path(&self) -> Option<String> {
         self.images.last().map(|c| c.path.clone())
     }
@@ -330,9 +331,7 @@ impl App {
             .nth(popped - 1);
         if let Some(at) = cut {
             self.transcript.truncate(at);
-            // Drop any image previews pinned past the cut so they don't dangle
-            // off the rolled-back transcript.
-            self.images.retain(|c| c.after <= at);
+            self.images.retain(|c| c.tool_entry < at);
         }
         self.live_assistant = None;
         self.status.turn_count = self.status.turn_count.saturating_sub(popped);

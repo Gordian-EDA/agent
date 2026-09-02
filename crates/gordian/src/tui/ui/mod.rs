@@ -111,13 +111,16 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::style::Modifier;
 
-    /// Render an app to a TestBackend and return the buffer's text as one string.
-    fn render_to_string(app: &mut App, w: u16, h: u16) -> String {
+    fn render_to_buffer(app: &mut App, w: u16, h: u16) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, app)).unwrap();
-        let buf = terminal.backend().buffer().clone();
-        buffer_text(&buf)
+        terminal.backend().buffer().clone()
+    }
+
+    /// Render an app to a TestBackend and return the buffer's text as one string.
+    fn render_to_string(app: &mut App, w: u16, h: u16) -> String {
+        buffer_text(&render_to_buffer(app, w, h))
     }
 
     fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
@@ -207,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn render_tool_posts_a_clickable_preview_link_row() {
+    fn render_tool_uses_a_clickable_inline_preview() {
         let mut a = app();
         for c in "render the board".chars() {
             a.update(Msg::Char(c));
@@ -216,35 +219,49 @@ mod tests {
         a.update(Msg::Agent(AgentEvent::ToolStarted {
             name: "render_board".into(),
         }));
-        // A render tool returns a PNG path: a preview link row is posted.
         a.update(Msg::Agent(AgentEvent::ToolFinished {
             name: "render_board".into(),
             summary: "routed view → ok".into(),
             image_path: Some("/tmp/proj/.gordian/renders/000.png".into()),
         }));
         assert_eq!(a.images.len(), 1, "a preview cell was posted");
-        let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("board preview"), "link row shows:\n{text}");
-        assert!(text.contains("000.png"), "link carries the path:\n{text}");
+        let buf = render_to_buffer(&mut a, 80, 24);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("└ Render board → preview"),
+            "tool row contains the inline link:\n{text}"
+        );
+        assert!(!text.contains("000.png"), "PNG path stays hidden:\n{text}");
+        assert!(
+            !text.contains("routed view"),
+            "render summary is replaced:\n{text}"
+        );
 
-        // The draw published a click zone over the link row, and a click inside
-        // it (only inside it) resolves to the preview.
         let zone = a
             .preview_zones
             .first()
             .copied()
-            .expect("the link row registered a click zone");
+            .expect("the inline link registered a click zone");
         assert_eq!(zone.idx, 0);
+        assert_eq!(zone.width, 7);
         assert_eq!(a.preview_at(zone.x, zone.y), Some(0));
+        assert_eq!(a.preview_at(zone.x + 6, zone.y), Some(0));
+        assert_eq!(a.preview_at(zone.x - 1, zone.y), None);
+        assert_eq!(a.preview_at(zone.x + zone.width, zone.y), None);
         assert_eq!(
-            a.preview_at(zone.x, zone.y + zone.height + 1),
+            a.preview_at(zone.x, zone.y + 1),
             None,
             "outside the row is not the link"
         );
+        for x in zone.x..zone.x + zone.width {
+            let style = buf[(x, zone.y)].style();
+            assert_eq!(style.fg, theme::LINK.fg);
+            assert!(style.add_modifier.contains(Modifier::UNDERLINED));
+        }
     }
 
     #[test]
-    fn render_schematic_preview_is_labeled_as_schematic() {
+    fn schematic_render_uses_the_same_inline_preview_form() {
         let mut a = app();
         for c in "render the schematic".chars() {
             a.update(Msg::Char(c));
@@ -261,12 +278,12 @@ mod tests {
 
         let text = render_to_string(&mut a, 80, 24);
         assert!(
-            text.contains("schematic preview"),
-            "schematic image label shows:\n{text}"
+            text.contains("└ Render schematic → preview"),
+            "schematic tool row contains the inline link:\n{text}"
         );
         assert!(
-            !text.contains("board preview"),
-            "schematic renders should not be labeled as board previews:\n{text}"
+            !text.contains("rendered schematic to PNG") && !text.contains("001.png"),
+            "summary and PNG path stay hidden:\n{text}"
         );
     }
 

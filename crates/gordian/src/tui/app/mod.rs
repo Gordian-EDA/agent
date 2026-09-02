@@ -569,6 +569,23 @@ mod tests {
     }
 
     #[test]
+    fn preview_command_opens_the_latest_render_without_adding_a_row() {
+        let mut a = app();
+        let path = "/tmp/p/.gordian/renders/001.png";
+        a.update(Msg::Agent(AgentEvent::ToolFinished {
+            name: "render_board".into(),
+            summary: "rendered board to PNG".into(),
+            image_path: Some(path.into()),
+        }));
+        let transcript_len = a.transcript.len();
+
+        type_str(&mut a, "/preview");
+        assert_eq!(a.update(Msg::Submit), Action::OpenPreview(path.into()));
+        assert_eq!(a.transcript.len(), transcript_len);
+        assert_eq!(a.images.len(), 1);
+    }
+
+    #[test]
     fn tab_cycles_through_matching_commands() {
         let mut a = app();
         type_str(&mut a, "/c");

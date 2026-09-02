@@ -12,8 +12,8 @@ pub(super) struct StashedPaste {
     pub text: String,
 }
 
-/// The screen rect of one render-preview link row from the last draw, plus the
-/// index into [`App::images`] it opens when clicked.
+/// The screen rect of one inline preview link from the last draw, plus the index
+/// into [`App::images`] it opens when clicked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreviewZone {
     pub x: u16,
@@ -66,11 +66,9 @@ impl Status {
 pub struct App {
     /// The chat transcript (top pane), oldest first.
     pub transcript: Vec<Entry>,
-    /// Render-preview links, each pinned after a transcript entry (see
-    /// [`super::ImageCell`]). Kept parallel to `transcript` so the text model
-    /// stays a plain `Vec<Entry>`.
+    /// Render-preview links attached to their producing tool entries.
     pub images: Vec<super::ImageCell>,
-    /// Screen rects where the last draw painted a preview link, with the index
+    /// Screen rects where the last draw painted an inline preview link, with the index
     /// of the [`super::ImageCell`] each opens. Written by the renderer (like
     /// `scroll_max` / `viewport_h`); the shell hit-tests mouse clicks against it.
     pub preview_zones: Vec<PreviewZone>,
@@ -249,7 +247,7 @@ impl App {
         }
     }
 
-    /// The [`App::images`] index whose link row contains screen position
+    /// The [`App::images`] index whose inline link contains screen position
     /// `(x, y)` in the last draw, if any — what a left click there opens.
     pub fn preview_at(&self, x: u16, y: u16) -> Option<usize> {
         self.preview_zones

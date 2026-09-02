@@ -213,6 +213,7 @@ impl Shell {
             Action::UnwindTo(k) => self.unwind_to(app, k),
             Action::Compact => self.spawn_compact(app),
             Action::ShowContext => self.show_context(app),
+            Action::OpenPreview(path) => open_preview(app, path),
             Action::SpawnTurn(prompt) => self.spawn_turn(app, prompt),
         }
     }
@@ -542,13 +543,18 @@ async fn event_loop(
     Ok(())
 }
 
-/// A left click on a preview link row opens its PNG in the system viewer
-/// (cross-platform via the `open` crate; xdg-open on Linux). Failures surface
-/// as an error notice rather than silently doing nothing.
+/// A left click on an inline preview link opens its PNG in the system viewer.
 fn open_preview_at(app: &mut App, x: u16, y: u16) {
     let Some(path) = app.preview_at(x, y).map(|i| app.images[i].path.clone()) else {
         return;
     };
+    open_preview(app, path);
+}
+
+/// Open a preview PNG in the system viewer
+/// (cross-platform via the `open` crate; xdg-open on Linux). Failures surface
+/// as an error notice rather than silently doing nothing.
+fn open_preview(app: &mut App, path: String) {
     if let Err(e) = open::that_detached(&path) {
         app.transcript.push(app::Entry::notice(
             app::NoticeLevel::Error,
@@ -564,7 +570,7 @@ fn open_preview_at(app: &mut App, x: u16, y: u16) {
 /// terminals translate wheel motion into synthetic Up/Down key events when in
 /// the alternate screen, which is indistinguishable from the user's own key
 /// presses and forces Up/Down to guess which one happened. Capture also lets a
-/// left click on a preview link row open its render. The trade is native
+/// left click on an inline preview link open its render. The trade is native
 /// click-drag text selection in the terminal, which most terminals still offer
 /// behind a modifier (e.g. Shift-drag).
 ///

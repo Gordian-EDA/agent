@@ -38,7 +38,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/preview",
-        desc: "re-post the latest board/schematic render link (click to open)",
+        desc: "open the latest board/schematic render",
     },
     CommandSpec {
         name: "/quit",
