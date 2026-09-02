@@ -34,6 +34,11 @@ pub struct Draw<'a> {
     /// Nets a power-output pin already drives in the document being drawn into. The
     /// realiser adds no `PWR_FLAG` for these: a second one is an ERC error.
     pub driven: &'a [String],
+    /// The drawing these items are being added BESIDE, when the sheet already has
+    /// content: its pins, wire ends and label anchors with the nets they carry. The
+    /// router, the stub retraction and the net audit all treat it as foreign, so this
+    /// block can neither draw across it nor weld onto it. `None` for a whole sheet.
+    pub beside: Option<&'a sch_model::route::RouteScene>,
 }
 
 /// Draw `items` at the poses they carry: route, label, no-connect, text-solve.
@@ -45,17 +50,14 @@ pub fn realize_block(
     ir: &LayoutIr,
     draw: Draw<'_>,
 ) -> std::io::Result<SchematicWriter> {
-    let realizer = RoutedSheetRealizer::new(env, inc, ir).already_driven(draw.driven);
+    let mut realizer = RoutedSheetRealizer::new(env, inc, ir).already_driven(draw.driven);
+    if let Some(scene) = draw.beside {
+        realizer = realizer.beside(scene);
+    }
     let mut writer = realizer.realize_writer(draw.title, items, RouteRealization::ShippedSheet)?;
     add_orphan_label_columns(&mut writer, design, inc);
     writer.set_frame(draw.frame);
     writer.prepare();
-    // The truthfulness invariant of the drawn geometry, before the caller grafts it and
-    // gates on the extracted netlist: no point may carry two nets. A break here is what
-    // the gate will later report as a refused edit, named at the coordinate it happened.
-    for short in crate::floorplan::place::net_conflicts(env, &writer, items, inc) {
-        tracing::warn!("realised block shorts nets — {short}");
-    }
     Ok(writer)
 }
 

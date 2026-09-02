@@ -57,6 +57,7 @@ pub struct RoutedSheetRealizer<'a> {
     inc: &'a Incidence,
     ir: &'a LayoutIr,
     driven: &'a [String],
+    beside: Option<&'a sch_model::route::RouteScene>,
 }
 
 impl<'a> RoutedSheetRealizer<'a> {
@@ -66,7 +67,16 @@ impl<'a> RoutedSheetRealizer<'a> {
             inc,
             ir,
             driven: &[],
+            beside: None,
         }
+    }
+
+    /// The drawing these items are being added BESIDE — the existing sheet's pins,
+    /// wires and label anchors with the nets they carry. Without it the router draws
+    /// this block's wires across the sheet's own geometry and welds nets it cannot see.
+    pub fn beside(mut self, scene: &'a sch_model::route::RouteScene) -> Self {
+        self.beside = Some(scene);
+        self
     }
 
     /// Nets a power-output pin already drives elsewhere in the document these items
@@ -93,6 +103,7 @@ impl<'a> RoutedSheetRealizer<'a> {
             self.ir,
             &needs_flag,
             mode.fan_risers(),
+            self.beside.cloned().unwrap_or_default(),
         )
     }
 }

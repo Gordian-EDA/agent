@@ -706,7 +706,40 @@ impl SchematicWriter {
         for w in &self.wires {
             scene.segments.push(NetSegment::new(w.a, w.b, w.net.clone()));
         }
+        scene.points.extend(self.beside.points.iter().cloned());
+        scene.segments.extend(self.beside.segments.iter().cloned());
+        scene.solids.extend(self.beside.solids.iter().copied());
         scene
+    }
+
+    /// Whether this writer is drawing a block INTO a sheet that already has content,
+    /// rather than composing a whole sheet of its own.
+    pub fn joins_existing_content(&self) -> bool {
+        !self.beside.points.is_empty() || !self.beside.segments.is_empty()
+    }
+
+    /// The neighbouring sheet's terminals, tagged with the nets they already carry.
+    pub fn beside_terminals(&self) -> Vec<(Point2, String)> {
+        self.beside.points.clone()
+    }
+
+    /// The neighbouring sheet's wire segments, tagged with the nets they already carry.
+    pub fn beside_wires(&self) -> Vec<(Segment, String)> {
+        self.beside
+            .segments
+            .iter()
+            .map(|s| (s.segment, s.net.clone()))
+            .collect()
+    }
+
+    /// Declare the drawing this block is being added beside: the existing sheet's pins,
+    /// wire ends and label anchors with the nets they already carry.
+    ///
+    /// A block placed onto a populated sheet is routed by a writer that holds only the
+    /// block; without this it draws its wires straight across the sheet's pins and
+    /// welds nets it never heard of. Whole-sheet builds pass nothing.
+    pub fn set_beside(&mut self, beside: sch_model::route::RouteScene) {
+        self.beside = beside;
     }
 
     /// Wire segments attributed to `net` (for junction counting at taps).

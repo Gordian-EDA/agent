@@ -1,0 +1,123 @@
+{
+ "name": "I2C pull-up network",
+ "block": "interface",
+ "parts": [
+  {
+   "ref": "J4",
+   "part": "Connector_Generic:Conn_01x06",
+   "value": "I2C HDR",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+   "pins": {
+    "1": "3V3",
+    "2": "GND",
+    "3": "I2C_SCL",
+    "4": "I2C_SDA",
+    "5": "ALERT_OUT",
+    "6": "TS2"
+   }
+  },
+  {
+   "ref": "R29",
+   "part": "Device:R_Network04",
+   "value": "10k I2C/ALERT PULLUPS",
+   "footprint": "Resistor_SMD:R_Array_Concave_4x0603",
+   "pins": {
+    "common": "3V3",
+    "R1": "I2C_SCL",
+    "R2": "I2C_SDA",
+    "R3": "ALERT",
+    "R4": "TS1"
+   }
+  },
+  {
+   "ref": "C16",
+   "part": "Device:C",
+   "value": "100nF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "3V3",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C17",
+   "part": "Device:C",
+   "value": "1uF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "3V3",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "TH1",
+   "part": "Device:R",
+   "value": "10k NTC",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "TS1",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "TH2",
+   "part": "Device:R",
+   "value": "10k NTC",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "TS2",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "R30",
+   "part": "Device:R",
+   "value": "10k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "3V3",
+    "2": "TS2"
+   }
+  },
+  {
+   "ref": "R31",
+   "part": "Device:R",
+   "value": "100R",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "ALERT",
+    "2": "ALERT_OUT"
+   }
+  }
+ ],
+ "intent": {
+  "flow": "lr",
+  "ports": {
+   "I2C_SCL": "right",
+   "I2C_SDA": "right",
+   "ALERT_OUT": "right",
+   "TS1": "right",
+   "TS2": "right"
+  },
+  "rails": {
+   "3V3": "top",
+   "GND": "bottom"
+  },
+  "relations": [
+   {
+    "anchor": "R29",
+    "kind": "group",
+    "members": [
+     "R30",
+     "R31",
+     "C16",
+     "C17",
+     "TH1",
+     "TH2"
+    ],
+    "name": "interface",
+    "side": "right"
+   }
+  ]
+ }
+}

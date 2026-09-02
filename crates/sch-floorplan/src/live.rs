@@ -42,7 +42,7 @@ use sch_check::model::{Block, Component, Design, PinTarget};
 use sch_check::{ExistingSheet, PayloadAudit, PlacePartsInput};
 use sch_doc::{Netlist, SchDoc, connect};
 use sch_model::ir::LayoutIr;
-use sch_model::item::Item;
+use sch_model::item::{Incidence, Item};
 use sch_model::place::{Deadline, PlaceOptions, PlacementEngineKind};
 use sch_model::result::IdiomReport;
 use serde::{Deserialize, Serialize};
@@ -479,9 +479,11 @@ fn place_parts_inner(
                     title: design.name.as_deref(),
                     frame: fresh,
                     driven: &driven_nets(doc, &before),
+                    beside: (!fresh).then(|| beside_scene(doc)).as_ref(),
                 },
             )?;
-            let warnings = writer.layout_warnings();
+            let mut warnings = writer.layout_warnings();
+            warnings.extend(net_conflict_warnings(env, &writer, &placed, &inc));
             crate::realize::graft(doc, writer)?;
             Ok(warnings)
         },
@@ -647,10 +649,12 @@ fn rearrange_inner(
                 &ir,
                 crate::realize::Draw {
                     driven: &driven_nets(doc, &before),
+                    beside: Some(&beside_scene_excluding(doc, &placed)),
                     ..Default::default()
                 },
             )?;
-            let warnings = writer.layout_warnings();
+            let mut warnings = writer.layout_warnings();
+            warnings.extend(net_conflict_warnings(env, &writer, &placed, &inc));
             crate::realize::graft_drawing(doc, writer)?;
             Ok((redrawn, inc, warnings))
         },
@@ -1032,6 +1036,77 @@ fn footprints(items: &[Item]) -> Vec<Rect> {
         .iter()
         .map(|it| item_rect(it, it.at).inflate(TOUCH_MARGIN))
         .collect()
+}
+
+/// The truthfulness invariant of the drawn geometry, checked before the graft and
+/// reported with the edit's own warnings: `mismatch.shorted` names the two nets that
+/// merged, and this names the point and the geometry that merged them. Without it a
+/// refusal is an engine failure with no cause attached. Normally empty — a hit here
+/// means the edit is about to be refused.
+fn net_conflict_warnings(
+    env: &KicadInstallation,
+    writer: &crate::write::SchematicWriter,
+    items: &[Item],
+    inc: &Incidence,
+) -> Vec<String> {
+    crate::floorplan::place::net_conflicts(env, writer, items, inc)
+        .into_iter()
+        .map(|conflict| format!("realised block shorts nets — {conflict}"))
+        .collect()
+}
+
+/// What `doc` already carries, as foreign routing geometry for a block about to be drawn
+/// beside it: every connection point and wire segment with the net it is on.
+///
+/// The realiser holds only the block it is drawing, so without this it routes as though
+/// the sheet were blank — across the existing pins, and onto the existing labels. Empty
+/// for a blank sheet, which makes a whole-sheet build byte-identical.
+///
+/// Symbol bodies are deliberately absent: the placement already keeps clear of them
+/// (see [`obstacles`]), and a wire crossing a body reads badly but shorts nothing, which
+/// is the question this scene answers.
+fn beside_scene(doc: &SchDoc) -> sch_model::route::RouteScene {
+    let scene = connect::scene(doc);
+    sch_model::route::RouteScene {
+        solids: Vec::new(),
+        points: scene.points,
+        segments: scene
+            .segments
+            .into_iter()
+            .map(|(a, b, net)| sch_model::route::NetSegment::new(a, b, net))
+            .collect(),
+        label_solids: Vec::new(),
+    }
+}
+
+/// The same scene for a RE-draw, where `redrawn`'s symbols are still seated in `doc` but
+/// their wiring has just been erased.
+///
+/// Their own pins must not come back as foreign: stripped of wires each reads as an
+/// unnamed one-pin net, which is foreign to everything — including to the block that is
+/// about to wire it.
+fn beside_scene_excluding(doc: &SchDoc, redrawn: &[Item]) -> sch_model::route::RouteScene {
+    // `pin_endpoint` grid-snaps and the document's own pin geometry does not, so the two
+    // are compared on the grid: a pin the snap moved is still the same pin.
+    let key = |p: geom::Point2| {
+        let p = geom::GRID_50_MIL.snap_point(p);
+        ((p.x * 1000.0).round() as i64, (p.y * 1000.0).round() as i64)
+    };
+    let own: BTreeSet<(i64, i64)> = redrawn
+        .iter()
+        .flat_map(|item| {
+            item.geom
+                .pins
+                .iter()
+                .filter(move |pin| pin.unit.max(1) == item.unit.max(1))
+                .map(move |pin| {
+                    key(sch_model::geometry::pin_endpoint(pin, item.at, item.angle, item.mirror).into())
+                })
+        })
+        .collect();
+    let mut scene = beside_scene(doc);
+    scene.points.retain(|(p, _)| !own.contains(&key(*p)));
+    scene
 }
 
 /// What a placement must not land on: the drawing already on the sheet — wires, label

@@ -107,10 +107,17 @@ pub(crate) fn wire(
     // silently shorting the two nets. Phase B gives signal nets this guard through the
     // routing scene; rails are drawn before that scene exists, so they carry their own.
     // Finalize-only (`fan_risers`), like the body jog, so the per-move scorer is untouched.
+    // The sheet this block is being added beside is foreign in exactly the same way, and
+    // its terminals are the ones the block cannot see at all.
     let foreign_pins: Vec<([f64; 2], String)> = if fan_risers {
         net_eps
             .iter()
             .flat_map(|(net, eps)| eps.iter().map(move |(p, _)| (*p, net.clone())))
+            .chain(
+                w.beside_terminals()
+                    .into_iter()
+                    .map(|(p, net)| ([p.x, p.y], net)),
+            )
             .collect()
     } else {
         Vec::new()
@@ -167,20 +174,8 @@ pub(crate) fn wire(
         for (p, _) in eps {
             scene.points.push(((*p).into(), net.clone()));
         }
-        // Reserve each port's pennant box up front so a LATER net's wire routes
-        // around it instead of straight through someone else's edge tag. The label
-        // is added during Phase C — too late to obstruct nets routed before it.
-        if let Some(side) = effective_port_side(ir.ports.get(net).copied(), eps) {
-            // Mirror route_signal's IC-pin override so the reserved box matches where
-            // the label actually lands (clear of the IC's long pin-name text).
-            let (side, at) = ic_port_exit_override(env, w, items, inc, net, eps, side)
-                .unwrap_or((side, port_exit_point(eps, side)));
-            let at = nudge_port_exit(&scene, at, side, net);
-            scene
-                .label_solids
-                .push((port_label_obstacle(at, side, net), net.clone()));
-        }
     }
+    let port_exits = plan_port_exits(env, w, items, inc, ir, &net_eps, &mut scene);
 
     // Phase C — route every signal/port net with the direction-aware,
     // obstacle-avoiding elbow router so wires leave pins along their facing
@@ -206,7 +201,7 @@ pub(crate) fn wire(
             inc,
             net,
             eps,
-            ir.ports.get(net).copied(),
+            port_exits.get(net).copied(),
             label_policy,
             &mut scene,
         )?;
@@ -266,29 +261,20 @@ pub(crate) fn route_signal(
     inc: &Incidence,
     net: &str,
     eps: &[([f64; 2], Dir)],
-    port: Option<Side>,
+    port_exit: Option<(Side, [f64; 2])>,
     label_policy: Option<LabelPolicy>,
     scene: &mut sch_model::route::RouteScene,
 ) -> io::Result<()> {
-    // A single-pin port follows its pin's real direction (see effective_port_side):
-    // a MOSFET gate faces left but the name heuristic would exit it right, onto the
-    // body. Multi-pin marked ports keep the name-inferred side.
-    let port = effective_port_side(port, eps);
+    let port = port_exit.map(|(side, _)| side);
+    // `label_policy` is Some only on the shipped sheet (see `wire`), which is the same
+    // signal the riser fan and the weld guard use: finalize-only repairs, so the
+    // per-move scorer realises every candidate through an unchanged code path.
+    let finalize = label_policy.is_some();
 
-    // A port tapping an IC pin whose long internal pin-name text the name-inferred
-    // side would cross (the ADXL343 SDA/SCL garble): flip the exit to the pin's
-    // outward face and hug the pin, clear of the body. Self-adjusting on the pin's
-    // actual name extent, so short-name parts (all references) stay byte-identical.
-    let ic_exit = port.and_then(|side| ic_port_exit_override(env, w, items, inc, net, eps, side));
-    let port = ic_exit.map(|(s, _)| s).or(port);
-
-    // Terminals: real pins (with outward dir) + an optional virtual port exit.
+    // Terminals: real pins (with outward dir) + the virtual port exit `plan_port_exits`
+    // already settled and reserved.
     let mut terms: Vec<([f64; 2], Option<Dir>)> = eps.iter().map(|(p, d)| (*p, Some(*d))).collect();
-    let port_idx = port.map(|side| {
-        let at = ic_exit
-            .map(|(_, at)| at)
-            .unwrap_or_else(|| port_exit_point(eps, side));
-        let at = nudge_port_exit(scene, at, side, net);
+    let port_idx = port_exit.map(|(_, at)| {
         terms.push((at, None));
         terms.len() - 1
     });
@@ -411,7 +397,9 @@ pub(crate) fn route_signal(
         .iter()
         .map(|tp| {
             tp.as_ref()
-                .is_none_or(|(it, num)| label_stub(w, env, &items[*it].refdes, num, net).1)
+                .is_none_or(|(it, num)| {
+                    label_stub(w, env, scene, &items[*it].refdes, num, net, finalize).1
+                })
         })
         .collect();
 
@@ -631,7 +619,7 @@ pub(crate) fn route_signal(
                 continue; // named by the port label below
             }
             if let Some((i, num)) = pin {
-                let (stub, _) = label_stub(w, env, &items[*i].refdes, num, net);
+                let (stub, _) = label_stub(w, env, scene, &items[*i].refdes, num, net, finalize);
                 w.add_signal_label_stub(env, &items[*i].refdes, num, net, stub)?;
                 if let Ok(ds) = w.pin_dirs(env, &items[*i].refdes, num) {
                     for (p, _) in ds {
@@ -678,14 +666,25 @@ pub(crate) fn route_signal(
 /// default 3.81 is tried first, so a pin whose usual landing is clear keeps it. When the
 /// outward path is walled in — a neighbouring body sits in every landing further out — the
 /// label tucks onto the pin endpoint itself, which is where the writer's stub retraction
-/// would put it anyway and which the lint exempts against the pin's own body. Only when
-/// even that collides does it give up and report the landing as not clear.
+/// would put it anyway and which the lint exempts against the pin's own body.
+///
+/// On a `finalize` build a rung whose anchor would MERGE the net with another
+/// (`anchor_merges`) is not a rung at all: readability may be given up, truthfulness may
+/// not. When every rung merges — which needs a foreign wire or pin over this pin's own
+/// tip, so only on a block drawn beside existing content — the default landing comes
+/// back reported as not clear, and the bridge picks another pin.
+///
+/// FINALIZE-ONLY, like the riser fan and the weld guard: the per-move scorer realises
+/// every candidate through this same path, so filtering there would make a truthfulness
+/// repair part of the cost landscape and move placements that never had a short.
 fn label_stub(
     w: &SchematicWriter,
     env: &KicadInstallation,
+    scene: &sch_model::route::RouteScene,
     refdes: &str,
     num: &str,
     net: &str,
+    finalize: bool,
 ) -> (f64, bool) {
     const LADDER: [f64; 5] = [3.81, 6.35, 8.89, 11.43, 13.97];
     let Some((ep, dir)) = w
@@ -699,13 +698,17 @@ fn label_stub(
     let landing = |s: f64| {
         geom::GRID_50_MIL.snap_point(::geom::Point2::new(ep[0] + v.x * s, ep[1] + v.y * s))
     };
-    match LADDER
+    let truthful: Vec<f64> = LADDER
         .into_iter()
         .chain([0.0])
-        .find(|&s| w.label_landing_clear(landing(s), dir, net, refdes))
+        .filter(|&s| !finalize || !anchor_merges(scene, landing(s), net))
+        .collect();
+    match truthful
+        .iter()
+        .find(|&&s| w.label_landing_clear(landing(s), dir, net, refdes))
     {
-        Some(s) => (s, true),
-        None => (LADDER[0], false),
+        Some(&s) => (s, true),
+        None => (truthful.first().copied().unwrap_or(LADDER[0]), false),
     }
 }
 
@@ -1020,47 +1023,110 @@ pub(crate) fn ic_port_exit_override(
     Some((side, exit))
 }
 
+/// Settle every marked port net's pennant ONCE, before any of them is drawn, reserving
+/// the box it occupies. The box contains its own anchor, so a later port cannot be
+/// nudged onto an earlier one — two global labels sharing a coordinate ARE one net, the
+/// `I2C_SCL`/`I2C_SDA` short on a pull-up network, where the first pennant slid off its
+/// body straight onto its neighbour's anchor.
+///
+/// The anchor is reserved as a point too, which is what stops the next port
+/// landing on it; the box alone would be far too coarse a keepout (see `anchor_merges`).
+///
+/// [`route_signal`] reads the answer instead of recomputing it, so the reservation and
+/// the label it stands for can never disagree.
+fn plan_port_exits(
+    env: &KicadInstallation,
+    w: &SchematicWriter,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    net_eps: &BTreeMap<String, Vec<([f64; 2], Dir)>>,
+    scene: &mut sch_model::route::RouteScene,
+) -> BTreeMap<String, (Side, [f64; 2])> {
+    let mut exits = BTreeMap::new();
+    for (net, eps) in net_eps {
+        if ir.rails.contains_key(net) {
+            continue;
+        }
+        let Some(side) = effective_port_side(ir.ports.get(net).copied(), eps) else {
+            continue;
+        };
+        // A port tapping an IC pin whose long internal pin-name text the name-inferred
+        // side would cross (the ADXL343 SDA/SCL garble) hugs the pin's outward face.
+        let (side, at) = ic_port_exit_override(env, w, items, inc, net, eps, side)
+            .unwrap_or((side, port_exit_point(eps, side)));
+        let at = nudge_port_exit(scene, at, side, net);
+        scene
+            .label_solids
+            .push((port_label_obstacle(at, side, net), net.clone()));
+        scene.points.push((at.into(), net.clone()));
+        exits.insert(net.clone(), (side, at));
+    }
+    exits
+}
+
 /// The box a port pennant occupies, for the router to keep FOREIGN wires out of it
 /// (a wire drawn across someone else's edge tag). Directional: the pennant + text
 /// extend OUTWARD from the exit anchor along `side`; `BACK` covers the connecting
 /// vertex that reaches slightly back toward the wire. `HALF` is the text half-height.
-/// Slide a pennant's exit outward along its side until its box clears every
-/// body solid: the exit-extent heuristic measures the NET's pins, so it can
-/// land the pennant inside an unrelated neighbour's body. No overlap, no move
-/// — clean sheets stay byte-identical.
+/// Slide a pennant's exit outward along its side until it is both TRUTHFUL and clear:
+/// the exit-extent heuristic measures the NET's pins, so it can land the pennant
+/// inside an unrelated neighbour's body — or, once nudged off it, on the anchor a
+/// neighbouring port already claimed. No collision, no move — clean sheets stay
+/// byte-identical.
+///
+/// The two hazards are not equal. Sitting on a body is ugly; sitting on another net's
+/// anchor, wire or pennant is a SHORT, and the netlist cannot tell the pennant from what
+/// it landed on. So the ladder is walked for truthfulness first: a clear-and-truthful
+/// rung wins, else the first merely-ugly truthful one. Only when EVERY rung merges is
+/// the caller's own starting point handed back, for the audit to report.
 pub(crate) fn nudge_port_exit(
     scene: &sch_model::route::RouteScene,
-    mut at: [f64; 2],
+    at: [f64; 2],
     side: Side,
     net: &str,
 ) -> [f64; 2] {
-    // A candidate is bad if the pennant box sits on a BODY, or if its anchor
-    // would touch a FOREIGN net's wire — a global label's anchor point on a
-    // wire JOINS that net (the preamp breaks=2 regression).
-    let bad = |at: [f64; 2]| {
-        let r = port_label_obstacle(at, side, net);
-        solids_hit(&scene.solids, &r)
-            || scene
-                .segments
-                .iter()
-                .any(|seg| seg.net != net && seg.segment.dist2_to_point(at.into()) < 0.01)
+    let merges = |at: [f64; 2]| anchor_merges(scene, at.into(), net);
+    let blocked = |at: [f64; 2]| solids_hit(&scene.solids, &port_label_obstacle(at, side, net));
+    let step = |at: [f64; 2], n: f64| match side {
+        Side::Right => [at[0] + 2.54 * n, at[1]],
+        Side::Left => [at[0] - 2.54 * n, at[1]],
+        Side::Top => [at[0], at[1] - 2.54 * n],
+        Side::Bottom => [at[0], at[1] + 2.54 * n],
     };
-    if !bad(at) {
-        return at;
-    }
-    let start = at;
-    for _ in 0..10 {
-        match side {
-            Side::Right => at[0] += 2.54,
-            Side::Left => at[0] -= 2.54,
-            Side::Top => at[1] -= 2.54,
-            Side::Bottom => at[1] += 2.54,
+    let ladder = (0..=10).map(|n| step(at, f64::from(n)));
+    let mut truthful = None;
+    for candidate in ladder {
+        if merges(candidate) {
+            continue;
         }
-        if !bad(at) {
-            return at;
+        if !blocked(candidate) {
+            return candidate;
         }
+        truthful.get_or_insert(candidate);
     }
-    start
+    truthful.unwrap_or(at)
+}
+
+/// Whether seating `net`'s label at `at` would MERGE it with another net.
+///
+/// A label is an electrical terminal: whatever its anchor lands ON, it joins. So the
+/// anchor may not sit on a foreign net's wire or on a foreign terminal — a pin tip, or
+/// another label's anchor. This is the truthfulness half of every label-seating
+/// decision; readability is the other half, and it is the one that gives way.
+///
+/// A foreign pennant's TEXT BOX is not a merge hazard, only an ugly one: it is long, and
+/// treating it as untouchable pushed a GPIO bank's pennants past anywhere their nets
+/// could route to, leaving three of them dangling.
+pub(crate) fn anchor_merges(scene: &sch_model::route::RouteScene, at: ::geom::Point2, net: &str) -> bool {
+    scene
+        .segments
+        .iter()
+        .any(|s| s.net != net && s.segment.dist2_to_point(at) < 0.01)
+        || scene
+            .points
+            .iter()
+            .any(|(p, other)| other != net && p.dist2(at) < 0.01)
 }
 
 fn solids_hit(solids: &[::geom::Rect], r: &::geom::Rect) -> bool {
@@ -1503,11 +1569,15 @@ pub(crate) fn emit_rail(
 /// crosses over, but ending on one welds them).
 fn foreign_rows(w: &SchematicWriter, net: &str) -> Vec<(f64, f64, f64)> {
     let mut out = Vec::new();
-    for seg in w.wires_with_nets() {
-        if seg.net.as_deref() == Some(net) {
+    let drawn = w
+        .wires_with_nets()
+        .into_iter()
+        .filter_map(|seg| Some((seg.segment, seg.net?)));
+    for (segment, seg_net) in drawn.chain(w.beside_wires()) {
+        if seg_net == net {
             continue;
         }
-        let (a, b) = (seg.segment.a, seg.segment.b);
+        let (a, b) = (segment.a, segment.b);
         if (a.y - b.y).abs() < EPS {
             out.push((a.y, a.x.min(b.x), a.x.max(b.x)));
         } else {
