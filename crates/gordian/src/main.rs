@@ -260,6 +260,10 @@ fn input_prompts(path: &Path) -> Result<Vec<String>> {
             || format!("opening prompt input {}", path.display()),
         )?))
     };
+    read_input_prompts(lines)
+}
+
+fn read_input_prompts(lines: impl BufRead) -> Result<Vec<String>> {
     lines
         .lines()
         .map(|line| line.context("reading prompt input"))
@@ -388,6 +392,19 @@ impl AgentDebugLog {
             }
         }
     }
+}
+
+fn phase_render_line(event: &AgentEvent) -> Option<String> {
+    let AgentEvent::ToolFinished {
+        name,
+        image_path: Some(path),
+        ..
+    } = event
+    else {
+        return None;
+    };
+    matches!(name.as_str(), "render_schematic" | "render_board")
+        .then(|| format!("phase-render: {path}"))
 }
 
 fn format_tool_elapsed(elapsed_ms: u64) -> String {
@@ -589,6 +606,9 @@ fn run_agent_command(args: &[String]) -> Result<()> {
             let printer = tokio::spawn(async move {
                 let mut log = AgentDebugLog::default();
                 while let Some(ev) = events_rx.recv().await {
+                    if let Some(line) = phase_render_line(&ev) {
+                        tracing::info!(target: logging::EVENTS_TARGET, "{line}");
+                    }
                     if let Some(line) = log.observe(&ev) {
                         tracing::info!(target: logging::EVENTS_TARGET, "{line}");
                     }
@@ -691,8 +711,12 @@ fn run_agent_command(args: &[String]) -> Result<()> {
 
     // 6. Final ERC: re-run on whatever the agent produced (the source of truth).
     tracing::info!("--- ERC ---");
+    let turn_is_partial = outcome.stop_reason != StopReason::Completed;
     if !sch_path.exists() {
         tracing::warn!("no schematic was written at {}", sch_path.display());
+        if turn_is_partial {
+            return Ok(());
+        }
         bail!("the agent did not produce a schematic");
     }
     let report = env
@@ -705,20 +729,17 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     if report.error_count() > 0 {
         // A nonzero ERC error count is real signal, not a tool failure — surface
         // it as a failing exit so scripts notice, but after printing the path.
-        bail!(
-            "ERC reported {} error(s) on the generated schematic",
-            report.error_count()
-        );
-    }
-    if turns
-        .iter()
-        .any(|(outcome, _)| {
-            outcome
-                .as_ref()
-                .is_ok_and(|outcome| outcome.stop_reason != StopReason::Completed)
-        })
-    {
-        bail!("one or more agent turns ended without completing their quality contract");
+        if turn_is_partial {
+            tracing::warn!(
+                "partial turn handed back with {} ERC error(s); continue from the saved files",
+                report.error_count()
+            );
+        } else {
+            bail!(
+                "ERC reported {} error(s) on the generated schematic",
+                report.error_count()
+            );
+        }
     }
     Ok(())
 }
@@ -822,6 +843,59 @@ mod tests {
         assert_eq!(inv.input, Some(PathBuf::from("prompts.txt")));
     }
 
+    #[tokio::test]
+    async fn headless_stdin_multi_turn_continue_rebuilds_from_project_files() {
+        use gordian_core::testing::{ScriptedClient, final_text, tool_call};
+        use serde_json::json;
+
+        let prompts = read_input_prompts(std::io::Cursor::new(
+            "create a two-resistor divider\ncontinue\n",
+        ))
+        .unwrap();
+        assert_eq!(prompts, ["create a two-resistor divider", "continue"]);
+
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCAD detected");
+            return;
+        };
+        let env = ctx.env().clone();
+        let project_dir = ctx.project_dir().to_path_buf();
+        let sch_path = ctx.sch_path().to_path_buf();
+        let first_script = vec![
+            tool_call(
+                "place",
+                "place_parts",
+                json!({
+                    "parts": [
+                        {"ref": "R1", "part": "Device:R", "value": "10k", "pins": {"1": "VCC", "2": "MID"}},
+                        {"ref": "R2", "part": "Device:R", "value": "10k", "pins": {"1": "MID", "2": "GND"}}
+                    ]
+                }),
+            ),
+            tool_call("check", "check_schematic", json!({})),
+            final_text("first phase saved"),
+        ];
+        let mut first = Agent::new(ScriptedClient::new(first_script), ctx, system_prompt());
+        first.run_turn(&prompts[0], None).await.unwrap();
+
+        let resumed_ctx = AgentRuntime::new(env, project_dir, sch_path.clone()).unwrap();
+        let resumed_script = vec![
+            tool_call("read", "read_schematic", json!({})),
+            final_text("continued from the saved schematic"),
+        ];
+        let mut resumed = Agent::new(
+            ScriptedClient::new(resumed_script),
+            resumed_ctx,
+            system_prompt(),
+        );
+        let outcome = resumed.run_turn(&prompts[1], None).await.unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        let schematic = std::fs::read_to_string(sch_path).unwrap();
+        assert!(schematic.contains("R1"));
+        assert!(schematic.contains("R2"));
+    }
+
     #[test]
     fn tui_double_dash_allows_a_dash_prefixed_project_path() {
         assert_eq!(
@@ -907,5 +981,35 @@ mod tests {
             None
         );
         assert_eq!(log.observe(&AgentEvent::AssistantText("   ".into())), None);
+    }
+
+    #[test]
+    fn headless_transcript_emits_one_phase_render_line_per_render() {
+        let schematic = AgentEvent::ToolFinished {
+            name: "render_schematic".into(),
+            summary: "rendered".into(),
+            image_path: Some("/tmp/schematic.png".into()),
+            elapsed_ms: 20,
+            revision: None,
+            result: serde_json::json!({"ok": true}),
+        };
+        let board = AgentEvent::ToolFinished {
+            name: "render_board".into(),
+            summary: "rendered".into(),
+            image_path: Some("/tmp/board.png".into()),
+            elapsed_ms: 20,
+            revision: None,
+            result: serde_json::json!({"ok": true}),
+        };
+
+        assert_eq!(
+            phase_render_line(&schematic).as_deref(),
+            Some("phase-render: /tmp/schematic.png")
+        );
+        assert_eq!(
+            phase_render_line(&board).as_deref(),
+            Some("phase-render: /tmp/board.png")
+        );
+        assert_eq!(phase_render_line(&AgentEvent::TurnDone), None);
     }
 }
