@@ -9,6 +9,7 @@ use pcb_model::{Point2, Polygon, Rect};
 use serde_json::{Value, json};
 
 use gordian_runtime::AgentRuntime;
+use gordian_runtime::render::{CoordinateOverlayStyle, RenderBounds};
 
 const BOARD_RENDER_LAYERS: &str = "F.Cu,B.Cu,F.SilkS,B.SilkS";
 const BOARD_FRONT_DETAIL_LAYERS: &str = "F.Cu,F.SilkS";
@@ -19,15 +20,6 @@ const BOARD_AXIS: &str = "#f8fafc";
 const BOARD_AXIS_GRID: &str = "#94a3b8";
 const BOARD_AXIS_X: &str = "#fb7185";
 const BOARD_AXIS_Y: &str = "#60a5fa";
-const DENSE_BOARD_PARTS: usize = 40;
-const REFERENCE_TEXT_HEIGHT_MM: f64 = 0.8;
-const TARGET_REFERENCE_HEIGHT_PX: f64 = 10.0;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RenderPlan {
-    overview_px: u32,
-    detail_px: Option<u32>,
-}
 
 /// Render the board to a PNG using KiCad's own PCB SVG exporter, save under
 /// `.gordian/renders/`, and attach via `IMAGE_PATH_KEY`.
@@ -79,9 +71,9 @@ pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .with_context(|| format!("reading PCB SVG {}", svg_path.display()))?;
     let svg = add_visual_overlays(&svg, source.outline.as_ref(), &source.bounds);
 
-    let plan = render_plan(
+    let plan = gordian_runtime::render::render_plan(
         source.part_count,
-        &source.bounds,
+        render_bounds(&source.bounds),
         ctx.config().tools.render_max_px,
     );
     let png = gordian_runtime::render::svg_to_png(&svg, plan.overview_px)?;
@@ -341,43 +333,6 @@ fn board_points_match(a: Point2, b: Point2) -> bool {
     (a.x - b.x).abs() <= 1e-6 && (a.y - b.y).abs() <= 1e-6
 }
 
-fn render_plan(part_count: usize, bounds: &Rect, configured_max_px: u32) -> RenderPlan {
-    let base = configured_max_px.max(1);
-    let board_w = (bounds.max_x - bounds.min_x).max(0.0);
-    let board_h = (bounds.max_y - bounds.min_y).max(0.0);
-    let board_long = board_w.max(board_h);
-    let needs_detail = part_count >= DENSE_BOARD_PARTS
-        || estimated_reference_pixels(board_long, base) < TARGET_REFERENCE_HEIGHT_PX;
-    if !needs_detail {
-        return RenderPlan {
-            overview_px: base,
-            detail_px: None,
-        };
-    }
-
-    // At most double the caller's normal render budget. This keeps memory bounded
-    // while making the common 1600 px configuration produce a 3200 px inspection
-    // artifact for a dense 200 mm board (roughly 10 px-high 0.8 mm references).
-    let margins = overlay_margins(board_long);
-    let overview_long =
-        (board_w + margins.left + margins.right).max(board_h + margins.top + margins.bottom);
-    let required = ((overview_long / REFERENCE_TEXT_HEIGHT_MM) * TARGET_REFERENCE_HEIGHT_PX)
-        .ceil()
-        .max(base as f64) as u32;
-    let detail_px = required.min(base.saturating_mul(2)).max(base);
-    RenderPlan {
-        overview_px: detail_px,
-        detail_px: Some(detail_px),
-    }
-}
-
-fn estimated_reference_pixels(board_long_mm: f64, long_edge_px: u32) -> f64 {
-    if board_long_mm <= 0.0 {
-        return f64::INFINITY;
-    }
-    REFERENCE_TEXT_HEIGHT_MM * long_edge_px as f64 / board_long_mm
-}
-
 #[allow(clippy::too_many_arguments)]
 fn render_side_detail(
     cli: &KicadInstallation,
@@ -419,9 +374,18 @@ fn add_dark_background(svg: &str) -> Option<String> {
 }
 
 fn add_visual_overlays(svg: &str, outline: Option<&Polygon>, bounds: &Rect) -> String {
-    let Some(mut svg) = expand_viewbox_and_add_background(svg, bounds) else {
-        return svg.to_owned();
-    };
+    let mut svg = gordian_runtime::render::add_coordinate_overlay(
+        svg,
+        render_bounds(bounds),
+        "mm",
+        CoordinateOverlayStyle {
+            background: BOARD_RENDER_BG,
+            axis: BOARD_AXIS,
+            grid: BOARD_AXIS_GRID,
+            x_axis: BOARD_AXIS_X,
+            y_axis: BOARD_AXIS_Y,
+        },
+    );
 
     let board_w = bounds.max_x - bounds.min_x;
     let board_h = bounds.max_y - bounds.min_y;
@@ -451,7 +415,6 @@ fn add_visual_overlays(svg: &str, outline: Option<&Polygon>, bounds: &Rect) -> S
         }
     }
 
-    push_coordinate_axes(&mut overlay, bounds);
     overlay.push_str("</g>\n");
 
     if let Some(insert) = svg.rfind("</svg>") {
@@ -460,66 +423,8 @@ fn add_visual_overlays(svg: &str, outline: Option<&Polygon>, bounds: &Rect) -> S
     svg
 }
 
-fn expand_viewbox_and_add_background(svg: &str, bounds: &Rect) -> Option<String> {
-    let (viewbox_start, viewbox_end, viewbox) = find_viewbox(svg)?;
-    let margins = overlay_margins((bounds.max_x - bounds.min_x).max(bounds.max_y - bounds.min_y));
-    let expanded = ViewBox {
-        x: viewbox.x - margins.left,
-        y: viewbox.y - margins.top,
-        w: viewbox.w + margins.left + margins.right,
-        h: viewbox.h + margins.top + margins.bottom,
-    };
-    let background = format!(
-        "\n  <rect id=\"gordian-render-background\" x=\"{:.4}\" y=\"{:.4}\" width=\"{:.4}\" height=\"{:.4}\" fill=\"{}\"/>\n",
-        expanded.x, expanded.y, expanded.w, expanded.h, BOARD_RENDER_BG
-    );
-
-    let mut out = String::with_capacity(svg.len() + background.len() + 64);
-    out.push_str(&svg[..viewbox_start]);
-    write!(
-        out,
-        "viewBox=\"{:.4} {:.4} {:.4} {:.4}\"",
-        expanded.x, expanded.y, expanded.w, expanded.h
-    )
-    .unwrap();
-    out.push_str(&svg[viewbox_end..]);
-
-    let svg_tag_start = out.find("<svg")?;
-    let svg_tag_end = out[svg_tag_start..].find('>')? + svg_tag_start + 1;
-    out = replace_svg_root_dimension(&out, svg_tag_start, svg_tag_end, "width", expanded.w)?;
-    let svg_tag_start = out.find("<svg")?;
-    let svg_tag_end = out[svg_tag_start..].find('>')? + svg_tag_start + 1;
-    out = replace_svg_root_dimension(&out, svg_tag_start, svg_tag_end, "height", expanded.h)?;
-    let svg_tag_start = out.find("<svg")?;
-    let svg_tag_end = out[svg_tag_start..].find('>')? + svg_tag_start + 1;
-    out.insert_str(svg_tag_end, &background);
-    Some(out)
-}
-
-fn replace_svg_root_dimension(
-    svg: &str,
-    svg_tag_start: usize,
-    svg_tag_end: usize,
-    attr: &str,
-    value_mm: f64,
-) -> Option<String> {
-    let tag = &svg[svg_tag_start..svg_tag_end];
-    let needle = format!("{attr}=\"");
-    let mut out = String::with_capacity(svg.len() + 16);
-    if let Some(rel_attr) = tag.find(&needle) {
-        let rel_start = rel_attr + needle.len();
-        let value_start = svg_tag_start + rel_start;
-        let value_end = svg[value_start..].find('"')? + value_start;
-        out.push_str(&svg[..value_start]);
-        write!(out, "{value_mm:.4}mm").unwrap();
-        out.push_str(&svg[value_end..]);
-    } else {
-        let insert = svg_tag_end - 1;
-        out.push_str(&svg[..insert]);
-        write!(out, " {attr}=\"{value_mm:.4}mm\"").unwrap();
-        out.push_str(&svg[insert..]);
-    }
-    Some(out)
+fn render_bounds(bounds: &Rect) -> RenderBounds {
+    RenderBounds::new(bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -555,177 +460,6 @@ fn push_outline_polygon(out: &mut String, points: &str, color: &str, width: f64,
     .unwrap();
 }
 
-fn push_coordinate_axes(out: &mut String, bounds: &Rect) {
-    let board_w = bounds.max_x - bounds.min_x;
-    let board_h = bounds.max_y - bounds.min_y;
-    if board_w <= 0.0 || board_h <= 0.0 {
-        return;
-    }
-
-    let long = board_w.max(board_h);
-    let margins = overlay_margins(long);
-    let axis_gap = (margins.left * 0.36).clamp(2.8, 6.2);
-    let tick = (long * 0.012).clamp(0.45, 1.5);
-    let font = (long * 0.018).clamp(1.0, 2.2);
-    let arrow = (tick * 2.8).clamp(1.8, 3.8);
-    let step = nice_tick_step(long);
-    let x_axis_y = board_h + axis_gap;
-    let y_axis_x = -axis_gap;
-    let x_axis_end = board_w + arrow;
-    let y_axis_end = board_h + arrow;
-
-    out.push_str("  <g id=\"gordian-coordinate-rulers\" fill=\"none\" stroke-linecap=\"round\" font-family=\"ui-monospace, SFMono-Regular, Menlo, Consolas, monospace\">\n");
-
-    let mut x = first_tick(bounds.min_x, step);
-    while x <= bounds.max_x + 1e-6 {
-        let lx = x - bounds.min_x;
-        if lx > 1e-6 && lx < board_w - 1e-6 {
-            writeln!(
-                out,
-                "    <line x1=\"{lx:.4}\" y1=\"0\" x2=\"{lx:.4}\" y2=\"{board_h:.4}\" stroke=\"{BOARD_AXIS_GRID}\" stroke-width=\"0.0800\" stroke-opacity=\"0.22\"/>"
-            )
-            .unwrap();
-        }
-        writeln!(
-            out,
-            "    <line x1=\"{lx:.4}\" y1=\"{:.4}\" x2=\"{lx:.4}\" y2=\"{:.4}\" stroke=\"{BOARD_AXIS}\" stroke-width=\"0.1800\" stroke-opacity=\"0.95\"/>",
-            x_axis_y - tick,
-            x_axis_y + tick,
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    <text x=\"{lx:.4}\" y=\"{:.4}\" fill=\"{BOARD_AXIS}\" stroke=\"none\" font-size=\"{font:.4}\" text-anchor=\"middle\">{}</text>",
-            x_axis_y + tick + font,
-            fmt_axis_label(x),
-        )
-        .unwrap();
-        x += step;
-    }
-
-    let mut y = first_tick(bounds.min_y, step);
-    while y <= bounds.max_y + 1e-6 {
-        let ly = y - bounds.min_y;
-        if ly > 1e-6 && ly < board_h - 1e-6 {
-            writeln!(
-                out,
-                "    <line x1=\"0\" y1=\"{ly:.4}\" x2=\"{board_w:.4}\" y2=\"{ly:.4}\" stroke=\"{BOARD_AXIS_GRID}\" stroke-width=\"0.0800\" stroke-opacity=\"0.22\"/>"
-            )
-            .unwrap();
-        }
-        writeln!(
-            out,
-            "    <line x1=\"{:.4}\" y1=\"{ly:.4}\" x2=\"{:.4}\" y2=\"{ly:.4}\" stroke=\"{BOARD_AXIS}\" stroke-width=\"0.1800\" stroke-opacity=\"0.95\"/>",
-            y_axis_x - tick,
-            y_axis_x + tick,
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    <text x=\"{:.4}\" y=\"{:.4}\" fill=\"{BOARD_AXIS}\" stroke=\"none\" font-size=\"{font:.4}\" text-anchor=\"end\">{}</text>",
-            y_axis_x - tick * 1.2,
-            ly + font * 0.35,
-            fmt_axis_label(y),
-        )
-        .unwrap();
-        y += step;
-    }
-
-    writeln!(
-        out,
-        "    <line x1=\"0\" y1=\"{x_axis_y:.4}\" x2=\"{x_axis_end:.4}\" y2=\"{x_axis_y:.4}\" stroke=\"{BOARD_AXIS_X}\" stroke-width=\"0.2800\" stroke-opacity=\"0.98\"/>"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "    <polygon points=\"{:.4},{:.4} {:.4},{:.4} {:.4},{:.4}\" fill=\"{BOARD_AXIS_X}\" stroke=\"none\" fill-opacity=\"0.98\"/>",
-        x_axis_end,
-        x_axis_y,
-        x_axis_end - arrow,
-        x_axis_y - arrow * 0.45,
-        x_axis_end - arrow,
-        x_axis_y + arrow * 0.45,
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "    <line x1=\"{y_axis_x:.4}\" y1=\"0\" x2=\"{y_axis_x:.4}\" y2=\"{y_axis_end:.4}\" stroke=\"{BOARD_AXIS_Y}\" stroke-width=\"0.2800\" stroke-opacity=\"0.98\"/>"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "    <polygon points=\"{:.4},{:.4} {:.4},{:.4} {:.4},{:.4}\" fill=\"{BOARD_AXIS_Y}\" stroke=\"none\" fill-opacity=\"0.98\"/>",
-        y_axis_x,
-        y_axis_end,
-        y_axis_x - arrow * 0.45,
-        y_axis_end - arrow,
-        y_axis_x + arrow * 0.45,
-        y_axis_end - arrow,
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "    <text x=\"{:.4}\" y=\"{:.4}\" fill=\"{BOARD_AXIS_X}\" stroke=\"none\" font-size=\"{:.4}\" font-weight=\"700\" text-anchor=\"start\">X mm</text>",
-        x_axis_end + font * 0.45,
-        x_axis_y + font * 0.35,
-        font * 1.08,
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "    <text x=\"{:.4}\" y=\"{:.4}\" fill=\"{BOARD_AXIS_Y}\" stroke=\"none\" font-size=\"{:.4}\" font-weight=\"700\" text-anchor=\"middle\">Y mm</text>",
-        y_axis_x,
-        y_axis_end + font * 1.2,
-        font * 1.08,
-    )
-    .unwrap();
-    out.push_str("  </g>\n");
-}
-
-#[derive(Clone, Copy, Debug)]
-struct OverlayMargins {
-    top: f64,
-    right: f64,
-    bottom: f64,
-    left: f64,
-}
-
-fn overlay_margins(long: f64) -> OverlayMargins {
-    let main = (long * 0.12).clamp(8.0, 18.0);
-    OverlayMargins {
-        top: (long * 0.018).clamp(1.2, 3.0),
-        right: main * 1.25,
-        bottom: main,
-        left: main,
-    }
-}
-
-fn nice_tick_step(span: f64) -> f64 {
-    let raw = (span / 6.0).max(1.0);
-    let exp = raw.log10().floor();
-    let base = 10f64.powf(exp);
-    for factor in [1.0, 2.0, 5.0, 10.0] {
-        let step = factor * base;
-        if step >= raw {
-            return step;
-        }
-    }
-    10.0 * base
-}
-
-fn first_tick(min: f64, step: f64) -> f64 {
-    (min / step).ceil() * step
-}
-
-fn fmt_axis_label(v: f64) -> String {
-    let v = if v.abs() < 0.0005 { 0.0 } else { v };
-    if (v - v.round()).abs() < 0.0005 {
-        format!("{v:.0}")
-    } else {
-        format!("{v:.1}")
-    }
-}
-
 fn push_outline_rect(
     out: &mut String,
     width: f64,
@@ -744,6 +478,7 @@ fn push_outline_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gordian_runtime::render::{RenderPlan, render_plan};
 
     const SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10">
 <rect x="0" y="0" width="20" height="10"/>
@@ -774,7 +509,7 @@ mod tests {
         assert!(source.outline.is_none());
         assert_eq!(source.part_count, 40);
         assert!(
-            render_plan(source.part_count, &source.bounds, 1600)
+            render_plan(source.part_count, render_bounds(&source.bounds), 1600)
                 .detail_px
                 .is_some()
         );
@@ -806,7 +541,7 @@ mod tests {
 
     #[test]
     fn sparse_small_board_keeps_the_configured_overview_only() {
-        let plan = render_plan(12, &Rect::new(0.0, 0.0, 80.0, 70.0), 1600);
+        let plan = render_plan(12, render_bounds(&Rect::new(0.0, 0.0, 80.0, 70.0)), 1600);
 
         assert_eq!(
             plan,
@@ -819,21 +554,13 @@ mod tests {
 
     #[test]
     fn dense_or_physically_large_boards_get_bounded_readable_details() {
-        let dense = render_plan(40, &Rect::new(0.0, 0.0, 80.0, 70.0), 1600);
+        let dense = render_plan(40, render_bounds(&Rect::new(0.0, 0.0, 80.0, 70.0)), 1600);
         assert_eq!(dense.detail_px, Some(1600));
 
-        let large = render_plan(12, &Rect::new(0.0, 0.0, 200.0, 120.0), 1600);
+        let large = render_plan(12, render_bounds(&Rect::new(0.0, 0.0, 200.0, 120.0)), 1600);
         let detail_px = large.detail_px.expect("large board detail render");
         assert!(detail_px > 1600 && detail_px <= 3200, "{large:?}");
         assert_eq!(large.overview_px, detail_px);
-
-        let margins = overlay_margins(200.0);
-        let overview_long =
-            (200.0 + margins.left + margins.right).max(120.0 + margins.top + margins.bottom);
-        assert!(
-            estimated_reference_pixels(overview_long, large.overview_px)
-                >= TARGET_REFERENCE_HEIGHT_PX - 0.01
-        );
     }
 
     #[test]
