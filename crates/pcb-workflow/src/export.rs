@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use kicad::Violation;
 
@@ -186,16 +186,15 @@ fn classified_unconnected(
     parts: &[kicad_board::ImportedPart],
     findings: &[ClassifiedViolation<'_>],
 ) -> Vec<Value> {
-    let violations = findings
+    findings
         .iter()
         .take(MAX_UNCONNECTED_PAIRS)
-        .map(|finding| finding.violation)
-        .collect::<Vec<_>>();
-    let mut pairs = crate::diagnose::unconnected_pairs(parts, violations.iter().copied());
-    for (pair, finding) in pairs.iter_mut().zip(findings) {
-        pair["classification"] = json!(finding.classification);
-    }
-    pairs
+        .filter_map(|finding| {
+            let mut pair = crate::diagnose::unconnected_pair(parts, finding.violation)?;
+            pair["classification"] = json!(finding.classification);
+            Some(pair)
+        })
+        .collect()
 }
 
 pub(super) struct DrcGate {
@@ -557,11 +556,9 @@ mod tests {
 
         let classified = classify_violations(&restored, &baseline);
 
-        assert!(
-            classified
-                .iter()
-                .all(|finding| finding.classification == "pre_existing")
-        );
+        assert!(classified
+            .iter()
+            .all(|finding| finding.classification == "pre_existing"));
     }
 
     #[test]
@@ -573,10 +570,8 @@ mod tests {
 
         let classified = classify_violations(&current, &[]);
 
-        assert!(
-            classified
-                .iter()
-                .all(|finding| finding.classification == "introduced")
-        );
+        assert!(classified
+            .iter()
+            .all(|finding| finding.classification == "introduced"));
     }
 }
