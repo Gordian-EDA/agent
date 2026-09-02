@@ -1,0 +1,12 @@
+The delivered design must be a recognizable, electrically plausible 10S BQ76930 battery monitor rather than a generic resistor bank. Judge the ten cell channels for consistent ordering and filtering, the back-to-back CHG/DSG MOSFET path and Kelvin shunt sensing for correctness, and the protection and low-voltage support circuitry for completeness. The schematic should be easy to scan, with aligned repeated channels, readable values and net labels, and no text or wire collisions. The PCB should be compact, keep connectors at usable edges, cluster the AFE with its filters, keep the high-current path short and wide, and separate Kelvin sense routing from noisy/high-current copper. Fabrication outputs must be present.
+expect: agent_exit == 0
+expect: schematic_created == true
+expect: pcb_created == true
+expect: erc_errors == 0
+expect: drc_errors == 0
+expect: partition_matches_kicad == true
+expect: part_count >= 45
+expect: unconnected_pins == []
+expect: unconnected_items == 0
+expect: len(fab_files) >= 3
+expect: elapsed_seconds <= 300

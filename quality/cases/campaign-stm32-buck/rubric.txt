@@ -1,0 +1,12 @@
+The design must contain a complete STM32F405 core and a plausible TPS54302 5 V-to-3.3 V power stage, including all MCU supply domains, VCAP capacitors, reset/boot, crystal, USB protection and series termination, SWD, and useful GPIO headers. Judge the schematic for clear functional blocks, readable signal naming and values, and absence of text/wire collisions. Judge the PCB for compact purposeful placement, accessible edge connectors, tight buck and crystal loops, close decoupling, sensible power widths, and clean routing rather than tangled traces. Fabrication outputs must be present.
+expect: agent_exit == 0
+expect: schematic_created == true
+expect: pcb_created == true
+expect: erc_errors == 0
+expect: drc_errors == 0
+expect: partition_matches_kicad == true
+expect: part_count >= 50
+expect: unconnected_pins == []
+expect: unconnected_items == 0
+expect: len(fab_files) >= 3
+expect: elapsed_seconds <= 300

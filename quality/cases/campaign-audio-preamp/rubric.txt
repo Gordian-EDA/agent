@@ -1,0 +1,12 @@
+The result must be a plausible single-supply two-stage audio preamp: protected and filtered 9 V entry, stable TLE2426 virtual ground, both MCP6002 units correctly powered and biased, selectable first-stage gain, buffered and AC-coupled output, and sensible RF/stability filtering. The schematic should read cleanly from input to output, show all op-amp units and power connections, have readable values, and contain no text, symbol, or wire collisions. The compact PCB should put jacks and controls on usable edges, separate sensitive input routing from power/output paths, cluster bypass and VREF parts around the op-amp, and use deliberate clean routing. Fabrication outputs must be present.
+expect: agent_exit == 0
+expect: schematic_created == true
+expect: pcb_created == true
+expect: erc_errors == 0
+expect: drc_errors == 0
+expect: partition_matches_kicad == true
+expect: part_count >= 30
+expect: unconnected_pins == []
+expect: unconnected_items == 0
+expect: len(fab_files) >= 3
+expect: elapsed_seconds <= 300
