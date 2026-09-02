@@ -1132,6 +1132,11 @@ REQUEST_CAP = re.compile(r"ProviderRequestLimit\s*\{\s*requests:\s*(\d+)\s*\}")
 REFUSAL = re.compile(r"\brefus(?:e|ed|al|ing)\b", re.IGNORECASE)
 TURN_STARTED = re.compile(r"^turn (?P<turn>\d+): (?P<prompt>.*)$")
 TURN_DONE = re.compile(r"^turn (?P<turn>\d+) done:")
+ASSISTANT_TEXT = re.compile(r"^assistant:\s*(.+)$", re.M)
+BUDGET_STOP = re.compile(
+    r"^Stopped after (?:the turn spent its \d+s wall-clock budget|"
+    r"the model exhausted the per-turn request safety limit)\b"
+)
 
 
 def parse_agent_stderr(stderr):
@@ -1239,6 +1244,8 @@ def parse_agent_stderr(stderr):
         index = end
 
     cap = REQUEST_CAP.search(text)
+    assistant_messages = ASSISTANT_TEXT.findall(text)
+    final_assistant = assistant_messages[-1].strip() if assistant_messages else ""
     return {
         "tool_calls": calls,
         "requests": requests,
@@ -1252,6 +1259,142 @@ def parse_agent_stderr(stderr):
         "errors": errors,
         "repeated_calls": repeated,
         "request_cap_hit": int(cap.group(1)) if cap else None,
+        "final_assistant": final_assistant,
+        "budget_stop": bool(BUDGET_STOP.match(final_assistant)),
+    }
+
+
+def phase_health(project, artifacts, number):
+    schematic = first_schematic(project)
+    board = next(iter(sorted(project.glob("*.kicad_pcb"))), None)
+    erc = run_check("sch", schematic, artifacts / f"phase-{number}-erc.json")
+    drc = run_check("pcb", board, artifacts / f"phase-{number}-drc.json")
+    health = {
+        "schematic_created": schematic is not None,
+        "pcb_created": board is not None,
+        **severity_counts(erc, "erc"),
+        **severity_counts(drc, "drc"),
+    }
+    if isinstance(drc, dict) and "error" not in drc:
+        health["unconnected_items"] = len(drc.get("unconnected_items", []))
+    return health
+
+
+def requested_outputs(prompt):
+    lowered = prompt.lower()
+    return {
+        "pcb": bool(re.search(r"\bpcb\b|\bboard\b", lowered)),
+        "fab": "fabrication" in lowered or "gerber" in lowered,
+    }
+
+
+def missing_deliverable(project, prompt, health):
+    requested = requested_outputs(prompt)
+    missing = []
+    if not health.get("schematic_created"):
+        missing.append("the schematic is missing")
+    elif health.get("erc_check_error") or health.get("erc_errors") != 0:
+        missing.append("a clean ERC check is missing")
+    if requested["pcb"]:
+        if not health.get("pcb_created"):
+            missing.append("the PCB is missing")
+        else:
+            if health.get("drc_check_error") or health.get("drc_errors") != 0:
+                missing.append("a clean DRC check is missing")
+            if health.get("unconnected_items") != 0:
+                missing.append("the PCB still has unconnected items")
+    if requested["fab"]:
+        fab = project / "fab"
+        if not fab.is_dir() or len(list(fab.glob("*"))) < 3:
+            missing.append("fabrication files are missing")
+    return missing
+
+
+def write_gallery(artifacts, phases):
+    cards = []
+    for phase in phases:
+        caption = (
+            f"Turn {phase['turn']} · {phase['tool_call_count']} tool calls · "
+            f"ERC {phase['health'].get('erc_errors', '?')} errors · "
+            f"DRC {phase['health'].get('drc_errors', '?')} errors"
+        )
+        images = []
+        for kind in ("schematic", "pcb"):
+            rendered = phase.get("renders", {}).get(kind, {})
+            if rendered.get("path"):
+                relative = Path(rendered["path"]).relative_to(artifacts)
+                images.append(
+                    f'<figure><img src="{html.escape(str(relative))}" '
+                    f'alt="Turn {phase["turn"]} {kind}"><figcaption>{kind}</figcaption></figure>'
+                )
+            else:
+                images.append(
+                    f'<figure class="missing"><div>No {kind} render</div><figcaption>{kind}</figcaption></figure>'
+                )
+        cards.append(
+            f'<section><h2>{html.escape(caption)}</h2><div class="pair">'
+            + "".join(images)
+            + "</div></section>"
+        )
+    document = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Gordian phase gallery</title>
+<style>
+body{font:15px system-ui,sans-serif;margin:24px;background:#17191d;color:#eee}
+section{margin:0 0 32px}h1,h2{font-weight:600}h2{font-size:16px;color:#bbb}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}figure{margin:0;background:#fff;padding:8px;color:#222}
+img{display:block;width:100%;height:auto}.missing div{display:grid;min-height:220px;place-items:center;color:#777}
+figcaption{text-align:center;padding-top:6px;text-transform:capitalize}@media(max-width:800px){.pair{grid-template-columns:1fr}}
+</style></head><body><h1>Design phases</h1>""" + "".join(cards) + "</body></html>\n"
+    (artifacts / "gallery.html").write_text(document, encoding="utf-8")
+
+
+def turn_record(number, prompt, result, seconds, parsed, phase):
+    transcript = parsed.get("turns", [])
+    transcript = transcript[-1].get("transcript", []) if transcript else []
+    return {
+        "turn": number,
+        "prompt": prompt,
+        "exit": result.returncode,
+        "seconds": seconds,
+        "requests": parsed["request_count"],
+        "request_details": parsed["requests"],
+        "tool_calls": parsed["tool_calls"],
+        "refusals": parsed["refusals"],
+        "errors": parsed["errors"],
+        "repeated_calls": parsed["repeated_calls"],
+        "request_cap_hit": parsed["request_cap_hit"],
+        "final_assistant": parsed["final_assistant"],
+        "budget_stop": parsed["budget_stop"],
+        "health": phase["health"],
+        "renders": phase["renders"],
+        "transcript": transcript,
+    }
+
+
+def aggregate_turn_facts(turns):
+    requests = []
+    calls = []
+    refusals = []
+    errors = []
+    repeated = []
+    for turn in turns:
+        requests.extend({"turn": turn["turn"], **item} for item in turn["request_details"])
+        calls.extend({"turn": turn["turn"], **item} for item in turn["tool_calls"])
+        refusals.extend({"turn": turn["turn"], **item} for item in turn["refusals"])
+        errors.extend({"turn": turn["turn"], **item} for item in turn["errors"])
+        repeated.extend({"turn": turn["turn"], **item} for item in turn["repeated_calls"])
+    return {
+        "turns": turns,
+        "request_count": sum(turn["requests"] for turn in turns),
+        "requests": requests,
+        "tool_call_details": calls,
+        "refusals": refusals,
+        "errors": errors,
+        "repeated_calls": repeated,
+        "request_cap_hit": next(
+            (turn["request_cap_hit"] for turn in reversed(turns) if turn["request_cap_hit"]),
+            None,
+        ),
     }
 
 
@@ -1273,12 +1416,23 @@ def run_agent(project, prompt, timeout, env, multiple=False):
         return subprocess.CompletedProcess(args, 124, stdout, stderr)
 
 
-def run_case(case, output_root):
+def prompt_lines(path):
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and line.strip() != "---" and not line.lstrip().startswith("#")
+    ]
+
+
+def run_case(case, output_root, max_turns):
     started = time.time()
     prompts_path = case / "prompts.txt"
-    multiple = prompts_path.is_file()
-    prompt_path = prompts_path if multiple else case / "prompt.txt"
-    prompt = prompt_path.read_text(encoding="utf-8").strip()
+    queued_prompts = (
+        prompt_lines(prompts_path)
+        if prompts_path.is_file()
+        else [(case / "prompt.txt").read_text(encoding="utf-8").strip()]
+    )
+    prompt = "\n".join(queued_prompts)
     rubric, checks = parse_rubric((case / "rubric.txt").read_text(encoding="utf-8"))
     run_dir = output_root / case.name
     if run_dir.exists():
@@ -1303,39 +1457,77 @@ def run_case(case, output_root):
     shutil.copytree(project, before_project)
     renders = {"before": render_project(project, artifacts, "before")}
 
-    agent_started = time.time()
-    result = run_agent(
-        project,
-        prompt,
-        int(os.environ.get("QUALITY_TIMEOUT", "900")),
-        {**os.environ, "GORDIAN_THREAD_ID": f"quality-{case.name}-{int(started)}"},
-        multiple=multiple,
-    )
-    agent_seconds = round(time.time() - agent_started, 1)
-    (artifacts / "agent.stdout.txt").write_text(result.stdout, encoding="utf-8")
-    (artifacts / "agent.stderr.txt").write_text(result.stderr, encoding="utf-8")
-    transcript_facts = parse_agent_stderr(result.stderr)
-    result_path.write_text(
-        json.dumps(
-            {
-                "case": case.name,
-                "started_utc": started_utc,
-                "_started_epoch": started,
-                "agent_exit": result.returncode,
-                "agent_seconds": agent_seconds,
-                "elapsed_seconds": round(time.time() - started, 1),
-                **transcript_facts,
-            },
-            indent=2,
+    turns = []
+    phases = []
+    stdout_parts = []
+    stderr_parts = []
+    result = None
+    thread_id = f"quality-{case.name}-{int(started)}"
+    current_prompt = queued_prompts.pop(0)
+    while current_prompt and len(turns) < max_turns:
+        number = len(turns) + 1
+        agent_started = time.time()
+        result = run_agent(
+            project,
+            current_prompt,
+            int(os.environ.get("QUALITY_TIMEOUT", "900")),
+            {**os.environ, "GORDIAN_THREAD_ID": thread_id},
+            multiple=number > 1 or prompts_path.is_file(),
         )
-        + "\n",
-        encoding="utf-8",
+        seconds = round(time.time() - agent_started, 1)
+        (artifacts / f"agent.turn-{number}.stdout.txt").write_text(
+            result.stdout, encoding="utf-8"
+        )
+        (artifacts / f"agent.turn-{number}.stderr.txt").write_text(
+            result.stderr, encoding="utf-8"
+        )
+        stdout_parts.append(result.stdout)
+        stderr_parts.append(result.stderr)
+        parsed = parse_agent_stderr(result.stderr)
+        phase = {
+            "turn": number,
+            "tool_call_count": len(parsed["tool_calls"]),
+            "health": phase_health(project, artifacts, number),
+            "renders": render_project(project, artifacts, f"phase-{number}"),
+        }
+        phases.append(phase)
+        turns.append(turn_record(number, current_prompt, result, seconds, parsed, phase))
+        write_gallery(artifacts, phases)
+        partial = {
+            "case": case.name,
+            "started_utc": started_utc,
+            "_started_epoch": started,
+            "agent_exit": result.returncode,
+            "agent_seconds": round(sum(turn["seconds"] for turn in turns), 1),
+            "elapsed_seconds": round(time.time() - started, 1),
+            **aggregate_turn_facts(turns),
+        }
+        result_path.write_text(json.dumps(partial, indent=2) + "\n", encoding="utf-8")
+
+        if queued_prompts:
+            current_prompt = queued_prompts.pop(0)
+            continue
+        missing = missing_deliverable(project, prompt, phase["health"])
+        if parsed["budget_stop"] and missing and len(turns) < max_turns:
+            current_prompt = "continue from the current state: " + "; ".join(missing)
+            continue
+        current_prompt = None
+
+    if result is None:
+        raise RuntimeError("case supplied no agent prompts")
+    agent_seconds = round(sum(turn["seconds"] for turn in turns), 1)
+    (artifacts / "agent.stdout.txt").write_text(
+        "\n".join(stdout_parts), encoding="utf-8"
     )
+    (artifacts / "agent.stderr.txt").write_text(
+        "\n".join(stderr_parts), encoding="utf-8"
+    )
+    turn_facts = aggregate_turn_facts(turns)
 
     facts, detail = deterministic_facts(project, before_project, artifacts, result)
-    renders["after"] = render_project(project, artifacts, "after")
+    renders["after"] = phases[-1]["renders"]
     facts.update(schematic_visual_facts(renders) if first_schematic(project) else {})
-    facts.update(transcript_facts)
+    facts.update(turn_facts)
     facts["elapsed_seconds"] = round(time.time() - started, 1)
     report = {
         "case": case.name,
@@ -1417,13 +1609,27 @@ def run_case(case, output_root):
         except Exception as error:
             report["judge"] = {"score": None, "issues": [], "error": str(error)}
 
-    if llm is None:
-        report["self_diagnosis"] = {"error": "judge credentials unavailable"}
-    else:
-        try:
-            report["self_diagnosis"] = self_diagnose(prompt, result.stderr, llm)
-        except Exception as error:
-            report["self_diagnosis"] = {"error": str(error)}
+    aggregate_diagnosis = {"struggles": [], "wishes": []}
+    for turn in turns:
+        if llm is None:
+            diagnosis = {"error": "judge credentials unavailable"}
+        else:
+            try:
+                transcript = (
+                    artifacts / f"agent.turn-{turn['turn']}.stderr.txt"
+                ).read_text(encoding="utf-8", errors="replace")
+                diagnosis = self_diagnose(turn["prompt"], transcript, llm)
+            except Exception as error:
+                diagnosis = {"error": str(error)}
+        turn["self_diagnosis"] = diagnosis
+        aggregate_diagnosis["struggles"].extend(
+            f"turn {turn['turn']}: {item}" for item in diagnosis.get("struggles", [])
+        )
+        aggregate_diagnosis["wishes"].extend(
+            f"turn {turn['turn']}: {item}" for item in diagnosis.get("wishes", [])
+        )
+    report["turns"] = turns
+    report["self_diagnosis"] = aggregate_diagnosis
 
     report["judge_score"] = report["judge"]["score"]
     if report["judge_score"] is not None:
@@ -1434,6 +1640,7 @@ def run_case(case, output_root):
         )
     report["elapsed_seconds"] = round(time.time() - started, 1)
     result_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    write_gallery(artifacts, phases)
     write_case_findings(run_dir, report)
     return report
 
@@ -1512,19 +1719,27 @@ def findings_for(report):
         if result.get("error"):
             findings.append(("harness", f"{kind} critic unavailable: {result['error']}"))
 
+        human = report.get("human_look", {}).get(kind, {})
+        for issue in human.get("worst_three", []):
+            findings.append(("judge", f"{kind} human-look: {issue}"))
+        if human.get("error") and not human.get("error", "").startswith(f"no {kind} render"):
+            findings.append(("harness", f"{kind} human-look unavailable: {human['error']}"))
+
     for signal_name, label in (("errors", "error"), ("refusals", "refusal")):
         for signal in report.get(signal_name, []):
+            turn = f"turn {signal['turn']} " if signal.get("turn") else ""
             findings.append(
                 (
                     "tool-contract",
-                    f"tool `{signal['tool']}` {label}: {signal['message']}",
+                    f"{turn}tool `{signal['tool']}` {label}: {signal['message']}",
                 )
             )
     for smell in report.get("repeated_calls", []):
+        turn = f"turn {smell['turn']} " if smell.get("turn") else ""
         findings.append(
             (
                 "prompt",
-                f"loop smell: tool `{smell['tool']}` called {smell['count']} times in a row",
+                f"{turn}loop smell: tool `{smell['tool']}` called {smell['count']} times in a row",
             )
         )
 
@@ -1548,8 +1763,32 @@ def findings_for(report):
 
 
 def write_case_findings(run_dir, report):
-    lines = [f"# Findings: {report['case']}", ""]
+    lines = [
+        f"# Findings: {report['case']}",
+        "",
+        "[Phase gallery](artifacts/gallery.html)",
+        "",
+    ]
     lines.extend(f"- [{tag}] {text}" for tag, text in findings_for(report))
+    human_look = report.get("human_look", {})
+    lines.extend(["", "## Human look", ""])
+    for kind in ("schematic", "pcb"):
+        verdict = human_look.get(kind, {})
+        lines.extend([
+            f"### {kind.title()}",
+            "",
+            f"Score: {verdict.get('score', '-')} / 10",
+            "",
+        ])
+        if verdict.get("reference"):
+            lines.append(f"Reference: `{verdict['reference']['source']}`")
+            lines.append("")
+        for issue in verdict.get("worst_three", []):
+            lines.append(f"- Worst: {issue}")
+        for change in verdict.get("what_a_human_would_change", []):
+            lines.append(f"- Human change: {change}")
+        if verdict.get("error"):
+            lines.append(f"- Unavailable: {verdict['error']}")
     for turn in report.get("turns", []):
         lines.extend([
             "",
@@ -1622,8 +1861,8 @@ def aggregate_findings(reports, output_root, suite, questions):
 
 
 COLUMNS = [
-    "case", "score", "sch critic", "pcb critic", "checks", "erc e/w", "moved",
-    "lost", "added", "pcb moved", "elapsed",
+    "case", "score", "sch critic", "pcb critic", "human look", "checks", "erc e/w",
+    "moved", "lost", "added", "pcb moved", "turns", "agent s", "elapsed s",
 ]
 
 
@@ -1636,12 +1875,19 @@ def critic_score(report, kind):
     return "-" if score is None else str(score)
 
 
+def human_look_score(report):
+    verdicts = report.get("human_look", {})
+    values = []
+    for kind in ("schematic", "pcb"):
+        score = verdicts.get(kind, {}).get("score")
+        values.append("-" if score is None else str(score))
+    return "/".join(values)
+
+
 def row(report):
     if "error" in report:
-        return [
-            report["case"], "-", "-", "-", "-", "-", "-", "-", "-", "-",
-            report["error"][:60],
-        ]
+        values = [report["case"]] + ["-"] * (len(COLUMNS) - 2)
+        return values + [report["error"][:60]]
     checks = report["checks"]
     total = len(checks["pass"]) + len(checks["fail"])
     return [
@@ -1649,12 +1895,15 @@ def row(report):
         str(report.get("score", "-")),
         critic_score(report, "schematic"),
         critic_score(report, "pcb"),
+        human_look_score(report),
         f"{len(checks['pass'])}/{total}" if total else "-",
         f"{report.get('erc_errors', '?')}/{report.get('erc_warnings', '?')}",
         count(report, "unchanged_symbols_moved"),
         count(report, "fields_lost"),
         count(report, "symbols_added"),
         count(report, "board_parts_moved"),
+        str(len(report.get("turns", []))),
+        f"{report.get('agent_seconds', 0):.0f}s",
         f"{report['elapsed_seconds']:.0f}s",
     ]
 
@@ -1693,6 +1942,12 @@ def main():
     )
     parser.add_argument("--scoreboard", type=Path, help="write the scoreboard here too")
     parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=4,
+        help="maximum agent turns per case, including budget continuations (default: 4)",
+    )
+    parser.add_argument(
         "--question",
         action="append",
         default=[],
@@ -1700,6 +1955,8 @@ def main():
     )
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
+    if args.max_turns < 1:
+        parser.error("--max-turns must be at least 1")
 
     available = {path.name: path for path in CASES.iterdir() if path.is_dir()}
     if args.list:
@@ -1719,7 +1976,7 @@ def main():
     reports = []
     for name in selected:
         try:
-            report = run_case(available[name], output)
+            report = run_case(available[name], output, args.max_turns)
         except Exception as error:
             report = recover_failed_report(output, name, error)
             print(f"{name}: {error}", file=sys.stderr)
