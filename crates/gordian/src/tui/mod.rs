@@ -92,7 +92,9 @@ async fn guard_turn_task(future: impl Future<Output = TurnEndReason>) -> TurnEnd
 pub async fn run(project_dir: PathBuf, config: GordianConfig, config_path: PathBuf) -> Result<()> {
     // 1. Detect KiCAD (best-effort: the UI still launches without it, just shows
     //    a disconnected indicator and the agent's tools will error).
-    let env = crate::config::detect_kicad(&config);
+    let env_result = crate::config::detect_kicad(&config);
+    let kicad_error = env_result.as_ref().err().map(ToString::to_string);
+    let env = env_result.ok();
     let kicad_connected = env.is_some();
 
     // 2. Build the agent if we have both KiCAD and LLM config; otherwise launch
@@ -140,11 +142,11 @@ pub async fn run(project_dir: PathBuf, config: GordianConfig, config_path: PathB
     if agent_handle.is_none() {
         let mut missing = Vec::new();
         if env.is_none() {
-            missing.push(
-                "no KiCAD install found (install KiCAD 9+/10, or set kicad.symbolDir / \
-                 kicad.footprintDir / kicad.cliPath)"
-                    .to_string(),
-            );
+            missing.push(kicad_error.clone().unwrap_or_else(|| {
+                "KiCad 10 is required; set kicad.cliPath, kicad.symbolDir, and \
+                 kicad.footprintDir"
+                    .to_string()
+            }));
         }
         if let Some(err) = &llm_error {
             missing.push(format!("LLM provider not configured: {err}"));

@@ -102,8 +102,9 @@ pub fn tool_defs() -> Vec<Tool> {
         Def {
             name: "search_symbols".into(),
             description: "Find symbol `Lib:Name`; batch up to 10 queries in one call. The \
-                 best hit for each query comes back with its full pin list and default \
-                 compatible footprint inline, so get_symbol_info is only needed for a hit further down."
+                 best hit for each query comes back with its full pin list, alternate functions, \
+                 and default compatible footprint inline. Those pin numbers, names, or alternates \
+                 are valid place_parts pin keys, case-insensitively."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -129,8 +130,8 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "get_symbol_info".into(),
-            description: "Return symbol ratings, datasheet, footprint, and pins. Pass \
-                 `lib_ids` to look up several symbols in one call."
+            description: "Return symbol ratings, datasheet, footprint, pins, and alternate \
+                 pin functions. Pass `lib_ids` to look up several symbols in one call."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -216,11 +217,6 @@ pub fn tool_defs() -> Vec<Tool> {
                 },
                 "required": ["lib_id"]
             }),
-        },
-        Def {
-            name: "open_board".into(),
-            description: "Open PCB for live IPC edits; return board state.".into(),
-            input_schema: json!({ "type": "object", "properties": {} }),
         },
         Def {
             name: "move_parts".into(),
@@ -626,7 +622,6 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "check_board" => pcb_workflow::check_board(input, ctx),
         "refill_zones" => pcb_workflow::refill_zones(input, ctx),
         "export_fab" => pcb_workflow::export_fab(input, ctx),
-        "open_board" => pcb_workflow::open_board(input, ctx),
         "move_parts" => pcb_workflow::move_parts(input, ctx),
         "route_track" => pcb_workflow::route_track(input, ctx),
         "delete_copper" => pcb_workflow::delete_copper(input, ctx),
@@ -661,6 +656,9 @@ fn pin_digest(meta: &sch_check::SymbolMeta) -> Vec<Value> {
             });
             if multi_unit {
                 pin["unit"] = json!(p.unit);
+            }
+            if !p.alternates.is_empty() {
+                pin["alternates"] = json!(p.alternates);
             }
             pin
         })

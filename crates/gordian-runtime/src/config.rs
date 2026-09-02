@@ -39,7 +39,7 @@ pub struct GordianConfig {
     pub schema_version: u32,
     /// LLM request behavior.
     pub llm: LlmConfig,
-    /// KiCAD discovery and IPC behavior.
+    /// KiCAD command-line and library discovery.
     pub kicad: KicadConfig,
     /// Project defaults that are config, not project state.
     pub project: ProjectConfig,
@@ -120,7 +120,7 @@ impl GordianConfig {
     }
 }
 
-/// KiCAD discovery and live board session behavior.
+/// KiCAD 10 command-line and library discovery.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct KicadConfig {
@@ -130,17 +130,6 @@ pub struct KicadConfig {
     pub footprint_dir: Option<PathBuf>,
     /// Optional `kicad-cli` path override.
     pub cli_path: Option<PathBuf>,
-    /// Optional matching `pcbnew` path override for live IPC sessions.
-    pub pcbnew_path: Option<PathBuf>,
-    /// Use the matching board in an already-running KiCad process for live state.
-    /// When disabled, ordinary board tools stay offline and never launch pcbnew.
-    /// If an attached write is unsupported and falls back to the saved file,
-    /// Gordian disconnects; reload or reopen the board in KiCad before editing it.
-    pub attach_running: bool,
-    /// Explicitly allow managed headless launch to enable the API server in the
-    /// selected KiCAD major version's preferences. Disabled by default because
-    /// library initialization must not silently rewrite user configuration.
-    pub enable_api_config: bool,
 }
 
 impl KicadConfig {
@@ -148,7 +137,6 @@ impl KicadConfig {
         validate_optional_path(path, "symbolDir", &self.symbol_dir)?;
         validate_optional_path(path, "footprintDir", &self.footprint_dir)?;
         validate_optional_path(path, "cliPath", &self.cli_path)?;
-        validate_optional_path(path, "pcbnewPath", &self.pcbnew_path)?;
         Ok(())
     }
 }
@@ -349,18 +337,6 @@ mod tests {
         assert_eq!(cfg.llm.reasoning_effort, None);
         assert!(!cfg.llm.capture_reasoning);
         assert_eq!(cfg.project.schematic_filename, DEFAULT_SCHEMATIC_FILENAME);
-    }
-
-    #[test]
-    fn kicad_pcbnew_path_round_trips_in_config() {
-        let mut cfg = GordianConfig::default();
-        cfg.kicad.pcbnew_path = Some(PathBuf::from("/opt/kicad10/bin/pcbnew"));
-
-        let encoded = toml::to_string(&cfg).unwrap();
-        let decoded: GordianConfig = toml::from_str(&encoded).unwrap();
-
-        assert_eq!(decoded.kicad.pcbnew_path, cfg.kicad.pcbnew_path);
-        decoded.validate().unwrap();
     }
 
     #[test]

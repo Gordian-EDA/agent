@@ -34,7 +34,10 @@ struct PatchFacts {
     affected_nets: BTreeSet<String>,
 }
 
-/// Patch one board's legacy net-class records without changing unrelated bytes.
+/// Patch KiCad 10 board net-class records without changing unrelated bytes.
+///
+/// KiCad 10.0.4 DRC applies these embedded class definitions and exact-net
+/// memberships even when the project file does not define the class.
 pub fn patch_board_net_class(
     text: &str,
     update: &NetClassUpdate,
@@ -101,7 +104,11 @@ pub fn patch_board_net_class(
     ))
 }
 
-/// Patch KiCad 9 project net settings while retaining bytes outside the two changed values.
+/// Patch KiCad 10 project net settings while retaining unrelated bytes.
+///
+/// KiCad 10.0.4 DRC applies both `classes` and exact-net
+/// `netclass_assignments`; the assignment is required for the class to affect a
+/// net that is otherwise in the default class.
 pub fn patch_project_net_class(
     text: &str,
     update: &NetClassUpdate,
@@ -215,7 +222,7 @@ pub fn patch_project_net_class(
     ))
 }
 
-/// Read exact legacy board net-class assignments as per-net widths.
+/// Read exact KiCad 10 board net-class assignments as per-net widths.
 pub fn board_net_widths(text: &str) -> Result<BTreeMap<String, f64>, String> {
     let (body_start, body_end) = root_body(text)?;
     let mut widths = BTreeMap::new();

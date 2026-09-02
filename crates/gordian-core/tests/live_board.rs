@@ -2,7 +2,7 @@
 //! and check that only what changed changed.
 //!
 //! Real `kicad-cli`, a real `.kicad_sch` and a real `.kicad_pcb` on disk — no
-//! pcbnew, network, or mocks. Skips when no KiCAD installation is available.
+//! editor process, network, or mocks. Skips when no KiCAD installation is available.
 
 use gordian_core::AgentRuntime;
 use gordian_core::tools::run_tool;

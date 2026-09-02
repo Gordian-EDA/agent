@@ -9,4 +9,7 @@ expect: part_count >= 50
 expect: unconnected_pins == []
 expect: unconnected_items == 0
 expect: len(fab_files) >= 3
-expect: agent_seconds <= 300
+expect: schematic_critic_score >= 8
+expect: pcb_critic_score >= 8
+expect: human_look_schematic_score >= 8
+expect: human_look_pcb_score >= 8

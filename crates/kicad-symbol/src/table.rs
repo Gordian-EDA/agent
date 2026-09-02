@@ -14,7 +14,7 @@ const SUGGEST_LIMIT: usize = 3;
 /// The single concrete symbol oracle: resolves `Lib:Name` ids to pin metadata.
 ///
 /// Backed either by installed KiCAD symbol libraries
-/// ([`from_symbol_dir`](SymbolTable::from_symbol_dir)) -- each KiCad 9 flat
+/// ([`from_symbol_dir`](SymbolTable::from_symbol_dir)) -- each flat
 /// `.kicad_sym` or KiCad 10 split `.kicad_symdir` library is parsed once on
 /// first reference and cached -- or by an in-memory fixture set for tests
 /// ([`mock`](SymbolTable::mock) / [`with_basics`](SymbolTable::with_basics)).
@@ -56,6 +56,7 @@ impl SymbolTable {
             .map(|(number, name, etype, unit)| PinMeta {
                 number: number.into(),
                 name: name.into(),
+                alternates: Vec::new(),
                 etype,
                 dir: match etype {
                     PinType::PowerInput | PinType::PowerOutput => PinDir::Power,
@@ -174,6 +175,7 @@ fn global_label_meta() -> SymbolMeta {
         pins: vec![PinMeta {
             number: "1".into(),
             name: "~".into(),
+            alternates: Vec::new(),
             etype: PinType::Passive,
             dir: PinDir::Passive,
             unit: 1,

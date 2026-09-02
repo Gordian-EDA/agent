@@ -1,1 +1,7 @@
 The chosen regulator's real pin functions and required topology must be respected. Feedback values should plausibly set 5 V, power parts and polarity must make sense for 12 V input and 1 A output, and protection/decoupling should be placed in the correct electrical order.
+expect: agent_exit == 0
+expect: schematic_created == true
+expect: part_count >= 10
+expect: erc_errors == 0
+expect: schematic_critic_score >= 8
+expect: human_look_schematic_score >= 8

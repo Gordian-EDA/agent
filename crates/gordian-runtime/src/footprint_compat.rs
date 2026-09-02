@@ -1,7 +1,7 @@
 //! Symbol/footprint electrical-pad compatibility checks shared by schematic
 //! authoring and PCB regeneration.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result, anyhow};
 use fuzzy_matcher::FuzzyMatcher;
@@ -498,6 +498,49 @@ pub fn footprint_input_error(
     }
 }
 
+/// Ranked catalog repairs when a requested footprint cannot be loaded.
+pub fn unresolved_footprint_suggestions(
+    ctx: &AgentRuntime,
+    symbol_id: &str,
+    footprint: &str,
+) -> Result<Option<Vec<String>>> {
+    let catalog = ctx.footprint_catalog()?;
+    let id = match FootprintId::parse(footprint) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(Some(
+                catalog
+                    .suggest(footprint)
+                    .into_iter()
+                    .map(|candidate| candidate.to_string())
+                    .collect(),
+            ));
+        }
+    };
+    match catalog.footprint(&id) {
+        Ok(_) => Ok(None),
+        Err(_) => {
+            let same_library = best_same_library_footprint(
+                ctx,
+                symbol_id,
+                footprint,
+                &BTreeSet::new(),
+                None,
+            )?;
+            let mut suggestions = same_library.into_iter().collect::<Vec<_>>();
+            suggestions.extend(
+                catalog
+                    .suggest(footprint)
+                    .into_iter()
+                    .map(|candidate| candidate.to_string()),
+            );
+            let mut seen = BTreeSet::new();
+            suggestions.retain(|candidate| seen.insert(candidate.clone()));
+            Ok(Some(suggestions))
+        }
+    }
+}
+
 /// Validate explicit footprint assignments in a compiled circuit design.
 pub fn design_pin_mismatches(
     ctx: &AgentRuntime,
@@ -532,6 +575,7 @@ pub fn design_pin_mismatches(
 pub fn netlist_pin_mismatches(
     ctx: &AgentRuntime,
     netlist: &kicad::Netlist,
+    ignored_pins: &BTreeMap<String, BTreeSet<String>>,
 ) -> Result<Vec<FootprintPinMismatch>> {
     assignment_mismatches(
         ctx,
@@ -543,7 +587,10 @@ pub fn netlist_pin_mismatches(
                     reference: &component.reference,
                     symbol: &component.lib_id,
                     footprint,
-                    ignored_pins: BTreeSet::new(),
+                    ignored_pins: ignored_pins
+                        .get(&component.reference)
+                        .cloned()
+                        .unwrap_or_default(),
                 })
         }),
     )

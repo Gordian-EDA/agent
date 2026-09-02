@@ -523,7 +523,6 @@ fn is_pcb_stage_tool(name: &str) -> bool {
             | "refill_zones"
             | "check_board"
             | "export_fab"
-            | "open_board"
             | "get_board"
             | "render_board"
             | "update_board_outline"
@@ -2377,7 +2376,6 @@ fn tool_effect(name: &str) -> ToolEffect {
         | "place_board"
         | "route_board"
         | "refill_zones"
-        | "open_board"
         | "move_parts"
         | "route_track"
         | "delete_copper"
@@ -2492,7 +2490,6 @@ async fn run_kicad_tool(ctx: &Arc<AgentRuntime>, call: &ToolCall) -> ToolOutcome
 
 async fn run_blocking(ctx: &Arc<AgentRuntime>, name: &str, input: Value) -> Result<Value> {
     let ctx = Arc::clone(ctx);
-    let timeout_ctx = Arc::clone(&ctx);
     let name = name.to_string();
     let timeout = tool_timeout(&name);
     let handle = tokio::task::spawn_blocking({
@@ -2501,19 +2498,14 @@ async fn run_blocking(ctx: &Arc<AgentRuntime>, name: &str, input: Value) -> Resu
     });
     match tokio::time::timeout(timeout, handle).await {
         Ok(joined) => joined.map_err(|e| anyhow::anyhow!("tool execution task failed: {e}"))?,
-        Err(_) => {
-            if is_kicad_session_tool(&name) {
-                timeout_ctx.close_kicad_session();
-            }
-            anyhow::bail!(tool_timeout_message(&name, timeout));
-        }
+        Err(_) => anyhow::bail!(tool_timeout_message(&name, timeout)),
     }
 }
 
 fn tool_timeout_message(name: &str, timeout: Duration) -> String {
     let recovery = if enforces_own_deadline(name) {
         "it holds itself to a budget well inside this timeout, so the project is intact; inspect it before retrying a smaller request"
-    } else if is_kicad_session_tool(name) {
+    } else if is_board_tool(name) {
         "close any KiCad dialogs/processes touching the project, then inspect project state before trying a changed call"
     } else {
         "the operation may still be finishing; do not immediately retry identical arguments — inspect project state or simplify/batch the request"
@@ -2521,7 +2513,7 @@ fn tool_timeout_message(name: &str, timeout: Duration) -> String {
     format!("{name} timed out after {}s; {recovery}", timeout.as_secs())
 }
 
-fn is_kicad_session_tool(name: &str) -> bool {
+fn is_board_tool(name: &str) -> bool {
     matches!(
         name,
         "sync_board"
@@ -2530,7 +2522,6 @@ fn is_kicad_session_tool(name: &str) -> bool {
             | "refill_zones"
             | "check_board"
             | "export_fab"
-            | "open_board"
             | "render_board"
             | "move_parts"
             | "route_track"
@@ -2550,9 +2541,9 @@ fn tool_timeout(name: &str) -> Duration {
         // These enforce their own budget and return cleanly; the loop timeout is a
         // backstop for a hang, not the mechanism.
         name if enforces_own_deadline(name) => PlacementBudget::DEFAULT + DEADLINE_MARGIN,
-        // KiCAD IPC/CLI paths can legitimately take longer on first launch.
+        // KiCad CLI paths can legitimately take longer on first use.
         "sync_board" | "place_board" | "route_board" | "refill_zones" | "check_board"
-        | "export_fab" | "open_board" => Duration::from_secs(180),
+        | "export_fab" => Duration::from_secs(180),
         _ => Duration::from_secs(90),
     }
 }

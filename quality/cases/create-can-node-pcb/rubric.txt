@@ -1,2 +1,14 @@
 The transceiver pins, termination, and protection must be electrically correct. The bus connector and TVS should be together at an edge, logic header on the opposite side, decoupling near the IC, routing complete and DRC-clean, with a fabrication bundle produced.
+expect: agent_exit == 0
+expect: schematic_created == true
+expect: pcb_created == true
+expect: part_count >= 7
+expect: erc_errors == 0
+expect: drc_errors == 0
+expect: unconnected_items == 0
 expect: unrouted == []
+expect: len(fab_files) >= 3
+expect: schematic_critic_score >= 8
+expect: pcb_critic_score >= 8
+expect: human_look_schematic_score >= 8
+expect: human_look_pcb_score >= 8

@@ -49,8 +49,8 @@ fn test_environment(symbol_dir: &Path) -> Option<KicadInstallation> {
         Some(symbol_dir),
         Some(installed.footprint_dir()),
         Some(installed.cli_path()),
-        Some(installed.pcbnew_path()),
     )
+    .ok()
 }
 
 fn cli_pin_nets(

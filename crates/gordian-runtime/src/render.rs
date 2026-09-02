@@ -429,15 +429,14 @@ pub fn crop_svg(svg: &str, bounds: RenderBounds) -> String {
 /// drop those axis-aligned strokes when they land below one output pixel even
 /// though other schematic geometry remains visible. Match the 0.254 mm symbol
 /// stroke so wires survive rasterization and subsequent vision-image resizing.
+/// KiCad 10.0.4 also exports zero-width `type default` wires in a `stroke:none`
+/// group, while `type solid` wires use the 0.1524 mm green group stroke, so each
+/// path in either current form receives an explicit visible stroke.
 fn thicken_schematic_wires(svg: &str) -> String {
     let thickened = svg.replace(
         "stroke:#009600; stroke-width:0.1524;",
         "stroke:#009600; stroke-width:0.2540;",
     );
-    // KiCad 9.0.3 may emit the entire schematic-wire layer as `stroke:none`
-    // even though its paths are the real committed wires. Older exports put
-    // the green stroke on the group. In either form give each path an explicit
-    // stroke: resvg then cannot lose it through absent/broken inheritance.
     let marker = [
         "<g style=\"fill:none; stroke:none;\">",
         "<g style=\"fill:none; \nstroke:#009600; stroke-width:0.2540;",

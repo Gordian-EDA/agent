@@ -23,7 +23,7 @@
 //! moment an edit invalidates it. Untouched items are re-emitted from those
 //! bytes, so parsing and writing an unedited file reproduces it byte for byte,
 //! and an edited file differs only at the items that changed. Rewritten items
-//! use the KiCAD 9/10 printer dialect (tab indent, one child per line, four
+//! use the KiCad printer dialect (tab indent, one child per line, four
 //! decimals), which is a fixed point of itself.
 //!
 //! ## Connectivity

@@ -355,7 +355,7 @@
         "B6": "USB_DP",
         "B7": "USB_DM",
         "B9": "VBUS",
-        "S1": "GND"
+        "SH": "GND"
       }
     },
     {

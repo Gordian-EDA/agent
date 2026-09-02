@@ -33,12 +33,11 @@ pub fn load_or_create() -> Result<LoadedConfig> {
     Ok(LoadedConfig { path, config })
 }
 
-pub fn detect_kicad(config: &GordianConfig) -> Option<KicadInstallation> {
+pub fn detect_kicad(config: &GordianConfig) -> std::io::Result<KicadInstallation> {
     KicadInstallation::detect_with(
         config.kicad.symbol_dir.as_deref(),
         config.kicad.footprint_dir.as_deref(),
         config.kicad.cli_path.as_deref(),
-        config.kicad.pcbnew_path.as_deref(),
     )
 }
 
