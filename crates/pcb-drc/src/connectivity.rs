@@ -68,20 +68,34 @@ use std::collections::{BTreeMap, BTreeSet};
 /// (`Unconnected` first, by connection then point index; then `CrossNetMerge`
 /// by name pair).
 pub fn check(problem: &RoutingView, solution: &RouteSolution) -> Vec<Violation> {
+    check_pairs(problem, solution, touch_candidates)
+}
+
+/// Element pairs worth an exact touch test: those whose fattened bounding boxes
+/// meet. Elements further apart than that cannot touch under either [`Fit`].
+fn touch_candidates(elements: &[Element]) -> Vec<(usize, usize)> {
+    let boxes: Vec<geom::Rect> = elements.iter().map(Element::bounds).collect();
+    geom::candidate_pairs(&boxes)
+}
+
+/// [`check`], with the pair source injected so a test can pin the broad-phase
+/// filter against the exhaustive loop it replaces. Union order does not affect
+/// the resulting partition, so only the pair *set* matters.
+fn check_pairs(
+    problem: &RoutingView,
+    solution: &RouteSolution,
+    pairs: fn(&[Element]) -> Vec<(usize, usize)>,
+) -> Vec<Violation> {
     let elements = build_elements(problem, solution);
     let mut proven = UnionFind::new(elements.len());
     let mut bounding = UnionFind::new(elements.len());
 
-    // O(n^2) pairwise touch test — element counts are tiny (a board's copper),
-    // and clarity beats a spatial index here.
-    for i in 0..elements.len() {
-        for j in (i + 1)..elements.len() {
-            if touches(&elements[i], &elements[j], Fit::Proven) {
-                proven.union(i, j);
-            }
-            if touches(&elements[i], &elements[j], Fit::Bounding) {
-                bounding.union(i, j);
-            }
+    for (i, j) in pairs(&elements) {
+        if touches(&elements[i], &elements[j], Fit::Proven) {
+            proven.union(i, j);
+        }
+        if touches(&elements[i], &elements[j], Fit::Bounding) {
+            bounding.union(i, j);
         }
     }
 
@@ -168,6 +182,23 @@ enum Shape {
     Point { at: geom::Point2, layer: LayerRef },
     /// A through via: a disc that stitches every layer at its position.
     Via { at: geom::Point2, radius: f64 },
+}
+
+impl Element {
+    /// The element's copper extent, `EPS`-widened so a pair that only just
+    /// touches still reaches the exact test. Uses the pad *bounding* fit, the
+    /// larger of the two.
+    fn bounds(&self) -> geom::Rect {
+        let r = match &self.shape {
+            Shape::Segment {
+                segment, half_w, ..
+            } => geom::Rect::from_points(segment.a, segment.b).inflate(*half_w),
+            Shape::Pad { rect, .. } => *rect,
+            Shape::Point { at, .. } => geom::Rect::from_points(*at, *at),
+            Shape::Via { at, radius } => geom::Rect::from_center_half(*at, (*radius, *radius)),
+        };
+        r.inflate(EPS)
+    }
 }
 
 fn build_elements(problem: &RoutingView, solution: &RouteSolution) -> Vec<Element> {
@@ -904,5 +935,34 @@ mod tests {
         };
         assert!(m.to_string().contains("GND"));
         assert!(m.to_string().contains("SIG"));
+    }
+}
+
+#[cfg(test)]
+mod broad_phase_equivalence {
+    use super::*;
+    use crate::goldens;
+
+    fn all_pairs(elements: &[Element]) -> Vec<(usize, usize)> {
+        (0..elements.len())
+            .flat_map(|i| ((i + 1)..elements.len()).map(move |j| (i, j)))
+            .collect()
+    }
+
+    /// The bounding-box filter must never drop a pair that actually touches:
+    /// filtered and exhaustive runs answer identically on real boards, and on
+    /// tilings of them large enough to take the hash-grid path.
+    #[test]
+    fn filtered_and_exhaustive_agree() {
+        for (name, view, solution) in goldens::boards() {
+            for n in [1, 4] {
+                let (view, solution) = goldens::tiled(&view, &solution, n);
+                assert_eq!(
+                    check_pairs(&view, &solution, touch_candidates),
+                    check_pairs(&view, &solution, all_pairs),
+                    "{name} tiled {n}x{n}"
+                );
+            }
+        }
     }
 }

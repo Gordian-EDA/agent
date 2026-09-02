@@ -4,6 +4,7 @@
 //! Core coordinates are millimetres in y-down space.
 
 mod angle;
+mod broadphase;
 mod consts;
 mod grid;
 mod hash;
@@ -17,6 +18,7 @@ mod shape;
 mod union_find;
 
 pub use angle::snap_quadrant;
+pub use broadphase::{boxes_meet, candidate_pairs};
 pub use consts::{EPS, JOIN_EPS, STRICT_EPS};
 pub use grid::{GRID_50_MIL, Grid};
 pub use hash::{fnv1a, uuid_v5};
