@@ -96,3 +96,14 @@ session; `history{limit?}` lists revisions (id, tool, summary, files, when). Rep
 `.gordian/sch-undo` + `SnapshotId` plumbing in `gordian-tools-sch/src/session.rs`; the
 tools' `snapshot` result field becomes `revision`. Bounded retention (keep last N, prune).
 Start after `lane/pcb-diagnostics` merges (shared pcb-workflow write paths).
+
+## PCB architecture (user approved 2026-09-01): mirror the schematic side
+Order: (1) `sync_board` replaces destructive `regenerate_board` — netlist diff schematic↔board,
+add/remove/retarget only the delta, auto-sized outline on an empty board; (2) `place_board{refs?}`
+/ `route_board{nets?}` as subset ops with the rest locked / fixed copper (whole = all selected);
+(3) one guard: every board mutator snapshot → edit → pcb-drc on the touched region → refuse with
+violations or write; invariant = copper connectivity ⊆ schematic netlist; (4) board intent
+(`edge`, `keep_near`, `group`, layers/rules, zones) → `PlacementHints`, never coordinates;
+(5) unified revisions + `check_board` (DRC + unconnected pairs + netlist consistency) as the
+completion signal; (6) delete the `PcbEngine` monolith, the destructive regenerate path, and
+`run_pcb_finish_pipeline` (hidden orchestrator) — the model orchestrates with tools.
