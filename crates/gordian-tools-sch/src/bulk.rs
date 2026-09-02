@@ -257,9 +257,6 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let refs = report.placed.clone();
     let mut value = edit
         .commit(
-            ctx,
-            "place_parts",
-            "Place schematic parts",
             json!(report),
             // Naming a previously auto-named net renames it; that is the point of an
             // `@ref.pin` target, so the guard is told rather than surprised.
@@ -295,9 +292,7 @@ fn clear_unknown_footprints(
         };
         let Some(did_you_mean) =
             gordian_runtime::footprint_compat::unresolved_footprint_suggestions(
-                ctx,
-                &part.part,
-                &requested,
+                ctx, &part.part, &requested,
             )?
         else {
             continue;
@@ -315,15 +310,14 @@ fn clear_unknown_footprints(
     Ok(unresolved)
 }
 
-fn with_unresolved_footprints(
-    mut value: Value,
-    unresolved: &[UnresolvedFootprint],
-) -> Value {
+fn with_unresolved_footprints(mut value: Value, unresolved: &[UnresolvedFootprint]) -> Value {
     if unresolved.is_empty() {
         return value;
     }
     value["footprints_unresolved"] = json!(unresolved);
-    let gaps = value["gaps"].as_array_mut().expect("place_parts gaps array");
+    let gaps = value["gaps"]
+        .as_array_mut()
+        .expect("place_parts gaps array");
     gaps.extend(unresolved.iter().map(|issue| {
         json!({
             "kind": "footprint_unresolved",
@@ -339,24 +333,27 @@ fn with_unresolved_footprints(
 
 /// Render the one exhaustive refusal shape used by both audit phases.
 fn invalid_payload_response(audit: sch_check::PayloadAudit, warnings: &[String]) -> Value {
-    with_warnings(json!({
-        "ok": false,
-        "code": "invalid_payload",
-        "input_errors": audit.input_errors,
-        "duplicate_refs": audit.duplicate_refs,
-        "unknown_pins": audit.unknown_pins,
-        "footprint_mismatch": audit.footprint_mismatch,
-        "dangling": audit.dangling,
-        "did_you_mean": audit.did_you_mean,
-        "unreliable_nets": audit.unreliable_nets,
-        "note": "this lists EVERY fault in the payload — fix them all before retrying. \
-                 `place_parts` appends to the sheet, so resubmit only the parts named \
-                 here, not the whole payload. `input_errors` are unresolvable lib_ids \
-                 and pin conflicts; `duplicate_refs` give the next free refdes; \
-                 `unknown_pins` name a key the symbol does not have; `footprint_mismatch` \
-                 includes the closest same-library pad-set repair. `dangling` pins \
-                 are NOT fatal on their own — they are listed so you can finish them.",
-    }), warnings)
+    with_warnings(
+        json!({
+            "ok": false,
+            "code": "invalid_payload",
+            "input_errors": audit.input_errors,
+            "duplicate_refs": audit.duplicate_refs,
+            "unknown_pins": audit.unknown_pins,
+            "footprint_mismatch": audit.footprint_mismatch,
+            "dangling": audit.dangling,
+            "did_you_mean": audit.did_you_mean,
+            "unreliable_nets": audit.unreliable_nets,
+            "note": "this lists EVERY fault in the payload — fix them all before retrying. \
+                     `place_parts` appends to the sheet, so resubmit only the parts named \
+                     here, not the whole payload. `input_errors` are unresolvable lib_ids \
+                     and pin conflicts; `duplicate_refs` give the next free refdes; \
+                     `unknown_pins` name a key the symbol does not have; `footprint_mismatch` \
+                     includes the closest same-library pad-set repair. `dangling` pins \
+                     are NOT fatal on their own — they are listed so you can finish them.",
+        }),
+        warnings,
+    )
 }
 
 fn with_warnings(mut value: Value, warnings: &[String]) -> Value {
@@ -495,7 +492,7 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         "refused"
     });
-    finish_arrangement(edit, report, ctx, "arrange")
+    finish_arrangement(edit, report, ctx)
 }
 
 pub(crate) fn rewire(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -521,7 +518,7 @@ pub(crate) fn rewire(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         "refused"
     });
-    finish_arrangement(edit, report, ctx, "rewire")
+    finish_arrangement(edit, report, ctx)
 }
 
 fn budget_refusal(error: &sch_floorplan::live::Error) -> Value {
@@ -555,24 +552,14 @@ fn budget_refusal(error: &sch_floorplan::live::Error) -> Value {
     })
 }
 
-fn finish_arrangement(
-    edit: Edit,
-    report: ArrangeReport,
-    ctx: &AgentRuntime,
-    tool: &str,
-) -> Result<Value> {
+fn finish_arrangement(edit: Edit, report: ArrangeReport, ctx: &AgentRuntime) -> Result<Value> {
     if !report.committed {
         return Ok(json!({
             "error": "refused: the solver's result changed connectivity; nothing was written",
             "report": report,
         }));
     }
-    let summary = if tool == "arrange" {
-        "Arrange schematic symbols"
-    } else {
-        "Rewire schematic symbols"
-    };
-    let value = edit.commit(ctx, tool, summary, json!(report), Allow::nothing())?;
+    let value = edit.commit(json!(report), Allow::nothing())?;
     if value.get("error").is_some() {
         return Ok(value);
     }

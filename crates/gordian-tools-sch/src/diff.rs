@@ -1,16 +1,15 @@
-//! Revision-aware schematic changes for the model's edit loop.
+//! Turn-relative schematic changes for the model's edit loop.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use anyhow::{Context, Result, anyhow};
 use gordian_runtime::AgentRuntime;
-use gordian_runtime::revisions::RevisionId;
 use sch_doc::{NetDelta, Netlist, SchDoc, SymbolInst, connect};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::session::{comparison_revision, delta_json};
+use crate::session::delta_json;
 
 #[derive(Serialize)]
 struct Pose {
@@ -239,8 +238,8 @@ fn net_delta_lines(delta: &NetDelta) -> Vec<String> {
     lines
 }
 
-fn compact(revision: RevisionId, changes: &Changes) -> String {
-    let mut out = format!("SCHEMATIC DIFF  revision {revision} → live\n");
+fn compact(changes: &Changes) -> String {
+    let mut out = "SCHEMATIC DIFF  turn-start → live\n".to_owned();
     if changes.is_empty() {
         out.push_str("No changes.\n");
         return out;
@@ -307,9 +306,9 @@ fn compact(revision: RevisionId, changes: &Changes) -> String {
     out
 }
 
-fn detailed(revision: RevisionId, changes: Changes) -> Value {
+fn detailed(changes: Changes) -> Value {
     json!({
-        "revision": revision,
+        "baseline": "turn-start",
         "added": changes.added,
         "removed": changes.removed,
         "moved": changes.moved,
@@ -321,32 +320,24 @@ fn detailed(revision: RevisionId, changes: Changes) -> Value {
     })
 }
 
-/// Compare the live sheet with an explicit revision or the turn baseline.
+/// Compare the live sheet with the turn-start baseline.
 pub fn diff_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let revision = match input.get("revision") {
-        Some(value) => {
-            let id = value
-                .as_u64()
-                .filter(|id| *id > 0)
-                .ok_or_else(|| anyhow!("revision must be a positive integer"))?;
-            Some(RevisionId::new(id))
-        }
-        None => None,
-    };
-    let baseline = comparison_revision(ctx, revision)?
-        .ok_or_else(|| anyhow!("no turn baseline yet; pass an explicit revision"))?;
+    let baseline = ctx
+        .turn_baseline()?
+        .ok_or_else(|| anyhow!("no turn-start baseline yet"))?;
     let before = baseline
-        .path
-        .as_deref()
-        .map(SchDoc::read)
-        .transpose()
-        .context("reading comparison revision")?
+        .file(ctx.project_dir(), ctx.sch_path())
+        .map(|bytes| {
+            let text = std::str::from_utf8(bytes).context("decoding turn-start schematic")?;
+            SchDoc::parse(text).context("parsing turn-start schematic")
+        })
+        .transpose()?
         .map_or_else(sch_floorplan::live::blank_sheet, Ok)?;
     let after = SchDoc::read(ctx.sch_path()).context("reading live schematic")?;
     let changes = compare(&before, &after);
     if input.get("detail").and_then(Value::as_bool) == Some(true) {
-        Ok(detailed(baseline.revision, changes))
+        Ok(detailed(changes))
     } else {
-        Ok(Value::String(compact(baseline.revision, &changes)))
+        Ok(Value::String(compact(&changes)))
     }
 }

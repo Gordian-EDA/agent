@@ -632,13 +632,7 @@ pub fn add_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .filter_map(|part| part["ref"].as_str().map(str::to_owned))
         .collect::<Vec<_>>();
-    let mut result = edit.commit(
-        ctx,
-        "add_symbols",
-        "Add schematic symbols",
-        json!({ "placed": placed }),
-        allow,
-    )?;
+    let mut result = edit.commit(json!({ "placed": placed }), allow)?;
     if result.get("error").is_none() {
         crate::session::attach_connectivity(
             &mut result,
@@ -692,9 +686,6 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     retracted += edit.doc.remove_drawing(&floating);
     let loose = refs::newly_loose(edit.before(), &sch_doc::connect::extract(&edit.doc));
     edit.commit(
-        ctx,
-        "remove_symbols",
-        "Remove schematic symbols",
         json!({
             "removed": targets,
             "retracted_drawing": retracted,
@@ -1020,9 +1011,6 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         placed.push(report);
     }
     edit.commit(
-        ctx,
-        "move_symbols",
-        "Move schematic symbols",
         json!({
             "moved": placed,
             "placement": "final and clean; any nudged_to coordinate is the collision-free final position, so do not move it again",
@@ -1105,9 +1093,6 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         applied.insert(name.clone(), json!(text));
     }
     edit.commit(
-        ctx,
-        "set_fields",
-        "Set schematic fields",
         json!({ "ref": refdes, "units": units.len(), "fields": applied }),
         allow,
     )
@@ -1248,9 +1233,6 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     }
     edit.commit(
-        ctx,
-        "assign_footprints",
-        "Assign schematic footprints",
         json!({
             "assigned": requested.iter().map(|(reference, footprint)| {
                 json!({ "reference": reference, "footprint": footprint })
@@ -1286,9 +1268,6 @@ pub fn set_flags(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         applied.insert("in_bom".into(), json!(in_bom));
     }
     edit.commit(
-        ctx,
-        "set_flags",
-        "Set schematic part flags",
         json!({ "ref": refdes, "flags": applied }),
         Allow::nothing().part(refdes),
     )
@@ -1586,9 +1565,6 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     });
     let mapped_by_name = plan.mapped_by_name(&old_pins, &new_pins);
     let mut result = edit.commit(
-        ctx,
-        "swap_symbol",
-        "Swap a schematic symbol",
         json!({
             "ref": refdes,
             "lib_id": lib_id,

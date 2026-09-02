@@ -129,15 +129,10 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "diff_schematic",
-            "Compare the live schematic with a captured revision, defaulting to this turn's first pre-write revision. Reports added and removed symbols, moved poses, changed fields, swapped library IDs, partition-aware net delta, and wire/label count changes as compact text; pass detail: true for structured JSON.",
+            "Compare the live schematic with its turn-start baseline. Reports added and removed symbols, moved poses, changed fields, swapped library IDs, partition-aware net delta, and wire/label count changes as compact text; pass detail: true for structured JSON.",
             json!({
                 "type": "object",
                 "properties": {
-                    "revision": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Captured project revision; defaults to the turn baseline."
-                    },
                     "detail": {
                         "type": "boolean",
                         "description": "Return structured JSON instead of aligned plain text."
@@ -168,7 +163,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "check_schematic",
-            "Lint + electrical rules + KiCAD ERC over the live file. Every finding includes an executable `{tool,args}` fix or `null` with a reason; `fix_groups` coalesces findings closed by one call. Findings are `introduced` or `pre_existing` against the turn's first pre-write revision, matched by code, refs, and nets. `ok` and `erc_clean` consider introduced errors only: fix those and leave inherited findings alone unless asked. Compact results put introduced findings first and use at most forty finding lines; pass `detail: true` to get all. Completeness findings are advisory: resolve them when the request implies a complete powered/interface design, but never expand a deliberately minimal or focused edit.",
+            "Lint + electrical rules + KiCAD ERC over the live file. Every finding includes an executable `{tool,args}` fix or `null` with a reason; `fix_groups` coalesces findings closed by one call. Findings are `introduced` or `pre_existing` against the turn-start baseline, matched by code, refs, and nets. `ok` and `erc_clean` consider introduced errors only: fix those and leave inherited findings alone unless asked. Compact results put introduced findings first and use at most forty finding lines; pass `detail: true` to get all. Completeness findings are advisory: resolve them when the request implies a complete powered/interface design, but never expand a deliberately minimal or focused edit.",
             json!({
                 "type": "object",
                 "properties": {
@@ -412,11 +407,6 @@ pub fn tool_defs() -> Vec<Tool> {
     ];
     defs.into_iter()
         .map(|(name, description, schema)| {
-            let description = if MUTATORS.contains(&name) {
-                format!("{description} Success returns the pre-write `revision`.")
-            } else {
-                description.to_owned()
-            };
             Tool::new(name)
                 .with_description(description)
                 .with_schema(schema)

@@ -1,6 +1,6 @@
 //! Project-local persistent state: `<project>/.gordian/`.
 //!
-//! Holds generated `renders/` and project revision history. The directory ships its own
+//! Holds generated render artifacts and durable project-local state. The directory ships its own
 //! `.gitignore` containing `*` so it never pollutes the user's repo.
 
 use std::io::{self, Write};

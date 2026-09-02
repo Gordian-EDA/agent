@@ -147,14 +147,7 @@ pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if failures == done.len() {
         return Ok(json!({ "error": "every connection failed", "connected": done }));
     }
-    let revision = done
-        .iter()
-        .find_map(|result| result.get("revision").cloned());
-    let mut output = json!({ "connected": done, "failed": failures });
-    if let Some(revision) = revision {
-        output["revision"] = revision;
-    }
-    Ok(output)
+    Ok(json!({ "connected": done, "failed": failures }))
 }
 
 /// Route a connection between two ends of the sheet.
@@ -244,13 +237,7 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 to.describe(),
                 wires.len()
             );
-            edit.commit(
-                ctx,
-                "connect",
-                "Connect schematic pins",
-                json!(changed),
-                allow,
-            )
+            edit.commit(json!(changed), allow)
         }
         None => {
             // Nothing orthogonal fits, so join the ends by name instead — the
@@ -277,9 +264,6 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 to.describe()
             ));
             edit.commit(
-                ctx,
-                "connect",
-                "Connect schematic pins",
                 json!(format!("labelled both ends `{net}` — no clear wire path")),
                 allow,
             )
@@ -350,9 +334,6 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let was = refs::net_of(edit.before(), &pin.refdes, &pin.number).map(str::to_string);
     edit.doc.add_label(kind, net, pose(pin.at));
     edit.commit(
-        ctx,
-        "label",
-        "Label a schematic net",
         json!(format!("named {spec} `{net}`")),
         Allow::nothing()
             .joining_nets([net.to_string()])
@@ -452,9 +433,6 @@ pub fn no_connect(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .map(|pin| pin.refdes.clone())
         .collect::<Vec<_>>();
     edit.commit(
-        ctx,
-        "no_connect",
-        "Mark schematic pins unconnected",
         json!({
             "pins": marked,
             "retracted": {"labels": retracted.labels, "wires": retracted.wires},
@@ -530,9 +508,6 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let stub = stand_off(&mut edit.doc, &refdes, &pin);
     edit.commit(
-        ctx,
-        "add_power",
-        "Add a schematic power symbol",
         json!(format!(
             "attached {lib_id} `{net}` to {spec}{}",
             if stub { " through a short wire" } else { "" }
@@ -900,13 +875,7 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             loose.join(", ")
         ),
     };
-    edit.commit(
-        ctx,
-        "delete_wires",
-        "Delete schematic wiring",
-        json!(changed),
-        allow,
-    )
+    edit.commit(json!(changed), allow)
 }
 
 /// A free spot near a symbol, used by the tools that place something beside an

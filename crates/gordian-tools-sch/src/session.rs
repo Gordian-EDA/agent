@@ -13,7 +13,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use gordian_runtime::AgentRuntime;
-use gordian_runtime::revisions::{RevisionId, TurnBaseline};
 use sch_doc::{NetDelta, Netlist, PinRef, SchDoc, SnapshotId, SymbolSource, connect, placed_pins};
 use serde_json::{Value, json};
 
@@ -217,14 +216,7 @@ impl Edit {
 
     /// Write the edit if its net delta stays within `allow`, else restore and
     /// report what it would have done.
-    pub fn commit(
-        mut self,
-        ctx: &AgentRuntime,
-        tool: &str,
-        summary: &str,
-        changed: Value,
-        allow: Allow,
-    ) -> Result<Value> {
+    pub fn commit(mut self, changed: Value, allow: Allow) -> Result<Value> {
         let after = connect::extract(&self.doc);
         let delta = Netlist::diff(&self.before, &after);
         let moved = pins_that_moved(&delta, &self.before, &after);
@@ -238,13 +230,6 @@ impl Edit {
                 "net_delta": delta_json(&delta),
             }));
         }
-        let revision = ctx
-            .revisions()
-            .capture(gordian_runtime::revisions::Capture::new(
-                tool,
-                summary,
-                &[self.path.clone()],
-            ))?;
         self.doc
             .write(&self.path)
             .with_context(|| format!("writing {}", self.path.display()))?;
@@ -252,7 +237,6 @@ impl Edit {
             "changed": changed,
             "net_delta": delta_json(&delta),
             "warnings": self.warnings,
-            "revision": revision,
         }))
     }
 }
@@ -260,20 +244,6 @@ impl Edit {
 /// Where new symbol definitions come from.
 pub(crate) fn symbol_source(ctx: &AgentRuntime) -> SymbolSource {
     SymbolSource::new(ctx.env().symbol_dir().to_path_buf())
-}
-
-/// Resolve an explicit schematic revision or this turn's first pre-write state.
-pub(crate) fn comparison_revision(
-    ctx: &AgentRuntime,
-    revision: Option<RevisionId>,
-) -> Result<Option<TurnBaseline>> {
-    match revision {
-        Some(revision) => ctx
-            .revisions()
-            .file_at_revision(revision, ctx.sch_path())
-            .map(Some),
-        None => ctx.revisions().turn_baseline(ctx.sch_path()),
-    }
 }
 
 /// Extractor-derived connectivity for the parts one mutator touched.
