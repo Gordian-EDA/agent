@@ -283,6 +283,19 @@ fn next_free_ref(prefix: &str, occupied: &BTreeSet<RefDes>) -> RefDes {
     }
 }
 
+/// `nc`, `NC`, `NC_RTS`, `NC3`, `N/C` — the conventional ways a payload declares a pin
+/// deliberately unconnected. Such a net is not dangling: the realiser draws it as a
+/// no-connect marker rather than a wire.
+fn is_no_connect_name(net: &str) -> bool {
+    let upper = net.to_ascii_uppercase();
+    upper == "NC"
+        || upper == "N/C"
+        || upper.strip_prefix("NC_").is_some_and(|rest| !rest.is_empty())
+        || upper
+            .strip_prefix("NC")
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+}
+
 fn audit_payload(
     input: &PlacePartsInput,
     design: &Design,
@@ -316,7 +329,7 @@ fn audit_payload(
             continue;
         };
         for (pin, net) in &spec.pins {
-            if net.eq_ignore_ascii_case("nc")
+            if is_no_connect_name(net)
                 || is_power_net(net)
                 || input
                     .intent
@@ -597,4 +610,17 @@ pub fn place_parts_input_schema() -> Value {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod no_connect_names {
+    #[test]
+    fn conventional_no_connect_names_are_recognised() {
+        for name in ["nc", "NC", "NC_RTS", "nc_cts", "NC3", "N/C"] {
+            assert!(super::is_no_connect_name(name), "{name}");
+        }
+        for name in ["NCS", "SYNC", "ENC1", "GND", "NC_"] {
+            assert!(!super::is_no_connect_name(name), "{name}");
+        }
+    }
 }
