@@ -25,14 +25,28 @@
 //! Copper is fattened by half its width; two elements touch when their fattened
 //! shapes overlap:
 //! - segment ↔ segment (same layer): segment distance ≤ (wa + wb)/2 + EPS.
-//! - segment ↔ pad (pad present on the segment's layer): segment-to-rect
+//! - segment ↔ pad (pad present on the segment's layer): segment-to-pad
 //!   distance ≤ wa/2 + EPS. A multi-layer (thru-hole-ish) pad is present on
 //!   each layer it lists.
 //! - segment ↔ point (same layer): point-to-segment distance ≤ wa/2 + EPS.
-//! - pad ↔ point (same layer): point inside / within EPS of the rect.
+//! - pad ↔ point (same layer): point inside / within EPS of the pad.
 //! - via ↔ anything (ANY layer): distance ≤ via_radius + other_half_width + EPS.
 //!   A through via stitches every layer at its position (v1: through only).
-//! - pad ↔ pad: rect-rect distance 0 *and* a shared layer.
+//! - pad ↔ pad: pad-pad distance 0 *and* a shared layer.
+//!
+//! ## Two fits, because the two answers are unsafe in opposite directions
+//!
+//! [`Obstacle`] records a pad only as its bounding box, which a round or oval
+//! pad does not fill: its box corners are bare laminate. Believing them joins
+//! copper that is physically apart — exactly how a trace that changes layer in a
+//! pad's *corner* with no via can look connected. So the union-find is built
+//! twice over the same elements ([`Fit`]):
+//!
+//! - [`Fit::Proven`] shrinks each pad to its inscribed capsule and answers
+//!   [`Violation::Unconnected`], so a connection is only ever claimed on copper
+//!   every plausible pad shape carries.
+//! - [`Fit::Bounding`] keeps the box and answers [`Violation::CrossNetMerge`],
+//!   so no short can hide in the slack.
 //!
 //! ## Cross-net merge suppression for shared pads
 //!
@@ -46,7 +60,7 @@
 //! between single-net copper are still reported.
 
 use geom::EPS;
-use pcb_model::{LayerRef, RouteSolution, RoutingView, Violation};
+use pcb_model::{Capsule, LayerRef, RouteSolution, RoutingView, Violation};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Check that `solution`'s copper connects every connection's points and merges
@@ -55,22 +69,36 @@ use std::collections::{BTreeMap, BTreeSet};
 /// by name pair).
 pub fn check(problem: &RoutingView, solution: &RouteSolution) -> Vec<Violation> {
     let elements = build_elements(problem, solution);
-    let mut uf = UnionFind::new(elements.len());
+    let mut proven = UnionFind::new(elements.len());
+    let mut bounding = UnionFind::new(elements.len());
 
     // O(n^2) pairwise touch test — element counts are tiny (a board's copper),
     // and clarity beats a spatial index here.
     for i in 0..elements.len() {
         for j in (i + 1)..elements.len() {
-            if touches(&elements[i], &elements[j]) {
-                uf.union(i, j);
+            if touches(&elements[i], &elements[j], Fit::Proven) {
+                proven.union(i, j);
+            }
+            if touches(&elements[i], &elements[j], Fit::Bounding) {
+                bounding.union(i, j);
             }
         }
     }
 
-    // Plane stitching: a net carried by a solid inner plane joins every through
-    // via and every pad present on that plane (notably through-hole pads). Foreign
-    // copper is relieved by anti-pads on a real board, so planes contribute only
-    // same-net unions, never merges.
+    for uf in [&mut proven, &mut bounding] {
+        stitch_planes(problem, &elements, uf);
+    }
+
+    let mut violations = unconnected_violations(problem, &elements, &mut proven);
+    violations.extend(cross_net_violations(&elements, &mut bounding));
+    violations
+}
+
+/// Plane stitching: a net carried by a solid inner plane joins every through via
+/// and every pad present on that plane (notably through-hole pads). Foreign
+/// copper is relieved by anti-pads on a real board, so planes contribute only
+/// same-net unions, never merges.
+fn stitch_planes(problem: &RoutingView, elements: &[Element], uf: &mut UnionFind) {
     for (net, plane_layer) in &problem.plane_nets {
         let mut first: Option<usize> = None;
         for (idx, el) in elements.iter().enumerate() {
@@ -107,10 +135,6 @@ pub fn check(problem: &RoutingView, solution: &RouteSolution) -> Vec<Violation> 
             }
         }
     }
-
-    let mut violations = unconnected_violations(problem, &elements, &mut uf);
-    violations.extend(cross_net_violations(&elements, &mut uf));
-    violations
 }
 
 // ── copper elements ──────────────────────────────────────────────────────────
@@ -134,9 +158,10 @@ enum Shape {
         half_w: f64,
         layer: LayerRef,
     },
-    /// An axis-aligned pad rectangle present on a set of layers.
+    /// A pad present on a set of layers, in both fits (see [`Fit`]).
     Pad {
         rect: geom::Rect,
+        capsule: Capsule,
         layers: Vec<LayerRef>,
     },
     /// A zero-size copper anchor (a `points_to_connect`) on one layer.
@@ -153,13 +178,12 @@ fn build_elements(problem: &RoutingView, solution: &RouteSolution) -> Vec<Elemen
         if ob.connected_to.is_empty() {
             continue;
         }
-        let hw = ob.width / 2.0;
-        let hh = ob.height / 2.0;
         els.push(Element {
             owners: ob.connected_to.clone(),
             shared_pad: ob.connected_to.len() > 1,
             shape: Shape::Pad {
-                rect: geom::Rect::from_center_half(ob.center, (hw, hh)),
+                rect: ob.bounds(),
+                capsule: ob.proven_capsule(),
                 layers: ob.layers.clone(),
             },
         });
@@ -225,14 +249,26 @@ fn build_elements(problem: &RoutingView, solution: &RouteSolution) -> Vec<Elemen
 
 // ── touch predicate ──────────────────────────────────────────────────────────
 
-/// Do two elements electrically touch? See the module docs for the per-pair
-/// rules. A via touches across *all* layers; everything else is layer-checked.
-fn touches(x: &Element, y: &Element) -> bool {
+/// Which pad shape a touch test uses. See the module docs: a bounding box that
+/// a rounded pad does not fill must not be believed when the answer is "these
+/// are connected", and must not be shrunk when the answer is "these are apart".
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fit {
+    /// Inscribed capsule — the copper every plausible pad shape carries.
+    Proven,
+    /// Bounding box — the copper no pad shape exceeds.
+    Bounding,
+}
+
+/// Do two elements electrically touch under `fit`? See the module docs for the
+/// per-pair rules. A via touches across *all* layers; everything else is
+/// layer-checked.
+fn touches(x: &Element, y: &Element, fit: Fit) -> bool {
     use Shape::*;
     match (&x.shape, &y.shape) {
         // via ↔ anything, any layer.
         (Via { at, radius }, other) | (other, Via { at, radius }) => {
-            via_touches(*at, *radius, other)
+            via_touches(*at, *radius, other, fit)
         }
 
         (
@@ -254,16 +290,16 @@ fn touches(x: &Element, y: &Element) -> bool {
                 half_w,
                 layer,
             },
-            Pad { rect, layers },
+            pad @ Pad { layers, .. },
         )
         | (
-            Pad { rect, layers },
+            pad @ Pad { layers, .. },
             Segment {
                 segment,
                 half_w,
                 layer,
             },
-        ) => layers.contains(layer) && segment.dist_to_rect(rect) <= half_w + EPS,
+        ) => layers.contains(layer) && pad_dist_to_segment(pad, *segment, fit) <= half_w + EPS,
 
         (
             Segment {
@@ -282,21 +318,29 @@ fn touches(x: &Element, y: &Element) -> bool {
             },
         ) => layer == pl && segment.dist_to_point(*at) <= half_w + EPS,
 
-        (Pad { rect, layers }, Point { at, layer })
-        | (Point { at, layer }, Pad { rect, layers }) => {
-            layers.contains(layer) && rect.dist_to_point(*at) <= EPS
+        (pad @ Pad { layers, .. }, Point { at, layer })
+        | (Point { at, layer }, pad @ Pad { layers, .. }) => {
+            layers.contains(layer) && pad_dist_to_point(pad, *at, fit) <= EPS
         }
 
         (
             Pad {
                 rect: r1,
+                capsule: c1,
                 layers: l1,
             },
             Pad {
                 rect: r2,
+                capsule: c2,
                 layers: l2,
             },
-        ) => l1.iter().any(|l| l2.contains(l)) && r1.dist_to_rect(r2) <= EPS,
+        ) => {
+            l1.iter().any(|l| l2.contains(l))
+                && match fit {
+                    Fit::Proven => c1.dist_to_capsule(c2),
+                    Fit::Bounding => r1.dist_to_rect(r2),
+                } <= EPS
+        }
 
         // point ↔ point: zero-size anchors never touch each other directly;
         // they are only ever joined through real copper.
@@ -304,14 +348,33 @@ fn touches(x: &Element, y: &Element) -> bool {
     }
 }
 
+/// Distance from a [`Shape::Pad`]'s copper to `p` under `fit`; `f64::MAX` for
+/// any other shape, so a caller that mismatched the arm can never report a
+/// touch.
+fn pad_dist_to_point(pad: &Shape, p: geom::Point2, fit: Fit) -> f64 {
+    match (pad, fit) {
+        (Shape::Pad { capsule, .. }, Fit::Proven) => capsule.dist_to_point(p),
+        (Shape::Pad { rect, .. }, Fit::Bounding) => rect.dist_to_point(p),
+        _ => f64::MAX,
+    }
+}
+
+fn pad_dist_to_segment(pad: &Shape, s: geom::Segment, fit: Fit) -> f64 {
+    match (pad, fit) {
+        (Shape::Pad { capsule, .. }, Fit::Proven) => capsule.dist_to_segment(s),
+        (Shape::Pad { rect, .. }, Fit::Bounding) => s.dist_to_rect(rect),
+        _ => f64::MAX,
+    }
+}
+
 /// A through via at `at` with `radius` touches `other` on any layer when the
 /// disc reaches the other element's fattened body.
-fn via_touches(at: geom::Point2, radius: f64, other: &Shape) -> bool {
+fn via_touches(at: geom::Point2, radius: f64, other: &Shape, fit: Fit) -> bool {
     match other {
         Shape::Segment {
             segment, half_w, ..
         } => segment.dist_to_point(at) <= radius + half_w + EPS,
-        Shape::Pad { rect, .. } => rect.dist_to_point(at) <= radius + EPS,
+        pad @ Shape::Pad { .. } => pad_dist_to_point(pad, at, fit) <= radius + EPS,
         Shape::Point { at: p, .. } => at.dist(*p) <= radius + EPS,
         Shape::Via { at: p, radius: r2 } => at.dist(*p) <= radius + r2 + EPS,
     }

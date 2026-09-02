@@ -227,11 +227,17 @@ impl RoutingView {
     }
 }
 
-/// A rectangular (or oval, treated as rect in v1) copper obstacle.
+/// A copper obstacle (a pad), recorded only as its bounding box.
+///
+/// The box is an *over*-approximation of the real pad: a round or oval pad
+/// leaves the box corners bare. So the two directions must use different
+/// shapes — [`Obstacle::bounds`] where missing contact would be unsafe
+/// (clearance, shorts) and [`Obstacle::proven_capsule`] where *claiming*
+/// contact would be unsafe (connectivity, via removal).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Obstacle {
-    /// Shape kind: `"rect"` or `"oval"` (oval treated as bounding rect in v1).
+    /// Shape kind. Only `"rect"` (the bounding box) is produced today.
     #[serde(rename = "type")]
     pub kind: String,
     pub layers: Vec<LayerRef>,
@@ -241,6 +247,61 @@ pub struct Obstacle {
     /// Connection names whose copper this obstacle belongs to.
     /// A router never treats an obstacle as blocking its own net.
     pub connected_to: Vec<String>,
+}
+
+/// The copper a pad *provably* carries, whatever its true KiCAD shape: a capsule
+/// (a core segment fattened by `radius`).
+///
+/// A `w × h` bounding box is the exact shape of a `rect` pad and a strict
+/// over-approximation of every rounded one; the inscribed capsule — radius
+/// `min(w, h)/2` around a core segment of length `|w - h|` along the long axis —
+/// is exactly a `circle`/`oval` pad and is contained in `rect` and `roundrect`.
+/// It is therefore the largest region every plausible shape shares.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Capsule {
+    pub core: Segment,
+    pub radius: f64,
+}
+
+impl Capsule {
+    pub fn dist_to_point(&self, p: Point2) -> f64 {
+        self.core.dist_to_point(p) - self.radius
+    }
+
+    pub fn dist_to_segment(&self, s: Segment) -> f64 {
+        self.core.dist_to_segment(s) - self.radius
+    }
+
+    pub fn dist_to_capsule(&self, other: &Capsule) -> f64 {
+        self.core.dist_to_segment(other.core) - self.radius - other.radius
+    }
+}
+
+impl Obstacle {
+    /// The pad's bounding rectangle: use it wherever *missing* contact is the
+    /// unsafe answer (clearance, cross-net shorts).
+    pub fn bounds(&self) -> Rect {
+        Rect::from_center_half(self.center, (self.width / 2.0, self.height / 2.0))
+    }
+
+    /// The pad's [`Capsule`]: use it wherever *claiming* contact is the unsafe
+    /// answer (connectivity, deciding a via is redundant).
+    pub fn proven_capsule(&self) -> Capsule {
+        let radius = self.width.min(self.height) / 2.0;
+        let half = (self.width - self.height).abs() / 2.0;
+        let (dx, dy) = if self.width >= self.height {
+            (half, 0.0)
+        } else {
+            (0.0, half)
+        };
+        Capsule {
+            core: Segment::new(
+                Point2::new(self.center.x - dx, self.center.y - dy),
+                Point2::new(self.center.x + dx, self.center.y + dy),
+            ),
+            radius,
+        }
+    }
 }
 
 /// A net that must be connected: a name and the set of points to join.

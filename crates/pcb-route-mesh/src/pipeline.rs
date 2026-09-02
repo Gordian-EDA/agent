@@ -1706,6 +1706,10 @@ pub fn postroute_cleanup(deps: &MeshDeps, problem: &RoutingView, solution: &mut 
 /// trace stays connected THROUGH the pad (both trace ends land inside it, and the
 /// pad bridges the layers). A pad is through-hole when its obstacle reaches both
 /// the top and bottom copper layers.
+///
+/// This removal is unguarded, so containment is judged on the pad's *proven*
+/// capsule, never its bounding box: a via in a round pad's box corner sits on
+/// bare laminate, and dropping it silently opens the layer change.
 fn drop_redundant_thruhole_vias(problem: &RoutingView, solution: &mut RouteSolution) {
     let (top, bottom) = (LayerRef::top(), LayerRef::bottom());
     solution.vias.retain(|v| {
@@ -1713,8 +1717,7 @@ fn drop_redundant_thruhole_vias(problem: &RoutingView, solution: &mut RouteSolut
             ob.connected_to.contains(&v.connection)
                 && ob.layers.contains(&top)
                 && ob.layers.contains(&bottom)
-                && (v.at.x - ob.center.x).abs() <= ob.width / 2.0
-                && (v.at.y - ob.center.y).abs() <= ob.height / 2.0
+                && ob.proven_capsule().dist_to_point(v.at) <= 0.0
         })
     });
 }

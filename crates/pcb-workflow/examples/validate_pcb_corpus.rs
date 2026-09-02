@@ -53,7 +53,7 @@ fn main() -> Result<()> {
     let boards = resolve_boards(&corpus_dir, &args)?;
 
     println!(
-        "board,parts,nets,layers,place_ms,route_ms,failed,lints,vias,wirelength_mm,attempts,slowest_engine,slowest_ms,kicad_faults,drc_ms,status"
+        "board,parts,nets,layers,place_ms,route_ms,failed,lints,vias,wirelength_mm,bends,off_angle,attempts,slowest_engine,slowest_ms,kicad_faults,drc_ms,status"
     );
     let mut failures = 0usize;
     for path in boards {
@@ -63,7 +63,7 @@ fn main() -> Result<()> {
             Ok(board) => board,
             Err(err) => {
                 failures += 1;
-                println!("{name},0,0,0,0,0,0,0,0,0.00,0,,0,,0,LOAD_ERROR:{err}");
+                println!("{name},0,0,0,0,0,0,0,0,0.00,0,0,0,,0,,0,LOAD_ERROR:{err}");
                 continue;
             }
         };
@@ -73,7 +73,7 @@ fn main() -> Result<()> {
         if !placed.legal {
             failures += 1;
             println!(
-                "{name},{},0,{},{},0,0,0,0,0.00,0,,0,,0,PLACE_ILLEGAL",
+                "{name},{},0,{},{},0,0,0,0,0.00,0,0,0,,0,,0,PLACE_ILLEGAL",
                 board.problem.parts.len(),
                 board.problem.layer_count,
                 place_ms
@@ -82,7 +82,7 @@ fn main() -> Result<()> {
         }
         if args.place_only {
             println!(
-                "{name},{},0,{},{},0,0,0,0,0.00,0,,0,,0,PLACE_OK",
+                "{name},{},0,{},{},0,0,0,0,0.00,0,0,0,,0,,0,PLACE_OK",
                 board.problem.parts.len(),
                 board.problem.layer_count,
                 place_ms
@@ -108,7 +108,7 @@ fn main() -> Result<()> {
                     "ASSIGN_FAULT"
                 };
                 println!(
-                    "{name},{},{},{},{},{},{},{},{},{:.2},{},mesh-assign,{},,0,{}",
+                    "{name},{},{},{},{},{},{},{},{},{:.2},0,0,{},mesh-assign,{},,0,{}",
                     board.problem.parts.len(),
                     rp.connections.len(),
                     rp.layer_count,
@@ -288,8 +288,11 @@ fn main() -> Result<()> {
             .map(|drc| drc.copper_violations + drc.unconnected_items)
             .map(|count| count.to_string())
             .unwrap_or_default();
+        if let Some(dir) = &args.emit_dir {
+            emit_board(dir, name, &board, &placed.placements, &routed.result, &catalog)?;
+        }
         println!(
-            "{name},{},{},{},{},{},{},{},{},{:.2},{},{},{},{},{},{}",
+            "{name},{},{},{},{},{},{},{},{},{:.2},{},{},{},{},{},{},{},{}",
             board.problem.parts.len(),
             rp.connections.len(),
             rp.layer_count,
@@ -299,6 +302,8 @@ fn main() -> Result<()> {
             findings.len(),
             metrics.via_count,
             metrics.wirelength,
+            metrics.bend_count,
+            metrics.off_angle_segments,
             routed.passes.len(),
             slowest_engine,
             slowest_ms,
@@ -381,6 +386,9 @@ struct Args {
     router: RouterMode,
     inspect_nets: Vec<String>,
     names: Vec<String>,
+    /// Directory each routed board is written to as `<name>.kicad_pcb`, for
+    /// rendering and critic scoring.
+    emit_dir: Option<PathBuf>,
 }
 
 impl Args {
@@ -395,6 +403,7 @@ impl Args {
             router: RouterMode::Auto,
             inspect_nets: Vec::new(),
             names: Vec::new(),
+            emit_dir: None,
         };
         let mut values = values.peekable();
         while let Some(arg) = values.next() {
@@ -413,6 +422,12 @@ impl Args {
                     })?;
                     args.router = RouterMode::parse(&value)?;
                 }
+                "--emit-dir" => {
+                    let value = values
+                        .next()
+                        .ok_or_else(|| anyhow!("--emit-dir requires a directory"))?;
+                    args.emit_dir = Some(PathBuf::from(value));
+                }
                 "--inspect-net" => {
                     let value = values.next().ok_or_else(|| {
                         anyhow!("--inspect-net requires a net name or comma list")
@@ -429,7 +444,7 @@ impl Args {
                 }
                 "-h" | "--help" => {
                     println!(
-                        "usage: validate_pcb_corpus [--required|--all] [--place-only] [--router auto|mesh|mesh-detail|mesh-global|mesh-assign|sequential|grid|astar] [--inspect-net NET[,NET...]] [--inspect-failed-nets] [--inspect-detail-jobs] [-v] [board ...]"
+                        "usage: validate_pcb_corpus [--required|--all] [--place-only] [--router auto|mesh|mesh-detail|mesh-global|mesh-assign|sequential|grid|astar] [--inspect-net NET[,NET...]] [--inspect-failed-nets] [--inspect-detail-jobs] [--emit-dir DIR] [-v] [board ...]"
                     );
                     std::process::exit(0);
                 }
@@ -1012,6 +1027,25 @@ fn route_with_mode(problem: &pcb_model::RoutingView, mode: RouterMode) -> TunedR
             unreachable!("mesh diagnostics are handled before copper routing")
         }
     }
+}
+
+/// Write the routed board to `dir/<name>.kicad_pcb` so it can be rendered and
+/// scored by `tools/pcb_critic.py`.
+fn emit_board(
+    dir: &Path,
+    name: &str,
+    board: &pcb_workflow::corpus::CorpusBoard,
+    placements: &[pcb_model::Placement],
+    routed: &RouteResult,
+    catalog: &FootprintCatalog,
+) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let text =
+        pcb_workflow::corpus::routed_board_text(board, placements, &routed.solution, catalog)
+            .map_err(|e| anyhow!("{name}: {e}"))?;
+    std::fs::write(dir.join(format!("{name}.kicad_pcb")), text)
+        .with_context(|| format!("writing {name}.kicad_pcb"))?;
+    Ok(())
 }
 
 fn resolve_boards(corpus_dir: &Path, args: &Args) -> Result<Vec<PathBuf>> {
