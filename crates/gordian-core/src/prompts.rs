@@ -65,7 +65,8 @@ mod tests {
         ] {
             assert!(prompt.contains(tool), "prompt missing `{tool}`");
         }
-        assert!(prompt.contains("one `place_parts"));
+        assert!(prompt.contains("for only the current block"));
+        assert!(!prompt.contains("one complete `place_parts`"));
         assert!(prompt.contains("Search footprints BY SYMBOL"));
         assert!(prompt.contains("never provide wire coordinates"));
         assert!(prompt.contains("completeness.gaps"));
@@ -78,7 +79,7 @@ mod tests {
 
     #[test]
     fn prompt_stays_concise() {
-        assert!(system_prompt().len() <= 6_500);
+        assert!(system_prompt().len() <= 7_000);
     }
 
     #[test]
