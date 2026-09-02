@@ -1252,11 +1252,23 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // below names the net at the pin instead, which is what that fallback is for.
     let shared: std::collections::HashSet<String> = {
         let all = placed_pins(&edit.doc);
+        let junctions: Vec<Point2> = edit
+            .doc
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                sch_doc::Item::Junction(junction) => Some(junction.at),
+                _ => None,
+            })
+            .collect();
         old_pins
             .iter()
             .filter(|old| {
+                // Another part's pin, or a junction dot: either means more than this
+                // part's own net terminates here.
                 all.iter()
                     .any(|other| other.refdes != *refdes && other.at.near_eq(old.at, geom::EPS))
+                    || junctions.iter().any(|at| at.near_eq(old.at, geom::EPS))
             })
             .map(|old| old.number.clone())
             .collect()

@@ -35,7 +35,11 @@ pub enum Band {
 pub enum Side {
     Left,
     Right,
+    /// `above` is what a caller writes when the neighbouring relation kinds are
+    /// `above`/`below`; it means this edge.
+    #[serde(alias = "above", alias = "up")]
     Top,
+    #[serde(alias = "below", alias = "down")]
     Bottom,
 }
 
@@ -291,6 +295,13 @@ mod group_side_tests {
         // The bare edge is what two of four campaign agents actually wrote.
         let bare: GroupSide = serde_json::from_str(r#""top""#).unwrap();
         assert_eq!(bare.parts(), (Side::Top, None));
+
+        // `above`/`below` next to `above_of`/`below_of` relation kinds; a rerun lost
+        // a whole 40-part payload to `"side":"above"` not parsing.
+        let above: GroupSide = serde_json::from_str(r#""above""#).unwrap();
+        assert_eq!(above.parts(), (Side::Top, None));
+        let below: GroupSide = serde_json::from_str(r#"["below","U1"]"#).unwrap();
+        assert_eq!(below.parts(), (Side::Bottom, Some("U1")));
     }
 
     #[test]
