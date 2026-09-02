@@ -5,8 +5,9 @@
 //! drop it where the drawing reads better, and they repeat until it looks
 //! clean. This crate is that loop, made mechanical:
 //!
-//! - [`drag`] moves, rotates or mirrors one symbol and re-draws its
-//!   connections, and *rolls itself back* if the netlist would change;
+//! - [`drag`] moves, rotates or mirrors a symbol and re-draws its connections,
+//!   and *rolls itself back* if the netlist would change or a pin would be left
+//!   with nothing drawn on it;
 //! - [`eval::measure`] says how clean a sheet is, in millimetres of equivalent
 //!   wire, off one pass over its geometry;
 //! - [`promote`] turns a pair of local labels back into the wire they stand
@@ -25,8 +26,8 @@ pub mod route;
 pub mod sheet;
 pub mod tidy;
 
-pub use drag::{DragError, DragReport, Placement, drag};
+pub use drag::{DragError, DragReport, Placement, drag, drag_many};
 pub use eval::{Metrics, Weights, measure};
 pub use promote::{Substitute, promote, substitutes};
 pub use sheet::Sheet;
-pub use tidy::{TidyReport, tidy};
+pub use tidy::{TidyOptions, TidyReport, tidy};

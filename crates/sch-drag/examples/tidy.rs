@@ -11,9 +11,7 @@
 
 use geom::Point2;
 use sch_doc::SchDoc;
-use sch_drag::drag::Placement;
-use sch_drag::tidy::TidyOptions;
-use sch_drag::{Metrics, Sheet, Weights, drag, measure, tidy};
+use sch_drag::{Metrics, Placement, Sheet, TidyOptions, Weights, drag, measure, tidy};
 
 /// Every part the search may move, by UUID — a multi-unit symbol places each
 /// unit separately, and a reference designator cannot tell them apart.

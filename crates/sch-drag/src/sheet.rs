@@ -90,16 +90,33 @@ pub struct Sheet {
     pub label_names: HashMap<NodeKey, String>,
 }
 
-fn text_extent(text: &str, at: Point2, rot: f64) -> Rect {
-    // KiCAD's default 1.27 mm text: roughly 0.7 mm advance per glyph.
-    let w = 0.72 * text.chars().count().max(1) as f64;
-    let h = 1.27;
-    let (w, h) = if (rot - 90.0).abs() < 1.0 || (rot - 270.0).abs() < 1.0 {
-        (h, w)
+/// KiCAD's default 1.27 mm text: roughly 0.72 mm of advance per glyph.
+fn glyph_span(text: &str) -> f64 {
+    0.72 * text.chars().count().max(1) as f64
+}
+
+/// The box a label's text occupies. A label reads *away* from its anchor, in
+/// the direction its rotation points — modelling it as always running to the
+/// right puts half the boxes on the wrong side of the sheet.
+fn label_extent(text: &str, at: Point2, rot: f64) -> Rect {
+    let (span, half) = (glyph_span(text), 1.27 / 2.0);
+    match rot.rem_euclid(360.0).round() as i64 {
+        90 => Rect::new(at.x - half, at.y - span, at.x + half, at.y),
+        180 => Rect::new(at.x - span, at.y - half, at.x, at.y + half),
+        270 => Rect::new(at.x - half, at.y, at.x + half, at.y + span),
+        _ => Rect::new(at.x, at.y - half, at.x + span, at.y + half),
+    }
+}
+
+/// The box a symbol field occupies. KiCAD centres a property on its point.
+fn field_extent(text: &str, at: Point2, rot: f64) -> Rect {
+    let (span, thick) = (glyph_span(text), 1.27);
+    let half = if (rot - 90.0).abs() < 1.0 || (rot - 270.0).abs() < 1.0 {
+        (thick / 2.0, span / 2.0)
     } else {
-        (w, h)
+        (span / 2.0, thick / 2.0)
     };
-    Rect::new(at.x, at.y - h / 2.0, at.x + w, at.y + h / 2.0)
+    Rect::from_center_half(at, half)
 }
 
 impl Sheet {
@@ -143,11 +160,11 @@ impl Sheet {
                     fixtures.insert(key(l.at.point()));
                     label_names.insert(key(l.at.point()), l.text.clone());
                     texts.push(TextBox {
-                        rect: text_extent(&l.text, l.at.point(), l.at.rot),
+                        rect: label_extent(&l.text, l.at.point(), l.at.rot),
                     });
                 }
                 Item::Text(t) => texts.push(TextBox {
-                    rect: text_extent(&t.text, t.at.point(), t.at.rot),
+                    rect: label_extent(&t.text, t.at.point(), t.at.rot),
                 }),
                 Item::Sheet(s) => {
                     for pin in &s.pins {
@@ -178,7 +195,7 @@ impl Sheet {
                     && let Some(at) = field.at
                 {
                     texts.push(TextBox {
-                        rect: text_extent(&field.value, at.point(), at.rot),
+                        rect: field_extent(&field.value, at.point(), at.rot),
                     });
                 }
             }

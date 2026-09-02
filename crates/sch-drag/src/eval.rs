@@ -48,7 +48,7 @@ impl Default for Weights {
             text_collision: 12.0,
             crowding: 40.0,
             label: 60.0,
-            net_spread: 0.30,
+            net_spread: 1.0,
             misalignment: 1.0,
         }
     }
