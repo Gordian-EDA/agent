@@ -923,6 +923,7 @@ dependencies = [
  "kicad",
  "kicad-footprint",
  "kicad-symbol",
+ "pcb-workflow",
  "sch-check",
  "sch-doc",
  "sch-floorplan",

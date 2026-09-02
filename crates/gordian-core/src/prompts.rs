@@ -61,6 +61,9 @@ mod tests {
         assert!(prompt.contains("never provide wire coordinates"));
         assert!(prompt.contains("completeness.gaps"));
         assert!(prompt.contains("deliberately minimal"));
+        assert!(prompt.contains("number, name or alternate"));
+        assert!(prompt.contains("footprints_unresolved"));
+        assert!(prompt.contains("Rails and ports accept left, right, top or bottom"));
         assert!(!prompt.contains("YAML"));
     }
 
