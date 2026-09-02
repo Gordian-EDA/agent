@@ -19,6 +19,8 @@ at 3 whatever the judge thought.
 import argparse
 import base64
 from datetime import datetime, timezone
+import hashlib
+import html
 import json
 import math
 import mimetypes
@@ -38,6 +40,10 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = Path(__file__).resolve().parent / "cases"
+REFERENCES = Path(__file__).resolve().parent / "references"
+KICAD_DEMOS = Path(
+    "/home/mimi/agent/.local/kicad-10.0.4/AppDir/usr/share/kicad/demos"
+)
 CAPPED_SCORE = 3
 FINDING_TAGS = (
     "tool-contract",
@@ -69,7 +75,17 @@ def kicad_cli():
     cli = config.get("kicad", {}).get("cliPath")
     if not cli:
         raise RuntimeError(f"set kicad.cliPath to KiCad 10 in {config_path}")
-    return str(cli)
+    cli = str(cli)
+    try:
+        version = subprocess.run(
+            [cli, "--version"], text=True, capture_output=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f"cannot run configured KiCad CLI {cli}: {error}") from error
+    if version.returncode or not version.stdout.strip().startswith("10."):
+        detail = (version.stdout or version.stderr).strip()
+        raise RuntimeError(f"configured KiCad CLI must be version 10, got {detail!r}")
+    return cli
 
 
 def command(args, *, timeout=600, check=True, env=None, input_text=None):
@@ -720,6 +736,147 @@ def llm_config():
     return base, key, model
 
 
+def demo_instance_count(path, kind):
+    """Cheap size proxy for choosing a similarly dense human demo."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    pattern = r"^\s*\(symbol\s*$" if kind == "schematic" else r"^\s*\(footprint\s+"
+    return len(re.findall(pattern, text, re.M))
+
+
+def closest_demo(kind, target_count):
+    suffix = ".kicad_sch" if kind == "schematic" else ".kicad_pcb"
+    candidates = []
+    if KICAD_DEMOS.is_dir():
+        for path in KICAD_DEMOS.rglob(f"*{suffix}"):
+            count = demo_instance_count(path, kind)
+            if count:
+                candidates.append((abs(count - target_count), count, str(path), path))
+    if not candidates:
+        raise RuntimeError(f"no KiCad demo {kind} references found under {KICAD_DEMOS}")
+    _, count, _, path = min(candidates)
+    return path, count
+
+
+def reference_render(kind, target_count):
+    """Render and cache the closest-size KiCad demo using configured KiCad 10."""
+    source, count = closest_demo(kind, target_count)
+    digest = hashlib.sha256(str(source).encode()).hexdigest()[:10]
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", source.stem).strip("-")
+    REFERENCES.mkdir(parents=True, exist_ok=True)
+    png = REFERENCES / f"{kind}-{count}-{stem}-{digest}.png"
+    svg = REFERENCES / f"{kind}-{count}-{stem}-{digest}.svg"
+    if not png.is_file():
+        if kind == "schematic":
+            with tempfile.TemporaryDirectory(prefix="gordian-quality-reference-") as temporary:
+                export = Path(temporary)
+                result = command(
+                    [
+                        kicad_cli(), "sch", "export", "svg", "--output", str(export),
+                        "--exclude-drawing-sheet", str(source),
+                    ],
+                    timeout=180,
+                    check=False,
+                )
+                rendered = sorted(export.glob("*.svg"))
+                if result.returncode or not rendered:
+                    detail = (result.stderr or result.stdout).strip()
+                    raise RuntimeError(f"KiCad demo schematic render failed: {detail}")
+                shutil.copy2(rendered[0], svg)
+            command(
+                [
+                    "magick", str(svg), "-background", "white", "-alpha", "remove",
+                    "-alpha", "off", str(png),
+                ],
+                timeout=180,
+            )
+        else:
+            result = command(
+                [
+                    kicad_cli(), "pcb", "render", "--output", str(png),
+                    "--width", "1600", "--height", "900", "--side", "top",
+                    "--quality", "basic", "--preset", "follow_plot_settings",
+                    str(source),
+                ],
+                timeout=300,
+                check=False,
+            )
+            if result.returncode or not png.is_file():
+                detail = (result.stderr or result.stdout).strip()
+                raise RuntimeError(f"KiCad demo PCB render failed: {detail}")
+    return {"path": str(png), "source": str(source), "part_count": count}
+
+
+def human_look_judge(kind, rendered, target_count, llm):
+    """Compare one final render with a closest-size human-authored KiCad demo."""
+    path = rendered.get("path")
+    if not path:
+        return {
+            "score": None,
+            "worst_three": [],
+            "what_a_human_would_change": [],
+            "error": rendered.get("error", f"no {kind} render"),
+        }
+    reference = reference_render(kind, target_count)
+    base, key, model = llm
+    text = f"""Compare the FIRST image, an agent-created KiCad {kind}, with the SECOND
+image, a human-authored KiCad demo chosen only because it has a comparable part
+count. Judge visual organization and drafting/layout craft, not whether the two
+circuits implement the same function. Be strict but size-aware. A score of 8 means
+the agent result looks like competent human engineering work; 10 means exemplary.
+
+Return only JSON with this exact shape:
+{{"score": 0, "worst_three": [], "what_a_human_would_change": []}}
+
+Score must be an integer from 1 to 10. Both arrays must contain short, concrete,
+actionable strings, with at most three entries each. Do not report electrical,
+ERC, DRC, or connectivity claims from pixels."""
+    body = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a senior electronics drafter comparing visual workmanship.",
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": text},
+                    {"type": "text", "text": f"Agent {kind} under review"},
+                    image_part(path),
+                    {"type": "text", "text": f"Human demo reference ({reference['part_count']} parts)"},
+                    image_part(reference["path"]),
+                ],
+            },
+        ],
+        "max_tokens": 3000,
+    }
+    request = urllib.request.Request(
+        f"{base}/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=240) as response:
+        payload = json.loads(response.read())
+    verdict = extract_object(
+        payload["choices"][0]["message"].get("content") or ""
+    )
+    score = verdict.get("score")
+    worst = verdict.get("worst_three")
+    changes = verdict.get("what_a_human_would_change")
+    if not isinstance(score, int) or isinstance(score, bool) or not 1 <= score <= 10:
+        raise ValueError(f"invalid human-look score: {score!r}")
+    if not isinstance(worst, list) or not all(isinstance(item, str) for item in worst):
+        raise ValueError(f"invalid human-look worst_three: {worst!r}")
+    if not isinstance(changes, list) or not all(isinstance(item, str) for item in changes):
+        raise ValueError(f"invalid human-look changes: {changes!r}")
+    return {
+        "score": score,
+        "worst_three": worst[:3],
+        "what_a_human_would_change": changes[:3],
+        "reference": reference,
+    }
+
+
 def judge(prompt, rubric, facts, checks, renders, llm):
     base, key, model = llm
     text = f"""Review Gordian's result for the user request below.
@@ -1180,11 +1337,9 @@ def run_case(case, output_root):
     facts.update(schematic_visual_facts(renders) if first_schematic(project) else {})
     facts.update(transcript_facts)
     facts["elapsed_seconds"] = round(time.time() - started, 1)
-    outcome = evaluate_checks(checks, facts)
     report = {
         "case": case.name,
         "started_utc": started_utc,
-        "checks": outcome,
         "agent_seconds": agent_seconds,
         "elapsed_seconds": round(time.time() - started, 1),
         **facts,
@@ -1198,12 +1353,6 @@ def run_case(case, output_root):
         llm = llm_config()
     except Exception as error:
         llm = None
-        report["judge"] = {"score": None, "issues": [], "error": str(error)}
-    else:
-        try:
-            report["judge"] = judge(prompt, rubric, facts, outcome, renders, llm)
-        except Exception as error:
-            report["judge"] = {"score": None, "issues": [], "error": str(error)}
 
     for kind in ("schematic", "pcb"):
         key = f"critic_{kind}"
@@ -1221,6 +1370,52 @@ def run_case(case, output_root):
                 report[key] = critic(kind, rendered, prompt, facts, llm)
             except Exception as error:
                 report[key] = {"score": None, "issues": [], "error": str(error)}
+
+    human_look = {}
+    for kind, count_name in (
+        ("schematic", "symbol_count"),
+        ("pcb", "board_part_count"),
+    ):
+        rendered = renders.get("after", {}).get(kind, {})
+        if not rendered.get("path"):
+            human_look[kind] = human_look_judge(
+                kind, rendered, int(facts.get(count_name, 0)), llm
+            )
+        elif llm is None:
+            human_look[kind] = {
+                "score": None,
+                "worst_three": [],
+                "what_a_human_would_change": [],
+                "error": "judge credentials unavailable",
+            }
+        else:
+            try:
+                human_look[kind] = human_look_judge(
+                    kind, rendered, int(facts.get(count_name, 0)), llm
+                )
+            except Exception as error:
+                human_look[kind] = {
+                    "score": None,
+                    "worst_three": [],
+                    "what_a_human_would_change": [],
+                    "error": str(error),
+                }
+    facts["human_look"] = human_look
+    facts["schematic_critic_score"] = report["critic_schematic"].get("score")
+    facts["pcb_critic_score"] = report["critic_pcb"].get("score")
+    facts["human_look_schematic_score"] = human_look["schematic"].get("score")
+    facts["human_look_pcb_score"] = human_look["pcb"].get("score")
+    report.update(facts)
+    outcome = evaluate_checks(checks, facts)
+    report["checks"] = outcome
+
+    if llm is None:
+        report["judge"] = {"score": None, "issues": [], "error": "judge credentials unavailable"}
+    else:
+        try:
+            report["judge"] = judge(prompt, rubric, facts, outcome, renders, llm)
+        except Exception as error:
+            report["judge"] = {"score": None, "issues": [], "error": str(error)}
 
     if llm is None:
         report["self_diagnosis"] = {"error": "judge credentials unavailable"}
