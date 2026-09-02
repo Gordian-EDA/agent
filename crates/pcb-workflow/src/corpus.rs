@@ -185,6 +185,26 @@ pub fn run_kicad_drc(
     let path = dir.path().join("corpus.kicad_pcb");
     std::fs::write(&path, text)
         .map_err(|e| format!("could not write temporary routed board: {e}"))?;
+    let project = serde_json::json!({
+        "board": {
+            "design_settings": {
+                "rules": {
+                    "min_clearance": 0.0,
+                    "min_track_width": 0.0,
+                    "min_via_diameter": 0.0,
+                    "min_hole_clearance": 0.0,
+                    "min_hole_to_hole": 0.0
+                }
+            }
+        },
+        "meta": { "filename": "corpus.kicad_pro", "version": 1 }
+    });
+    std::fs::write(
+        path.with_extension("kicad_pro"),
+        serde_json::to_vec_pretty(&project)
+            .map_err(|e| format!("could not serialize temporary DRC project: {e}"))?,
+    )
+    .map_err(|e| format!("could not write temporary DRC project: {e}"))?;
     super::export::materialize_zones_for_drc(&path, env)?;
     let report = env
         .drc(&path)

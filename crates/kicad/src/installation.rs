@@ -71,11 +71,13 @@ impl KicadInstallation {
                 )
             })?,
         };
-        let cli_version = cli_version(&cli_path).ok_or_else(|| {
-            config_error(
-                "kicad.cliPath",
-                &cli_path,
-                "did not return a version from `kicad-cli version`",
+        let cli_version = cli_version(&cli_path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "kicad.cliPath {} failed `kicad-cli version`: {error}",
+                    cli_path.display()
+                ),
             )
         })?;
         if !supported_version(&cli_version) {
@@ -260,13 +262,42 @@ fn cli_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-fn cli_version(cli_path: &Path) -> Option<String> {
-    let output = Command::new(cli_path).arg("version").output().ok()?;
+fn cli_version(cli_path: &Path) -> io::Result<String> {
+    let mut output = None;
+    let mut last_error = None;
+    for _ in 0..3 {
+        match Command::new(cli_path).arg("version").output() {
+            Ok(result) => {
+                output = Some(result);
+                break;
+            }
+            Err(error) => {
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+    let output = output.ok_or_else(|| {
+        last_error.unwrap_or_else(|| io::Error::other("version command did not run"))
+    })?;
     if !output.status.success() {
-        return None;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(io::Error::other(format!(
+            "command exited {}{}",
+            output.status,
+            if stderr.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", stderr.trim())
+            }
+        )));
     }
     let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!version.is_empty()).then_some(version)
+    if version.is_empty() {
+        Err(io::Error::other("command returned an empty version"))
+    } else {
+        Ok(version)
+    }
 }
 
 fn version_major(version: &str) -> Option<u32> {

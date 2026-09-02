@@ -193,6 +193,7 @@ impl KicadInstallation {
             "pcb",
             "export",
             "svg",
+            "--check-zones",
             "--mode-single",
             "--exclude-drawing-sheet",
             "--page-size-mode",
@@ -221,7 +222,13 @@ impl KicadInstallation {
     pub fn export_gerbers(&self, pcb: &Path, out_dir: &Path) -> io::Result<Vec<PathBuf>> {
         std::fs::create_dir_all(out_dir)?;
         let output = Command::new(self.cli_path())
-            .args(["pcb", "export", "gerbers", "--no-protel-ext"])
+            .args([
+                "pcb",
+                "export",
+                "gerbers",
+                "--check-zones",
+                "--no-protel-ext",
+            ])
             .arg("--output")
             .arg(out_dir)
             .arg(pcb)
