@@ -10,7 +10,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{EPS, Point2, Segment};
 use kicad::KicadInstallation;
-use sch_check::model::Design;
 
 use sch_model::route::DrawnSegment;
 use crate::write::SchematicWriter;
@@ -462,109 +461,6 @@ pub fn count_crossings(wires: &[DrawnSegment]) -> usize {
         }
     }
     n
-}
-
-/// DIAGNOSTIC (env-gated): log every short — a pin landing on a foreign net's
-/// wire (endpoint or interior) and every collinear/junction merge — naming the
-/// pin (refdes.num@net) and the offending wire (net + endpoints), so the exact
-/// rail/trunk wire that merges two nets is pinpointable without kicad.
-pub(crate) fn diagnose_shorts(
-    env: &KicadInstallation,
-    w: &SchematicWriter,
-    items: &[Item],
-    inc: &Incidence,
-    design: &Design,
-) {
-    let wires = w.wires_with_nets();
-    let junctions = w.junction_positions();
-    tracing::debug!(
-        "[SHORT-DIAG] {} ({} wires, {} junctions)",
-        design.name.as_deref().unwrap_or("<unnamed>"),
-        wires.len(),
-        junctions.len()
-    );
-    // (1) pin-on-foreign-wire shorts (count_shorts geometry).
-    for (net, pins) in inc {
-        for (i, num) in pins {
-            let Ok(eps) = w.pin_dirs(env, &items[*i].refdes, num) else {
-                continue;
-            };
-            for (ep, _) in eps {
-                for wire in &wires {
-                    if wire.net.as_deref() == Some(net.as_str()) {
-                        continue;
-                    }
-                    let seg = wire.segment;
-                    let ep_point = ::geom::Point2::from(ep);
-                    let how = if ep_point.near_eq(seg.a, EPS) || ep_point.near_eq(seg.b, EPS) {
-                        "ENDPOINT"
-                    } else if seg.contains_point(ep.into()) {
-                        "INTERIOR"
-                    } else {
-                        continue;
-                    };
-                    tracing::debug!(
-                        "[SHORT-DIAG]  PIN {}.{}@{net} at [{:.2},{:.2}] lands {how} of net {:?} wire \
-                         [{:.2},{:.2}]->[{:.2},{:.2}]",
-                        items[*i].refdes,
-                        num,
-                        ep[0],
-                        ep[1],
-                        &wire.net,
-                        seg.a.x,
-                        seg.a.y,
-                        seg.b.x,
-                        seg.b.y
-                    );
-                }
-            }
-        }
-    }
-    // (2) collinear overlaps of different nets.
-    for i in 0..wires.len() {
-        for j in (i + 1)..wires.len() {
-            let a = &wires[i];
-            let b = &wires[j];
-            if a.net.as_deref() == b.net.as_deref() || a.net.is_none() || b.net.is_none() {
-                continue;
-            }
-            if a.segment.axis_aligned_collinear_overlap(b.segment) {
-                tracing::debug!(
-                    "[SHORT-DIAG]  COLLINEAR net {:?} [{:.2},{:.2}]->[{:.2},{:.2}] overlaps net {:?} \
-                     [{:.2},{:.2}]->[{:.2},{:.2}]",
-                    &a.net,
-                    a.segment.a.x,
-                    a.segment.a.y,
-                    a.segment.b.x,
-                    a.segment.b.y,
-                    &b.net,
-                    b.segment.a.x,
-                    b.segment.a.y,
-                    b.segment.b.x,
-                    b.segment.b.y
-                );
-            }
-        }
-    }
-    // (3) junctions fusing >1 net.
-    for &jp in &junctions {
-        let mut nets: BTreeSet<&str> = BTreeSet::new();
-        for wire in &wires {
-            if let Some(net) = wire.net.as_deref()
-                && wire.segment.contains_point(jp.into())
-            {
-                nets.insert(net);
-            }
-        }
-        if nets.len() > 1 {
-            tracing::debug!(
-                "[SHORT-DIAG]  JUNCTION at [{:.2},{:.2}] fuses nets {:?}",
-                jp[0],
-                jp[1],
-                nets
-            );
-        }
-    }
 }
 
 /// Placement shorts: a pin whose connection point coincides exactly with the

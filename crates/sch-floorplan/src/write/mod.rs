@@ -172,16 +172,21 @@ pub(super) struct Wire {
     pub(super) b: Point2,
     /// Stable key for the wire uuid (content-derived from the endpoints).
     pub(super) uuid_key: String,
-    /// The net this wire belongs to, when known (cluster-generated wires).
-    /// `None` for power stubs/risers (treated as a reserved foreign net).
-    pub(super) net: Option<String>,
+    /// The net this wire belongs to. Every wire the realiser draws is drawn *for*
+    /// a net, so this is total — it is what makes same-net touches deliberate
+    /// joins and foreign-net touches shorts.
+    pub(super) net: String,
 }
 
 /// One `(junction …)` dot marking a deliberate ≥3-way wire join.
+///
+/// A junction welds every wire passing through it, so it carries the net it was
+/// placed for: a dot is only ever legitimate where segments of ONE net meet.
 pub(super) struct Junction {
     pub(super) at: Point2,
     /// Stable key for the junction uuid (content-derived from the position).
     pub(super) uuid_key: String,
+    pub(super) net: String,
 }
 
 /// Free-standing sheet text annotation.

@@ -545,7 +545,7 @@ mod tests {
     fn titled_user_page_reserves_bottom_title_block() {
         let mut w = SchematicWriter::new();
         w.set_title("my_board");
-        w.add_junction([25.4, 25.4]);
+        w.add_junction_on_net([25.4, 25.4], "N1");
 
         let text = w.finish();
         let paper = text
@@ -607,9 +607,9 @@ mod tests {
     #[test]
     fn junctions_render_sorted_and_deduped() {
         let mut w = SchematicWriter::new();
-        w.add_junction([50.8, 25.4]);
-        w.add_junction([25.4, 25.4]);
-        w.add_junction([50.8, 25.4]); // duplicate -> dropped
+        w.add_junction_on_net([50.8, 25.4], "N2");
+        w.add_junction_on_net([25.4, 25.4], "N1");
+        w.add_junction_on_net([50.8, 25.4], "N2"); // duplicate -> dropped
         let sch = w.finish();
         let count = sch.matches("(junction").count();
         assert_eq!(count, 2);

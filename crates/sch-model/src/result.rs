@@ -44,4 +44,8 @@ pub struct EmitOutput {
     /// Idioms the engine recognized + co-placed (crystal, decoupling, feedback),
     /// surfaced to the agent loop by schematic mutators.
     pub detected_idioms: Vec<IdiomReport>,
+    /// One line per point where the realised sheet puts two nets — the shorts the
+    /// netlist would show. Empty is the invariant; a non-empty list is an engine
+    /// defect, not a payload one.
+    pub net_shorts: Vec<String>,
 }

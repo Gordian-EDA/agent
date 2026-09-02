@@ -374,14 +374,23 @@ pub(crate) fn prepare_writer(
         &problem.items,
         RouteRealization::ShippedSheet,
     )?;
-    if problem.options.debug_timing {
-        diagnose_shorts(env, &w, &problem.items, &problem.inc, design);
-    }
     add_orphan_label_columns(&mut w, design, &problem.inc);
     w.set_frame(true);
     w.prepare();
     let warnings = w.layout_warnings();
     let crossings = evaluator.crossings(&problem.items);
+    // The truthfulness invariant of the finished geometry, read back off the writer:
+    // no point may carry two nets. Cheap next to the search, and it names the pair.
+    let net_shorts: Vec<String> = super::net_conflicts(env, &w, &problem.items, &problem.inc)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    for short in &net_shorts {
+        tracing::warn!(
+            "{}: realised sheet shorts nets — {short}",
+            design.name.as_deref().unwrap_or("<unnamed>")
+        );
+    }
     Ok((
         w,
         EmitOutput {
@@ -389,6 +398,7 @@ pub(crate) fn prepare_writer(
             layout_warnings: warnings,
             crossings,
             detected_idioms,
+            net_shorts,
         },
     ))
 }
