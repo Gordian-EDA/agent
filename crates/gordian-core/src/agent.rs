@@ -882,18 +882,20 @@ impl<P: Provider> Agent<P> {
     /// repeat, until the model returns a final text with no pending tool calls.
     #[tracing::instrument(skip_all, fields(history_messages = self.history.len()))]
     pub async fn run_turn(&mut self, user_msg: &str, events: Events<'_>) -> Result<TurnOutcome> {
-        self.begin_turn();
+        self.begin_turn()?;
         let outcome = self.run_agent_subturn(user_msg, user_msg, events).await?;
         emit(events, AgentEvent::TurnDone);
         Ok(outcome)
     }
 
     /// Start a fresh whole-turn clock and request budget.
-    fn begin_turn(&mut self) {
+    fn begin_turn(&mut self) -> Result<()> {
+        self.runtime.begin_turn()?;
         self.turn_budget = Some(TurnClock {
             started: std::time::Instant::now(),
             provider_requests: 0,
         });
+        Ok(())
     }
 
     async fn run_agent_subturn(
@@ -1397,7 +1399,7 @@ impl<P: Provider> Agent<P> {
         events: Events<'_>,
         max_fix: usize,
     ) -> Result<TurnOutcome> {
-        self.begin_turn();
+        self.begin_turn()?;
         let mut outcome = self.run_agent_subturn(user_msg, intent, events).await?;
         if !outcome.applied || outcome.stop_reason != StopReason::Completed {
             emit(events, AgentEvent::TurnDone);

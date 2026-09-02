@@ -242,6 +242,11 @@ impl AgentRuntime {
         &self.revisions
     }
 
+    /// Starts per-file baseline tracking for a new user turn.
+    pub fn begin_turn(&self) -> Result<()> {
+        self.revisions.begin_turn()
+    }
+
     /// The live KiCAD IPC session manager.
     pub fn kicad(&self) -> &kicad_ipc::SessionManager {
         &self.services.kicad
