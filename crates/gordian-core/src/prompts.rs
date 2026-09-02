@@ -26,9 +26,9 @@ Unknown or pad-incompatible footprints are cleared, reported in `footprints_unre
 
 For an existing schematic: `read_schematic()` once, perform only the requested mutators, use their returned `connectivity`/`unconnected` report for every new or swapped part, then `diff_schematic()` instead of re-reading to verify the exact edit, then `check_schematic()`. `set_fields`, `set_flags`, `swap_symbol`, `add_symbols`, `remove_symbols`, `label`, `no_connect`, `add_power`, `delete_wires` edit; `arrange({refs|bbox})` re-places. Do not move unrelated parts.
 
-Create wires only with `connect` or `rewire`; never provide wire coordinates. To insert a series part, disconnect one real target pin, add the part, then connect both sides. Mutators return a pre-write `revision`; `undo({revision?})` restores one and `history` lists them.
+Create wires only with `connect` or `rewire`; never provide wire coordinates. To insert a series part, disconnect one real target pin, add the part, then connect both sides.
 
-Every fitted non-power part needs a footprint before PCB work. `check_schematic` classifies findings against the turn-start revision: fix introduced errors, but leave pre-existing findings alone unless asked. Only introduced errors block completion. A final passing schematic render and check starts the board.
+Every fitted non-power part needs a footprint before PCB work. `check_schematic` classifies findings against the turn-start baseline: fix introduced errors, but leave pre-existing findings alone unless asked. Only introduced errors block completion. A final passing schematic render and check starts the board.
 
 # PCB phased loop
 A request for a board, PCB, layout, gerbers or a complete "design" continues here once `check_schematic` is clean; "schematic only" stops there. Choose the layer count explicitly before `sync_board`: use `rules.layer_count` with 2, 4, 6, or 8 based on density, escape needs, signal integrity, and cost. `sync_board({bounds?, rules?, intent?})` creates a board or applies only the schematic delta while keeping existing placement and copper. Omit `bounds` to size from footprints. Use `rules.pours` for the GND plane and net widths for power.
@@ -45,7 +45,7 @@ Follow these phases. After EVERY phase call `render_board` and `check_board`, in
 8. Call `export_fab()` only when `check_board` is clean. Otherwise preserve and report the useful partial board.
 
 
-Never call the same failing tool twice without changing its arguments or making a concrete schematic, placement, copper, outline, or rule change first. Every mutator captures a revision first and re-checks what it wrote; pass `expect_revision` when you must not clobber a newer write, `checkpoint({label})` before a risky phase, `undo` to back out, `reserve_refs({prefix,count})` before minting references in parallel. Time and request limits are per turn, not per task: preserve legal partial files, then hand off with `## Partial state` (parts placed n/m, ERC errors/warnings, board yes/no, routed n/m, DRC status, and blockers) and `## Next steps` (the exact next phase and tool calls). The next turn continues from those files."#;
+Never call the same failing tool twice without changing its arguments or making a concrete schematic, placement, copper, outline, or rule change first. Every mutator re-checks what it wrote; use `reserve_refs({prefix,count})` before minting references in parallel. Time and request limits are per turn, not per task: preserve legal partial files, then hand off with `## Partial state` (parts placed n/m, ERC errors/warnings, board yes/no, routed n/m, DRC status, and blockers) and `## Next steps` (the exact next phase and tool calls). The next turn continues from those files."#;
 
 #[cfg(test)]
 mod tests {
@@ -125,7 +125,6 @@ mod tests {
         }
         assert!(prompt.contains("After EVERY phase call `render_board` and `check_board`"));
         assert!(!prompt.contains("`lock_parts`"));
-        assert!(!prompt.contains("`checkpoint`"));
         assert!(!prompt.contains("`reserve_refs`"));
     }
 }
