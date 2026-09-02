@@ -11,6 +11,7 @@
 mod config;
 mod tui;
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -289,6 +290,8 @@ struct UsageTotals {
 #[derive(Debug, Default)]
 struct AgentDebugLog {
     usage: UsageTotals,
+    revisions: BTreeSet<u64>,
+    files: BTreeSet<String>,
 }
 
 impl AgentDebugLog {
@@ -299,18 +302,50 @@ impl AgentDebugLog {
                 let text = text.trim();
                 (!text.is_empty()).then(|| format!("assistant: {text}"))
             }
-            AgentEvent::ToolStarted { name } => Some(format!("tool -> {name}")),
+            AgentEvent::ToolStarted { name, args, .. } => {
+                Some(format!("tool -> {name} {}", compact_tool_args(args)))
+            }
             AgentEvent::ToolFinished {
                 name,
                 summary,
                 image_path,
+                elapsed_ms,
+                revision,
+                result,
             } => {
+                if let Some(revision) = revision {
+                    self.revisions.insert(*revision);
+                }
+                collect_result_files(result, &mut self.files);
                 let image = image_path
                     .as_deref()
                     .map(|path| format!(" (image: {path})"))
                     .unwrap_or_default();
-                Some(format!("tool <- {name}: {summary}{image}"))
+                let revision = revision
+                    .map(|revision| format!(", revision {revision}"))
+                    .unwrap_or_default();
+                let details = tool_result_details(name, result);
+                Some(format!(
+                    "tool <- {name} (elapsed {:.1}s{revision}): {summary}{details}{image}",
+                    *elapsed_ms as f64 / 1_000.0
+                ))
             }
+            AgentEvent::ProviderRequest {
+                request,
+                input_tokens,
+                output_tokens,
+                cache_write_tokens,
+                cache_read_tokens,
+                latency_ms,
+            } => Some(format!(
+                "usage: request #{request} in={input_tokens} out={output_tokens} cached={cache_read_tokens} cache_write={cache_write_tokens} latency={:.1}s",
+                *latency_ms as f64 / 1_000.0
+            )),
+            AgentEvent::Diagnostic {
+                level,
+                target,
+                message,
+            } => Some(format!("{level}: {target}: {message}")),
             AgentEvent::Usage {
                 provider_requests,
                 input_tokens,
@@ -352,6 +387,114 @@ impl AgentDebugLog {
                 ))
             }
         }
+    }
+}
+
+fn compact_tool_args(args: &serde_json::Value) -> String {
+    fn compact(value: &serde_json::Value, key: Option<&str>) -> serde_json::Value {
+        match value {
+            serde_json::Value::String(text) if text.chars().count() > 120 => {
+                let prefix = text.chars().take(96).collect::<String>();
+                serde_json::Value::String(format!("{prefix}…({} chars)", text.chars().count()))
+            }
+            serde_json::Value::Array(items) if key == Some("parts") => {
+                let refs = items
+                    .iter()
+                    .filter_map(|part| part.get("ref").and_then(serde_json::Value::as_str))
+                    .take(6)
+                    .collect::<Vec<_>>();
+                let suffix = if items.len() > refs.len() { ", …" } else { "" };
+                serde_json::Value::String(format!(
+                    "[{}{suffix} {} parts]",
+                    refs.join(", "),
+                    items.len()
+                ))
+            }
+            serde_json::Value::Array(items) => serde_json::Value::Array(
+                items.iter().map(|item| compact(item, None)).collect(),
+            ),
+            serde_json::Value::Object(fields) => serde_json::Value::Object(
+                fields
+                    .iter()
+                    .map(|(key, value)| (key.clone(), compact(value, Some(key))))
+                    .collect(),
+            ),
+            _ => value.clone(),
+        }
+    }
+    compact(args, None).to_string()
+}
+
+fn tool_result_details(name: &str, result: &serde_json::Value) -> String {
+    let refused = result.get("error").is_some()
+        || result.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
+        || result.get("legal").and_then(serde_json::Value::as_bool) == Some(false);
+    if refused {
+        return format!(" | refusal={result}");
+    }
+
+    let keys: &[&str] = match name {
+        "check_schematic" => &["errors", "warnings", "erc", "completeness", "diagnostics"],
+        "check_board" => &[
+            "blocking_findings",
+            "reported_findings",
+            "copper_violations",
+            "unconnected_items",
+            "top_violations",
+            "top_unconnected",
+        ],
+        "place_parts" => &["placed", "nets", "gaps", "placement"],
+        _ => &[
+            "changed",
+            "net_delta",
+            "placed",
+            "placed_refs",
+            "retracted",
+            "nets_to_reroute",
+            "routed",
+            "failed",
+        ],
+    };
+    let mut facts = serde_json::Map::new();
+    for key in keys {
+        if let Some(value) = result.get(*key) {
+            let value = if matches!(*key, "diagnostics" | "top_violations" | "top_unconnected") {
+                value
+                    .as_array()
+                    .map(|items| serde_json::Value::Array(items.iter().take(3).cloned().collect()))
+                    .unwrap_or_else(|| value.clone())
+            } else if matches!(*key, "completeness" | "erc") {
+                let mut report = value.clone();
+                for findings in ["gaps", "violations"] {
+                    if let Some(items) = report
+                        .get_mut(findings)
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        items.truncate(3);
+                    }
+                }
+                report
+            } else {
+                value.clone()
+            };
+            facts.insert((*key).to_owned(), value);
+        }
+    }
+    if facts.is_empty() {
+        String::new()
+    } else {
+        format!(" | facts={}", serde_json::Value::Object(facts))
+    }
+}
+
+fn collect_result_files(result: &serde_json::Value, files: &mut BTreeSet<String>) {
+    for key in ["file", "path", "sch_path", "pcb_path", "fab_dir", "png_path"] {
+        if let Some(path) = result.get(key).and_then(serde_json::Value::as_str) {
+            files.insert(path.to_owned());
+        }
+    }
+    if let Some(paths) = result.get("files").and_then(serde_json::Value::as_array) {
+        files.extend(paths.iter().filter_map(serde_json::Value::as_str).map(str::to_owned));
     }
 }
 
@@ -444,7 +587,7 @@ fn run_agent_command(args: &[String]) -> Result<()> {
                         tracing::info!(target: logging::EVENTS_TARGET, "{line}");
                     }
                 }
-                log.usage
+                log
             });
 
             let outcome = if review && config.agent.post_commit_review {
@@ -460,12 +603,25 @@ fn run_agent_command(args: &[String]) -> Result<()> {
                 agent.run_turn(prompt, Some(&events_tx)).await
             }?;
             drop(events_tx);
-            let usage = printer.await.unwrap_or_default();
+            let log = printer.await.unwrap_or_default();
+            let usage = log.usage;
             let elapsed = started.elapsed().as_secs_f64();
+            let stop = format!("{:?}", outcome.stop_reason);
+            let files = log.files.into_iter().collect::<Vec<_>>().join(",");
+            let revisions = log
+                .revisions
+                .into_iter()
+                .map(|revision| revision.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
             tracing::info!(
                 target: logging::EVENTS_TARGET,
-                "turn {turn} done: stop={:?} requests={} elapsed={elapsed:.1}s",
-                outcome.stop_reason,
+                "turn: stop={stop} requests={} elapsed={elapsed:.1}s files=[{files}] revisions=[{revisions}]",
+                usage.provider_requests
+            );
+            tracing::info!(
+                target: logging::EVENTS_TARGET,
+                "turn {turn} done: stop={stop} requests={} elapsed={elapsed:.1}s",
                 usage.provider_requests
             );
             turns.push((outcome, usage));
@@ -662,17 +818,25 @@ mod tests {
         );
         assert_eq!(
             log.observe(&AgentEvent::ToolStarted {
-                name: "sync_board".into()
+                name: "sync_board".into(),
+                args: serde_json::json!({}),
+                seq: 1,
             }),
-            Some("tool -> sync_board".into())
+            Some("tool -> sync_board {}".into())
         );
         assert_eq!(
             log.observe(&AgentEvent::ToolFinished {
                 name: "sync_board".into(),
                 summary: "written".into(),
                 image_path: Some(".gordian/renders/render-001.png".into()),
+                elapsed_ms: 1_200,
+                revision: Some(7),
+                result: serde_json::json!({"revision": 7}),
             }),
-            Some("tool <- sync_board: written (image: .gordian/renders/render-001.png)".into())
+            Some(
+                "tool <- sync_board (elapsed 1.2s, revision 7): written (image: .gordian/renders/render-001.png)"
+                    .into()
+            )
         );
         assert_eq!(
             log.observe(&AgentEvent::Reviewed {

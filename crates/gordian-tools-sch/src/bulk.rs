@@ -116,7 +116,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         Err(error) => return Err(error.into()),
     };
-    timing.done(if report.committed {
+    let elapsed_ms = timing.done(if report.committed {
         "committed"
     } else {
         "refused"
@@ -125,7 +125,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(refused_place(report));
     }
     let refs = report.placed.clone();
-    let value = edit
+    let mut value = edit
         .commit(
             ctx,
             "place_parts",
@@ -137,6 +137,12 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if value.get("error").is_some() {
         return Ok(value);
     }
+    value["placement"] = json!({
+        "engine": timing.engine,
+        "parts": timing.parts,
+        "budget_ms": timing.budget_secs.saturating_mul(1_000),
+        "elapsed_ms": elapsed_ms,
+    });
     with_check(value, ctx).context("checking placed parts")
 }
 
@@ -274,16 +280,22 @@ impl Timing {
         }
     }
 
-    fn done(self, outcome: &str) {
+    fn done(&self, outcome: &str) -> u64 {
+        let elapsed_ms = self
+            .started
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
         tracing::info!(
             tool = self.tool,
             engine = self.engine,
             parts = self.parts,
             budget_s = self.budget_secs,
-            elapsed_s = self.started.elapsed().as_secs_f64(),
+            elapsed_ms,
             outcome,
             "placement finished"
         );
+        elapsed_ms
     }
 }
 

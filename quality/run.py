@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Run Gordian quality cases: deterministic facts first, one VLM judge second.
 
-A case is `cases/<name>/{prompt.txt,rubric.txt,input/}`. The prompt goes to the
-real agent; the artifacts it leaves behind are measured, not guessed at. Every
+A case has `rubric.txt`, `input/`, and either `prompt.txt` or `prompts.txt`.
+The prompt session goes to the real agent; the artifacts it leaves behind are
+measured, not guessed at. Every
 schematic case records what actually happened to the file — which symbols moved,
 which fields were dropped, how the net partition changed, what KiCAD's own ERC
 says — and a rubric may assert on any of it:
@@ -41,9 +42,10 @@ CAPPED_SCORE = 3
 FINDING_TAGS = ("tool-contract", "prompt", "engine", "harness", "judge", "variance")
 
 
-def command(args, *, timeout=600, check=True, env=None):
+def command(args, *, timeout=600, check=True, env=None, input_text=None):
     result = subprocess.run(
-        args, cwd=ROOT, text=True, capture_output=True, timeout=timeout, env=env
+        args, cwd=ROOT, text=True, capture_output=True, timeout=timeout, env=env,
+        input=input_text,
     )
     if check and result.returncode:
         raise RuntimeError(
@@ -504,7 +506,7 @@ def transcript_facts(artifacts):
     path = artifacts / "agent.stderr.txt"
     text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
     calls = re.findall(r"^\s*tool -> (\S+)", text, re.M)
-    refused = re.findall(r"^\s*tool <- (\S+): error", text, re.M)
+    refused = re.findall(r"^\s*tool <- (\S+)(?: \([^\n]*\))?: (?:error|refused)", text, re.M)
     return {
         "tool_calls": calls,
         "board_tool_calls": [name for name in calls if name in BOARD_TOOLS],
@@ -905,25 +907,37 @@ def render_project(project, artifacts, prefix):
     return rendered
 
 
-def agent_command(project, prompt):
+def agent_command(project, prompt, multiple=False):
     configured = os.environ.get("GORDIAN_BIN")
+    tail = ["--input", "-"] if multiple else [prompt]
     if configured:
-        return [configured, "agent", "--project", str(project), "--no-review", prompt]
+        return [configured, "agent", "--project", str(project), "--no-review", *tail]
     return [
         "cargo", "run", "--release", "--quiet", "-p", "gordian", "--",
-        "agent", "--project", str(project), "--no-review", prompt,
+        "agent", "--project", str(project), "--no-review", *tail,
     ]
 
 
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-TOOL_STARTED = re.compile(r"^tool -> (?P<tool>[A-Za-z0-9_]+)\s*$")
+TOOL_STARTED = re.compile(
+    r"^tool -> (?P<tool>[A-Za-z0-9_]+)(?:\s+(?P<args>\{.*\}))?\s*$"
+)
 TOOL_FINISHED = re.compile(
-    r"^tool <- (?P<tool>[A-Za-z0-9_]+):\s?(?P<summary>.*)$"
+    r"^tool <- (?P<tool>[A-Za-z0-9_]+)"
+    r"(?: \(elapsed (?P<elapsed>[0-9.]+)s(?:, revision (?P<revision>\d+))?\))?"
+    r":\s?(?P<summary>.*)$"
 )
 USAGE_REQUESTS = re.compile(r"^usage: provider_requests=(\d+)\b")
+USAGE_REQUEST = re.compile(
+    r"^usage: request #(?P<request>\d+) in=(?P<input>\d+) out=(?P<output>\d+) "
+    r"cached=(?P<cached>\d+)(?: cache_write=(?P<cache_write>\d+))? "
+    r"latency=(?P<latency>[0-9.]+)s$"
+)
 TOTAL_REQUESTS = re.compile(r"\bprovider requests:\s*(\d+)\b")
 REQUEST_CAP = re.compile(r"ProviderRequestLimit\s*\{\s*requests:\s*(\d+)\s*\}")
 REFUSAL = re.compile(r"\brefus(?:e|ed|al|ing)\b", re.IGNORECASE)
+TURN_STARTED = re.compile(r"^turn (?P<turn>\d+): (?P<prompt>.*)$")
+TURN_DONE = re.compile(r"^turn (?P<turn>\d+) done:")
 
 
 def parse_agent_stderr(stderr):
@@ -933,12 +947,32 @@ def parse_agent_stderr(stderr):
     attempted = []
     usage_counts = []
     total_counts = []
+    requests = []
+    turns = []
+    active_turn = None
     for line in text.splitlines():
         stripped = line.strip()
+        if match := TURN_STARTED.match(stripped):
+            active_turn = {
+                "turn": int(match.group("turn")),
+                "prompt": match.group("prompt"),
+                "transcript": [stripped],
+            }
+            turns.append(active_turn)
+            continue
+        if active_turn is not None:
+            active_turn["transcript"].append(stripped)
+            if TURN_DONE.match(stripped):
+                active_turn = None
         if match := TOOL_STARTED.match(stripped):
             name = match.group("tool")
             attempted.append(name)
-            calls.append({"tool": name, "status": None, "summary": ""})
+            calls.append({
+                "tool": name,
+                "status": None,
+                "summary": "",
+                "args": match.group("args") or "",
+            })
             continue
         if match := TOOL_FINISHED.match(stripped):
             name = match.group("tool")
@@ -961,7 +995,25 @@ def parse_agent_stderr(stderr):
                 else "ok"
             )
             target["summary"] = summary
+            target["elapsed_ms"] = (
+                round(float(match.group("elapsed")) * 1000)
+                if match.group("elapsed") else None
+            )
+            target["revision"] = (
+                int(match.group("revision")) if match.group("revision") else None
+            )
+            if " | refusal=" in summary:
+                target["refusal_reason"] = summary.split(" | refusal=", 1)[1]
             continue
+        if match := USAGE_REQUEST.match(stripped):
+            requests.append({
+                "request": int(match.group("request")),
+                "input_tokens": int(match.group("input")),
+                "output_tokens": int(match.group("output")),
+                "cached_tokens": int(match.group("cached")),
+                "cache_write_tokens": int(match.group("cache_write") or 0),
+                "latency_ms": round(float(match.group("latency")) * 1000),
+            })
         if match := USAGE_REQUESTS.match(stripped):
             usage_counts.append(int(match.group(1)))
         if match := TOTAL_REQUESTS.search(stripped):
@@ -976,7 +1028,10 @@ def parse_agent_stderr(stderr):
     for call in calls:
         if call["status"] != "error":
             continue
-        signal = {"tool": call["tool"], "message": call["summary"]}
+        signal = {
+            "tool": call["tool"],
+            "message": call.get("refusal_reason") or call["summary"],
+        }
         (refusals if REFUSAL.search(call["summary"]) else errors).append(signal)
 
     repeated = []
@@ -992,7 +1047,13 @@ def parse_agent_stderr(stderr):
     cap = REQUEST_CAP.search(text)
     return {
         "tool_calls": calls,
-        "request_count": total_counts[-1] if total_counts else sum(usage_counts),
+        "requests": requests,
+        "request_count": (
+            total_counts[-1] if total_counts
+            else len(requests) if requests
+            else sum(usage_counts)
+        ),
+        "turns": turns,
         "refusals": refusals,
         "errors": errors,
         "repeated_calls": repeated,
@@ -1000,10 +1061,13 @@ def parse_agent_stderr(stderr):
     }
 
 
-def run_agent(project, prompt, timeout, env):
-    args = agent_command(project, prompt)
+def run_agent(project, prompt, timeout, env, multiple=False):
+    args = agent_command(project, prompt, multiple)
     try:
-        return command(args, timeout=timeout, check=False, env=env)
+        return command(
+            args, timeout=timeout, check=False, env=env,
+            input_text=prompt if multiple else None,
+        )
     except subprocess.TimeoutExpired as error:
         stdout = error.stdout or ""
         stderr = error.stderr or ""
@@ -1017,7 +1081,10 @@ def run_agent(project, prompt, timeout, env):
 
 def run_case(case, output_root):
     started = time.time()
-    prompt = (case / "prompt.txt").read_text(encoding="utf-8").strip()
+    prompts_path = case / "prompts.txt"
+    multiple = prompts_path.is_file()
+    prompt_path = prompts_path if multiple else case / "prompt.txt"
+    prompt = prompt_path.read_text(encoding="utf-8").strip()
     rubric, checks = parse_rubric((case / "rubric.txt").read_text(encoding="utf-8"))
     run_dir = output_root / case.name
     if run_dir.exists():
@@ -1048,6 +1115,7 @@ def run_case(case, output_root):
         prompt,
         int(os.environ.get("QUALITY_TIMEOUT", "900")),
         {**os.environ, "GORDIAN_THREAD_ID": f"quality-{case.name}-{int(started)}"},
+        multiple=multiple,
     )
     agent_seconds = round(time.time() - agent_started, 1)
     (artifacts / "agent.stdout.txt").write_text(result.stdout, encoding="utf-8")
@@ -1238,12 +1306,27 @@ def findings_for(report):
     if cap:
         cost += f"; request cap hit at {cap}"
     findings.append((cost_tag, cost))
+    if report.get("requests"):
+        latencies = ", ".join(
+            f"#{request['request']}={request['latency_ms']}ms"
+            for request in report["requests"]
+        )
+        findings.append(("variance", f"provider latency: {latencies}"))
     return findings
 
 
 def write_case_findings(run_dir, report):
     lines = [f"# Findings: {report['case']}", ""]
     lines.extend(f"- [{tag}] {text}" for tag, text in findings_for(report))
+    for turn in report.get("turns", []):
+        lines.extend([
+            "",
+            f"## Turn {turn['turn']}: {turn['prompt']}",
+            "",
+            "````text",
+            *turn["transcript"],
+            "````",
+        ])
     (run_dir / "findings.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

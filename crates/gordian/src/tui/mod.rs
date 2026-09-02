@@ -672,6 +672,8 @@ mod shell_tests {
             1,
             AgentEvent::ToolStarted {
                 name: "stale tool".into(),
+                args: serde_json::json!({}),
+                seq: 0,
             },
         );
         shell.finish_task(&mut app, 1, TurnEndReason::Completed);

@@ -576,6 +576,9 @@ mod tests {
             name: "render_board".into(),
             summary: "rendered board to PNG".into(),
             image_path: Some(path.into()),
+            elapsed_ms: 0,
+            revision: None,
+            result: serde_json::json!({}),
         }));
         let transcript_len = a.transcript.len();
 
@@ -770,6 +773,8 @@ mod tests {
         let mut a = app();
         a.update(Msg::Agent(AgentEvent::ToolStarted {
             name: "search_symbols".into(),
+            args: serde_json::json!({}),
+            seq: 0,
         }));
         assert!(
             !a.transcript.iter().any(|e| e.speaker == Speaker::Tool),
@@ -779,6 +784,9 @@ mod tests {
             name: "search_symbols".into(),
             summary: "\"STM32\" → 4 hits".into(),
             image_path: None,
+            elapsed_ms: 0,
+            revision: None,
+            result: serde_json::json!({}),
         }));
         // The finished card is appended once.
         let cards: Vec<&Entry> = a
@@ -817,6 +825,8 @@ mod tests {
         a.update(Msg::Submit);
         a.update(Msg::Agent(AgentEvent::ToolStarted {
             name: "get_design".into(),
+            args: serde_json::json!({}),
+            seq: 0,
         }));
         a.update(Msg::TurnEnded(TurnEndReason::Completed));
         let last = a.transcript.last().unwrap();
@@ -988,6 +998,8 @@ mod tests {
         a.update(Msg::Agent(AgentEvent::AssistantText("first".into())));
         a.update(Msg::Agent(AgentEvent::ToolStarted {
             name: "get_design".into(),
+            args: serde_json::json!({}),
+            seq: 0,
         }));
         a.update(Msg::Agent(AgentEvent::AssistantDelta("second".into())));
         a.update(Msg::Agent(AgentEvent::AssistantText("second".into())));
