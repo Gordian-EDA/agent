@@ -609,12 +609,20 @@ fn run_agent_command(args: &[String]) -> Result<()> {
                     .await
             } else {
                 agent.run_turn(prompt, Some(&events_tx)).await
-            }?;
+            };
             drop(events_tx);
             let log = printer.await.unwrap_or_default();
             let usage = log.usage;
             let elapsed = started.elapsed().as_secs_f64();
-            let stop = format!("{:?}", outcome.stop_reason);
+            let outcome = outcome.map_err(|error| {
+                let message = format!("{error:#}");
+                tracing::error!(target: logging::EVENTS_TARGET, "error: gordian::agent: {message}");
+                message
+            });
+            let stop = outcome
+                .as_ref()
+                .map(|outcome| format!("{:?}", outcome.stop_reason))
+                .unwrap_or_else(|_| "Error".to_owned());
             let files = log.files.into_iter().collect::<Vec<_>>().join(",");
             let revisions = log
                 .revisions
@@ -634,13 +642,13 @@ fn run_agent_command(args: &[String]) -> Result<()> {
             );
             turns.push((outcome, usage));
         }
-        Ok::<_, anyhow::Error>(turns)
+        turns
     });
     // A timed-out `spawn_blocking` placement cannot be cancelled by Tokio. Do
     // not let one detached tool keep the one-shot headless CLI alive forever
     // after its turn result and diagnostics are already available.
     runtime.shutdown_timeout(Duration::from_secs(1));
-    let turns = run.context("running the agent session")?;
+    let turns = run;
     let usage = turns
         .iter()
         .fold(UsageTotals::default(), |mut total, (_, usage)| {
@@ -651,7 +659,19 @@ fn run_agent_command(args: &[String]) -> Result<()> {
             total.cache_read_tokens += usage.cache_read_tokens;
             total
         });
-    let outcome = &turns.last().expect("at least one prompt").0;
+    let turn_errors = turns
+        .iter()
+        .filter_map(|(outcome, _)| outcome.as_ref().err())
+        .cloned()
+        .collect::<Vec<_>>();
+    if !turn_errors.is_empty() {
+        bail!("{} turn(s) failed: {}", turn_errors.len(), turn_errors.join("; "));
+    }
+    let outcome = turns
+        .iter()
+        .rev()
+        .find_map(|(outcome, _)| outcome.as_ref().ok())
+        .expect("at least one completed prompt");
 
     // 5. Report the outcome.
     tracing::info!("--- agent turn ---");
@@ -694,7 +714,11 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     }
     if turns
         .iter()
-        .any(|(outcome, _)| outcome.stop_reason != StopReason::Completed)
+        .any(|(outcome, _)| {
+            outcome
+                .as_ref()
+                .is_ok_and(|outcome| outcome.stop_reason != StopReason::Completed)
+        })
     {
         bail!("one or more agent turns ended without completing their quality contract");
     }
