@@ -2450,7 +2450,9 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                     "DRC copper clean, but {silk} silkscreen warning(s) block quality acceptance"
                 )
             } else {
-                let worst = ["top_violations", "top_unconnected"]
+                // The reported order, not a ranking: check_board lists findings
+                // as KiCAD produced them.
+                let first = ["top_violations", "top_unconnected"]
                     .iter()
                     .filter_map(|key| result.get(key).and_then(Value::as_array))
                     .flatten()
@@ -2472,10 +2474,10 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                             None => kind.to_owned(),
                         })
                     })
-                    .map(|worst| format!(" — worst is {worst}"))
+                    .map(|first| format!(" — first is {first}"))
                     .unwrap_or_default();
                 format!(
-                    "DRC failed: {blocking} blocking findings{worst}; fix them, then check_board again"
+                    "DRC failed: {blocking} blocking findings{first}; fix them, then check_board again"
                 )
             }
         }
@@ -2776,7 +2778,7 @@ mod tests {
     /// board, and a summary reading "refused: refused" told the model neither
     /// what failed nor what to do about it.
     #[test]
-    fn a_failing_board_check_names_its_worst_finding() {
+    fn a_failing_board_check_names_the_finding_it_reported_first() {
         let result = json!({
             "ok": false,
             "blocking_findings": 3,
@@ -2793,7 +2795,7 @@ mod tests {
 
         assert_eq!(
             tool_summary("check_board", &json!({}), &result),
-            "DRC failed: 3 blocking findings — worst is clearance: Pad 3 of U1 ↔ Pad 4 of U1; \
+            "DRC failed: 3 blocking findings — first is clearance: Pad 3 of U1 ↔ Pad 4 of U1; \
              fix them, then check_board again"
         );
     }
