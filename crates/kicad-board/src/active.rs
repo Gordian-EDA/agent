@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use geom::{Point2, Rect};
 use pcb_model::{
-    Connection, LayerRef, Obstacle, RoutePoint, RouteSolution, RoutingView, Trace, Via, ViaSpan,
+    Connection, LayerRef, Obstacle, Placement, RoutePoint, RouteSolution, RoutingView, Trace, Via,
+    ViaSpan,
 };
-use pcb_place::Placement;
 
 /// Domain view consumed by placement and routing tools.
 #[derive(Debug, Clone)]
@@ -86,6 +86,8 @@ pub fn from_bridge(snapshot: kicad_ipc::snapshot::IpcBoardSnapshot) -> IpcBoardS
             outline: problem.outline,
             escape_layers: Default::default(),
             plane_nets: problem.plane_nets,
+            fixed_copper: RouteSolution::default(),
+            nets: None,
         },
         imported: ImportedBoard {
             layer_count: snapshot.imported.layer_count,
@@ -477,6 +479,8 @@ mod tests {
                 outline: None,
                 escape_layers: BTreeMap::new(),
                 plane_nets: BTreeMap::from([("GND".to_owned(), 31)]),
+                fixed_copper: RouteSolution::default(),
+                nets: None,
             },
             imported: ImportedBoard {
                 layer_count: 32,
@@ -575,5 +579,6 @@ mod tests {
                 micro: true
             }
         );
+        assert_eq!(snapshot.problem.fixed_copper, RouteSolution::default());
     }
 }

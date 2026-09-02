@@ -1,4 +1,4 @@
-//! Routing-view result and quality types used inside the Gordian PCB engine.
+//! Routing phase results, capabilities, and quality measures.
 
 use crate::{FailedNet, RouteSolution, RoutingView, Trace};
 
@@ -6,12 +6,11 @@ use crate::{FailedNet, RouteSolution, RoutingView, Trace};
 
 /// The outcome of routing a [`RoutingView`]: the emitted copper, the nets that
 /// could not be fully routed, and which engine produced it.
-///
-/// The concrete routing phase's result before it is folded into [`PcbSolution`](crate::PcbSolution).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RouteResult {
-    /// Emitted traces and vias for the nets that routed.
+    /// Newly emitted traces and vias for the nets that routed. Fixed input
+    /// copper remains owned by the caller and is not repeated here.
     pub solution: RouteSolution,
     /// Nets that could not be fully routed (deterministic order), each with a
     /// human-readable cause.
@@ -70,7 +69,6 @@ pub struct RoutingCapabilities {
 }
 
 impl RoutingCapabilities {
-    /// Can a router with these capabilities route `problem`? The default
     /// Whether this capability set covers a routing view.
     pub fn can_route(&self, problem: &RoutingView) -> bool {
         self.max_layers >= problem.layer_count
@@ -195,6 +193,8 @@ mod tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: RouteSolution::default(),
+            nets: None,
         }
     }
 

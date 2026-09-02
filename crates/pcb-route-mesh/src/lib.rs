@@ -1,4 +1,4 @@
-//! Routing implementation owned by Gordian's single PCB engine.
+//! Concrete routing algorithms used by the production routing policy.
 //!
 //! [`pipeline::route_tuned`] is the production entry point. It combines a
 //! deterministic grid pass with targeted rip-up/rescue phases. The capacity-mesh,

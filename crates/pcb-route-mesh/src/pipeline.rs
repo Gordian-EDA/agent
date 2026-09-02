@@ -298,7 +298,7 @@ fn better(_problem: &RoutingView, incumbent: &RouteQuality, challenger: &RouteQu
     }
 }
 
-/// The single tuned routing algorithm used by the unified PCB engine.
+/// The tuned routing algorithm selected by the production routing policy.
 ///
 /// It performs one deterministic orthogonal grid pass followed by targeted
 /// adaptive rip-up/rescue for any failed nets.  The rescue is a phase of the
@@ -2591,6 +2591,8 @@ mod tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         }
     }
 
@@ -2991,6 +2993,8 @@ mod tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         }
     }
 
@@ -3063,6 +3067,8 @@ mod tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         }
     }
 

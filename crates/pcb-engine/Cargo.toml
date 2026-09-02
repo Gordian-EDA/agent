@@ -4,10 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The single Gordian PCB physical-design engine."
+description = "Production policy facade for independently invoked PCB placement and routing."
 
 [dependencies]
-pcb-drc = { path = "../pcb-drc" }
 pcb-model = { path = "../pcb-model" }
 pcb-place = { path = "../pcb-place" }
 pcb-route-mesh = { path = "../pcb-route-mesh" }
