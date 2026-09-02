@@ -103,16 +103,33 @@ fn retracted_copper(snapshot: &IpcBoardSnapshot, plan: &MovePlan) -> RetractedCo
             .iter()
             .any(|point| pads.iter().any(|pad| pad.contains(*point)))
     };
+    // A net whose copper is only PARTLY removed is left with a stub hanging off
+    // nothing — KiCAD reports it as `track_dangling`, and the board fails DRC
+    // with no unrouted net to explain it. So the unit of retraction is the net:
+    // once a move invalidates any of its copper, all of it goes and the net is
+    // named for re-routing.
     let mut retract = RetractedCopper::default();
+    retract.nets = snapshot
+        .copper
+        .traces
+        .iter()
+        .filter(|trace| touches_moved_pad(trace))
+        .map(|trace| trace.connection.clone())
+        .collect();
     for trace in &snapshot.copper.traces {
-        if touches_moved_pad(trace) {
-            retract.nets.insert(trace.connection.clone());
+        if retract.nets.contains(&trace.connection) {
             retract.count += 1;
         } else {
             retract.retained.traces.push(trace.clone());
         }
     }
-    retract.retained.vias = snapshot.copper.vias.clone();
+    retract.retained.vias = snapshot
+        .copper
+        .vias
+        .iter()
+        .filter(|via| !retract.nets.contains(&via.connection))
+        .cloned()
+        .collect();
     retract
 }
 
