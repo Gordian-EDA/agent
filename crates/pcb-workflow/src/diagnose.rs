@@ -884,10 +884,12 @@ mod tests {
                 kicad::ViolationItem {
                     description: "Pad 3 of U1 on F.Cu".to_owned(),
                     uuid: None,
+                    pos: None,
                 },
                 kicad::ViolationItem {
                     description: "Pad 1 of J1 on F.Cu".to_owned(),
                     uuid: None,
+                    pos: None,
                 },
             ],
         };

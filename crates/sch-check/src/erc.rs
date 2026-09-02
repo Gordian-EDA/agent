@@ -275,6 +275,7 @@ pub fn erc_checks(d: &Design, provider: &SymbolTable) -> Vec<String> {
 
 /// A deterministic electrical finding and whether it blocks.
 pub struct Defect {
+    pub code: &'static str,
     pub blocking: bool,
     pub line: String,
 }
@@ -287,23 +288,10 @@ pub struct Defect {
 /// a design may legitimately answer for those, and a gate the author cannot clear
 /// costs more than the defect.
 pub fn defects(d: &Design, provider: &SymbolTable) -> Vec<Defect> {
-    let mut blocking = Vec::new();
-    let mut advisory = Vec::new();
-    run_checks(d, provider, &mut blocking, &mut advisory);
-    let mark = |lines: Vec<String>, blocking: bool| {
-        lines
-            .into_iter()
-            .map(move |line| Defect { blocking, line })
-    };
-    mark(blocking, true).chain(mark(advisory, false)).collect()
+    run_checks(d, provider)
 }
 
-fn run_checks(
-    d: &Design,
-    provider: &SymbolTable,
-    blocking: &mut Vec<String>,
-    advisory: &mut Vec<String>,
-) {
+fn run_checks(d: &Design, provider: &SymbolTable) -> Vec<Defect> {
     let lib_ids: std::collections::BTreeSet<&str> = d
         .blocks
         .values()
@@ -333,19 +321,53 @@ fn run_checks(
             net_items.entry(n).or_default().push(i);
         }
     }
-    check_phototransistor_optocoupler_polarity(&items, blocking);
-    check_led_indicator_polarity(&items, &net_items, blocking);
-    check_output_short(&items, &net_items, blocking);
-    check_dangling(&items, blocking);
-
-    check_led_current(&items, &net_items, advisory);
-    check_fb_divider(&items, &net_items, advisory);
-    check_555_timing_topology(&items, &net_items, advisory);
-    check_crystal(&items, &net_items, advisory);
-    check_missing_decoupling(&items, &net_items, advisory);
-    check_missing_pullup(&items, &net_items, advisory);
-    check_floating_input(&items, &net_items, advisory);
-    check_undriven_rail(&items, &net_items, advisory);
+    let mut defects = Vec::new();
+    let mut check = |code, blocking, run: &mut dyn FnMut(&mut Vec<String>)| {
+        let mut lines = Vec::new();
+        run(&mut lines);
+        defects.extend(lines.into_iter().map(|line| Defect {
+            code,
+            blocking,
+            line,
+        }));
+    };
+    check("optocoupler-polarity", true, &mut |out| {
+        check_phototransistor_optocoupler_polarity(&items, out)
+    });
+    check("led-polarity", true, &mut |out| {
+        check_led_indicator_polarity(&items, &net_items, out)
+    });
+    check("output-short", true, &mut |out| {
+        check_output_short(&items, &net_items, out)
+    });
+    check("dangling-passive", true, &mut |out| {
+        check_dangling(&items, out)
+    });
+    check("led-current", false, &mut |out| {
+        check_led_current(&items, &net_items, out)
+    });
+    check("feedback-divider", false, &mut |out| {
+        check_fb_divider(&items, &net_items, out)
+    });
+    check("timer-topology", false, &mut |out| {
+        check_555_timing_topology(&items, &net_items, out)
+    });
+    check("crystal-load", false, &mut |out| {
+        check_crystal(&items, &net_items, out)
+    });
+    check("missing-decoupling", false, &mut |out| {
+        check_missing_decoupling(&items, &net_items, out)
+    });
+    check("missing-pullup", false, &mut |out| {
+        check_missing_pullup(&items, &net_items, out)
+    });
+    check("floating-input", false, &mut |out| {
+        check_floating_input(&items, &net_items, out)
+    });
+    check("undriven-rail", false, &mut |out| {
+        check_undriven_rail(&items, &net_items, out)
+    });
+    defects
 }
 
 /// Catch a reversed output transistor on optocouplers whose numeric pinout is fixed and
