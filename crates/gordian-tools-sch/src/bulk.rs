@@ -96,6 +96,34 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(minted) => minted,
         Err(error) => return Ok(error),
     };
+    let existing_netlist = sch_doc::connect::extract(&edit.doc);
+    let existing = sch_check::ExistingSheet {
+        net_pins: existing_netlist
+            .nets
+            .iter()
+            .map(|net| (net.name.clone(), net.pins.len()))
+            .collect(),
+        refs: edit
+            .doc
+            .symbols()
+            .map(|symbol| symbol.refdes().to_string())
+            .collect(),
+    };
+    let (design, diags, mut audit) = sch_check::into_design(&payload, ctx.provider(), &existing);
+    audit.footprint_mismatch =
+        gordian_runtime::footprint_compat::design_pin_mismatches(ctx, &design)?
+            .iter()
+            .map(gordian_runtime::footprint_compat::FootprintPinMismatch::payload)
+            .collect::<Vec<_>>();
+    if !audit.is_valid() || diags.has_errors() {
+        audit.input_errors = diags
+            .0
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == sch_check::Severity::Error)
+            .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
+            .collect();
+        return Ok(invalid_payload_response(audit));
+    }
     let derived: Vec<String> = payload
         .parts
         .iter()
@@ -181,22 +209,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 return Ok(budget_refusal(&error));
             }
             Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
-                return Ok(json!({
-                    "ok": false,
-                    "code": "invalid_payload",
-                    "input_errors": audit.input_errors,
-                    "duplicate_refs": audit.duplicate_refs,
-                    "unknown_pins": audit.unknown_pins,
-                    "dangling": audit.dangling,
-                    "did_you_mean": audit.did_you_mean,
-                    "unreliable_nets": audit.unreliable_nets,
-                    "note": "this lists EVERY fault in the payload — fix them all before retrying. \
-                             `place_parts` appends to the sheet, so resubmit only the parts named \
-                             here, not the whole payload. `input_errors` are unresolvable lib_ids \
-                             and pin conflicts; `duplicate_refs` give the next free refdes; \
-                             `unknown_pins` name a key the symbol does not have. `dangling` pins are \
-                             NOT fatal on their own — they are listed so you can finish them.",
-                }));
+                return Ok(invalid_payload_response(*audit));
             }
             Err(error) => return Err(error.into()),
         }
@@ -241,6 +254,28 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let refs = report.placed.join(" ");
     attach_connectivity(&mut value, ctx, report.placed, &format!("PLACED  {refs}"))?;
     with_check(value, ctx).context("checking placed parts")
+}
+
+/// Render the one exhaustive refusal shape used by both audit phases.
+fn invalid_payload_response(audit: sch_check::PayloadAudit) -> Value {
+    json!({
+        "ok": false,
+        "code": "invalid_payload",
+        "input_errors": audit.input_errors,
+        "duplicate_refs": audit.duplicate_refs,
+        "unknown_pins": audit.unknown_pins,
+        "footprint_mismatch": audit.footprint_mismatch,
+        "dangling": audit.dangling,
+        "did_you_mean": audit.did_you_mean,
+        "unreliable_nets": audit.unreliable_nets,
+        "note": "this lists EVERY fault in the payload — fix them all before retrying. \
+                 `place_parts` appends to the sheet, so resubmit only the parts named \
+                 here, not the whole payload. `input_errors` are unresolvable lib_ids \
+                 and pin conflicts; `duplicate_refs` give the next free refdes; \
+                 `unknown_pins` name a key the symbol does not have; `footprint_mismatch` \
+                 includes a compatible assignment when the catalog has one. `dangling` pins \
+                 are NOT fatal on their own — they are listed so you can finish them.",
+    })
 }
 
 enum GuardedPlacement {

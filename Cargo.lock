@@ -899,6 +899,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "directories",
+ "fuzzy-matcher",
  "gordian-llm",
  "kicad",
  "kicad-footprint",

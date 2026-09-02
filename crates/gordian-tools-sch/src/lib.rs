@@ -247,8 +247,8 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "set_fields",
-            "Set properties on one part (Value, Footprint, Reference, user fields), on every unit \
-             of it — how a resistor's value or footprint changes. Moves nothing.",
+            "Set properties on one part (Value, Reference, user fields), on every unit of it. \
+             Footprints go through assign_footprints so compatibility is validated. Moves nothing.",
             json!({
                 "type": "object",
                 "properties": {
@@ -262,7 +262,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "assign_footprints",
-            "Set footprint fields directly on one or more live schematic parts. Use search_footprints first; the complete batch is validated and written atomically.",
+            "Set footprints on one or more live schematic parts. The complete batch is checked against each symbol and written atomically; an incompatible assignment is refused with a compatible catalog suggestion inline.",
             json!({
                 "type": "object",
                 "properties": {

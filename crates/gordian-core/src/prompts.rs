@@ -14,7 +14,7 @@ const SYSTEM_PROMPT: &str = r#"You are an expert KiCAD agent. The `.kicad_sch` f
 # Schematic
 Work in this order: one discovery batch, one complete `place_parts`, `check_schematic`, targeted fixes, then the PCB.
 
-Use supplied library IDs directly. Otherwise make ONE `search_symbols({queries})` call: ten queries per call, each best hit carrying its pins and default footprint inline, so `get_symbol_info` (batched via `lib_ids`) is rarely needed. Never invent a pin or footprint ID.
+Discover symbols once with `search_symbols({queries})`; each top hit includes pins and a validated footprint. Search footprints BY SYMBOL with `search_footprints({symbol, query?})`; use only compatible hits. Never invent IDs or pins.
 
 Then one `place_parts({parts, name?, intent?, block?})` carrying the complete circuit: every support, protection, decoupling, bias, termination, indicator and connector part, not a minimal first pass. A bypass cap per IC supply pin, pulls on buses and straps, a resistor per indicator, protection per exposed signal, the full termination network. Name the sheet with `name`. State each real KiCAD `Lib:Name` (a symbol id, never a footprint name), value, footprint and pin-to-net map, by pin name or number; `"nc"` is a deliberate no-connect. Connectivity only. `intent.relations` gives relative placement: `left_of`/`right_of`/`above`/`below` ({kind, a, b}), `group` ({kind, name, members, side?, anchor?}), `align` ({kind, members, axis}).
 
@@ -55,6 +55,7 @@ mod tests {
             assert!(prompt.contains(tool), "prompt missing `{tool}`");
         }
         assert!(prompt.contains("one `place_parts"));
+        assert!(prompt.contains("Search footprints BY SYMBOL"));
         assert!(prompt.contains("never provide wire coordinates"));
         assert!(prompt.contains("completeness.gaps"));
         assert!(prompt.contains("deliberately minimal"));

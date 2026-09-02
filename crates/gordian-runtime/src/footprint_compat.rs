@@ -1,10 +1,12 @@
 //! Symbol/footprint electrical-pad compatibility checks shared by schematic
 //! authoring and PCB regeneration.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
-use anyhow::Result;
-use kicad_footprint::FootprintId;
+use anyhow::{Context, Result, anyhow};
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use kicad_footprint::{FootprintId, PadTechnology, SearchQuery};
 use sch_check::model::Design;
 use serde::Serialize;
 
@@ -18,15 +20,306 @@ pub struct FootprintPinMismatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub polarity_mismatch: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub footprint_pads_absent_from_symbol: Vec<String>,
+    pub missing_pads: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub symbol_pins_absent_from_footprint: Vec<String>,
+    pub extra_pins: Vec<String>,
+    pub suggestion: Option<String>,
+    pub symbol_suggestion: Option<String>,
+}
+
+impl FootprintPinMismatch {
+    /// Model-facing payload audit entry for this mismatch.
+    pub fn payload(&self) -> sch_check::place_parts::FootprintMismatch {
+        sch_check::place_parts::FootprintMismatch {
+            refdes: self.reference.clone(),
+            symbol: self.symbol.clone(),
+            footprint: self.footprint.clone(),
+            missing_pads: self.missing_pads.clone(),
+            extra_pins: self.extra_pins.clone(),
+            suggestion: self.suggestion.clone(),
+        }
+    }
+}
+
+/// Electrical compatibility of one installed symbol/footprint pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FootprintCompatibility {
+    pub compatible: bool,
+    pub pads: Vec<String>,
+    pub missing_pads: Vec<String>,
+    pub extra_pins: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub polarity_mismatch: Option<String>,
+}
+
+/// One compatibility-aware footprint search result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CompatibleFootprintHit {
+    pub lib_id: String,
+    pub compatible: bool,
+    pub pads: Vec<String>,
+    #[serde(skip)]
+    score: i64,
 }
 
 struct Assignment<'a> {
     reference: &'a str,
     symbol: &'a str,
     footprint: &'a str,
+}
+
+/// Decide one symbol/footprint pair using the shared electrical policy.
+pub fn footprint_compatibility(
+    ctx: &AgentRuntime,
+    symbol_id: &str,
+    footprint_id: &str,
+) -> Result<FootprintCompatibility> {
+    let symbol = ctx
+        .provider()
+        .symbol(symbol_id)
+        .or_else(|| ctx.index().ok()?.symbol(symbol_id))
+        .ok_or_else(|| anyhow!("unknown symbol `{symbol_id}`"))?;
+    footprint_compatibility_for_pins(
+        ctx,
+        symbol_id,
+        symbol.pins.iter().map(|pin| pin.number.as_str()),
+        footprint_id,
+    )
+}
+
+/// Decide a pair when the live schematic, rather than the provider, owns its pins.
+pub fn footprint_compatibility_for_pins<'a>(
+    ctx: &AgentRuntime,
+    symbol_id: &str,
+    symbol_pin_numbers: impl IntoIterator<Item = &'a str>,
+    footprint_id: &str,
+) -> Result<FootprintCompatibility> {
+    let id = FootprintId::parse(footprint_id)
+        .map_err(|_| anyhow!("malformed footprint id `{footprint_id}`"))?;
+    let footprint = ctx
+        .footprint_catalog()?
+        .footprint(&id)
+        .with_context(|| format!("loading footprint `{id}`"))?;
+
+    let symbol_pins = symbol_pin_numbers
+        .into_iter()
+        .filter(|number| !number.is_empty())
+        .collect::<BTreeSet<_>>();
+    let footprint_pads = footprint
+        .pads
+        .iter()
+        .filter(|pad| pad.technology != PadTechnology::NpThruHole)
+        .map(|pad| pad.number.as_str())
+        .filter(|number| !number.is_empty())
+        .collect::<BTreeSet<_>>();
+    let missing_pads = symbol_pins
+        .difference(&footprint_pads)
+        .map(|number| (*number).to_owned())
+        .collect::<Vec<_>>();
+    let extra_pins = footprint
+        .pads
+        .iter()
+        .filter(|pad| {
+            pad.technology != PadTechnology::NpThruHole
+                && !pad.number.is_empty()
+                && !symbol_pins.contains(pad.number.as_str())
+                && !mechanical_or_shield_pad(&pad.number)
+        })
+        .map(|pad| pad.number.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let pads = footprint_pads.into_iter().map(str::to_owned).collect();
+    let polarity_mismatch = capacitor_polarity_mismatch(symbol_id, &id).map(str::to_owned);
+    Ok(FootprintCompatibility {
+        compatible: missing_pads.is_empty() && extra_pins.is_empty() && polarity_mismatch.is_none(),
+        pads,
+        missing_pads,
+        extra_pins,
+        polarity_mismatch,
+    })
+}
+
+/// Rank catalog footprints by compatibility first and fuzzy query score second.
+pub fn search_compatible_footprints(
+    ctx: &AgentRuntime,
+    symbol_id: &str,
+    query: Option<&str>,
+    limit: usize,
+) -> Result<Vec<CompatibleFootprintHit>> {
+    const TEXT_POOL: usize = 64;
+    const FAMILY_POOL: usize = 2;
+
+    if ctx
+        .provider()
+        .symbol(symbol_id)
+        .or_else(|| ctx.index().ok()?.symbol(symbol_id))
+        .is_none()
+    {
+        return Err(anyhow!("unknown symbol `{symbol_id}`"));
+    }
+    let catalog = ctx.footprint_catalog()?;
+    let search_text = query
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| footprint_query_for_symbol(symbol_id));
+    let text_hits = catalog.search(SearchQuery::new(&search_text).limit(TEXT_POOL));
+    let matcher = SkimMatcherV2::default().ignore_case();
+    let mut libraries = Vec::new();
+    let explicit_family = FootprintId::parse(&search_text).ok().filter(|preferred| {
+        catalog
+            .libraries()
+            .any(|library| library.id() == preferred.library())
+    });
+    if let Some(preferred) = &explicit_family {
+        libraries.push(preferred.library().clone());
+    }
+    if explicit_family.is_none() {
+        for hit in text_hits.iter().take(FAMILY_POOL) {
+            if !libraries.contains(hit.id.library()) {
+                libraries.push(hit.id.library().clone());
+            }
+        }
+    }
+    let mut scored = HashMap::<FootprintId, i64>::new();
+    for hit in &text_hits {
+        if libraries.contains(hit.id.library()) {
+            scored.insert(hit.id.clone(), hit.score);
+        }
+    }
+    for library in &libraries {
+        for entry in catalog.entries_in(library) {
+            let id = entry.id().clone();
+            let score = matcher
+                .fuzzy_match(&id.to_string(), &search_text)
+                .unwrap_or(0);
+            scored.entry(id).or_insert(score);
+        }
+    }
+
+    let mut hits = Vec::with_capacity(scored.len());
+    for (id, score) in scored {
+        let Ok(verdict) = footprint_compatibility(ctx, symbol_id, &id.to_string()) else {
+            continue;
+        };
+        hits.push(CompatibleFootprintHit {
+            lib_id: id.to_string(),
+            compatible: verdict.compatible,
+            pads: verdict.pads,
+            score,
+        });
+    }
+    hits.sort_by(|left, right| {
+        right
+            .compatible
+            .cmp(&left.compatible)
+            .then_with(|| right.score.cmp(&left.score))
+            .then_with(|| left.lib_id.cmp(&right.lib_id))
+    });
+    hits.truncate(limit);
+    Ok(hits)
+}
+
+/// Best installed compatible footprint for a symbol near `preferred`.
+pub fn best_compatible_footprint(
+    ctx: &AgentRuntime,
+    symbol_id: &str,
+    preferred: Option<&str>,
+) -> Result<Option<String>> {
+    let nearby = search_compatible_footprints(ctx, symbol_id, preferred, 1)?
+        .into_iter()
+        .find(|hit| hit.compatible)
+        .map(|hit| hit.lib_id);
+    if nearby.is_some() {
+        return Ok(nearby);
+    }
+
+    let search_text = preferred
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| footprint_query_for_symbol(symbol_id));
+    let matcher = SkimMatcherV2::default().ignore_case();
+    let catalog = ctx.footprint_catalog()?;
+    let mut compatible = Vec::new();
+    for entry in catalog.entries() {
+        let id = entry.id().to_string();
+        if footprint_compatibility(ctx, symbol_id, &id).is_ok_and(|verdict| verdict.compatible) {
+            let score = matcher.fuzzy_match(&id, &search_text).unwrap_or(0);
+            compatible.push((score, id));
+        }
+    }
+    compatible.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    Ok(compatible.into_iter().next().map(|(_, id)| id))
+}
+
+/// Best nearby symbol variant whose pins agree with an installed footprint.
+pub fn best_compatible_symbol(
+    ctx: &AgentRuntime,
+    symbol_id: &str,
+    footprint_id: &str,
+) -> Result<Option<String>> {
+    let mut candidates = ctx
+        .index()?
+        .search(symbol_id, 25)
+        .into_iter()
+        .map(|hit| hit.lib_id)
+        .collect::<Vec<_>>();
+    candidates.extend(ctx.provider().suggest(symbol_id));
+    candidates
+        .retain(|candidate| candidate != symbol_id && same_symbol_family(symbol_id, candidate));
+    candidates.dedup();
+    for candidate in candidates {
+        if footprint_compatibility(ctx, &candidate, footprint_id).is_ok_and(|v| v.compatible) {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether a suggested replacement is a named variant of the same symbol family.
+fn same_symbol_family(current: &str, candidate: &str) -> bool {
+    let Some((current_library, current_name)) = current.split_once(':') else {
+        return false;
+    };
+    let Some((candidate_library, candidate_name)) = candidate.split_once(':') else {
+        return false;
+    };
+    if current_library != candidate_library {
+        return false;
+    }
+    current_name
+        .strip_prefix(candidate_name)
+        .or_else(|| candidate_name.strip_prefix(current_name))
+        .is_some_and(|suffix| suffix.starts_with('_'))
+}
+
+/// Audit one resolvable assignment and attach its best catalog repair.
+pub fn assignment_pin_mismatch(
+    ctx: &AgentRuntime,
+    reference: &str,
+    symbol_id: &str,
+    footprint_id: &str,
+) -> Result<Option<FootprintPinMismatch>> {
+    let verdict = footprint_compatibility(ctx, symbol_id, footprint_id)?;
+    if verdict.compatible {
+        return Ok(None);
+    }
+    let suggestion = best_compatible_footprint(ctx, symbol_id, Some(footprint_id))?;
+    let symbol_suggestion = if suggestion.is_none() {
+        best_compatible_symbol(ctx, symbol_id, footprint_id)?
+    } else {
+        None
+    };
+    Ok(Some(FootprintPinMismatch {
+        reference: reference.to_owned(),
+        symbol: symbol_id.to_owned(),
+        footprint: footprint_id.to_owned(),
+        polarity_mismatch: verdict.polarity_mismatch,
+        missing_pads: verdict.missing_pads,
+        extra_pins: verdict.extra_pins,
+        suggestion,
+        symbol_suggestion,
+    }))
 }
 
 /// Validate explicit footprint assignments in a compiled circuit design.
@@ -83,33 +376,60 @@ fn assignment_mismatches<'a>(
     let catalog = ctx.footprint_catalog()?;
     let mut mismatches = Vec::new();
     for assignment in assignments {
-        let Some(symbol) = ctx.provider().symbol(assignment.symbol) else {
-            continue; // circuit compilation reports unknown symbols
-        };
+        if ctx.provider().symbol(assignment.symbol).is_none() {
+            continue;
+        }
         let Ok(footprint_id) = FootprintId::parse(assignment.footprint) else {
-            continue; // footprint discovery reports malformed ids more specifically
+            continue;
         };
-        let Ok(footprint) = catalog.footprint(&footprint_id) else {
+        if catalog.footprint(&footprint_id).is_err() {
             continue; // footprint discovery/regeneration reports lookup failures
-        };
-        let (extra_pads, missing_pins) = pad_number_differences(
-            symbol.pins.iter().map(|pin| pin.number.as_str()),
-            footprint.pads.iter().map(|pad| pad.number.as_str()),
-        );
-        let polarity_mismatch =
-            capacitor_polarity_mismatch(assignment.symbol, &footprint_id).map(str::to_owned);
-        if !extra_pads.is_empty() || !missing_pins.is_empty() || polarity_mismatch.is_some() {
-            mismatches.push(FootprintPinMismatch {
-                reference: assignment.reference.to_owned(),
-                symbol: assignment.symbol.to_owned(),
-                footprint: footprint_id.to_string(),
-                polarity_mismatch,
-                footprint_pads_absent_from_symbol: extra_pads,
-                symbol_pins_absent_from_footprint: missing_pins,
-            });
+        }
+        if let Some(mismatch) = assignment_pin_mismatch(
+            ctx,
+            assignment.reference,
+            assignment.symbol,
+            &footprint_id.to_string(),
+        )? {
+            mismatches.push(mismatch);
         }
     }
     Ok(mismatches)
+}
+
+fn mechanical_or_shield_pad(number: &str) -> bool {
+    let upper = number.to_ascii_uppercase();
+    upper == "MP"
+        || upper.starts_with("MP") && upper[2..].chars().all(|ch| ch.is_ascii_digit())
+        || upper == "MH"
+        || upper.starts_with("MH") && upper[2..].chars().all(|ch| ch.is_ascii_digit())
+        || upper == "SH"
+        || upper.starts_with("SHIELD")
+}
+
+fn footprint_query_for_symbol(symbol_id: &str) -> String {
+    let name = symbol_id
+        .split_once(':')
+        .map_or(symbol_id, |(_, name)| name);
+    if name.starts_with("C_Polarized") {
+        return "Capacitor_SMD:CP_Elec".to_string();
+    }
+    if matches!(name, "C" | "C_Small" | "C_US" | "C_Small_US") {
+        return "Capacitor_SMD:C_0603_1608Metric".to_string();
+    }
+    if matches!(name, "R" | "R_Small" | "R_US" | "R_Small_US") {
+        return "Resistor_SMD:R_0603_1608Metric".to_string();
+    }
+    if name.starts_with("LED") {
+        return "LED_SMD:LED_0603_1608Metric".to_string();
+    }
+    if name.starts_with("Barrel_Jack") {
+        return "Connector_BarrelJack:BarrelJack".to_string();
+    }
+    if name.starts_with("AudioJack") {
+        return "Connector_Audio:Jack".to_string();
+    }
+    name.replace('_', " ")
 }
 
 /// A footprint the catalog cannot produce, and whether the id itself is at fault.
@@ -155,38 +475,16 @@ pub fn unresolvable_footprints(
             out.push(UnresolvableFootprint {
                 malformed,
                 message: format!(
-                    "{reference}: {} — search_footprints for a \
-                     real `Library:Name`, then assign_footprints",
+                    "{reference}: {} — use search_footprints{{symbol: \"{}\", query: \
+                     \"{}\"}} for a real `Library:Name`, then assign_footprints",
                     kicad_footprint::unknown_footprint_message(footprint, &problem),
+                    component.part,
+                    footprint,
                 ),
             });
         }
     }
     Ok(out)
-}
-
-fn pad_number_differences<'a>(
-    symbol_pin_numbers: impl IntoIterator<Item = &'a str>,
-    footprint_pad_numbers: impl IntoIterator<Item = &'a str>,
-) -> (Vec<String>, Vec<String>) {
-    let symbol_pins: BTreeSet<&str> = symbol_pin_numbers
-        .into_iter()
-        .filter(|pin| !pin.is_empty())
-        .collect();
-    let footprint_pads: BTreeSet<&str> = footprint_pad_numbers
-        .into_iter()
-        .filter(|pad| !pad.is_empty())
-        .collect();
-
-    let extra_pads = footprint_pads
-        .difference(&symbol_pins)
-        .map(|pad| (*pad).to_owned())
-        .collect();
-    let missing_pins = symbol_pins
-        .difference(&footprint_pads)
-        .map(|pin| (*pin).to_owned())
-        .collect();
-    (extra_pads, missing_pins)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,43 +554,15 @@ fn footprint_capacitor_polarity(footprint_id: &FootprintId) -> Option<CapacitorP
 
 #[cfg(test)]
 mod tests {
-    use super::{capacitor_polarity_mismatch, pad_number_differences};
+    use super::{
+        best_compatible_footprint, capacitor_polarity_mismatch, footprint_compatibility,
+        same_symbol_family, search_compatible_footprints,
+    };
+    use crate::AgentRuntime;
     use kicad_footprint::FootprintId;
 
     fn footprint(id: &str) -> FootprintId {
         FootprintId::parse(id).expect("valid test footprint id")
-    }
-
-    #[test]
-    fn detects_both_directions_of_numbered_pad_mismatch() {
-        let symbol_pins: Vec<_> = (1..=60).map(|n| n.to_string()).collect();
-        let footprint_pads: Vec<_> = (1..=4).map(|n| n.to_string()).collect();
-        let (extra, missing) = pad_number_differences(
-            symbol_pins.iter().map(String::as_str),
-            footprint_pads.iter().map(String::as_str),
-        );
-
-        assert!(extra.is_empty());
-        assert_eq!(missing.len(), 56);
-        assert_eq!(missing.first().map(String::as_str), Some("10"));
-        assert!(missing.contains(&"60".to_owned()));
-    }
-
-    #[test]
-    fn allows_mechanical_and_repeated_shield_pads() {
-        let (extra, missing) =
-            pad_number_differences(["1", "2", "S1"], ["1", "2", "S1", "S1", "", ""]);
-
-        assert!(extra.is_empty());
-        assert!(missing.is_empty());
-    }
-
-    #[test]
-    fn reports_numbered_footprint_pads_missing_from_symbol() {
-        let (extra, missing) = pad_number_differences(["1", "2"], ["1", "2", "3", "3", ""]);
-
-        assert_eq!(extra, ["3"]);
-        assert!(missing.is_empty());
     }
 
     #[test]
@@ -368,5 +638,100 @@ mod tests {
             None,
             "unknown footprint naming must not be guessed"
         );
+    }
+
+    #[test]
+    fn real_campaign_pairs_are_rejected_with_compatible_suggestions() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCad detected");
+            return;
+        };
+        let cases = [
+            (
+                "Connector:Barrel_Jack",
+                "Connector_BarrelJack:BarrelJack_Horizontal",
+                Vec::<&str>::new(),
+                vec!["3"],
+            ),
+            (
+                "Device:C_Polarized",
+                "Capacitor_SMD:C_1206_3216Metric",
+                vec![],
+                vec![],
+            ),
+            (
+                "Connector_Audio:AudioJack2_Switch",
+                "Connector_Audio:Jack_3.5mm_CUI_SJ1-3514N_Horizontal",
+                vec!["SN"],
+                vec!["R"],
+            ),
+        ];
+        for (symbol, footprint, missing, extra) in cases {
+            let verdict = footprint_compatibility(&ctx, symbol, footprint).unwrap();
+            assert!(
+                !verdict.compatible,
+                "{symbol} unexpectedly accepted {footprint}"
+            );
+            assert_eq!(verdict.missing_pads, missing);
+            assert_eq!(verdict.extra_pins, extra);
+            if symbol == "Device:C_Polarized" {
+                assert!(verdict.polarity_mismatch.is_some());
+            }
+            let suggestion = best_compatible_footprint(&ctx, symbol, Some(footprint))
+                .unwrap()
+                .unwrap_or_else(|| panic!("no compatible suggestion for {symbol}"));
+            let suggested = footprint_compatibility(&ctx, symbol, &suggestion).unwrap();
+            assert!(
+                suggested.compatible,
+                "suggested {suggestion} does not fit {symbol}: {suggested:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compatibility_tier_precedes_a_closer_text_match() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCad detected");
+            return;
+        };
+        let hits = search_compatible_footprints(
+            &ctx,
+            "Connector:Barrel_Jack",
+            Some("Connector_BarrelJack:BarrelJack_Horizontal"),
+            usize::MAX,
+        )
+        .unwrap();
+        let incompatible = hits
+            .iter()
+            .position(|hit| hit.lib_id == "Connector_BarrelJack:BarrelJack_Horizontal")
+            .expect("exact text match remains visible");
+        assert!(incompatible > 0);
+        assert!(hits[..incompatible].iter().all(|hit| hit.compatible));
+        assert!(!hits[incompatible].compatible);
+        assert_eq!(hits[incompatible].pads, ["1", "2", "3"]);
+        assert!(
+            hits.iter()
+                .all(|hit| hit.lib_id.starts_with("Connector_BarrelJack:"))
+        );
+    }
+
+    #[test]
+    fn symbol_repairs_stay_within_a_named_variant_family() {
+        assert!(same_symbol_family(
+            "Connector:Barrel_Jack",
+            "Connector:Barrel_Jack_Switch"
+        ));
+        assert!(same_symbol_family(
+            "Connector_Audio:AudioJack2",
+            "Connector_Audio:AudioJack2_Switch"
+        ));
+        assert!(!same_symbol_family(
+            "Connector:Barrel_Jack",
+            "Connector:Conn_01x02_Pin"
+        ));
+        assert!(!same_symbol_family(
+            "Connector:Barrel_Jack",
+            "Other:Barrel_Jack_Switch"
+        ));
     }
 }

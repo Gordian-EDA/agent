@@ -588,6 +588,29 @@ pub fn add_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if specs.is_empty() {
         return Ok(json!({ "error": "add_symbols needs a non-empty `parts` list" }));
     }
+    let mut footprint_mismatch = Vec::new();
+    for spec in &specs {
+        let Some(symbol) = spec.get("lib_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(footprint) = spec.get("footprint").and_then(Value::as_str) else {
+            continue;
+        };
+        let reference = spec.get("ref").and_then(Value::as_str).unwrap_or(symbol);
+        if let Some(mismatch) = gordian_runtime::footprint_compat::assignment_pin_mismatch(
+            ctx, reference, symbol, footprint,
+        )? {
+            footprint_mismatch.push(mismatch.payload());
+        }
+    }
+    if !footprint_mismatch.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "code": "invalid_payload",
+            "footprint_mismatch": footprint_mismatch,
+            "note": "symbol/footprint compatibility is checked before symbols are added; use each compatible suggestion directly",
+        }));
+    }
     let mut edit = Edit::open(ctx)?;
     let source = symbol_source(ctx);
     let mut allow = Allow::nothing().creating();
@@ -1025,6 +1048,11 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     ) else {
         return Ok(json!({ "error": "set_fields needs `ref` and `fields`" }));
     };
+    if fields.contains_key("Footprint") {
+        return Ok(json!({
+            "error": "set_fields does not set Footprint; use assign_footprints so symbol compatibility is validated",
+        }));
+    }
     let mut edit = Edit::open(ctx)?;
     // Address the symbol by UUID: setting `Reference` renames it, and every
     // later field in the same call would then be looking for a part that is
@@ -1140,6 +1168,27 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "error": format!("{reference} is virtual or DNP and cannot receive a footprint")
             }));
         }
+    }
+    let mut footprint_mismatch = Vec::new();
+    for (reference, footprint) in &requested {
+        let units = refs::units(&edit.doc, reference);
+        let symbol = units
+            .first()
+            .and_then(|(_, uuid)| edit.doc.symbol(uuid))
+            .map(|symbol| symbol.lib_id.clone())
+            .expect("validated schematic reference has a symbol");
+        if let Some(mismatch) = gordian_runtime::footprint_compat::assignment_pin_mismatch(
+            ctx, reference, &symbol, footprint,
+        )? {
+            footprint_mismatch.push(mismatch.payload());
+        }
+    }
+    if !footprint_mismatch.is_empty() {
+        return Ok(json!({
+            "error": "symbol/footprint mismatch; nothing was written",
+            "code": "invalid_payload",
+            "footprint_mismatch": footprint_mismatch,
+        }));
     }
     for (reference, footprint) in &requested {
         for (_, uuid) in refs::units(&edit.doc, reference) {
@@ -1348,6 +1397,40 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             ),
             "suggestion": suggestion,
         }));
+    }
+    let selected_footprint = input
+        .get("footprint")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            units.first().and_then(|(_, uuid)| {
+                edit.doc
+                    .symbol(uuid)?
+                    .fields
+                    .get("Footprint")
+                    .map(|field| field.value.clone())
+                    .filter(|footprint| !footprint.is_empty())
+            })
+        });
+    if let Some(footprint) = selected_footprint {
+        match gordian_runtime::footprint_compat::assignment_pin_mismatch(
+            ctx, refdes, lib_id, &footprint,
+        ) {
+            Ok(Some(mismatch)) => {
+                return Ok(json!({
+                    "error": "symbol/footprint mismatch; nothing was written",
+                    "code": "invalid_payload",
+                    "footprint_mismatch": [mismatch.payload()],
+                }));
+            }
+            Ok(None) => {}
+            Err(error) if input.get("footprint").is_some() => {
+                return Ok(json!({
+                    "error": format!("{refdes}: footprint `{footprint}` could not be used: {error}"),
+                }));
+            }
+            Err(_) => {}
+        }
     }
     for (key, field) in [("value", "Value"), ("footprint", "Footprint")] {
         if let Some(text) = input.get(key).and_then(Value::as_str) {

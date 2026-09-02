@@ -94,6 +94,138 @@ fn place_parts_reports_an_auto_assigned_reference_as_placed() {
     assert_eq!(result["changed"]["placed"], json!(["R1"]));
 }
 
+#[test]
+fn wrong_footprint_is_refused_and_its_suggestion_closes_the_loop() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let wrong = "Capacitor_SMD:C_1206_3216Metric";
+    let payload = |footprint: &str| {
+        json!({"parts": [{
+            "ref": "C1",
+            "part": "Device:C_Polarized",
+            "value": "10uF",
+            "footprint": footprint,
+            "pins": {"1": "VIN", "2": "GND"}
+        }]})
+    };
+
+    let refused = call(&ctx, "place_parts", payload(wrong));
+    assert_eq!(refused["code"], "invalid_payload");
+    let mismatch = &refused["footprint_mismatch"][0];
+    assert_eq!(mismatch["ref"], "C1");
+    assert_eq!(mismatch["symbol"], "Device:C_Polarized");
+    assert_eq!(mismatch["footprint"], wrong);
+    let suggestion = mismatch["suggestion"]
+        .as_str()
+        .expect("refusal must include a compatible footprint")
+        .to_string();
+    assert!(!listing(&ctx).contains("C1"), "refusal wrote the part");
+
+    let placed = call(&ctx, "place_parts", payload(&suggestion));
+    assert!(placed.get("error").is_none(), "placement failed: {placed}");
+    let reassignment = call(
+        &ctx,
+        "assign_footprints",
+        json!({"assignments": [{"reference": "C1", "footprint": wrong}]}),
+    );
+    assert_eq!(reassignment["code"], "invalid_payload");
+    let repaired = reassignment["footprint_mismatch"][0]["suggestion"]
+        .as_str()
+        .expect("assignment refusal must include a compatible footprint");
+    let assigned = call(
+        &ctx,
+        "assign_footprints",
+        json!({"assignments": [{"reference": "C1", "footprint": repaired}]}),
+    );
+    assert!(
+        assigned.get("error").is_none(),
+        "assignment failed: {assigned}"
+    );
+
+    let source = std::fs::read_to_string(ctx.sch_path()).unwrap();
+    let broken = source.replacen(repaired, wrong, 1);
+    assert_ne!(broken, source, "fixture footprint was not written");
+    std::fs::write(ctx.sch_path(), broken).unwrap();
+    let checked = call(&ctx, "check_schematic", json!({"detail": true}));
+    let finding = checked["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["code"] == "footprint-pins")
+        .expect("checker missed the incompatible footprint");
+    assert_eq!(finding["fix"]["tool"], "assign_footprints");
+    assert_eq!(finding["fix"]["args"]["assignments"][0]["reference"], "C1");
+    let fixed = call(
+        &ctx,
+        finding["fix"]["tool"].as_str().unwrap(),
+        finding["fix"]["args"].clone(),
+    );
+    assert!(fixed.get("error").is_none(), "inline fix failed: {fixed}");
+
+    let checked = call(&ctx, "check_schematic", json!({"detail": true}));
+    assert!(
+        checked["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|finding| finding["code"] != "footprint-pins"),
+        "compatible repair left a footprint-pins finding: {checked}"
+    );
+}
+
+#[test]
+fn add_symbols_cannot_bypass_footprint_compatibility() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let result = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{
+            "lib_id": "Connector:Barrel_Jack",
+            "ref": "J1",
+            "footprint": "Connector_BarrelJack:BarrelJack_Horizontal"
+        }]}),
+    );
+
+    assert_eq!(result["code"], "invalid_payload");
+    assert_eq!(result["footprint_mismatch"][0]["ref"], "J1");
+    assert!(result["footprint_mismatch"][0]["suggestion"].is_string());
+    assert!(!listing(&ctx).contains("J1"), "refusal wrote the symbol");
+}
+
+#[test]
+fn place_parts_reports_footprints_with_other_payload_faults() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let seeded = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "Device:R", "ref": "J1"}]}),
+    );
+    assert!(seeded.get("error").is_none(), "fixture failed: {seeded}");
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [{
+            "ref": "J1",
+            "part": "Connector:Barrel_Jack",
+            "footprint": "Connector_BarrelJack:BarrelJack_Horizontal",
+            "pins": {"bad-pin": "SIG"}
+        }]}),
+    );
+
+    assert_eq!(result["code"], "invalid_payload");
+    assert!(!result["duplicate_refs"].as_array().unwrap().is_empty());
+    assert!(!result["unknown_pins"].as_array().unwrap().is_empty());
+    assert!(!result["footprint_mismatch"].as_array().unwrap().is_empty());
+}
+
 /// Renaming a part onto a reference another part already holds must be refused:
 /// two symbols answering to `R2` is a corrupt sheet — `uuid_of` can no longer
 /// resolve it, so every later tool call on `R2` is ambiguous, and KiCAD's own

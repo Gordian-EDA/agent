@@ -696,25 +696,17 @@ impl FixPlanner {
         ctx: &AgentRuntime,
     ) -> Option<String> {
         let part = self.parts.get(reference)?;
-        if !footprint_family_matches(part, candidate) {
-            return None;
-        }
-        let id = kicad_footprint::FootprintId::parse(candidate).ok()?;
-        let footprint = ctx.footprint_catalog().ok()?.footprint(&id).ok()?;
-        let symbol_pins = self
+        let pins = self
             .pins
             .iter()
             .filter(|pin| pin.refdes == reference)
-            .filter(|pin| !is_library_no_connect(&pin.etype))
-            .filter_map(|pin| pin.id.rsplit_once('.').map(|(_, number)| number))
-            .collect::<BTreeSet<_>>();
-        let footprint_pads = footprint
-            .pads
-            .iter()
-            .map(|pad| pad.number.as_str())
-            .filter(|number| !number.is_empty())
-            .collect::<BTreeSet<_>>();
-        (symbol_pins == footprint_pads).then(|| candidate.to_owned())
+            .filter_map(|pin| pin.id.rsplit_once('.').map(|(_, number)| number));
+        gordian_runtime::footprint_compat::footprint_compatibility_for_pins(
+            ctx, part, pins, candidate,
+        )
+        .ok()
+        .filter(|verdict| verdict.compatible)
+        .map(|_| candidate.to_owned())
     }
 
     fn library_no_connect(&self, finding: &Finding) -> Option<(ToolFix, String)> {
@@ -821,39 +813,6 @@ fn footprint_assignment(reference: &str, footprint: &str, part: &str) -> (ToolFi
         },
         format!("{footprint} is the best installed catalog match for {part}."),
     )
-}
-
-fn footprint_family_matches(part: &str, footprint: &str) -> bool {
-    let part = part.to_ascii_uppercase();
-    let footprint = footprint.to_ascii_uppercase();
-    if part.contains("C_POLARIZED") || part.ends_with(":CP") {
-        return footprint.starts_with("CAPACITOR_")
-            && (footprint.contains(":CP_") || footprint.contains("C_ELEC"));
-    }
-    if part.ends_with(":C") || part.contains(":C_SMALL") {
-        return footprint.starts_with("CAPACITOR_")
-            && !footprint.contains(":CP_")
-            && !footprint.contains("C_ELEC");
-    }
-    if part.contains("LED") {
-        return footprint.starts_with("LED_");
-    }
-    if part.contains("DIODE") || part.ends_with(":D") || part.contains(":D_") {
-        return footprint.starts_with("DIODE_");
-    }
-    if part.contains("FERRITE") || part.ends_with(":L") || part.contains(":L_") {
-        return footprint.starts_with("INDUCTOR_");
-    }
-    if part.ends_with(":R") || part.contains(":R_SMALL") {
-        return footprint.starts_with("RESISTOR_");
-    }
-    if part.contains("CONNECTOR") || part.contains(":CONN_") {
-        return footprint.starts_with("CONNECTOR_")
-            || footprint.starts_with("TERMINALBLOCK_")
-            || footprint.starts_with("TESTPOINT:")
-            || footprint.starts_with("MOUNTINGHOLE:");
-    }
-    true
 }
 
 fn finding_message(message: &str) -> String {
@@ -1086,29 +1045,72 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
         findings.push(diagnostic_finding(&locator, &diagnostic, "footprint"));
     }
     for mismatch in gordian_runtime::footprint_compat::design_pin_mismatches(ctx, &design)? {
-        let diagnostic = sch_check::Diagnostic::error(
-            "footprint-pins",
-            format!(
-                "{}: symbol `{}` and footprint `{}` do not agree on pads{}{}{} — swap_symbol to a \
-                 part with the footprint's pad numbers, or assign a package that matches the pins",
-                mismatch.reference,
-                mismatch.symbol,
-                mismatch.footprint,
-                pad_clause(
-                    " (pads with no pin: ",
-                    &mismatch.footprint_pads_absent_from_symbol
-                ),
-                pad_clause(
-                    " (pins with no pad: ",
-                    &mismatch.symbol_pins_absent_from_footprint
-                ),
-                mismatch
-                    .polarity_mismatch
-                    .map(|why| format!(" ({why})"))
-                    .unwrap_or_default(),
-            ),
+        let message = format!(
+            "symbol `{}` and footprint `{}` do not agree{}{}{}",
+            mismatch.symbol,
+            mismatch.footprint,
+            pad_clause(" (missing pads: ", &mismatch.missing_pads),
+            pad_clause(" (extra electrical pins: ", &mismatch.extra_pins),
+            mismatch
+                .polarity_mismatch
+                .as_deref()
+                .map(|why| format!(" ({why})"))
+                .unwrap_or_default(),
         );
-        findings.push(diagnostic_finding(&locator, &diagnostic, "footprint"));
+        let (fix, why) = if let Some(suggestion) = mismatch.suggestion.as_deref() {
+            footprint_assignment(&mismatch.reference, suggestion, &mismatch.symbol)
+        } else if let Some(symbol) = mismatch.symbol_suggestion.as_deref() {
+            (
+                ToolFix {
+                    tool: "swap_symbol",
+                    args: json!({"ref": mismatch.reference, "lib_id": symbol}),
+                },
+                format!(
+                    "No compatible footprint exists in the catalog for {}; `{symbol}` matches the desired package.",
+                    mismatch.symbol
+                ),
+            )
+        } else {
+            let (refs, nets, at) = locator.locate(
+                &message,
+                [mismatch.reference.clone()],
+                std::iter::empty::<String>(),
+            );
+            findings.push(Finding {
+                classification: "introduced",
+                severity: "error".to_string(),
+                source: "footprint",
+                code: "footprint-pins".to_string(),
+                message: format!(
+                    "{message}; no compatible footprint exists in the installed catalog"
+                ),
+                refs,
+                nets,
+                at,
+                fix: None,
+                why: "Swap to a symbol variant whose pins match the desired package.".to_string(),
+                advisory: false,
+            });
+            continue;
+        };
+        let (refs, nets, at) = locator.locate(
+            &message,
+            [mismatch.reference.clone()],
+            std::iter::empty::<String>(),
+        );
+        findings.push(Finding {
+            classification: "introduced",
+            severity: "error".to_string(),
+            source: "footprint",
+            code: "footprint-pins".to_string(),
+            message,
+            refs,
+            nets,
+            at,
+            fix: Some(fix),
+            why,
+            advisory: false,
+        });
     }
     for warning in &netlist.warnings {
         let message = finding_message(warning);
@@ -1622,7 +1624,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_footprint_assigns_the_catalog_match_exactly() {
+    fn footprint_assignment_has_the_executable_batch_shape() {
         assert_eq!(
             footprint_assignment("R5", "Resistor_SMD:R_0805_2012Metric", "Device:R").0,
             ToolFix {
@@ -1633,18 +1635,6 @@ mod tests {
                 }]}),
             }
         );
-        assert!(footprint_family_matches(
-            "Device:C_Polarized",
-            "Capacitor_SMD:C_Elec_6.3x5.8"
-        ));
-        assert!(!footprint_family_matches(
-            "Device:C_Polarized",
-            "Inductor_SMD:L_0805_2012Metric"
-        ));
-        assert!(!footprint_family_matches(
-            "Device:LED",
-            "Fuse:Fuse_0603_1608Metric"
-        ));
     }
 
     #[test]
