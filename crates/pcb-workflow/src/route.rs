@@ -429,12 +429,12 @@ fn route_live_board(
             .map(|connection| connection.name.clone())
             .filter(|name| !scope.contains(name) && !has_copper(&result.solution, name))
             .collect();
+        let reason = match bbox {
+            Some(_) => "it does not reach into this call's `bbox`, and it had no copper to keep",
+            None => "not in this call's `nets`, and it had no copper to keep",
+        };
         for net in out_of_scope {
-            append_failed(
-                &mut result,
-                &net,
-                "not in this call's `nets`, and it had no copper to keep",
-            );
+            append_failed(&mut result, &net, reason);
         }
     }
     // `prune_dangling_spurs_if_safe` reverts its own pruning whenever the lint
