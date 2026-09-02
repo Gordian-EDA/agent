@@ -6,10 +6,10 @@
 //! clean. This crate is that loop, made mechanical:
 //!
 //! - [`drag`] moves, rotates or mirrors a symbol and re-draws its connections,
-//!   and *rolls itself back* if the netlist would change or a pin would be left
-//!   with nothing drawn on it;
+//!   and *rolls itself back* if the netlist would change, a pin would be left
+//!   with nothing drawn on it, or the sheet would gain a loose end;
 //! - [`eval::measure`] says how clean a sheet is, in millimetres of equivalent
-//!   wire, off one pass over its geometry;
+//!   wire, from the sheet's geometry alone — no KiCAD, no round trip;
 //! - [`promote`] turns a pair of local labels back into the wire they stand
 //!   for, wherever a person would have drawn one;
 //! - [`tidy`] searches over both for the cleanest sheet it can reach in a

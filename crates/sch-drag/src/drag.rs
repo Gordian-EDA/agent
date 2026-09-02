@@ -267,8 +267,9 @@ pub fn drag(doc: &mut SchDoc, id: &str, to: Placement) -> Result<DragReport, Dra
 /// Move several symbols at once, carrying their connections.
 ///
 /// Moving a block in one step is not the same as moving its parts one by one:
-/// the wires *inside* the block are retracted once and re-drawn once, so an IC
-/// and its decoupling caps keep their local drawing while the group travels.
+/// the wires *inside* the block are retracted and re-drawn once, against a
+/// sheet where every member has already arrived, so an IC and its decoupling
+/// caps are re-wired to each other rather than to wherever they used to be.
 pub fn drag_many(
     doc: &mut SchDoc,
     moves: &[(String, Placement)],

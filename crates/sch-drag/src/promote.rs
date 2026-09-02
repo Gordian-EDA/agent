@@ -79,8 +79,9 @@ fn leaving(sheet: &Sheet, at: Point2) -> Point2 {
 
 /// Replace a label pair with the wire it stands for.
 ///
-/// Refused — and rolled back — when the two ends are far enough apart or the
-/// route bent enough that a person would have reached for the label too, and
+/// Refused — and rolled back — when the route would be longer than about a
+/// quarter of a sheet, more than twice the direct distance, or bent more than
+/// twice, all of which are where a person reaches for the label instead; and
 /// whenever the netlist would not come out identical.
 pub fn promote(
     doc: &mut SchDoc,
@@ -106,9 +107,11 @@ pub fn promote(
         .or_else(|| route::maze(&obstacles, a, out, b, &net));
 
     // A wire only reads better than a name while it stays short and straight.
+    // Across a sheet a person reaches for the label too, which is why there is
+    // an absolute cap as well as a detour one.
     let acceptable = path.as_ref().is_some_and(|p| {
         let length: f64 = p.windows(2).map(|w| w[0].manhattan(w[1])).sum();
-        p.len() <= 4 && length <= 2.0 * a.manhattan(b) + 5.08
+        p.len() <= 4 && length <= (2.0 * a.manhattan(b) + 5.08).min(60.0)
     });
     let Some(path) = path.filter(|_| acceptable) else {
         *doc = backup;
