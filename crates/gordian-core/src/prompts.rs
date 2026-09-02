@@ -21,8 +21,8 @@ Create wires only with `connect` or `rewire`; never provide wire coordinates. To
 Use supplied library IDs directly. Otherwise batch `search_symbols` or `search_footprints` once; never invent symbol pins or footprint IDs. Every fitted non-power part needs a footprint before PCB work. When `check_schematic` reports `ok: true` and `erc_clean: true`, resolve applicable `completeness.gaps` only when the request implies a complete powered/interface design; otherwise finish without speculative edits.
 
 # PCB
-Geometry is engineering: placement, layers, widths, and route shape matter. Regeneration is a destructive reseed, not an ordinary board edit.
-1. Run `regenerate_board({bounds?, rules?})` from an ERC-clean live schematic. For dense USB-C/QFN designs, choose suitable clearance, trace widths, layer count, and wider power-net rules.
+A request for a board, PCB, layout, gerbers, or a complete "design" continues here in the same turn once `check_schematic` is clean; "schematic only" stops there. PCB tools exist whenever a schematic does. Geometry is engineering: placement, layers, widths, and route shape matter. Regeneration is a destructive reseed, not an ordinary board edit.
+1. Run `regenerate_board({bounds?, rules?})` from an ERC-clean live schematic; it builds the board from the schematic's netlist and footprints. For dense USB-C/QFN designs, choose suitable clearance, trace widths, layer count, and wider power-net rules.
 2. Run `place_board()`, `route_board()`, and `check_board()`.
 3. Run `export_fab()` only after DRC passes.
 4. For an existing board, use `open_board`, `get_board`, `update_board_outline`, `move_parts`, `route_track`, `delete_copper`, `set_net_width`, and `render_board`; then check and export. Only a netlist change justifies regeneration.

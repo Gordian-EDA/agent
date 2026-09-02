@@ -716,7 +716,6 @@ impl<P: Provider> Agent<P> {
 
         let budgets = TurnBudgets::for_intent(authoritative_intent);
         let pcb_work_requested = request_requires_pcb_work(authoritative_intent);
-        let pcb_tools_authorized = request_authorizes_pcb_tools(authoritative_intent);
         let fabrication_required = request_requires_fabrication(authoritative_intent);
         let mut applied = false;
         let mut schematic_mutator_issued = false;
@@ -781,9 +780,6 @@ impl<P: Provider> Agent<P> {
                 && !self.runtime.sch_path().exists()
             {
                 defs.retain(|tool| !is_discovery_tool(tool.name.as_str()));
-            }
-            if !pcb_tools_authorized {
-                defs.retain(|tool| !is_pcb_stage_tool(tool.name.as_str()));
             }
 
             let (text, end) = if stream_transport_available {
@@ -1726,14 +1722,6 @@ fn request_requires_pcb_work(user_msg: &str) -> bool {
             && ["place", "routing", "layer", "drc", "finish", "fab"]
                 .iter()
                 .any(|term| request.contains(term)))
-}
-
-fn request_authorizes_pcb_tools(user_msg: &str) -> bool {
-    let request = user_msg.to_ascii_lowercase();
-    request_requires_pcb_work(user_msg)
-        || ["board", "outline", "copper", "trace", " via", "drc"]
-            .iter()
-            .any(|term| request.contains(term))
 }
 
 fn request_requires_fabrication(user_msg: &str) -> bool {
