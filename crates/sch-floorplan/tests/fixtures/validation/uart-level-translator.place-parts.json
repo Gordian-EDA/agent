@@ -32,8 +32,8 @@
       "pins": {
         "Pin_1": "TX_RAW",
         "Pin_2": "RX_RAW",
-        "Pin_3": "NC_RTS",
-        "Pin_4": "NC_CTS",
+        "Pin_3": "nc",
+        "Pin_4": "nc",
         "Pin_5": "GNDD"
       }
     },

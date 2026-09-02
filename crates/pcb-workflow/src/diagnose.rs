@@ -727,6 +727,8 @@ mod tests {
 
     fn problem() -> RoutingView {
         RoutingView {
+            fixed_copper: pcb_model::RouteSolution::default(),
+            nets: None,
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: Vec::new(),

@@ -3439,6 +3439,8 @@ mod escape_bottleneck_tests {
             layer: LayerRef::top(),
         };
         let problem = RoutingView {
+            fixed_copper: pcb_model::RouteSolution::default(),
+            nets: None,
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],
@@ -3555,6 +3557,8 @@ mod escape_bottleneck_tests {
             layer: LayerRef::top(),
         };
         let problem = RoutingView {
+            fixed_copper: pcb_model::RouteSolution::default(),
+            nets: None,
             layer_count: 2,
             min_trace_width: 0.2,
             obstacles: vec![],
