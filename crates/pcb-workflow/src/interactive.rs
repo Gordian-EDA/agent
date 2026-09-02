@@ -43,7 +43,8 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(snapshot) => snapshot,
         Err(err) => return Ok(json!({ "error": err })),
     };
-    let mut board = MoveBoard::from_snapshot(&snapshot);
+    let mut board =
+        MoveBoard::from_snapshot(&snapshot, &crate::place::courtyard_extents(&snapshot, ctx));
     let plan = match resolve_move_parts(&input, &mut board) {
         Ok(plan) => plan,
         Err(err) => return Ok(json!({ "error": err })),
@@ -137,8 +138,10 @@ fn write_retained_copper(
     std::fs::write(&path, replacement).map_err(|err| format!("could not write the board: {err}"))
 }
 
-/// Reject a move that would land a part on top of another one: the pad extents
-/// plus the board clearance must not overlap.
+/// Reject a move that would land a part on top of another one: the courtyards
+/// plus the board clearance must not overlap. Courtyards are what KiCAD's DRC
+/// checks, so a move this accepts cannot leave the board failing
+/// `courtyards_overlap`.
 fn overlap_error(board: &MoveBoard, plan: &MovePlan, clearance: f64) -> Option<String> {
     let extent = |reference: &str| {
         board.parts.get(reference).map(|part| {
@@ -162,7 +165,7 @@ fn overlap_error(board: &MoveBoard, plan: &MovePlan, clearance: f64) -> Option<S
             }
             return Some(format!(
                 "move_parts refused: {} at [{:.3}, {:.3}] would overlap {} — leave at least \
-                 {:.3} mm between their pad extents",
+                 {:.3} mm between their courtyards",
                 position.reference, position.at.x, position.at.y, reference, clearance
             ));
         }
@@ -215,7 +218,14 @@ enum Edge {
 }
 
 impl MoveBoard {
-    fn from_snapshot(snapshot: &IpcBoardSnapshot) -> Self {
+    /// `courtyards` is the KiCAD courtyard extent per reference — what DRC
+    /// actually checks. Pads alone underestimate it, so a move judged by pads
+    /// could report success and leave the board failing `courtyards_overlap`.
+    /// A part missing from the map falls back to its pad bounding box.
+    fn from_snapshot(
+        snapshot: &IpcBoardSnapshot,
+        courtyards: &BTreeMap<String, (f64, f64)>,
+    ) -> Self {
         let mut sizes = BTreeMap::new();
         for part in &snapshot.imported.parts {
             let points: Vec<Point2> = snapshot
@@ -233,6 +243,10 @@ impl MoveBoard {
             let (width, height) = Rect::bounding(&points)
                 .map(|r| (r.max_x - r.min_x, r.max_y - r.min_y))
                 .unwrap_or((1.0, 1.0));
+            let (width, height) = courtyards
+                .get(&part.reference)
+                .copied()
+                .unwrap_or((width, height));
             sizes.insert(part.reference.clone(), (width.max(1.0), height.max(1.0)));
         }
         let parts = snapshot
@@ -1298,6 +1312,50 @@ fn layer_name_from_index(idx: u32, layer_names: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// KiCAD's DRC checks courtyards, which are wider than the pads inside them.
+    /// A move judged by pads alone reported success and left the board failing
+    /// `courtyards_overlap`, so the guard must measure what DRC measures.
+    #[test]
+    fn a_move_is_judged_by_courtyards_not_by_the_pads_inside_them() {
+        let pad = |number: &str, x: f64| pcb_model::Obstacle {
+            kind: "pad:C1".to_owned(),
+            layers: vec![LayerRef::top()],
+            center: Point2::new(x, 5.0),
+            width: 0.9,
+            height: 1.0,
+            connected_to: vec![number.to_owned()],
+        };
+        let snapshot = IpcBoardSnapshot {
+            imported: kicad_board::ImportedBoard {
+                layer_count: 2,
+                bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
+                parts: vec![ImportedPart {
+                    reference: "C1".to_owned(),
+                    lib_id: "Capacitor_SMD:C_0603_1608Metric".to_owned(),
+                    at: Point2::new(5.0, 5.0),
+                    rotation: 0,
+                    locked: false,
+                    pads: vec![],
+                }],
+                placement_keepouts: vec![],
+                keepout_count: 0,
+            },
+            problem: route_problem(vec![pad("GND", 4.2), pad("VCC", 5.8)]),
+            copper: RouteSolution::default(),
+            layer_names: vec!["F.Cu".to_owned(), "B.Cu".to_owned()],
+        };
+
+        let pads_only = MoveBoard::from_snapshot(&snapshot, &BTreeMap::new());
+        let c1 = &pads_only.parts["C1"];
+        assert!((c1.width - 2.5).abs() < 1e-6, "pad bbox: {c1:?}");
+
+        let courtyards = BTreeMap::from([("C1".to_owned(), (3.1, 1.8))]);
+        let with_courtyards = MoveBoard::from_snapshot(&snapshot, &courtyards);
+        let c1 = &with_courtyards.parts["C1"];
+        assert!((c1.width - 3.1).abs() < 1e-6, "courtyard: {c1:?}");
+        assert!((c1.height - 1.8).abs() < 1e-6, "courtyard: {c1:?}");
+    }
 
     fn fixture_board() -> MoveBoard {
         MoveBoard {

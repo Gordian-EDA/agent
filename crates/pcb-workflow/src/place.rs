@@ -395,6 +395,36 @@ fn snapshot_net_pin_counts(board: &IpcBoardSnapshot) -> BTreeMap<String, usize> 
 
 // ── IPC snapshot to engine problem ───────────────────────────────────────────
 
+/// Each part's COURTYARD extent (mm), by reference.
+///
+/// KiCAD's DRC checks courtyards, not pads, so a caller reasoning about whether
+/// two parts may sit next to each other must use these. Rotation-aware: a part
+/// turned a quarter-turn presents its courtyard the other way round. A part
+/// whose footprint no longer resolves is simply absent.
+pub(super) fn courtyard_extents(
+    board: &IpcBoardSnapshot,
+    ctx: &AgentRuntime,
+) -> std::collections::BTreeMap<String, (f64, f64)> {
+    let Ok(catalog) = ctx.footprint_catalog() else {
+        return Default::default();
+    };
+    board
+        .imported
+        .parts
+        .iter()
+        .filter_map(|part| {
+            let id = FootprintId::parse(&part.lib_id).ok()?;
+            let footprint = catalog.footprint(&id).ok()?;
+            let (w, h) = enclosing_courtyard(&footprint);
+            let swapped = part.rotation.rem_euclid(180) == 90;
+            Some((
+                part.reference.clone(),
+                if swapped { (h, w) } else { (w, h) },
+            ))
+        })
+        .collect()
+}
+
 pub(super) fn place_problem_from_snapshot(
     board: &IpcBoardSnapshot,
     ctx: &AgentRuntime,
