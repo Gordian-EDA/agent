@@ -58,6 +58,30 @@ fn library_no_connect_pin_type_is_preserved() {
 }
 
 #[test]
+fn pin_alternate_functions_are_preserved() {
+    let lib_text = r#"(kicad_symbol_lib
+	(version 20231120)
+	(generator "test")
+	(symbol "MCU"
+		(symbol "MCU_1_1"
+			(pin bidirectional line (at 0 0 0) (length 2.54)
+				(name "PH0" (effects (font (size 1.27 1.27))))
+				(number "5" (effects (font (size 1.27 1.27))))
+				(alternate "RCC_OSC_IN" bidirectional line)
+				(alternate "MCO_1" output line))
+		)
+	)
+)
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Test.kicad_sym"), lib_text).unwrap();
+    let table = SymbolTable::from_symbol_dir(dir.path().to_path_buf());
+    let symbol = table.symbol("Test:MCU").unwrap();
+
+    assert_eq!(symbol.pins[0].alternates, ["MCO_1", "RCC_OSC_IN"]);
+}
+
+#[test]
 fn extends_chain_resolves() {
     let Some(t) = installed() else {
         eprintln!("SKIP");
