@@ -266,6 +266,10 @@ pub(crate) fn route_signal(
     scene: &mut sch_model::route::RouteScene,
 ) -> io::Result<()> {
     let port = port_exit.map(|(side, _)| side);
+    // `label_policy` is Some only on the shipped sheet (see `wire`), which is the same
+    // signal the riser fan and the weld guard use: finalize-only repairs, so the
+    // per-move scorer realises every candidate through an unchanged code path.
+    let finalize = label_policy.is_some();
 
     // Terminals: real pins (with outward dir) + the virtual port exit `plan_port_exits`
     // already settled and reserved.
@@ -393,7 +397,9 @@ pub(crate) fn route_signal(
         .iter()
         .map(|tp| {
             tp.as_ref()
-                .is_none_or(|(it, num)| label_stub(w, env, scene, &items[*it].refdes, num, net).1)
+                .is_none_or(|(it, num)| {
+                    label_stub(w, env, scene, &items[*it].refdes, num, net, finalize).1
+                })
         })
         .collect();
 
@@ -613,7 +619,7 @@ pub(crate) fn route_signal(
                 continue; // named by the port label below
             }
             if let Some((i, num)) = pin {
-                let (stub, _) = label_stub(w, env, scene, &items[*i].refdes, num, net);
+                let (stub, _) = label_stub(w, env, scene, &items[*i].refdes, num, net, finalize);
                 w.add_signal_label_stub(env, &items[*i].refdes, num, net, stub)?;
                 if let Ok(ds) = w.pin_dirs(env, &items[*i].refdes, num) {
                     for (p, _) in ds {
@@ -662,11 +668,15 @@ pub(crate) fn route_signal(
 /// label tucks onto the pin endpoint itself, which is where the writer's stub retraction
 /// would put it anyway and which the lint exempts against the pin's own body.
 ///
-/// A rung whose anchor would MERGE the net with another (`anchor_merges`) is not a rung
-/// at all: readability may be given up, truthfulness may not. When every rung merges —
-/// which needs a foreign wire or pin over this pin's own tip, so only on a block drawn
-/// beside existing content — the default landing comes back reported as not clear, and
-/// the bridge picks another pin.
+/// On a `finalize` build a rung whose anchor would MERGE the net with another
+/// (`anchor_merges`) is not a rung at all: readability may be given up, truthfulness may
+/// not. When every rung merges — which needs a foreign wire or pin over this pin's own
+/// tip, so only on a block drawn beside existing content — the default landing comes
+/// back reported as not clear, and the bridge picks another pin.
+///
+/// FINALIZE-ONLY, like the riser fan and the weld guard: the per-move scorer realises
+/// every candidate through this same path, so filtering there would make a truthfulness
+/// repair part of the cost landscape and move placements that never had a short.
 fn label_stub(
     w: &SchematicWriter,
     env: &KicadInstallation,
@@ -674,6 +684,7 @@ fn label_stub(
     refdes: &str,
     num: &str,
     net: &str,
+    finalize: bool,
 ) -> (f64, bool) {
     const LADDER: [f64; 5] = [3.81, 6.35, 8.89, 11.43, 13.97];
     let Some((ep, dir)) = w
@@ -690,7 +701,7 @@ fn label_stub(
     let truthful: Vec<f64> = LADDER
         .into_iter()
         .chain([0.0])
-        .filter(|&s| !anchor_merges(scene, landing(s), net))
+        .filter(|&s| !finalize || !anchor_merges(scene, landing(s), net))
         .collect();
     match truthful
         .iter()

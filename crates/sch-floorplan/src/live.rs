@@ -1086,7 +1086,13 @@ fn beside_scene(doc: &SchDoc) -> sch_model::route::RouteScene {
 /// unnamed one-pin net, which is foreign to everything — including to the block that is
 /// about to wire it.
 fn beside_scene_excluding(doc: &SchDoc, redrawn: &[Item]) -> sch_model::route::RouteScene {
-    let own: Vec<geom::Point2> = redrawn
+    // `pin_endpoint` grid-snaps and the document's own pin geometry does not, so the two
+    // are compared on the grid: a pin the snap moved is still the same pin.
+    let key = |p: geom::Point2| {
+        let p = geom::GRID_50_MIL.snap_point(p);
+        ((p.x * 1000.0).round() as i64, (p.y * 1000.0).round() as i64)
+    };
+    let own: BTreeSet<(i64, i64)> = redrawn
         .iter()
         .flat_map(|item| {
             item.geom
@@ -1094,14 +1100,12 @@ fn beside_scene_excluding(doc: &SchDoc, redrawn: &[Item]) -> sch_model::route::R
                 .iter()
                 .filter(move |pin| pin.unit.max(1) == item.unit.max(1))
                 .map(move |pin| {
-                    sch_model::geometry::pin_endpoint(pin, item.at, item.angle, item.mirror).into()
+                    key(sch_model::geometry::pin_endpoint(pin, item.at, item.angle, item.mirror).into())
                 })
         })
         .collect();
     let mut scene = beside_scene(doc);
-    scene
-        .points
-        .retain(|(p, _)| !own.iter().any(|q| q.dist2(*p) < 0.01));
+    scene.points.retain(|(p, _)| !own.contains(&key(*p)));
     scene
 }
 
