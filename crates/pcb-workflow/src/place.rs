@@ -111,10 +111,10 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .map(|(name, &pins)| json!({ "name": name, "pins": pins }))
         .collect();
 
-    // Placed means every part has been laid out. A board can be half laid out —
-    // sync adds a part and it waits in the seed row — so the list is the fact
-    // and the flag is derived from it.
-    let unplaced = kicad_board::seed_row_references(&board.imported);
+    // A board is built incrementally, so its parts sit in three states at once:
+    // staged (in the seed row, with the reason they are there), placed, and
+    // locked. The lists are the fact; every flag is derived from them.
+    let state = crate::staging::BoardState::of(&board);
     let routed = !board.copper.traces.is_empty() || !board.copper.vias.is_empty();
     let parts: Vec<Value> = board
         .imported
@@ -128,6 +128,8 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "y": part.at.y,
                 "rotation": part.rotation,
                 "pad_count": part.pads.iter().filter(|pad| pad.net.is_some()).count(),
+                "locked_reason": crate::staging::lock_reason(part)
+                    .map(crate::staging::LockReason::as_str),
             })
         })
         .collect();
@@ -173,6 +175,10 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     if let Some(net) = net_filter {
         board_json["terminals"] = terminals_json(&board, net);
+        let scope = std::collections::BTreeSet::from([net.to_owned()]);
+        board_json["ratsnest"] = json!(
+            crate::ratsnest::build(&board, &board.problem, &[], Some(&scope)).entries
+        );
     }
 
     Ok(json!({
@@ -182,8 +188,10 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "net_count": net_pins.len(),
             "nets": nets,
             "keepout_count": board.imported.keepout_count,
-            "placed": unplaced.is_empty(),
-            "unplaced": unplaced,
+            "staged": state.staged_json(),
+            "placed": state.placed,
+            "locked": state.locked,
+            "fully_placed": state.staged.is_empty(),
             "routed": routed,
         },
     }))

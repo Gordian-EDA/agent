@@ -368,8 +368,12 @@ fn explain(violation: &DrcViolation, problem: &RoutingView, parts: &[ImportedPar
 // ── unrouted nets ────────────────────────────────────────────────────────────
 
 /// A terminal of a net, named the way a caller can act on it.
-struct Terminal {
-    pad: String,
+pub(crate) struct Terminal {
+    /// `U1.3`, or the `[x, y]` literal `route_track` also accepts when no pad
+    /// sits on the point.
+    pub(crate) pad: String,
+    /// The footprint owning the pad, when there is one.
+    pub(crate) reference: Option<String>,
     at: Point2,
     layer: String,
 }
@@ -378,9 +382,24 @@ impl Terminal {
     fn to_json(&self) -> Value {
         json!({ "pad": self.pad, "at": [round2(self.at.x), round2(self.at.y)], "layer": self.layer })
     }
+
+    /// The ratsnest endpoint shape: the part, the pad, where it is, and on what.
+    pub(crate) fn to_endpoint_json(&self) -> Value {
+        json!({
+            "ref": self.reference,
+            "pad": self.pad.rsplit_once('.').map_or(self.pad.as_str(), |(_, pad)| pad),
+            "x": round2(self.at.x),
+            "y": round2(self.at.y),
+            "layer": self.layer,
+        })
+    }
 }
 
-fn terminals_of(problem: &RoutingView, parts: &[ImportedPart], net: &str) -> Vec<Terminal> {
+pub(crate) fn terminals_of(
+    problem: &RoutingView,
+    parts: &[ImportedPart],
+    net: &str,
+) -> Vec<Terminal> {
     problem
         .connections
         .iter()
@@ -390,14 +409,16 @@ fn terminals_of(problem: &RoutingView, parts: &[ImportedPart], net: &str) -> Vec
                 .iter()
                 .map(|point| {
                     let at = point.point();
+                    // No pad on this point means no handle, so hand back the
+                    // coordinate form `route_track` also accepts rather than a
+                    // label it would reject.
+                    let handle = pads_at(parts, at).first().cloned();
                     Terminal {
-                        // No pad on this point means no handle, so hand back the
-                        // coordinate form `route_track` also accepts rather than
-                        // a label it would reject.
-                        pad: pads_at(parts, at)
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| format!("[{:.3}, {:.3}]", at.x, at.y)),
+                        reference: handle
+                            .as_ref()
+                            .and_then(|pad| pad.split_once('.'))
+                            .map(|(reference, _)| reference.to_owned()),
+                        pad: handle.unwrap_or_else(|| format!("[{:.3}, {:.3}]", at.x, at.y)),
                         at,
                         layer: point.layer.0.clone(),
                     }
@@ -412,13 +433,67 @@ fn terminals_of(problem: &RoutingView, parts: &[ImportedPart], net: &str) -> Vec
 ///
 /// This is board state, not a guess at the router's search: if a pad or keepout
 /// sits on the direct path, that is what a caller must move.
-fn obstruction_between(
+/// The thing standing between two terminals, in the terms a caller acts on.
+pub(crate) struct Obstruction {
+    /// `pad`, `track`, `via`, `zone`, or `courtyard` for a keep-out.
+    pub(crate) kind: &'static str,
+    /// The footprint that would have to move, when the blocker belongs to one.
+    pub(crate) owner_ref: Option<String>,
+    pub(crate) net: Option<String>,
+    pub(crate) layer: Option<String>,
+    pub(crate) at: Point2,
+    pub(crate) gap_mm: f64,
+    pub(crate) need_mm: f64,
+    /// The blocker named in prose, e.g. `U3.7 (net GND)`.
+    pub(crate) what: String,
+    pub(crate) detail: String,
+}
+
+impl Obstruction {
+    fn to_json(&self) -> Value {
+        json!({
+            "what": self.what,
+            "blocker": self.owner_ref,
+            "at": [round2(self.at.x), round2(self.at.y)],
+            "gap_mm": round3(self.gap_mm),
+            "detail": self.detail,
+        })
+    }
+
+    /// The ratsnest `blocker` shape.
+    pub(crate) fn to_blocker_json(&self) -> Value {
+        json!({
+            "kind": self.kind,
+            "owner_ref": self.owner_ref,
+            "net": self.net,
+            "layer": self.layer,
+            "at": [round2(self.at.x), round2(self.at.y)],
+            "gap_mm": round3(self.gap_mm),
+            "need_mm": round3(self.need_mm),
+        })
+    }
+}
+
+/// Which of the five blocker kinds an obstacle is. Anything the board does not
+/// name as copper is a placement keep-out, which on a KiCad board is a
+/// courtyard.
+fn obstacle_kind(kind: &str) -> &'static str {
+    match kind {
+        _ if kind.starts_with("pad:") => "pad",
+        "track" | "route-trace" => "track",
+        "via" | "route-via" => "via",
+        "zone" => "zone",
+        _ => "courtyard",
+    }
+}
+
+pub(crate) fn obstruction_between(
     problem: &RoutingView,
     parts: &[ImportedPart],
     net: &str,
     from: &Terminal,
     to: &Terminal,
-) -> Option<Value> {
+) -> Option<Obstruction> {
     let path = geom::Segment::new(from.at, to.at);
     // The two ends sit ON their own pads, whose neighbours are inches from the
     // line by construction. Naming one of those would tell the caller to move
@@ -458,18 +533,29 @@ fn obstruction_between(
         }
     }
     let (gap, obstacle) = best?;
-    let (what, blocker) = obstacle_label(parts, obstacle);
-    Some(json!({
-        "what": what,
-        "blocker": blocker,
-        "at": [round2(obstacle.center.x), round2(obstacle.center.y)],
-        "gap_mm": round3(gap.max(0.0)),
-        "detail": format!(
+    let (what, owner_ref) = obstacle_label(parts, obstacle);
+    Some(Obstruction {
+        kind: obstacle_kind(&obstacle.kind),
+        owner_ref,
+        net: obstacle.connected_to.first().cloned(),
+        layer: obstacle
+            .layers
+            .first()
+            .map(|layer| layer.0.clone())
+            .or_else(|| Some(from.layer.clone())),
+        at: obstacle.center,
+        gap_mm: gap.max(0.0),
+        need_mm: problem.clearance,
+        detail: format!(
             "the direct path is crossed by {what} at ({:.2}, {:.2}) mm, {:.3} mm from the line \
              (the board needs {:.2} mm)",
-            obstacle.center.x, obstacle.center.y, gap.max(0.0), problem.clearance
+            obstacle.center.x,
+            obstacle.center.y,
+            gap.max(0.0),
+            problem.clearance
         ),
-    }))
+        what,
+    })
 }
 
 /// Name an obstacle the way a caller can act on it, and the part (if any) that
@@ -521,12 +607,11 @@ fn unrouted_suggestion(
     net: &str,
     from: &Terminal,
     to: &Terminal,
-    obstruction: &Option<Value>,
+    obstruction: &Option<Obstruction>,
 ) -> String {
     match obstruction
         .as_ref()
-        .and_then(|o| o.get("blocker"))
-        .and_then(Value::as_str)
+        .and_then(|obstruction| obstruction.owner_ref.as_deref())
     {
         Some(blocker) => format!(
             "move_parts to shift {blocker} off the line between {} and {}, then \
@@ -589,7 +674,7 @@ pub(crate) fn unrouted_report(
                 "terminals": terminals.iter().map(Terminal::to_json).collect::<Vec<_>>(),
                 "layer_attempts": layer_names,
                 "reason": reasons.join("; "),
-                "obstruction": obstruction,
+                "obstruction": obstruction.as_ref().map(Obstruction::to_json),
                 "suggestion": match (from, to) {
                     (Some(a), Some(b)) if in_scope => unrouted_suggestion(net, a, b, &obstruction),
                     (Some(_), Some(_)) => format!(

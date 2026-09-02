@@ -67,6 +67,32 @@ struct ClassifiedViolation<'a> {
     violation: &'a Violation,
 }
 
+impl ClassifiedViolation<'_> {
+    /// Whether this finding is the board's to answer for. A finding that only
+    /// names parts still in the staging row is not: they are not part of the
+    /// board yet, and DRC has no rule for "never laid out".
+    fn blocks(&self) -> bool {
+        self.classification != "staged"
+    }
+}
+
+/// Re-classify every finding that only names staged parts, so the DRC verdict
+/// is about the board being built and not about the row waiting to join it.
+fn excuse_staged<'a>(
+    findings: &mut [ClassifiedViolation<'a>],
+    staged: &std::collections::BTreeSet<String>,
+) {
+    if staged.is_empty() {
+        return;
+    }
+    for finding in findings.iter_mut() {
+        let (_, refs, _) = violation_key(finding.violation);
+        if !refs.is_empty() && refs.iter().all(|reference| staged.contains(reference)) {
+            finding.classification = "staged";
+        }
+    }
+}
+
 fn bracketed_names(text: &str) -> impl Iterator<Item = &str> {
     text.split('[')
         .skip(1)
@@ -398,13 +424,9 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .as_ref()
         .map(|report| report.unconnected_items.as_slice())
         .unwrap_or_default();
-    let violations = classify_violations(&report.violations, baseline_violations);
-    let unconnected_findings = classify_violations(&report.unconnected_items, baseline_unconnected);
-    let meaningful_unconnected = unconnected_findings
-        .iter()
-        .filter(|finding| !is_zone_self_unconnected(finding.violation))
-        .copied()
-        .collect::<Vec<_>>();
+    let mut violations = classify_violations(&report.violations, baseline_violations);
+    let mut unconnected_findings =
+        classify_violations(&report.unconnected_items, baseline_unconnected);
     let board = match crate::active_board(ctx) {
         Ok(board) => board,
         Err(error) => {
@@ -417,6 +439,20 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }));
         }
     };
+    // A part still in the staging row is progress outstanding, not a defect:
+    // excuse its findings before anything counts them.
+    let state = crate::staging::BoardState::of(&board);
+    let staged_refs: std::collections::BTreeSet<String> =
+        state.staged.iter().map(|part| part.reference.clone()).collect();
+    excuse_staged(&mut violations, &staged_refs);
+    excuse_staged(&mut unconnected_findings, &staged_refs);
+    let violations = violations;
+    let unconnected_findings = unconnected_findings;
+    let meaningful_unconnected = unconnected_findings
+        .iter()
+        .filter(|finding| !is_zone_self_unconnected(finding.violation))
+        .copied()
+        .collect::<Vec<_>>();
     let containment = crate::board::guard::outline_containment(&board);
     let outline_blocking =
         containment.outside_outline.len() + usize::from(containment.copper_outside_outline > 0);
@@ -430,11 +466,22 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .filter(|finding| finding.classification == "introduced")
         .count();
-    let pre_existing_copper = gate.copper_violations - introduced_copper;
-    let pre_existing_unconnected = gate.meaningful_unconnected - introduced_unconnected;
+    // Staged parts are outside the verdict, so they are outside every count of
+    // it too: the gate's raw totals are reduced by what was excused.
+    let staged_copper = violations
+        .iter()
+        .filter(|finding| !finding.blocks() && !is_non_copper(finding.violation))
+        .count();
+    let staged_unconnected = meaningful_unconnected
+        .iter()
+        .filter(|finding| !finding.blocks())
+        .count();
+    let copper_violations = gate.copper_violations - staged_copper;
+    let unconnected_items = gate.meaningful_unconnected - staged_unconnected;
+    let pre_existing_copper = copper_violations - introduced_copper;
+    let pre_existing_unconnected = unconnected_items - introduced_unconnected;
     let blocking_findings = introduced_copper + introduced_unconnected + outline_blocking;
-    let blocking_findings_absolute =
-        gate.copper_violations + gate.meaningful_unconnected + outline_blocking;
+    let blocking_findings_absolute = copper_violations + unconnected_items + outline_blocking;
     let introduced = violations
         .iter()
         .chain(&unconnected_findings)
@@ -460,7 +507,10 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // A part left in the seed row is not a DRC finding — KiCAD has no rule for
     // "never laid out" — but it is exactly what the next `place_board({refs})`
     // call must name, so the completion signal has to say it.
-    let unplaced = kicad_board::seed_row_references(&board.imported);
+    let ratsnest = crate::ratsnest::build(&board, &board.problem, &[], None);
+    let blocked = ratsnest.blocked();
+    let staged = state.staged_json();
+    let staged_refs_list = state.staged_references();
     let unconnected = if meaningful_unconnected.is_empty() {
         Vec::new()
     } else {
@@ -533,6 +583,30 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             containment.copper_outside_outline
         ));
     }
+    let note = if blocking_findings == 0 {
+        format!(
+            "{note_prefix}Routed {}/{}; {} part(s) staged. No introduced blocking DRC \
+             findings; {pre_existing} pre-existing finding(s) and {silk_warnings} absolute \
+             silkscreen warning(s) remain.",
+            ratsnest.routed,
+            ratsnest.total,
+            staged_refs_list.len(),
+        )
+    } else {
+        format!("{note_prefix}Board checks reported {blocking_findings} blocking finding(s); inspect the introduced DRC findings and absolute outline containment first.")
+    };
+    let next = if !staged_refs_list.is_empty() {
+        format!(
+            "{} footprint(s) are still staged: call place_board({{\"refs\": {}}}) \
+             to lay them out, then route_board, then check_board again.",
+            staged_refs_list.len(),
+            serde_json::to_string(&staged_refs_list).unwrap_or_else(|_| "[]".to_owned()),
+        )
+    } else if blocking_findings == 0 {
+        "export_fab".to_owned()
+    } else {
+        "Fix the introduced blocking violations/unconnected items, then call check_board again. Leave pre-existing findings alone and do not resync blindly.".to_owned()
+    };
     let text = diagnostics.join("\n");
     Ok(json!({
         "ok": blocking_findings == 0,
@@ -552,10 +626,10 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "silk_references_moved": silk_references_moved,
         "silk_cleanup_error": silk_cleanup_error,
         "violations": report.violations.len(),
-        "copper_violations": gate.copper_violations,
+        "copper_violations": copper_violations,
         "introduced_copper_violations": introduced_copper,
         "pre_existing_copper_violations": pre_existing_copper,
-        "unconnected_items": gate.meaningful_unconnected,
+        "unconnected_items": unconnected_items,
         "introduced_unconnected_items": introduced_unconnected,
         "pre_existing_unconnected_items": pre_existing_unconnected,
         "ignored_zone_self_unconnected": gate.ignored_zone_self_unconnected,
@@ -580,26 +654,16 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         // which route_track / route_board{nets} call repairs the board.
         "unconnected": unconnected,
         "islands": islands,
-        // Footprints still in the seed row: place them with
-        // place_board({refs}) before routing expects copper to reach them.
-        "unplaced": unplaced,
-        "note": if blocking_findings == 0 {
-            format!("{note_prefix}No introduced blocking DRC findings; {pre_existing} pre-existing finding(s) and {silk_warnings} absolute silkscreen warning(s) remain.")
-        } else {
-            format!("{note_prefix}Board checks reported {blocking_findings} blocking finding(s); inspect the introduced DRC findings and absolute outline containment first.")
-        },
-        "next": if !unplaced.is_empty() {
-            format!(
-                "{} footprint(s) are still in the seed row: call place_board({{\"refs\": {}}}) \
-                 to lay them out, then route_board, then check_board again.",
-                unplaced.len(),
-                serde_json::to_string(&unplaced).unwrap_or_else(|_| "[]".to_owned()),
-            )
-        } else if blocking_findings == 0 {
-            "export_fab".to_owned()
-        } else {
-            "Fix the introduced blocking violations/unconnected items, then call check_board again. Leave pre-existing findings alone and do not resync blindly.".to_owned()
-        },
+        // Progress, not pass/fail: how much of the board is routed, what is
+        // standing in the way of the rest, and who is still in the staging row.
+        "routed": format!("{}/{}", ratsnest.routed, ratsnest.total),
+        "routed_connection_count": ratsnest.routed,
+        "total_connection_count": ratsnest.total,
+        "blocked": blocked,
+        "staged": staged,
+        "staged_count": staged_refs_list.len(),
+        "note": note,
+        "next": next,
     }))
 }
 

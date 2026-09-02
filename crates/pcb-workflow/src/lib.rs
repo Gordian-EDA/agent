@@ -26,6 +26,8 @@
 //! - [`staging`] — the seed row read back as board state: staged, placed, locked.
 //! - [`intent`] — board intent (edges, proximity, groups, zones) → placement
 //!   constraints. The model states intent; solvers own coordinates.
+//! - [`ratsnest`] — the one connectivity shape `get_board` and `route_board`
+//!   both answer with: endpoints, status, blocker, escapes.
 //! - [`selection`] — `bbox` board-window selection, lowered to the `refs` /
 //!   `nets` subsets the local tools take.
 //! - [`sizing`] — how big a board its own parts require.
@@ -36,6 +38,10 @@
 //! - [`render`] — `render_board`.
 //! - [`interactive`] — file-backed board editing (`move_parts`, `route_track`,
 //!   `delete_copper`, `set_net_width`). Reload the file in KiCad after changes.
+
+// `check_board`'s single JSON payload is wider than the `json!` macro's default
+// expansion depth.
+#![recursion_limit = "256"]
 
 mod board;
 mod copper;
@@ -52,6 +58,7 @@ mod outline;
 mod place;
 mod render;
 mod route;
+mod ratsnest;
 mod rules;
 mod seed;
 mod selection;
