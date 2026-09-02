@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use kicad_board::{sexpr_end, sexpr_point};
-use pcb_model::{Part, PlacementView, Point2, Polygon, Rect, RouteSolution};
+use pcb_model::{PlaceReport, PlaceResult, Placement, PlacementHints, Point2, Polygon, Rect};
 use serde_json::{Value, json};
 
 use gordian_runtime::AgentRuntime;
@@ -19,31 +19,22 @@ use super::create::req_num;
 /// Inputs:
 /// - `bounds`: `{min_x,max_x,min_y,max_y}` rectangular outline in mm.
 /// - `outline`: `[[x,y], ...]` arbitrary closed polygon in mm.
-/// - `fit_to_geometry`: when true, derives rectangular bounds from current
-///   footprint/copper geometry plus `margin`.
+/// - `fit`: re-place an unrouted board on its compact rule-derived frame.
 pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let fit = input
-        .get("fit_to_geometry")
+        .get("fit")
         .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let margin = input.get("margin").and_then(Value::as_f64).unwrap_or(2.0);
+        .unwrap_or(false)
+        || input
+            .get("fit_to_geometry")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
-    let outline = if fit {
-        let board = match crate::active_board(ctx) {
-            Ok(board) => board,
-            Err(err) => return Ok(json!({ "error": err })),
-        };
-        let placement = match super::place::place_problem_from_snapshot(&board, ctx) {
-            Ok(placement) => placement,
-            Err(err) => return Ok(json!({ "error": err })),
-        };
-        let Some(bounds) = geometry_bounds(&board, &placement) else {
-            return Ok(json!({
-                "error": "cannot fit outline: board has no footprint or copper geometry"
-            }));
-        };
-        Outline::Rect(expand_rect(bounds, margin))
-    } else if input.get("outline").is_some() {
+    if fit {
+        return refit_existing_board(ctx);
+    }
+
+    let outline = if input.get("outline").is_some() {
         match parse_outline(input.get("outline")) {
             Ok(poly) => Outline::Polygon(poly),
             Err(msg) => return Ok(json!({ "error": msg })),
@@ -55,7 +46,7 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     } else {
         return Ok(json!({
-            "error": "update_board_outline needs `bounds`, `outline`, or fit_to_geometry=true"
+            "error": "update_board_outline needs `bounds`, `outline`, or fit=true"
         }));
     };
 
@@ -75,7 +66,7 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("reading board {}", path.display()))?;
     let changed = !edge_cuts_match(&text, &outline)?;
-    let updated = replace_edge_cuts(&text, &outline)?;
+    let updated = replace_edge_cuts(&text, &outline, false)?;
     if changed {
         ctx.close_kicad_session();
         crate::route::write_board_atomically(&path, updated.as_bytes())
@@ -91,6 +82,117 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "outline_points": outline.point_count(),
         "note": "updated Edge.Cuts on the existing PCB without regenerating placement or routing",
     })))
+}
+
+fn refit_existing_board(ctx: &AgentRuntime) -> Result<Value> {
+    let board = match crate::active_board(ctx) {
+        Ok(board) => board,
+        Err(err) => return Ok(json!({ "error": err })),
+    };
+    if !board.copper.traces.is_empty() || !board.copper.vias.is_empty() {
+        return Ok(json!({
+            "error": "cannot re-fit a routed board: moving footprints would detach existing copper; re-fit before route_board, or deliberately re-place the whole board first"
+        }));
+    }
+    let placement = match super::place::place_problem_from_snapshot(&board, ctx) {
+        Ok(placement) => placement,
+        Err(err) => return Ok(json!({ "error": err })),
+    };
+    let path = ctx.pcb_path();
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading board {}", path.display()))?;
+    if let Err(error) = managed_outline_bounds(&text) {
+        return Ok(json!({ "error": error }));
+    }
+    let mut hints = PlacementHints::default();
+    for part in &board.imported.parts {
+        if super::place::is_connector(&part.lib_id, &part.reference) {
+            hints.edge_seek.push(part.reference.clone());
+        }
+    }
+    let current = PlaceResult {
+        placements: board
+            .imported
+            .parts
+            .iter()
+            .map(|part| Placement {
+                reference: part.reference.clone(),
+                at: part.at,
+                rotation: part.rotation as f64,
+            })
+            .collect(),
+        legal: true,
+        report: PlaceReport::default(),
+    };
+    let Some(plan) = super::place::plan_outline_refit(
+        &placement,
+        &board.imported.parts,
+        &board.problem,
+        &hints,
+        &current,
+    ) else {
+        return Ok(json!({
+            "error": "cannot re-fit this placement to a smaller legal rule-derived rectangle"
+        }));
+    };
+    let gate = match Guard::open(
+        ctx,
+        "update_board_outline",
+        "Re-fit the board outline",
+        std::slice::from_ref(&path),
+    ) {
+        Ok(gate) => gate,
+        Err(refusal) => return Ok(refusal),
+    };
+    let locked: std::collections::BTreeSet<&str> = board
+        .imported
+        .parts
+        .iter()
+        .filter(|part| part.locked)
+        .map(|part| part.reference.as_str())
+        .collect();
+    let moves: Vec<kicad_ipc::FootprintMove> = plan
+        .result
+        .placements
+        .iter()
+        .filter(|placement| !locked.contains(placement.reference.as_str()))
+        .map(|placement| kicad_ipc::FootprintMove {
+            reference: placement.reference.clone(),
+            x_nm: kicad_ipc::units::mm_to_nm(placement.at.x),
+            y_nm: kicad_ipc::units::mm_to_nm(placement.at.y),
+            rotation_deg: Some(placement.rotation),
+        })
+        .collect();
+    if let Err(error) = super::place::write_placement(ctx, &moves) {
+        return Ok(gate.rollback(
+            ctx,
+            json!({ "error": format!("could not write compact placement: {error}") }),
+        ));
+    }
+    let placed = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading placed board {}", path.display()))?;
+    let updated = match replace_managed_outline(&placed, plan.to) {
+        Ok(updated) => updated,
+        Err(error) => return Ok(gate.rollback(ctx, json!({ "error": error.to_string() }))),
+    };
+    ctx.close_kicad_session();
+    if let Err(error) = crate::route::write_board_atomically(&path, updated.as_bytes()) {
+        return Ok(gate.rollback(
+            ctx,
+            json!({ "error": format!("could not write fitted outline: {error}") }),
+        ));
+    }
+    Ok(gate.commit(
+        ctx,
+        json!({
+            "ok": true,
+            "changed": plan.from != plan.to,
+            "path": path.display().to_string(),
+            "bounds": plan.to,
+            "outline_refit": outline_refit_json(&plan),
+            "note": "re-placed the unrouted board on its compact rule-derived managed outline",
+        }),
+    ))
 }
 
 enum Outline {
@@ -153,96 +255,7 @@ fn parse_outline(v: Option<&Value>) -> std::result::Result<Polygon, String> {
     Polygon::new(points)
 }
 
-fn geometry_bounds(
-    board: &kicad_board::IpcBoardSnapshot,
-    placement: &PlacementView,
-) -> Option<Rect> {
-    let mut bounds = routed_copper_bounds(&board.copper);
-    for (imported, part) in board.imported.parts.iter().zip(&placement.parts) {
-        debug_assert_eq!(imported.reference, part.reference);
-        include_rect(
-            &mut bounds,
-            placed_part_bounds(imported.at, imported.rotation as f64, part),
-        );
-    }
-    bounds
-}
-
-/// World-space bounds of a placed footprint, including its courtyard and every
-/// pad's actual offset and copper extent. The latter is deliberately explicit:
-/// some connector pads extend beyond a library courtyard, and fitting Edge.Cuts
-/// to footprint origins alone can clip them.
-fn placed_part_bounds(at: Point2, rotation: f64, part: &Part) -> Rect {
-    let courtyard_half =
-        Point2::new(part.courtyard_w / 2.0, part.courtyard_h / 2.0).rotated_half_extents(rotation);
-    let mut bounds = Rect::from_center_half(at, (courtyard_half.x, courtyard_half.y));
-    for pad in &part.pads {
-        let center = pad.offset.rotate(rotation);
-        let center = Point2::new(at.x + center.x, at.y + center.y);
-        let half = Point2::new(pad.width / 2.0, pad.height / 2.0).rotated_half_extents(rotation);
-        extend_rect(
-            &mut bounds,
-            Rect::from_center_half(center, (half.x, half.y)),
-        );
-    }
-    bounds
-}
-
-fn routed_copper_bounds(copper: &RouteSolution) -> Option<Rect> {
-    let mut bounds = None;
-    for trace in &copper.traces {
-        let half = trace.width / 2.0;
-        for point in &trace.path {
-            include_rect(
-                &mut bounds,
-                Rect::new(
-                    point.x - half,
-                    point.y - half,
-                    point.x + half,
-                    point.y + half,
-                ),
-            );
-        }
-    }
-    for via in &copper.vias {
-        let half = via.diameter / 2.0;
-        include_rect(
-            &mut bounds,
-            Rect::new(
-                via.at.x - half,
-                via.at.y - half,
-                via.at.x + half,
-                via.at.y + half,
-            ),
-        );
-    }
-    bounds
-}
-
-fn include_rect(bounds: &mut Option<Rect>, rect: Rect) {
-    match bounds {
-        Some(bounds) => extend_rect(bounds, rect),
-        None => *bounds = Some(rect),
-    }
-}
-
-fn extend_rect(bounds: &mut Rect, rect: Rect) {
-    bounds.min_x = bounds.min_x.min(rect.min_x);
-    bounds.min_y = bounds.min_y.min(rect.min_y);
-    bounds.max_x = bounds.max_x.max(rect.max_x);
-    bounds.max_y = bounds.max_y.max(rect.max_y);
-}
-
-fn expand_rect(mut rect: Rect, margin: f64) -> Rect {
-    let margin = margin.max(0.0);
-    rect.min_x -= margin;
-    rect.max_x += margin;
-    rect.min_y -= margin;
-    rect.max_y += margin;
-    rect
-}
-
-fn replace_edge_cuts(board: &str, outline: &Outline) -> Result<String> {
+fn replace_edge_cuts(board: &str, outline: &Outline, managed: bool) -> Result<String> {
     let stripped = remove_edge_cut_shapes(board)?;
     let insert_at = stripped
         .find("\n\t(footprint ")
@@ -250,7 +263,7 @@ fn replace_edge_cuts(board: &str, outline: &Outline) -> Result<String> {
         .context("could not find insertion point in .kicad_pcb")?;
     let mut out = String::with_capacity(stripped.len() + 512);
     out.push_str(&stripped[..insert_at]);
-    out.push_str(&edge_cut_sexpr(outline));
+    out.push_str(&edge_cut_sexpr(outline, managed));
     out.push_str(&stripped[insert_at..]);
     Ok(out)
 }
@@ -354,7 +367,7 @@ fn points_match(a: Point2, b: Point2) -> bool {
     a.near_eq(b, geom::STRICT_EPS)
 }
 
-fn edge_cut_sexpr(outline: &Outline) -> String {
+fn edge_cut_sexpr(outline: &Outline, managed: bool) -> String {
     match outline {
         Outline::Rect(rect) => {
             let x0 = super::fmt_num(rect.min_x);
@@ -365,7 +378,11 @@ fn edge_cut_sexpr(outline: &Outline) -> String {
                 "\n\t(gr_rect\n\t\t(start {x0} {y0})\n\t\t(end {x1} {y1})\n\
                  \t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n\
                  \t\t(fill no)\n\t\t(layer \"Edge.Cuts\")\n\t\t(uuid \"{}\")\n\t)\n",
-                outline_uuid("rect", 0)
+                if managed {
+                    managed_rect_uuid(rect)
+                } else {
+                    outline_uuid("rect", 0)
+                }
             )
         }
         Outline::Polygon(poly) => {
@@ -390,6 +407,105 @@ fn edge_cut_sexpr(outline: &Outline) -> String {
     }
 }
 
+fn managed_rect_uuid(rect: &Rect) -> String {
+    seed_uuid(&format!(
+        "edge:{}:{}:{}:{}",
+        super::fmt_num(rect.min_x),
+        super::fmt_num(rect.min_y),
+        super::fmt_num(rect.max_x),
+        super::fmt_num(rect.max_y)
+    ))
+}
+
+fn seed_uuid(key: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    "gordian-seed-a".hash(&mut h1);
+    key.hash(&mut h1);
+    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+    "gordian-seed-b".hash(&mut h2);
+    key.hash(&mut h2);
+    let a = h1.finish();
+    let b = h2.finish();
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        (a >> 32) as u32,
+        (a >> 16) as u16,
+        (a as u16 & 0x0fff) | 0x5000,
+        ((b >> 48) as u16 & 0x3fff) | 0x8000,
+        b & 0x0000_ffff_ffff_ffff
+    )
+}
+
+pub(crate) fn managed_outline_bounds(board: &str) -> std::result::Result<Rect, String> {
+    let blocks = edge_cut_blocks(board).map_err(|error| error.to_string())?;
+    let [block] = blocks.as_slice() else {
+        return Err(managed_outline_error());
+    };
+    if !block.starts_with("(gr_rect") {
+        return Err(managed_outline_error());
+    }
+    let start = sexpr_point(block, "start").ok_or_else(managed_outline_error)?;
+    let end = sexpr_point(block, "end").ok_or_else(managed_outline_error)?;
+    let rect = Rect::new(
+        start.x.min(end.x),
+        start.y.min(end.y),
+        start.x.max(end.x),
+        start.y.max(end.y),
+    );
+    if rect.width() <= geom::EPS || rect.height() <= geom::EPS {
+        return Err(managed_outline_error());
+    }
+    let actual_uuid = block
+        .split_once("(uuid \"")
+        .and_then(|(_, tail)| tail.split_once("\")"))
+        .map(|(uuid, _)| uuid);
+    if actual_uuid != Some(managed_rect_uuid(&rect).as_str()) {
+        return Err(
+            "cannot re-fit outline: the rectangular Edge.Cuts was hand-edited after seeding; automatic re-fit only changes its matching managed seed rectangle".to_owned(),
+        );
+    }
+    Ok(rect)
+}
+
+fn managed_outline_error() -> String {
+    "cannot re-fit outline: Edge.Cuts is not the single managed seed rectangle; non-rectangular or user-drawn outlines are never changed automatically".to_owned()
+}
+
+pub(crate) fn replace_managed_outline(board: &str, rect: Rect) -> Result<String> {
+    managed_outline_bounds(board).map_err(anyhow::Error::msg)?;
+    replace_edge_cuts(board, &Outline::Rect(rect), true)
+}
+
+pub(crate) fn outline_refit_json(plan: &super::place::OutlineRefitPlan) -> Value {
+    let rect_json = |rect: Rect| {
+        json!({
+            "min_x": rect.min_x,
+            "min_y": rect.min_y,
+            "max_x": rect.max_x,
+            "max_y": rect.max_y,
+            "width": rect.width(),
+            "height": rect.height(),
+        })
+    };
+    json!({
+        "from": rect_json(plan.from),
+        "to": rect_json(plan.to),
+        "routing_headroom_mm": {
+            "west": plan.headroom.west,
+            "east": plan.headroom.east,
+            "north": plan.headroom.north,
+            "south": plan.headroom.south,
+        },
+        "nets_per_edge": {
+            "west": plan.edge_net_counts[0],
+            "east": plan.edge_net_counts[1],
+            "north": plan.edge_net_counts[2],
+            "south": plan.edge_net_counts[3],
+        },
+    })
+}
+
 fn outline_uuid(kind: &str, idx: usize) -> String {
     // Stable UUID-shaped values; uniqueness only needs to hold within this board.
     format!("0f1e0000-0000-4000-8000-{idx:08x}{}", suffix(kind))
@@ -405,55 +521,6 @@ fn suffix(kind: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pcb_model::PartPad;
-    use pcb_model::{LayerRef, Trace, Via, ViaSpan};
-
-    #[test]
-    fn fit_bounds_include_rotated_courtyard_and_off_center_pad_extents() {
-        let part = Part {
-            reference: "J1".to_owned(),
-            courtyard_w: 2.0,
-            courtyard_h: 6.0,
-            pads: vec![PartPad {
-                number: "1".to_owned(),
-                offset: Point2::new(4.0, 0.0),
-                width: 2.0,
-                height: 1.0,
-                layers: vec![LayerRef::top()],
-                net: Some("VBUS".to_owned()),
-            }],
-            edge_datum: None,
-            locked: None,
-        };
-
-        let bounds = placed_part_bounds(Point2::new(10.0, 20.0), 90.0, &part);
-
-        assert_eq!(bounds, Rect::new(7.0, 15.0, 13.0, 21.0));
-    }
-
-    #[test]
-    fn fit_bounds_include_trace_width_and_via_diameter() {
-        let copper = RouteSolution {
-            traces: vec![Trace {
-                connection: "N1".to_owned(),
-                layer: LayerRef::top(),
-                width: 2.0,
-                path: vec![Point2::new(1.0, 2.0), Point2::new(5.0, 6.0)],
-            }],
-            vias: vec![Via {
-                connection: "N1".to_owned(),
-                at: Point2::new(-3.0, 10.0),
-                diameter: 4.0,
-                drill: 2.0,
-                span: ViaSpan::Through,
-            }],
-        };
-
-        assert_eq!(
-            routed_copper_bounds(&copper),
-            Some(Rect::new(-5.0, 1.0, 6.0, 12.0))
-        );
-    }
 
     #[test]
     fn replaces_rectangular_edge_cuts() {
@@ -466,6 +533,7 @@ mod tests {
                 max_x: 12.0,
                 max_y: 13.0,
             }),
+            false,
         )
         .unwrap();
         assert!(updated.contains("(start 2 3)"));
@@ -501,9 +569,29 @@ mod tests {
             Point2 { x: 5.0, y: 8.0 },
         ])
         .unwrap();
-        let updated = replace_edge_cuts(board, &Outline::Polygon(poly)).unwrap();
+        let updated = replace_edge_cuts(board, &Outline::Polygon(poly), false).unwrap();
         assert_eq!(updated.matches("(layer \"Edge.Cuts\")").count(), 3);
         assert!(updated.contains("(gr_line"));
         assert!(!updated.contains("(gr_rect"));
+    }
+
+    #[test]
+    fn managed_rectangle_round_trips_and_rejects_coordinate_edits() {
+        let original = Rect::new(2.0, 3.0, 12.0, 13.0);
+        let board = format!("(kicad_pcb{})", edge_cut_sexpr(&Outline::Rect(original), true));
+
+        assert_eq!(managed_outline_bounds(&board).unwrap(), original);
+        let changed = board.replacen("(end 12 13)", "(end 12.5 13)", 1);
+        assert!(managed_outline_bounds(&changed).unwrap_err().contains("hand-edited"));
+    }
+
+    #[test]
+    fn managed_outline_rejects_user_drawn_edges() {
+        let board = r#"(kicad_pcb
+            (gr_line (start 0 0) (end 10 0) (layer "Edge.Cuts") (uuid "a"))
+            (gr_line (start 10 0) (end 0 0) (layer "Edge.Cuts") (uuid "b"))
+        )"#;
+
+        assert!(managed_outline_bounds(board).unwrap_err().contains("user-drawn"));
     }
 }

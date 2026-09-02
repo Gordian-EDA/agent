@@ -115,6 +115,55 @@ const PACKING_FACTOR: f64 = 2.0;
 /// Copper must keep this far from the board edge, so every part is inset by it.
 const EDGE_CLEAR_MM: f64 = 0.5;
 
+/// Routing rules and per-edge channel demand for a placed-board outline fit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RoutingChannels {
+    pub clearance: f64,
+    pub track_width: f64,
+    pub via_diameter: f64,
+    pub layer_count: u32,
+    /// West, east, north, south net counts.
+    pub edge_net_counts: [usize; 4],
+}
+
+/// Routing space outside the compact placed-part core, in millimetres.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct EdgeHeadroom {
+    pub west: f64,
+    pub east: f64,
+    pub north: f64,
+    pub south: f64,
+}
+
+/// Convert channel density into a physical routing strip on every edge.
+///
+/// A strip carries `ceil(edge_nets / copper_layers)` parallel lanes. Empty
+/// strips retain only KiCad's copper-to-edge clearance. Otherwise the strip is
+/// `edge_clear + clearance + lanes × max(track_width, via_diameter) +
+/// (lanes - 1) × clearance`.
+pub(crate) fn routing_headroom(channels: RoutingChannels) -> EdgeHeadroom {
+    let element = channels.track_width.max(channels.via_diameter).max(0.0);
+    let clearance = channels.clearance.max(0.0);
+    let layers = channels.layer_count.max(1) as usize;
+    let strip = |nets: usize| {
+        let lanes = nets.div_ceil(layers);
+        if lanes == 0 {
+            EDGE_CLEAR_MM
+        } else {
+            EDGE_CLEAR_MM
+                + clearance
+                + lanes as f64 * element
+                + lanes.saturating_sub(1) as f64 * clearance
+        }
+    };
+    EdgeHeadroom {
+        west: strip(channels.edge_net_counts[0]),
+        east: strip(channels.edge_net_counts[1]),
+        north: strip(channels.edge_net_counts[2]),
+        south: strip(channels.edge_net_counts[3]),
+    }
+}
+
 /// The board sizes a set of parts implies, mm.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BoardSizing {
@@ -261,6 +310,31 @@ mod tests {
             layer_count: 2,
             net_count: 8,
         }
+    }
+
+    #[test]
+    fn routing_headroom_scales_with_cut_density_and_layer_capacity() {
+        let two_layer = routing_headroom(RoutingChannels {
+            clearance: 0.2,
+            track_width: 0.25,
+            via_diameter: 0.6,
+            layer_count: 2,
+            edge_net_counts: [0, 1, 5, 8],
+        });
+        assert_eq!(two_layer.west, EDGE_CLEAR_MM);
+        assert!((two_layer.east - 1.3).abs() < 1e-9);
+        assert!((two_layer.north - 2.9).abs() < 1e-9);
+        assert!((two_layer.south - 3.7).abs() < 1e-9);
+
+        let four_layer = routing_headroom(RoutingChannels {
+            clearance: 0.2,
+            track_width: 0.25,
+            via_diameter: 0.6,
+            layer_count: 4,
+            edge_net_counts: [0, 1, 5, 8],
+        });
+        assert!(four_layer.north < two_layer.north);
+        assert!(four_layer.south < two_layer.south);
     }
 
     #[test]
