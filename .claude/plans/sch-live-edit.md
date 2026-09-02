@@ -146,3 +146,12 @@ the turn's first revision) or `pre-existing`, and the loop summary must say "N n
 pre-existing"; the model then fixes what it broke and leaves inherited warnings alone
 unless asked. Same for `render_schematic`'s `visual` facts (`_added` is already computed
 by the harness — move it into the tool).
+
+## Queued (ctri4, 2026-09-02): placement is a HARD deadline
+A `place_parts` on an 88-part sheet ran 68 s past a 45 s budget (25% of the wall clock) and
+still refused. The engine polls the deadline but realise/verify/gate do not, and a slow
+engine step can overrun by tens of seconds. Make the budget a hard cancel: run the engine +
+realiser on a worker thread, abandon it at the deadline (discard its result, return the
+refusal immediately), and size the default block so ≥60-part sheets are placed as
+regions (`place_parts` of a block onto the existing sheet) rather than whole-sheet
+re-placements. After `lane/spine-panic` merges (shared `bulk.rs` ladder).
