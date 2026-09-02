@@ -963,6 +963,36 @@ fn undo(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .map(|file| ctx.project_dir().join(&file.path))
         .collect();
+    // Restoring a revision captured before a file existed DELETES that file. When
+    // it is the project's own schematic or board, a blind `undo` after a failed
+    // check throws the whole design away and every later tool answers "no
+    // schematic yet". Ask for the revision by number to mean it.
+    let removals: Vec<String> = target
+        .files
+        .iter()
+        .filter(|file| !file.existed)
+        .map(|file| ctx.project_dir().join(&file.path))
+        .filter(|path| path.exists())
+        .map(|path| path.display().to_string())
+        .collect();
+    let design = [ctx.sch_path().to_path_buf(), ctx.pcb_path()]
+        .iter()
+        .map(|path| path.display().to_string())
+        .filter(|path| removals.contains(path))
+        .collect::<Vec<_>>();
+    if id.is_none() && !design.is_empty() {
+        return Ok(json!({
+            "error": format!(
+                "refused: undoing revision {} would delete the project's own {} — the design \
+                 would be gone and every later tool would report `no schematic yet`. Pass \
+                 `revision` explicitly to mean it, or undo a later revision.",
+                target.id,
+                design.join(" and "),
+            ),
+            "would_remove": removals,
+            "revision_offered": target.id,
+        }));
+    }
     let revision = match ctx.revisions().capture(
         "undo",
         &format!("Restore revision {}", target.id),

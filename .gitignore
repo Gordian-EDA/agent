@@ -35,3 +35,5 @@ tools/vendor/freerouting.jar
 logs/
 freerouting.json
 tools/vendor/freerouting-2.2.4.jar
+/target-slow
+/target-rel

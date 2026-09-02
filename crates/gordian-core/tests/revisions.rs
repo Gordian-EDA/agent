@@ -101,3 +101,44 @@ fn undo_and_history_span_schematic_and_board_mutators() {
         assert!(history.contains(tool), "history omitted {tool}:\n{history}");
     }
 }
+
+/// A bare `undo` after the very first `place_parts` would restore the state from
+/// before the schematic existed — which DELETES it, and every later tool then
+/// answers "no schematic yet". Meaning that costs a revision number.
+#[test]
+fn a_bare_undo_refuses_to_delete_the_only_schematic() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let _ = std::fs::remove_file(ctx.sch_path());
+    tool(
+        &ctx,
+        "place_parts",
+        json!({"block": "divider", "parts": [
+            {"ref": "R1", "part": "Device:R", "value": "10k", "footprint": R0805,
+             "pins": {"1": "VIN", "2": "SENSE"}},
+            {"ref": "R2", "part": "Device:R", "value": "10k", "footprint": R0805,
+             "pins": {"1": "SENSE", "2": "GND"}}
+        ]}),
+    );
+
+    let refused = run_tool("undo", json!({}), &ctx).unwrap();
+
+    let error = refused["error"].as_str().unwrap_or_default();
+    let sch = ctx.sch_path().display().to_string();
+    assert!(error.contains(&sch), "{refused:#}");
+    assert!(
+        refused["would_remove"]
+            .as_array()
+            .is_some_and(|files| !files.is_empty()),
+        "the refusal did not list what it would remove: {refused:#}"
+    );
+    assert!(ctx.sch_path().exists(), "the schematic was deleted anyway");
+
+    // Named explicitly, it is what the caller meant.
+    let revision = refused["revision_offered"].as_u64().unwrap();
+    let done = run_tool("undo", json!({ "revision": revision }), &ctx).unwrap();
+    assert!(done.get("error").is_none(), "{done:#}");
+    assert!(!ctx.sch_path().exists(), "the explicit undo did nothing");
+}
