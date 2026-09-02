@@ -2836,7 +2836,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                         .filter_map(Value::as_str)
                         .collect::<Vec<_>>()
                         .join(", ");
-                    let message = finding.get("message")?.as_str()?;
+                    let message = compact_summary_text(finding.get("message")?.as_str()?, 120);
                     let mut summary = if references.is_empty() {
                         format!("{code}: {message}")
                     } else {
@@ -2847,13 +2847,20 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                         finding.pointer("/fix/args"),
                     ) {
                         summary.push_str(&format!(" → fix: {tool}{args}"));
+                    } else if finding.get("fix").is_some_and(Value::is_null) {
+                        let why = finding
+                            .get("why")
+                            .and_then(Value::as_str)
+                            .map(|why| compact_summary_text(why, 100))
+                            .unwrap_or_else(|| "no safe one-call repair".to_string());
+                        summary.push_str(&format!(" → fix: null ({why})"));
                     }
                     Some(summary)
                 })
                 .map(|finding| {
                     format!(
                         " — first blocking finding: {}",
-                        compact_summary_text(&finding, 180)
+                        compact_summary_text(&finding, 500)
                     )
                 })
                 .unwrap_or_default();
@@ -3259,6 +3266,28 @@ mod tests {
             "1 introduced, 11 pre-existing — first blocking finding: power_pin_not_driven at \
              U1.8: no driver on net VCC → fix: add_power{\"net\":\"VCC\",\"pin\":\"U1.8\"}"
         );
+    }
+
+    #[test]
+    fn a_long_check_summary_keeps_the_fix_visible() {
+        let result = json!({
+            "introduced": 1,
+            "pre_existing": 0,
+            "findings": [{
+                "classification": "introduced",
+                "severity": "error",
+                "code": "footprint-pins",
+                "message": "a very long footprint compatibility explanation that names every missing pad and every extra symbol pin before eventually describing the repair the model must make",
+                "refs": ["J1"],
+                "fix": null,
+                "why": "No installed footprint is proven compatible with this symbol."
+            }]
+        });
+
+        let summary = tool_summary("check_schematic", &json!({}), &result);
+
+        assert!(summary.contains("→ fix: null"), "{summary}");
+        assert!(summary.contains("No installed footprint"), "{summary}");
     }
 
     /// `check_board` is the same shape: `ok: false` is DRC's verdict on the
