@@ -117,3 +117,7 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   replace-pcb-component 9, finish-existing-pcb 7/7; led-driver fails only on schematic looks.
   Open: `next_refdes` must consult the `reserve_refs` store (W3); human-look PCB reference board fails
   to render (harness fix).
+- Harness reference fallback merged (PCB ref: demos/microwave; sch ref: sallen_key). First honest
+  human-look PCB verdict on the LED driver: 4/10 — "reference designators scattered far from their
+  footprints", oversized outline, silkscreen alignment → queue a PCB-looks lane (silk placement next
+  to footprints, outline refit, alignment) after W3.
