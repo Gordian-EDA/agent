@@ -1,5 +1,5 @@
 use super::anneal::{greedy_swap_polish_with_order, routing_aware_swap_order};
-use super::cost::place_cost;
+use super::cost::{CostTerms, place_cost};
 use super::cost::ratline_crossings;
 use super::cost::ratline_obstruction_pressure;
 use super::geometry::{
@@ -868,8 +868,8 @@ fn greedy_swap_polish_untangles_crossed_two_pin_ratlines() {
         .map(|(p, &r)| rotated_courtyard_half(p, r))
         .collect();
     let margin = courtyard_margin(problem.clearance);
-    let pairs = Vec::new();
-    let edge_idx = Vec::new();
+    let pairs: Vec<(usize, usize)> = Vec::new();
+    let terms = CostTerms::new(&problem, &PlacementHints::default(), pairs.clone());
     let mut pos = vec![
         Point2 { x: 5.0, y: 5.0 },
         Point2 { x: 25.0, y: 5.0 },
@@ -878,7 +878,7 @@ fn greedy_swap_polish_untangles_crossed_two_pin_ratlines() {
     ];
     let cost_of = |p: &[Point2]| {
         place_cost(
-            &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, p,
+            &problem, &nets, &half, margin, &rotations, &terms, p,
         )
     };
     let mut cost = cost_of(&pos);
@@ -1138,11 +1138,11 @@ fn position_polish_takes_legal_grid_step_that_lowers_cost() {
         .map(|(p, &r)| rotated_copper_bbox(p, r))
         .collect();
     let margin = courtyard_margin(problem.clearance);
-    let pairs = Vec::new();
-    let edge_idx = Vec::new();
+    let pairs: Vec<(usize, usize)> = Vec::new();
+    let terms = CostTerms::new(&problem, &PlacementHints::default(), pairs.clone());
     let mut pos = vec![Point2 { x: 5.0, y: 5.0 }, Point2 { x: 10.0, y: 5.0 }];
     let before = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     let before_dist = pos[0].dist(pos[1]);
 
@@ -1150,8 +1150,7 @@ fn position_polish_takes_legal_grid_step_that_lowers_cost() {
         &problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &rotations,
         &half,
         &copper_bbox,
@@ -1159,7 +1158,7 @@ fn position_polish_takes_legal_grid_step_that_lowers_cost() {
     );
 
     let after = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     assert!(
         after + 1e-9 < before,
@@ -1206,17 +1205,17 @@ fn position_polish_can_jump_over_narrow_illegal_band() {
         .map(|(p, &r)| rotated_copper_bbox(p, r))
         .collect();
     let margin = courtyard_margin(problem.clearance);
-    let pairs = Vec::new();
-    let edge_idx = Vec::new();
+    let pairs: Vec<(usize, usize)> = Vec::new();
+    let terms = CostTerms::new(&problem, &PlacementHints::default(), pairs.clone());
     let mut pos = vec![Point2 { x: 5.0, y: 5.0 }, Point2 { x: 12.0, y: 5.0 }];
     assert!(is_legal(&problem, &half, &copper_bbox, margin, &pos));
     let before = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     let jumped = vec![Point2 { x: 7.0, y: 5.0 }, Point2 { x: 12.0, y: 5.0 }];
     assert!(is_legal(&problem, &half, &copper_bbox, margin, &jumped));
     let jumped_cost = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &jumped,
+        &problem, &nets, &half, margin, &rotations, &terms, &jumped,
     );
     assert!(
         jumped_cost + 1e-9 < before,
@@ -1227,8 +1226,7 @@ fn position_polish_can_jump_over_narrow_illegal_band() {
         &problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &rotations,
         &half,
         &copper_bbox,
@@ -1236,7 +1234,7 @@ fn position_polish_can_jump_over_narrow_illegal_band() {
     );
 
     let after = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     assert!(
         pos[0].x > 5.95,
@@ -1287,8 +1285,8 @@ fn position_polish_can_take_ratline_crossing_relief_move() {
         .map(|(p, &r)| rotated_copper_bbox(p, r))
         .collect();
     let margin = courtyard_margin(problem.clearance);
-    let pairs = Vec::new();
-    let edge_idx = Vec::new();
+    let pairs: Vec<(usize, usize)> = Vec::new();
+    let terms = CostTerms::new(&problem, &PlacementHints::default(), pairs.clone());
     let mut pos = vec![
         Point2 { x: 5.0, y: 5.0 },
         Point2 { x: 25.0, y: 25.0 },
@@ -1309,21 +1307,20 @@ fn position_polish_can_take_ratline_crossing_relief_move() {
     );
 
     let before = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     polish_positions(
         &problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &rotations,
         &half,
         &copper_bbox,
         &mut pos,
     );
     let after = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
 
     assert_eq!(ratline_crossings(&problem, &rotations, &nets, &pos), 0);
@@ -1536,8 +1533,8 @@ fn position_polish_can_take_ratline_obstruction_relief_move() {
         .map(|(p, &r)| rotated_copper_bbox(p, r))
         .collect();
     let margin = courtyard_margin(problem.clearance);
-    let pairs = Vec::new();
-    let edge_idx = Vec::new();
+    let pairs: Vec<(usize, usize)> = Vec::new();
+    let terms = CostTerms::new(&problem, &PlacementHints::default(), pairs.clone());
     let mut pos = vec![
         Point2 { x: 5.0, y: 10.0 },
         Point2 { x: 25.0, y: 10.0 },
@@ -1569,21 +1566,20 @@ fn position_polish_can_take_ratline_obstruction_relief_move() {
     );
 
     let before = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     polish_positions(
         &problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &rotations,
         &half,
         &copper_bbox,
         &mut pos,
     );
     let after = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
 
     assert_eq!(
@@ -1636,8 +1632,8 @@ fn position_polish_can_move_foreign_obstructor_off_ratline() {
         .map(|(p, &r)| rotated_copper_bbox(p, r))
         .collect();
     let margin = courtyard_margin(problem.clearance);
-    let pairs = Vec::new();
-    let edge_idx = Vec::new();
+    let pairs: Vec<(usize, usize)> = Vec::new();
+    let terms = CostTerms::new(&problem, &PlacementHints::default(), pairs.clone());
     let mut pos = vec![
         Point2 { x: 5.0, y: 10.0 },
         Point2 { x: 25.0, y: 10.0 },
@@ -1668,21 +1664,20 @@ fn position_polish_can_move_foreign_obstructor_off_ratline() {
     );
 
     let before = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     polish_positions(
         &problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &rotations,
         &half,
         &copper_bbox,
         &mut pos,
     );
     let after = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
 
     assert_eq!(
@@ -1822,7 +1817,15 @@ fn edge_seek_position_candidates_include_all_edge_band_targets() {
         .collect();
     let pos = vec![Point2 { x: 15.0, y: 10.0 }];
 
-    let candidates = edge_seek_position_candidates(&problem, &half, 0.0, &pos, 0, &[0]);
+    let seeking = CostTerms::new(
+        &problem,
+        &PlacementHints {
+            edge_seek: vec![problem.parts[0].reference.clone()],
+            ..PlacementHints::default()
+        },
+        Vec::new(),
+    );
+    let candidates = edge_seek_position_candidates(&problem, &half, 0.0, &pos, 0, &seeking);
 
     assert_eq!(
         candidates,
@@ -1847,7 +1850,15 @@ fn edge_seek_position_candidates_include_all_edge_band_targets() {
         "edge polish should offer direct non-local targets for every board edge"
     );
     assert!(
-        edge_seek_position_candidates(&problem, &half, 0.0, &pos, 0, &[]).is_empty(),
+        edge_seek_position_candidates(
+            &problem,
+            &half,
+            0.0,
+            &pos,
+            0,
+            &CostTerms::new(&problem, &PlacementHints::default(), Vec::new())
+        )
+        .is_empty(),
         "non-edge-seeking parts should not pay extra edge candidates"
     );
 }
@@ -1879,18 +1890,24 @@ fn position_polish_can_take_long_edge_seek_move() {
         .collect();
     let margin = courtyard_margin(problem.clearance);
     let pairs = Vec::new();
-    let edge_idx = vec![0];
+    let terms = CostTerms::new(
+        &problem,
+        &PlacementHints {
+            edge_seek: vec![problem.parts[0].reference.clone()],
+            ..PlacementHints::default()
+        },
+        pairs.clone(),
+    );
     let mut pos = vec![Point2 { x: 15.0, y: 10.0 }];
     let before = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
 
     polish_positions(
         &problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &rotations,
         &half,
         &copper_bbox,
@@ -1898,7 +1915,7 @@ fn position_polish_can_take_long_edge_seek_move() {
     );
 
     let after = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     let edge_gap = [
         pos[0].x - half[0].0 - problem.bounds.min_x,
@@ -1948,16 +1965,16 @@ fn position_polish_can_take_long_pad_centroid_move() {
         .map(|(p, &r)| rotated_copper_bbox(p, r))
         .collect();
     let margin = courtyard_margin(problem.clearance);
-    let pairs = Vec::new();
-    let edge_idx = Vec::new();
+    let pairs: Vec<(usize, usize)> = Vec::new();
+    let terms = CostTerms::new(&problem, &PlacementHints::default(), pairs.clone());
     let mut pos = vec![Point2 { x: 5.0, y: 5.0 }, Point2 { x: 45.0, y: 5.0 }];
     let before = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     let centroid = vec![Point2 { x: 40.0, y: 5.0 }, Point2 { x: 45.0, y: 5.0 }];
     assert!(is_legal(&problem, &half, &copper_bbox, margin, &centroid));
     let centroid_cost = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &centroid,
+        &problem, &nets, &half, margin, &rotations, &terms, &centroid,
     );
     assert!(
         centroid_cost + 1e-9 < before,
@@ -1968,8 +1985,7 @@ fn position_polish_can_take_long_pad_centroid_move() {
         &problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &rotations,
         &half,
         &copper_bbox,
@@ -1977,7 +1993,7 @@ fn position_polish_can_take_long_pad_centroid_move() {
     );
 
     let after = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     assert!(
         pos[0].x > 30.0,
@@ -2262,19 +2278,18 @@ fn position_polish_can_take_axis_alignment_when_full_pad_target_is_illegal() {
         .map(|(p, &r)| rotated_copper_bbox(p, r))
         .collect();
     let margin = courtyard_margin(problem.clearance);
-    let pairs = Vec::new();
-    let edge_idx = Vec::new();
+    let pairs: Vec<(usize, usize)> = Vec::new();
+    let terms = CostTerms::new(&problem, &PlacementHints::default(), pairs.clone());
     let mut pos = vec![Point2 { x: 20.0, y: 10.0 }, Point2 { x: 10.0, y: 14.0 }];
     let before = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
 
     polish_positions(
         &problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &rotations,
         &half,
         &copper_bbox,
@@ -2282,7 +2297,7 @@ fn position_polish_can_take_axis_alignment_when_full_pad_target_is_illegal() {
     );
 
     let after = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     assert!(
         after + 1e-9 < before,
@@ -2327,8 +2342,8 @@ fn swap_polish_untangles_post_legalized_assignment() {
         .map(|(p, &r)| rotated_copper_bbox(p, r))
         .collect();
     let margin = courtyard_margin(problem.clearance);
-    let pairs = Vec::new();
-    let edge_idx = Vec::new();
+    let pairs: Vec<(usize, usize)> = Vec::new();
+    let terms = CostTerms::new(&problem, &PlacementHints::default(), pairs.clone());
     let mut pos = vec![
         Point2 { x: 5.0, y: 5.0 },
         Point2 { x: 25.0, y: 5.0 },
@@ -2336,7 +2351,7 @@ fn swap_polish_untangles_post_legalized_assignment() {
         Point2 { x: 25.0, y: 25.0 },
     ];
     let before = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     assert_eq!(ratline_crossings(&problem, &rotations, &nets, &pos), 1);
 
@@ -2344,8 +2359,7 @@ fn swap_polish_untangles_post_legalized_assignment() {
         &problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &rotations,
         &half,
         &copper_bbox,
@@ -2353,7 +2367,7 @@ fn swap_polish_untangles_post_legalized_assignment() {
     );
 
     let after = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     assert!(
         after + 1e-9 < before,
@@ -2462,18 +2476,17 @@ fn rotation_polish_lowers_pad_level_wirelength_for_unlocked_part() {
         .zip(&rotations)
         .map(|(p, &r)| rotated_copper_bbox(p, r))
         .collect();
-    let pairs = Vec::new();
-    let edge_idx = Vec::new();
+    let pairs: Vec<(usize, usize)> = Vec::new();
+    let terms = CostTerms::new(&problem, &PlacementHints::default(), pairs.clone());
     let before = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
 
     polish_rotations(
         &problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &pos,
         &mut rotations,
         &mut half,
@@ -2481,7 +2494,7 @@ fn rotation_polish_lowers_pad_level_wirelength_for_unlocked_part() {
     );
 
     let after = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     assert!(
         after < before,
@@ -2531,15 +2544,14 @@ fn rotation_polish_revisits_parts_after_later_rotations_change_the_cost() {
         .zip(&rotations)
         .map(|(p, &r)| rotated_copper_bbox(p, r))
         .collect();
-    let pairs = Vec::new();
-    let edge_idx = Vec::new();
+    let pairs: Vec<(usize, usize)> = Vec::new();
+    let terms = CostTerms::new(&problem, &PlacementHints::default(), pairs.clone());
 
     polish_rotations(
         &problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &pos,
         &mut rotations,
         &mut half,
@@ -2552,7 +2564,7 @@ fn rotation_polish_revisits_parts_after_later_rotations_change_the_cost() {
         "A must be revisited after B rotates; a single pass leaves A at 90°"
     );
     let cost = place_cost(
-        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+        &problem, &nets, &half, margin, &rotations, &terms, &pos,
     );
     assert!(
         cost < 5.0,
@@ -2592,15 +2604,14 @@ fn rotation_polish_preserves_locked_rotation() {
         .zip(&rotations)
         .map(|(p, &r)| rotated_copper_bbox(p, r))
         .collect();
-    let pairs = Vec::new();
-    let edge_idx = Vec::new();
+    let pairs: Vec<(usize, usize)> = Vec::new();
+    let terms = CostTerms::new(&problem, &PlacementHints::default(), pairs.clone());
 
     polish_rotations(
         &problem,
         &nets,
         margin,
-        &pairs,
-        &edge_idx,
+        &terms,
         &pos,
         &mut rotations,
         &mut half,
@@ -4106,6 +4117,7 @@ fn tuned_placement_is_byte_identical_across_runs() {
         }],
         edge_seek: vec!["J1".into()],
         corner_seek: vec![],
+        keep_near: vec![],
     };
 
     let first = serde_json::to_string(&place_tuned(&problem, &hints)).unwrap();

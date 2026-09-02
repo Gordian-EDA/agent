@@ -12,13 +12,10 @@
 //! creates the board: every part is "added", and the outline is sized from the
 //! footprints unless the caller names `bounds`.
 //!
-//! Every run that writes snapshots the board first and re-checks connectivity
-//! afterwards. The invariant is one-directional: copper may connect *less* than
-//! the schematic asks (an unrouted net is a to-do), never *more* (a short is a
-//! defect). A violation restores the snapshot and refuses.
+//! Every run that writes goes through [`crate::board::guard`] like every other
+//! board mutator: snapshot, edit, re-check, then write or roll back.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -27,10 +24,10 @@ use geom::Rect;
 use gordian_runtime::AgentRuntime;
 use kicad_board::{BoardDoc, BoardFootprint};
 use kicad_footprint::FootprintCatalog;
-use pcb_drc::connectivity::Violation;
 use pcb_model::Point2;
-use pcb_place::{LockedAt, PlacementHints};
+use pcb_place::PlacementHints;
 
+use crate::board::guard::Guard;
 use crate::seed::{PourPadConnection, PourSpec};
 
 use crate::create::{
@@ -385,6 +382,9 @@ fn seed_board(
     let seed = seed_parts(parts);
     if !rebuilding {
         apply_complexity_default_layer_count(&mut rules, input.get("rules"), seed.len());
+        if let Err(e) = add_intent_zones(&mut rules, input) {
+            return json!({ "error": e });
+        }
         add_default_power_pours(&mut rules, &seed);
     }
 
@@ -455,7 +455,49 @@ fn seed_board(
         "note": "board created from the schematic — run place_board, then route_board, then check_board",
     });
     merge(&mut out, sizes);
+    // The layout half of the intent is placement's to honour, not the seed's.
+    // Hand it straight back so the next call carries it instead of losing it.
+    if let Some(layout) = layout_intent(input) {
+        merge(
+            &mut out,
+            json!({
+                "next": format!(
+                    "call place_board({{\"intent\": {layout}}}), then route_board, then check_board"
+                ),
+                "place_board_intent": layout,
+            }),
+        );
+    }
     out
+}
+
+/// `intent.zones` names the nets that get a copper pour. A board with inner
+/// layers pours on the last inner one, where a plane belongs; a two-layer board
+/// pours on the bottom.
+fn add_intent_zones(rules: &mut SeedRules, input: &Value) -> std::result::Result<(), String> {
+    for net in crate::intent::parse(input)?.zones {
+        if rules.pours.iter().any(|pour| pour.net == net) {
+            continue;
+        }
+        let layer = if rules.layer_count >= 4 {
+            format!("inner{}", rules.layer_count - 2)
+        } else {
+            "bottom".to_owned()
+        };
+        rules.pours.push(PourSpec {
+            net,
+            layer,
+            pad_connection: PourPadConnection::Thermal,
+        });
+    }
+    Ok(())
+}
+
+/// The placement half of an `intent`, if it has one.
+fn layout_intent(input: &Value) -> Option<Value> {
+    let mut intent = input.get("intent")?.as_object()?.clone();
+    intent.remove("zones");
+    (!intent.is_empty()).then_some(Value::Object(intent))
 }
 
 fn bounds_json(bounds: &Rect) -> Value {
@@ -517,9 +559,9 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         });
     }
 
-    let revision = match snapshot(ctx, &original) {
-        Ok(revision) => revision,
-        Err(e) => return json!({ "error": format!("could not snapshot the board: {e}") }),
+    let gate = match Guard::open(ctx, "sync_board") {
+        Ok(gate) => gate,
+        Err(refusal) => return refusal,
     };
 
     let existing: BTreeMap<String, BoardFootprint> = doc
@@ -543,11 +585,11 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         seed_origin,
         catalog,
     ) {
-        return json!({ "error": e, "revision": revision });
+        return gate.rollback(ctx, json!({ "error": e }));
     }
 
     if let Err(e) = write_board(ctx, &doc.into_text()) {
-        return json!({ "error": e, "revision": revision });
+        return gate.rollback(ctx, json!({ "error": e }));
     }
 
     // Only copper the edit invalidated comes out: traces touching a pad that
@@ -562,35 +604,34 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         &before.layer_names,
         &retract,
     ) {
-        return json!({ "error": format!("the board was synced but its copper was not retracted: {e}"), "revision": revision });
+        return gate.rollback(
+            ctx,
+            json!({ "error": format!("the board was synced but its copper was not retracted: {e}") }),
+        );
     }
 
     let placed = match place_added(&delta.added, ctx) {
         Ok(placed) => placed,
-        Err(e) => return json!({ "error": e, "revision": revision }),
+        Err(e) => return gate.rollback(ctx, json!({ "error": e })),
     };
 
     let mut nets_to_reroute: BTreeSet<String> = retract.nets.clone();
     nets_to_reroute.extend(delta.nets_changed.iter().cloned());
 
-    let mut result = json!({
+    let result = json!({
         "ok": true,
         "changed": true,
         "delta": delta.to_json(),
         "placed": placed,
         "retracted_tracks": retract.count,
         "nets_to_reroute": nets_to_reroute,
-        "revision": revision,
         "next_tool": "route_board",
         "next": "call route_board({nets: nets_to_reroute}), then check_board",
         "note": "only the delta was applied; every part the delta did not name kept its position \
                  and its copper, and anything sync added is already placed. Do NOT run \
                  place_board — it re-places the whole board and would undo that.",
     });
-    if let Some(refusal) = guard(ctx, &path, &original, &revision, &shorts(&before)) {
-        result = refusal;
-    }
-    result
+    gate.commit(ctx, result)
 }
 
 /// Rebuild the board under new rules or a new outline, keeping every part where
@@ -639,9 +680,9 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
             rotation_deg: Some(fp.rotation),
         })
         .collect();
-    let revision = match snapshot(ctx, &original) {
-        Ok(revision) => revision,
-        Err(e) => return json!({ "error": format!("could not snapshot the board: {e}") }),
+    let gate = match Guard::open(ctx, "sync_board") {
+        Ok(gate) => gate,
+        Err(refusal) => return refusal,
     };
 
     // Keep the outline the board already has unless the caller asked for another.
@@ -668,14 +709,15 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
     {
         Ok(()) => {}
         Err(e) => {
-            return json!({
-                "error": format!("the board was reseeded but its placement was not restored: {e}"),
-                "revision": revision,
-            });
+            return gate.rollback(
+                ctx,
+                json!({
+                    "error": format!(
+                        "the board was reseeded but its placement was not restored: {e}"
+                    ),
+                }),
+            );
         }
-    }
-    if let Some(refusal) = guard(ctx, &path, &original, &revision, &shorts(&before)) {
-        return refusal;
     }
     merge(
         &mut result,
@@ -683,7 +725,6 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
             "created": false,
             "reseeded": true,
             "delta": delta.to_json(),
-            "revision": revision,
             "retracted_tracks": original.matches("(segment").count(),
             "nets_to_reroute": delta_nets(parts),
             "next_tool": "route_board",
@@ -693,7 +734,7 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
                      the new rules — run route_board, then check_board",
         }),
     );
-    result
+    gate.commit(ctx, result)
 }
 
 /// The rules the board is already built with, as the starting point a rules
@@ -856,34 +897,6 @@ fn apply(
     Ok(())
 }
 
-/// Bounding boxes of the copper still on the board, as placement keep-outs.
-fn copper_keepouts(copper: &pcb_model::RouteSolution) -> Vec<Rect> {
-    let mut out = Vec::new();
-    for trace in &copper.traces {
-        let half = trace.width / 2.0;
-        for pair in trace.path.windows(2) {
-            if let Some(rect) = Rect::bounding(pair) {
-                out.push(Rect::new(
-                    rect.min_x - half,
-                    rect.min_y - half,
-                    rect.max_x + half,
-                    rect.max_y + half,
-                ));
-            }
-        }
-    }
-    for via in &copper.vias {
-        let half = via.diameter / 2.0;
-        out.push(Rect::new(
-            via.at.x - half,
-            via.at.y - half,
-            via.at.x + half,
-            via.at.y + half,
-        ));
-    }
-    out
-}
-
 /// Place the parts the sync added, with every part already on the board locked.
 fn place_added(added: &[String], ctx: &AgentRuntime) -> std::result::Result<Vec<Value>, String> {
     if added.is_empty() {
@@ -891,27 +904,8 @@ fn place_added(added: &[String], ctx: &AgentRuntime) -> std::result::Result<Vec<
     }
     let board = crate::active_board(ctx)?;
     let mut problem = crate::place::place_problem_from_snapshot(&board, ctx)?;
-    // Copper the sync kept is as real an obstacle as a part: a new footprint
-    // dropped on a live trace shorts it, and the guard would then revert the
-    // whole sync.
-    problem.keepouts.extend(copper_keepouts(&board.copper));
     let new: BTreeSet<&str> = added.iter().map(String::as_str).collect();
-    let existing: BTreeMap<&str, &kicad_board::ImportedPart> = board
-        .imported
-        .parts
-        .iter()
-        .map(|part| (part.reference.as_str(), part))
-        .collect();
-    for part in &mut problem.parts {
-        if new.contains(part.reference.as_str()) {
-            part.locked = None;
-        } else if let Some(imported) = existing.get(part.reference.as_str()) {
-            part.locked = Some(LockedAt {
-                at: imported.at,
-                rotation: imported.rotation as f64,
-            });
-        }
-    }
+    crate::place::restrict_to_refs(&mut problem, &board, &new);
 
     let result = pcb_engine::place_tuned(&problem, &PlacementHints::default());
     if !result.legal {
@@ -945,79 +939,6 @@ fn place_added(added: &[String], ctx: &AgentRuntime) -> std::result::Result<Vec<
             })
         })
         .collect())
-}
-
-// ── the guard ───────────────────────────────────────────────────────────────
-
-/// Where a board sync's pre-edit copies live, one per committed sync.
-fn undo_dir(ctx: &AgentRuntime) -> PathBuf {
-    ctx.project_dir().join(".gordian").join("pcb-undo")
-}
-
-fn snapshot(ctx: &AgentRuntime, original: &str) -> std::io::Result<String> {
-    let dir = undo_dir(ctx);
-    std::fs::create_dir_all(&dir)?;
-    let next = 1 + std::fs::read_dir(&dir)?
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            entry
-                .path()
-                .file_stem()?
-                .to_str()?
-                .strip_prefix("pcb-")?
-                .parse::<u32>()
-                .ok()
-        })
-        .max()
-        .unwrap_or(0);
-    let id = format!("pcb-{next}");
-    std::fs::write(dir.join(format!("{id}.kicad_pcb")), original)?;
-    Ok(id)
-}
-
-/// Pairs of nets the board's copper electrically merges.
-fn shorts(board: &kicad_board::IpcBoardSnapshot) -> BTreeSet<(String, String)> {
-    pcb_drc::connectivity::check(&board.problem, &board.copper)
-        .into_iter()
-        .filter_map(|violation| match violation {
-            Violation::CrossNetMerge { a, b } => Some((a, b)),
-            Violation::Unconnected { .. } => None,
-        })
-        .collect()
-}
-
-/// The one board invariant: copper may connect less than the schematic asks,
-/// never more. Returns the refusal when the synced board shorts two nets, after
-/// restoring the snapshot; `None` when the board is honest or the check could
-/// not run.
-fn guard(
-    ctx: &AgentRuntime,
-    path: &Path,
-    original: &str,
-    revision: &str,
-    before: &BTreeSet<(String, String)>,
-) -> Option<Value> {
-    let board = crate::active_board(ctx).ok()?;
-    // Only shorts the sync INTRODUCED are the sync's to answer for. A board that
-    // arrived already shorted stays the agent's problem, not a reason to refuse
-    // every future edit.
-    let shorts: Vec<Value> = shorts(&board)
-        .difference(before)
-        .map(|(a, b)| json!({ "a": a, "b": b }))
-        .collect();
-    if shorts.is_empty() {
-        return None;
-    }
-    ctx.close_kicad_session();
-    let restored = std::fs::write(path, original).is_ok();
-    Some(json!({
-        "ok": false,
-        "error": "sync_board refused: the synced board's copper would short nets the schematic keeps apart",
-        "shorts": shorts,
-        "restored": restored,
-        "revision": revision,
-        "note": "the board is back to its pre-sync state — delete the offending copper with delete_copper, then sync_board again",
-    }))
 }
 
 #[cfg(test)]

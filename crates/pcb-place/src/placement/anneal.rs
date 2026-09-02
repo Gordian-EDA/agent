@@ -7,7 +7,7 @@
 //! spring/halo heuristics — the legalizer never has to fight it: the annealed state
 //! is already near-legal and the final `legalize` only nudges.
 
-use super::cost::place_cost;
+use super::cost::{CostTerms, place_cost};
 use super::geometry::{PLACEMENT_GRID, courtyard_margin, rotated_courtyard_half};
 use super::pairs::coplacement_pairs;
 use crate::{LogicalNet, Pin, PlacementHints, PlacementView};
@@ -63,11 +63,7 @@ pub(crate) fn anneal_placement(
         return;
     }
     let pairs = coplacement_pairs(problem);
-    let edge_idx: Vec<usize> = hints
-        .edge_seek
-        .iter()
-        .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
-        .collect();
+    let terms = CostTerms::new(problem, hints, pairs.clone());
     // Clusters for the block move: anchor → its caps.
     let mut clusters: std::collections::BTreeMap<usize, Vec<usize>> =
         std::collections::BTreeMap::new();
@@ -86,7 +82,7 @@ pub(crate) fn anneal_placement(
     let iters = (250 * movable.len()).clamp(1000, 8000);
     let t0 = 8.0;
     let cost_of =
-        |p: &[Point2]| place_cost(problem, nets, half, margin, rotations, &pairs, &edge_idx, p);
+        |p: &[Point2]| place_cost(problem, nets, half, margin, rotations, &terms, p);
     let mut cost = cost_of(pos);
 
     let mut restore: Vec<(usize, Point2)> = Vec::with_capacity(8);

@@ -19,6 +19,8 @@ use gordian_runtime::AgentRuntime;
 
 use kicad_board::{ImportedPad, ImportedPart, IpcBoardSnapshot};
 
+use crate::board::guard::Guard;
+
 pub(super) fn part_from_footprint_layers(
     footprint: &Footprint,
     reference: &str,
@@ -1791,6 +1793,117 @@ fn placement_existing_copper_error(tracks: usize, vias: usize) -> Option<Value> 
     })
 }
 
+/// Bounding boxes of the copper on the board, as placement keep-outs.
+pub(crate) fn copper_keepouts(copper: &pcb_model::RouteSolution) -> Vec<Rect> {
+    let mut out = Vec::new();
+    for trace in &copper.traces {
+        let half = trace.width / 2.0;
+        for pair in trace.path.windows(2) {
+            if let Some(rect) = Rect::bounding(pair) {
+                out.push(Rect::new(
+                    rect.min_x - half,
+                    rect.min_y - half,
+                    rect.max_x + half,
+                    rect.max_y + half,
+                ));
+            }
+        }
+    }
+    for via in &copper.vias {
+        let half = via.diameter / 2.0;
+        out.push(Rect::new(
+            via.at.x - half,
+            via.at.y - half,
+            via.at.x + half,
+            via.at.y + half,
+        ));
+    }
+    out
+}
+
+/// Free only `refs` to move: every other part is locked where the board has it,
+/// and the copper already down becomes a keep-out.
+///
+/// A footprint dropped on a live trace shorts it, so copper is as real an
+/// obstacle as a part. This is the machinery `sync_board` uses for the parts it
+/// just added and `place_board{refs}` uses for the ones the model names — one
+/// subset placement, so both behave the same way.
+pub(crate) fn restrict_to_refs(
+    problem: &mut PlacementView,
+    board: &IpcBoardSnapshot,
+    free: &std::collections::BTreeSet<&str>,
+) {
+    problem.keepouts.extend(copper_keepouts(&board.copper));
+    let existing: BTreeMap<&str, &ImportedPart> = board
+        .imported
+        .parts
+        .iter()
+        .map(|part| (part.reference.as_str(), part))
+        .collect();
+    for part in &mut problem.parts {
+        if free.contains(part.reference.as_str()) {
+            part.locked = None;
+        } else if let Some(imported) = existing.get(part.reference.as_str()) {
+            part.locked = Some(LockedAt {
+                at: imported.at,
+                rotation: imported.rotation as f64,
+            });
+        }
+    }
+}
+
+/// The `refs` subset a `place_board` call names, checked against the board.
+///
+/// Naming a part that is not there is a mistake worth catching: the placer would
+/// otherwise silently lay out nothing and report a legal placement.
+fn subset_refs(
+    input: &Value,
+    board: &IpcBoardSnapshot,
+) -> std::result::Result<Option<Vec<String>>, String> {
+    let Some(value) = input.get("refs") else {
+        return Ok(None);
+    };
+    let refs: Vec<String> = value
+        .as_array()
+        .ok_or_else(|| "refs must be an array of board references".to_owned())?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "each entry of refs must be a reference string".to_owned())
+        })
+        .collect::<std::result::Result<_, _>>()?;
+    if refs.is_empty() {
+        return Err("refs was empty — omit it to place the whole board".to_owned());
+    }
+    check_references(refs.iter().map(String::as_str), board, "refs")?;
+    Ok(Some(refs))
+}
+
+/// Every named reference must be on this board.
+fn check_references<'a>(
+    named: impl Iterator<Item = &'a str>,
+    board: &IpcBoardSnapshot,
+    what: &str,
+) -> std::result::Result<(), String> {
+    let known: std::collections::BTreeSet<&str> = board
+        .imported
+        .parts
+        .iter()
+        .map(|part| part.reference.as_str())
+        .collect();
+    let unknown: Vec<&str> = named.filter(|name| !known.contains(name)).collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{what} names {} which {} not on this board; the board has {}",
+        unknown.join(", "),
+        if unknown.len() == 1 { "is" } else { "are" },
+        known.into_iter().collect::<Vec<_>>().join(", "),
+    ))
+}
+
 /// Automatic placement moves EVERY unlocked part, so running it on a board that
 /// already has a layout throws that layout away — the exact loss `sync_board`
 /// exists to prevent. A board still at its seed row has no layout to lose, and a
@@ -1814,10 +1927,16 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(board) => board,
         Err(live_err) => return Ok(json!({ "error": live_err })),
     };
-    if let Some(error) =
-        placement_existing_copper_error(board.copper.traces.len(), board.copper.vias.len())
-    {
-        return Ok(error);
+    let refs = match subset_refs(&input, &board) {
+        Ok(refs) => refs,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
+    let intent = match crate::intent::parse(&input) {
+        Ok(intent) => intent,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
+    if let Err(error) = check_references(intent.references().into_iter(), &board, "intent") {
+        return Ok(json!({ "error": error }));
     }
     let replace = input
         .get("replace")
@@ -1825,15 +1944,36 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .unwrap_or(false);
     if let Some(object) = input.as_object_mut() {
         object.remove("replace");
+        object.remove("refs");
+        object.remove("intent");
     }
-    if let Some(error) = already_placed_error(&board, replace) {
-        return Ok(error);
+    // A subset placement keeps everything else exactly where it is, so neither
+    // gate applies: the copper is a keep-out rather than a thing to lose, and
+    // the layout it protects is what makes the subset placement worth doing.
+    if refs.is_none() {
+        if let Some(error) =
+            placement_existing_copper_error(board.copper.traces.len(), board.copper.vias.len())
+        {
+            return Ok(error);
+        }
+        if let Some(error) = already_placed_error(&board, replace) {
+            return Ok(error);
+        }
     }
 
-    let problem = match place_problem_from_snapshot(&board, ctx) {
+    let mut problem = match place_problem_from_snapshot(&board, ctx) {
         Ok(p) => p,
         Err(msg) => return Ok(json!({ "error": msg })),
     };
+    let free: std::collections::BTreeSet<&str> = refs
+        .iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    if refs.is_some() {
+        restrict_to_refs(&mut problem, &board, &free);
+    }
+    let problem = problem;
 
     // Auto edge-affinity: pull connectors/headers to their nearest board edge so
     // they land at the perimeter (where a cable or the enclosure reaches them),
@@ -1843,6 +1983,8 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(hints) => hints,
         Err(error) => return Ok(json!({ "error": error })),
     };
+    let zones = intent.zones.clone();
+    intent.merge_into(&mut hints);
     let explicitly_edged: std::collections::BTreeSet<&str> = hints
         .groups
         .iter()
@@ -1935,6 +2077,10 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     }
 
+    // A subset placement writes ONLY the parts it was asked to place, so every
+    // other footprint's pose stays byte-identical — the placer's own answer for
+    // a locked part is not the same bytes the board already has.
+    let mut gate = None;
     if result.legal {
         let locked_refs: std::collections::BTreeSet<&str> = board
             .imported
@@ -1947,6 +2093,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .placements
             .iter()
             .filter(|p| !locked_refs.contains(p.reference.as_str()))
+            .filter(|p| refs.is_none() || free.contains(p.reference.as_str()))
             .map(|p| FootprintMove {
                 reference: p.reference.clone(),
                 x_nm: kicad_ipc::units::mm_to_nm(p.at.x),
@@ -1954,10 +2101,16 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 rotation_deg: Some(p.rotation),
             })
             .collect();
-        if !moves.is_empty()
-            && let Err(e) = write_placement(ctx, &moves)
-        {
-            return Ok(json!({ "error": format!("could not write placement: {e}") }));
+        if !moves.is_empty() {
+            let opened = match Guard::open(ctx, "place_board") {
+                Ok(opened) => opened,
+                Err(refusal) => return Ok(refusal),
+            };
+            if let Err(e) = write_placement(ctx, &moves) {
+                let error = json!({ "error": format!("could not write placement: {e}") });
+                return Ok(opened.rollback(ctx, error));
+            }
+            gate = Some(opened);
         }
     }
     let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
@@ -2086,7 +2239,24 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !result.legal {
         out["error"] = Value::String(illegal_placement_error(&out));
     }
-    Ok(out)
+    if let Some(refs) = &refs {
+        out["placed_refs"] = json!(refs);
+        out["note"] = json!(
+            "placed only the named parts; every other footprint kept its pose and its copper. \
+             Call route_board({nets}) on the nets those parts carry, then check_board."
+        );
+    }
+    if !zones.is_empty() {
+        out["ignored_intent_zones"] = json!(zones);
+        out["zones_note"] = json!(
+            "intent.zones are board rules, not placement: pass them to \
+             sync_board({rules:{pours:[…]}})."
+        );
+    }
+    Ok(match gate {
+        Some(gate) => gate.commit(ctx, out),
+        None => out,
+    })
 }
 
 /// The refusal a caller can act on in one move: how much copper area the parts

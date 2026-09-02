@@ -385,6 +385,27 @@ pub fn is_seed_imported_board(board: &ImportedBoard) -> bool {
     is_seed_placement(&board.bounds, &imported_placements(board))
 }
 
+/// References still sitting in the board's seed row: a part that was written to
+/// the board but never laid out. They sit unrotated on the 2.54 mm lattice
+/// running right from the top-left inset, which nothing but seeding produces.
+pub fn seed_row_references(board: &ImportedBoard) -> Vec<String> {
+    let row_y = board.bounds.min_y + 2.0;
+    let mut refs: Vec<String> = board
+        .parts
+        .iter()
+        .filter(|part| {
+            let lattice = (part.at.x - board.bounds.min_x - 2.0) / 2.54;
+            (part.at.y - row_y).abs() < geom::EPS
+                && part.rotation == 0
+                && lattice >= -geom::EPS
+                && (lattice - lattice.round()).abs() < geom::EPS
+        })
+        .map(|part| part.reference.clone())
+        .collect();
+    refs.sort();
+    refs
+}
+
 fn is_seed_placement(bounds: &pcb_model::Rect, placements: &[Placement]) -> bool {
     if placements.is_empty() {
         return false;

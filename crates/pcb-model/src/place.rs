@@ -125,6 +125,10 @@ pub struct PlacementHints {
     /// References pulled toward their nearest board corner.
     #[serde(default)]
     pub corner_seek: Vec<String>,
+    /// Reference pairs that should end up close together — the author's own
+    /// proximity intent, alongside the decoupling pairs placement detects.
+    #[serde(default)]
+    pub keep_near: Vec<[String; 2]>,
 }
 
 /// A group of parts that should cohere or occupy a prescribed region.

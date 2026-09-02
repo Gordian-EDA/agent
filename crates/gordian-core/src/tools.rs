@@ -304,6 +304,41 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "intent": {
+                        "type": "object",
+                        "description": "What the layout should be, not where parts go. Coordinates belong only in move_parts{to}.",
+                        "properties": {
+                            "edge": {
+                                "type": "object",
+                                "description": "Reference -> board side its courtyard should touch.",
+                                "additionalProperties": { "type": "string", "enum": ["left", "right", "top", "bottom"] }
+                            },
+                            "keep_near": {
+                                "type": "array",
+                                "description": "Pairs that must end up close, e.g. [[\"C3\",\"U1\"]].",
+                                "items": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "minItems": 2, "maxItems": 2
+                                }
+                            },
+                            "group": {
+                                "type": "array",
+                                "description": "Parts that belong together, e.g. [[\"U1\",\"C3\",\"C4\"]].",
+                                "items": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "minItems": 2
+                                }
+                            },
+                            "zones": {
+                                "type": "array",
+                                "description": "Nets to pour as a copper zone; applied by sync_board on creation.",
+                                "items": { "type": "string" }
+                            }
+                        },
+                        "additionalProperties": false
+                    },
                     "bounds": {
                         "description": "Omit (or \"auto\") to size the board from its parts. Bounds smaller than required_bounds are refused before anything is written.",
                         "oneOf": [
@@ -365,12 +400,56 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "place_board".into(),
-            description: "Auto-place a newly created PCB; groups steer regions, grids, \
-                 surrounds, and edges. Refuses an already-placed board unless replace:true."
+            description: "Place a PCB from stated intent: `intent` gives edges, \
+                 proximities and groups (never coordinates); `groups` steers regions, grids \
+                 and surrounds. `refs` places only those parts and leaves every other pose \
+                 untouched — what to call after sync_board adds parts, or when check_board \
+                 reports unplaced. Without `refs`, refuses an already-placed board unless \
+                 replace:true."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "refs": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Place only these footprints, with every other part locked where it sits and the existing copper as keep-outs. Omit to place the whole board."
+                    },
+                    "intent": {
+                        "type": "object",
+                        "description": "What the layout should be, not where parts go. Coordinates belong only in move_parts{to}.",
+                        "properties": {
+                            "edge": {
+                                "type": "object",
+                                "description": "Reference -> board side its courtyard should touch.",
+                                "additionalProperties": { "type": "string", "enum": ["left", "right", "top", "bottom"] }
+                            },
+                            "keep_near": {
+                                "type": "array",
+                                "description": "Pairs that must end up close, e.g. [[\"C3\",\"U1\"]].",
+                                "items": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "minItems": 2, "maxItems": 2
+                                }
+                            },
+                            "group": {
+                                "type": "array",
+                                "description": "Parts that belong together, e.g. [[\"U1\",\"C3\",\"C4\"]].",
+                                "items": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "minItems": 2
+                                }
+                            },
+                            "zones": {
+                                "type": "array",
+                                "description": "Nets to pour as a copper zone; applied by sync_board on creation.",
+                                "items": { "type": "string" }
+                            }
+                        },
+                        "additionalProperties": false
+                    },
                     "replace": {
                         "type": "boolean",
                         "description": "Re-place an already-placed board, losing its layout."
@@ -431,8 +510,9 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "check_board".into(),
-            description: "Run PCB DRC; stop when ok. On failure lists the blocking violations \
-                 and every unconnected item as the pad pair it is."
+            description: "Run PCB DRC; stop when ok. On failure lists the blocking violations, \
+                 every unconnected item as the pad pair it is, and `unplaced` — the footprints \
+                 still in the seed row, which place_board({refs}) lays out."
                 .into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },

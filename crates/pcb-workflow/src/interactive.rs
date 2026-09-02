@@ -23,6 +23,7 @@ use gordian_runtime::tool::require_str;
 
 use kicad_board::{ImportedPart, IpcBoardSnapshot};
 
+use crate::board::guard::Guard;
 use crate::copper::RetractedCopper;
 
 fn ipc_err(e: kicad_ipc::Error) -> anyhow::Error {
@@ -55,8 +56,13 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": err }));
     }
     let retract = retracted_copper(&snapshot, &plan);
+    let gate = match Guard::open(ctx, "move_parts") {
+        Ok(gate) => gate,
+        Err(refusal) => return Ok(refusal),
+    };
     if let Err(err) = crate::place::write_placement(ctx, &plan.ipc_moves) {
-        return Ok(json!({ "error": format!("move_parts could not write the board: {err}") }));
+        let error = json!({ "error": format!("move_parts could not write the board: {err}") });
+        return Ok(gate.rollback(ctx, error));
     }
     if let Err(err) = crate::copper::write_retained(
         ctx,
@@ -64,11 +70,12 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         &snapshot.layer_names,
         &retract,
     ) {
-        return Ok(json!({
+        let error = json!({
             "error": format!("move_parts moved the parts but could not retract their copper: {err}"),
-        }));
+        });
+        return Ok(gate.rollback(ctx, error));
     }
-    Ok(plan.output(&retract))
+    Ok(gate.commit(ctx, plan.output(&retract)))
 }
 
 /// Copper the move invalidates: every net with a trace ending on a pad that
@@ -531,14 +538,17 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     ctx.close_kicad_session();
     match prepared {
         Ok((problem, solution, request, layer_names)) => {
+            let gate = match Guard::open(ctx, "route_track") {
+                Ok(gate) => gate,
+                Err(refusal) => return Ok(refusal),
+            };
             if let Err(err) =
                 super::route::write_route_offline(ctx, &problem, &solution, &layer_names)
             {
-                return Ok(
-                    json!({ "error": format!("route_track could not write copper: {err}") }),
-                );
+                let error = json!({ "error": format!("route_track could not write copper: {err}") });
+                return Ok(gate.rollback(ctx, error));
             }
-            Ok(route_track_output(&problem, &solution, &request))
+            Ok(gate.commit(ctx, route_track_output(&problem, &solution, &request)))
         }
         Err(err) => Ok(json!({ "error": err })),
     }
@@ -547,6 +557,10 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// Delete live-board track/via copper near a click point.
 pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
+    let gate = match Guard::open(ctx, "delete_copper") {
+        Ok(gate) => gate,
+        Err(refusal) => return Ok(refusal),
+    };
     match ctx.kicad().with_session(&path, |session| {
         let snapshot = session.kicad().board_snapshot()?;
         let request = match parse_delete_copper_request(&input, snapshot.layer_names.len() as u32) {
@@ -558,9 +572,9 @@ pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .delete_copper_near(&request, &snapshot.layer_names)?;
         Ok(Ok(delete_copper_output(&request, &hits)))
     }) {
-        Ok(Ok(out)) => Ok(out),
-        Ok(Err(err)) => Ok(json!({ "error": err })),
-        Err(e) => Ok(json!({ "error": e.to_string() })),
+        Ok(Ok(out)) => Ok(gate.commit(ctx, out)),
+        Ok(Err(err)) => Ok(gate.rollback(ctx, json!({ "error": err }))),
+        Err(e) => Ok(gate.rollback(ctx, json!({ "error": e.to_string() }))),
     }
 }
 
@@ -594,6 +608,10 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "name must be non-empty and not Default" }));
     }
     let path = ctx.pcb_path();
+    let gate = match Guard::open(ctx, "set_net_width") {
+        Ok(gate) => gate,
+        Err(refusal) => return Ok(refusal),
+    };
     let live = ctx.kicad().with_session(&path, |session| {
         let width_nm = mm_to_nm(width);
         let clearance_nm = mm_to_nm(clearance);
@@ -607,7 +625,7 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(changed)
     });
     match live {
-        Ok(changed) => Ok(json!({
+        Ok(changed) => Ok(gate.commit(ctx, json!({
             "ok": true,
             "write_path": "ipc",
             "changed": changed,
@@ -617,7 +635,7 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "nets": [net.clone()],
             "changed_nets": if changed { vec![net] } else { Vec::new() },
             "changed_classes": if changed { vec![name] } else { Vec::new() },
-        })),
+        }))),
         Err(live_error) => {
             ctx.close_kicad_session();
             let project_path = ctx.sch_path().with_extension("kicad_pro");
@@ -628,7 +646,7 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 nets: vec![net.clone()],
             };
             match write_net_width_offline(&path, &project_path, &update) {
-                Ok(report) => Ok(json!({
+                Ok(report) => Ok(gate.commit(ctx, json!({
                     "ok": true,
                     "write_path": "offline",
                     "fallback_reason": live_error.to_string(),
@@ -641,12 +659,12 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     "nets": [net],
                     "changed_nets": report.nets,
                     "changed_classes": report.classes,
-                })),
-                Err(offline_error) => Ok(json!({
+                }))),
+                Err(offline_error) => Ok(gate.rollback(ctx, json!({
                     "error": format!(
                         "{live_error}; offline net-width fallback failed: {offline_error}"
                     )
-                })),
+                }))),
             }
         }
     }

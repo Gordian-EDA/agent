@@ -20,6 +20,8 @@ use pcb_route_mesh::pipeline::{RoutePassReport, postroute_cleanup, prepare_wide_
 
 use gordian_runtime::AgentRuntime;
 
+use crate::board::guard::Guard;
+
 // ── route_board ──────────────────────────────────────────────────────────────
 
 /// A `lint_summary` for a routed solution, split into two buckets.
@@ -197,8 +199,13 @@ pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(nets) => nets,
         Err(message) => return Ok(refusal(message)),
     };
+    let gate = match Guard::open(ctx, "route_board") {
+        Ok(gate) => gate,
+        Err(refusal) => return Ok(refusal),
+    };
     match route_live_board(ctx, nets) {
-        Ok(out) | Err(out) => Ok(out),
+        Ok(out) => Ok(gate.commit(ctx, out)),
+        Err(out) => Ok(gate.rollback(ctx, out)),
     }
 }
 

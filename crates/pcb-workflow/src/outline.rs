@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 
 use gordian_runtime::AgentRuntime;
 
+use crate::board::guard::Guard;
+
 use super::create::req_num;
 
 /// Replace the current board Edge.Cuts with a rectangle or arbitrary polygon.
@@ -57,9 +59,13 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     };
 
-    // If KiCad has the board open, save first so the file edit is applied to the
-    // latest state; close after writing so later tools reopen the updated board.
-    let _ = ctx.kicad().save_if_open();
+    // The guard saves any live session first, so the file edit lands on the
+    // latest state, and drops the session after a write so later tools reopen
+    // the updated board.
+    let gate = match Guard::open(ctx, "update_board_outline") {
+        Ok(gate) => gate,
+        Err(refusal) => return Ok(refusal),
+    };
     let path = ctx.pcb_path();
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("reading board {}", path.display()))?;
@@ -72,14 +78,14 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 
     let bounds = outline.bounds();
-    Ok(json!({
+    Ok(gate.commit(ctx, json!({
         "ok": true,
         "changed": changed,
         "path": path.display().to_string(),
         "bounds": bounds,
         "outline_points": outline.point_count(),
         "note": "updated Edge.Cuts on the existing PCB without regenerating placement or routing",
-    }))
+    })))
 }
 
 enum Outline {
