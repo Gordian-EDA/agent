@@ -150,6 +150,15 @@ pub enum Finding {
         /// The via position, for debugging.
         at: Point2,
     },
+    /// A trace endpoint or via does not terminate in enough same-net copper.
+    DanglingEnd {
+        /// The net that owns the dangling copper.
+        net: String,
+        /// The unanchored endpoint or via position.
+        at: Point2,
+        /// The trace layer, or the first unconnected layer in a via's span.
+        layer: String,
+    },
     /// A connectivity defect from the connectivity oracle, folded in.
     Connectivity {
         /// The wrapped connectivity violation.
@@ -170,6 +179,7 @@ impl Finding {
             | Finding::OutOfBounds { connection, .. }
             | Finding::ViaDiameterBelowMin { connection, .. }
             | Finding::InvalidLayer { connection, .. } => vec![connection.clone()],
+            Finding::DanglingEnd { net, .. } => vec![net.clone()],
             Finding::Connectivity { .. } => Vec::new(),
         }
     }
@@ -204,9 +214,25 @@ pub trait Drc {
     /// bounds / invalid layer) — excluding connectivity, which already
     /// correlates with the failed-net count.
     fn geometry_violations(&self, view: &RoutingView, solution: &RouteSolution) -> usize {
-        self.check(view, solution)
+        let findings = self.check(view, solution);
+        let incomplete: BTreeSet<&str> = findings
             .iter()
-            .filter(|f| f.is_geometry())
+            .filter_map(|finding| match finding {
+                Finding::Connectivity {
+                    violation: Violation::Unconnected { connection, .. },
+                } => Some(connection.as_str()),
+                _ => None,
+            })
+            .collect();
+        findings
+            .iter()
+            .filter(|finding| {
+                finding.is_geometry()
+                    && !matches!(
+                        finding,
+                        Finding::DanglingEnd { net, .. } if incomplete.contains(net.as_str())
+                    )
+            })
             .count()
     }
 

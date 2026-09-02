@@ -77,7 +77,8 @@ impl DrcSuite {
 
     /// The canonical in-house rule set, in its fixed reporting order:
     /// invalid-layer, trace-width, out-of-bounds, copper-to-board-edge,
-    /// pairwise clearance, hole-to-hole/copper, via-diameter, then connectivity
+    /// pairwise clearance, hole-to-hole/copper, via-diameter, dangling ends,
+    /// then connectivity
     /// (folded in last). This order is part of the contract: a report is
     /// comparable across runs only because it is fixed.
     pub fn standard() -> Self {

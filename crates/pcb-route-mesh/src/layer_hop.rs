@@ -715,7 +715,7 @@ fn candidate_is_geometry_clean(
             pcb_model::Finding::Connectivity {
                 violation: pcb_model::Violation::CrossNetMerge { ref a, ref b },
             } if a == connection || b == connection => return false,
-            pcb_model::Finding::Connectivity { .. } => {}
+            pcb_model::Finding::Connectivity { .. } | pcb_model::Finding::DanglingEnd { .. } => {}
             _ => return false,
         }
     }
