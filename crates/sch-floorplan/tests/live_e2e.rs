@@ -216,8 +216,6 @@ fn bulk_create_matches_the_whole_sheet_pipeline() {
     };
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let dir = tempfile::tempdir().unwrap();
-    let engine = engine();
-
     // Every fixture runs even after one fails: which circuits break, and how, is the
     // whole point of a corpus gate.
     let mut rows: Vec<Row> = Vec::new();
@@ -234,7 +232,7 @@ fn bulk_create_matches_the_whole_sheet_pipeline() {
         let old_erc = env.erc(&old).expect("erc").error_count();
 
         let mut doc = live::blank_sheet().unwrap();
-        let report = live::place_parts(&env, &mut doc, &input, &engine, None).unwrap();
+        let report = live::place_parts(&env, &mut doc, &input, Box::new(engine()), None).unwrap();
         if !report.committed {
             if old_truthful {
                 failures.push(format!(
@@ -371,7 +369,7 @@ fn incremental_place_is_additive() {
     let mut doc = SchDoc::parse(&original).unwrap();
     let before = connect::extract(&doc);
 
-    let report = live::place_parts(&env, &mut doc, &ldo_block(), &engine(), None).unwrap();
+    let report = live::place_parts(&env, &mut doc, &ldo_block(), Box::new(engine()), None).unwrap();
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
     assert_eq!(
         report.placed,
@@ -428,14 +426,14 @@ fn arrange_is_idempotent_on_connectivity() {
     };
     let dir = tempfile::tempdir().unwrap();
     let mut doc = SchDoc::read(&demo).unwrap();
-    let placed = live::place_parts(&env, &mut doc, &ldo_block(), &engine(), None).unwrap();
+    let placed = live::place_parts(&env, &mut doc, &ldo_block(), Box::new(engine()), None).unwrap();
     assert!(placed.committed, "{:?}", placed.mismatch);
     let before = extracted_partition(&doc);
     let seeded = save(&mut doc, dir.path(), "seeded");
     let before_erc = erc_kinds(&env, &seeded);
 
     let selection = Selection::Refs(NEW_REFS.iter().map(|s| s.to_string()).collect());
-    let report = live::arrange(&env, &mut doc, &selection, &engine(), None).unwrap();
+    let report = live::arrange(&env, &mut doc, &selection, Box::new(engine()), None).unwrap();
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
     // Over the PARTS: a re-wire is free to replace the rail terminals and flags it
     // draws, so the invariant is the parts' connectivity, not every uuid on the sheet.

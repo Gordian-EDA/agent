@@ -124,30 +124,36 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // The engines fail on different sheets, and the model has no way to tell which
     // will work — leaving it to guess turned one campaign case into a dead end.
     let mut tried = Vec::new();
+    let mut skipped = Vec::new();
     let mut report = None;
     // The last attempt's timing, reported on the result whether it committed or not.
     let mut placement = json!(null);
     // The ladder shares ONE budget: a second engine only gets what the first left,
     // so three attempts can never stack past the tool's timeout.
     let ladder_started = std::time::Instant::now();
-    let ladder_budget = PlacementBudget::new(sheet_parts).budget;
+    let policy = PlacementBudget::new(sheet_parts);
+    let ladder_budget = policy.budget;
     for kind in engines_to_try(requested) {
         let remaining = ladder_budget.saturating_sub(ladder_started.elapsed());
-        if remaining < Duration::from_secs(5) {
-            break;
+        if requested.is_none() && !policy.engine_fits(kind, remaining) {
+            let name = engine_kind_name(kind);
+            tracing::info!(
+                engine = name,
+                parts = sheet_parts,
+                remaining_ms = remaining.as_millis().min(u128::from(u64::MAX)) as u64,
+                "skipping placement engine that cannot finish in the remaining budget"
+            );
+            skipped.push(name);
+            continue;
         }
         let (budget, engine) = budgeted_within(ctx, remaining, sheet_parts, Some(kind));
-        let timing = Timing::start("place_parts", &budget, engine.name());
-        let attempt = guarded_place_parts(
-            ctx.env(),
-            &mut edit.doc,
-            &payload,
-            engine.as_ref(),
-            Some(budget),
-        )?;
+        let engine_name = engine.name();
+        let timing = Timing::start("place_parts", &budget, engine_name);
+        let attempt =
+            guarded_place_parts(ctx.env(), &mut edit.doc, &payload, engine, Some(budget))?;
         let GuardedPlacement::Completed(result) = attempt else {
             timing.done("panicked");
-            tried.push(engine.name());
+            tried.push(engine_name);
             continue;
         };
         match *result {
@@ -160,10 +166,10 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 placement = json!({
                     "engine": timing.engine,
                     "parts": timing.parts,
-                    "budget_ms": timing.budget_secs.saturating_mul(1_000),
+                    "budget_ms": timing.budget_ms,
                     "elapsed_ms": elapsed_ms,
                 });
-                tried.push(engine.name());
+                tried.push(engine_name);
                 let committed = placed.committed;
                 report = Some(placed);
                 if committed {
@@ -172,7 +178,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
             Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
                 timing.done("overran");
-                return Ok(json!({ "error": error.to_string() }));
+                return Ok(budget_refusal(&error));
             }
             Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
                 return Ok(json!({
@@ -201,11 +207,18 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             return Ok(json!({
                 "error": "no placement engine completed",
                 "engines_tried": tried,
+                "engines_skipped": skipped,
             }));
         }
     };
     if !report.committed {
-        return Ok(refused_place(report, &payload, &tried));
+        return Ok(refused_place(
+            report,
+            &payload,
+            &tried,
+            &skipped,
+            sheet_parts,
+        ));
     }
     let refs = report.placed.clone();
     let mut value = edit
@@ -224,6 +237,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     value["placement"] = placement;
     value["engines_tried"] = json!(tried);
+    value["engines_skipped"] = json!(skipped);
     let refs = report.placed.join(" ");
     attach_connectivity(&mut value, ctx, report.placed, &format!("PLACED  {refs}"))?;
     with_check(value, ctx).context("checking placed parts")
@@ -238,10 +252,11 @@ fn guarded_place_parts(
     env: &kicad::KicadInstallation,
     doc: &mut sch_doc::SchDoc,
     payload: &sch_check::PlacePartsInput,
-    engine: &dyn PlacementEngine,
+    engine: Box<dyn PlacementEngine>,
     budget: Option<PlacementBudget>,
 ) -> Result<GuardedPlacement> {
     let snapshot = doc.snapshot();
+    let engine_name = engine.name();
     match catch_unwind(AssertUnwindSafe(|| {
         sch_floorplan::live::place_parts(env, doc, payload, engine, budget)
     })) {
@@ -253,7 +268,7 @@ fn guarded_place_parts(
                 .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
                 .unwrap_or("non-string panic payload");
             tracing::error!(
-                engine = engine.name(),
+                engine = engine_name,
                 panic = message,
                 "placement engine panicked"
             );
@@ -273,13 +288,13 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         ctx.env(),
         &mut edit.doc,
         &selection,
-        engine.as_ref(),
+        engine,
         Some(budget),
     ) {
         Ok(report) => report,
         Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
             timing.done("overran");
-            return Ok(json!({ "error": error.to_string() }));
+            return Ok(budget_refusal(&error));
         }
         Err(error) => return Err(error.into()),
     };
@@ -298,8 +313,54 @@ pub(crate) fn rewire(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let selection = selection(&input)?;
     let mut edit = Edit::open(ctx)?;
-    let report = sch_floorplan::live::rewire(ctx.env(), &mut edit.doc, &selection)?;
+    let budget = PlacementBudget::new(edit.doc.symbols().count());
+    let timing = Timing::start("rewire", &budget, "rewire");
+    let report =
+        match sch_floorplan::live::rewire(ctx.env(), &mut edit.doc, &selection, Some(budget)) {
+            Ok(report) => report,
+            Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
+                timing.done("overran");
+                return Ok(budget_refusal(&error));
+            }
+            Err(error) => return Err(error.into()),
+        };
+    timing.done(if report.committed {
+        "committed"
+    } else {
+        "refused"
+    });
     finish_arrangement(edit, report, ctx, "rewire")
+}
+
+fn budget_refusal(error: &sch_floorplan::live::Error) -> Value {
+    let sch_floorplan::live::Error::Budget {
+        budget,
+        elapsed,
+        parts,
+        engine,
+        phase,
+    } = error
+    else {
+        unreachable!("budget_refusal only formats a budget error")
+    };
+    let millis = |duration: Duration| duration.as_millis().min(u128::from(u64::MAX)) as u64;
+    let overrun = elapsed.saturating_sub(*budget);
+    let overran_ms = if elapsed > budget {
+        millis(overrun).max(1)
+    } else {
+        0
+    };
+    json!({
+        "error": error.to_string(),
+        "placement": {
+            "engine": engine,
+            "parts": parts,
+            "budget_ms": millis(*budget),
+            "elapsed_ms": millis(*elapsed),
+            "overran_ms": overran_ms,
+            "phase": phase,
+        }
+    })
 }
 
 fn finish_arrangement(
@@ -416,6 +477,8 @@ fn refused_place(
     report: PlaceReport,
     payload: &sch_check::PlacePartsInput,
     tried: &[&str],
+    skipped: &[&str],
+    sheet_parts: usize,
 ) -> Value {
     let m = &report.mismatch;
     let mut why = Vec::new();
@@ -442,17 +505,25 @@ fn refused_place(
         .iter()
         .map(|(name, count)| format!("{name} ({count} parts)"))
         .collect();
+    let block_guidance = if sheet_parts >= 60 {
+        " This sheet is large: place one named functional block per call with the `block` field; \
+         each call takes the region path and freezes symbols already on the sheet."
+    } else {
+        ""
+    };
     json!({
         "error": format!(
             "refused: the placed result does not match the requested connectivity ({}); nothing \
              was written. This is a placement-engine failure, not a payload error — {} already \
              tried it. Send one payload per block instead ({}); a smaller block is what has \
-             recovered this every time.",
+             recovered this every time.{}",
             why.join("; "),
             tried.join(", then "),
-            split.join(", ")
+            split.join(", "),
+            block_guidance,
         ),
         "engines_tried": tried,
+        "engines_skipped": skipped,
         "split_into": split,
         "report": report,
     })
@@ -486,12 +557,20 @@ fn placement_engine(selected: PlacementEngineKind) -> Box<dyn PlacementEngine> {
     }
 }
 
+fn engine_kind_name(selected: PlacementEngineKind) -> &'static str {
+    match selected {
+        PlacementEngineKind::Anneal => "anneal",
+        PlacementEngineKind::Spine => "spine",
+        PlacementEngineKind::Cluster => "cluster",
+    }
+}
+
 /// One placement call's wall time, logged when it ends — the record that says
 /// whether the deadline policy is holding on real designs.
 struct Timing {
     tool: &'static str,
     engine: &'static str,
-    budget_secs: u64,
+    budget_ms: u64,
     parts: usize,
     started: std::time::Instant,
 }
@@ -501,7 +580,7 @@ impl Timing {
         Self {
             tool,
             engine,
-            budget_secs: budget.budget.as_secs(),
+            budget_ms: budget.budget.as_millis().min(u128::from(u64::MAX)) as u64,
             parts: budget.parts,
             started: std::time::Instant::now(),
         }
@@ -513,7 +592,7 @@ impl Timing {
             tool = self.tool,
             engine = self.engine,
             parts = self.parts,
-            budget_s = self.budget_secs,
+            budget_ms = self.budget_ms,
             elapsed_ms,
             outcome,
             "placement finished"
@@ -570,6 +649,17 @@ mod tests {
     }
 
     #[test]
+    fn budget_refusal_reports_a_real_sub_millisecond_overrun() {
+        let error = PlacementBudget::within(Duration::from_secs(1), 70).overrun(
+            Duration::from_secs(1) + Duration::from_nanos(1),
+            "spine",
+            "verify",
+        );
+        let value = budget_refusal(&error);
+        assert_eq!(value.pointer("/placement/overran_ms"), Some(&json!(1)));
+    }
+
+    #[test]
     fn panicking_engine_restores_the_document_and_falls_through() {
         let Some(ctx) = AgentRuntime::detect_for_test() else {
             eprintln!("SKIP: no KiCAD detected");
@@ -586,21 +676,29 @@ mod tests {
         let before = doc.to_text();
         let mut tried = Vec::new();
 
-        match guarded_place_parts(ctx.env(), &mut doc, &payload, &PanicEngine, None).unwrap() {
+        match guarded_place_parts(ctx.env(), &mut doc, &payload, Box::new(PanicEngine), None)
+            .unwrap()
+        {
             GuardedPlacement::Panicked => tried.push(PanicEngine.name()),
             GuardedPlacement::Completed(_) => panic!("panic stub unexpectedly completed"),
         }
         assert_eq!(doc.to_text(), before);
 
-        let fallback = spine_place::SpinePlace;
-        let report =
-            match guarded_place_parts(ctx.env(), &mut doc, &payload, &fallback, None).unwrap() {
-                GuardedPlacement::Completed(result) => {
-                    tried.push(fallback.name());
-                    (*result).unwrap()
-                }
-                GuardedPlacement::Panicked => panic!("fallback engine panicked"),
-            };
+        let report = match guarded_place_parts(
+            ctx.env(),
+            &mut doc,
+            &payload,
+            Box::new(spine_place::SpinePlace),
+            None,
+        )
+        .unwrap()
+        {
+            GuardedPlacement::Completed(result) => {
+                tried.push("spine");
+                (*result).unwrap()
+            }
+            GuardedPlacement::Panicked => panic!("fallback engine panicked"),
+        };
 
         assert!(report.committed, "fallback placement was refused");
         assert_eq!(tried, ["panic-stub", "spine"]);
