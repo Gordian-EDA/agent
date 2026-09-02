@@ -42,15 +42,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "place-parts" => {
             let source = std::fs::read_to_string(rest.first().ok_or("missing input.json")?)?;
             let input: PlacePartsInput = serde_json::from_str(&source)?;
-            let report = live::place_parts(&env, &mut doc, &input, engine.as_ref(), None)?;
+            let report = live::place_parts(&env, &mut doc, &input, engine, None)?;
             (serde_json::to_string_pretty(&report)?, report.committed)
         }
         "arrange" => {
-            let report = live::arrange(&env, &mut doc, &selection(rest)?, engine.as_ref(), None)?;
+            let report = live::arrange(&env, &mut doc, &selection(rest)?, engine, None)?;
             (serde_json::to_string_pretty(&report)?, report.committed)
         }
         "rewire" => {
-            let report = live::rewire(&env, &mut doc, &selection(rest)?)?;
+            let report = live::rewire(&env, &mut doc, &selection(rest)?, None)?;
             (serde_json::to_string_pretty(&report)?, report.committed)
         }
         other => return Err(format!("unknown command `{other}`").into()),

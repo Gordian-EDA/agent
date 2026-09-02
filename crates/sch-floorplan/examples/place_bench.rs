@@ -56,7 +56,7 @@ fn main() {
                 &env,
                 &mut doc,
                 &input,
-                engine.as_ref(),
+                engine,
                 Some(PlacementBudget::within(budget, parts)),
             );
             let secs = t0.elapsed().as_secs_f64();

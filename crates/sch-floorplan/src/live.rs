@@ -27,6 +27,11 @@
 //! written until the gate passes, so overrunning is always safe to refuse.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use geom::{Point2, Rect};
@@ -129,6 +134,29 @@ struct Deadlines {
     hard: Option<Deadline>,
 }
 
+#[derive(Clone)]
+struct Phase(Arc<AtomicU8>);
+
+impl Phase {
+    const NAMES: [&'static str; 5] = ["lower", "audit", "place", "realise", "verify"];
+
+    fn new() -> Self {
+        Self(Arc::new(AtomicU8::new(0)))
+    }
+
+    fn enter(&self, name: &'static str) {
+        let index = Self::NAMES
+            .iter()
+            .position(|candidate| *candidate == name)
+            .expect("live phase has a published name");
+        self.0.store(index as u8, Ordering::Release);
+    }
+
+    fn current(&self) -> &'static str {
+        Self::NAMES[usize::from(self.0.load(Ordering::Acquire))]
+    }
+}
+
 impl PlacementBudget {
     /// The budget a placement tool call gets when the caller states none.
     pub const DEFAULT: Duration = Duration::from_secs(60);
@@ -155,10 +183,13 @@ impl PlacementBudget {
     }
 
     /// The refusal a caller reports when the call overran: nothing was written.
-    pub fn overrun(&self) -> Error {
+    pub fn overrun(&self, elapsed: Duration, engine: &'static str, phase: &'static str) -> Error {
         Error::Budget {
-            seconds: self.budget.as_secs(),
+            budget: self.budget,
+            elapsed,
             parts: self.parts,
+            engine,
+            phase,
         }
     }
 }
@@ -169,10 +200,6 @@ impl Deadlines {
             search: Some(Deadline::after(b.budget.mul_f64(SEARCH_SHARE))),
             hard: Some(Deadline::after(b.budget)),
         })
-    }
-
-    fn out_of_time(&self) -> bool {
-        sch_model::place::expired(self.hard)
     }
 }
 
@@ -188,10 +215,16 @@ pub enum Error {
     #[error("selection matched no symbol")]
     EmptySelection,
     #[error(
-        "placement exceeded its budget of {seconds}s ({parts} parts on the sheet) — nothing \
-         was written; retry with a smaller block, or split the sheet"
+        "{engine} placement exceeded its {budget:?} budget after {elapsed:?} during {phase} \
+         ({parts} parts on the sheet) — nothing was written; retry with a smaller named block"
     )]
-    Budget { seconds: u64, parts: usize },
+    Budget {
+        budget: Duration,
+        elapsed: Duration,
+        parts: usize,
+        engine: &'static str,
+        phase: &'static str,
+    },
     #[error("invalid payload")]
     InvalidPayload(Box<PayloadAudit>),
 }
@@ -296,12 +329,33 @@ pub fn place_parts(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     input: &PlacePartsInput,
-    engine: &dyn PlacementEngine,
+    engine: Box<dyn PlacementEngine>,
     budget: Option<PlacementBudget>,
 ) -> Result<PlaceReport> {
-    let deadlines = Deadlines::of(budget);
+    let input = input.clone();
+    bounded_edit(
+        env,
+        doc,
+        budget,
+        engine.name(),
+        move |env, doc, phase, deadlines| {
+            place_parts_inner(&env, doc, &input, engine.as_ref(), phase, deadlines)
+        },
+    )
+}
+
+fn place_parts_inner(
+    env: &KicadInstallation,
+    doc: &mut SchDoc,
+    input: &PlacePartsInput,
+    engine: &dyn PlacementEngine,
+    phase: &Phase,
+    deadlines: Deadlines,
+) -> Result<PlaceReport> {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    let before = live_phase("lower", input.parts.len(), 0, || connect::extract(doc));
+    let before = live_phase(phase, "lower", input.parts.len(), 0, || {
+        connect::extract(doc)
+    });
     let existing = ExistingSheet {
         net_pins: before
             .nets
@@ -314,7 +368,7 @@ pub fn place_parts(
             .collect(),
     };
     let (added, diags, mut audit) =
-        live_phase("audit", input.parts.len(), before.nets.len(), || {
+        live_phase(phase, "audit", input.parts.len(), before.nets.len(), || {
             sch_check::into_design(input, &provider, &existing)
         });
     tracing::info!(
@@ -380,7 +434,7 @@ pub fn place_parts(
     }
     let held = seated_items(doc, &before);
 
-    let out = live_phase("place", movable.len(), design.nets.len(), || {
+    let out = live_phase(phase, "place", movable.len(), design.nets.len(), || {
         region_arrange(
             RegionProblem::new(
                 env,
@@ -394,35 +448,35 @@ pub fn place_parts(
             .by(deadlines.search),
         )
     });
-    // The only point where refusing is worth it: the search is done but the sheet is
-    // not drawn, so nothing is thrown away that realising and gating would not cost
-    // again. Past here a truthful placement always commits — a finished sheet is worth
-    // more than a punctual refusal.
-    if deadlines.out_of_time() {
-        doc.restore(snapshot)?;
-        return Err(budget.expect("a hard deadline implies a budget").overrun());
-    }
     let placed = posed(movable, &out.poses);
     let inc = incidence(&placed);
-    let warnings = live_phase("realise", placed.len(), inc.len(), || -> Result<_> {
-        let writer = crate::realize::realize_block(
-            env,
-            &design,
-            &placed,
-            &inc,
-            &out.ir,
-            crate::realize::Draw {
-                title: design.name.as_deref(),
-                frame: fresh,
-                driven: &driven_nets(doc, &before),
-            },
-        )?;
-        let warnings = writer.layout_warnings();
-        crate::realize::graft(doc, writer)?;
-        Ok(warnings)
-    })?;
+    let warnings = live_phase(
+        phase,
+        "realise",
+        placed.len(),
+        inc.len(),
+        || -> Result<_> {
+            let writer = crate::realize::realize_block(
+                env,
+                &design,
+                &placed,
+                &inc,
+                &out.ir,
+                crate::realize::Draw {
+                    title: design.name.as_deref(),
+                    frame: fresh,
+                    driven: &driven_nets(doc, &before),
+                },
+            )?;
+            let warnings = writer.layout_warnings();
+            crate::realize::graft(doc, writer)?;
+            Ok(warnings)
+        },
+    )?;
 
-    let mut mismatch = live_phase("verify", placed.len(), inc.len(), || verify(doc, &design));
+    let mut mismatch = live_phase(phase, "verify", placed.len(), inc.len(), || {
+        verify(doc, &design)
+    });
     mismatch.disturbed = disturbed(&before, &connect::extract(doc));
     let committed = mismatch.is_empty();
     if !committed {
@@ -440,7 +494,14 @@ pub fn place_parts(
     })
 }
 
-fn live_phase<T>(phase: &'static str, parts: usize, nets: usize, run: impl FnOnce() -> T) -> T {
+fn live_phase<T>(
+    current: &Phase,
+    phase: &'static str,
+    parts: usize,
+    nets: usize,
+    run: impl FnOnce() -> T,
+) -> T {
+    current.enter(phase);
     let span = tracing::info_span!("sch_floorplan_phase", phase, parts, nets);
     let started = Instant::now();
     let result = span.in_scope(run);
@@ -455,37 +516,66 @@ pub fn arrange(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     selection: &Selection,
-    engine: &dyn PlacementEngine,
+    engine: Box<dyn PlacementEngine>,
     budget: Option<PlacementBudget>,
 ) -> Result<ArrangeReport> {
-    rearrange(env, doc, selection, Some((engine, budget)))
+    let selection = selection.clone();
+    bounded_edit(
+        env,
+        doc,
+        budget,
+        engine.name(),
+        move |env, doc, phase, deadlines| {
+            rearrange_inner(
+                &env,
+                doc,
+                &selection,
+                Some(engine.as_ref()),
+                phase,
+                deadlines,
+            )
+        },
+    )
 }
 
-/// Redraw `selection`'s wiring where it stands, moving nothing. No search runs, so
-/// there is nothing to bound.
+/// Redraw `selection`'s wiring where it stands, moving nothing, under the same hard
+/// wall-clock promise as [`place_parts`].
 pub fn rewire(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     selection: &Selection,
+    budget: Option<PlacementBudget>,
 ) -> Result<ArrangeReport> {
-    rearrange(env, doc, selection, None)
+    let selection = selection.clone();
+    bounded_edit(
+        env,
+        doc,
+        budget,
+        "rewire",
+        move |env, doc, phase, deadlines| {
+            rearrange_inner(&env, doc, &selection, None, phase, deadlines)
+        },
+    )
 }
 
-fn rearrange(
+fn rearrange_inner(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     selection: &Selection,
-    engine: Option<(&dyn PlacementEngine, Option<PlacementBudget>)>,
+    engine: Option<&dyn PlacementEngine>,
+    phase: &Phase,
+    deadlines: Deadlines,
 ) -> Result<ArrangeReport> {
-    let budget = engine.and_then(|(_, b)| b);
-    let deadlines = Deadlines::of(budget);
     let chosen = selection.resolve(doc);
-    let before = connect::extract(doc);
-    let mut design = Design::default();
-    design
-        .blocks
-        .insert(SHEET_BLOCK.to_string(), lift_sheet(doc, &before));
-    sch_check::nets::derive_attrs(&mut design);
+    let (before, design) = live_phase(phase, "lower", chosen.len(), 0, || {
+        let before = connect::extract(doc);
+        let mut design = Design::default();
+        design
+            .blocks
+            .insert(SHEET_BLOCK.to_string(), lift_sheet(doc, &before));
+        sch_check::nets::derive_attrs(&mut design);
+        (before, design)
+    });
 
     let (mut movable, held): (Vec<Item>, Vec<Item>) = seated_items(doc, &before)
         .into_iter()
@@ -504,54 +594,59 @@ fn rearrange(
     let ir = crate::floorplan::infer_ir(env, &design);
     let snapshot = doc.snapshot();
     let (placed, ir) = match engine {
-        Some((engine, _)) => {
-            let out = region_arrange(
-                RegionProblem::new(
-                    env,
-                    &design,
-                    movable.clone(),
-                    held.clone(),
-                    obstacles(doc, &owned),
-                    ir,
-                    engine,
+        Some(engine) => {
+            let out = live_phase(phase, "place", movable.len(), before.nets.len(), || {
+                region_arrange(
+                    RegionProblem::new(
+                        env,
+                        &design,
+                        movable.clone(),
+                        held.clone(),
+                        obstacles(doc, &owned),
+                        ir,
+                        engine,
+                    )
+                    .by(deadlines.search),
                 )
-                .by(deadlines.search),
-            );
+            });
             (posed(movable, &out.poses), out.ir)
         }
         None => (movable, ir),
     };
-    // Refuse before the sheet is redrawn, for the reason `place_parts` gives.
-    if deadlines.out_of_time() {
-        return Err(budget.expect("a hard deadline implies a budget").overrun());
-    }
-    for part in &placed {
-        seat(doc, part)?;
-    }
-
-    owned.extend(footprints(&placed));
-    let erase = selection_drawing(doc, &owned, &held);
-    let redrawn = doc.retain_drawing(|item| !erase.contains(&drawing_key(item)));
-
-    let inc = incidence(&placed);
-    let writer = crate::realize::realize_block(
-        env,
-        &design,
-        &placed,
-        &inc,
-        &ir,
-        crate::realize::Draw {
-            driven: &driven_nets(doc, &before),
-            ..Default::default()
+    let (redrawn, inc, warnings) = live_phase(
+        phase,
+        "realise",
+        placed.len(),
+        before.nets.len(),
+        || -> Result<_> {
+            for part in &placed {
+                seat(doc, part)?;
+            }
+            owned.extend(footprints(&placed));
+            let erase = selection_drawing(doc, &owned, &held);
+            let redrawn = doc.retain_drawing(|item| !erase.contains(&drawing_key(item)));
+            let inc = incidence(&placed);
+            let writer = crate::realize::realize_block(
+                env,
+                &design,
+                &placed,
+                &inc,
+                &ir,
+                crate::realize::Draw {
+                    driven: &driven_nets(doc, &before),
+                    ..Default::default()
+                },
+            )?;
+            let warnings = writer.layout_warnings();
+            crate::realize::graft_drawing(doc, writer)?;
+            Ok((redrawn, inc, warnings))
         },
     )?;
-    let warnings = writer.layout_warnings();
-    crate::realize::graft_drawing(doc, writer)?;
 
-    let mismatch = Mismatch {
+    let mismatch = live_phase(phase, "verify", placed.len(), inc.len(), || Mismatch {
         disturbed: disturbed(&before, &connect::extract(doc)),
         ..Default::default()
-    };
+    });
     let committed = mismatch.is_empty();
     if !committed {
         doc.restore(snapshot)?;
@@ -568,6 +663,79 @@ fn rearrange(
         mismatch,
         committed,
     })
+}
+
+enum WorkerReply<T> {
+    Completed(Result<T>, SchDoc),
+    Panicked(Box<dyn std::any::Any + Send>),
+}
+
+fn bounded_edit<T, F>(
+    env: &KicadInstallation,
+    doc: &mut SchDoc,
+    budget: Option<PlacementBudget>,
+    engine: &'static str,
+    run: F,
+) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(KicadInstallation, &mut SchDoc, &Phase, Deadlines) -> Result<T> + Send + 'static,
+{
+    let started = Instant::now();
+    let deadlines = Deadlines::of(budget);
+    let phase = Phase::new();
+    let worker_phase = phase.clone();
+    let mut worker_doc = doc.clone();
+    let worker_env = env.clone();
+    let (send, receive) = sync_channel(1);
+    thread::Builder::new()
+        .name(format!("schematic-{engine}"))
+        .spawn(move || {
+            let reply = match catch_unwind(AssertUnwindSafe(|| {
+                run(worker_env, &mut worker_doc, &worker_phase, deadlines)
+            })) {
+                Ok(result) => WorkerReply::Completed(result, worker_doc),
+                Err(panic) => WorkerReply::Panicked(panic),
+            };
+            if send.send(reply).is_err() {
+                let elapsed = started.elapsed();
+                let overran_ms = budget
+                    .map(|limit| elapsed.saturating_sub(limit.budget).as_millis())
+                    .unwrap_or_default()
+                    .min(u128::from(u64::MAX)) as u64;
+                tracing::warn!(
+                    engine,
+                    phase = worker_phase.current(),
+                    elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
+                    placement.overran_ms = overran_ms,
+                    "abandoned placement worker exited"
+                );
+            }
+        })?;
+
+    let reply = match deadlines.hard {
+        Some(hard) => match receive.recv_timeout(hard.remaining()) {
+            Ok(reply) => reply,
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(budget.expect("a hard deadline implies a budget").overrun(
+                    started.elapsed(),
+                    engine,
+                    phase.current(),
+                ));
+            }
+            Err(RecvTimeoutError::Disconnected) => unreachable!("worker always sends a reply"),
+        },
+        None => receive.recv().expect("worker always sends a reply"),
+    };
+    match reply {
+        WorkerReply::Completed(result, completed_doc) => {
+            if result.is_ok() {
+                *doc = completed_doc;
+            }
+            result
+        }
+        WorkerReply::Panicked(panic) => resume_unwind(panic),
+    }
 }
 
 /// Move a symbol in the document onto the pose the engine chose for it.
@@ -990,7 +1158,35 @@ fn disturbed(before: &Netlist, after: &Netlist) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use sch_model::engine::{CandidateEvaluator, PlacementOutput, SchematicPlaceProblem};
+
     use super::*;
+
+    struct SleepEngine;
+
+    impl PlacementEngine for SleepEngine {
+        fn name(&self) -> &'static str {
+            "sleep-stub"
+        }
+
+        fn place(
+            &self,
+            problem: &mut SchematicPlaceProblem,
+            _eval: &dyn CandidateEvaluator,
+        ) -> PlacementOutput {
+            thread::sleep(Duration::from_secs(3));
+            PlacementOutput {
+                result: sch_model::place::PlaceResult {
+                    engine: self.name().to_string(),
+                    truthfulness_breaks: 0,
+                    warnings: 0,
+                    crossings: Default::default(),
+                    cost: 0.0,
+                },
+                ir: problem.ir.clone(),
+            }
+        }
+    }
 
     #[test]
     fn policy_picks_the_engine_that_keeps_the_budget() {
@@ -1019,13 +1215,56 @@ mod tests {
     #[test]
     fn overrun_names_the_budget_and_the_way_out() {
         let message = PlacementBudget::within(Duration::from_secs(60), 46)
-            .overrun()
+            .overrun(Duration::from_millis(60_001), "spine", "verify")
             .to_string();
         assert!(
-            message.contains("budget of 60s (46 parts on the sheet)"),
+            message.contains("spine placement exceeded its 60s budget"),
             "{message}"
         );
+        assert!(message.contains("during verify"), "{message}");
         assert!(message.contains("nothing was written"), "{message}");
         assert!(message.contains("smaller block"), "{message}");
+    }
+
+    #[test]
+    fn sleeping_engine_is_abandoned_at_the_deadline_without_touching_the_document() {
+        let Some(env) = KicadInstallation::detect() else {
+            eprintln!("SKIP: no KiCad environment detected");
+            return;
+        };
+        let input: PlacePartsInput = serde_json::from_value(serde_json::json!({
+            "parts": [
+                {"ref": "R1", "part": "Device:R", "pins": {"1": "VCC", "2": "MID"}},
+                {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "GND"}}
+            ]
+        }))
+        .unwrap();
+        let mut doc = blank_sheet().unwrap();
+        let before = doc.to_text();
+        let limit = Duration::from_secs(1);
+        let started = Instant::now();
+
+        let error = place_parts(
+            &env,
+            &mut doc,
+            &input,
+            Box::new(SleepEngine),
+            Some(PlacementBudget::within(limit, input.parts.len())),
+        )
+        .unwrap_err();
+
+        assert!(started.elapsed() <= limit + Duration::from_secs(1));
+        assert_eq!(doc.to_text(), before);
+        assert!(
+            matches!(
+                &error,
+                Error::Budget {
+                    engine: "sleep-stub",
+                    phase: "place",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
     }
 }

@@ -214,7 +214,7 @@ pub struct CohesionPlan {
 ///   and ship the best-so-far; honouring a deadline costs convergence, never correctness.
 /// - **Never panics.** A unit it cannot place reports through the result's counts.
 /// - The returned [`PlacementOutput`] describes the FINAL `problem.items`.
-pub trait PlacementEngine {
+pub trait PlacementEngine: Send + Sync {
     /// Open provenance: the engine's stable name (e.g. `"anneal"`, `"spine"`).
     fn name(&self) -> &'static str;
 
