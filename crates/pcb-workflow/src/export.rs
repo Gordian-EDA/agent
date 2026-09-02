@@ -694,6 +694,13 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "drc_clean": blocking_findings == 0,
         "path": path.display().to_string(),
         "blocking_findings": blocking_findings,
+        // The headline counts stay at the top level: `drc` below carries the
+        // classification detail, but these are what a caller reads first.
+        "introduced": introduced,
+        "pre_existing": pre_existing,
+        "reported_findings": reported_findings,
+        "copper_violations": copper_violations,
+        "unconnected_items": unconnected_items,
         // Progress, not pass/fail: how much of the board is routed, what is
         // standing in the way of the rest, and who is still in the staging row.
         "routed": format!("{}/{}", ratsnest.routed, ratsnest.total),
