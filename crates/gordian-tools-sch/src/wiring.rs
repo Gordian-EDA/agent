@@ -420,18 +420,20 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         false => connect::extract(&edit.doc),
     };
     let was = refs::net_of(&live, &pin.refdes, &pin.number).map(str::to_string);
-    // Hanging a second authored name on a pin does not rename its net — it merges
-    // two of them, and the merge is invisible in the drawing. Naming a net KiCAD
-    // named for itself is still fine: that partition has no authored name to lose.
+    // A label never REPLACES the name a pin already has — it stacks a second one on
+    // the same point, which merges the two partitions under whichever name wins. So
+    // a pin that already carries an authored name is refused, whether or not the new
+    // name is in use. Naming a partition KiCAD named for itself is still fine: that
+    // one has no authored name to lose.
     if let Some(was) = was.as_deref()
         && was != net
         && !is_auto(was)
     {
         return Ok(json!({
             "error": format!(
-                "{spec} is already on net `{was}`; naming it `{net}` would merge `{was}` and \
-                 `{net}` into one net. Delete the wiring that puts {spec} on `{was}` first, or \
-                 name a pin that is loose."
+                "{spec} is already on net `{was}`; a label does not replace that name, it \
+                 merges `{was}` and `{net}` into one net. Use delete_wires to take {spec} off \
+                 `{was}` first, or name a pin that is loose."
             ),
         }));
     }
@@ -591,7 +593,14 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(pin) => pin,
         Err(error) => return Ok(json!({ "error": error })),
     };
-    let was = refs::net_of(edit.before(), &pin.refdes, &pin.number).map(str::to_string);
+    // Seating a rail on a pin connects it, so the pin's marker goes with the same
+    // rule `connect` and `label` follow — and goes before its net is read.
+    let cleared = clear_no_connects(&mut edit.doc, &[(pin.at, spec.to_string())]);
+    let live = match cleared.is_empty() {
+        true => edit.before().clone(),
+        false => connect::extract(&edit.doc),
+    };
+    let was = refs::net_of(&live, &pin.refdes, &pin.number).map(str::to_string);
     let source = symbol_source(ctx);
     let candidates: Vec<String> = match input.get("lib_id").and_then(Value::as_str) {
         Some(lib_id) => vec![lib_id.to_string()],
@@ -628,10 +637,13 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         ctx,
         "add_power",
         "Add a schematic power symbol",
-        json!(format!(
-            "attached {lib_id} `{net}` to {spec}{}",
-            if stub { " through a short wire" } else { "" }
-        )),
+        with_cleared(
+            format!(
+                "attached {lib_id} `{net}` to {spec}{}",
+                if stub { " through a short wire" } else { "" }
+            ),
+            cleared,
+        ),
         Allow::nothing()
             .joining_nets([net.to_string()])
             .joining_nets(was)
@@ -782,9 +794,12 @@ pub(crate) fn floating_wires(doc: &SchDoc) -> Vec<String> {
     }
     let mut anchors: Vec<Point2> = sch_doc::placed_pins(doc).iter().map(|p| p.at).collect();
     anchors.extend(doc.labels().map(|l| l.at.point()));
-    anchors.extend(doc.items().iter().filter_map(|item| match item {
-        sch_doc::Item::NoConnect(marker) => Some(marker.at),
-        _ => None,
+    anchors.extend(doc.items().iter().flat_map(|item| match item {
+        sch_doc::Item::NoConnect(marker) => vec![marker.at],
+        // A sheet pin is a connection point no symbol owns; a run that reaches one
+        // is held by it, not floating.
+        sch_doc::Item::Sheet(sheet) => sheet.pins.iter().map(|pin| pin.at.point()).collect(),
+        _ => Vec::new(),
     }));
     let roots: Vec<usize> = (0..runs.len()).map(|i| groups.find(i)).collect();
     let held: Vec<usize> = runs
@@ -967,7 +982,18 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if doomed.is_empty() {
         return Ok(json!({ "changed": "no wire matched", "net_delta": "connectivity unchanged" }));
     }
+    // The endpoints the cut is about to leave in the air. Deleting the middle of a
+    // run leaves the surviving half anchored at one end and dangling at the other,
+    // which is the same `unconnected_wire_endpoint` a removed pin leaves behind.
+    let cut: Vec<Point2> = edit
+        .doc
+        .wires()
+        .filter(|wire| doomed.contains(&wire.uuid))
+        .filter_map(refs::ends)
+        .flat_map(|(a, b)| [a, b])
+        .collect();
     let mut removed = edit.doc.remove_drawing(&doomed);
+    removed += crate::edit::retract_stubs(&mut edit.doc, &cut);
     removed += edit.doc.remove_drawing(&floating_wires(&edit.doc));
     // Deleting copper loosens the pins that shared it, which is the point of
     // the call: every net the request named, and every pin on one, is fair game.

@@ -718,7 +718,12 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// KiCAD's `no_connect_dangling`.
 ///
 /// Returns how many items went.
-fn retract_stubs(doc: &mut SchDoc, orphaned: &[Point2]) -> usize {
+pub(crate) fn retract_stubs(doc: &mut SchDoc, orphaned: &[Point2]) -> usize {
+    // A power symbol is placed straight onto the pin it feeds, so a removed pin's
+    // coordinate may still carry a pin that is very much there — and everything
+    // hanging off it, its marker included, still belongs to that pin.
+    let mut orphaned: Vec<Point2> = orphaned.to_vec();
+    orphaned.retain(|p| !anchor_points(doc).iter().any(|q| q.near_eq(*p, EPS)));
     let markers: Vec<String> = doc
         .items()
         .iter()
@@ -732,12 +737,10 @@ fn retract_stubs(doc: &mut SchDoc, orphaned: &[Point2]) -> usize {
         })
         .collect();
     let mut removed = doc.remove_drawing(&markers);
-    let mut frontier: Vec<Point2> = orphaned.to_vec();
-    let mut peeled: Vec<Point2> = orphaned.to_vec();
+    let mut frontier: Vec<Point2> = orphaned.clone();
+    let mut peeled: Vec<Point2> = orphaned;
     for _ in 0..64 {
-        // A power symbol is placed straight onto the pin it feeds, so a removed
-        // pin's coordinate may still carry a pin that is very much there.
-        let live: Vec<Point2> = placed_pins(doc).into_iter().map(|p| p.at).collect();
+        let live = anchor_points(doc);
         frontier.retain(|p| !live.iter().any(|q| q.near_eq(*p, EPS)));
         let runs: Vec<(String, Point2, Point2)> = doc
             .wires()
@@ -772,11 +775,33 @@ fn retract_stubs(doc: &mut SchDoc, orphaned: &[Point2]) -> usize {
         if doomed.is_empty() {
             break;
         }
+        // Runs that converge on one point would otherwise re-walk it once per
+        // arrival, inflating the count and multiplying the frontier each round.
+        next.retain(|p| !peeled.iter().any(|q| q.near_eq(*p, EPS)));
+        next.dedup_by(|a, b| a.near_eq(*b, EPS));
         removed += doc.remove_drawing(&doomed);
         peeled.extend(&next);
         frontier = next;
     }
     removed + doc.remove_drawing(&stranded_labels(doc, &peeled))
+}
+
+/// Every point the sheet holds a connection at: symbol pins and the pins of a
+/// hierarchical sheet symbol.
+///
+/// A sheet pin is a connection point that no symbol owns, so a retraction that
+/// only knew about `placed_pins` would peel a run straight through one and cut
+/// the child sheet loose.
+fn anchor_points(doc: &SchDoc) -> Vec<Point2> {
+    let sheet_pins = doc.items().iter().filter_map(|item| match item {
+        sch_doc::Item::Sheet(sheet) => Some(sheet.pins.iter().map(|pin| pin.at.point())),
+        _ => None,
+    });
+    placed_pins(doc)
+        .into_iter()
+        .map(|pin| pin.at)
+        .chain(sheet_pins.flatten())
+        .collect()
 }
 
 /// The labels at `points` that no longer sit on any wire or pin.
@@ -785,7 +810,7 @@ fn retract_stubs(doc: &mut SchDoc, orphaned: &[Point2]) -> usize {
 /// once the run is gone — which is why this is a sweep over everything the
 /// retraction peeled, run after the peeling rather than during it.
 fn stranded_labels(doc: &SchDoc, points: &[Point2]) -> Vec<String> {
-    let pins: Vec<Point2> = placed_pins(doc).into_iter().map(|p| p.at).collect();
+    let pins = anchor_points(doc);
     let held = |p: Point2| {
         pins.iter().any(|q| q.near_eq(p, EPS))
             || doc
@@ -1591,8 +1616,11 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         if refs::net_of(&after, refdes, &number) == Some(net.as_str()) {
             continue;
         }
+        // The sheet's own scope for that net, not a plain label: a plain one on a
+        // net drawn with a pennant shadows it instead of restoring the pin to it.
+        let kind = crate::wiring::sheet_scope(&edit.doc, &net).unwrap_or(LabelKind::Local);
         edit.doc
-            .add_label(LabelKind::Local, &net, Pose::new(landed.x, landed.y, 0.0));
+            .add_label(kind, &net, Pose::new(landed.x, landed.y, 0.0));
         restored.push(format!("{refdes}.{number}={net}"));
     }
     if !restored.is_empty() {

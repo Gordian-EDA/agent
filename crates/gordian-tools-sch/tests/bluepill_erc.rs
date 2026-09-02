@@ -421,3 +421,110 @@ fn a_later_label_adopts_the_nets_existing_scope() {
         .expect("SWDIO exists");
     assert_eq!(net.pins.len(), 2, "the two labels did not join: {net:?}");
 }
+
+/// Seating a rail on a marked pin connects it, so the marker goes — the same
+/// rule `connect` follows.
+#[test]
+fn add_power_clears_the_marker_on_the_pin_it_feeds() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    add(&ctx, json!([{"lib_id": "Device:R", "ref": "R1"}]));
+    call(&ctx, "no_connect", json!({"pins": ["R1.2"]}));
+
+    let powered = call(&ctx, "add_power", json!({"pin": "R1.2", "net": "GND"}));
+
+    assert!(powered.get("error").is_none(), "{powered}");
+    assert!(
+        markers(&SchDoc::read(ctx.sch_path()).unwrap()).is_empty(),
+        "a marker was left on a pin that now sits on a rail"
+    );
+}
+
+/// Cutting the middle of a run leaves the surviving half dangling at the cut —
+/// the same `unconnected_wire_endpoint` a removed pin leaves behind.
+#[test]
+fn delete_wires_retracts_the_half_it_leaves_dangling() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    add(&ctx, json!([{"lib_id": "Device:R", "ref": "R1"}]));
+    let mut doc = SchDoc::read(ctx.sch_path()).unwrap();
+    let pin = pin_at(&doc, "R1", "2");
+    let mid = Point2::new(pin.x, pin.y + 2.54);
+    let far = Point2::new(pin.x, pin.y + 5.08);
+    doc.add_wire(pin, mid);
+    doc.add_wire(mid, far);
+    doc.write(ctx.sch_path()).unwrap();
+
+    let cut = call(&ctx, "delete_wires", json!({"pins": ["R1.2"]}));
+
+    assert!(cut.get("error").is_none(), "{cut}");
+    let after = SchDoc::read(ctx.sch_path()).unwrap();
+    assert_eq!(after.wires().count(), 0, "the far half was left dangling");
+}
+
+/// A run held only by hierarchical sheet pins is not floating: a sheet pin is a
+/// connection point no symbol owns, and sweeping it cuts the child sheet loose.
+#[test]
+fn a_run_between_sheet_pins_survives_an_unrelated_removal() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    add(
+        &ctx,
+        json!([
+            {"lib_id": "Device:R", "ref": "R1"},
+            {"lib_id": "Device:R", "ref": "R2"},
+        ]),
+    );
+    let mut doc = SchDoc::read(ctx.sch_path()).unwrap();
+    let a = Point2::new(50.8, 50.8);
+    let b = Point2::new(50.8, 63.5);
+    doc.add_wire(a, b);
+    let text = doc.to_text();
+    let close = text.rfind("\n)").expect("the sheet closes");
+    std::fs::write(
+        ctx.sch_path(),
+        format!("{}\n{}{}", &text[..close], child_sheet(a, b), ")\n"),
+    )
+    .unwrap();
+    let seeded = SchDoc::read(ctx.sch_path()).unwrap();
+    assert_eq!(
+        seeded
+            .items()
+            .iter()
+            .filter(|item| matches!(item, Item::Sheet(_)))
+            .count(),
+        1,
+        "fixture must place a hierarchical sheet"
+    );
+
+    let removed = call(&ctx, "remove_symbols", json!({"refs": ["R1"]}));
+
+    assert!(removed.get("error").is_none(), "{removed}");
+    let after = SchDoc::read(ctx.sch_path()).unwrap();
+    assert_eq!(
+        after.wires().count(),
+        1,
+        "the run between two sheet pins was swept as floating"
+    );
+}
+
+/// A hierarchical sheet whose two pins sit exactly on `a` and `b`.
+fn child_sheet(a: Point2, b: Point2) -> String {
+    format!(
+        "\t(sheet\n\t\t(at 40 40)\n\t\t(size 30 30)\n\
+         \t\t(uuid \"4a1c0f2e-0000-4000-8000-0000000000dd\")\n\
+         \t\t(property \"Sheetname\" \"child\")\n\
+         \t\t(property \"Sheetfile\" \"child.kicad_sch\")\n\
+         \t\t(pin \"IN\" input\n\t\t\t(at {} {} 0)\n\
+         \t\t\t(uuid \"4a1c0f2e-0000-4000-8000-0000000000de\")\n\t\t)\n\
+         \t\t(pin \"OUT\" output\n\t\t\t(at {} {} 0)\n\
+         \t\t\t(uuid \"4a1c0f2e-0000-4000-8000-0000000000df\")\n\t\t)\n\t)\n",
+        a.x, a.y, b.x, b.y
+    )
+}

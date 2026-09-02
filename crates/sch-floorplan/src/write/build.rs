@@ -704,9 +704,7 @@ impl SchematicWriter {
             }
         }
         for w in &self.wires {
-            scene
-                .segments
-                .push(NetSegment::new(w.a, w.b, w.net.clone()));
+            scene.segments.push(NetSegment::new(w.a, w.b, w.net.clone()));
         }
         scene
     }
