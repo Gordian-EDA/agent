@@ -34,6 +34,7 @@ pub mod label;
 pub mod live;
 pub mod realize;
 pub mod region;
+pub mod visual;
 pub mod wire;
 pub mod write;
 

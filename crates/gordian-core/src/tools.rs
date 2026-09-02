@@ -32,7 +32,7 @@
 
 use gordian_runtime::tool::{IMAGE_PATH_KEY, require_search_query, require_str};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use crate::{AgentRuntime, Tool};
@@ -93,7 +93,7 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "render_schematic".into(),
-            description: "Render schematic PNG, once, at the end.".into(),
+            description: "Render the schematic to a PNG with mm axes to check the visual result; use it whenever you want to see what an edit did. Not a substitute for `check_schematic`.".into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         // ── PCB tools (slice 5) ─────────────────────────────────────────
@@ -656,17 +656,125 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
             "error": "no schematic yet — create one with place_parts first",
         }));
     }
-    let png = gordian_runtime::render::schematic_png(
-        ctx.env(),
-        ctx.sch_path(),
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).context("reading schematic visual facts")?;
+    let visual = sch_floorplan::visual::measure(&doc);
+    let content_bounds = render_bounds(visual.sheet_extent);
+    let overview_bounds = padded_bounds(content_bounds, 2.54);
+    let part_count = doc
+        .symbols()
+        .filter(|symbol| !symbol.refdes().is_empty() && !symbol.refdes().starts_with('#'))
+        .count();
+    let plan = gordian_runtime::render::render_plan(
+        part_count,
+        content_bounds,
         ctx.config().tools.render_max_px,
-    )?;
+    );
+    let source_svg = gordian_runtime::render::schematic_svg(ctx.env(), ctx.sch_path())?;
+    let overview_svg = schematic_overlay(&source_svg, overview_bounds);
+    let png = gordian_runtime::render::svg_to_png(&overview_svg, plan.overview_px)?;
     let path = ctx.workspace().write_render(&png)?;
+    let mut detail_paths = Vec::new();
+    if let Some(detail_px) = plan.detail_px {
+        for region in detail_regions(content_bounds) {
+            let detail_svg = schematic_overlay(&source_svg, region);
+            let detail_png = gordian_runtime::render::svg_to_png(&detail_svg, detail_px)?;
+            let detail_path = ctx.workspace().write_render(&detail_png)?;
+            detail_paths.push(json!({
+                "region": [region.min_x, region.min_y, region.max_x, region.max_y],
+                "png_path": detail_path.display().to_string(),
+            }));
+        }
+    }
     let mut obj = json!({
         "ok": true,
         "png_path": path.display().to_string(),
-        "note": "image attached; also saved to png_path for the user to open",
+        "overview_px": plan.overview_px,
+        "detail_paths": detail_paths,
+        "visual": visual,
+        "note": format!(
+            "Schematic rendered from the saved .kicad_sch using KiCad's schematic SVG export and attached. \
+             Symbols, fields, labels, and wires are drawn on a light background; X/Y axes and ticks \
+             are sheet millimetres, matching read_schematic @x,y positions. PNG saved to {}. \
+             visual lists the deterministic measured problems; dense/large sheets also return \
+             detail_paths whose region boxes can be passed to read_schematic.",
+            path.display(),
+        ),
     });
     obj[IMAGE_PATH_KEY] = json!(path.display().to_string());
     Ok(obj)
+}
+
+fn render_bounds(extent: [f64; 4]) -> gordian_runtime::render::RenderBounds {
+    let [mut min_x, mut min_y, mut max_x, mut max_y] = extent;
+    if max_x - min_x < 1.0 {
+        min_x -= 10.0;
+        max_x += 10.0;
+    }
+    if max_y - min_y < 1.0 {
+        min_y -= 10.0;
+        max_y += 10.0;
+    }
+    gordian_runtime::render::RenderBounds::new(min_x, min_y, max_x, max_y)
+}
+
+fn padded_bounds(
+    bounds: gordian_runtime::render::RenderBounds,
+    padding: f64,
+) -> gordian_runtime::render::RenderBounds {
+    gordian_runtime::render::RenderBounds::new(
+        bounds.min_x - padding,
+        bounds.min_y - padding,
+        bounds.max_x + padding,
+        bounds.max_y + padding,
+    )
+}
+
+fn schematic_overlay(svg: &str, bounds: gordian_runtime::render::RenderBounds) -> String {
+    let cropped = gordian_runtime::render::crop_svg(svg, bounds);
+    gordian_runtime::render::add_coordinate_overlay(
+        &cropped,
+        bounds,
+        "mm",
+        gordian_runtime::render::CoordinateOverlayStyle {
+            background: "#fffdf7",
+            axis: "#1f2937",
+            grid: "#94a3b8",
+            x_axis: "#be123c",
+            y_axis: "#1d4ed8",
+        },
+    )
+}
+
+fn detail_regions(
+    bounds: gordian_runtime::render::RenderBounds,
+) -> [gordian_runtime::render::RenderBounds; 4] {
+    let mid_x = (bounds.min_x + bounds.max_x) / 2.0;
+    let mid_y = (bounds.min_y + bounds.max_y) / 2.0;
+    let overlap = 1.27;
+    [
+        gordian_runtime::render::RenderBounds::new(
+            bounds.min_x,
+            bounds.min_y,
+            (mid_x + overlap).min(bounds.max_x),
+            (mid_y + overlap).min(bounds.max_y),
+        ),
+        gordian_runtime::render::RenderBounds::new(
+            (mid_x - overlap).max(bounds.min_x),
+            bounds.min_y,
+            bounds.max_x,
+            (mid_y + overlap).min(bounds.max_y),
+        ),
+        gordian_runtime::render::RenderBounds::new(
+            bounds.min_x,
+            (mid_y - overlap).max(bounds.min_y),
+            (mid_x + overlap).min(bounds.max_x),
+            bounds.max_y,
+        ),
+        gordian_runtime::render::RenderBounds::new(
+            (mid_x - overlap).max(bounds.min_x),
+            (mid_y - overlap).max(bounds.min_y),
+            bounds.max_x,
+            bounds.max_y,
+        ),
+    ]
 }
