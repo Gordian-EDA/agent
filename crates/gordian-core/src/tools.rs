@@ -93,7 +93,7 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "render_schematic".into(),
-            description: "Render schematic PNG, once, at the end.".into(),
+            description: "Render the schematic to a PNG with mm axes to check the visual result; use it whenever you want to see what an edit did. Not a substitute for `check_schematic`.".into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         // ── PCB tools (slice 5) ─────────────────────────────────────────
