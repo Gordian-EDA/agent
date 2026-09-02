@@ -44,6 +44,7 @@ REFERENCES = Path(__file__).resolve().parent / "references"
 KICAD_DEMOS = Path(
     "/home/mimi/agent/.local/kicad-10.0.4/AppDir/usr/share/kicad/demos"
 )
+VALIDATED_KICAD_CLIS = set()
 CAPPED_SCORE = 3
 FINDING_TAGS = (
     "tool-contract",
@@ -68,14 +69,15 @@ def platform_config():
 
 def kicad_cli():
     """Configured KiCad 10 command-line executable."""
-    configured = os.environ.get("KICAD_CLI")
-    if configured:
-        return configured
-    config, config_path = platform_config()
-    cli = config.get("kicad", {}).get("cliPath")
+    cli = os.environ.get("KICAD_CLI")
     if not cli:
-        raise RuntimeError(f"set kicad.cliPath to KiCad 10 in {config_path}")
-    cli = str(cli)
+        config, config_path = platform_config()
+        cli = config.get("kicad", {}).get("cliPath")
+        if not cli:
+            raise RuntimeError(f"set kicad.cliPath to KiCad 10 in {config_path}")
+    cli = str(Path(cli).expanduser())
+    if cli in VALIDATED_KICAD_CLIS:
+        return cli
     try:
         version = subprocess.run(
             [cli, "--version"], text=True, capture_output=True, timeout=15,
@@ -85,6 +87,7 @@ def kicad_cli():
     if version.returncode or not version.stdout.strip().startswith("10."):
         detail = (version.stdout or version.stderr).strip()
         raise RuntimeError(f"configured KiCad CLI must be version 10, got {detail!r}")
+    VALIDATED_KICAD_CLIS.add(cli)
     return cli
 
 
