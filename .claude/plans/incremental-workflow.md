@@ -125,3 +125,8 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   ERC 0 in minutes; audio 68 symbols ERC 0 in 138 s / 3 builds; BMS 90 symbols in 147 s but 14
   power_pin_not_driven + 1 pin_to_pin, and the render is rows of isolated label-chains (no circuit
   topology drawn). Quality bar kept: titled blocks, notes, pin-map design JSON, 2–5 build loop.
+- EXPERIMENT lane/sch-drag (Opus, user idea): KiCAD-style drag as the primitive — move/rotate/mirror a
+  symbol, carry its connections as clean orthogonal re-draws of only the attached segments, netlist
+  identical; cheap sheet evaluator (length, bends, crossings, through-body, text, label debits,
+  adjacency); `tidy` = local search over drag moves; harness vs scrambled human sheets + our BluePill.
+  Integrate into move_symbols + a `tidy_schematic` tool only if it beats the engines on the critic.
