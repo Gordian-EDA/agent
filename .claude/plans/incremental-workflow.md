@@ -121,3 +121,7 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   human-look PCB verdict on the LED driver: 4/10 — "reference designators scattered far from their
   footprints", oversized outline, silkscreen alignment → queue a PCB-looks lane (silk placement next
   to footprints, outline refit, alignment) after W3.
+- Comparison data (user's ~/sch-agent, NOT ported — "idiom cells are kinda cheating"): BluePill 49 symbols
+  ERC 0 in minutes; audio 68 symbols ERC 0 in 138 s / 3 builds; BMS 90 symbols in 147 s but 14
+  power_pin_not_driven + 1 pin_to_pin, and the render is rows of isolated label-chains (no circuit
+  topology drawn). Quality bar kept: titled blocks, notes, pin-map design JSON, 2–5 build loop.
