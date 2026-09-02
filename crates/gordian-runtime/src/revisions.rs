@@ -393,11 +393,11 @@ mod tests {
         let revisions = Revisions::for_project(project.path().to_path_buf());
         fs::write(&path, b"one").unwrap();
         revisions
-            .capture("first", "first", &[path.clone()])
+            .capture("first", "first", std::slice::from_ref(&path))
             .unwrap();
         fs::write(&path, b"two").unwrap();
         let latest = revisions
-            .capture("second", "second", &[path.clone()])
+            .capture("second", "second", std::slice::from_ref(&path))
             .unwrap();
         fs::write(&path, b"three").unwrap();
 
@@ -413,7 +413,9 @@ mod tests {
         fs::write(&path, b"state").unwrap();
         for index in 0..=RETENTION {
             fs::write(&path, index.to_string()).unwrap();
-            revisions.capture("edit", "edit", &[path.clone()]).unwrap();
+            revisions
+                .capture("edit", "edit", std::slice::from_ref(&path))
+                .unwrap();
         }
 
         let history = revisions.history(RETENTION + 10).unwrap();

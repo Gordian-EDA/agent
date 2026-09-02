@@ -61,7 +61,7 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let revision = match ctx.revisions().capture(
         "update_board_outline",
         "Update the board outline",
-        &[path.clone()],
+        std::slice::from_ref(&path),
     ) {
         Ok(revision) => revision,
         Err(error) => {

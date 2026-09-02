@@ -591,7 +591,7 @@ pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let revision = match ctx.revisions().capture(
         "delete_copper",
         "Delete board copper",
-        &[path.clone()],
+        std::slice::from_ref(&path),
     ) {
         Ok(revision) => revision,
         Err(error) => {
