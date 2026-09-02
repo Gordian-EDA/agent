@@ -23,7 +23,8 @@
 pub(crate) struct PartExtent {
     pub w: f64,
     pub h: f64,
-    /// Connectors want board edge, so they set a floor on the board's width.
+    /// Connectors want an edge each, so they widen the RECOMMENDED board; the
+    /// hard floor stays pure geometry.
     pub edge_seeking: bool,
 }
 
