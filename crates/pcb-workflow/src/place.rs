@@ -3297,6 +3297,11 @@ pub(crate) fn write_placement(
     write_placement_file(&path, moves)
 }
 
+/// Move footprints, and drop the staging annotation from every one of them.
+///
+/// Staging membership is the seed row, so a part that has just been laid out is
+/// no longer staged; leaving the reason behind would be a stale claim about a
+/// part that has moved on.
 fn write_placement_file(
     path: &std::path::Path,
     moves: &[FootprintPlacement],
@@ -3305,6 +3310,16 @@ fn write_placement_file(
         std::fs::read_to_string(path).map_err(|e| format!("could not read the board: {e}"))?;
     let patched = kicad_board::patch_placements(&text, moves)
         .map_err(|e| format!("could not patch placement: {e}"))?;
+    let unstaged: Vec<kicad_board::Annotation> = moves
+        .iter()
+        .map(|placement| {
+            kicad_board::Annotation::new(placement.reference.clone())
+                .clear(kicad_board::STAGED_REASON)
+                .clear(kicad_board::STAGED_DETAIL)
+        })
+        .collect();
+    let patched = kicad_board::patch_annotations(&patched, &unstaged)
+        .map_err(|e| format!("could not clear the staging annotation: {e}"))?;
     crate::route::write_board_atomically(path, patched.as_bytes())
         .map_err(|e| format!("could not replace the board: {e}"))
 }

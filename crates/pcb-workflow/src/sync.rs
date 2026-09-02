@@ -227,10 +227,11 @@ fn changed_nets(
 
 /// Bring the board into agreement with the live schematic.
 pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let parts = match schematic_parts(ctx) {
-        Ok(parts) => parts,
+    let design = match schematic_parts(ctx) {
+        Ok(design) => design,
         Err(refusal) => return Ok(refusal),
     };
+    let parts = design.parts.clone();
     let net_count = parts
         .iter()
         .flat_map(|part| part.pad_nets.values())
@@ -240,7 +241,7 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Err(error) = crate::intent::parse(&input) {
         return Ok(json!({ "error": error }));
     }
-    let result = if !ctx.pcb_path().exists() {
+    let mut result = if !ctx.pcb_path().exists() {
         create_board(&parts, &input, ctx)
     } else if input.get("intent").is_some() {
         json!({
@@ -250,8 +251,11 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "code": "intent_after_creation",
         })
     } else {
-        update_board(&parts, &input, ctx)
+        update_board(&parts, &design.mismatched, &input, ctx)
     };
+    // The parts whose symbol and footprint disagree did not block this sync;
+    // they were built into the board and staged, and the report says so.
+    stage_mismatched(ctx, &design, &mut result);
     phase.facts(
         result
             .get("retracted_tracks")
@@ -269,11 +273,106 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(result)
 }
 
+/// Annotate every part whose symbol and footprint disagree with the reason it
+/// is staged, and say so in the result. A part that ended up placed anyway is
+/// pulled back to the staging row so the annotation is not a lie.
+fn stage_mismatched(ctx: &AgentRuntime, design: &SchematicDesign, result: &mut Value) {
+    if design.mismatched.is_empty() || result.get("error").is_some() {
+        return;
+    }
+    let Ok(board) = crate::active_board(ctx) else {
+        return;
+    };
+    let on_board: Vec<&String> = design
+        .mismatched
+        .keys()
+        .filter(|reference| {
+            board
+                .imported
+                .parts
+                .iter()
+                .any(|part| &&part.reference == reference)
+        })
+        .collect();
+    if on_board.is_empty() {
+        return;
+    }
+    let row_y = kicad_board::seed_row_y(board.imported.bounds.min_y);
+    let mut moves = Vec::new();
+    let annotations: Vec<kicad_board::Annotation> = on_board
+        .iter()
+        .enumerate()
+        .map(|(index, reference)| {
+            moves.push(kicad_board::FootprintPlacement {
+                reference: (*reference).clone(),
+                at: pcb_model::Point2::new(
+                    kicad_board::seed_row_x(board.imported.bounds.min_x, index),
+                    row_y,
+                ),
+                rotation_deg: Some(0.0),
+            });
+            kicad_board::Annotation::new((*reference).clone())
+                .set(kicad_board::STAGED_REASON, "footprint_mismatch")
+                .set(
+                    kicad_board::STAGED_DETAIL,
+                    design.mismatched[*reference].clone(),
+                )
+        })
+        .collect();
+    let path = ctx.pcb_path();
+    let staged: Vec<String> = on_board.iter().map(|reference| (*reference).clone()).collect();
+    let written = std::fs::read_to_string(&path)
+        .map_err(|error| error.to_string())
+        .and_then(|text| kicad_board::patch_placements(&text, &moves))
+        .and_then(|text| kicad_board::patch_annotations(&text, &annotations))
+        .and_then(|text| {
+            std::fs::write(&path, text).map_err(|error| error.to_string())
+        });
+    let Some(object) = result.as_object_mut() else {
+        return;
+    };
+    match written {
+        Ok(()) => {
+            object.insert("staged".to_owned(), json!(staged));
+            object.insert(
+                "footprint_pin_mismatches".to_owned(),
+                json!(design.mismatches),
+            );
+            object.insert("next_tool".to_owned(), json!("swap_symbol"));
+            object.insert("next".to_owned(), json!(format!(
+                "{} part(s) are staged because their symbol pins and footprint pads disagree: \
+                 {}. The rest of the board is synced. Make the two agree — swap_symbol to a part \
+                 whose pin numbers are the footprint's pad numbers, or assign_footprints a \
+                 package whose pads match the pins — then sync_board again.",
+                staged.len(),
+                staged.join(", "),
+            )));
+        }
+        Err(error) => {
+            object.insert(
+                "staging_error".to_owned(),
+                json!(format!("could not stage the mismatched parts: {error}")),
+            );
+        }
+    }
+}
+
+/// The schematic as sync sees it: every part, plus the ones whose symbol pins
+/// and footprint pads disagree.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SchematicDesign {
+    pub(crate) parts: Vec<SchematicPart>,
+    /// Reference → why its symbol and footprint disagree.
+    pub(crate) mismatched: BTreeMap<String, String>,
+    /// The full mismatch records, for the report.
+    pub(crate) mismatches: Vec<Value>,
+}
+
 /// The schematic's parts and nets, or the refusal that says why the board
-/// cannot be synced yet. The gate is exactly `check_schematic`'s: ERC errors,
-/// unassigned footprints and symbol/footprint pad mismatches block; warnings do
-/// not.
-fn schematic_parts(ctx: &AgentRuntime) -> std::result::Result<Vec<SchematicPart>, Value> {
+/// cannot be synced yet. ERC errors and unassigned footprints block, because
+/// there is no netlist to sync without them. A symbol/footprint pin mismatch
+/// does not: that part is staged and the rest of the board is built.
+fn schematic_parts(ctx: &AgentRuntime) -> std::result::Result<SchematicDesign, Value> {
     if !ctx.sch_path().exists() {
         return Err(json!({
             "error": "no .kicad_sch yet — create the schematic with place_parts first"
@@ -356,17 +455,49 @@ fn schematic_parts(ctx: &AgentRuntime) -> std::result::Result<Vec<SchematicPart>
 
     let mismatches = gordian_runtime::footprint_compat::netlist_pin_mismatches(ctx, &netlist)
         .map_err(|e| json!({ "error": format!("could not compare symbol pins to pads: {e}") }))?;
-    if !mismatches.is_empty() {
-        return Err(json!({
-            "ok": false,
-            "error": "schematic symbol and assigned footprint have incompatible numbered pins/pads",
-            "footprint_pin_mismatches": mismatches,
-            "next_tool": "swap_symbol",
-            "next": "make the two agree: swap_symbol to a part whose pin numbers are the footprint's pad numbers, or assign_footprints a package whose pads match the pins — then sync_board again",
-            "note": "Every named electrical pad must match a symbol pin and every symbol pin must have a physical pad. Unnumbered mechanical pads and repeated pads with a valid shared number are allowed.",
-        }));
+    Ok(SchematicDesign {
+        parts,
+        mismatched: mismatches
+            .iter()
+            .map(|mismatch| (mismatch.reference.clone(), mismatch_detail(mismatch)))
+            .collect(),
+        mismatches: mismatches
+            .iter()
+            .map(|mismatch| serde_json::to_value(mismatch).unwrap_or(Value::Null))
+            .collect(),
+    })
+}
+
+/// The mismatch in one line, so a staged part carries the reason it is staged.
+fn mismatch_detail(
+    mismatch: &gordian_runtime::footprint_compat::FootprintPinMismatch,
+) -> String {
+    let mut parts = Vec::new();
+    if !mismatch.missing_pads.is_empty() {
+        parts.push(format!(
+            "symbol pin(s) {} have no pad",
+            mismatch.missing_pads.join(", ")
+        ));
     }
-    Ok(parts)
+    if !mismatch.extra_pins.is_empty() {
+        parts.push(format!(
+            "footprint pad(s) {} have no pin",
+            mismatch.extra_pins.join(", ")
+        ));
+    }
+    if let Some(polarity) = &mismatch.polarity_mismatch {
+        parts.push(polarity.clone());
+    }
+    format!(
+        "{} + {}: {}",
+        mismatch.symbol,
+        mismatch.footprint,
+        if parts.is_empty() {
+            "symbol pins and footprint pads disagree".to_owned()
+        } else {
+            parts.join("; ")
+        }
+    )
 }
 
 fn seed_parts(parts: &[SchematicPart]) -> Vec<SeedPart> {
@@ -570,7 +701,12 @@ fn bounds_json(bounds: &Rect) -> Value {
 
 // ── the incremental edit ────────────────────────────────────────────────────
 
-fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> Value {
+fn update_board(
+    parts: &[SchematicPart],
+    mismatched: &BTreeMap<String, String>,
+    input: &Value,
+    ctx: &AgentRuntime,
+) -> Value {
     if input.get("rules").is_some() || input.get("bounds").is_some() {
         return reseed_board(parts, input, ctx);
     }
@@ -642,6 +778,7 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         &existing,
         seed_origin,
         catalog,
+        mismatched,
     ) {
         return gate.rollback(ctx, json!({ "error": e }));
     }
@@ -668,10 +805,19 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         );
     }
 
-    let placed = match place_added(&delta.added, ctx) {
+    let to_place: Vec<String> = delta
+        .added
+        .iter()
+        .filter(|reference| !mismatched.contains_key(*reference))
+        .cloned()
+        .collect();
+    let placed = match place_added(&to_place, ctx) {
         Ok(placed) => placed,
         Err(e) => return gate.rollback(ctx, json!({ "error": e })),
     };
+    if let Err(e) = mark_new_from_sync(ctx, &delta.added) {
+        return gate.rollback(ctx, json!({ "error": e }));
+    }
 
     let mut nets_to_reroute: BTreeSet<String> = retract.nets.clone();
     nets_to_reroute.extend(delta.nets_changed.iter().cloned());
@@ -916,6 +1062,11 @@ fn write_board(ctx: &AgentRuntime, text: &str) -> std::result::Result<(), String
 }
 
 /// Write the delta into the board document.
+/// Write one delta into the board document.
+///
+/// `mismatched` names the parts whose symbol pins and footprint pads disagree:
+/// their pads cannot all be retargeted, and that is exactly why they are staged
+/// rather than allowed to fail the whole sync.
 fn apply(
     doc: &mut BoardDoc,
     delta: &BoardDelta,
@@ -923,6 +1074,7 @@ fn apply(
     existing: &BTreeMap<String, BoardFootprint>,
     seed_origin: Point2,
     catalog: &FootprintCatalog,
+    mismatched: &BTreeMap<String, String>,
 ) -> std::result::Result<(), String> {
     let wanted: BTreeSet<&str> = schematic
         .values()
@@ -1000,7 +1152,9 @@ fn apply(
                     .ok_or_else(|| format!("net {name} is missing from the board net table"))
             })
             .transpose()?;
-        if !doc.set_pad_net(&retarget.reference, &retarget.pad, net)? {
+        if !doc.set_pad_net(&retarget.reference, &retarget.pad, net)?
+            && !mismatched.contains_key(&retarget.reference)
+        {
             return Err(format!(
                 "{}.{} is a schematic pin with no pad on the board footprint — assign a package \
                  whose pads match the symbol's pins, then sync again",
@@ -1018,6 +1172,36 @@ fn apply(
         }
     }
     Ok(())
+}
+
+/// Record why the parts this sync added are still in the staging row.
+///
+/// A part that placement did find room for has already left the row, so only
+/// the ones still sitting in it are annotated.
+fn mark_new_from_sync(
+    ctx: &AgentRuntime,
+    added: &[String],
+) -> std::result::Result<(), String> {
+    if added.is_empty() {
+        return Ok(());
+    }
+    let board = crate::active_board(ctx)?;
+    let staged = crate::staging::staged_references(&board);
+    let annotations: Vec<kicad_board::Annotation> = added
+        .iter()
+        .filter(|reference| staged.contains(*reference))
+        .map(|reference| {
+            kicad_board::Annotation::new(reference.clone())
+                .set(kicad_board::STAGED_REASON, "new_from_sync")
+        })
+        .collect();
+    if annotations.is_empty() {
+        return Ok(());
+    }
+    let path = ctx.pcb_path();
+    let text = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let patched = kicad_board::patch_annotations(&text, &annotations)?;
+    std::fs::write(&path, patched).map_err(|error| error.to_string())
 }
 
 /// Place the parts the sync added, with every part already on the board locked.
