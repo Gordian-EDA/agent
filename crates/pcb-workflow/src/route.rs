@@ -197,6 +197,11 @@ fn escape_bottleneck(
 
 #[tracing::instrument(skip_all, fields(project = %ctx.project_dir().display()))]
 pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let phase = crate::WorkflowPhase::start(
+        "route",
+        0,
+        input.get("nets").and_then(Value::as_array).map_or(0, Vec::len),
+    );
     let nets = match requested_nets(&input) {
         Ok(nets) => nets,
         Err(message) => return Ok(refusal(message)),
@@ -213,10 +218,22 @@ pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
-    match route_live_board(ctx, nets) {
-        Ok(out) => Ok(gate.commit(ctx, out)),
-        Err(out) => Ok(gate.rollback(ctx, out)),
-    }
+    let result = match route_live_board(ctx, nets) {
+        Ok(out) => gate.commit(ctx, out),
+        Err(out) => gate.rollback(ctx, out),
+    };
+    phase.facts(
+        result.pointer("/metrics/traces").and_then(Value::as_u64).map(|n| n as usize),
+        result
+            .get("failed_connection_count")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize),
+        result
+            .get("blocking_findings")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize),
+    );
+    Ok(result)
 }
 
 /// A recoverable routing failure, as the JSON payload the caller receives.

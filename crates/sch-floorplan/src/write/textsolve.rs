@@ -194,7 +194,14 @@ impl SchematicWriter {
         applies.extend(field_applies);
 
         let picks = GreedyText.solve(&obstacles, &movables);
-        for (apply, sch_model::text::Pick { candidate: pick, fits }) in applies.into_iter().zip(picks) {
+        for (
+            apply,
+            sch_model::text::Pick {
+                candidate: pick,
+                fits,
+            },
+        ) in applies.into_iter().zip(picks)
+        {
             match apply {
                 Apply::StubLabel(i) => {
                     if pick == 1 {

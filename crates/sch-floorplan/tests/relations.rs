@@ -9,10 +9,10 @@ use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
 use sch_model::engine::{PlacementEngine, SchematicPlaceProblem};
-use sch_model::place::PlaceOptions;
-use sch_model::relation::{relation_group_spread, relation_viol, repair_relations};
 use sch_model::ir::{Axis, GroupSide, LayoutIr, Relation, Side};
 use sch_model::item::Item;
+use sch_model::place::PlaceOptions;
+use sch_model::relation::{relation_group_spread, relation_viol, repair_relations};
 
 // ---------------------------------------------------------------------------
 // Synthetic parts — a 2-pin passive's geometry is all the relation math reads.
@@ -192,7 +192,7 @@ fn group_spread_measures_only_group_members() {
             name: "g".into(),
             members: vec!["R1".into(), "R2".into()],
             side: None,
-        anchor: None,
+            anchor: None,
         }]),
     );
     let wide = relation_group_spread(
@@ -201,7 +201,7 @@ fn group_spread_measures_only_group_members() {
             name: "g".into(),
             members: vec!["R1".into(), "R3".into()],
             side: None,
-        anchor: None,
+            anchor: None,
         }]),
     );
     assert!(tight < wide, "{tight} !< {wide}");
@@ -366,9 +366,13 @@ fn chain_problem(
     let input: sch_check::PlacePartsInput = serde_json::from_str(CHAIN).unwrap();
     let (design, diagnostics, _) = sch_check::into_design(&input, &provider, &Default::default());
     assert!(!diagnostics.has_errors(), "{:#?}", diagnostics);
-    let problem =
-        sch_floorplan::floorplan::place_problem(env, &design, Some(intent), PlaceOptions::default())
-            .unwrap();
+    let problem = sch_floorplan::floorplan::place_problem(
+        env,
+        &design,
+        Some(intent),
+        PlaceOptions::default(),
+    )
+    .unwrap();
     (design, problem)
 }
 

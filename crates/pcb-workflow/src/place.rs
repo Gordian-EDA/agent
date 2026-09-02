@@ -2164,6 +2164,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(board) => board,
         Err(live_err) => return Ok(json!({ "error": live_err })),
     };
+    let phase = crate::WorkflowPhase::start("place", board.imported.parts.len(), 0);
     let refs = match subset_refs(&input, &board) {
         Ok(refs) => refs,
         Err(error) => return Ok(json!({ "error": error })),
@@ -2454,10 +2455,18 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
              sync_board({rules:{pours:[…]}})."
         );
     }
-    Ok(match gate {
+    let out = match gate {
         Some(gate) => gate.commit(ctx, out),
         None => out,
-    })
+    };
+    phase.facts(
+        out.get("positions").and_then(Value::as_array).map(Vec::len),
+        out.get("legal")
+            .and_then(Value::as_bool)
+            .map(|legal| usize::from(!legal)),
+        out.get("violations").and_then(Value::as_array).map(Vec::len),
+    );
+    Ok(out)
 }
 
 /// The refusal a caller can act on in one move: how much copper area the parts

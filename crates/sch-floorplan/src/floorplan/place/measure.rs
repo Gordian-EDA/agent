@@ -19,17 +19,21 @@ use sch_check::model::Design;
 
 use crate::write::SchematicWriter;
 use circuit_graph::netclass::is_ground;
+use sch_model::engine::{CandidateEvaluator, CohesionPlan, RawMetrics};
 use sch_model::ir::LayoutIr;
 use sch_model::item::{Incidence, Item};
-use sch_model::engine::{CandidateEvaluator, CohesionPlan, RawMetrics};
 use sch_model::place::Crossings;
 
-
 use super::emit::{build_writer, compute_needs_flag};
+use super::score::{
+    count_body_crossings, count_close_wires, count_collinear_body_crossings, count_congestion,
+    count_corners, count_crossings, count_foreign_taps, count_ic_body_crossings, count_merges,
+    count_parallel_body_crossings, count_shorts, count_stray, signal_anchor_centroid,
+    supply_pin_target,
+};
 use sch_model::geometry::body_overlap_count;
-use sch_model::relation::{relation_group_spread, relation_viol};
-use super::score::{signal_anchor_centroid, supply_pin_target, count_body_crossings, count_close_wires, count_collinear_body_crossings, count_congestion, count_corners, count_crossings, count_foreign_taps, count_ic_body_crossings, count_merges, count_parallel_body_crossings, count_shorts, count_stray};
 use sch_model::geometry::{grid_order_viol, item_rect};
+use sch_model::relation::{relation_group_spread, relation_viol};
 
 /// Which routed realization to build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,7 +262,10 @@ impl CandidateEvaluator for RoutedEvaluator<'_> {
 
     fn with_ir<'a>(&'a self, ir: &'a LayoutIr) -> Box<dyn CandidateEvaluator + 'a> {
         Box::new(RoutedEvaluator {
-            realizer: RoutedSheetRealizer { ir, ..self.realizer },
+            realizer: RoutedSheetRealizer {
+                ir,
+                ..self.realizer
+            },
             design: self.design,
         })
     }

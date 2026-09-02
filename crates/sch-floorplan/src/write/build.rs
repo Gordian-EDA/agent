@@ -4,10 +4,10 @@
 
 use std::io;
 
-use sch_model::geometry::pin_endpoint;
 use geom::{GRID_50_MIL, Point2, Rect, Segment};
 use kicad::KicadInstallation;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
+use sch_model::geometry::pin_endpoint;
 
 use sch_model::route::{DrawnSegment, NetSegment};
 
@@ -987,7 +987,6 @@ pub fn quantize_dir(pin_angle: f64, inst_angle: f64, mirror: bool) -> Dir {
         Dir::North
     }
 }
-
 
 #[cfg(test)]
 mod tests {

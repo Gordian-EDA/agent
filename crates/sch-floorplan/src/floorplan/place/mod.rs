@@ -28,11 +28,11 @@ pub(crate) use route::*;
 #[cfg(test)]
 mod grid_tests {
     use super::*;
-    use sch_model::route::DrawnSegment;
     use geom::{Dir, Rect};
     use indexmap::IndexMap;
     use sch_check::model::{Block, Component, Design, LayoutGrid};
     use sch_model::ir::Side;
+    use sch_model::route::DrawnSegment;
 
     fn cells(names: &[&str]) -> Vec<Option<String>> {
         names

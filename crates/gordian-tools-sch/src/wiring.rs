@@ -208,7 +208,8 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .map(str::to_string)
         .collect();
     let scene = scene(&edit.doc, a, b, &own);
-    let drawn = ElbowRouter.route_edge(a, dir_a, b, ROUTING_NET, &scene)
+    let drawn = ElbowRouter
+        .route_edge(a, dir_a, b, ROUTING_NET, &scene)
         .map(|path| draw(&mut edit.doc, &path))
         // Drawing a path is not the same as making a connection: if the two
         // ends did not end up on one partition, the wire is decoration.

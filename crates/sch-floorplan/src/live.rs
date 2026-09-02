@@ -27,7 +27,7 @@
 //! written until the gate passes, so overrunning is always safe to refuse.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use geom::{Point2, Rect};
 use kicad::KicadInstallation;
@@ -42,10 +42,10 @@ use sch_model::place::{Deadline, PlaceOptions, PlacementEngineKind};
 use sch_model::result::IdiomReport;
 use serde::{Deserialize, Serialize};
 
-use sch_model::engine::PlacementEngine;
 use crate::floorplan::place::incidence;
-use sch_model::geometry::item_rect;
 use crate::region::{RegionProblem, arrange as region_arrange};
+use sch_model::engine::PlacementEngine;
+use sch_model::geometry::item_rect;
 
 /// Block name the parts already on the sheet are lifted into. Prefixed so it cannot
 /// collide with a block an author named.
@@ -301,7 +301,7 @@ pub fn place_parts(
 ) -> Result<PlaceReport> {
     let deadlines = Deadlines::of(budget);
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    let before = connect::extract(doc);
+    let before = live_phase("lower", input.parts.len(), 0, || connect::extract(doc));
     let existing = ExistingSheet {
         net_pins: before
             .nets
@@ -313,7 +313,17 @@ pub fn place_parts(
             .map(|symbol| symbol.refdes().to_string())
             .collect(),
     };
-    let (added, diags, mut audit) = sch_check::into_design(input, &provider, &existing);
+    let (added, diags, mut audit) =
+        live_phase("audit", input.parts.len(), before.nets.len(), || {
+            sch_check::into_design(input, &provider, &existing)
+        });
+    tracing::info!(
+        dangling = audit.dangling.len(),
+        duplicate_refs = audit.duplicate_refs.len(),
+        unknown_pins = audit.unknown_pins.len(),
+        diagnostics = diags.0.len(),
+        "schematic payload audited"
+    );
     // One refusal reports every payload fault. Reporting the audit and the lowering
     // diagnostics in sequence made each layer mask the next, so a payload with a bad
     // lib_id and a bad net name cost two full resubmissions to discover.
@@ -362,25 +372,28 @@ pub fn place_parts(
     ir.ports
         .retain(|net, _| declared.contains(net.as_str()) || !audit.dangling_nets().contains(net));
 
-    let movable = crate::floorplan::place_problem(env, &design, Some(ir.clone()), PlaceOptions::default())?
-        .items;
+    let movable =
+        crate::floorplan::place_problem(env, &design, Some(ir.clone()), PlaceOptions::default())?
+            .items;
     if movable.is_empty() {
         return Err(Error::Nothing);
     }
     let held = seated_items(doc, &before);
 
-    let out = region_arrange(
-        RegionProblem::new(
-            env,
-            &design,
-            movable.clone(),
-            held,
-            obstacles(doc, &[]),
-            ir,
-            engine,
+    let out = live_phase("place", movable.len(), design.nets.len(), || {
+        region_arrange(
+            RegionProblem::new(
+                env,
+                &design,
+                movable.clone(),
+                held,
+                obstacles(doc, &[]),
+                ir,
+                engine,
+            )
+            .by(deadlines.search),
         )
-        .by(deadlines.search),
-    );
+    });
     // The only point where refusing is worth it: the search is done but the sheet is
     // not drawn, so nothing is thrown away that realising and gating would not cost
     // again. Past here a truthful placement always commits — a finished sheet is worth
@@ -391,22 +404,25 @@ pub fn place_parts(
     }
     let placed = posed(movable, &out.poses);
     let inc = incidence(&placed);
-    let writer = crate::realize::realize_block(
-        env,
-        &design,
-        &placed,
-        &inc,
-        &out.ir,
-        crate::realize::Draw {
-            title: design.name.as_deref(),
-            frame: fresh,
-            driven: &driven_nets(doc, &before),
-        },
-    )?;
-    let warnings = writer.layout_warnings();
-    crate::realize::graft(doc, writer)?;
+    let warnings = live_phase("realise", placed.len(), inc.len(), || -> Result<_> {
+        let writer = crate::realize::realize_block(
+            env,
+            &design,
+            &placed,
+            &inc,
+            &out.ir,
+            crate::realize::Draw {
+                title: design.name.as_deref(),
+                frame: fresh,
+                driven: &driven_nets(doc, &before),
+            },
+        )?;
+        let warnings = writer.layout_warnings();
+        crate::realize::graft(doc, writer)?;
+        Ok(warnings)
+    })?;
 
-    let mut mismatch = verify(doc, &design);
+    let mut mismatch = live_phase("verify", placed.len(), inc.len(), || verify(doc, &design));
     mismatch.disturbed = disturbed(&before, &connect::extract(doc));
     let committed = mismatch.is_empty();
     if !committed {
@@ -422,6 +438,15 @@ pub fn place_parts(
         mismatch,
         committed,
     })
+}
+
+fn live_phase<T>(phase: &'static str, parts: usize, nets: usize, run: impl FnOnce() -> T) -> T {
+    let span = tracing::info_span!("sch_floorplan_phase", phase, parts, nets);
+    let started = Instant::now();
+    let result = span.in_scope(run);
+    let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    tracing::info!(parent: &span, elapsed_ms, "schematic engine phase finished");
+    result
 }
 
 /// Re-place `selection` among the parts around it, redrawing only its own wiring,
@@ -604,14 +629,14 @@ fn coord(p: Point2) -> (i64, i64) {
 /// joins instead takes the whole run, and stopping at a foreign pin is what keeps it
 /// from swallowing the sheet through a shared ground.
 fn selection_drawing(doc: &SchDoc, owned: &[Rect], held: &[Item]) -> BTreeSet<String> {
-    let stop: BTreeSet<(i64, i64)> =
-        held.iter()
-            .flat_map(|it| {
-                it.geom.pins.iter().filter(|p| p.unit == it.unit).map(|p| {
-                    coord(sch_model::geometry::pin_endpoint(p, it.at, it.angle, it.mirror).into())
-                })
+    let stop: BTreeSet<(i64, i64)> = held
+        .iter()
+        .flat_map(|it| {
+            it.geom.pins.iter().filter(|p| p.unit == it.unit).map(|p| {
+                coord(sch_model::geometry::pin_endpoint(p, it.at, it.angle, it.mirror).into())
             })
-            .collect();
+        })
+        .collect();
 
     let items: Vec<(String, Vec<Point2>)> = doc
         .items()
@@ -962,7 +987,6 @@ fn disturbed(before: &Netlist, after: &Netlist) -> Vec<String> {
     out.dedup();
     out
 }
-
 
 #[cfg(test)]
 mod tests {

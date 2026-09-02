@@ -15,8 +15,8 @@ use std::path::Path;
 use kicad::KicadInstallation;
 use sch_check::PlacePartsInput;
 use sch_doc::SchDoc;
-use sch_model::engine::PlacementEngine;
 use sch_floorplan::live::{self, Selection};
+use sch_model::engine::PlacementEngine;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();

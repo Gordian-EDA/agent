@@ -14,8 +14,10 @@
 //! ([`Agent::clear_history`]), or compacted into a summary ([`Agent::compact`]).
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -23,6 +25,7 @@ use base64::Engine as _;
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
+use tracing::Instrument as _;
 
 use gordian_llm::{
     Binary, ChatMessage, ChatRole, ChatStreamEvent, ContentPart, EventStream, GenaiProvider,
@@ -97,32 +100,96 @@ fn out_of_time_nudge() -> String {
 /// persistent configuration errors still fail promptly.
 const MAX_PROVIDER_ERROR_RETRIES: usize = 2;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct MeteredUsage {
     provider_requests: u64,
     input: u64,
     output: u64,
     cache_write: u64,
     cache_read: u64,
+    requests: Vec<RequestUsage>,
 }
 
 impl MeteredUsage {
-    fn add_request(&mut self) {
+    fn add_request(&mut self, request: u64, started: Instant) {
         self.provider_requests = self.provider_requests.saturating_add(1);
+        self.requests.push(RequestUsage {
+            request,
+            input: 0,
+            output: 0,
+            cache_write: 0,
+            cache_read: 0,
+            latency_ms: 0,
+            started,
+            completed: false,
+        });
     }
 
-    fn add_end(&mut self, end: &StreamEnd) {
+    fn add_end(&mut self, request: u64, started: Instant, end: &StreamEnd) {
         let (input, output, cache_write, cache_read) = token_usage(end);
         self.input = self.input.saturating_add(input);
         self.output = self.output.saturating_add(output);
         self.cache_write = self.cache_write.saturating_add(cache_write);
         self.cache_read = self.cache_read.saturating_add(cache_read);
+        if let Some(usage) = self
+            .requests
+            .iter_mut()
+            .find(|usage| usage.request == request)
+        {
+            *usage = RequestUsage {
+                request,
+                input,
+                output,
+                cache_write,
+                cache_read,
+                latency_ms: millis(started.elapsed()),
+                started,
+                completed: true,
+            };
+        }
     }
+
+    fn add_failed(&mut self, request: u64, started: Instant) {
+        if let Some(usage) = self
+            .requests
+            .iter_mut()
+            .find(|usage| usage.request == request)
+        {
+            usage.latency_ms = millis(started.elapsed());
+            usage.completed = true;
+        }
+    }
+
+    fn finish_unreported(&mut self) {
+        for usage in &mut self.requests {
+            if !usage.completed {
+                usage.latency_ms = millis(usage.started.elapsed());
+                usage.completed = true;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RequestUsage {
+    request: u64,
+    input: u64,
+    output: u64,
+    cache_write: u64,
+    cache_read: u64,
+    latency_ms: u64,
+    started: Instant,
+    completed: bool,
+}
+
+fn millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 struct MeteredProvider<P> {
     inner: P,
     pending: Arc<Mutex<MeteredUsage>>,
+    request_seq: AtomicU64,
 }
 
 impl<P> MeteredProvider<P> {
@@ -130,11 +197,14 @@ impl<P> MeteredProvider<P> {
         Self {
             inner,
             pending: Arc::new(Mutex::new(MeteredUsage::default())),
+            request_seq: AtomicU64::new(0),
         }
     }
 
     fn take_usage(&self) -> MeteredUsage {
-        std::mem::take(&mut *self.pending.lock().expect("usage meter poisoned"))
+        let mut pending = self.pending.lock().expect("usage meter poisoned");
+        pending.finish_unreported();
+        std::mem::take(&mut *pending)
     }
 }
 
@@ -154,16 +224,28 @@ impl<P: Provider> Provider for MeteredProvider<P> {
         messages: &[ChatMessage],
         tools: &[Tool],
     ) -> Result<StreamEnd> {
+        let started = Instant::now();
+        let request = self.request_seq.fetch_add(1, Ordering::Relaxed) + 1;
         self.pending
             .lock()
             .expect("usage meter poisoned")
-            .add_request();
-        let end = self.inner.complete(system, messages, tools).await?;
-        self.pending
-            .lock()
-            .expect("usage meter poisoned")
-            .add_end(&end);
-        Ok(end)
+            .add_request(request, started);
+        match self.inner.complete(system, messages, tools).await {
+            Ok(end) => {
+                self.pending
+                    .lock()
+                    .expect("usage meter poisoned")
+                    .add_end(request, started, &end);
+                Ok(end)
+            }
+            Err(error) => {
+                self.pending
+                    .lock()
+                    .expect("usage meter poisoned")
+                    .add_failed(request, started);
+                Err(error)
+            }
+        }
     }
 
     async fn stream<'a>(
@@ -172,16 +254,30 @@ impl<P: Provider> Provider for MeteredProvider<P> {
         messages: &'a [ChatMessage],
         tools: &'a [Tool],
     ) -> Result<EventStream<'a>> {
+        let started = Instant::now();
+        let request = self.request_seq.fetch_add(1, Ordering::Relaxed) + 1;
         self.pending
             .lock()
             .expect("usage meter poisoned")
-            .add_request();
+            .add_request(request, started);
         let pending = Arc::clone(&self.pending);
-        let stream = self.inner.stream(system, messages, tools).await?;
+        let stream = match self.inner.stream(system, messages, tools).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                pending
+                    .lock()
+                    .expect("usage meter poisoned")
+                    .add_failed(request, started);
+                return Err(error);
+            }
+        };
         Ok(stream
             .map(move |event| {
                 if let Ok(ChatStreamEvent::End(end)) = &event {
-                    pending.lock().expect("usage meter poisoned").add_end(end);
+                    pending
+                        .lock()
+                        .expect("usage meter poisoned")
+                        .add_end(request, started, end);
                 }
                 event
             })
@@ -239,7 +335,7 @@ pub enum AgentEvent {
     /// The model produced assistant text (interleaved with tool calls or final).
     AssistantText(String),
     /// A tool call is about to run.
-    ToolStarted { name: String },
+    ToolStarted { name: String, args: Value, seq: u64 },
     /// A tool call finished; `summary` is a short one-line digest for a card.
     /// `image_path` carries the on-disk PNG a render tool produced (if any), so a
     /// UI can display it inline; it is `None` for every non-render tool.
@@ -247,6 +343,24 @@ pub enum AgentEvent {
         name: String,
         summary: String,
         image_path: Option<String>,
+        elapsed_ms: u64,
+        revision: Option<u64>,
+        result: Value,
+    },
+    /// One provider invocation, including failed requests with zero token counts.
+    ProviderRequest {
+        request: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_write_tokens: u64,
+        cache_read_tokens: u64,
+        latency_ms: u64,
+    },
+    /// An ordered warning or error that belongs in the live transcript.
+    Diagnostic {
+        level: &'static str,
+        target: String,
+        message: String,
     },
     /// Provider invocation and token usage accumulated since the last telemetry
     /// flush. Usually this represents one call; concurrent review lenses can be
@@ -597,6 +711,7 @@ pub struct Agent<P: Provider = GenaiProvider> {
     /// the request ceiling belong to the turn, not to whichever subturn is
     /// running. `None` until a turn starts one.
     turn_budget: Option<TurnClock>,
+    tool_seq: AtomicU64,
 }
 
 /// What a whole user turn has spent so far, shared by its subturns.
@@ -619,6 +734,7 @@ impl<P: Provider> Agent<P> {
             turn_starts: Vec::new(),
             tool_phase,
             turn_budget: None,
+            tool_seq: AtomicU64::new(0),
         }
     }
 
@@ -631,6 +747,27 @@ impl<P: Provider> Agent<P> {
     fn emit_pending_usage(&self, events: Events<'_>) {
         let usage = self.client.take_usage();
         if usage != MeteredUsage::default() {
+            for request in &usage.requests {
+                tracing::info!(
+                    requests = request.request,
+                    input_tokens = request.input,
+                    output_tokens = request.output,
+                    cached = request.cache_read,
+                    latency_ms = request.latency_ms,
+                    "provider request"
+                );
+                emit(
+                    events,
+                    AgentEvent::ProviderRequest {
+                        request: request.request,
+                        input_tokens: request.input,
+                        output_tokens: request.output,
+                        cache_write_tokens: request.cache_write,
+                        cache_read_tokens: request.cache_read,
+                        latency_ms: request.latency_ms,
+                    },
+                );
+            }
             emit(
                 events,
                 AgentEvent::Usage {
@@ -642,6 +779,10 @@ impl<P: Provider> Agent<P> {
                 },
             );
         }
+    }
+
+    fn next_tool_seq(&self) -> u64 {
+        self.tool_seq.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Drop the entire conversation history (a fresh start; project files
@@ -840,6 +981,7 @@ impl<P: Provider> Agent<P> {
                 && (remaining <= wrap_up_reserve(budgets.provider_requests) || out_of_time)
             {
                 wrap_up_sent = true;
+                tracing::info!(remaining, out_of_time, "turn budget wrap-up nudge");
                 self.history.push(ChatMessage::user(if out_of_time {
                     out_of_time_nudge()
                 } else {
@@ -851,7 +993,11 @@ impl<P: Provider> Agent<P> {
                 budget.provider_requests = provider_requests;
             }
 
+            let prior_phase = self.tool_phase;
             self.tool_phase = self.tool_phase.max(ToolPhase::observe(&self.runtime));
+            if self.tool_phase != prior_phase {
+                tracing::info!(from = ?prior_phase, to = ?self.tool_phase, "tool phase changed");
+            }
             let revision_reads_used = revision_read_uses
                 .iter()
                 .filter(|(_, revision)| **revision == tool_state_revision)
@@ -902,9 +1048,9 @@ impl<P: Provider> Agent<P> {
                             });
                         }
                         provider_requests += 1;
-            if let Some(budget) = self.turn_budget.as_mut() {
-                budget.provider_requests = provider_requests;
-            }
+                        if let Some(budget) = self.turn_budget.as_mut() {
+                            budget.provider_requests = provider_requests;
+                        }
                         let end = self
                             .client
                             .complete(&self.system, &self.history, &defs)
@@ -989,12 +1135,24 @@ impl<P: Provider> Agent<P> {
             let mut discovery_seen = HashSet::new();
             for call in &tool_calls {
                 tool_calls_made += 1;
+                let seq = self.next_tool_seq();
+                let started = Instant::now();
+                let args_digest = value_digest(&call.fn_arguments);
+                let span = tracing::info_span!(
+                    "tool",
+                    name = %call.fn_name,
+                    seq,
+                    args_digest
+                );
+                tracing::debug!(parent: &span, args = %call.fn_arguments, "tool payload");
                 schematic_mutator_issued |= is_schematic_mutator(&call.fn_name);
                 let effect = tool_effect(&call.fn_name);
                 emit(
                     events,
                     AgentEvent::ToolStarted {
                         name: call.fn_name.clone(),
+                        args: call.fn_arguments.clone(),
+                        seq,
                     },
                 );
                 let budgeted_discovery = is_batchable_discovery_tool(&call.fn_name);
@@ -1075,7 +1233,9 @@ impl<P: Provider> Agent<P> {
                             .or_default() += 1;
                     }
                     let effective = coalesced_discovery_call(call, &tool_calls);
-                    self.run_tool_call(effective.as_ref().unwrap_or(call)).await
+                    self.run_tool_call(effective.as_ref().unwrap_or(call))
+                        .instrument(span.clone())
+                        .await
                 };
                 let parsed = parse_or_null(&content);
                 if tool_result_is_timeout(&parsed) {
@@ -1126,6 +1286,25 @@ impl<P: Provider> Agent<P> {
                 }
                 let summary =
                     tool_summary(&call.fn_name, &call.fn_arguments, &parse_or_null(&content));
+                let result = parse_or_null(&content);
+                tracing::debug!(parent: &span, content = %content, "tool result payload");
+                let elapsed_ms = millis(started.elapsed());
+                let revision = result.get("revision").and_then(serde_json::Value::as_u64);
+                tracing::info!(
+                    parent: &span,
+                    elapsed_ms,
+                    revision,
+                    "tool finished"
+                );
+                if call.fn_name == "undo" {
+                    let restored_revision = result
+                        .get("restored_revision")
+                        .and_then(serde_json::Value::as_u64);
+                    tracing::info!(revision, restored_revision, "undo completed");
+                } else if let Some(revision) = revision {
+                    tracing::info!(tool = %call.fn_name, revision, "revision captured");
+                }
+                emit_result_diagnostic(events, &call.fn_name, &result);
                 last_tool_status = Some(format!("{}: {summary}", call.fn_name));
                 emit(
                     events,
@@ -1133,6 +1312,9 @@ impl<P: Provider> Agent<P> {
                         name: call.fn_name.clone(),
                         summary,
                         image_path,
+                        elapsed_ms,
+                        revision,
+                        result,
                     },
                 );
 
@@ -1343,10 +1525,15 @@ impl<P: Provider> Agent<P> {
         events: Events<'_>,
     ) -> PcbFinishStage {
         const NAME: &str = "review_board";
+        let seq = self.next_tool_seq();
+        let started = Instant::now();
+        let args = json!({});
         emit(
             events,
             AgentEvent::ToolStarted {
                 name: NAME.to_string(),
+                args: args.clone(),
+                seq,
             },
         );
         let value = if !self.runtime.config().review.layout {
@@ -1399,12 +1586,17 @@ impl<P: Provider> Agent<P> {
                 }),
             }
         };
+        let elapsed_ms = millis(started.elapsed());
+        emit_result_diagnostic(events, NAME, &value);
         emit(
             events,
             AgentEvent::ToolFinished {
                 name: NAME.to_string(),
-                summary: tool_summary(NAME, &json!({}), &value),
+                summary: tool_summary(NAME, &args, &value),
                 image_path: None,
+                elapsed_ms,
+                revision: value.get("revision").and_then(Value::as_u64),
+                result: value.clone(),
             },
         );
         PcbFinishStage {
@@ -1421,13 +1613,23 @@ impl<P: Provider> Agent<P> {
         pcb_recovery: &mut PcbRecoveryState,
         events: Events<'_>,
     ) -> PcbFinishStage {
+        let seq = self.next_tool_seq();
+        let started = Instant::now();
         emit(
             events,
             AgentEvent::ToolStarted {
                 name: name.to_string(),
+                args: input.clone(),
+                seq,
             },
         );
-        let outcome = into_outcome(run_blocking(&self.runtime, name, input).await);
+        let args_digest = value_digest(&input);
+        let span = tracing::info_span!("tool", name, seq, args_digest);
+        let outcome = into_outcome(
+            run_blocking(&self.runtime, name, input.clone())
+                .instrument(span.clone())
+                .await,
+        );
         let mut content = tool_result_text(&outcome.value);
         let parsed = parse_or_null(&content);
         if pcb_recovery.observe_tool_result(name, &parsed, true) {
@@ -1438,13 +1640,19 @@ impl<P: Provider> Agent<P> {
             );
         }
         let parsed = parse_or_null(&content);
-        let summary = tool_summary(name, &json!({}), &parsed);
+        let summary = tool_summary(name, &input, &parsed);
+        let elapsed_ms = millis(started.elapsed());
+        tracing::info!(parent: &span, elapsed_ms, "tool finished");
+        emit_result_diagnostic(events, name, &parsed);
         emit(
             events,
             AgentEvent::ToolFinished {
                 name: name.to_string(),
                 summary,
                 image_path: outcome.image_path.clone(),
+                elapsed_ms,
+                revision: parsed.get("revision").and_then(Value::as_u64),
+                result: parsed,
             },
         );
         PcbFinishStage {
@@ -1470,6 +1678,37 @@ fn tool_result_text(value: &Value) -> String {
         .as_str()
         .map(str::to_string)
         .unwrap_or_else(|| value.to_string())
+}
+
+fn value_digest(value: &Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.to_string().hash(&mut hasher);
+    hasher.finish()
+}
+
+fn emit_result_diagnostic(events: Events<'_>, name: &str, result: &Value) {
+    let timed_out = tool_result_is_timeout(result);
+    let refused = result.get("error").is_some()
+        || result.get("ok").and_then(Value::as_bool) == Some(false)
+        || result.get("legal").and_then(Value::as_bool) == Some(false);
+    if !refused {
+        return;
+    }
+    let level = if timed_out { "error" } else { "warn" };
+    let message = result.to_string();
+    if timed_out {
+        tracing::error!(target: "gordian::tool", tool = name, payload = %message, "deadline expiry");
+    } else {
+        tracing::warn!(target: "gordian::tool", tool = name, payload = %message, "tool refusal");
+    }
+    emit(
+        events,
+        AgentEvent::Diagnostic {
+            level,
+            target: format!("gordian::tool::{name}"),
+            message,
+        },
+    );
 }
 
 /// Preserve a useful, honest outcome when a tool-only cycle reaches the hard

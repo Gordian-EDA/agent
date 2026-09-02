@@ -10,10 +10,10 @@ use kicad::KicadInstallation;
 use crate::write::SchematicWriter;
 use geom::{Dir, EPS, ParentForest, Rect};
 
-use sch_model::refine::FAST_PINS;
-use sch_model::route::SchRouter;
 use circuit_graph::netclass::{is_connector_like, is_ground};
 use sch_model::item::{Incidence, Item};
+use sch_model::refine::FAST_PINS;
+use sch_model::route::SchRouter;
 
 use sch_model::ir::{Band, LayoutIr, Side};
 
@@ -787,8 +787,9 @@ pub(crate) fn route_local_tee(
     } else {
         [[trunk_line, min_y], [trunk_line, max_y]]
     };
-    let clear =
-        |path: [[f64; 2]; 2]| sch_model::route::path_ok(&[path[0].into(), path[1].into()], net, scene);
+    let clear = |path: [[f64; 2]; 2]| {
+        sch_model::route::path_ok(&[path[0].into(), path[1].into()], net, scene)
+    };
     if !clear(trunk) || terms.iter().any(|(p, _)| !clear([*p, foot(p)])) {
         return false;
     }

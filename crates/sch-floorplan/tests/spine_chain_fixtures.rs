@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
-use sch_model::place::PlaceOptions;
 use sch_model::ir::LayoutIr;
+use sch_model::place::PlaceOptions;
 use spine_place::chain::{NodeKind, contract};
 use spine_place::net::classify_nets;
 

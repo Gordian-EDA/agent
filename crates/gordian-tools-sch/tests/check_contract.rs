@@ -65,10 +65,7 @@ fn check_schematic_matches_kicad_warning_count_and_names_each_finding() {
     }
     let p1 = findings
         .iter()
-        .find(|finding| {
-            finding["code"] == "footprint-unknown"
-                && finding["refs"] == json!(["P1"])
-        })
+        .find(|finding| finding["code"] == "footprint-unknown" && finding["refs"] == json!(["P1"]))
         .expect("P1 footprint finding");
     assert_eq!(p1["refs"], json!(["P1"]));
     assert_eq!(

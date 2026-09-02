@@ -1159,8 +1159,10 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // Only a pin carrying a net can be lost by a swap. Refusing over unwired pins
     // made every narrowing swap impossible — the case that had an agent cycle
     // through five connector symbols and never find the one that fits.
-    let wired: std::collections::HashSet<&str> =
-        before.iter().map(|(number, _, _)| number.as_str()).collect();
+    let wired: std::collections::HashSet<&str> = before
+        .iter()
+        .map(|(number, _, _)| number.as_str())
+        .collect();
     let orphaned: Vec<usize> = plan
         .old_without_counterpart
         .iter()

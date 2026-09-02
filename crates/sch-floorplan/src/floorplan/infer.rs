@@ -11,11 +11,11 @@ use sch_check::model::Design;
 
 use super::idiom;
 use super::place::{gather, grid_from_layout, grid_occurrences, incidence};
-use sch_model::cells::unit_place_key;
 use super::*;
-use sch_model::topology::anchor_tap;
 use circuit_graph::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
+use sch_model::cells::unit_place_key;
 use sch_model::item::{Incidence, Item, PinSide, pin_side};
+use sch_model::topology::anchor_tap;
 
 /// A deterministic baseline IR for designs without an LLM-produced one: rails
 /// from the design's power nets (ground-like → bottom, else top), no explicit
@@ -1021,7 +1021,6 @@ pub(super) fn place_crystal(
         Some(cells)
     }
 }
-
 
 /// Whether an IC should be flipped left↔right: its EAST-side signal pins reach a
 /// connector (the upstream input) more than its WEST-side pins do, so flipping

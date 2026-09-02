@@ -22,9 +22,9 @@ use geom::{EPS, Point2, Rect};
 
 use kicad::KicadInstallation;
 use sch_check::Design;
+use sch_model::engine::CandidateEvaluator;
 use sch_model::ir::LayoutIr;
 use sch_model::item::{Incidence, Item};
-use sch_model::engine::CandidateEvaluator;
 use sch_model::place::{Deadline, PlaceOptions, PlaceResult};
 
 use sch_model::engine::{PlacementEngine, SchematicPlaceProblem};

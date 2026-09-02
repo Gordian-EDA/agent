@@ -266,7 +266,11 @@ fn write_wrapped_net(out: &mut String, net: &Net, name_width: usize) {
         .count();
     let mut items = Vec::new();
     if power_count > 0 {
-        let noun = if power_count == 1 { "symbol" } else { "symbols" };
+        let noun = if power_count == 1 {
+            "symbol"
+        } else {
+            "symbols"
+        };
         items.push(format!("({power_count} power {noun})"));
     }
     items.extend(

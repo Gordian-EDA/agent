@@ -241,11 +241,7 @@ impl PinNet {
 /// to whatever P3 pin 1 is on". This is that way. When the net has no usable name
 /// the caller labels the pin with [`PinNet::Mint`]'s name first, which makes the
 /// identity real before anything joins it.
-pub(crate) fn net_of_pin(
-    doc: &SchDoc,
-    netlist: &Netlist,
-    spec: &str,
-) -> Result<PinNet, String> {
+pub(crate) fn net_of_pin(doc: &SchDoc, netlist: &Netlist, spec: &str) -> Result<PinNet, String> {
     let spec = spec.strip_prefix(NET_OF_PIN).unwrap_or(spec);
     let pin = pin(doc, spec)?;
     let usable = netlist.nets.iter().find(|net| {

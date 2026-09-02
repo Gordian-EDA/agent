@@ -17,10 +17,10 @@ use sch_check::{PinType, SymbolMeta, find_pin};
 use crate::write::SchematicWriter;
 use geom::Dir;
 use kicad_symbol::PinDir;
+use sch_model::engine::CandidateEvaluator;
 use sch_model::engine::{PinFlow, PlacementEngine, SchematicPlaceProblem};
 use sch_model::place::PlaceOptions;
 use sch_model::refine::SEARCH_SEED;
-use sch_model::engine::CandidateEvaluator;
 use sch_model::result::EmitOutput;
 
 use super::*;
@@ -91,7 +91,6 @@ pub(crate) fn grid_occurrences(design: &Design) -> BTreeMap<String, Vec<(i32, i3
     }
     out
 }
-
 
 // ---------------------------------------------------------------------------
 // Compiler internal model.

@@ -77,7 +77,13 @@ mod tests {
                 Rect::new(12.0, 0.0, 15.0, 3.0),
             ],
         };
-        assert_eq!(GreedyText.solve(&obstacles, &[m]), vec![Pick { candidate: 1, fits: true }]);
+        assert_eq!(
+            GreedyText.solve(&obstacles, &[m]),
+            vec![Pick {
+                candidate: 1,
+                fits: true
+            }]
+        );
     }
 
     #[test]
@@ -87,7 +93,13 @@ mod tests {
             owner: None,
             candidates: vec![Rect::new(1.0, 1.0, 2.0, 2.0), Rect::new(3.0, 3.0, 4.0, 4.0)],
         };
-        assert_eq!(GreedyText.solve(&obstacles, &[m]), vec![Pick { candidate: 0, fits: false }]);
+        assert_eq!(
+            GreedyText.solve(&obstacles, &[m]),
+            vec![Pick {
+                candidate: 0,
+                fits: false
+            }]
+        );
     }
 
     #[test]
@@ -106,13 +118,25 @@ mod tests {
             owner: Some("R1".into()),
             candidates: vec![Rect::new(1.0, 1.0, 3.0, 3.0), Rect::new(5.0, 5.0, 9.0, 9.0)],
         };
-        assert_eq!(GreedyText.solve(&obstacles, &[m]), vec![Pick { candidate: 1, fits: true }]);
+        assert_eq!(
+            GreedyText.solve(&obstacles, &[m]),
+            vec![Pick {
+                candidate: 1,
+                fits: true
+            }]
+        );
         // A different owner gets no exemption anywhere -> all collide -> fallback.
         let m2 = Movable {
             owner: Some("R2".into()),
             candidates: vec![Rect::new(1.0, 1.0, 3.0, 3.0), Rect::new(5.0, 5.0, 9.0, 9.0)],
         };
-        assert_eq!(GreedyText.solve(&obstacles, &[m2]), vec![Pick { candidate: 0, fits: false }]);
+        assert_eq!(
+            GreedyText.solve(&obstacles, &[m2]),
+            vec![Pick {
+                candidate: 0,
+                fits: false
+            }]
+        );
     }
 
     #[test]
@@ -128,7 +152,9 @@ mod tests {
                 Rect::new(10.0, 10.0, 12.0, 12.0),
             ],
         };
-        assert_eq!(GreedyText.solve(&[], &[a, b]), vec![
+        assert_eq!(
+            GreedyText.solve(&[], &[a, b]),
+            vec![
                 Pick {
                     candidate: 0,
                     fits: true
@@ -137,7 +163,8 @@ mod tests {
                     candidate: 1,
                     fits: true
                 }
-            ]);
+            ]
+        );
     }
 
     #[test]
@@ -147,7 +174,12 @@ mod tests {
             owner: None,
             candidates: vec![Rect::new(10.0, 0.0, 14.0, 4.0)],
         };
-        assert_eq!(GreedyText.solve(&obstacles, &[m]), vec![Pick { candidate: 0, fits: true }]);
+        assert_eq!(
+            GreedyText.solve(&obstacles, &[m]),
+            vec![Pick {
+                candidate: 0,
+                fits: true
+            }]
+        );
     }
-
 }

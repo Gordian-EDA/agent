@@ -188,11 +188,16 @@ mod tests {
         a.update(Msg::Submit);
         a.update(Msg::Agent(AgentEvent::ToolStarted {
             name: "search_symbols".into(),
+            args: serde_json::json!({}),
+            seq: 0,
         }));
         a.update(Msg::Agent(AgentEvent::ToolFinished {
             name: "search_symbols".into(),
             summary: "\"STM32\" → 4 hits".into(),
             image_path: None,
+            elapsed_ms: 0,
+            revision: None,
+            result: serde_json::json!({}),
         }));
 
         let text = render_to_string(&mut a, 80, 24);
@@ -218,11 +223,16 @@ mod tests {
         a.update(Msg::Submit);
         a.update(Msg::Agent(AgentEvent::ToolStarted {
             name: "render_board".into(),
+            args: serde_json::json!({}),
+            seq: 0,
         }));
         a.update(Msg::Agent(AgentEvent::ToolFinished {
             name: "render_board".into(),
             summary: "routed view → ok".into(),
             image_path: Some("/tmp/proj/.gordian/renders/000.png".into()),
+            elapsed_ms: 0,
+            revision: None,
+            result: serde_json::json!({}),
         }));
         assert_eq!(a.images.len(), 1, "a preview cell was posted");
         let buf = render_to_buffer(&mut a, 80, 24);
@@ -269,11 +279,16 @@ mod tests {
         a.update(Msg::Submit);
         a.update(Msg::Agent(AgentEvent::ToolStarted {
             name: "render_schematic".into(),
+            args: serde_json::json!({}),
+            seq: 0,
         }));
         a.update(Msg::Agent(AgentEvent::ToolFinished {
             name: "render_schematic".into(),
             summary: "rendered schematic to PNG".into(),
             image_path: Some("/tmp/proj/.gordian/renders/001.png".into()),
+            elapsed_ms: 0,
+            revision: None,
+            result: serde_json::json!({}),
         }));
 
         let text = render_to_string(&mut a, 80, 24);
@@ -377,6 +392,8 @@ mod tests {
         a.update(Msg::Submit);
         a.update(Msg::Agent(AgentEvent::ToolStarted {
             name: "route_board".into(),
+            args: serde_json::json!({}),
+            seq: 0,
         }));
         let text = render_to_string(&mut a, 80, 24);
         assert!(
@@ -392,6 +409,9 @@ mod tests {
             name: "route_board".into(),
             summary: "ok".into(),
             image_path: None,
+            elapsed_ms: 0,
+            revision: None,
+            result: serde_json::json!({}),
         }));
         assert!(
             a.active_work.is_none(),

@@ -178,7 +178,7 @@ impl App {
                     None => {}
                 }
             }
-            AgentEvent::ToolStarted { name } => {
+            AgentEvent::ToolStarted { name, .. } => {
                 self.turn_tool_calls += 1;
                 self.active_work = Some(name.clone());
             }
@@ -186,6 +186,7 @@ impl App {
                 name,
                 summary,
                 image_path,
+                ..
             } => {
                 // Replace the most recent "running…" card for this tool, if any,
                 // so the card collapses into its result in place. The leading
@@ -235,6 +236,14 @@ impl App {
                     cache_read_tokens,
                 );
             }
+            AgentEvent::ProviderRequest { .. } => {}
+            AgentEvent::Diagnostic {
+                level,
+                target,
+                message,
+            } => self
+                .transcript
+                .push(Entry::system(format!("{level}: {target}: {message}"))),
             AgentEvent::Compacted {
                 messages_before,
                 messages_after,

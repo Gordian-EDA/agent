@@ -232,11 +232,18 @@ fn push(app: &mut App, speaker: Speaker, text: &str, level: NoticeLevel) {
 /// so the screenshot exercises the same renderer code as production — the card's
 /// single marker comes from the renderer, never the event text.
 fn tool(app: &mut App, name: &str, summary: &str) {
-    app.update(Msg::Agent(AgentEvent::ToolStarted { name: name.into() }));
+    app.update(Msg::Agent(AgentEvent::ToolStarted {
+        name: name.into(),
+        args: serde_json::json!({}),
+        seq: 0,
+    }));
     app.update(Msg::Agent(AgentEvent::ToolFinished {
         name: name.into(),
         summary: summary.into(),
         image_path: None,
+        elapsed_ms: 0,
+        revision: None,
+        result: serde_json::json!({}),
     }));
 }
 
@@ -430,19 +437,29 @@ fn tui_screenshots() {
     );
     app.update(Msg::Agent(AgentEvent::ToolStarted {
         name: "route_board".into(),
+        args: serde_json::json!({}),
+        seq: 0,
     }));
     app.update(Msg::Agent(AgentEvent::ToolFinished {
         name: "route_board".into(),
         summary: "2-layer · 0 failed nets".into(),
         image_path: None,
+        elapsed_ms: 0,
+        revision: None,
+        result: serde_json::json!({}),
     }));
     app.update(Msg::Agent(AgentEvent::ToolStarted {
         name: "render_board".into(),
+        args: serde_json::json!({}),
+        seq: 0,
     }));
     app.update(Msg::Agent(AgentEvent::ToolFinished {
         name: "render_board".into(),
         summary: "routed view → ok".into(),
         image_path: Some("/home/you/projects/buck/.gordian/renders/003.png".into()),
+        elapsed_ms: 0,
+        revision: None,
+        result: serde_json::json!({}),
     }));
     app.update(Msg::Agent(AgentEvent::AssistantText(
         "Routed cleanly on two layers — preview above.".into(),

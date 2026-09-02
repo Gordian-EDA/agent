@@ -18,8 +18,8 @@ use sch_doc::SchDoc;
 use sch_model::ir::LayoutIr;
 use sch_model::item::{Incidence, Item};
 
-use crate::floorplan::place::{RouteRealization, RoutedSheetRealizer};
 use crate::floorplan::place::add_orphan_label_columns;
+use crate::floorplan::place::{RouteRealization, RoutedSheetRealizer};
 use crate::write::SchematicWriter;
 
 /// How a block is drawn, beyond the items themselves.

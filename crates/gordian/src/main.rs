@@ -1,10 +1,9 @@
 //! The `gordian` CLI.
 //!
 //! - `gordian` (no args) prints the version.
-//! - `gordian agent [--project <dir>] "<prompt>"` runs ONE headless agent turn
-//!   against real Bedrock + real KiCAD and prints the
-//!   live transcript, turn outcome, token totals, and final ERC result. This is
-//!   the CLI form of the interactive copilot.
+//! - `gordian agent [--project <dir>] [--input <file>] ["<prompt>"]` runs one
+//!   or more headless agent turns against real Bedrock + real KiCAD and prints
+//!   the live transcript, turn outcomes, token totals, and final ERC result.
 //! - `gordian tui [--project <dir>]` launches the ratatui copilot cockpit
 //!   (spec §11): a chat transcript and input line, driving the same agent
 //!   interactively.
@@ -12,7 +11,9 @@
 mod config;
 mod tui;
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -27,8 +28,8 @@ const DEFAULT_PROJECT_DIR: &str = "gordian-project";
 
 const USAGE: &str = "usage:
   gordian                              print version
-  gordian agent [--project <dir>] [--no-review] \"<prompt>\"
-                                       run one agent turn
+  gordian agent [--project <dir>] [--no-review] [--input <file|->] [\"<prompt>\"]
+                                       run one or more agent turns
   gordian tui [--project <dir>]        launch the copilot cockpit
 
 options:
@@ -64,7 +65,7 @@ fn main() -> ExitCode {
         Some("agent") if is_help_request(&args[1..]) => {
             logging::init_stderr_only();
             tracing::info!(
-                "usage: gordian agent [--project <dir>] [--no-review] \"<prompt>\"\n\nRun one headless agent turn."
+                "usage: gordian agent [--project <dir>] [--no-review] [--input <file|->] [\"<prompt>\"]\n\nRun one or more headless agent turns."
             );
             ExitCode::SUCCESS
         }
@@ -168,7 +169,8 @@ fn run_tui_command(args: &[String]) -> Result<()> {
 /// post-turn self-correction review runs after a committed change.
 struct AgentInvocation {
     project_dir: PathBuf,
-    prompt: String,
+    prompt: Option<String>,
+    input: Option<PathBuf>,
     /// Run the independent post-commit review→fix pass (default on; `--no-review`
     /// turns it off). Read-only/conversational turns never trigger it regardless.
     review: bool,
@@ -177,12 +179,14 @@ struct AgentInvocation {
 /// Parse `agent` args into an [`AgentInvocation`].
 ///
 /// Accepts both `agent --project <dir> "<prompt>"` and `agent <dir> "<prompt>"`,
-/// as well as `agent "<prompt>"` (default project dir), with an optional
-/// `--no-review` flag. The prompt is the last remaining positional argument.
+/// as well as `agent "<prompt>"` (default project dir), with optional
+/// `--no-review` and `--input <file|->` flags. A prompt is optional only when
+/// input supplies the session turns.
 fn parse_agent_args(args: &[String]) -> Result<AgentInvocation> {
     let mut project_dir: Option<PathBuf> = None;
     let mut positionals: Vec<String> = Vec::new();
     let mut review = true;
+    let mut input: Option<PathBuf> = None;
     let mut parse_options = true;
 
     let mut i = 0;
@@ -206,6 +210,14 @@ fn parse_agent_args(args: &[String]) -> Result<AgentInvocation> {
                 review = false;
                 i += 1;
             }
+            "--input" if parse_options => {
+                if input.is_some() {
+                    bail!("input was specified more than once");
+                }
+                let path = args.get(i + 1).context("--input requires a file or `-`")?;
+                input = Some(PathBuf::from(path));
+                i += 2;
+            }
             flag if parse_options && flag.starts_with('-') => {
                 bail!("unknown agent option `{flag}`");
             }
@@ -219,13 +231,14 @@ fn parse_agent_args(args: &[String]) -> Result<AgentInvocation> {
     // With no --project flag, the first of two positionals is the project dir
     // and the second is the prompt (`agent <dir> "<prompt>"` form).
     let prompt = match (project_dir.is_some(), positionals.len()) {
-        (_, 0) => bail!("missing prompt: gordian agent [--project <dir>] \"<prompt>\""),
-        (true, 1) => positionals.remove(0),
+        (_, 0) if input.is_some() => None,
+        (_, 0) => bail!("missing prompt: provide a positional prompt or --input <file|->"),
+        (true, 1) => Some(positionals.remove(0)),
         (true, _) => bail!("unexpected extra arguments after the prompt"),
-        (false, 1) => positionals.remove(0),
+        (false, 1) => Some(positionals.remove(0)),
         (false, 2) => {
             project_dir = Some(PathBuf::from(positionals.remove(0)));
-            positionals.remove(0)
+            Some(positionals.remove(0))
         }
         (false, _) => bail!("unexpected extra arguments; expected [--project <dir>] \"<prompt>\""),
     };
@@ -234,8 +247,35 @@ fn parse_agent_args(args: &[String]) -> Result<AgentInvocation> {
     Ok(AgentInvocation {
         project_dir,
         prompt,
+        input,
         review,
     })
+}
+
+fn input_prompts(path: &Path) -> Result<Vec<String>> {
+    let lines: Box<dyn BufRead> = if path.as_os_str() == "-" {
+        Box::new(BufReader::new(std::io::stdin()))
+    } else {
+        Box::new(BufReader::new(std::fs::File::open(path).with_context(
+            || format!("opening prompt input {}", path.display()),
+        )?))
+    };
+    lines
+        .lines()
+        .map(|line| line.context("reading prompt input"))
+        .filter_map(|line| match line {
+            Ok(line)
+                if {
+                    let trimmed = line.trim();
+                    trimmed.is_empty() || trimmed == "---" || trimmed.starts_with('#')
+                } =>
+            {
+                None
+            }
+            Ok(line) => Some(Ok(line.trim().to_owned())),
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -250,6 +290,8 @@ struct UsageTotals {
 #[derive(Debug, Default)]
 struct AgentDebugLog {
     usage: UsageTotals,
+    revisions: BTreeSet<u64>,
+    files: BTreeSet<String>,
 }
 
 impl AgentDebugLog {
@@ -260,18 +302,50 @@ impl AgentDebugLog {
                 let text = text.trim();
                 (!text.is_empty()).then(|| format!("assistant: {text}"))
             }
-            AgentEvent::ToolStarted { name } => Some(format!("tool -> {name}")),
+            AgentEvent::ToolStarted { name, args, .. } => {
+                Some(format!("tool -> {name} {}", compact_tool_args(args)))
+            }
             AgentEvent::ToolFinished {
                 name,
                 summary,
                 image_path,
+                elapsed_ms,
+                revision,
+                result,
             } => {
+                if let Some(revision) = revision {
+                    self.revisions.insert(*revision);
+                }
+                collect_result_files(result, &mut self.files);
                 let image = image_path
                     .as_deref()
                     .map(|path| format!(" (image: {path})"))
                     .unwrap_or_default();
-                Some(format!("tool <- {name}: {summary}{image}"))
+                let revision = revision
+                    .map(|revision| format!(", revision {revision}"))
+                    .unwrap_or_default();
+                let details = tool_result_details(name, result);
+                Some(format!(
+                    "tool <- {name} (elapsed {}s{revision}): {summary}{details}{image}",
+                    format_tool_elapsed(*elapsed_ms)
+                ))
             }
+            AgentEvent::ProviderRequest {
+                request,
+                input_tokens,
+                output_tokens,
+                cache_write_tokens,
+                cache_read_tokens,
+                latency_ms,
+            } => Some(format!(
+                "usage: request #{request} in={input_tokens} out={output_tokens} cached={cache_read_tokens} cache_write={cache_write_tokens} latency={:.1}s",
+                *latency_ms as f64 / 1_000.0
+            )),
+            AgentEvent::Diagnostic {
+                level,
+                target,
+                message,
+            } => Some(format!("{level}: {target}: {message}")),
             AgentEvent::Usage {
                 provider_requests,
                 input_tokens,
@@ -316,6 +390,122 @@ impl AgentDebugLog {
     }
 }
 
+fn format_tool_elapsed(elapsed_ms: u64) -> String {
+    if elapsed_ms < 1_000 {
+        format!("{:.3}", elapsed_ms as f64 / 1_000.0)
+    } else {
+        format!("{:.1}", elapsed_ms as f64 / 1_000.0)
+    }
+}
+
+fn compact_tool_args(args: &serde_json::Value) -> String {
+    fn compact(value: &serde_json::Value, key: Option<&str>) -> serde_json::Value {
+        match value {
+            serde_json::Value::String(text) if text.chars().count() > 120 => {
+                let prefix = text.chars().take(96).collect::<String>();
+                serde_json::Value::String(format!("{prefix}…({} chars)", text.chars().count()))
+            }
+            serde_json::Value::Array(items) if key == Some("parts") => {
+                let refs = items
+                    .iter()
+                    .filter_map(|part| part.get("ref").and_then(serde_json::Value::as_str))
+                    .take(6)
+                    .collect::<Vec<_>>();
+                let suffix = if items.len() > refs.len() { ", …" } else { "" };
+                serde_json::Value::String(format!(
+                    "[{}{suffix} {} parts]",
+                    refs.join(", "),
+                    items.len()
+                ))
+            }
+            serde_json::Value::Array(items) => serde_json::Value::Array(
+                items.iter().map(|item| compact(item, None)).collect(),
+            ),
+            serde_json::Value::Object(fields) => serde_json::Value::Object(
+                fields
+                    .iter()
+                    .map(|(key, value)| (key.clone(), compact(value, Some(key))))
+                    .collect(),
+            ),
+            _ => value.clone(),
+        }
+    }
+    compact(args, None).to_string()
+}
+
+fn tool_result_details(name: &str, result: &serde_json::Value) -> String {
+    let refused = result.get("error").is_some()
+        || result.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
+        || result.get("legal").and_then(serde_json::Value::as_bool) == Some(false);
+    if refused {
+        return format!(" | refusal={result}");
+    }
+
+    let keys: &[&str] = match name {
+        "check_schematic" => &["errors", "warnings", "erc", "completeness", "diagnostics"],
+        "check_board" => &[
+            "blocking_findings",
+            "reported_findings",
+            "copper_violations",
+            "unconnected_items",
+            "top_violations",
+            "top_unconnected",
+        ],
+        "place_parts" => &["placed", "nets", "gaps", "placement"],
+        _ => &[
+            "changed",
+            "net_delta",
+            "placed",
+            "placed_refs",
+            "retracted",
+            "nets_to_reroute",
+            "routed",
+            "failed",
+        ],
+    };
+    let mut facts = serde_json::Map::new();
+    for key in keys {
+        if let Some(value) = result.get(*key) {
+            let value = if matches!(*key, "diagnostics" | "top_violations" | "top_unconnected") {
+                value
+                    .as_array()
+                    .map(|items| serde_json::Value::Array(items.iter().take(3).cloned().collect()))
+                    .unwrap_or_else(|| value.clone())
+            } else if matches!(*key, "completeness" | "erc") {
+                let mut report = value.clone();
+                for findings in ["gaps", "violations"] {
+                    if let Some(items) = report
+                        .get_mut(findings)
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        items.truncate(3);
+                    }
+                }
+                report
+            } else {
+                value.clone()
+            };
+            facts.insert((*key).to_owned(), value);
+        }
+    }
+    if facts.is_empty() {
+        String::new()
+    } else {
+        format!(" | facts={}", serde_json::Value::Object(facts))
+    }
+}
+
+fn collect_result_files(result: &serde_json::Value, files: &mut BTreeSet<String>) {
+    for key in ["file", "path", "sch_path", "pcb_path", "fab_dir", "png_path"] {
+        if let Some(path) = result.get(key).and_then(serde_json::Value::as_str) {
+            files.insert(path.to_owned());
+        }
+    }
+    if let Some(paths) = result.get("files").and_then(serde_json::Value::as_array) {
+        files.extend(paths.iter().filter_map(serde_json::Value::as_str).map(str::to_owned));
+    }
+}
+
 fn format_score(score: f64) -> String {
     if score.fract().abs() < f64::EPSILON {
         format!("{score:.0}")
@@ -324,13 +514,21 @@ fn format_score(score: f64) -> String {
     }
 }
 
-/// Run the `agent` subcommand: one headless turn against real Bedrock + KiCAD.
+/// Run the `agent` subcommand: one headless session against real Bedrock + KiCAD.
 fn run_agent_command(args: &[String]) -> Result<()> {
     let AgentInvocation {
         project_dir,
         prompt,
+        input,
         review,
     } = parse_agent_args(args)?;
+    let mut prompts = prompt.into_iter().collect::<Vec<_>>();
+    if let Some(path) = input.as_ref() {
+        prompts.extend(input_prompts(path)?);
+    }
+    if prompts.is_empty() {
+        bail!("prompt input contained no prompts");
+    }
 
     let loaded = config::load_or_create()?;
     let config = loaded.config;
@@ -370,9 +568,9 @@ fn run_agent_command(args: &[String]) -> Result<()> {
             .context("building the tool context for the project")?;
     let sch_path = ctx.sch_path().to_path_buf();
     tracing::info!("project: {}", project_dir.display());
-    tracing::info!("prompt:  {prompt}");
+    tracing::info!("turns:   {}", prompts.len());
 
-    // 4. Run ONE agent turn. By default it routes
+    // 4. Run every turn on the same agent. By default each routes
     //    through `run_turn_reviewed`: after a turn that COMMITS a design change,
     //    an independent reviewer pass scores the netlist and feeds high-confidence
     //    defects into a bounded follow-up fix turn. `--no-review` runs the plain
@@ -384,39 +582,96 @@ fn run_agent_command(args: &[String]) -> Result<()> {
 
     tracing::info!(target: logging::EVENTS_TARGET, "--- agent events ---");
     let run = runtime.block_on(async {
-        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-        let printer = tokio::spawn(async move {
-            let mut log = AgentDebugLog::default();
-            while let Some(ev) = events_rx.recv().await {
-                if let Some(line) = log.observe(&ev) {
-                    tracing::info!(target: logging::EVENTS_TARGET, "{line}");
+        let mut turns = Vec::with_capacity(prompts.len());
+        for (index, prompt) in prompts.iter().enumerate() {
+            let turn = index + 1;
+            tracing::info!(target: logging::EVENTS_TARGET, "turn {turn}: {prompt}");
+            let started = std::time::Instant::now();
+            let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+            let printer = tokio::spawn(async move {
+                let mut log = AgentDebugLog::default();
+                while let Some(ev) = events_rx.recv().await {
+                    if let Some(line) = log.observe(&ev) {
+                        tracing::info!(target: logging::EVENTS_TARGET, "{line}");
+                    }
                 }
-            }
-            log.usage
-        });
+                log
+            });
 
-        let run = if review && config.agent.post_commit_review {
-            // intent == prompt: the design goal the reviewer judges against.
-            agent
-                .run_turn_reviewed(
-                    &prompt,
-                    &prompt,
-                    Some(&events_tx),
-                    config.agent.review_fix_rounds as usize,
-                )
-                .await
-        } else {
-            agent.run_turn(&prompt, Some(&events_tx)).await
-        };
-        drop(events_tx);
-        let usage = printer.await.unwrap_or_default();
-        run.map(|outcome| (outcome, usage))
+            let outcome = if review && config.agent.post_commit_review {
+                agent
+                    .run_turn_reviewed(
+                        prompt,
+                        prompt,
+                        Some(&events_tx),
+                        config.agent.review_fix_rounds as usize,
+                    )
+                    .await
+            } else {
+                agent.run_turn(prompt, Some(&events_tx)).await
+            };
+            drop(events_tx);
+            let log = printer.await.unwrap_or_default();
+            let usage = log.usage;
+            let elapsed = started.elapsed().as_secs_f64();
+            let outcome = outcome.map_err(|error| {
+                let message = format!("{error:#}");
+                tracing::error!(target: logging::EVENTS_TARGET, "error: gordian::agent: {message}");
+                message
+            });
+            let stop = outcome
+                .as_ref()
+                .map(|outcome| format!("{:?}", outcome.stop_reason))
+                .unwrap_or_else(|_| "Error".to_owned());
+            let files = log.files.into_iter().collect::<Vec<_>>().join(",");
+            let revisions = log
+                .revisions
+                .into_iter()
+                .map(|revision| revision.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            tracing::info!(
+                target: logging::EVENTS_TARGET,
+                "turn: stop={stop} requests={} elapsed={elapsed:.1}s files=[{files}] revisions=[{revisions}]",
+                usage.provider_requests
+            );
+            tracing::info!(
+                target: logging::EVENTS_TARGET,
+                "turn {turn} done: stop={stop} requests={} elapsed={elapsed:.1}s",
+                usage.provider_requests
+            );
+            turns.push((outcome, usage));
+        }
+        turns
     });
     // A timed-out `spawn_blocking` placement cannot be cancelled by Tokio. Do
     // not let one detached tool keep the one-shot headless CLI alive forever
     // after its turn result and diagnostics are already available.
     runtime.shutdown_timeout(Duration::from_secs(1));
-    let (outcome, usage) = run.context("running the agent turn")?;
+    let turns = run;
+    let usage = turns
+        .iter()
+        .fold(UsageTotals::default(), |mut total, (_, usage)| {
+            total.provider_requests += usage.provider_requests;
+            total.input_tokens += usage.input_tokens;
+            total.output_tokens += usage.output_tokens;
+            total.cache_write_tokens += usage.cache_write_tokens;
+            total.cache_read_tokens += usage.cache_read_tokens;
+            total
+        });
+    let turn_errors = turns
+        .iter()
+        .filter_map(|(outcome, _)| outcome.as_ref().err())
+        .cloned()
+        .collect::<Vec<_>>();
+    if !turn_errors.is_empty() {
+        bail!("{} turn(s) failed: {}", turn_errors.len(), turn_errors.join("; "));
+    }
+    let outcome = turns
+        .iter()
+        .rev()
+        .find_map(|(outcome, _)| outcome.as_ref().ok())
+        .expect("at least one completed prompt");
 
     // 5. Report the outcome.
     tracing::info!("--- agent turn ---");
@@ -457,11 +712,15 @@ fn run_agent_command(args: &[String]) -> Result<()> {
             report.error_count()
         );
     }
-    if outcome.stop_reason != StopReason::Completed {
-        bail!(
-            "agent turn ended without completing its quality contract: {:?}",
-            outcome.stop_reason
-        );
+    if turns
+        .iter()
+        .any(|(outcome, _)| {
+            outcome
+                .as_ref()
+                .is_ok_and(|outcome| outcome.stop_reason != StopReason::Completed)
+        })
+    {
+        bail!("one or more agent turns ended without completing their quality contract");
     }
     Ok(())
 }
@@ -479,7 +738,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(inv.project_dir, PathBuf::from("/tmp/demo"));
-        assert_eq!(inv.prompt, "make a board");
+        assert_eq!(inv.prompt.as_deref(), Some("make a board"));
         assert!(inv.review, "review defaults on");
     }
 
@@ -487,20 +746,20 @@ mod tests {
     fn parses_positional_dir_and_prompt() {
         let inv = parse_agent_args(&["/tmp/demo".into(), "make a board".into()]).unwrap();
         assert_eq!(inv.project_dir, PathBuf::from("/tmp/demo"));
-        assert_eq!(inv.prompt, "make a board");
+        assert_eq!(inv.prompt.as_deref(), Some("make a board"));
     }
 
     #[test]
     fn parses_prompt_only_with_default_dir() {
         let inv = parse_agent_args(&["make a board".into()]).unwrap();
         assert_eq!(inv.project_dir, PathBuf::from(DEFAULT_PROJECT_DIR));
-        assert_eq!(inv.prompt, "make a board");
+        assert_eq!(inv.prompt.as_deref(), Some("make a board"));
     }
 
     #[test]
     fn no_review_flag_disables_review() {
         let inv = parse_agent_args(&["--no-review".into(), "make a board".into()]).unwrap();
-        assert_eq!(inv.prompt, "make a board");
+        assert_eq!(inv.prompt.as_deref(), Some("make a board"));
         assert!(!inv.review, "--no-review turns the post-commit review off");
     }
 
@@ -543,8 +802,26 @@ mod tests {
     #[test]
     fn agent_double_dash_allows_a_dash_prefixed_prompt() {
         let inv = parse_agent_args(&["--".into(), "--literal prompt".into()]).unwrap();
-        assert_eq!(inv.prompt, "--literal prompt");
+        assert_eq!(inv.prompt.as_deref(), Some("--literal prompt"));
         assert!(inv.review);
+    }
+
+    #[test]
+    fn input_allows_an_optional_positional_prompt() {
+        let inv = parse_agent_args(&[
+            "--project".into(),
+            "/tmp/demo".into(),
+            "first".into(),
+            "--input".into(),
+            "-".into(),
+        ])
+        .unwrap();
+        assert_eq!(inv.prompt.as_deref(), Some("first"));
+        assert_eq!(inv.input, Some(PathBuf::from("-")));
+
+        let inv = parse_agent_args(&["--input".into(), "prompts.txt".into()]).unwrap();
+        assert_eq!(inv.prompt, None);
+        assert_eq!(inv.input, Some(PathBuf::from("prompts.txt")));
     }
 
     #[test]
@@ -573,17 +850,25 @@ mod tests {
         );
         assert_eq!(
             log.observe(&AgentEvent::ToolStarted {
-                name: "sync_board".into()
+                name: "sync_board".into(),
+                args: serde_json::json!({}),
+                seq: 1,
             }),
-            Some("tool -> sync_board".into())
+            Some("tool -> sync_board {}".into())
         );
         assert_eq!(
             log.observe(&AgentEvent::ToolFinished {
                 name: "sync_board".into(),
                 summary: "written".into(),
                 image_path: Some(".gordian/renders/render-001.png".into()),
+                elapsed_ms: 1_200,
+                revision: Some(7),
+                result: serde_json::json!({"revision": 7}),
             }),
-            Some("tool <- sync_board: written (image: .gordian/renders/render-001.png)".into())
+            Some(
+                "tool <- sync_board (elapsed 1.2s, revision 7): written (image: .gordian/renders/render-001.png)"
+                    .into()
+            )
         );
         assert_eq!(
             log.observe(&AgentEvent::Reviewed {

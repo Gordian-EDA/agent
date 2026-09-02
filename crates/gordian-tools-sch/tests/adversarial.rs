@@ -479,7 +479,10 @@ fn place_parts_joins_a_net_named_only_by_a_pin_reference() {
     // C7 pin 1 must now share a net with P3 pin 1 — not sit on a second one.
     let nets = call(&ctx, "get_net", json!({"name": "N_P3_1"}));
     let text = serde_json::to_string(&nets).unwrap();
-    assert!(text.contains("C7") && text.contains("P3"), "not one net: {text}");
+    assert!(
+        text.contains("C7") && text.contains("P3"),
+        "not one net: {text}"
+    );
 }
 
 #[test]
@@ -530,5 +533,8 @@ fn place_parts_accepts_the_engine_its_own_refusal_recommends() {
         ]}),
     );
     let message = unknown["error"].as_str().unwrap_or_default();
-    assert!(message.contains("nonsense") && message.contains("anneal"), "{unknown}");
+    assert!(
+        message.contains("nonsense") && message.contains("anneal"),
+        "{unknown}"
+    );
 }

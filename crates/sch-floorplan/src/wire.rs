@@ -16,8 +16,6 @@ use sch_model::route::{RouteScene, SchRouter, path_ok};
 /// Minimum lead length out of a pin before the first turn, mm.
 const LEAD_MM: f64 = 2.54;
 
-
-
 /// 2–4 point Manhattan elbow from `a` (leaving along `dir_a` for at least
 /// [`LEAD_MM`]) to `b`: straight when the lead axis lines up, else one L or
 /// one Z. Every segment is axis-aligned.
@@ -53,9 +51,6 @@ pub fn elbow(a: Point2, dir_a: Dir, b: Point2) -> Vec<Point2> {
     };
     Polyline::new(path).simplify().into_points()
 }
-
-
-
 
 /// Clearance candidates keep this far off obstacle edges, mm.
 const CLEAR_MM: f64 = 2.54;

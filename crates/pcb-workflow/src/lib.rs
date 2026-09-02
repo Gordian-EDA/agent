@@ -59,6 +59,45 @@ mod silk;
 mod sizing;
 mod sync;
 
+pub(crate) struct WorkflowPhase {
+    span: tracing::Span,
+    started: std::time::Instant,
+}
+
+impl WorkflowPhase {
+    pub(crate) fn start(phase: &'static str, parts: usize, nets: usize) -> Self {
+        Self {
+            span: tracing::info_span!(
+                "pcb_workflow_phase",
+                phase,
+                parts,
+                nets
+            ),
+            started: std::time::Instant::now(),
+        }
+    }
+
+    pub(crate) fn facts(
+        &self,
+        routed: Option<usize>,
+        failed: Option<usize>,
+        violations: Option<usize>,
+    ) {
+        tracing::info!(parent: &self.span, routed, failed, violations, "PCB workflow facts");
+    }
+}
+
+impl Drop for WorkflowPhase {
+    fn drop(&mut self) {
+        let elapsed_ms = self
+            .started
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        tracing::info!(parent: &self.span, elapsed_ms, "PCB workflow phase finished");
+    }
+}
+
 pub(crate) fn fmt_num(v: f64) -> String {
     let v = if v == 0.0 { 0.0 } else { v };
     format!("{v}")

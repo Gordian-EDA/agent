@@ -124,7 +124,10 @@ fn the_board_guard_and_its_subset_placement() {
     // With nothing unplaced, bare place_board refuses rather than re-place.
     let whole = run_tool("place_board", json!({}), &ctx).unwrap();
     assert_eq!(whole["code"], json!("board_already_placed"), "{whole:#}");
-    assert_eq!(std::fs::read_to_string(ctx.pcb_path()).unwrap(), before_text);
+    assert_eq!(
+        std::fs::read_to_string(ctx.pcb_path()).unwrap(),
+        before_text
+    );
 
     let placed = tool(&ctx, "place_board", json!({ "refs": ["R3"] }));
     assert_eq!(placed["placed_refs"], json!(["R3"]), "{placed:#}");
@@ -145,7 +148,6 @@ fn the_board_guard_and_its_subset_placement() {
     );
     ctx.close_kicad_session();
 }
-
 
 /// `move_parts` judges a move by the courtyards KiCAD's DRC checks. A connector
 /// whose origin is pin 1 rather than its body centre must not be measured by a
@@ -191,20 +193,32 @@ fn move_parts_measures_the_real_courtyards() {
             { "reference": "J1", "to": [6.0, 20.0] },
         ]}),
     );
-    let clear = tool(&ctx, "move_parts", json!({"moves": [
-        { "reference": "C1", "to": [40.0, 40.0] }
-    ]}));
+    let clear = tool(
+        &ctx,
+        "move_parts",
+        json!({"moves": [
+            { "reference": "C1", "to": [40.0, 40.0] }
+        ]}),
+    );
     assert_eq!(clear["moved"], json!(1), "{clear:#}");
 
     // A quarter-turned header beside an axial resistor: 5 mm of clear board is
     // 5 mm however the part is turned.
-    let turned = tool(&ctx, "move_parts", json!({"moves": [
-        { "reference": "J1", "to": [40.0, 25.0], "rotation": 90.0 }
-    ]}));
+    let turned = tool(
+        &ctx,
+        "move_parts",
+        json!({"moves": [
+            { "reference": "J1", "to": [40.0, 25.0], "rotation": 90.0 }
+        ]}),
+    );
     assert_eq!(turned["moved"], json!(1), "{turned:#}");
-    let beside = tool(&ctx, "move_parts", json!({"moves": [
-        { "reference": "R1", "to": [40.0, 33.0] }
-    ]}));
+    let beside = tool(
+        &ctx,
+        "move_parts",
+        json!({"moves": [
+            { "reference": "R1", "to": [40.0, 33.0] }
+        ]}),
+    );
     assert_eq!(beside["moved"], json!(1), "{beside:#}");
 
     // And a move that really does collide still refuses — showing its work.
@@ -217,7 +231,9 @@ fn move_parts_measures_the_real_courtyards() {
     assert_eq!(refused["code"], json!("courtyards_overlap"), "{refused:#}");
     assert_eq!(refused["moved"]["reference"], json!("R2"), "{refused:#}");
     assert!(
-        refused["moved"]["courtyard_mm"].as_array().is_some_and(|r| r.len() == 4),
+        refused["moved"]["courtyard_mm"]
+            .as_array()
+            .is_some_and(|r| r.len() == 4),
         "the refusal must show both courtyards: {refused:#}"
     );
     ctx.close_kicad_session();

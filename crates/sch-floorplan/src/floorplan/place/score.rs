@@ -12,8 +12,8 @@ use geom::{EPS, Point2, Segment};
 use kicad::KicadInstallation;
 use sch_check::model::Design;
 
-use sch_model::route::DrawnSegment;
 use crate::write::SchematicWriter;
+use sch_model::route::DrawnSegment;
 
 use circuit_graph::netclass::is_ground;
 use sch_model::item::{Incidence, Item};
@@ -21,9 +21,6 @@ use sch_model::item::{Incidence, Item};
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
 // `geom::union_find`, shared with the desugar pin reconciler.
 use sch_model::ir::LayoutIr;
-
-
-
 
 /// Wires that run straight THROUGH a 2-pin part's body — a foreign (or trunk)
 /// segment crossing the pin-to-pin axis at a point strictly interior to it,
@@ -222,7 +219,6 @@ pub fn count_foreign_taps(wires: &[DrawnSegment]) -> usize {
     }
     n
 }
-
 
 /// "Stay near your pin": total Manhattan distance from each satellite (2-pin
 /// part) to the centroid of the ANCHOR pins it wires to. A pull-up belongs by the

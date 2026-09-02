@@ -3,8 +3,8 @@
 use anyhow::{Context, Result, anyhow};
 use gordian_runtime::AgentRuntime;
 use gordian_runtime::config::PlacementEngineKind;
-use sch_model::engine::PlacementEngine;
 use sch_floorplan::live::{ArrangeReport, PlaceReport, PlacementBudget, Selection};
+use sch_model::engine::PlacementEngine;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -123,6 +123,8 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // will work — leaving it to guess turned one campaign case into a dead end.
     let mut tried = Vec::new();
     let mut report = None;
+    // The last attempt's timing, reported on the result whether it committed or not.
+    let mut placement = json!(null);
     for kind in engines_to_try(requested) {
         let (budget, engine) = budgeted(ctx, sheet_parts, Some(kind));
         let timing = Timing::start("place_parts", &budget, engine.name());
@@ -134,7 +136,17 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             Some(budget),
         ) {
             Ok(placed) => {
-                timing.done(if placed.committed { "committed" } else { "refused" });
+                let elapsed_ms = timing.done(if placed.committed {
+                    "committed"
+                } else {
+                    "refused"
+                });
+                placement = json!({
+                    "engine": timing.engine,
+                    "parts": timing.parts,
+                    "budget_ms": timing.budget_secs.saturating_mul(1_000),
+                    "elapsed_ms": elapsed_ms,
+                });
                 tried.push(engine.name());
                 let committed = placed.committed;
                 report = Some(placed);
@@ -146,24 +158,24 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 timing.done("overran");
                 return Ok(json!({ "error": error.to_string() }));
             }
-        Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
-            return Ok(json!({
-                "ok": false,
-                "code": "invalid_payload",
-                "input_errors": audit.input_errors,
-                "duplicate_refs": audit.duplicate_refs,
-                "unknown_pins": audit.unknown_pins,
-                "dangling": audit.dangling,
-                "did_you_mean": audit.did_you_mean,
-                "unreliable_nets": audit.unreliable_nets,
-                "note": "this lists EVERY fault in the payload — fix them all before retrying. \
-                         `place_parts` appends to the sheet, so resubmit only the parts named \
-                         here, not the whole payload. `input_errors` are unresolvable lib_ids \
-                         and pin conflicts; `duplicate_refs` give the next free refdes; \
-                         `unknown_pins` name a key the symbol does not have. `dangling` pins are \
-                         NOT fatal on their own — they are listed so you can finish them.",
-            }));
-        }
+            Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
+                return Ok(json!({
+                    "ok": false,
+                    "code": "invalid_payload",
+                    "input_errors": audit.input_errors,
+                    "duplicate_refs": audit.duplicate_refs,
+                    "unknown_pins": audit.unknown_pins,
+                    "dangling": audit.dangling,
+                    "did_you_mean": audit.did_you_mean,
+                    "unreliable_nets": audit.unreliable_nets,
+                    "note": "this lists EVERY fault in the payload — fix them all before retrying. \
+                             `place_parts` appends to the sheet, so resubmit only the parts named \
+                             here, not the whole payload. `input_errors` are unresolvable lib_ids \
+                             and pin conflicts; `duplicate_refs` give the next free refdes; \
+                             `unknown_pins` name a key the symbol does not have. `dangling` pins are \
+                             NOT fatal on their own — they are listed so you can finish them.",
+                }));
+            }
             Err(error) => return Err(error.into()),
         }
     }
@@ -175,7 +187,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(refused_place(report, &payload, &tried));
     }
     let refs = report.placed.clone();
-    let value = edit
+    let mut value = edit
         .commit(
             ctx,
             "place_parts",
@@ -189,6 +201,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if value.get("error").is_some() {
         return Ok(value);
     }
+    value["placement"] = placement;
     with_check(value, ctx).context("checking placed parts")
 }
 
@@ -436,16 +449,18 @@ impl Timing {
         }
     }
 
-    fn done(self, outcome: &str) {
+    fn done(&self, outcome: &str) -> u64 {
+        let elapsed_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         tracing::info!(
             tool = self.tool,
             engine = self.engine,
             parts = self.parts,
             budget_s = self.budget_secs,
-            elapsed_s = self.started.elapsed().as_secs_f64(),
+            elapsed_ms,
             outcome,
             "placement finished"
         );
+        elapsed_ms
     }
 }
 
