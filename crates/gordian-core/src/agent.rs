@@ -90,8 +90,9 @@ fn wrap_up_nudge(remaining: usize) -> String {
 }
 
 fn out_of_time_nudge() -> String {
-    "Time limit: this turn has spent its wall-clock budget. Stop all work now and answer with \
-     your final summary in prose only — no tool calls."
+    "Time limit: most of this turn's wall-clock budget is spent. Do not start anything new. \
+     Land the single most valuable step still outstanding — a clean check, or the board if the \
+     schematic is already clean — and then answer with your final summary."
         .to_string()
 }
 
@@ -936,17 +937,21 @@ impl<P: Provider> Agent<P> {
         let mut revision_read_uses: HashMap<String, u64> = HashMap::new();
         let mut timed_out_tool_calls: Vec<(String, Value, u64)> = Vec::new();
         let mut last_tool_status: Option<String> = None;
+        let mut last_clean_schematic: Option<gordian_runtime::revisions::RevisionId> = None;
         let mut pcb_recovery = PcbRecoveryState::default();
         let mut pcb_quality = PcbQualityState::default();
 
         loop {
             if provider_requests >= budgets.provider_requests {
-                let final_text = provider_limit_final_text(
+                let rolled_back =
+                    restore_last_clean_schematic(&self.runtime, last_clean_schematic);
+                let mut final_text = provider_limit_final_text(
                     None,
                     applied,
                     tool_calls_made,
                     last_tool_status.as_deref(),
                 );
+                final_text.push_str(rolled_back.as_deref().unwrap_or_default());
                 emit(events, AgentEvent::AssistantText(final_text.clone()));
                 return Ok(TurnOutcome {
                     applied,
@@ -958,12 +963,15 @@ impl<P: Provider> Agent<P> {
                 });
             }
             if started.elapsed() >= TURN_WALL_CLOCK {
-                let final_text = time_limit_final_text(
+                let rolled_back =
+                    restore_last_clean_schematic(&self.runtime, last_clean_schematic);
+                let mut final_text = time_limit_final_text(
                     started.elapsed(),
                     applied,
                     tool_calls_made,
                     last_tool_status.as_deref(),
                 );
+                final_text.push_str(rolled_back.as_deref().unwrap_or_default());
                 emit(events, AgentEvent::AssistantText(final_text.clone()));
                 return Ok(TurnOutcome {
                     applied,
@@ -975,9 +983,17 @@ impl<P: Provider> Agent<P> {
                 });
             }
             let remaining = budgets.provider_requests - provider_requests;
-            let out_of_time = started.elapsed().as_secs_f64()
-                >= TURN_WALL_CLOCK.as_secs_f64() * WRAP_UP_AT_ELAPSED;
+            // Telling a turn that has produced nothing to stop and summarise gets
+            // exactly that: two campaign cases answered "it cannot be completed in
+            // this session" with no schematic on disk, having spent under a third of
+            // their requests. A wrap-up is advice about how to land work, so it is
+            // only advice once there is work to land; before that the hard bounds are
+            // the only thing that should stop the turn.
+            let out_of_time = applied
+                && started.elapsed().as_secs_f64()
+                    >= TURN_WALL_CLOCK.as_secs_f64() * WRAP_UP_AT_ELAPSED;
             if !wrap_up_sent
+                && applied
                 && (remaining <= wrap_up_reserve(budgets.provider_requests) || out_of_time)
             {
                 wrap_up_sent = true;
@@ -1283,6 +1299,22 @@ impl<P: Provider> Agent<P> {
                         pcb_recovery.failed_route_attempts,
                         pcb_recovery.retry_note(),
                     );
+                }
+                // A turn can be cut off by its clock or its ceiling at any point,
+                // including between a `delete_wires` and the `connect` that was going
+                // to put the signal back. Remember the last schematic that checked
+                // clean so a cut-off turn can be handed that instead of a teardown.
+                if call.fn_name == "check_schematic" && check_schematic_is_clean(&parsed) {
+                    last_clean_schematic = self
+                        .runtime
+                        .revisions()
+                        .capture(
+                            "checkpoint",
+                            "last schematic that checked clean",
+                            &[self.runtime.sch_path().to_path_buf()],
+                        )
+                        .ok()
+                        .or(last_clean_schematic);
                 }
                 let summary =
                     tool_summary(&call.fn_name, &call.fn_arguments, &parse_or_null(&content));
@@ -1737,6 +1769,30 @@ fn provider_limit_final_text(
         report.push_str(partial.trim());
     }
     report
+}
+
+/// Hand a cut-off turn back its last clean schematic rather than a half-finished edit.
+///
+/// Repairing connectivity is two calls — break the net, then remake it — so a turn
+/// stopped on its clock or its ceiling can leave the sheet mid-teardown, with every
+/// pin the edit loosened now unconnected. That is strictly worse than where the turn
+/// started. When a checkpoint exists and the sheet no longer checks clean, restore it.
+fn restore_last_clean_schematic(
+    runtime: &AgentRuntime,
+    checkpoint: Option<gordian_runtime::revisions::RevisionId>,
+) -> Option<String> {
+    let checkpoint = checkpoint?;
+    let current = gordian_tools_sch::run("check_schematic", json!({}), runtime)
+        .and_then(Result::ok)
+        .unwrap_or_else(|| json!({}));
+    if check_schematic_is_clean(&current) {
+        return None;
+    }
+    runtime.revisions().restore(Some(checkpoint)).ok()?;
+    Some(format!(
+        " The turn was cut off mid-edit, so the schematic was rolled back to revision \
+         {checkpoint}, the last one that checked clean."
+    ))
 }
 
 fn time_limit_final_text(

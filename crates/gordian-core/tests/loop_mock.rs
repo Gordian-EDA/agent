@@ -196,3 +196,42 @@ async fn the_request_ceiling_spans_a_whole_reviewed_turn() {
         "a reviewed turn spent {spent} requests against a ceiling of 56"
     );
 }
+
+/// Repairing connectivity takes two calls — break the net, then remake it — so a
+/// turn stopped on its ceiling between them leaves every pin the edit loosened
+/// unconnected. That is worse than where the turn started, so the sheet is rolled
+/// back to the last one that checked clean.
+#[tokio::test]
+async fn a_turn_cut_off_mid_edit_keeps_the_last_clean_schematic() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let sch_path = ctx.sch_path().to_path_buf();
+    let mut script = vec![
+        place_two_resistors(),
+        tool_call("check", "check_schematic", json!({})),
+        // The teardown half of a repair, and then nothing puts it back.
+        tool_call("tear", "remove_symbols", json!({"refs": ["R2"]})),
+    ];
+    script.extend(
+        (0..80).map(|index| tool_call(&format!("spin-{index}"), "project_info", json!({}))),
+    );
+    let (client, _) = ScriptedClient::recording(script);
+    let mut agent = Agent::new(client, ctx, system_prompt());
+
+    let outcome = agent.run_turn("build a divider", None).await.unwrap();
+    assert!(
+        matches!(outcome.stop_reason, StopReason::ProviderRequestLimit { .. }),
+        "{:?}",
+        outcome.stop_reason
+    );
+
+    // The invariant: a cut-off turn never leaves a sheet worse than the last one
+    // that checked clean. R2 is what the teardown removed.
+    let after = std::fs::read_to_string(&sch_path).unwrap();
+    assert!(
+        after.contains("R2"),
+        "a cut-off turn kept the torn-down sheet instead of the clean checkpoint"
+    );
+}
