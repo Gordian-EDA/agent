@@ -796,7 +796,9 @@ fn adaptive_grid_rescue(deps: &MeshDeps, problem: &RoutingView, selected: &Route
 
     let mut best: Option<(RouteResult, RouteQuality)> = None;
     let base = adaptive_rescue_base(problem, selected, &failed_names);
-    for order in adaptive_rescue_orders(problem, &failed_names)
+    let orders = adaptive_rescue_orders(problem, &failed_names);
+    let hopeless = hopeless_nets(deps, problem, &base.obstacles, &orders);
+    for order in prune_orders(orders, &hopeless)
         .into_iter()
         .take(ADAPTIVE_RESCUE_MAX_ORDERS)
     {
@@ -825,7 +827,10 @@ fn adaptive_grid_rescue(deps: &MeshDeps, problem: &RoutingView, selected: &Route
         selected,
         deps.drc.geometry_violations(problem, &selected.solution),
     );
-    for order in adaptive_ripup_rescue_orders(problem, selected, &failed_names)
+    let ripup_orders = adaptive_ripup_rescue_orders(problem, selected, &failed_names);
+    let floor = ripup_floor(problem, selected, &ripup_orders);
+    let ripup_hopeless = hopeless_nets(deps, problem, &floor, &ripup_orders);
+    for order in prune_orders(ripup_orders, &ripup_hopeless)
         .into_iter()
         .take(ADAPTIVE_RESCUE_MAX_ORDERS)
     {
@@ -863,7 +868,11 @@ fn adaptive_grid_rescue(deps: &MeshDeps, problem: &RoutingView, selected: &Route
             .map(|f| f.connection.clone())
             .filter(|name| !name.is_empty())
             .collect();
-        for order in adaptive_ripup_rescue_orders(problem, &residual, &residual_failed_names)
+        let residual_orders =
+            adaptive_ripup_rescue_orders(problem, &residual, &residual_failed_names);
+        let residual_floor = ripup_floor(problem, &residual, &residual_orders);
+        let residual_hopeless = hopeless_nets(deps, problem, &residual_floor, &residual_orders);
+        for order in prune_orders(residual_orders, &residual_hopeless)
             .into_iter()
             .take(ADAPTIVE_RESCUE_MAX_ORDERS)
         {
@@ -1069,6 +1078,76 @@ fn adaptive_grid_ripup_rescue_order(
         failed,
         engine: format!("{}+{}", selected.engine, ADAPTIVE_GRID_RIPUP_RESCUE_ENGINE),
     })
+}
+
+/// The failed nets no attempt in a rescue phase can save.
+///
+/// Every attempt routes one net against `floor` plus whatever copper the nets
+/// before it in that attempt laid down, so the obstacle set an attempt presents
+/// only ever grows from `floor`. A net the grid router cannot route against
+/// `floor` is therefore unroutable in *every* order of that phase, and probing
+/// it once per order is exactly where a board that cannot be finished spends
+/// its time — `mcu-board` burnt 46 of its 62 routing seconds inside A* searches
+/// that had already been proven hopeless.
+///
+/// Order-independent and clock-free, so the emitted board is unchanged.
+fn hopeless_nets(
+    deps: &MeshDeps,
+    problem: &RoutingView,
+    floor: &[Obstacle],
+    orders: &[Vec<usize>],
+) -> BTreeSet<usize> {
+    let mut probed = BTreeSet::new();
+    let mut hopeless = BTreeSet::new();
+    for idx in orders.iter().flatten().copied() {
+        if !probed.insert(idx) {
+            continue;
+        }
+        let Some(conn) = problem.connections.get(idx) else {
+            continue;
+        };
+        if conn.points_to_connect.len() < 2 {
+            continue;
+        }
+        let sub = problem_with_single_connection_and_obstacles(problem, idx, floor);
+        if !deps.grid.route(&sub, &deps.budget).failed.is_empty() {
+            hopeless.insert(idx);
+        }
+    }
+    hopeless
+}
+
+/// Drop the hopeless nets from every order, then drop the orders that collapse
+/// to nothing or to a duplicate of an earlier one — different orders of the same
+/// nets are only worth trying while the nets differ.
+fn prune_orders(orders: Vec<Vec<usize>>, hopeless: &BTreeSet<usize>) -> Vec<Vec<usize>> {
+    let mut pruned = Vec::new();
+    for order in orders {
+        let kept: Vec<usize> = order
+            .into_iter()
+            .filter(|idx| !hopeless.contains(idx))
+            .collect();
+        push_adaptive_rescue_order(&mut pruned, kept);
+    }
+    pruned
+}
+
+/// The copper `selected` keeps once every net any rip-up order might remove is
+/// removed — the emptiest board those orders can present.
+fn ripup_floor(problem: &RoutingView, selected: &RouteResult, orders: &[Vec<usize>]) -> Vec<Obstacle> {
+    let removable: BTreeSet<&str> = orders
+        .iter()
+        .flatten()
+        .filter_map(|&idx| problem.connections.get(idx).map(|c| c.name.as_str()))
+        .collect();
+    let mut solution = selected.solution.clone();
+    solution
+        .traces
+        .retain(|t| !removable.contains(t.connection.as_str()));
+    solution
+        .vias
+        .retain(|v| !removable.contains(v.connection.as_str()));
+    copper_obstacles(problem, &solution)
 }
 
 fn adaptive_rescue_orders(

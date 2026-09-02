@@ -151,6 +151,13 @@ fn route_iterated(drc: &dyn Drc, problem: &RoutingView, costs: AStarCosts) -> Ro
     let metrics = net_order_metrics(problem);
     let empty = std::collections::BTreeSet::new();
     let mut best = route_order_portfolio(drc, problem, costs, &empty, &metrics);
+    // Re-prioritising a failed net only changes anything when there is another
+    // net to reorder it against. A single-connection problem — what the adaptive
+    // rescue routes, one net at a time — can only ever produce the same order
+    // again, so the retry is a second exhaustive search for the same answer.
+    if problem.connections.len() < 2 {
+        return best;
+    }
     for _ in 0..3 {
         if best.failed.is_empty() {
             break;
@@ -1555,6 +1562,8 @@ impl GridAStarRouter {
     fn route_with_drc(&self, drc: &dyn Drc, problem: &RoutingView) -> RouteResult {
         let strict = route(drc, problem);
         let lenient = route_lenient(drc, problem);
+        let routed_nothing = lenient.solution.traces.is_empty()
+            && lenient.failed.len() == problem.connections.len();
         let diag = if grid_candidate_better(drc, problem, &lenient, &strict) {
             lenient
         } else {
@@ -1562,6 +1571,14 @@ impl GridAStarRouter {
         };
         if grid_candidate_can_skip_orthogonal(drc, problem, &diag) {
             return diag; // the 8-way pass aced the board without vias
+        }
+        if routed_nothing {
+            // Every 4-way move is also an 8-way move, and the lenient pass drops
+            // the via-barrel scan, so its move set contains both orthogonal
+            // candidates'. A board it routed NOTHING on leaves them nothing to
+            // find: they would tie the diagonal on every key the arbiter compares,
+            // and a tie keeps the diagonal. Two exhaustive passes, skipped.
+            return diag;
         }
         // The ORTHOGONAL candidate: the better-scoring of its strict (via-scan) and lenient
         // (no-scan) variants, by the SAME key. Keep it only when STRICTLY better;

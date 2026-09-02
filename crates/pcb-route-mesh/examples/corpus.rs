@@ -18,7 +18,7 @@ use pcb_route_grid::router::{GridRouter, GridSinglePassRouter};
 use pcb_route_mesh::deps::MeshDeps;
 use pcb_route_mesh::pipeline::MeshRouter;
 
-const BOARDS: [&str; 7] = [
+const BOARDS: [&str; 8] = [
     "rc-divider",
     "transistor-led-driver",
     "keepout-route",
@@ -26,6 +26,7 @@ const BOARDS: [&str; 7] = [
     "power-buck",
     "led-array",
     "bga25-route",
+    "mcu-board",
 ];
 
 fn load(name: &str) -> RoutingView {
