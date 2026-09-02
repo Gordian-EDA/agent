@@ -83,3 +83,16 @@ progress" text goes with it. Keep only the per-turn provider-request cap.
 the canonical resolvers (`sch_check::pins::resolve`, `find_pin`, `pin_endpoints`) are
 globally number-first. On a symbol whose pin is *named* `2` the emitter can attach one net
 to two pins. No reproduction yet — needs a fixture with such a symbol + a netlist gate.
+
+## Queued (user, 2026-09-01): one revision/undo system for schematic AND board
+`gordian_runtime::revisions` owns `<project>/.gordian/revisions/<n>/` — every mutating
+tool (schematic: all `gordian-tools-sch` mutators; board: `regenerate_board`, `place_board`,
+`route_board`, `move_parts`, `route_track`, `delete_copper`, `set_net_width`,
+`update_board_outline`, `assign_footprints`) calls `capture(tool, summary, &[paths])` BEFORE
+writing, snapshotting exactly the files it will touch (`.kicad_sch`, `.kicad_pcb`,
+`.kicad_pro`, `fp-lib-table`…) and gets a `RevisionId`. One `undo{revision?}` tool restores
+every file of that revision atomically (default: the latest) and reloads any live board
+session; `history{limit?}` lists revisions (id, tool, summary, files, when). Replaces
+`.gordian/sch-undo` + `SnapshotId` plumbing in `gordian-tools-sch/src/session.rs`; the
+tools' `snapshot` result field becomes `revision`. Bounded retention (keep last N, prune).
+Start after `lane/pcb-diagnostics` merges (shared pcb-workflow write paths).
