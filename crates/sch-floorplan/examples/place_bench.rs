@@ -100,8 +100,26 @@ fn main() {
             let label = engine_label(kind);
             match report {
                 Ok(report) => {
+                    let why = if report.committed {
+                        String::new()
+                    } else {
+                        let m = &report.mismatch;
+                        let shorted: Vec<String> =
+                            m.shorted.iter().map(|(a, b)| format!("{a}+{b}")).collect();
+                        format!(
+                            "\tshorted={} scattered={}\n{}",
+                            shorted.join(","),
+                            m.scattered.join(","),
+                            report
+                                .warnings
+                                .iter()
+                                .map(|w| format!("\t\t{w}"))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        )
+                    };
                     println!(
-                        "{fixture}\t{label}\t{parts}\t{secs:.1}\t{}",
+                        "{fixture}\t{label}\t{parts}\t{secs:.1}\t{}{why}",
                         report.committed as u8
                     );
                     doc.write(format!(
