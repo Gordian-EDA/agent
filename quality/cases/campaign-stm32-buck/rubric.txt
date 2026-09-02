@@ -9,4 +9,4 @@ expect: part_count >= 50
 expect: unconnected_pins == []
 expect: unconnected_items == 0
 expect: len(fab_files) >= 3
-expect: elapsed_seconds <= 300
+expect: agent_seconds <= 300
