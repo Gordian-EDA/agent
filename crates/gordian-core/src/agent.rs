@@ -2057,7 +2057,8 @@ fn check_board_is_clean(value: &Value) -> bool {
             .and_then(Value::as_u64)
             .is_some_and(|count| count == 0)
         && value
-            .get("silk_warnings")
+            .get("introduced_silk_warnings")
+            .or_else(|| value.get("silk_warnings"))
             .and_then(Value::as_u64)
             .is_some_and(|count| count == 0)
 }
@@ -2790,6 +2791,14 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             .to_string(),
         "render_schematic" => "rendered schematic to PNG".to_string(),
         "check_board" => {
+            let introduced = result
+                .get("introduced")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let pre_existing = result
+                .get("pre_existing")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             let blocking = result
                 .get("blocking_findings")
                 .and_then(Value::as_u64)
@@ -2803,22 +2812,18 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                             .and_then(Value::as_u64)
                             .unwrap_or(0)
                 });
-            let reported = result
-                .get("reported_findings")
-                .and_then(Value::as_u64)
-                .or_else(|| result.get("violations").and_then(Value::as_u64))
-                .unwrap_or(0);
             let silk = result
-                .get("silk_warnings")
+                .get("introduced_silk_warnings")
+                .or_else(|| result.get("silk_warnings"))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             if check_board_is_clean(result) {
                 format!(
-                    "PCB quality clean: 0 blocking findings, 0 silkscreen warnings ({reported} total reported)"
+                    "{introduced} introduced, {pre_existing} pre-existing; PCB quality gate passed"
                 )
             } else if result.get("ok").and_then(Value::as_bool) == Some(true) {
                 format!(
-                    "DRC copper clean, but {silk} silkscreen warning(s) block quality acceptance"
+                    "{introduced} introduced, {pre_existing} pre-existing; {silk} introduced silkscreen warning(s) block quality acceptance"
                 )
             } else {
                 // The reported order, not a ranking: check_board lists findings
@@ -2848,7 +2853,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                     .map(|first| format!(" — first is {first}"))
                     .unwrap_or_default();
                 format!(
-                    "DRC failed: {blocking} blocking findings{first}; fix them, then check_board again"
+                    "{introduced} introduced, {pre_existing} pre-existing; {blocking} introduced blocking findings{first}; fix them, then check_board again"
                 )
             }
         }
@@ -3162,6 +3167,8 @@ mod tests {
     fn a_failing_board_check_names_the_finding_it_reported_first() {
         let result = json!({
             "ok": false,
+            "introduced": 3,
+            "pre_existing": 9,
             "blocking_findings": 3,
             "reported_findings": 4,
             "silk_warnings": 1,
@@ -3176,8 +3183,8 @@ mod tests {
 
         assert_eq!(
             tool_summary("check_board", &json!({}), &result),
-            "DRC failed: 3 blocking findings — first is clearance: Pad 3 of U1 ↔ Pad 4 of U1; \
-             fix them, then check_board again"
+            "3 introduced, 9 pre-existing; 3 introduced blocking findings — first is clearance: \
+             Pad 3 of U1 ↔ Pad 4 of U1; fix them, then check_board again"
         );
     }
 }

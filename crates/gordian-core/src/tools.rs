@@ -508,9 +508,11 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "check_board".into(),
-            description: "Run PCB DRC; stop when ok. On failure lists the blocking violations, \
-                 every unconnected item as the pad pair it is, and `unplaced` — the footprints \
-                 still in the seed row, which place_board({refs}) lays out."
+            description: "Run PCB DRC and classify violations and unrouted pairs against the \
+                 turn-start board. `ok` considers introduced blocking findings only: fix those \
+                 and leave inherited findings alone unless asked. On failure lists every introduced \
+                 unconnected item as the pad pair it is, and `unplaced` — the footprints still in \
+                 the seed row, which place_board({refs}) lays out."
                 .into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
@@ -1001,7 +1003,7 @@ fn visual_with_introduced(
                 available
                     .iter()
                     .position(|baseline| baseline == *item)
-                    .map_or(true, |position| {
+                    .is_none_or(|position| {
                         available.remove(position);
                         false
                     })
