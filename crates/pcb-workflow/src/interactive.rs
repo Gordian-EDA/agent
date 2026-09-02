@@ -1,9 +1,9 @@
-//! Interactive IPC board editing.
+//! Interactive saved-board editing with an explicit IPC escape hatch.
 //!
 //! Once the engine has seeded a board (sync_board → place_board → route_board),
-//! `open_board` launches or inspects the live KiCAD session and the geometry
-//! tools edit the REAL board over IPC. This is where the LLM directly controls
-//! geometry (the engine is the assist that produced the starting point).
+//! geometry tools read and atomically patch the durable board file. `open_board`
+//! is the explicit operation that launches or inspects a live KiCad session;
+//! configured attached sessions may also receive edits directly.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -40,7 +40,7 @@ pub fn open_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     super::place::get_board(json!({}), ctx)
 }
 
-/// Move one or more live-board parts in a single KiCAD IPC commit.
+/// Move one or more saved-board parts in one atomic edit, or one attached IPC commit.
 pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let snapshot = match crate::active_board(ctx) {
         Ok(snapshot) => snapshot,
@@ -49,7 +49,7 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut board = MoveBoard::from_snapshot(
         &snapshot,
         &crate::place::courtyard_extents(&snapshot, ctx),
-        &back_side_references(ctx),
+        &back_side_references(&snapshot),
     );
     let plan = match resolve_move_parts(&input, &mut board) {
         Ok(plan) => plan,
@@ -88,20 +88,15 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
 /// The parts sitting on the back of the board. KiCAD mirrors a flipped
 /// footprint about its y axis, so an asymmetric courtyard is on the other side
-/// of the origin there — and the live snapshot does not carry the side, so the
-/// board document is asked.
-fn back_side_references(ctx: &AgentRuntime) -> BTreeSet<String> {
-    std::fs::read_to_string(ctx.pcb_path())
-        .ok()
-        .and_then(|text| kicad_board::BoardDoc::parse(text).ok())
-        .map(|doc| {
-            doc.footprints()
-                .into_iter()
-                .filter(kicad_board::BoardFootprint::on_back)
-                .map(|footprint| footprint.reference)
-                .collect()
-        })
-        .unwrap_or_default()
+/// of the origin there.
+fn back_side_references(snapshot: &IpcBoardSnapshot) -> BTreeSet<String> {
+    snapshot
+        .imported
+        .parts
+        .iter()
+        .filter(|part| part.side == kicad_board::BoardSide::Back)
+        .map(|part| part.reference.clone())
+        .collect()
 }
 
 /// Copper the move invalidates: every net with a trace ending on a pad that
@@ -552,7 +547,7 @@ fn edge_position(part: &MovePart, bounds: Rect, edge: Edge, gap: f64) -> Point2 
     }
 }
 
-/// Route a single live-board connection with grid-A* obstacle avoidance.
+/// Route a single saved-board connection with grid-A* obstacle avoidance.
 pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // KiCad 9.0.2 can apply CreateItems but time out before acknowledging the
     // commit, leaving route_track unable to tell whether retrying would
@@ -592,7 +587,7 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 }
 
-/// Delete live-board track/via copper near a click point.
+/// Delete saved-board track/via copper near a click point.
 pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
     let snapshot = match crate::active_board(ctx) {
@@ -612,13 +607,20 @@ pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
-    match ctx.kicad().with_session(&path, |session| {
-        session
-            .kicad()
-            .delete_copper_near(&request, &snapshot.layer_names)
-    }) {
+    let deleted = if ctx.config().kicad.attach_running {
+        ctx.kicad()
+            .with_session(&path, |session| {
+                session
+                    .kicad()
+                    .delete_copper_near(&request, &snapshot.layer_names)
+            })
+            .map_err(|error| error.to_string())
+    } else {
+        delete_copper_offline(ctx, &snapshot, &request)
+    };
+    match deleted {
         Ok(hits) => Ok(gate.commit(ctx, delete_copper_output(&request, &hits))),
-        Err(e) => Ok(gate.rollback(ctx, json!({ "error": e.to_string() }))),
+        Err(error) => Ok(gate.rollback(ctx, json!({ "error": error }))),
     }
 }
 
@@ -662,6 +664,21 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
+    if !ctx.config().kicad.attach_running {
+        ctx.close_kicad_session();
+        let update = kicad_board::NetClassUpdate {
+            name: name.clone(),
+            width,
+            clearance,
+            nets: vec![net.clone()],
+        };
+        return match write_net_width_offline(&path, &project_path, &update) {
+            Ok(report) => {
+                Ok(gate.commit(ctx, net_width_output(name, net, width, clearance, report)))
+            }
+            Err(error) => Ok(gate.rollback(ctx, json!({ "error": error }))),
+        };
+    }
     let live = ctx.kicad().with_session(&path, |session| {
         let width_nm = mm_to_nm(width);
         let clearance_nm = mm_to_nm(clearance);
@@ -698,23 +715,11 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 nets: vec![net.clone()],
             };
             match write_net_width_offline(&path, &project_path, &update) {
-                Ok(report) => Ok(gate.commit(
-                    ctx,
-                    json!({
-                        "ok": true,
-                        "write_path": "offline",
-                        "fallback_reason": live_error.to_string(),
-                        "changed": report.changed,
-                        "board_changed": report.board_changed,
-                        "project_changed": report.project_changed,
-                        "net_class": name,
-                        "width": width,
-                        "clearance": clearance,
-                        "nets": [net],
-                        "changed_nets": report.nets,
-                        "changed_classes": report.classes,
-                    }),
-                )),
+                Ok(report) => {
+                    let mut output = net_width_output(name, net, width, clearance, report);
+                    output["fallback_reason"] = json!(live_error.to_string());
+                    Ok(gate.commit(ctx, output))
+                }
                 Err(offline_error) => Ok(gate.rollback(
                     ctx,
                     json!({
@@ -726,6 +731,170 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
         }
     }
+}
+
+fn net_width_output(
+    name: String,
+    net: String,
+    width: f64,
+    clearance: f64,
+    report: kicad_board::NetClassUpdateReport,
+) -> Value {
+    json!({
+        "ok": true,
+        "write_path": "offline",
+        "changed": report.changed,
+        "board_changed": report.board_changed,
+        "project_changed": report.project_changed,
+        "net_class": name,
+        "width": width,
+        "clearance": clearance,
+        "nets": [net],
+        "changed_nets": report.nets,
+        "changed_classes": report.classes,
+    })
+}
+
+fn delete_copper_offline(
+    ctx: &AgentRuntime,
+    snapshot: &IpcBoardSnapshot,
+    request: &CopperDeleteRequest,
+) -> std::result::Result<Vec<CopperHit>, String> {
+    #[derive(Clone, Copy)]
+    enum Selected {
+        Trace(usize),
+        Via(usize),
+    }
+
+    let layer_count = snapshot.problem.layer_count;
+    let mut matches = Vec::<(Selected, CopperHit)>::new();
+    if request.kinds.contains(&CopperKind::Track) {
+        for (index, trace) in snapshot.copper.traces.iter().enumerate() {
+            if request
+                .net
+                .as_deref()
+                .is_some_and(|net| net != trace.connection)
+                || request
+                    .layer
+                    .is_some_and(|layer| trace.layer.index(layer_count) != Some(layer))
+            {
+                continue;
+            }
+            for pair in trace.path.windows(2) {
+                let distance = (geom::Segment::new(pair[0], pair[1]).dist_to_point(request.at)
+                    - trace.width / 2.0)
+                    .max(0.0);
+                matches.push((
+                    Selected::Trace(index),
+                    CopperHit {
+                        kind: CopperKind::Track,
+                        distance,
+                        net: Some(trace.connection.clone()),
+                        layer: trace
+                            .layer
+                            .index(layer_count)
+                            .and_then(|layer| snapshot.layer_names.get(layer as usize).cloned()),
+                        layers: Vec::new(),
+                        at: None,
+                        start: Some(pair[0]),
+                        end: Some(pair[1]),
+                    },
+                ));
+            }
+        }
+    }
+    if request.kinds.contains(&CopperKind::Via) {
+        for (index, via) in snapshot.copper.vias.iter().enumerate() {
+            if request
+                .net
+                .as_deref()
+                .is_some_and(|net| net != via.connection)
+            {
+                continue;
+            }
+            let indices: Vec<u32> = match via.span {
+                ViaSpan::Through => (0..layer_count).collect(),
+                ViaSpan::Partial { from, to, .. } => (from.min(to)..=from.max(to)).collect(),
+            };
+            if request.layer.is_some_and(|layer| !indices.contains(&layer)) {
+                continue;
+            }
+            matches.push((
+                Selected::Via(index),
+                CopperHit {
+                    kind: CopperKind::Via,
+                    distance: (via.at.dist(request.at) - via.diameter / 2.0).max(0.0),
+                    net: Some(via.connection.clone()),
+                    layer: None,
+                    layers: indices
+                        .iter()
+                        .filter_map(|index| snapshot.layer_names.get(*index as usize).cloned())
+                        .collect(),
+                    at: Some(via.at),
+                    start: None,
+                    end: None,
+                },
+            ));
+        }
+    }
+    matches.retain(|(_, hit)| hit.distance <= request.radius + geom::EPS);
+    matches.sort_by(|a, b| {
+        a.1.distance
+            .total_cmp(&b.1.distance)
+            .then_with(|| a.1.kind.cmp(&b.1.kind))
+    });
+    if !request.all {
+        matches.truncate(1);
+    }
+    if matches.is_empty() {
+        return Ok(Vec::new());
+    }
+    let trace_indices: BTreeSet<usize> = matches
+        .iter()
+        .filter_map(|(selected, _)| match selected {
+            Selected::Trace(index) => Some(*index),
+            Selected::Via(_) => None,
+        })
+        .collect();
+    let via_indices: BTreeSet<usize> = matches
+        .iter()
+        .filter_map(|(selected, _)| match selected {
+            Selected::Via(index) => Some(*index),
+            Selected::Trace(_) => None,
+        })
+        .collect();
+    let retained = RouteSolution {
+        traces: snapshot
+            .copper
+            .traces
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !trace_indices.contains(index))
+            .map(|(_, trace)| trace.clone())
+            .collect(),
+        vias: snapshot
+            .copper
+            .vias
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !via_indices.contains(index))
+            .map(|(_, via)| via.clone())
+            .collect(),
+    };
+    ctx.close_kicad_session();
+    let path = ctx.pcb_path();
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("could not read the board: {error}"))?;
+    let (stripped, _, _) = kicad_board::strip_copper(&text)?;
+    let updated = kicad_board::append_copper(
+        &stripped,
+        &retained,
+        snapshot.problem.layer_count,
+        &snapshot.layer_names,
+    )?;
+    crate::route::write_board_atomically(&path, updated.as_bytes())
+        .map_err(|error| format!("could not replace the board: {error}"))?;
+    Ok(matches.into_iter().map(|(_, hit)| hit).collect())
 }
 
 fn write_net_width_offline(
@@ -1430,7 +1599,9 @@ mod tests {
                     lib_id: "Capacitor_SMD:C_0603_1608Metric".to_owned(),
                     at: Point2::new(5.0, 5.0),
                     rotation: 0,
+                    side: kicad_board::BoardSide::Front,
                     locked: false,
+                    courtyard: None,
                     pads: vec![],
                 }],
                 placement_keepouts: vec![],
@@ -1910,19 +2081,27 @@ mod tests {
             lib_id: "Package_TO_SOT_SMD:SOT-23-5".to_owned(),
             at: Point2::new(0.0, 0.0),
             rotation: 0,
+            side: kicad_board::BoardSide::Front,
             locked: false,
+            courtyard: None,
             pads: vec![
                 kicad_board::ImportedPad {
                     number: "3".to_owned(),
                     net: Some("SIG".to_owned()),
                     at: Point2::new(4.0, 2.0),
                     layers: vec![LayerRef::top()],
+                    shape: "rect".to_owned(),
+                    size: Point2::new(0.0, 0.0),
+                    drill: None,
                 },
                 kicad_board::ImportedPad {
                     number: "5".to_owned(),
                     net: Some("SIG".to_owned()),
                     at: Point2::new(9.0, 2.0),
                     layers: vec![LayerRef::top()],
+                    shape: "rect".to_owned(),
+                    size: Point2::new(0.0, 0.0),
+                    drill: None,
                 },
             ],
         }];

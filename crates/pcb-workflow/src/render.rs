@@ -1,4 +1,4 @@
-//! `render_board` - render the live KiCad board to a PNG for the model and user.
+//! `render_board` - render the saved KiCad board to a PNG for the model and user.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};

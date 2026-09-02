@@ -1,6 +1,4 @@
-//! Unified revision integration through the public tool dispatcher.
-
-mod common;
+//! Unified offline revision integration through the public tool dispatcher.
 
 use gordian_core::AgentRuntime;
 use gordian_core::tools::run_tool;
@@ -30,7 +28,6 @@ fn position(ctx: &AgentRuntime, reference: &str) -> ([f64; 2], f64) {
 
 #[test]
 fn undo_and_history_span_schematic_and_board_mutators() {
-    let _kicad = common::KicadLock::acquire();
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -99,5 +96,4 @@ fn undo_and_history_span_schematic_and_board_mutators() {
     ] {
         assert!(history.contains(tool), "history omitted {tool}:\n{history}");
     }
-    ctx.close_kicad_session();
 }

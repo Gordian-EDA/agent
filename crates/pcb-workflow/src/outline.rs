@@ -77,9 +77,9 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let changed = !edge_cuts_match(&text, &outline)?;
     let updated = replace_edge_cuts(&text, &outline)?;
     if changed {
-        std::fs::write(&path, updated)
-            .with_context(|| format!("writing board {}", path.display()))?;
         ctx.close_kicad_session();
+        crate::route::write_board_atomically(&path, updated.as_bytes())
+            .with_context(|| format!("writing board {}", path.display()))?;
     }
 
     let bounds = outline.bounds();

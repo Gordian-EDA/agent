@@ -10,8 +10,8 @@
 use std::collections::BTreeSet;
 
 use kicad_board::ImportedPart;
-use pcb_model::Violation as ConnViolation;
 use pcb_model::Finding as DrcViolation;
+use pcb_model::Violation as ConnViolation;
 use pcb_model::{Point2, RoutingView};
 use serde_json::{Value, json};
 
@@ -744,7 +744,9 @@ mod tests {
             lib_id: "Package_TO_SOT_SMD:SOT-23-5".to_owned(),
             at: Point2 { x: 0.0, y: 0.0 },
             rotation: 0,
+            side: kicad_board::BoardSide::Front,
             locked: false,
+            courtyard: None,
             pads: pads
                 .iter()
                 .map(|(number, x, y)| ImportedPad {
@@ -752,6 +754,9 @@ mod tests {
                     net: None,
                     at: Point2 { x: *x, y: *y },
                     layers: vec![LayerRef::top()],
+                    shape: "rect".to_owned(),
+                    size: Point2::new(0.0, 0.0),
+                    drill: None,
                 })
                 .collect(),
         }

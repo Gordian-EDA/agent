@@ -132,8 +132,10 @@ pub struct KicadConfig {
     pub cli_path: Option<PathBuf>,
     /// Optional matching `pcbnew` path override for live IPC sessions.
     pub pcbnew_path: Option<PathBuf>,
-    /// Prefer attaching to an already-running KiCAD IPC server before launching
-    /// a managed headless process.
+    /// Use the matching board in an already-running KiCad process for live state.
+    /// When disabled, ordinary board tools stay offline and never launch pcbnew.
+    /// If an attached write is unsupported and falls back to the saved file,
+    /// Gordian disconnects; reload or reopen the board in KiCad before editing it.
     pub attach_running: bool,
     /// Explicitly allow managed headless launch to enable the API server in the
     /// selected KiCAD major version's preferences. Disabled by default because

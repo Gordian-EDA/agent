@@ -1,15 +1,14 @@
-//! Live KiCAD-board views and the explicit bridge-to-domain conversion seam.
+//! Board snapshot types and the explicit live-IPC conversion seam.
 
 use std::path::{Path, PathBuf};
 
 use geom::{Point2, Rect};
 use pcb_model::{
-    Connection, LayerRef, Obstacle, RoutePoint, RouteSolution, RoutingView, Trace, Via,
-    ViaSpan,
+    Connection, LayerRef, Obstacle, RoutePoint, RouteSolution, RoutingView, Trace, Via, ViaSpan,
 };
 
 /// Domain view consumed by placement and routing tools.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IpcBoardSnapshot {
     pub problem: RoutingView,
     pub imported: ImportedBoard,
@@ -17,7 +16,7 @@ pub struct IpcBoardSnapshot {
     pub layer_names: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImportedBoard {
     pub layer_count: u32,
     pub bounds: Rect,
@@ -26,22 +25,34 @@ pub struct ImportedBoard {
     pub keepout_count: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImportedPart {
     pub reference: String,
     pub lib_id: String,
     pub at: Point2,
     pub rotation: i32,
+    pub side: BoardSide,
     pub locked: bool,
+    pub courtyard: Option<Rect>,
     pub pads: Vec<ImportedPad>,
 }
 
-#[derive(Debug, Clone)]
+/// Side of the board carrying a footprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardSide {
+    Front,
+    Back,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImportedPad {
     pub number: String,
     pub net: Option<String>,
     pub at: Point2,
     pub layers: Vec<LayerRef>,
+    pub shape: String,
+    pub size: Point2,
+    pub drill: Option<Point2>,
 }
 
 pub fn from_bridge(snapshot: kicad_ipc::snapshot::IpcBoardSnapshot) -> IpcBoardSnapshot {
@@ -101,7 +112,12 @@ pub fn from_bridge(snapshot: kicad_ipc::snapshot::IpcBoardSnapshot) -> IpcBoardS
                     lib_id: part.lib_id,
                     at: part.at,
                     rotation: part.rotation,
+                    side: match part.side {
+                        kicad_ipc::snapshot::BoardSide::Front => BoardSide::Front,
+                        kicad_ipc::snapshot::BoardSide::Back => BoardSide::Back,
+                    },
                     locked: part.locked,
+                    courtyard: part.courtyard,
                     pads: part
                         .pads
                         .into_iter()
@@ -110,6 +126,9 @@ pub fn from_bridge(snapshot: kicad_ipc::snapshot::IpcBoardSnapshot) -> IpcBoardS
                             net: pad.net,
                             at: pad.at,
                             layers: pad.layers.into_iter().map(domain_layer).collect(),
+                            shape: pad.shape,
+                            size: pad.size,
+                            drill: pad.drill,
                         })
                         .collect(),
                 })
@@ -210,27 +229,19 @@ pub fn save_live_board(
     if !path.exists() {
         return Err("no board exists yet — run sync_board first".to_owned());
     }
-    // A wedged live session must not block file-based consumers: the offline
-    // write paths keep the on-disk board current, so drop the session and hand
-    // back the file.
-    if sessions
-        .with_session(path, |session| session.kicad().save())
-        .is_err()
-    {
+    if sessions.save_if_open().is_err() {
         sessions.close();
     }
     Ok(path.to_path_buf())
 }
 
 /// Read the active board as a routing problem.
-pub fn board_problem(
-    path: &Path,
-    sessions: &kicad_ipc::SessionManager,
-) -> std::result::Result<IpcBoardSnapshot, String> {
-    read_snapshot(path, sessions)
+pub fn board_problem(path: &Path) -> std::result::Result<IpcBoardSnapshot, String> {
+    crate::offline::read_snapshot(path)
 }
 
-fn read_snapshot(
+/// Read the board selected in a live KiCad IPC session.
+pub fn read_live_snapshot(
     path: &Path,
     sessions: &kicad_ipc::SessionManager,
 ) -> std::result::Result<IpcBoardSnapshot, String> {
@@ -284,6 +295,13 @@ fn reconcile_file_stackup(
 ) -> std::result::Result<(), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("could not read board layer table: {err}"))?;
+    let (body_start, body_end) = crate::patch::root_body(&text)?;
+    let top = crate::patch::child_nodes(&text, body_start, body_end);
+    let rules = crate::offline::file_rules(path, &text, &top)?;
+    snapshot.problem.min_trace_width = rules.min_trace_width;
+    snapshot.problem.clearance = rules.clearance;
+    snapshot.problem.via_diameter = rules.via_diameter;
+    snapshot.problem.via_drill = rules.via_drill;
     let layer_names = crate::patch::board_copper_layer_names(&text)?;
     let ipc_layer_names = snapshot.layer_names.clone();
     let layer_count = layer_names.len() as u32;
@@ -302,24 +320,7 @@ fn reconcile_file_stackup(
     for (net, layer) in crate::patch::board_file_plane_nets(&text)? {
         snapshot.problem.plane_nets.insert(net, layer);
     }
-    snapshot
-        .problem
-        .net_widths
-        .extend(crate::board_net_widths(&text)?);
-    let project_path = path.with_extension("kicad_pro");
-    match std::fs::read_to_string(&project_path) {
-        Ok(project) => snapshot
-            .problem
-            .net_widths
-            .extend(crate::project_net_widths(&project)?),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => {
-            return Err(format!(
-                "could not read project net classes {}: {err}",
-                project_path.display()
-            ));
-        }
-    }
+    snapshot.problem.net_widths.extend(rules.net_widths);
     let known_nets: std::collections::BTreeSet<_> = snapshot
         .imported
         .parts
@@ -402,7 +403,9 @@ mod tests {
             lib_id: "Resistor_SMD:R_0603_1608Metric".to_owned(),
             at: Point2 { x, y },
             rotation,
+            side: BoardSide::Front,
             locked: false,
+            courtyard: None,
             pads: vec![],
         }
     }

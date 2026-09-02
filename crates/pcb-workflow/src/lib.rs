@@ -7,13 +7,13 @@
 //!
 //! ## Active board
 //!
-//! The saved `.kicad_pcb` is the durable board state. When pcbnew is open, tools
-//! snapshot and save it through IPC; headless operations use `kicad-board`'s
-//! atomic file-edit fallback and invalidate any stale live session.
+//! The saved `.kicad_pcb` is the durable board state. Board tools read it
+//! offline by default. `kicad.attachRunning = true` selects the matching live
+//! pcbnew document instead, without launching another editor.
 //!
 //! `sync_board` writes the `.kicad_pcb`: it creates the file when absent and
 //! otherwise applies only the schematic delta. Active placement, routing,
-//! rendering, and `get_board` read the live IPC board.
+//! rendering, and `get_board` read the saved board.
 //!
 //! ## Tool families (one module each)
 //!
@@ -119,7 +119,11 @@ pub use sync::sync_board;
 fn active_board(
     ctx: &gordian_runtime::AgentRuntime,
 ) -> Result<kicad_board::IpcBoardSnapshot, String> {
-    kicad_board::board_problem(&ctx.pcb_path(), ctx.kicad())
+    if ctx.config().kicad.attach_running {
+        kicad_board::read_live_snapshot(&ctx.pcb_path(), ctx.kicad())
+    } else {
+        kicad_board::board_problem(&ctx.pcb_path())
+    }
 }
 
 fn save_active_board(ctx: &gordian_runtime::AgentRuntime) -> Result<std::path::PathBuf, String> {

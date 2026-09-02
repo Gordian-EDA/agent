@@ -100,6 +100,7 @@ pub(super) fn materialize_zones_for_drc(
     path: &Path,
     env: &kicad::KicadInstallation,
     sessions: &kicad_ipc::SessionManager,
+    attach_running: bool,
 ) -> std::result::Result<bool, String> {
     let has_zones = std::fs::read_to_string(path)
         .map(|text| text.contains("\n\t(zone") || text.contains("\n  (zone"))
@@ -115,6 +116,12 @@ pub(super) fn materialize_zones_for_drc(
         .unwrap_or(0);
     if major >= 10 {
         // drc uses `--refill-zones` when this version supports it.
+        return Ok(false);
+    }
+    if !attach_running {
+        // KiCad 9 has no CLI refill operation. Offline DRC still reads the
+        // durable zone definitions; do not turn a quality check into an
+        // implicit pcbnew launch just to update cached fill polygons.
         return Ok(false);
     }
     if major < 9 {
@@ -153,7 +160,12 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         "No live KiCAD session was open; ran DRC directly on the board file. "
     };
-    match materialize_zones_for_drc(&path, ctx.env(), ctx.kicad()) {
+    match materialize_zones_for_drc(
+        &path,
+        ctx.env(),
+        ctx.kicad(),
+        ctx.config().kicad.attach_running,
+    ) {
         Ok(true) => note_prefix = "Refilled and saved the live KiCAD board zones, then ran DRC. ",
         Ok(false) => {}
         Err(e) => return Ok(json!({ "error": e })),

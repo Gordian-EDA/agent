@@ -1,13 +1,8 @@
-//! Offline `.kicad_pcb` writes — the no-IPC fallback for `place_board`,
-//! `route_board`, and `check_board`.
+//! Offline `.kicad_pcb` writes for board placement, routing, and inspection.
 //!
-//! The live path drives a running KiCAD over IPC, which needs a working GUI
-//! session and (for footprint moves) KiCAD ≥ 9.0.3. Headless runs — LLM e2e
-//! harnesses, CI — have neither, so these functions apply the same edits as
-//! s-expression text operations on the board file itself. They only need to
-//! handle the dialect Gordian's own seed writer emits plus KiCAD's resaves of
-//! it: footprint blocks with a block-level `(at …)`, top-level
-//! `(segment …)`/`(via …)` copper, and `(net N "NAME")` declarations.
+//! These functions are the default write path and apply s-expression edits
+//! directly to the durable board. An explicitly attached KiCad session can use
+//! the equivalent IPC operations where supported.
 
 use std::{collections::BTreeMap, io::Write, path::Path};
 

@@ -1,4 +1,4 @@
-//! Placement over the live KiCAD IPC board.
+//! Placement over the saved KiCad board.
 
 use circuit_graph::netclass::is_ground;
 use std::collections::BTreeMap;
@@ -369,21 +369,31 @@ pub(super) fn courtyard_extents(
     board: &IpcBoardSnapshot,
     ctx: &AgentRuntime,
 ) -> std::collections::BTreeMap<String, Rect> {
-    // An unreadable catalog leaves the map empty and the caller falls back to
-    // pad extents — a weaker guard, but never a wrong one.
-    let Ok(catalog) = ctx.footprint_catalog() else {
-        return Default::default();
-    };
-    board
+    let mut courtyards: BTreeMap<String, Rect> = board
         .imported
         .parts
         .iter()
+        .filter_map(|part| {
+            part.courtyard
+                .map(|courtyard| (part.reference.clone(), courtyard))
+        })
+        .collect();
+    let Ok(catalog) = ctx.footprint_catalog() else {
+        return courtyards;
+    };
+    let catalog_courtyards = board
+        .imported
+        .parts
+        .iter()
+        .filter(|part| !courtyards.contains_key(&part.reference))
         .filter_map(|part| {
             let id = FootprintId::parse(&part.lib_id).ok()?;
             let footprint = catalog.footprint(&id).ok()?;
             Some((part.reference.clone(), placement_envelope(&footprint)))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    courtyards.extend(catalog_courtyards);
+    courtyards
 }
 
 /// The footprint's courtyard in FOOTPRINT-LOCAL coordinates, widened to hold
@@ -2517,22 +2527,30 @@ pub(crate) fn write_placement(
     moves: &[FootprintMove],
 ) -> std::result::Result<(), String> {
     let path = ctx.pcb_path();
+    if !ctx.config().kicad.attach_running {
+        return write_placement_offline(ctx, &path, moves);
+    }
     let live = ctx.kicad().with_session(&path, |session| {
         session.kicad().move_footprints(moves)?;
         session.kicad().save()
     });
     let Err(live_err) = live else { return Ok(()) };
-    // Headless / pre-9.0.3 fallback: apply the same moves to the board file
-    // as s-expression edits. Any open session now holds stale state — drop it
-    // so the next read reopens from disk.
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("{live_err}; offline fallback could not read the board: {e}"))?;
-    let patched = kicad_board::patch_placements(&text, moves)
-        .map_err(|e| format!("{live_err}; offline fallback failed: {e}"))?;
-    std::fs::write(&path, patched)
-        .map_err(|e| format!("{live_err}; offline fallback could not write the board: {e}"))?;
+    write_placement_offline(ctx, &path, moves)
+        .map_err(|offline| format!("{live_err}; offline placement failed: {offline}"))
+}
+
+fn write_placement_offline(
+    ctx: &AgentRuntime,
+    path: &std::path::Path,
+    moves: &[FootprintMove],
+) -> std::result::Result<(), String> {
     ctx.close_kicad_session();
-    Ok(())
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("could not read the board: {e}"))?;
+    let patched = kicad_board::patch_placements(&text, moves)
+        .map_err(|e| format!("could not patch placement: {e}"))?;
+    crate::route::write_board_atomically(path, patched.as_bytes())
+        .map_err(|e| format!("could not replace the board: {e}"))
 }
 
 #[cfg(test)]
@@ -2550,7 +2568,9 @@ mod tests {
             lib_id: lib_id.into(),
             at: Point2::new(1.0, 1.0),
             rotation: 0,
+            side: kicad_board::BoardSide::Front,
             locked: false,
+            courtyard: None,
             pads: pads
                 .into_iter()
                 .map(|(number, net)| ImportedPad {
@@ -2558,6 +2578,9 @@ mod tests {
                     net: Some(net),
                     at: Point2::new(1.0, 1.0),
                     layers: vec![LayerRef::top()],
+                    shape: "rect".to_owned(),
+                    size: Point2::new(0.0, 0.0),
+                    drill: None,
                 })
                 .collect(),
         }
@@ -3698,19 +3721,27 @@ mod tests {
                     lib_id: "Package:Test".to_owned(),
                     at: Point2::new(10.0, 10.0),
                     rotation: 0,
+                    side: kicad_board::BoardSide::Front,
                     locked: false,
+                    courtyard: None,
                     pads: vec![
                         ImportedPad {
                             number: "A4".to_owned(),
                             net: Some("VBUS".to_owned()),
                             at: Point2::new(8.75, 9.5),
                             layers: vec![LayerRef::top()],
+                            shape: "rect".to_owned(),
+                            size: Point2::new(0.0, 0.0),
+                            drill: None,
                         },
                         ImportedPad {
                             number: "A6".to_owned(),
                             net: Some("D+".to_owned()),
                             at: Point2::new(8.75, 10.0),
                             layers: vec![LayerRef::top()],
+                            shape: "rect".to_owned(),
+                            size: Point2::new(0.0, 0.0),
+                            drill: None,
                         },
                     ],
                 }],

@@ -9,15 +9,15 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use kicad_board::ImportedPart;
-use pcb_model::Violation as ConnViolation;
 use pcb_engine::check as lint;
+use pcb_engine::{postroute_cleanup, prepare_wide_terminal_escapes};
 use pcb_model::Finding as DrcViolation;
+use pcb_model::Violation as ConnViolation;
 use pcb_model::{
     FailedNet, LayerRef, Point2, RouteResult, RouteSolution, RoutingView, Trace, Via, ViaSpan,
 };
 use pcb_route_mesh::copper::copper_obstacles;
 use pcb_route_mesh::pathing::GlobalRouteResult;
-use pcb_engine::{postroute_cleanup, prepare_wide_terminal_escapes};
 use pcb_route_mesh::pipeline::RoutePassReport;
 
 use gordian_runtime::AgentRuntime;
@@ -564,16 +564,19 @@ fn replace_route_atomically(
     let original = std::fs::read(&path).map_err(|error| {
         format!("could not snapshot existing board before replacement: {error}")
     })?;
-    let ipc_route = kicad_board::bridge_route(rp, solution);
-    let live = ctx.kicad().with_session(&path, |session| {
-        session
-            .kicad()
-            .replace_route_solution(&ipc_route, layer_names)
-    });
-    let replace = match live {
-        Ok(_) => Ok(()),
-        Err(live_error) => replace_route_offline(ctx, rp, solution, layer_names)
-            .map_err(|offline| format!("{live_error}; offline fallback failed: {offline}")),
+    let replace = if ctx.config().kicad.attach_running {
+        let ipc_route = kicad_board::bridge_route(rp, solution);
+        match ctx.kicad().with_session(&path, |session| {
+            session
+                .kicad()
+                .replace_route_solution(&ipc_route, layer_names)
+        }) {
+            Ok(_) => Ok(()),
+            Err(live_error) => replace_route_offline(ctx, rp, solution, layer_names)
+                .map_err(|offline| format!("{live_error}; offline replacement failed: {offline}")),
+        }
+    } else {
+        replace_route_offline(ctx, rp, solution, layer_names)
     };
     if let Err(error) = replace {
         ctx.close_kicad_session();
@@ -1627,9 +1630,7 @@ fn simplify_candidate_paths(solution: &mut RouteSolution) {
 }
 
 fn direct_candidate_layers(layer_count: u32) -> Vec<LayerRef> {
-    let plane_layers: BTreeSet<u32> = pcb_model::plane_layers(layer_count)
-        .into_iter()
-        .collect();
+    let plane_layers: BTreeSet<u32> = pcb_model::plane_layers(layer_count).into_iter().collect();
     let mut layers = Vec::new();
     for idx in 0..layer_count.max(1) {
         if plane_layers.contains(&idx) {
@@ -2110,6 +2111,9 @@ fn write_route(
     solution: &RouteSolution,
     layer_names: &[String],
 ) -> std::result::Result<(), String> {
+    if !ctx.config().kicad.attach_running {
+        return write_route_offline(ctx, rp, solution, layer_names);
+    }
     let ipc_route = kicad_board::bridge_route(rp, solution);
     let path = ctx.pcb_path();
     let live = ctx.kicad().with_session(&path, |session| {
@@ -2118,9 +2122,8 @@ fn write_route(
             .create_route_solution(&ipc_route, layer_names)
     });
     let Err(live_err) = live else { return Ok(()) };
-    // Headless fallback: append the copper to the board file directly.
     write_route_offline(ctx, rp, solution, layer_names)
-        .map_err(|err| format!("{live_err}; offline fallback failed: {err}"))
+        .map_err(|err| format!("{live_err}; offline route write failed: {err}"))
 }
 
 /// Append one solution directly to the board file while preserving its copper.
@@ -2168,7 +2171,9 @@ mod escape_bottleneck_tests {
             lib_id: footprint.to_owned(),
             at: Point2 { x: 0.0, y: 0.0 },
             rotation: 0,
+            side: kicad_board::BoardSide::Front,
             locked: false,
+            courtyard: None,
             pads: nets
                 .iter()
                 .map(|(p, n)| ImportedPad {
@@ -2176,6 +2181,9 @@ mod escape_bottleneck_tests {
                     net: Some(n.to_string()),
                     at: Point2 { x: 0.0, y: 0.0 },
                     layers: vec![LayerRef::top()],
+                    shape: "rect".to_owned(),
+                    size: Point2::new(0.0, 0.0),
+                    drill: None,
                 })
                 .collect(),
         }
