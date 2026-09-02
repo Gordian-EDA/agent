@@ -132,6 +132,7 @@ impl AgentRuntime {
         let project_dir = tempdir.path().to_path_buf();
         let sch_path = project_dir.join("project.kicad_sch");
         let project = ProjectContext::for_project(project_dir, sch_path).ok()?;
+        ensure_project_files(&env, &project.project_dir, &project.sch_path).ok()?;
         let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
         let services = ToolServices::new(provider, None);
         let revisions = crate::revisions::Revisions::for_project(project.project_dir.clone());

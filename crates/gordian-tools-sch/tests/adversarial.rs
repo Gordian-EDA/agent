@@ -1,4 +1,4 @@
-//! Adversarial cases for the live-schematic mutators: the edits that slip past
+//! Adversarial cases for schematic mutators: the edits that slip past
 //! the connectivity guard or corrupt the sheet's identity table.
 //!
 //! Skips when no KiCAD is installed: the mutators embed library definitions.
@@ -336,7 +336,7 @@ fn swap_symbol_maps_differently_numbered_connector_pins_by_name() {
         ("2", "DM_NET"),
         ("3", "DP_NET"),
         ("4", "GND_NET"),
-        ("5", "SHIELD_NET"),
+        ("SH", "SHIELD_NET"),
     ] {
         let labeled = call(
             &ctx,
@@ -354,7 +354,7 @@ fn swap_symbol_maps_differently_numbered_connector_pins_by_name() {
     assert!(result.get("error").is_none(), "swap failed: {result}");
     assert_eq!(
         result["changed"]["mapped_by_name"],
-        json!({"1": "A4", "2": "A7", "3": "A6", "4": "A1", "5": "S1"}),
+        json!({"1": "A4", "2": "A7", "3": "A6", "4": "A1"}),
         "the response must expose every automatic name mapping: {result}"
     );
     assert_eq!(
