@@ -3863,12 +3863,12 @@ mod tests {
 
     #[test]
     fn refs_and_bbox_together_are_refused() {
-        let error = subset_selection(
+        let error = crate::selection::check_one_selector(
             &json!({
                 "refs": ["R1"],
                 "bbox": { "min_x": 0.0, "min_y": 0.0, "max_x": 10.0, "max_y": 10.0 }
             }),
-            &spread_board(),
+            "refs",
         )
         .unwrap_err();
         assert!(error.contains("not both"), "{error}");
