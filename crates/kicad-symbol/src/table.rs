@@ -8,8 +8,6 @@ use crate::search::SymbolNames;
 use crate::symlib;
 use crate::types::{PinDir, PinMeta, PinType, SymbolMeta};
 
-/// Maximum levenshtein distance for a real-library name to qualify as a suggestion.
-const SUGGEST_MAX_DISTANCE: usize = 6;
 /// Maximum number of suggestions returned.
 const SUGGEST_LIMIT: usize = 3;
 
@@ -124,47 +122,22 @@ impl SymbolTable {
 
     /// Closest known `lib_id`s for an unknown one (for diagnostics).
     ///
-    /// Two tiers, because the two ways of getting a lib_id wrong are different. A
-    /// misspelt *symbol* in a real library (`Device:Resistr`) is a typo, and edit
-    /// distance within that library names it precisely. A lib_id whose *library* does
-    /// not exist (`Fuse:Fuse`) is a guess at where a part lives, so there is no
-    /// library to search — the fallback ranks the whole install with the project's
-    /// fuzzy matcher, exactly as `search_symbols` does, and returns `Device:Fuse`,
-    /// `Device:Fuse_Small`, `Device:Polyfuse`.
+    /// Ranked across the WHOLE install, on the whole `Lib:Name`, by the project's
+    /// fuzzy matcher — the same ranking `search_symbols` serves. Both ways of getting
+    /// a lib_id wrong then answer from one place: a misspelt symbol
+    /// (`Regulator:AMS1117-3.3`) and a guessed library (`Fuse:Fuse`) are the same
+    /// query, and keeping the library half in the needle is what lets the first find
+    /// `Regulator_Linear:AMS1117-3.3` and the second `Device:Fuse`.
     pub fn suggest(&self, lib_id: &str) -> Vec<String> {
         if !self.inline.is_empty() {
             return suggest_inline(&self.inline, lib_id);
         }
-        let Some((lib, name)) = lib_id.split_once(':') else {
-            return Vec::new();
-        };
-        let needle = name.to_lowercase();
-        let within = self.with_lib(lib, |syms| {
-            let mut hits: Vec<(usize, &str)> = syms
-                .keys()
-                .map(|n| (strsim::levenshtein(&needle, &n.to_lowercase()), n.as_str()))
-                .filter(|(d, _)| *d <= SUGGEST_MAX_DISTANCE)
-                .collect();
-            hits.sort();
-            hits.into_iter()
-                .take(SUGGEST_LIMIT)
-                .map(|(_, n)| format!("{lib}:{n}"))
-                .collect::<Vec<_>>()
-        });
-        match within {
-            Some(hits) if !hits.is_empty() => hits,
-            _ => self.suggest_across_libraries(name),
-        }
-    }
-
-    /// Fuzzy-rank `name` against every installed symbol, whatever library it is in.
-    fn suggest_across_libraries(&self, name: &str) -> Vec<String> {
         let Some(dir) = self.symbol_dir.as_ref() else {
             return Vec::new();
         };
         self.names
             .get_or_init(|| SymbolNames::scan(dir).unwrap_or_else(|_| SymbolNames::empty()))
-            .best(name, SUGGEST_LIMIT)
+            .best(lib_id, SUGGEST_LIMIT)
             .into_iter()
             .map(str::to_string)
             .collect()

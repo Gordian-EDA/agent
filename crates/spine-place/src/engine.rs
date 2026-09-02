@@ -73,7 +73,7 @@ impl PlacementEngine for SpinePlace {
         }
         let classes = classify_nets(&problem.inc, &ir);
         let labeled = crate::compact::labeled_nets(&problem.items, &problem.inc, &classes);
-        if labeled.is_empty() {
+        if labeled.is_empty() || problem.out_of_time() {
             return out1;
         }
         let items1: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
@@ -422,12 +422,20 @@ impl SpinePlace {
                 if with_area { sheet_area(items) } else { 0 },
             )
         };
+        // Spine has no stochastic search to cut short; its cost is this fixed sequence
+        // of self-proving passes, each of which routes and text-solves the whole sheet
+        // twice. Out of time, a pass is simply not attempted — every one is strictly
+        // additive, so skipping costs polish and nothing else.
+        let deadline = problem.deadline;
         let ab_gate = |items: &mut Vec<sch_place::item::Item>,
                        breaks: &mut usize,
                        name: &str,
                        with_area: bool,
                        apply: &mut dyn FnMut(&mut Vec<sch_place::item::Item>) -> usize|
          -> bool {
+            if sch_place::place::expired(deadline) {
+                return false;
+            }
             let before: Vec<_> = items.iter().map(|it| (it.at, it.angle)).collect();
             let a = measure(items, *breaks, with_area);
             let b_breaks = apply(items);

@@ -406,8 +406,12 @@ mod tests {
             .expect("write split symbol");
 
         let index = SymbolIndex::build(dir.path()).expect("build");
-        let lib_ids: std::collections::BTreeSet<_> =
-            index.names.entries.iter().map(|e| e.lib_id.as_str()).collect();
+        let lib_ids: std::collections::BTreeSet<_> = index
+            .names
+            .entries
+            .iter()
+            .map(|e| e.lib_id.as_str())
+            .collect();
 
         assert!(lib_ids.contains("Device:R"), "{lib_ids:?}");
         assert!(lib_ids.contains("Device:C"), "{lib_ids:?}");

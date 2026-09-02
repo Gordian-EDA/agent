@@ -85,7 +85,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !derived.is_empty() {
         return Ok(json!({ "ok": false, "code": "derived_net_name", "nets": derived }));
     }
-    let (budget, engine) = budgeted(ctx, payload.parts.len(), None);
+    let (budget, engine) = budgeted(ctx, edit.doc.symbols().count() + payload.parts.len(), None);
     let timing = Timing::start("place_parts", &budget, engine.name());
     let report = match sch_floorplan::live::place_parts(
         ctx.env(),
@@ -116,7 +116,11 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         Err(error) => return Err(error.into()),
     };
-    timing.done(if report.committed { "committed" } else { "refused" });
+    timing.done(if report.committed {
+        "committed"
+    } else {
+        "refused"
+    });
     if !report.committed {
         return Ok(refused_place(report));
     }
@@ -134,7 +138,7 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let input: SelectionInput = typed(input, "arrange")?;
     let selection = selection(&input)?;
     let mut edit = Edit::open(ctx)?;
-    let (budget, engine) = budgeted(ctx, selection.size(&edit.doc), input.engine);
+    let (budget, engine) = budgeted(ctx, edit.doc.symbols().count(), input.engine);
     let timing = Timing::start("arrange", &budget, engine.name());
     let report = match sch_floorplan::live::arrange(
         ctx.env(),
@@ -150,7 +154,11 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         Err(error) => return Err(error.into()),
     };
-    timing.done(if report.committed { "committed" } else { "refused" });
+    timing.done(if report.committed {
+        "committed"
+    } else {
+        "refused"
+    });
     finish_arrangement(edit, report, ctx)
 }
 
@@ -263,8 +271,10 @@ impl Timing {
     }
 }
 
-/// The deadline policy for a call placing `parts`, with the engine it chose —
-/// honouring an explicit `engine` on the call, then the configured override.
+/// The deadline policy for a call that leaves `parts` on the sheet, with the engine
+/// it chose — honouring an explicit `engine` on the call, then the configured
+/// override. The engine routes the WHOLE sheet per candidate, so the sheet's size is
+/// what the budget must be read against, never the size of the block being placed.
 fn budgeted(
     ctx: &AgentRuntime,
     parts: usize,

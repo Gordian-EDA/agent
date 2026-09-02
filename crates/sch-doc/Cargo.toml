@@ -16,4 +16,3 @@ thiserror.workspace = true
 
 [dev-dependencies]
 kicad = { path = "../kicad" }
-tempfile.workspace = true

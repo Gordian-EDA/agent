@@ -53,7 +53,7 @@ const SHEET_BLOCK: &str = "$sheet";
 /// Clearance added around a selected part when deciding which wires belong to it.
 const TOUCH_MARGIN: f64 = 1.27;
 
-/// Part count at or above which the deterministic engine is the default.
+/// Sheet size at or above which the deterministic engine is the default.
 ///
 /// Below it, `cluster`'s pose search and de-sprawl polish — each of which re-routes
 /// and re-text-solves the whole sheet several times — still fit comfortably; above it
@@ -70,8 +70,11 @@ const SEARCH_SHARE: f64 = 0.7;
 /// A placement search is unbounded in principle, so "how long may this take" is a
 /// caller's decision, not the engine's. [`engine`](Self::engine) says which engine
 /// keeps the promise; the deadlines behind it stop the search with room to spare.
-/// Nothing is written before the truthfulness gate, so a call that overruns anyway
-/// is refused with the document untouched.
+///
+/// `parts` is the size of the WHOLE SHEET the call leaves behind, not the size of
+/// the block being placed. Every engine routes and text-solves the entire sheet per
+/// candidate, so two new parts added to a 40-part sheet cost what 42 parts cost —
+/// measured at 45 s for a two-part call the old block-sized rule sent to `cluster`.
 ///
 /// ## Why this shape
 ///
@@ -107,8 +110,17 @@ const SEARCH_SHARE: f64 = 0.7;
 pub struct PlacementBudget {
     /// Wall time the whole call — search, realise, gate — may take.
     pub budget: Duration,
-    /// How many parts the call places.
+    /// Parts on the sheet the call leaves behind.
     pub parts: usize,
+}
+
+/// The two instants a [`PlacementBudget`] resolves to, or `None` for an unbounded
+/// call. Built once at the top of an operation and consulted at its two decision
+/// points: when the search must stop, and whether there is still time to realise.
+#[derive(Debug, Clone, Copy, Default)]
+struct Deadlines {
+    search: Option<Deadline>,
+    hard: Option<Deadline>,
 }
 
 impl PlacementBudget {
@@ -136,20 +148,25 @@ impl PlacementBudget {
         })
     }
 
-    /// `(search, hard)` — when the engine stops, and when the call is refused.
-    fn deadlines(&self) -> (Deadline, Deadline) {
-        (
-            Deadline::after(self.budget.mul_f64(SEARCH_SHARE)),
-            Deadline::after(self.budget),
-        )
-    }
-
     /// The refusal a caller reports when the call overran: nothing was written.
     pub fn overrun(&self) -> Error {
         Error::Budget {
             seconds: self.budget.as_secs(),
             parts: self.parts,
         }
+    }
+}
+
+impl Deadlines {
+    fn of(budget: Option<PlacementBudget>) -> Self {
+        budget.map_or(Deadlines::default(), |b| Deadlines {
+            search: Some(Deadline::after(b.budget.mul_f64(SEARCH_SHARE))),
+            hard: Some(Deadline::after(b.budget)),
+        })
+    }
+
+    fn out_of_time(&self) -> bool {
+        sch_place::place::expired(self.hard)
     }
 }
 
@@ -167,8 +184,8 @@ pub enum Error {
     #[error("input is not buildable: {0}")]
     Input(String),
     #[error(
-        "placement exceeded its budget of {seconds}s ({parts} parts) — nothing was written; \
-         retry with a smaller block or `engine: spine`"
+        "placement exceeded its budget of {seconds}s ({parts} parts on the sheet) — nothing \
+         was written; retry with a smaller block, or split the sheet"
     )]
     Budget { seconds: u64, parts: usize },
     #[error("invalid payload")]
@@ -235,12 +252,6 @@ pub enum Selection {
 }
 
 impl Selection {
-    /// How many symbols this selection matches — the part count a
-    /// [`PlacementBudget`] is built from.
-    pub fn size(&self, doc: &SchDoc) -> usize {
-        self.resolve(doc).len()
-    }
-
     fn resolve(&self, doc: &SchDoc) -> BTreeSet<String> {
         match self {
             Selection::Refs(refs) => refs.iter().cloned().collect(),
@@ -278,13 +289,7 @@ pub fn place_parts(
     engine: &dyn PlacementEngine,
     budget: Option<PlacementBudget>,
 ) -> Result<PlaceReport> {
-    let (search, hard) = match budget {
-        Some(b) => {
-            let (s, h) = b.deadlines();
-            (Some(s), Some(h))
-        }
-        None => (None, None),
-    };
+    let deadlines = Deadlines::of(budget);
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let before = connect::extract(doc);
     let existing = ExistingSheet {
@@ -347,8 +352,16 @@ pub fn place_parts(
             ir,
             engine,
         )
-        .by(search),
+        .by(deadlines.search),
     );
+    // The only point where refusing is worth it: the search is done but the sheet is
+    // not drawn, so nothing is thrown away that realising and gating would not cost
+    // again. Past here a truthful placement always commits — a finished sheet is worth
+    // more than a punctual refusal.
+    if deadlines.out_of_time() {
+        doc.restore(snapshot)?;
+        return Err(budget.expect("a hard deadline implies a budget").overrun());
+    }
     let placed = posed(movable, &out.poses);
     let inc = incidence(&placed);
     let writer = crate::realize::realize_block(
@@ -368,10 +381,6 @@ pub fn place_parts(
 
     let mut mismatch = verify(doc, &design);
     mismatch.disturbed = disturbed(&before, &connect::extract(doc));
-    if hard.is_some_and(|h| h.expired()) {
-        doc.restore(snapshot)?;
-        return Err(budget.expect("hard deadline implies a budget").overrun());
-    }
     let committed = mismatch.is_empty();
     if !committed {
         doc.restore(snapshot)?;
@@ -415,10 +424,7 @@ fn rearrange(
     engine: Option<(&dyn PlacementEngine, Option<PlacementBudget>)>,
 ) -> Result<ArrangeReport> {
     let budget = engine.and_then(|(_, b)| b);
-    let (search, hard) = budget.map_or((None, None), |b| {
-        let (s, h) = b.deadlines();
-        (Some(s), Some(h))
-    });
+    let deadlines = Deadlines::of(budget);
     let chosen = selection.resolve(doc);
     let before = connect::extract(doc);
     let mut design = Design::default();
@@ -455,12 +461,16 @@ fn rearrange(
                     ir,
                     engine,
                 )
-                .by(search),
+                .by(deadlines.search),
             );
             (posed(movable, &out.poses), out.ir)
         }
         None => (movable, ir),
     };
+    // Refuse before the sheet is redrawn, for the reason `place_parts` gives.
+    if deadlines.out_of_time() {
+        return Err(budget.expect("a hard deadline implies a budget").overrun());
+    }
     for part in &placed {
         seat(doc, part)?;
     }
@@ -488,10 +498,6 @@ fn rearrange(
         disturbed: disturbed(&before, &connect::extract(doc)),
         ..Default::default()
     };
-    if hard.is_some_and(|h| h.expired()) {
-        doc.restore(snapshot)?;
-        return Err(budget.expect("hard deadline implies a budget").overrun());
-    }
     let committed = mismatch.is_empty();
     if !committed {
         doc.restore(snapshot)?;
@@ -951,13 +957,14 @@ mod tests {
     }
 
     #[test]
-    fn the_search_stops_before_the_call_is_refused() {
-        let (search, hard) = PlacementBudget::new(40).deadlines();
-        assert!(search.instant() < hard.instant());
+    fn the_search_stops_with_room_to_realise_and_gate() {
+        let d = Deadlines::of(Some(PlacementBudget::new(40)));
+        let (search, hard) = (d.search.unwrap(), d.hard.unwrap());
         assert!(
             hard.remaining() - search.remaining() > Duration::from_secs(10),
             "realising and gating need real room"
         );
+        assert!(Deadlines::of(None).search.is_none(), "unbounded stays so");
     }
 
     #[test]
@@ -965,8 +972,11 @@ mod tests {
         let message = PlacementBudget::within(Duration::from_secs(60), 46)
             .overrun()
             .to_string();
-        assert!(message.contains("budget of 60s (46 parts)"), "{message}");
+        assert!(
+            message.contains("budget of 60s (46 parts on the sheet)"),
+            "{message}"
+        );
         assert!(message.contains("nothing was written"), "{message}");
-        assert!(message.contains("engine: spine"), "{message}");
+        assert!(message.contains("smaller block"), "{message}");
     }
 }

@@ -31,9 +31,9 @@ use gordian_llm::{
 
 use crate::AgentRuntime;
 use crate::tools::{run_tool, tool_defs};
-use gordian_tools_sch::PlacementBudget;
 use gordian_runtime::tool::IMAGE_PATH_KEY;
 use gordian_runtime::tool::{ReviewOutcome, ToolEffect, ToolOutcome};
+use gordian_tools_sch::PlacementBudget;
 
 /// After this many route attempts with failed nets, block further blind PCB
 /// regenerate/place/route retries in the same turn and force an honest report.
@@ -761,7 +761,8 @@ impl<P: Provider> Agent<P> {
             let remaining = budgets.provider_requests - provider_requests;
             if !wrap_up_sent && remaining <= PROVIDER_REQUEST_WRAP_UP_RESERVE {
                 wrap_up_sent = true;
-                self.history.push(ChatMessage::user(wrap_up_nudge(remaining)));
+                self.history
+                    .push(ChatMessage::user(wrap_up_nudge(remaining)));
             }
             provider_requests += 1;
 
@@ -2114,7 +2115,7 @@ async fn run_blocking(ctx: &Arc<AgentRuntime>, name: &str, input: Value) -> Resu
 
 fn tool_timeout_message(name: &str, timeout: Duration) -> String {
     let recovery = if enforces_own_deadline(name) {
-        "nothing was written — retry with a smaller block or `engine: spine`"
+        "it holds itself to a budget well inside this timeout, so the project is intact; inspect it before retrying a smaller request"
     } else if is_kicad_session_tool(name) {
         "close any KiCad dialogs/processes touching the project, then inspect project state before trying a changed call"
     } else {
@@ -2140,9 +2141,11 @@ fn is_kicad_session_tool(name: &str) -> bool {
     )
 }
 
-/// Margin over a self-deadlining tool's own budget: enough for the payload audit,
-/// the schematic write and the post-commit check that bracket the search.
-const DEADLINE_MARGIN: Duration = Duration::from_secs(30);
+/// Margin over a self-deadlining tool's own budget. The budget covers the search and
+/// the gate; the payload audit before it and the atomic write plus the post-commit
+/// ERC after it are outside it, and ERC shells out to `kicad-cli`. Generous, because
+/// this timeout only ever fires on a genuine hang.
+const DEADLINE_MARGIN: Duration = Duration::from_secs(60);
 
 fn tool_timeout(name: &str) -> Duration {
     match name {

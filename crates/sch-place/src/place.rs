@@ -25,26 +25,17 @@ pub enum PlacementEngineKind {
 
 /// The wall-clock instant a placement search must stop by.
 ///
-/// A search is stochastic and unbounded in principle; every engine here keeps its
+/// A search is stochastic and unbounded in principle; each engine keeps its
 /// best-so-far, so honouring a deadline costs convergence, never correctness. Checks
 /// are cooperative — an engine polls [`Deadline::expired`] at its loop heads and
 /// returns what it has.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct Deadline(Instant);
 
 impl Deadline {
     /// A deadline `budget` from now.
     pub fn after(budget: Duration) -> Self {
         Deadline(Instant::now() + budget)
-    }
-
-    /// A deadline at `at`.
-    pub fn at(at: Instant) -> Self {
-        Deadline(at)
-    }
-
-    pub fn instant(&self) -> Instant {
-        self.0
     }
 
     pub fn expired(&self) -> bool {
@@ -54,12 +45,6 @@ impl Deadline {
     /// Time left, zero once passed.
     pub fn remaining(&self) -> Duration {
         self.0.saturating_duration_since(Instant::now())
-    }
-
-    /// A deadline `fraction` of the way through this one's remaining time — how a
-    /// stage reserves room for the stages after it.
-    pub fn fraction(&self, fraction: f64) -> Self {
-        Deadline(Instant::now() + self.remaining().mul_f64(fraction))
     }
 }
 

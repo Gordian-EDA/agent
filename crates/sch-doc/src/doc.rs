@@ -138,6 +138,11 @@ impl SchDoc {
             .tempfile_in(dir)?;
         std::io::Write::write_all(&mut temp, self.to_text().as_bytes())?;
         temp.as_file().sync_all()?;
+        // The temp file is created 0600; a schematic the user could read before the
+        // edit must still be readable after it.
+        if let Ok(existing) = std::fs::metadata(path) {
+            temp.as_file().set_permissions(existing.permissions())?;
+        }
         temp.persist(path).map_err(|e| e.error)?;
         Ok(())
     }
