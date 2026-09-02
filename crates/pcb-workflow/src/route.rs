@@ -398,6 +398,13 @@ fn route_live_board(
         }
     };
     let kept_counts = (kept.traces.len(), kept.vias.len());
+    // The nets whose copper this call promised to leave alone.
+    let kept_nets: BTreeSet<String> = kept
+        .traces
+        .iter()
+        .map(|trace| trace.connection.clone())
+        .chain(kept.vias.iter().map(|via| via.connection.clone()))
+        .collect();
     let (router_problem, terminal_escapes) = prepare_wide_terminal_escapes(&solve_view);
     let (routing_subproblem, reserved_wide_routes) = reserve_wide_multi_pin_routes(&router_problem);
     let routed = route_with_engine(&routing_subproblem);
@@ -455,6 +462,25 @@ fn route_live_board(
     let pruned_spurs = prune_dangling_spurs_if_safe(&rp, &mut result);
     let plane_nets = rp.plane_nets.keys().cloned().collect();
     let (dropped, final_violations) = make_route_honest_with_report(&rp, &mut result, &plane_nets);
+    // The promise a LOCAL call makes is that copper it did not select is left
+    // alone. The honesty pass answers a dirty net by dropping ALL of its copper,
+    // and it judges the merged board — so it can delete a route this call never
+    // touched. That is damage, not a to-do, and the caller must not be told the
+    // copper was "kept". Refuse and let the guard restore.
+    let lost = lost_kept_nets(&kept_nets, &result.solution);
+    if !lost.is_empty() {
+        return Err(json!({
+            "error": format!(
+                "route_board refused: re-routing the selection would have destroyed copper on \
+                 {}, which this call promised to leave alone",
+                lost.join(", ")
+            ),
+            "code": "local_route_would_damage_kept_copper",
+            "damaged_nets": lost,
+            "note": "Nothing was written. Widen the selection to include these nets, or move \
+                     what is crowding them first.",
+        }));
+    }
     let split = lint_summary_from_violations(&final_violations, &result.failed, &plane_nets);
     if split.real > 0 {
         let failure_summary = failed_route_summary(&result.failed);
@@ -850,6 +876,19 @@ fn anchor_terminals(
     if pcb_engine::geometry_violations(rp, solution) > pcb_engine::geometry_violations(rp, &tidy) {
         *solution = tidy;
     }
+}
+
+/// Nets whose kept copper did not survive to the final solution.
+///
+/// Counted per net rather than per trace: cleanup legitimately merges and
+/// simplifies kept polylines, so the honest question is whether the net still
+/// has copper at all.
+fn lost_kept_nets(kept_nets: &BTreeSet<String>, final_solution: &RouteSolution) -> Vec<String> {
+    kept_nets
+        .iter()
+        .filter(|net| !has_copper(final_solution, net))
+        .cloned()
+        .collect()
 }
 
 fn add_terminal_stubs(
@@ -3854,6 +3893,40 @@ mod escape_bottleneck_tests {
 
         assert_eq!(solution.traces.len(), 1);
         assert_eq!(solution.traces[0].path[0], Point2 { x: 4.13, y: 1.13 });
+    }
+
+    #[test]
+    fn kept_copper_that_did_not_survive_is_named() {
+        let kept: BTreeSet<String> = ["GND".to_owned(), "VIN".to_owned()].into();
+        let survived = RouteSolution {
+            traces: vec![Trace {
+                connection: "GND".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![Point2 { x: 0.0, y: 0.0 }, Point2 { x: 1.0, y: 0.0 }],
+            }],
+            vias: vec![],
+        };
+
+        assert_eq!(lost_kept_nets(&kept, &survived), ["VIN"]);
+        assert!(lost_kept_nets(&BTreeSet::new(), &survived).is_empty());
+    }
+
+    #[test]
+    fn a_net_kept_only_as_a_via_still_counts_as_surviving() {
+        let kept: BTreeSet<String> = ["GND".to_owned()].into();
+        let survived = RouteSolution {
+            traces: vec![],
+            vias: vec![Via {
+                connection: "GND".to_owned(),
+                at: Point2 { x: 1.0, y: 1.0 },
+                diameter: 0.6,
+                drill: 0.3,
+                span: pcb_model::ViaSpan::Through,
+            }],
+        };
+
+        assert!(lost_kept_nets(&kept, &survived).is_empty());
     }
 
     #[test]
