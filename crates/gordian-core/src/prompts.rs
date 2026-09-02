@@ -35,8 +35,8 @@ A request for a board, PCB, layout, gerbers or a complete "design" continues her
 
 Follow these phases. After EVERY phase call `render_board` and `check_board`, inspect progress and fix introduced violations before advancing.
 
-1. Create or update the outline, then place connectors and mechanical parts at the intended edges with focused `place_board({refs, intent})` calls. Treat those established poses as fixed: later focused placement calls must omit them, and `move_parts` must not move them.
-2. Place the big ICs by functional intent with `place_board({refs, intent})` and render/check.
+1. Create or update the outline, then place connectors and mechanical parts at the intended edges with focused `place_board({refs, intent})` calls. Lock them with `lock_parts({refs, reason})` (edge-intent connectors and mounting holes self-lock as `mechanical`); locked parts never move.
+2. Place the big ICs by functional intent with `place_board({refs, intent})` and render/check. Partial boards are legal: `sync_board` leaves new parts `staged`; `get_board` lists `staged`/`placed`/`locked`, `check_board` reports `routed n/m`, `blocked` (each with its blocker and a way out) and `staged n` as progress. Say layout as intent, never coordinates: `intent.edge` ({"J1":"left"}), `intent.keep_near` ([["C3","U1"]]), `intent.group`.
 3. Place satellites tightly around their anchors: decouplers by supply pins, crystal parts by oscillator pins, feedback parts by the regulator, and pull-ups by their consumers.
 4. Establish the GND pour early with `sync_board` rules and `refill_zones`; fan out dense ground pads early using `route_track` with vias where needed.
 5. Route critical nets first with focused `route_board({nets})`: power, crystal, then differential pairs. Check the result. If blocked, inspect with `get_board({net})`, use `move_parts` or `delete_copper`/`set_net_width`, and re-route ONLY the blocked nets. Consider swapping header/GPIO pins in the schematic when equivalent pin assignments would remove a routing blockage; then re-check the schematic and `sync_board` before routing that changed net.
@@ -44,9 +44,8 @@ Follow these phases. After EVERY phase call `render_board` and `check_board`, in
 7. Run the DRC loop: `check_board`, inspect named blockers, make one concrete placement/copper/rule fix, re-route only affected nets, `refill_zones`, render, and check again. Fix introduced DRC findings and leave pre-existing ones alone unless asked.
 8. Call `export_fab()` only when `check_board` is clean. Otherwise preserve and report the useful partial board.
 
-For existing boards use `get_board`, `update_board_outline`, focused `place_board`, `move_parts`, `route_board({nets})`, `route_track`, `delete_copper`, `set_net_width`, `refill_zones`, and `render_board`. Say placement as intent except where `move_parts` or `route_track` explicitly accepts coordinates.
 
-Never call the same failing tool twice without changing its arguments or making a concrete schematic, placement, copper, outline, or rule change first. Every mutator captures a revision first and re-checks what it wrote. Time and request limits are per turn, not per task: preserve legal partial files, then hand off with `## Partial state` (parts placed n/m, ERC errors/warnings, board yes/no, routed n/m, DRC status, and blockers) and `## Next steps` (the exact next phase and tool calls). The next turn continues from those files."#;
+Never call the same failing tool twice without changing its arguments or making a concrete schematic, placement, copper, outline, or rule change first. Every mutator captures a revision first and re-checks what it wrote; pass `expect_revision` when you must not clobber a newer write, `checkpoint({label})` before a risky phase, `undo` to back out, `reserve_refs({prefix,count})` before minting references in parallel. Time and request limits are per turn, not per task: preserve legal partial files, then hand off with `## Partial state` (parts placed n/m, ERC errors/warnings, board yes/no, routed n/m, DRC status, and blockers) and `## Next steps` (the exact next phase and tool calls). The next turn continues from those files."#;
 
 #[cfg(test)]
 mod tests {
@@ -79,7 +78,7 @@ mod tests {
 
     #[test]
     fn prompt_stays_concise() {
-        assert!(system_prompt().len() <= 7_000);
+        assert!(system_prompt().len() <= 7_500);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //!
 //! This crate owns saved-board parsing and atomic s-expression edits.
 
+mod annotate;
 mod edit;
 mod netclass;
 mod offline;
@@ -9,6 +10,10 @@ mod patch;
 mod sexpr;
 mod snapshot;
 
+pub use annotate::{
+    Annotation, GORDIAN_PREFIX, LOCKED_REASON, STAGED_DETAIL, STAGED_REASON, patch_annotations,
+    remove_footprints,
+};
 pub use edit::{BoardDoc, BoardFootprint};
 pub use netclass::{
     NetClassUpdate, NetClassUpdateReport, board_net_widths, patch_board_net_class,

@@ -191,6 +191,7 @@ mod tests {
                         rotation: 0,
                         locked: false,
                         pads: vec![pad("INSIDE", 15.0, 15.0)],
+                        properties: Default::default(),
                     },
                     ImportedPart {
                         side: kicad_board::BoardSide::Front,
@@ -201,6 +202,7 @@ mod tests {
                         rotation: 0,
                         locked: false,
                         pads: vec![pad("OUTSIDE", 35.0, 35.0)],
+                        properties: Default::default(),
                     },
                 ],
                 placement_keepouts: vec![],

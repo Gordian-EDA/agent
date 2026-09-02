@@ -10,7 +10,7 @@ use kicad::Violation;
 
 use gordian_runtime::AgentRuntime;
 
-use crate::board::guard::Guard;
+use crate::board::guard::{Edit, Guard};
 
 /// DRC findings KiCAD raises that are independent of routed copper.
 const NON_COPPER_WARNINGS: &[&str] = &[
@@ -65,6 +65,61 @@ pub(super) fn violation_summaries<'a>(
 struct ClassifiedViolation<'a> {
     classification: &'static str,
     violation: &'a Violation,
+}
+
+impl ClassifiedViolation<'_> {
+    /// Whether this finding is the board's to answer for. A finding that only
+    /// names parts still in the staging row is not: they are not part of the
+    /// board yet, and DRC has no rule for "never laid out".
+    fn blocks(&self) -> bool {
+        self.classification != "staged"
+    }
+}
+
+/// A finding kind that is settled purely by placing the part it names — copper
+/// that has nowhere to go yet, or a courtyard sitting in the staging row.
+fn is_settled_by_placing(kind: &str) -> bool {
+    matches!(
+        kind,
+        "unconnected_items" | "courtyards_overlap" | "footprint_type_mismatch"
+    )
+}
+
+/// Re-classify the findings a staged part is answerable for, so the DRC verdict
+/// is about the board being built and not about the row waiting to join it.
+///
+/// For a finding that placing the part settles — an unrouted pair, two
+/// courtyards in the staging row — naming ONE staged part is enough. A copper
+/// defect is different: a clearance fault or a short between a placed track and
+/// a staged pad is real copper on the placed board, and it is excused only when
+/// every part it names is staged. `referenced_parts` is a prose heuristic, so
+/// erring toward keeping copper defects in the verdict is the safe direction.
+///
+/// The list is re-sorted afterwards: what the caller must act on leads, then
+/// what the board arrived with, then the staging row it has not reached yet.
+fn excuse_staged<'a>(
+    findings: &mut Vec<ClassifiedViolation<'a>>,
+    staged: &std::collections::BTreeSet<String>,
+) {
+    if staged.is_empty() {
+        return;
+    }
+    for finding in findings.iter_mut() {
+        let (kind, refs, _) = violation_key(finding.violation);
+        let excused = if is_settled_by_placing(&kind) {
+            refs.iter().any(|reference| staged.contains(reference))
+        } else {
+            !refs.is_empty() && refs.iter().all(|reference| staged.contains(reference))
+        };
+        if excused {
+            finding.classification = "staged";
+        }
+    }
+    findings.sort_by_key(|finding| match finding.classification {
+        "introduced" => 0,
+        "pre_existing" => 1,
+        _ => 2,
+    });
 }
 
 fn bracketed_names(text: &str) -> impl Iterator<Item = &str> {
@@ -247,13 +302,16 @@ pub(crate) fn materialize_zones_for_drc(
 
 /// Refill every copper zone in the saved board and persist KiCad's fill cache.
 #[tracing::instrument(skip_all, fields(project = %ctx.project_dir().display()))]
-pub fn refill_zones(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
+pub fn refill_zones(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
     let gate = match Guard::open(
         ctx,
-        "refill_zones",
-        "Refill board copper zones",
-        std::slice::from_ref(&path),
+        Edit::new(
+            "refill_zones",
+            "Refill board copper zones",
+            std::slice::from_ref(&path),
+        )
+        .expecting(&input),
     ) {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
@@ -265,7 +323,9 @@ pub fn refill_zones(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         ctx.env()
             .refill_zones(&path, true)
             .map(|_| true)
-            .map_err(|error| format!("kicad-cli pcb drc --refill-zones --save-board failed: {error}"))
+            .map_err(|error| {
+                format!("kicad-cli pcb drc --refill-zones --save-board failed: {error}")
+            })
     } else {
         Ok(false)
     };
@@ -399,13 +459,9 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .as_ref()
         .map(|report| report.unconnected_items.as_slice())
         .unwrap_or_default();
-    let violations = classify_violations(&report.violations, baseline_violations);
-    let unconnected_findings = classify_violations(&report.unconnected_items, baseline_unconnected);
-    let meaningful_unconnected = unconnected_findings
-        .iter()
-        .filter(|finding| !is_zone_self_unconnected(finding.violation))
-        .copied()
-        .collect::<Vec<_>>();
+    let mut violations = classify_violations(&report.violations, baseline_violations);
+    let mut unconnected_findings =
+        classify_violations(&report.unconnected_items, baseline_unconnected);
     let board = match crate::active_board(ctx) {
         Ok(board) => board,
         Err(error) => {
@@ -418,6 +474,23 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }));
         }
     };
+    // A part still in the staging row is progress outstanding, not a defect:
+    // excuse its findings before anything counts them.
+    let state = crate::staging::BoardState::of(&board);
+    let staged_refs: std::collections::BTreeSet<String> = state
+        .staged
+        .iter()
+        .map(|part| part.reference.clone())
+        .collect();
+    excuse_staged(&mut violations, &staged_refs);
+    excuse_staged(&mut unconnected_findings, &staged_refs);
+    let violations = violations;
+    let unconnected_findings = unconnected_findings;
+    let meaningful_unconnected = unconnected_findings
+        .iter()
+        .filter(|finding| !is_zone_self_unconnected(finding.violation))
+        .copied()
+        .collect::<Vec<_>>();
     let containment = crate::board::guard::outline_containment(&board);
     let outline_blocking =
         containment.outside_outline.len() + usize::from(containment.copper_outside_outline > 0);
@@ -431,11 +504,22 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .filter(|finding| finding.classification == "introduced")
         .count();
-    let pre_existing_copper = gate.copper_violations - introduced_copper;
-    let pre_existing_unconnected = gate.meaningful_unconnected - introduced_unconnected;
+    // Staged parts are outside the verdict, so they are outside every count of
+    // it too: the gate's raw totals are reduced by what was excused.
+    let staged_copper = violations
+        .iter()
+        .filter(|finding| !finding.blocks() && !is_non_copper(finding.violation))
+        .count();
+    let staged_unconnected = meaningful_unconnected
+        .iter()
+        .filter(|finding| !finding.blocks())
+        .count();
+    let copper_violations = gate.copper_violations - staged_copper;
+    let unconnected_items = gate.meaningful_unconnected - staged_unconnected;
+    let pre_existing_copper = copper_violations - introduced_copper;
+    let pre_existing_unconnected = unconnected_items - introduced_unconnected;
     let blocking_findings = introduced_copper + introduced_unconnected + outline_blocking;
-    let blocking_findings_absolute =
-        gate.copper_violations + gate.meaningful_unconnected + outline_blocking;
+    let blocking_findings_absolute = copper_violations + unconnected_items + outline_blocking;
     let introduced = violations
         .iter()
         .chain(&unconnected_findings)
@@ -461,7 +545,10 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // A part left in the seed row is not a DRC finding — KiCAD has no rule for
     // "never laid out" — but it is exactly what the next `place_board({refs})`
     // call must name, so the completion signal has to say it.
-    let unplaced = kicad_board::seed_row_references(&board.imported);
+    let ratsnest = crate::ratsnest::build(&board, &board.problem, &[], None);
+    let blocked = ratsnest.blocked();
+    let staged = state.staged_json();
+    let staged_refs_list = state.staged_references();
     let unconnected = if meaningful_unconnected.is_empty() {
         Vec::new()
     } else {
@@ -534,73 +621,105 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             containment.copper_outside_outline
         ));
     }
+    let note = if blocking_findings == 0 {
+        format!(
+            "{note_prefix}Routed {}/{}; {} part(s) staged. No introduced blocking DRC \
+             findings; {pre_existing} pre-existing finding(s) and {silk_warnings} absolute \
+             silkscreen warning(s) remain.",
+            ratsnest.routed,
+            ratsnest.total,
+            staged_refs_list.len(),
+        )
+    } else {
+        format!(
+            "{note_prefix}Board checks reported {blocking_findings} blocking finding(s); inspect the introduced DRC findings and absolute outline containment first."
+        )
+    };
+    let next = if !staged_refs_list.is_empty() {
+        format!(
+            "{} footprint(s) are still staged: call place_board({{\"refs\": {}}}) \
+             to lay them out, then route_board, then check_board again.",
+            staged_refs_list.len(),
+            serde_json::to_string(&staged_refs_list).unwrap_or_else(|_| "[]".to_owned()),
+        )
+    } else if blocking_findings == 0 {
+        "export_fab".to_owned()
+    } else {
+        "Fix the introduced blocking violations/unconnected items, then call check_board again. Leave pre-existing findings alone and do not resync blindly.".to_owned()
+    };
     let text = diagnostics.join("\n");
-    Ok(json!({
-        "ok": blocking_findings == 0,
-        "drc_clean": blocking_findings == 0,
-        "path": path.display().to_string(),
+    // The DRC detail and the silkscreen pass each get their own object: the
+    // board's verdict and its progress stay at the top level, where a caller
+    // reads them, and no single `json!` grows past what the macro can expand.
+    let drc = json!({
         "baseline_revision": baseline.as_ref().map(|baseline| baseline.revision),
         "baseline_error": baseline_error,
         "introduced": introduced,
         "pre_existing": pre_existing,
-        "blocking_findings": blocking_findings,
         "blocking_findings_absolute": blocking_findings_absolute,
         "reported_findings": reported_findings,
-        "silk_warnings": silk_warnings,
-        "introduced_silk_warnings": introduced_silk_warnings,
-        "silk_warnings_fixed": initial_silk_warnings.saturating_sub(silk_warnings),
-        "silk_cleanup_attempts": silk_cleanup_attempts,
-        "silk_references_moved": silk_references_moved,
-        "silk_cleanup_error": silk_cleanup_error,
         "violations": report.violations.len(),
-        "copper_violations": gate.copper_violations,
+        "copper_violations": copper_violations,
         "introduced_copper_violations": introduced_copper,
         "pre_existing_copper_violations": pre_existing_copper,
-        "unconnected_items": gate.meaningful_unconnected,
+        "unconnected_items": unconnected_items,
         "introduced_unconnected_items": introduced_unconnected,
         "pre_existing_unconnected_items": pre_existing_unconnected,
         "ignored_zone_self_unconnected": gate.ignored_zone_self_unconnected,
         "outside_outline": containment.outside_outline,
         "copper_outside_outline": containment.copper_outside_outline > 0,
-        "findings": findings,
-        "diagnostics": diagnostics,
-        "text": text,
         "top_violations": classified_summaries(
             violations.iter().filter(|finding| !is_non_copper(finding.violation)),
             5,
         ),
-        "top_silk_violations": classified_summaries(
+        "top_unconnected": classified_summaries(meaningful_unconnected.iter(), 5),
+    });
+    let silk = json!({
+        "warnings": silk_warnings,
+        "introduced_warnings": introduced_silk_warnings,
+        "warnings_fixed": initial_silk_warnings.saturating_sub(silk_warnings),
+        "cleanup_attempts": silk_cleanup_attempts,
+        "references_moved": silk_references_moved,
+        "cleanup_error": silk_cleanup_error,
+        "top_violations": classified_summaries(
             violations.iter().filter(|finding| {
                 finding.violation.severity == "warning" && matches!(finding.violation.kind.as_str(),
                     "silk_over_copper" | "silk_overlap" | "silk_edge_clearance" | "silk_over_silk")
             }),
             5,
         ),
-        "top_unconnected": classified_summaries(meaningful_unconnected.iter(), 5),
+    });
+    Ok(json!({
+        "ok": blocking_findings == 0,
+        "drc_clean": blocking_findings == 0,
+        "path": path.display().to_string(),
+        "blocking_findings": blocking_findings,
+        // The headline counts stay at the top level: `drc` below carries the
+        // classification detail, but these are what a caller reads first.
+        "introduced": introduced,
+        "pre_existing": pre_existing,
+        "reported_findings": reported_findings,
+        "copper_violations": copper_violations,
+        "unconnected_items": unconnected_items,
+        // Progress, not pass/fail: how much of the board is routed, what is
+        // standing in the way of the rest, and who is still in the staging row.
+        "routed": format!("{}/{}", ratsnest.routed, ratsnest.total),
+        "routed_connection_count": ratsnest.routed,
+        "total_connection_count": ratsnest.total,
+        "blocked": blocked,
+        "staged": staged,
+        "staged_count": staged_refs_list.len(),
+        "drc": drc,
+        "silk": silk,
+        "findings": findings,
+        "diagnostics": diagnostics,
+        "text": text,
         // Never a bare count: the two pads that should be joined are what say
         // which route_track / route_board{nets} call repairs the board.
         "unconnected": unconnected,
         "islands": islands,
-        // Footprints still in the seed row: place them with
-        // place_board({refs}) before routing expects copper to reach them.
-        "unplaced": unplaced,
-        "note": if blocking_findings == 0 {
-            format!("{note_prefix}No introduced blocking DRC findings; {pre_existing} pre-existing finding(s) and {silk_warnings} absolute silkscreen warning(s) remain.")
-        } else {
-            format!("{note_prefix}Board checks reported {blocking_findings} blocking finding(s); inspect the introduced DRC findings and absolute outline containment first.")
-        },
-        "next": if !unplaced.is_empty() {
-            format!(
-                "{} footprint(s) are still in the seed row: call place_board({{\"refs\": {}}}) \
-                 to lay them out, then route_board, then check_board again.",
-                unplaced.len(),
-                serde_json::to_string(&unplaced).unwrap_or_else(|_| "[]".to_owned()),
-            )
-        } else if blocking_findings == 0 {
-            "export_fab".to_owned()
-        } else {
-            "Fix the introduced blocking violations/unconnected items, then call check_board again. Leave pre-existing findings alone and do not resync blindly.".to_owned()
-        },
+        "note": note,
+        "next": next,
     }))
 }
 
@@ -707,6 +826,7 @@ mod tests {
                 size: Point2::new(1.0, 1.0),
                 drill: None,
             }],
+            properties: Default::default(),
         }];
         let same_net = Violation {
             severity: "error".to_owned(),

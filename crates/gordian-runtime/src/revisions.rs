@@ -72,6 +72,51 @@ pub struct RevisionManifest {
     /// Conversation identifier from the logging context, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+    /// Board and schematic references the tool declared it might change, sorted and deduped.
+    #[serde(default)]
+    pub refs_touched: Vec<String>,
+    /// Human checkpoint label, when the mutator named one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// What a mutator declares before it writes.
+pub struct Capture<'a> {
+    /// Mutating tool capturing the state.
+    pub tool: &'a str,
+    /// Human-readable description of the pending edit.
+    pub summary: &'a str,
+    /// Exact paths the tool might change.
+    pub files: &'a [PathBuf],
+    /// References the edit names, for an incremental caller to diff against.
+    pub refs_touched: Vec<String>,
+    /// Human checkpoint label.
+    pub label: Option<String>,
+}
+
+impl<'a> Capture<'a> {
+    /// Declares an edit over `files` with no references or label.
+    pub fn new(tool: &'a str, summary: &'a str, files: &'a [PathBuf]) -> Self {
+        Self {
+            tool,
+            summary,
+            files,
+            refs_touched: Vec::new(),
+            label: None,
+        }
+    }
+
+    /// Names the references the edit touches.
+    pub fn refs(mut self, refs: impl IntoIterator<Item = String>) -> Self {
+        self.refs_touched.extend(refs);
+        self
+    }
+
+    /// Names a human checkpoint label.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
 }
 
 /// Files restored by an undo operation.
@@ -150,7 +195,14 @@ impl Revisions {
     }
 
     /// Captures the exact named files before a mutating tool writes them.
-    pub fn capture(&self, tool: &str, summary: &str, files: &[PathBuf]) -> Result<RevisionId> {
+    pub fn capture(&self, capture: Capture<'_>) -> Result<RevisionId> {
+        let Capture {
+            tool,
+            summary,
+            files,
+            refs_touched,
+            label,
+        } = capture;
         let _guard = self
             .lock
             .lock()
@@ -203,6 +255,12 @@ impl Revisions {
             files: entries,
             created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             thread_id: crate::logging::thread_id().map(str::to_owned),
+            refs_touched: refs_touched
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            label,
         };
         let manifest_json = serde_json::to_vec_pretty(&manifest)?;
         atomic_write(&staging.path().join("manifest.json"), &manifest_json)?;
@@ -310,6 +368,42 @@ impl Revisions {
         self.read_manifest(id)
     }
 
+    /// The newest revision on disk, or `None` when the project has none.
+    ///
+    /// This is the optimistic-concurrency token: a caller reads it, does its
+    /// work, and passes it back to [`Revisions::conflict`] before writing.
+    pub fn current(&self) -> Result<Option<RevisionId>> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow!("revision store lock poisoned"))?;
+        Ok(self.revision_ids()?.into_iter().next_back())
+    }
+
+    /// Reports whether anyone captured a revision since `expected`.
+    ///
+    /// `Ok(None)` means `expected` is still the newest revision, so the caller
+    /// may write. Otherwise the current manifest is returned, naming the tool
+    /// that moved and the references it touched. A project with no revisions at
+    /// all cannot match any token, so that is an error rather than agreement.
+    pub fn conflict(&self, expected: RevisionId) -> Result<Option<RevisionManifest>> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow!("revision store lock poisoned"))?;
+        let current = self
+            .revision_ids()?
+            .into_iter()
+            .next_back()
+            .ok_or_else(|| {
+                anyhow!("project has no revisions to compare revision {expected} against")
+            })?;
+        if current == expected {
+            return Ok(None);
+        }
+        self.read_manifest(current).map(Some)
+    }
+
     fn resolve_path(&self, requested: &Path) -> Result<(PathBuf, PathBuf)> {
         let relative = if requested.is_absolute() {
             requested.strip_prefix(&self.project).map_err(|_| {
@@ -406,11 +500,11 @@ mod tests {
         let revisions = Revisions::for_project(project.path().to_path_buf());
 
         let id = revisions
-            .capture(
+            .capture(Capture::new(
                 "sync_board",
                 "Create the project board",
                 &[schematic.clone(), board.clone()],
-            )
+            ))
             .unwrap();
         fs::write(&schematic, b"after schematic").unwrap();
         fs::write(&board, b"created board").unwrap();
@@ -449,11 +543,15 @@ mod tests {
         let revisions = Revisions::for_project(project.path().to_path_buf());
         fs::write(&path, b"one").unwrap();
         revisions
-            .capture("first", "first", std::slice::from_ref(&path))
+            .capture(Capture::new("first", "first", std::slice::from_ref(&path)))
             .unwrap();
         fs::write(&path, b"two").unwrap();
         let latest = revisions
-            .capture("second", "second", std::slice::from_ref(&path))
+            .capture(Capture::new(
+                "second",
+                "second",
+                std::slice::from_ref(&path),
+            ))
             .unwrap();
         fs::write(&path, b"three").unwrap();
 
@@ -470,11 +568,11 @@ mod tests {
         revisions.begin_turn().unwrap();
 
         let first = revisions
-            .capture("edit", "first", std::slice::from_ref(&path))
+            .capture(Capture::new("edit", "first", std::slice::from_ref(&path)))
             .unwrap();
         fs::write(&path, b"after first").unwrap();
         revisions
-            .capture("edit", "second", std::slice::from_ref(&path))
+            .capture(Capture::new("edit", "second", std::slice::from_ref(&path)))
             .unwrap();
 
         let baseline = revisions.turn_baseline(&path).unwrap().unwrap();
@@ -483,7 +581,11 @@ mod tests {
 
         revisions.begin_turn().unwrap();
         let next = revisions
-            .capture("edit", "next turn", std::slice::from_ref(&path))
+            .capture(Capture::new(
+                "edit",
+                "next turn",
+                std::slice::from_ref(&path),
+            ))
             .unwrap();
         assert_eq!(
             revisions.turn_baseline(&path).unwrap().unwrap().revision,
@@ -500,7 +602,7 @@ mod tests {
         for index in 0..=RETENTION {
             fs::write(&path, index.to_string()).unwrap();
             revisions
-                .capture("edit", "edit", std::slice::from_ref(&path))
+                .capture(Capture::new("edit", "edit", std::slice::from_ref(&path)))
                 .unwrap();
         }
 
@@ -509,5 +611,75 @@ mod tests {
         assert_eq!(history.first().unwrap().id.get(), (RETENTION + 1) as u64);
         assert_eq!(history.last().unwrap().id.get(), 2);
         assert!(!project.path().join(".gordian/revisions/1").exists());
+    }
+
+    #[test]
+    fn refs_touched_and_label_survive_the_manifest_round_trip() {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().join("design.kicad_sch");
+        fs::write(&path, b"state").unwrap();
+        let revisions = Revisions::for_project(project.path().to_path_buf());
+
+        let id = revisions
+            .capture(
+                Capture::new("place_parts", "Place the bias network", &[path])
+                    .refs(["R2".to_owned(), "R1".to_owned(), "R2".to_owned()])
+                    .label("before bias network"),
+            )
+            .unwrap();
+
+        let manifest = revisions.manifest(Some(id)).unwrap();
+        assert_eq!(manifest.refs_touched, ["R1", "R2"]);
+        assert_eq!(manifest.label.as_deref(), Some("before bias network"));
+
+        let manifest_path = project
+            .path()
+            .join(format!(".gordian/revisions/{id}/manifest.json"));
+        let on_disk: RevisionManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        assert_eq!(on_disk, manifest);
+
+        let legacy = serde_json::json!({
+            "id": id,
+            "tool": "place_parts",
+            "summary": "no refs recorded",
+            "files": [],
+            "created_at": manifest.created_at,
+        });
+        let legacy: RevisionManifest = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.refs_touched.is_empty());
+        assert!(legacy.label.is_none());
+    }
+
+    #[test]
+    fn current_is_the_newest_revision_and_conflict_names_the_writer() {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().join("design.kicad_sch");
+        fs::write(&path, b"state").unwrap();
+        let revisions = Revisions::for_project(project.path().to_path_buf());
+
+        assert_eq!(revisions.current().unwrap(), None);
+        assert!(
+            revisions.conflict(RevisionId::new(1)).is_err(),
+            "an empty store cannot agree with any token"
+        );
+
+        let first = revisions
+            .capture(Capture::new("edit", "first", std::slice::from_ref(&path)))
+            .unwrap();
+        assert_eq!(revisions.current().unwrap(), Some(first));
+        assert_eq!(revisions.conflict(first).unwrap(), None);
+
+        let second = revisions
+            .capture(
+                Capture::new("other_agent", "second", std::slice::from_ref(&path))
+                    .refs(["U3".to_owned()]),
+            )
+            .unwrap();
+        assert_eq!(revisions.current().unwrap(), Some(second));
+        let writer = revisions.conflict(first).unwrap().unwrap();
+        assert_eq!(writer.id, second);
+        assert_eq!(writer.tool, "other_agent");
+        assert_eq!(writer.refs_touched, ["U3"]);
     }
 }

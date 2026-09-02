@@ -1334,9 +1334,12 @@ impl<P: Provider> Agent<P> {
                         .runtime
                         .revisions()
                         .capture(
-                            "checkpoint",
-                            "last schematic that checked clean",
-                            &[self.runtime.sch_path().to_path_buf()],
+                            gordian_runtime::revisions::Capture::new(
+                                "checkpoint",
+                                "last schematic that checked clean",
+                                &[self.runtime.sch_path().to_path_buf()],
+                            )
+                            .label("last clean schematic"),
                         )
                         .ok()
                         .or(last_clean_schematic);

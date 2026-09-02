@@ -240,7 +240,11 @@ impl Edit {
         }
         let revision = ctx
             .revisions()
-            .capture(tool, summary, &[self.path.clone()])?;
+            .capture(gordian_runtime::revisions::Capture::new(
+                tool,
+                summary,
+                &[self.path.clone()],
+            ))?;
         self.doc
             .write(&self.path)
             .with_context(|| format!("writing {}", self.path.display()))?;

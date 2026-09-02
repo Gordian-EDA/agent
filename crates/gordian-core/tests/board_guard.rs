@@ -66,23 +66,39 @@ fn the_board_guard_and_its_subset_placement() {
     };
     divider(&ctx);
 
-    // ── check_board names what nothing has placed ───────────────────────────
+    // ── check_board reports the staging row as progress ─────────────────────
     let checked = run_tool("check_board", json!({}), &ctx).unwrap();
     assert_eq!(
-        checked["unplaced"],
-        json!(["R1", "R2", "R3"]),
+        checked["staged"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|part| part["ref"].clone())
+            .collect::<Vec<_>>(),
+        json!(["R1", "R2", "R3"]).as_array().unwrap().clone(),
         "a board straight out of sync has laid out nothing: {checked:#}"
     );
+    assert_eq!(checked["routed"], json!("0/2"), "{checked:#}");
 
-    // Routing a board nothing has laid out is refused before any write, rather
-    // than reported as a row of failed nets.
+    // Routing a board nothing has laid out writes nothing and refuses nothing:
+    // every net reaches a staged part, so every net comes back open.
     let early = run_tool("route_board", json!({}), &ctx).unwrap();
-    assert_eq!(early["code"], json!("board_not_placed"), "{early:#}");
-    assert_eq!(early["unplaced"], json!(["R1", "R2", "R3"]), "{early:#}");
+    assert!(early.get("error").is_none(), "{early:#}");
+    assert_eq!(early["routed"], json!("0/2"), "{early:#}");
+    for entry in early["ratsnest"].as_array().unwrap() {
+        assert_eq!(entry["status"], json!("open"), "{early:#}");
+        assert!(
+            entry["escapes"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("place_board"),
+            "{early:#}"
+        );
+    }
 
     tool(&ctx, "place_board", json!({}));
     let checked = run_tool("check_board", json!({}), &ctx).unwrap();
-    assert_eq!(checked["unplaced"], json!([]), "{checked:#}");
+    assert_eq!(checked["staged"], json!([]), "{checked:#}");
 
     // ── a refused mutator writes nothing ────────────────────────────────────
     let routed = tool(&ctx, "route_board", json!({}));
@@ -118,9 +134,11 @@ fn the_board_guard_and_its_subset_placement() {
     );
 
     // ── a subset placement moves only what it was asked to ──────────────────
-    // With nothing unplaced, bare place_board refuses rather than re-place.
+    // With nothing staged, bare place_board is a no-op that says so.
     let whole = run_tool("place_board", json!({}), &ctx).unwrap();
-    assert_eq!(whole["code"], json!("board_already_placed"), "{whole:#}");
+    assert_eq!(whole["placement_applied"], json!(false), "{whole:#}");
+    assert_eq!(whole["staged"], json!([]), "{whole:#}");
+    assert_eq!(whole["placed"], json!(["R1", "R2", "R3"]), "{whole:#}");
     assert_eq!(
         std::fs::read_to_string(ctx.pcb_path()).unwrap(),
         before_text
