@@ -35,8 +35,8 @@ fn first_existing(suffix: &str) -> Option<PathBuf> {
 /// The KiCAD 10 install the demos were authored with, if it is present.
 pub fn kicad10() -> Option<KicadInstallation> {
     KicadInstallation::detect_with(
-        Some(&first_existing("share/kicad/symbols")?),
-        Some(&first_existing("share/kicad/footprints")?),
+        Some(&first_existing("usr/share/kicad/symbols")?),
+        Some(&first_existing("usr/share/kicad/footprints")?),
         Some(&first_existing("usr/bin/kicad-cli")?),
     )
     .ok()
@@ -60,7 +60,7 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Every corpus schematic, sorted.
 pub fn files() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(demos) = first_existing("share/kicad/demos") {
+    if let Some(demos) = first_existing("usr/share/kicad/demos") {
         collect(&demos, &mut out);
     }
     for root in repo_roots() {
