@@ -412,16 +412,18 @@ fn pad_touches(
         .iter()
         .flat_map(|part| {
             part.pads.iter().filter_map(move |pad| {
-                (pad.net.as_deref() == Some(net)
+                if pad.net.as_deref() == Some(net)
                     && pad.layers.contains(layer)
                     && (at.x - pad.at.x).abs() <= pad.size.x / 2.0 + radius + geom::EPS
-                    && (at.y - pad.at.y).abs() <= pad.size.y / 2.0 + radius + geom::EPS)
-                    .then(|| {
-                        json!({
-                            "kind": "pad",
-                            "pad": format!("{}.{}", part.reference, pad.number),
-                        })
-                    })
+                    && (at.y - pad.at.y).abs() <= pad.size.y / 2.0 + radius + geom::EPS
+                {
+                    Some(json!({
+                        "kind": "pad",
+                        "pad": format!("{}.{}", part.reference, pad.number),
+                    }))
+                } else {
+                    None
+                }
             })
         })
         .collect()

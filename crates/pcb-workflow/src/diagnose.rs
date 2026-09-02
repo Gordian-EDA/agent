@@ -909,13 +909,13 @@ mod tests {
             ],
         };
 
-        let pairs = vec![unconnected_pair(&parts, &violation).unwrap()];
+        let pair = unconnected_pair(&parts, &violation).unwrap();
 
-        assert_eq!(pairs[0]["net"], "VOUT");
-        assert_eq!(pairs[0]["from"]["pad"], "U1.3");
-        assert_eq!(pairs[0]["to"]["pad"], "J1.1");
-        assert_eq!(pairs[0]["to"]["at"], json!([20.0, 10.0]));
-        let suggestion = pairs[0]["suggestion"].as_str().unwrap();
+        assert_eq!(pair["net"], "VOUT");
+        assert_eq!(pair["from"]["pad"], "U1.3");
+        assert_eq!(pair["to"]["pad"], "J1.1");
+        assert_eq!(pair["to"]["at"], json!([20.0, 10.0]));
+        let suggestion = pair["suggestion"].as_str().unwrap();
         assert!(
             suggestion.contains("route_board {\"nets\":[\"VOUT\"]}"),
             "{suggestion}"
