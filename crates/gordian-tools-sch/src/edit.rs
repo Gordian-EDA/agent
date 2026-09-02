@@ -1025,6 +1025,11 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     ) else {
         return Ok(json!({ "error": "set_fields needs `ref` and `fields`" }));
     };
+    if fields.contains_key("Footprint") {
+        return Ok(json!({
+            "error": "set_fields does not set Footprint; use assign_footprints so symbol compatibility is validated",
+        }));
+    }
     let mut edit = Edit::open(ctx)?;
     // Address the symbol by UUID: setting `Reference` renames it, and every
     // later field in the same call would then be looking for a part that is
