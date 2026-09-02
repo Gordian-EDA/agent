@@ -44,14 +44,15 @@ pub struct KicadInstallation {
 }
 
 impl KicadInstallation {
-    /// Discover an installed KiCAD. Returns `None` if required resources cannot
-    /// be found.
+    /// Discover a complete, version-verified KiCad 10 installation.
     ///
-    /// Checks known install paths for libraries and `PATH` for `kicad-cli`.
+    /// CLI candidates are tried in this order: `KICAD_CLI`, `PATH`,
+    /// `~/.local/*/AppDir/usr/bin/kicad-cli`, workspace-adjacent AppDirs, and
+    /// known macOS application paths. Every candidate must report version 10 or
+    /// newer before its sibling libraries or Debian/Ubuntu and macOS fallback
+    /// library paths are considered.
     pub fn detect() -> Option<Self> {
-        cli_candidates()
-            .into_iter()
-            .find_map(|cli| Self::detect_with(None, None, Some(&cli)).ok())
+        Self::detect_with(None, None, None).ok()
     }
 
     /// Discover KiCAD using explicit overrides where provided, then known
@@ -61,16 +62,39 @@ impl KicadInstallation {
         footprint_dir: Option<&Path>,
         cli_path: Option<&Path>,
     ) -> io::Result<Self> {
-        let cli_path = match cli_path {
-            Some(path) if path.is_file() => path.to_path_buf(),
-            Some(path) => return Err(config_error("kicad.cliPath", path, "is not a file")),
-            None => find_in_path("kicad-cli").ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "KiCad 10 is required; set kicad.cliPath, kicad.symbolDir, and kicad.footprintDir in config.toml",
-                )
-            })?,
+        if let Some(cli_path) = cli_path {
+            return Self::detect_at(symbol_dir, footprint_dir, cli_path);
+        }
+
+        let mut failures = Vec::new();
+        for candidate in cli_candidates() {
+            match Self::detect_at(symbol_dir, footprint_dir, &candidate) {
+                Ok(installation) => return Ok(installation),
+                Err(error) => failures.push(format!("{}: {error}", candidate.display())),
+            }
+        }
+        let detail = if failures.is_empty() {
+            String::new()
+        } else {
+            format!("; rejected candidates: {}", failures.join("; "))
         };
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "KiCad 10 is required; set kicad.cliPath, kicad.symbolDir, and kicad.footprintDir in config.toml{detail}"
+            ),
+        ))
+    }
+
+    fn detect_at(
+        symbol_dir: Option<&Path>,
+        footprint_dir: Option<&Path>,
+        cli_path: &Path,
+    ) -> io::Result<Self> {
+        if !cli_path.is_file() {
+            return Err(config_error("kicad.cliPath", cli_path, "is not a file"));
+        }
+        let cli_path = cli_path.to_path_buf();
         let cli_version = cli_version(&cli_path).map_err(|error| {
             io::Error::new(
                 error.kind(),
@@ -230,20 +254,12 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
     {
         return Some(found);
     }
-    if name == "kicad-cli" {
-        return KNOWN_CLI_PATHS
-            .iter()
-            .map(PathBuf::from)
-            .find(|p| p.is_file());
-    }
     None
 }
 
 fn cli_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(cli) = find_in_path("kicad-cli") {
-        candidates.push(cli);
-    }
+    let environment_cli = std::env::var_os("KICAD_CLI").map(PathBuf::from);
+    let path_cli = find_in_path("kicad-cli");
     let mut local_roots = std::env::var_os("HOME")
         .map(PathBuf::from)
         .into_iter()
@@ -254,6 +270,15 @@ fn cli_candidates() -> Vec<PathBuf> {
     }
     local_roots.sort();
     local_roots.dedup();
+    cli_candidates_from(environment_cli, path_cli, local_roots)
+}
+
+fn cli_candidates_from(
+    environment_cli: Option<PathBuf>,
+    path_cli: Option<PathBuf>,
+    local_roots: Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut candidates = environment_cli.into_iter().chain(path_cli).collect::<Vec<_>>();
     for local in local_roots {
         if let Ok(entries) = std::fs::read_dir(local) {
             let mut app_dirs = entries
@@ -272,6 +297,8 @@ fn cli_candidates() -> Vec<PathBuf> {
             .map(PathBuf::from)
             .filter(|path| path.is_file()),
     );
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|path| seen.insert(path.clone()));
     candidates
 }
 
@@ -327,7 +354,8 @@ fn version_major(version: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::supported_version;
+    use super::{cli_candidates_from, supported_version};
+    use std::path::PathBuf;
 
     #[test]
     fn supports_kicad_ten_and_newer() {
@@ -335,5 +363,26 @@ mod tests {
         assert!(!supported_version("9.0.3"));
         assert!(supported_version("10.0.5"));
         assert!(supported_version("11.0.0"));
+    }
+
+    #[test]
+    fn cli_candidates_prefer_environment_then_path_then_local_appdirs() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let local = root.path().join(".local");
+        let app_cli = local.join("kicad-10/AppDir/usr/bin/kicad-cli");
+        std::fs::create_dir_all(app_cli.parent().expect("app bin")).expect("app bin");
+        std::fs::write(&app_cli, "").expect("app cli");
+        let environment_cli = PathBuf::from("/configured/kicad-cli");
+        let path_cli = PathBuf::from("/path/kicad-cli");
+
+        let candidates = cli_candidates_from(
+            Some(environment_cli.clone()),
+            Some(path_cli.clone()),
+            vec![local],
+        );
+
+        assert_eq!(candidates[0], environment_cli);
+        assert_eq!(candidates[1], path_cli);
+        assert_eq!(candidates[2], app_cli);
     }
 }
