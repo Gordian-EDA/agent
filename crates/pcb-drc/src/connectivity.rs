@@ -743,6 +743,68 @@ mod tests {
     }
 
     #[test]
+    fn layer_change_in_a_round_pads_box_corner_is_unconnected() {
+        // A 1.7mm round thru-hole pad drawn as its 1.7x1.7 bounding box. The
+        // route leaves the pad on top, hops to bottom at (16.325, 18.875) — a
+        // box corner, 1.066mm from the centre, so outside the real 0.85mm
+        // copper — and carries on. Nothing stitches the layers there.
+        let p = problem(
+            vec![conn(
+                "SIG",
+                &[(15.5, 19.55, "top"), (19.625, 18.425, "bottom")],
+            )],
+            vec![pad(&["SIG"], (15.5, 19.55), 1.7, 1.7, &["top", "bottom"])],
+        );
+        let unstitched = RouteSolution {
+            traces: vec![
+                trace("SIG", "top", 0.15, &[(15.5, 19.55), (16.325, 18.875)]),
+                trace("SIG", "bottom", 0.15, &[(16.325, 18.875), (19.625, 18.425)]),
+            ],
+            vias: vec![],
+        };
+        assert_eq!(
+            check(&p, &unstitched),
+            vec![Violation::Unconnected {
+                connection: "SIG".to_owned(),
+                point_index: 1,
+            }]
+        );
+
+        // The via the router owed us makes it whole.
+        assert_eq!(
+            check(
+                &p,
+                &RouteSolution {
+                    vias: vec![via("SIG", (16.325, 18.875))],
+                    ..unstitched
+                }
+            ),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn foreign_copper_in_a_pads_box_corner_still_merges() {
+        // The other direction: a short must never hide in the slack between a
+        // pad's real shape and its box, so merges keep the bounding fit.
+        let p = problem(
+            vec![
+                conn("SIG", &[(0.0, 0.0, "top")]),
+                conn("GND", &[(5.0, 5.0, "top")]),
+            ],
+            vec![pad(&["SIG"], (0.0, 0.0), 1.7, 1.7, &["top"])],
+        );
+        let s = RouteSolution {
+            traces: vec![trace("GND", "top", 0.15, &[(5.0, 5.0), (0.825, 0.825)])],
+            vias: vec![],
+        };
+        assert!(check(&p, &s).contains(&Violation::CrossNetMerge {
+            a: "GND".to_owned(),
+            b: "SIG".to_owned(),
+        }));
+    }
+
+    #[test]
     fn multi_name_shared_pad_does_not_merge_by_itself() {
         // A single pad legitimately owned by two connections: no merge, and each
         // connection's single point is trivially connected.
