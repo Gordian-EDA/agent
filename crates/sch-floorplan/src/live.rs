@@ -103,9 +103,14 @@ const SEARCH_SHARE: f64 = 0.7;
 /// spine fast path or has room for the polish that earns its 9s.
 ///
 /// Hence: `cluster` below [`SPINE_ABOVE_PARTS`], `spine` at or above it, and a real
-/// deadline underneath both so no topology can escape the promise. Under a 60 s
-/// budget every cell above finishes inside it — the worst are `cluster` at 39 parts
-/// (54.9 s) and a forced `anneal` on the blinker (54.2 s).
+/// deadline underneath both so no topology can escape the promise. Re-measured under
+/// a 60 s budget, all 24 cells commit inside it — the worst are `bedrock` on
+/// `cluster` (49.8 s) and a forced `anneal` on the blinker (48.5 s), and the two that
+/// most overran are now `openmyo`/`cluster` 114.2 → 44.5 s and `stm32f4-buck`/
+/// `cluster` 69.7 → 47.9 s.
+///
+/// Reproduce with `cargo run --release --example place_bench -- <dir> [--budget 60]
+/// <fixture>...`.
 #[derive(Debug, Clone, Copy)]
 pub struct PlacementBudget {
     /// Wall time the whole call — search, realise, gate — may take.
