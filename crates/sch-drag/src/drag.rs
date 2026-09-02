@@ -401,11 +401,13 @@ pub(crate) fn settle_junctions(
 /// A pin re-routed to a different point of its own net leaves the label that
 /// used to hold it naming an empty spot. The netlist does not notice — the name
 /// still merges — but KiCAD reports it and a reader sees a name in mid-air. The
-/// partition gate has the last word: a label that was carrying the connection
-/// cannot be dropped, because dropping it changes the partition.
+/// partition gate has the last word within the sheet, and only *local* labels
+/// are ever dropped: a global or hierarchical name may be holding a connection
+/// to a sheet this crate cannot see.
 fn strip_stranded_labels(doc: &mut SchDoc, sheet: &Sheet, touched: &HashSet<NodeKey>) -> usize {
     let stranded: Vec<String> = doc
         .labels()
+        .filter(|l| l.kind == LabelKind::Local)
         .filter(|l| touched.contains(&key(l.at.point())) && sheet.label_stranded(l.at.point()))
         .map(|l| l.uuid.clone())
         .collect();
