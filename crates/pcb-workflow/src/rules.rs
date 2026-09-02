@@ -6,6 +6,8 @@
 //! [`pad_limited_rules`] reads the pads that will be on the board and lowers the
 //! seed rules to what those pads permit, never below the fabrication floor.
 
+use std::collections::BTreeMap;
+
 use kicad_footprint::{Footprint, FootprintPad};
 use pcb_model::Point2;
 
@@ -89,9 +91,15 @@ fn pad_gap(a: &FootprintPad, b: &FootprintPad) -> f64 {
 
 /// The tightest pad geometry in one footprint's source text.
 ///
-/// Pads sharing a number are the same electrical node (a split thermal pad, a
-/// multi-pad connector shield), so they never constrain clearance.
-pub(crate) fn footprint_limits(lib_id: &str, source: &str) -> PadLimits {
+/// `pad_nets` is the part's schematic net per pad number. Clearance is a
+/// between-nodes rule, so two pads of the same net never constrain it — and a
+/// USB-C receptacle's ground pads, which deliberately merge into one piece of
+/// copper, would otherwise read as a zero-clearance board.
+pub(crate) fn footprint_limits(
+    lib_id: &str,
+    source: &str,
+    pad_nets: &BTreeMap<String, String>,
+) -> PadLimits {
     let Ok(footprint) = Footprint::parse_str(lib_id, source) else {
         return PadLimits::none();
     };
@@ -108,9 +116,16 @@ pub(crate) fn footprint_limits(lib_id: &str, source: &str) -> PadLimits {
             limits.min_pad_width = Some(limits.min_pad_width.map_or(width, |m| m.min(width)));
         }
     }
+    let same_node = |a: &FootprintPad, b: &FootprintPad| {
+        a.number == b.number
+            || matches!(
+                (pad_nets.get(&a.number), pad_nets.get(&b.number)),
+                (Some(x), Some(y)) if x == y
+            )
+    };
     for (i, a) in pads.iter().enumerate() {
         for b in &pads[i + 1..] {
-            if a.number == b.number || !shares_copper_layer(a, b) {
+            if same_node(a, b) || !shares_copper_layer(a, b) {
                 continue;
             }
             let gap = pad_gap(a, b);
@@ -125,11 +140,11 @@ pub(crate) fn footprint_limits(lib_id: &str, source: &str) -> PadLimits {
 
 /// The tightest geometry across every footprint the board will carry.
 pub(crate) fn board_limits<'a>(
-    footprints: impl IntoIterator<Item = (&'a str, &'a str)>,
+    footprints: impl IntoIterator<Item = (&'a str, &'a str, &'a BTreeMap<String, String>)>,
 ) -> PadLimits {
     footprints
         .into_iter()
-        .map(|(lib_id, source)| footprint_limits(lib_id, source))
+        .map(|(lib_id, source, pad_nets)| footprint_limits(lib_id, source, pad_nets))
         .fold(PadLimits::none(), PadLimits::merge)
 }
 
@@ -209,7 +224,7 @@ mod tests {
 
     #[test]
     fn pad_gap_is_measured_edge_to_edge() {
-        let limits = footprint_limits("Package_TO_SOT_SMD:SOT-23", SOT23_ROW);
+        let limits = footprint_limits("Package_TO_SOT_SMD:SOT-23", SOT23_ROW, &BTreeMap::new());
         approx(limits.min_pad_gap, 0.35);
         approx(limits.min_pad_width, 0.6);
         assert_eq!(
@@ -224,14 +239,14 @@ mod tests {
 
     #[test]
     fn pads_sharing_a_number_are_one_node_and_never_constrain_clearance() {
-        let limits = footprint_limits("Package_DFN_QFN:DFN", SPLIT_THERMAL);
+        let limits = footprint_limits("Package_DFN_QFN:DFN", SPLIT_THERMAL, &BTreeMap::new());
         assert_eq!(limits.min_pad_gap, None);
         approx(limits.min_pad_width, 1.0);
     }
 
     #[test]
     fn a_fine_pitch_part_lowers_the_seed_clearance_below_the_default() {
-        let limits = board_limits([("Connector_USB:USB_C", FINE_PITCH)]);
+        let limits = board_limits([("Connector_USB:USB_C", FINE_PITCH, &BTreeMap::new())]);
         approx(limits.min_pad_gap, 0.2);
         let (clearance, width, notes) = pad_limited_rules(0.15, 0.15, &limits);
         assert_eq!(clearance, 0.15, "0.2 mm of pad gap still admits 0.15");
@@ -244,6 +259,30 @@ mod tests {
             notes[0].contains("Connector_USB:USB_C pads A1/A2"),
             "{notes:?}"
         );
+    }
+
+    /// A USB-C receptacle merges its ground pads into one piece of copper. They
+    /// carry different pad numbers, so only the schematic net tells them apart —
+    /// without it the board reads as zero-clearance and every rule collapses to
+    /// the fabrication floor.
+    #[test]
+    fn pads_on_one_net_do_not_constrain_clearance_even_when_they_touch() {
+        const MERGED_GROUND: &str = r#"(footprint "USB_C"
+          (pad "A1" smd rect (at 0 0) (size 0.6 1.2) (layers "F.Cu"))
+          (pad "B12" smd rect (at 0.6 0) (size 0.6 1.2) (layers "F.Cu"))
+          (pad "A4" smd rect (at 2.0 0) (size 0.6 1.2) (layers "F.Cu"))
+        )"#;
+        let touching = footprint_limits("Connector_USB:USB_C", MERGED_GROUND, &BTreeMap::new());
+        approx(touching.min_pad_gap, 0.0);
+
+        let nets = BTreeMap::from([
+            ("A1".to_owned(), "GND".to_owned()),
+            ("B12".to_owned(), "GND".to_owned()),
+            ("A4".to_owned(), "VBUS".to_owned()),
+        ]);
+        let with_nets = footprint_limits("Connector_USB:USB_C", MERGED_GROUND, &nets);
+        approx(with_nets.min_pad_gap, 0.8);
+        assert_eq!(with_nets.tightest.unwrap().1, "B12");
     }
 
     #[test]
@@ -261,9 +300,10 @@ mod tests {
 
     #[test]
     fn the_tightest_footprint_on_the_board_wins() {
+        let no_nets = BTreeMap::new();
         let limits = board_limits([
-            ("Package_TO_SOT_SMD:SOT-23", SOT23_ROW),
-            ("Connector_USB:USB_C", FINE_PITCH),
+            ("Package_TO_SOT_SMD:SOT-23", SOT23_ROW, &no_nets),
+            ("Connector_USB:USB_C", FINE_PITCH, &no_nets),
         ]);
         approx(limits.min_pad_gap, 0.2);
         approx(limits.min_pad_width, 0.3);

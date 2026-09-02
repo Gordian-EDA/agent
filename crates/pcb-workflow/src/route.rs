@@ -479,9 +479,13 @@ fn disconnected_non_plane_nets(
             } if !plane_nets.contains(connection) => {
                 disconnected.insert(connection.clone());
             }
+            // A short is a defect on any net, plane or not. Exempting plane nets
+            // here left the shorted copper in place and the lint counting it
+            // forever, so every later route_board refused with the same
+            // violation count and no move could clear it.
             DrcViolation::Connectivity {
                 violation: ConnViolation::CrossNetMerge { a, b },
-            } if !plane_nets.contains(a) && !plane_nets.contains(b) => {
+            } => {
                 disconnected.extend([a.clone(), b.clone()]);
             }
             _ => {}
@@ -3208,6 +3212,63 @@ mod escape_bottleneck_tests {
         assert_eq!(result.solution.traces.len(), 1);
         assert_eq!(result.solution.vias.len(), 1);
         assert!(result.failed.is_empty());
+    }
+
+    /// A short involving a plane net used to be exempt from the honesty drop, so
+    /// the shorted copper stayed and the lint kept counting it — every later
+    /// route_board refused with the same count, and no `move_parts` could clear
+    /// it. Copper that shorts two nets is always dropped now.
+    #[test]
+    fn a_short_onto_a_plane_net_is_dropped_rather_than_refused_forever() {
+        let mut problem = bottom_plane_problem();
+        problem.connections.push(pcb_model::Connection {
+            name: "V3V3".to_string(),
+            points_to_connect: vec![
+                pcb_model::RoutePoint {
+                    x: 6.0,
+                    y: 1.0,
+                    layer: LayerRef::top(),
+                },
+                pcb_model::RoutePoint {
+                    x: 8.0,
+                    y: 1.0,
+                    layer: LayerRef::top(),
+                },
+            ],
+        });
+        // V3V3's copper runs straight through GND's terminal, so the two nets
+        // are electrically one.
+        let mut result = RouteResult {
+            engine: "test".to_string(),
+            failed: vec![],
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "V3V3".to_string(),
+                    layer: LayerRef::top(),
+                    width: 0.2,
+                    path: vec![Point2 { x: 6.0, y: 1.0 }, Point2 { x: 1.13, y: 1.13 }],
+                }],
+                vias: vec![],
+            },
+        };
+        let planes = BTreeSet::from(["GND".to_string()]);
+
+        let violations = lint(&problem, &result.solution);
+        assert!(violations.iter().any(|v| matches!(
+            v,
+            DrcViolation::Connectivity {
+                violation: ConnViolation::CrossNetMerge { .. }
+            }
+        )));
+
+        let (dropped, remaining) = make_route_honest_with_report(&problem, &mut result, &planes);
+        assert!(dropped.contains(&"V3V3".to_string()), "{dropped:?}");
+        assert!(result.solution.traces.is_empty());
+        assert_eq!(
+            lint_summary_from_violations(&remaining, &result.failed, &planes).real,
+            0,
+            "{remaining:?}"
+        );
     }
 
     #[test]

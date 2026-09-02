@@ -390,7 +390,7 @@ fn effective_seed_rules(
     let limits = crate::rules::board_limits(
         parts
             .iter()
-            .map(|part| (part.lib_id.as_str(), part.source.as_str())),
+            .map(|part| (part.lib_id.as_str(), part.source.as_str(), &part.pad_nets)),
     );
     let (clearance, min_trace_width, notes) =
         crate::rules::pad_limited_rules(effective.clearance, effective.min_trace_width, &limits);
