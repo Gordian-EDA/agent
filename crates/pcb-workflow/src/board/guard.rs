@@ -40,7 +40,7 @@ pub(crate) struct Defects {
     /// Connections whose copper does not join all their pads.
     unrouted: BTreeSet<String>,
     /// Footprint courtyards that cross the physical board outline.
-    outside_outline: BTreeSet<String>,
+    outside_outline: BTreeMap<String, String>,
     /// Routed copper items that do not clear the physical board outline.
     copper_outside_outline: BTreeSet<String>,
 }
@@ -78,7 +78,7 @@ impl Defects {
             *defects.faults.entry(fault.key.clone()).or_default() += 1;
         }
         let containment = outline_containment(board);
-        defects.outside_outline = containment.outside_outline;
+        defects.outside_outline = containment.outside_outline_keys;
         defects.copper_outside_outline = containment.copper_outside_keys;
         (defects, explained)
     }
@@ -89,6 +89,7 @@ impl Defects {
 pub(crate) struct OutlineContainment {
     pub(crate) outside_outline: BTreeSet<String>,
     pub(crate) copper_outside_outline: usize,
+    outside_outline_keys: BTreeMap<String, String>,
     copper_outside_keys: BTreeSet<String>,
 }
 
@@ -128,6 +129,17 @@ pub(crate) fn outline_containment_against(
             );
             if !rect_inside_outline(courtyard, outline) {
                 result.outside_outline.insert(part.reference.clone());
+                result.outside_outline_keys.insert(
+                    format!(
+                        "{outline_key}|courtyard|{}|{:016x}:{:016x}:{:016x}:{:016x}",
+                        part.reference,
+                        courtyard.min_x.to_bits(),
+                        courtyard.min_y.to_bits(),
+                        courtyard.max_x.to_bits(),
+                        courtyard.max_y.to_bits(),
+                    ),
+                    part.reference.clone(),
+                );
             }
         }
     }
@@ -206,12 +218,43 @@ fn rect_inside_outline(rect: geom::Rect, outline: &Polygon) -> bool {
     .into_iter()
     .all(|point| outline.contains_point(point));
     corners_inside
-        && !outline.points().iter().any(|point| {
-            point.x > rect.min_x + geom::EPS
-                && point.x < rect.max_x - geom::EPS
-                && point.y > rect.min_y + geom::EPS
-                && point.y < rect.max_y - geom::EPS
-        })
+        && !outline
+            .edges()
+            .any(|edge| segment_hits_rect_interior(edge, rect))
+}
+
+fn segment_hits_rect_interior(segment: geom::Segment, rect: geom::Rect) -> bool {
+    let inner = geom::Rect::new(
+        rect.min_x + geom::EPS,
+        rect.min_y + geom::EPS,
+        rect.max_x - geom::EPS,
+        rect.max_y - geom::EPS,
+    );
+    if inner.min_x >= inner.max_x || inner.min_y >= inner.max_y {
+        return false;
+    }
+    let direction = Point2::new(segment.b.x - segment.a.x, segment.b.y - segment.a.y);
+    let mut enter = 0.0_f64;
+    let mut exit = 1.0_f64;
+    for (origin, delta, low, high) in [
+        (segment.a.x, direction.x, inner.min_x, inner.max_x),
+        (segment.a.y, direction.y, inner.min_y, inner.max_y),
+    ] {
+        if delta.abs() <= f64::EPSILON {
+            if origin < low || origin > high {
+                return false;
+            }
+            continue;
+        }
+        let first = (low - origin) / delta;
+        let second = (high - origin) / delta;
+        enter = enter.max(first.min(second));
+        exit = exit.min(first.max(second));
+        if enter > exit {
+            return false;
+        }
+    }
+    exit >= 0.0 && enter <= 1.0
 }
 
 /// What an edit added to a board's defects. Everything the board already
@@ -244,7 +287,9 @@ fn introduced<'a>(
             .collect(),
         outside_outline: after
             .outside_outline
-            .difference(&before.outside_outline)
+            .iter()
+            .filter(|(key, _)| !before.outside_outline.contains_key(*key))
+            .map(|(_, reference)| reference)
             .collect(),
         copper_outside_outline: after
             .copper_outside_outline
@@ -510,7 +555,7 @@ mod tests {
             shorts: shorts.iter().cloned().collect(),
             faults: counts,
             unrouted: BTreeSet::new(),
-            outside_outline: BTreeSet::new(),
+            outside_outline: BTreeMap::new(),
             copper_outside_outline: BTreeSet::new(),
         }
     }
@@ -564,7 +609,9 @@ mod tests {
     fn newly_outside_geometry_is_a_guard_defect() {
         let before = defects(&[], &[]);
         let mut after = defects(&[], &[]);
-        after.outside_outline.insert("R1".to_owned());
+        after
+            .outside_outline
+            .insert("R1:moved".to_owned(), "R1".to_owned());
         after.copper_outside_outline.insert("via:old-outline".to_owned());
 
         let added = introduced(&before, &after, &[]);
@@ -582,6 +629,20 @@ mod tests {
             introduced(&before, &after, &[]).copper_outside_outline,
             [&"trace:after".to_owned()],
             "an equal-count replacement is still newly outside geometry"
+        );
+
+        let mut before = defects(&[], &[]);
+        before
+            .outside_outline
+            .insert("R1:before".to_owned(), "R1".to_owned());
+        let mut after = defects(&[], &[]);
+        after
+            .outside_outline
+            .insert("R1:after".to_owned(), "R1".to_owned());
+        assert_eq!(
+            introduced(&before, &after, &[]).outside_outline,
+            [&"R1".to_owned()],
+            "moving the same reference farther out is still a new defect"
         );
     }
 
@@ -612,5 +673,20 @@ mod tests {
             "the regression requires all four corners to look valid"
         );
         assert!(!rect_inside_outline(across_notch, &outline));
+
+        let diagonal = Polygon::new(vec![
+            Point2::new(-10.0, -10.0),
+            Point2::new(20.0, -10.0),
+            Point2::new(20.0, 20.0),
+            Point2::new(-10.0, 20.0),
+            Point2::new(-10.0, 6.0),
+            Point2::new(11.0, 5.0),
+            Point2::new(-10.0, 4.0),
+        ])
+        .unwrap();
+        assert!(!rect_inside_outline(
+            geom::Rect::new(0.0, 0.0, 10.0, 10.0),
+            &diagonal,
+        ));
     }
 }
