@@ -1391,7 +1391,7 @@ def aggregate_findings(reports, output_root, suite, questions):
     grouped = {tag: [] for tag in FINDING_TAGS}
     for report in reports:
         for tag, finding in findings_for(report):
-            grouped[tag].append((report["case"], finding))
+            grouped.setdefault(tag, []).append((report["case"], finding))
     for tag in FINDING_TAGS:
         if not grouped[tag]:
             continue

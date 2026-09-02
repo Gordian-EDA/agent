@@ -117,7 +117,7 @@ fn live_place_parts_commits_every_corpus_fixture() {
             &env,
             &mut doc,
             &input,
-            &spine_place::SpinePlace,
+            Box::new(spine_place::SpinePlace),
             None,
         ) {
             Ok(report) if !report.committed => {
