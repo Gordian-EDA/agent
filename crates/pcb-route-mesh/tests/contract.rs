@@ -41,6 +41,24 @@ fn boards() -> Vec<(&'static str, RoutingView)> {
         .collect()
 }
 
+/// The prepared routing problems for the seven `--required` corpus boards.
+fn corpus_boards() -> Vec<(&'static str, RoutingView)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/corpus");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .expect("corpus fixtures")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|n| {
+            let json = std::fs::read_to_string(dir.join(&n)).unwrap();
+            let view: RoutingView = serde_json::from_str(&json).unwrap();
+            (Box::leak(n.into_boxed_str()) as &'static str, view)
+        })
+        .collect()
+}
+
 fn route(view: &RoutingView, budget: &Budget) -> RouteResult {
     let drc = StandardDrc;
     let grid = GridRouter::new(&drc);
@@ -151,5 +169,30 @@ fn a_stub_sub_router_still_yields_a_valid_result() {
     );
     for trace in &result.solution.traces {
         assert!(trace.layer.index(view.layer_count).is_some());
+    }
+}
+
+/// Every segment of emitted copper is axis-aligned or exactly 45°.
+///
+/// This is an invariant, not a preference: a board editor draws no other angle,
+/// and nothing downstream repairs one. It covers the whole `--required` corpus,
+/// where the terminal and escape emitters (which have to reach off-lattice pad
+/// centres) are the geometry most at risk of skewing.
+#[test]
+fn every_emitted_segment_is_octilinear() {
+    for (name, view) in boards().into_iter().chain(corpus_boards()) {
+        let result = route(&view, &Budget::unlimited());
+        for trace in &result.solution.traces {
+            for w in trace.path.windows(2) {
+                assert!(
+                    pcb_model::is_octilinear(w[0], w[1]),
+                    "{name}: {} emits an off-angle segment {:?} -> {:?}",
+                    trace.connection,
+                    w[0],
+                    w[1]
+                );
+            }
+        }
+        assert_eq!(result.solution.metrics().off_angle_segments, 0, "{name}");
     }
 }

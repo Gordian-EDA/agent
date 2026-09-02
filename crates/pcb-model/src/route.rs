@@ -99,6 +99,26 @@ pub fn is_octilinear(a: crate::Point2, b: crate::Point2) -> bool {
     dx < ANGLE_EPS || dy < ANGLE_EPS || (dx - dy).abs() < ANGLE_EPS
 }
 
+/// The octilinear path from `from` to `to`: a straight leg along the dominant
+/// axis, then one 45° diagonal.
+///
+/// This is how a board editor draws a connection, and it is the shape a pad
+/// exit must have — copper leaves the pad square-on and turns once. A pure
+/// axial or pure diagonal move needs no knee and comes back as two points.
+pub fn octilinear_path(from: crate::Point2, to: crate::Point2) -> Vec<crate::Point2> {
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let diagonal = dx.abs().min(dy.abs());
+    let knee = if dx.abs() >= dy.abs() {
+        crate::Point2::new(from.x + dx.signum() * (dx.abs() - diagonal), from.y)
+    } else {
+        crate::Point2::new(from.x, from.y + dy.signum() * (dy.abs() - diagonal))
+    };
+    if knee.dist(from) < ANGLE_EPS || knee.dist(to) < ANGLE_EPS {
+        return vec![from, to];
+    }
+    vec![from, knee, to]
+}
+
 /// Does the polyline turn at `b`? Zero-length steps are not corners.
 pub fn is_bend(a: crate::Point2, b: crate::Point2, c: crate::Point2) -> bool {
     let (ux, uy) = (b.x - a.x, b.y - a.y);
@@ -302,7 +322,51 @@ mod tests {
         };
         let m = s.metrics();
         assert_eq!(m.bend_count, 2);
-        assert_eq!(m.off_angle_segments, 1, "only the last segment is off-angle");
+        assert_eq!(
+            m.off_angle_segments, 1,
+            "only the last segment is off-angle"
+        );
+    }
+
+    #[test]
+    fn an_octilinear_path_leaves_along_the_dominant_axis_then_turns_45() {
+        let p = |x: f64, y: f64| Point2 { x, y };
+        let path = octilinear_path(p(0.0, 0.0), p(10.0, 3.0));
+        assert_eq!(path, vec![p(0.0, 0.0), p(7.0, 0.0), p(10.0, 3.0)]);
+        for w in path.windows(2) {
+            assert!(is_octilinear(w[0], w[1]), "{:?}", w);
+        }
+    }
+
+    #[test]
+    fn a_pure_axial_or_diagonal_move_needs_no_knee() {
+        let p = |x: f64, y: f64| Point2 { x, y };
+        assert_eq!(
+            octilinear_path(p(0.0, 0.0), p(5.0, 0.0)),
+            vec![p(0.0, 0.0), p(5.0, 0.0)]
+        );
+        assert_eq!(
+            octilinear_path(p(0.0, 0.0), p(-4.0, 4.0)),
+            vec![p(0.0, 0.0), p(-4.0, 4.0)]
+        );
+    }
+
+    #[test]
+    fn an_octilinear_path_is_octilinear_in_every_quadrant() {
+        let p = |x: f64, y: f64| Point2 { x, y };
+        for to in [
+            p(3.0, 11.0),
+            p(-3.0, 11.0),
+            p(3.0, -11.0),
+            p(-11.0, -3.0),
+            p(0.13, 0.41),
+        ] {
+            let path = octilinear_path(p(0.0, 0.0), to);
+            assert_eq!(*path.last().unwrap(), to);
+            for w in path.windows(2) {
+                assert!(is_octilinear(w[0], w[1]), "{to:?} -> {path:?}");
+            }
+        }
     }
 
     #[test]

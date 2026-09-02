@@ -1,0 +1,322 @@
+{
+  "layerCount": 2,
+  "minTraceWidth": 0.15,
+  "obstacles": [
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 42.5,
+        "y": 16.5
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "S1"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 42.5,
+        "y": 19.04
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "S2"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 42.5,
+        "y": 21.58
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "S3"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 42.5,
+        "y": 24.12
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "S4"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 42.5,
+        "y": 26.66
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "S5"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 42.5,
+        "y": 29.2
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "S6"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 48.5,
+        "y": 16.5
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "S1"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 48.5,
+        "y": 19.04
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "S2"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 48.5,
+        "y": 21.58
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "S3"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 48.5,
+        "y": 24.12
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "S4"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 48.5,
+        "y": 26.66
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "S5"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 48.5,
+        "y": 29.2
+      },
+      "width": 1.7,
+      "height": 1.7,
+      "connectedTo": [
+        "S6"
+      ]
+    },
+    {
+      "type": "rect",
+      "layers": [
+        "top",
+        "bottom"
+      ],
+      "center": {
+        "x": 32.0,
+        "y": 20.0
+      },
+      "width": 16.0,
+      "height": 28.0,
+      "connectedTo": []
+    }
+  ],
+  "connections": [
+    {
+      "name": "S1",
+      "pointsToConnect": [
+        {
+          "x": 42.5,
+          "y": 16.5,
+          "layer": "top"
+        },
+        {
+          "x": 48.5,
+          "y": 16.5,
+          "layer": "top"
+        }
+      ]
+    },
+    {
+      "name": "S2",
+      "pointsToConnect": [
+        {
+          "x": 42.5,
+          "y": 19.04,
+          "layer": "top"
+        },
+        {
+          "x": 48.5,
+          "y": 19.04,
+          "layer": "top"
+        }
+      ]
+    },
+    {
+      "name": "S3",
+      "pointsToConnect": [
+        {
+          "x": 42.5,
+          "y": 21.58,
+          "layer": "top"
+        },
+        {
+          "x": 48.5,
+          "y": 21.58,
+          "layer": "top"
+        }
+      ]
+    },
+    {
+      "name": "S4",
+      "pointsToConnect": [
+        {
+          "x": 42.5,
+          "y": 24.12,
+          "layer": "top"
+        },
+        {
+          "x": 48.5,
+          "y": 24.12,
+          "layer": "top"
+        }
+      ]
+    },
+    {
+      "name": "S5",
+      "pointsToConnect": [
+        {
+          "x": 42.5,
+          "y": 26.66,
+          "layer": "top"
+        },
+        {
+          "x": 48.5,
+          "y": 26.66,
+          "layer": "top"
+        }
+      ]
+    },
+    {
+      "name": "S6",
+      "pointsToConnect": [
+        {
+          "x": 42.5,
+          "y": 29.2,
+          "layer": "top"
+        },
+        {
+          "x": 48.5,
+          "y": 29.2,
+          "layer": "top"
+        }
+      ]
+    }
+  ],
+  "bounds": {
+    "minX": 0.5,
+    "minY": 0.5,
+    "maxX": 63.5,
+    "maxY": 39.5
+  },
+  "clearance": 0.15,
+  "viaDiameter": 0.6,
+  "viaDrill": 0.3,
+  "netWidths": {},
+  "outline": null,
+  "planeNets": {},
+  "escapeLayers": {},
+  "fixedCopper": {
+    "traces": [],
+    "vias": []
+  },
+  "nets": null
+}

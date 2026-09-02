@@ -27,6 +27,6 @@ pub use point::Point2;
 pub use polygon::Polygon;
 pub use polyline::Polyline;
 pub use rect::{BoundaryAxis, Rect, SharedBoundary};
-pub use segment::Segment;
+pub use segment::{Segment, octilinear_path};
 pub use shape::Dir;
 pub use union_find::{ParentForest, UnionFind};

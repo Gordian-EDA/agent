@@ -30,7 +30,7 @@ pub use place::{
 };
 pub use route::{
     RouteMetrics, RouteQuality, RouteResult, RoutingCapabilities, failed_pad_weight, is_bend,
-    is_octilinear,
+    is_octilinear, octilinear_path,
 };
 
 /// Floor on the routing grid pitch (mm), so loose design rules on a large board

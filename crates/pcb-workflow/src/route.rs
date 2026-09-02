@@ -844,11 +844,15 @@ fn add_terminal_stubs(
             if (exact.x - center.x).abs() < geom::EPS && (exact.y - center.y).abs() < geom::EPS {
                 continue;
             }
+            // Straight out of the pad, then one 45° turn onto the lattice. A
+            // direct exact→centre segment is an arbitrary angle, and it is the
+            // copper the critic keeps calling out — every pad on the board
+            // wears one.
             solution.traces.push(Trace {
                 connection: conn.name.clone(),
                 layer: point.layer.clone(),
                 width,
-                path: vec![exact, center],
+                path: pcb_model::octilinear_path(exact, center),
             });
         }
     }
@@ -3799,6 +3803,28 @@ mod escape_bottleneck_tests {
 
         assert_eq!(solution.traces.len(), 1);
         assert_eq!(solution.traces[0].path[0], Point2 { x: 4.13, y: 1.13 });
+    }
+
+    #[test]
+    fn every_pad_exit_leaves_the_pad_on_an_octilinear_leg() {
+        let problem = bottom_plane_problem();
+        let mut solution = RouteSolution::default();
+
+        add_terminal_stubs(&problem, &mut solution, &BTreeSet::new());
+
+        assert!(
+            !solution.traces.is_empty(),
+            "the fixture has pads to anchor"
+        );
+        for trace in &solution.traces {
+            for pair in trace.path.windows(2) {
+                assert!(
+                    pcb_model::is_octilinear(pair[0], pair[1]),
+                    "{:?} is an arbitrary angle",
+                    pair
+                );
+            }
+        }
     }
 
     #[test]

@@ -33,8 +33,9 @@
 
 use pcb_grid::astar::{self, AStarCosts, DIAG_COST, State};
 use pcb_grid::grid::RouteGrid;
+use pcb_grid::tidy;
 use pcb_model::{
-    Budget, Drc, Finding, PcbRouter,
+    Budget, Drc, PcbRouter,
     Connection, FailedNet, LayerRef, Point2, RouteQuality, RouteResult, RouteSolution, RoutingView,
     Trace, Via, ViaSpan,
 };
@@ -268,10 +269,12 @@ fn reconcile_with_options(
     result: &mut RouteResult,
     allow_octilinear_shortcuts: bool,
 ) {
-    if allow_octilinear_shortcuts {
-        shortcut_octilinear_traces(drc, problem, &mut result.solution);
-    }
-    pull_orthogonal_trace_corners(drc, problem, &mut result.solution);
+    let corners = if allow_octilinear_shortcuts {
+        tidy::Corners::Octilinear
+    } else {
+        tidy::Corners::Orthogonal
+    };
+    tidy::straighten_traces(drc, problem, &mut result.solution, corners);
     drop_duplicate_vias(&mut result.solution);
     drop_covered_vias(drc, problem, &mut result.solution);
     let mut dropped = drc.drop_violating_copper(problem, &mut result.solution);
@@ -296,190 +299,6 @@ fn reconcile_with_options(
         })
         .collect();
     result.failed.extend(added);
-}
-
-/// Pull grid trace corners tight with conservative straight/45-degree shortcuts.
-/// A candidate replaces `p[i]..p[j]` with the direct segment only when it shortens
-/// copper and introduces no new lint finding.
-fn shortcut_octilinear_traces(drc: &dyn Drc, problem: &RoutingView, solution: &mut RouteSolution) {
-    if !has_octilinear_shortcut_candidate_shape(solution) {
-        return;
-    }
-
-    let mut baseline = drc.check(problem, solution);
-    let mut lint_budget = 256usize;
-
-    loop {
-        let mut improved = false;
-        'candidate: for ti in 0..solution.traces.len() {
-            let n = solution.traces[ti].path.len();
-            if n < 3 {
-                continue;
-            }
-            for span in (2..n).rev() {
-                for i in 0..(n - span) {
-                    if lint_budget == 0 {
-                        return;
-                    }
-                    let j = i + span;
-                    let a = solution.traces[ti].path[i];
-                    let b = solution.traces[ti].path[j];
-                    if !is_octilinear_segment(a, b) {
-                        continue;
-                    }
-
-                    let old_len = path_len(&solution.traces[ti].path[i..=j]);
-                    let new_len = a.dist(b);
-                    if new_len + 0.01 >= old_len {
-                        continue;
-                    }
-
-                    let mut candidate = solution.clone();
-                    candidate.traces[ti].path.drain(i + 1..j);
-                    let findings = drc.check(problem, &candidate);
-                    lint_budget -= 1;
-                    if !introduces_new_findings(&baseline, &findings) {
-                        *solution = candidate;
-                        baseline = findings;
-                        improved = true;
-                        break 'candidate;
-                    }
-                }
-            }
-        }
-
-        if !improved {
-            break;
-        }
-    }
-}
-
-fn has_octilinear_shortcut_candidate_shape(solution: &RouteSolution) -> bool {
-    solution.traces.iter().any(|trace| {
-        let n = trace.path.len();
-        if n < 3 {
-            return false;
-        }
-        for span in (2..n).rev() {
-            for i in 0..(n - span) {
-                let j = i + span;
-                let a = trace.path[i];
-                let b = trace.path[j];
-                if !is_octilinear_segment(a, b) {
-                    continue;
-                }
-                let old_len = path_len(&trace.path[i..=j]);
-                let new_len = a.dist(b);
-                if new_len + 0.01 < old_len {
-                    return true;
-                }
-            }
-        }
-        false
-    })
-}
-
-/// Line-pull grid detours after path emission. A candidate replaces `a..b` with
-/// one of the two Manhattan L-shapes and is accepted only when it shortens copper
-/// without introducing any new lint finding, so via anchors and existing DRC
-/// semantics remain under the same oracle as reconciliation.
-fn pull_orthogonal_trace_corners(drc: &dyn Drc, problem: &RoutingView, solution: &mut RouteSolution) {
-    if !has_orthogonal_pull_candidate_shape(solution) {
-        return;
-    }
-
-    let mut baseline = drc.check(problem, solution);
-    let mut lint_budget = 256usize;
-
-    loop {
-        let mut improved = false;
-        'candidate: for ti in 0..solution.traces.len() {
-            let n = solution.traces[ti].path.len();
-            if n < 4 {
-                continue;
-            }
-            for span in (3..n).rev() {
-                for i in 0..(n - span) {
-                    if lint_budget == 0 {
-                        return;
-                    }
-                    let j = i + span;
-                    let a = solution.traces[ti].path[i];
-                    let b = solution.traces[ti].path[j];
-                    if (a.x - b.x).abs() < geom::EPS || (a.y - b.y).abs() < geom::EPS {
-                        continue;
-                    }
-
-                    let old_len = path_len(&solution.traces[ti].path[i..=j]);
-                    for corner in [Point2 { x: a.x, y: b.y }, Point2 { x: b.x, y: a.y }] {
-                        let new_len = a.dist(corner) + corner.dist(b);
-                        if new_len + 0.01 >= old_len {
-                            continue;
-                        }
-
-                        let mut candidate = solution.clone();
-                        candidate.traces[ti].path.splice(i + 1..j, [corner]);
-                        candidate.traces[ti].path =
-                            geom::Polyline::new(candidate.traces[ti].path.clone())
-                                .simplify()
-                                .into_points();
-                        let findings = drc.check(problem, &candidate);
-                        lint_budget -= 1;
-                        if !introduces_new_findings(&baseline, &findings)
-                            && candidate.metrics().wirelength + 1e-9 < solution.metrics().wirelength
-                        {
-                            *solution = candidate;
-                            baseline = findings;
-                            improved = true;
-                            break 'candidate;
-                        }
-                        if lint_budget == 0 {
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-
-        if !improved {
-            break;
-        }
-    }
-}
-
-fn has_orthogonal_pull_candidate_shape(solution: &RouteSolution) -> bool {
-    solution.traces.iter().any(|trace| {
-        let n = trace.path.len();
-        if n < 4 {
-            return false;
-        }
-        for span in (3..n).rev() {
-            for i in 0..(n - span) {
-                let j = i + span;
-                let a = trace.path[i];
-                let b = trace.path[j];
-                if (a.x - b.x).abs() < geom::EPS || (a.y - b.y).abs() < geom::EPS {
-                    continue;
-                }
-                let old_len = path_len(&trace.path[i..=j]);
-                let new_len = (a.x - b.x).abs() + (a.y - b.y).abs();
-                if new_len + 0.01 < old_len {
-                    return true;
-                }
-            }
-        }
-        false
-    })
-}
-
-fn is_octilinear_segment(a: Point2, b: Point2) -> bool {
-    let dx = (a.x - b.x).abs();
-    let dy = (a.y - b.y).abs();
-    dx < geom::EPS || dy < geom::EPS || (dx - dy).abs() < 0.01
-}
-
-fn path_len(path: &[Point2]) -> f64 {
-    path.windows(2).map(|w| w[0].dist(w[1])).sum()
 }
 
 fn drop_duplicate_vias(solution: &mut RouteSolution) {
@@ -514,7 +333,7 @@ fn drop_covered_vias(drc: &dyn Drc, problem: &RoutingView, solution: &mut RouteS
         let mut candidate = solution.clone();
         candidate.vias.remove(idx);
         let findings = drc.check(problem, &candidate);
-        if !introduces_new_findings(&baseline, &findings)
+        if !tidy::introduces_new_findings(&baseline, &findings)
             && candidate.metrics().via_count < solution.metrics().via_count
         {
             *solution = candidate;
@@ -523,15 +342,6 @@ fn drop_covered_vias(drc: &dyn Drc, problem: &RoutingView, solution: &mut RouteS
             idx += 1;
         }
     }
-}
-
-fn introduces_new_findings(
-    baseline: &[Finding],
-    candidate: &[Finding],
-) -> bool {
-    candidate
-        .iter()
-        .any(|finding| !baseline.iter().any(|known| known == finding))
 }
 
 fn via_is_covered_by_another(problem: &RoutingView, solution: &RouteSolution, idx: usize) -> bool {
@@ -584,6 +394,13 @@ fn route_with_order(problem: &RoutingView, costs: AStarCosts, order: Vec<usize>)
     let costs = AStarCosts {
         plane_mask: plane_mask_for(layer_count),
         ..costs
+    };
+    // A diagonal-free search must not have 45-degree legs spliced back into it
+    // by the terminal/escape emitters.
+    let corners = if costs.diag == u32::MAX {
+        tidy::Corners::Orthogonal
+    } else {
+        tidy::Corners::Octilinear
     };
 
     // Clearance halo: when a net claims a cell, foreign nets must stay a full
@@ -661,6 +478,7 @@ fn route_with_order(problem: &RoutingView, costs: AStarCosts, order: Vec<usize>)
             seed_pad,
             halo,
             escape_layer,
+            corners,
             &mut traces,
             &mut vias,
         );
@@ -685,6 +503,7 @@ fn route_with_order(problem: &RoutingView, costs: AStarCosts, order: Vec<usize>)
                 start_pad,
                 halo,
                 escape_layer,
+                corners,
                 &mut traces,
                 &mut vias,
             );
@@ -738,20 +557,7 @@ fn route_with_order(problem: &RoutingView, costs: AStarCosts, order: Vec<usize>)
                 };
                 let exact = terminal.point();
                 if !exact.near_eq(center, geom::EPS) {
-                    let path = if (exact.x - center.x).abs() < geom::EPS
-                        || (exact.y - center.y).abs() < geom::EPS
-                    {
-                        vec![exact, center]
-                    } else {
-                        vec![
-                            exact,
-                            Point2 {
-                                x: center.x,
-                                y: exact.y,
-                            },
-                            center,
-                        ]
-                    };
+                    let path = tidy::leg(exact, center, corners);
                     traces.push(Trace {
                         connection: conn.name.clone(),
                         layer: terminal.layer.clone(),
@@ -1327,6 +1133,7 @@ fn escape_cells(
     pad_cell: State,
     halo: usize,
     escape_layer: Option<u32>,
+    corners: tidy::Corners,
     traces: &mut Vec<Trace>,
     vias: &mut Vec<Via>,
 ) -> Vec<State> {
@@ -1437,9 +1244,9 @@ fn escape_cells(
     // Author the stub from the pad's exact centre (sub-grid, so the near-pad run is
     // collinear with the pad and clears the perpendicular neighbours by construction)
     // to the tip CELL centre, where the maze router takes over (so the stub end meets
-    // the routed path byte-exactly). The tip sits ~1 pad-length out in open board, so
-    // the half-pitch perpendicular snap there is harmless; `drop_violating_copper`
-    // gates the emitted mm regardless.
+    // the routed path byte-exactly). The half-pitch perpendicular snap at the tip is
+    // absorbed by a 45-degree leg rather than skewing the whole stub;
+    // `drop_violating_copper` gates the emitted mm regardless.
     let start_mm = Point2 { x: pt.x, y: pt.y };
     let tip_mm = Point2 {
         x: grid.cell_center_x(tip.ix),
@@ -1449,7 +1256,7 @@ fn escape_cells(
         connection: problem.connections[conn_idx].name.clone(),
         layer: layer_ref(pad_cell.layer, problem.layer_count.max(1) as usize),
         width: problem.net_width(&problem.connections[conn_idx].name),
-        path: vec![start_mm, tip_mm],
+        path: tidy::leg(start_mm, tip_mm, corners),
     });
     mark_segment(grid, conn_idx, pad_cell, tip, halo);
     cells.push(tip);
@@ -1847,6 +1654,7 @@ fn grid_candidate_can_skip_orthogonal(drc: &dyn Drc, problem: &RoutingView, resu
 
 #[cfg(test)]
 mod tests {
+    use pcb_model::Finding;
     use super::*;
     use pcb_drc::{StandardDrc, connectivity};
 
@@ -3537,95 +3345,6 @@ mod tests {
             "exact ties keep the incumbent"
         );
     }
-
-    #[test]
-    fn orthogonal_pull_candidate_shape_filters_trivial_routes() {
-        let straight = RouteSolution {
-            traces: vec![Trace {
-                connection: "N".to_owned(),
-                layer: LayerRef::top(),
-                width: 0.2,
-                path: vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 5.0, y: 1.0 }],
-            }],
-            vias: vec![],
-        };
-        let already_tight_l = RouteSolution {
-            traces: vec![Trace {
-                connection: "N".to_owned(),
-                layer: LayerRef::top(),
-                width: 0.2,
-                path: vec![
-                    Point2 { x: 1.0, y: 1.0 },
-                    Point2 { x: 1.0, y: 4.0 },
-                    Point2 { x: 5.0, y: 4.0 },
-                ],
-            }],
-            vias: vec![],
-        };
-        let detour = RouteSolution {
-            traces: vec![Trace {
-                connection: "N".to_owned(),
-                layer: LayerRef::top(),
-                width: 0.2,
-                path: vec![
-                    Point2 { x: 1.0, y: 1.0 },
-                    Point2 { x: 1.0, y: 5.0 },
-                    Point2 { x: 3.0, y: 5.0 },
-                    Point2 { x: 3.0, y: 4.0 },
-                    Point2 { x: 5.0, y: 4.0 },
-                ],
-            }],
-            vias: vec![],
-        };
-
-        assert!(!has_orthogonal_pull_candidate_shape(&straight));
-        assert!(!has_orthogonal_pull_candidate_shape(&already_tight_l));
-        assert!(has_orthogonal_pull_candidate_shape(&detour));
-    }
-
-    #[test]
-    fn octilinear_shortcut_candidate_shape_filters_trivial_routes() {
-        let straight = RouteSolution {
-            traces: vec![Trace {
-                connection: "N".to_owned(),
-                layer: LayerRef::top(),
-                width: 0.2,
-                path: vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 5.0, y: 1.0 }],
-            }],
-            vias: vec![],
-        };
-        let already_tight_l = RouteSolution {
-            traces: vec![Trace {
-                connection: "N".to_owned(),
-                layer: LayerRef::top(),
-                width: 0.2,
-                path: vec![
-                    Point2 { x: 1.0, y: 1.0 },
-                    Point2 { x: 1.0, y: 4.0 },
-                    Point2 { x: 5.0, y: 4.0 },
-                ],
-            }],
-            vias: vec![],
-        };
-        let diagonal_detour = RouteSolution {
-            traces: vec![Trace {
-                connection: "N".to_owned(),
-                layer: LayerRef::top(),
-                width: 0.2,
-                path: vec![
-                    Point2 { x: 1.0, y: 1.0 },
-                    Point2 { x: 1.0, y: 4.0 },
-                    Point2 { x: 4.0, y: 4.0 },
-                ],
-            }],
-            vias: vec![],
-        };
-
-        assert!(!has_octilinear_shortcut_candidate_shape(&straight));
-        assert!(!has_octilinear_shortcut_candidate_shape(&already_tight_l));
-        assert!(has_octilinear_shortcut_candidate_shape(&diagonal_detour));
-    }
-
     #[test]
     fn reconcile_shortcuts_clean_octilinear_detour() {
         let p = RoutingView {
