@@ -1,5 +1,6 @@
 use kicad_footprint::{
     CourtyardSource, Footprint, FootprintCatalog, LibraryId, PadTechnology, SearchQuery,
+    unknown_footprint_message,
 };
 
 #[test]
@@ -49,7 +50,7 @@ fn suggestion_catalog(tmp: &std::path::Path, lib_ids: &[&str]) -> FootprintCatal
 
 fn suggested(catalog: &FootprintCatalog, id: &str) -> Vec<String> {
     catalog
-        .suggest(&id.parse().unwrap())
+        .suggest(id)
         .iter()
         .map(ToString::to_string)
         .collect()
@@ -103,7 +104,7 @@ fn suggest_recovers_from_wrong_or_invented_library() {
     // Missing-colon shape: the embedded name suffix wins.
     assert_eq!(
         catalog
-            .suggest_text("Device_R_0805")
+            .suggest("Device_R_0805")
             .first()
             .map(ToString::to_string),
         Some("Resistor_SMD:R_0805_2012Metric".to_string())
@@ -134,8 +135,39 @@ fn suggest_recovers_live_mistakes_against_system_library() {
     );
     assert!(
         catalog
-            .suggest_text("Device_R_0805")
+            .suggest("Device_R_0805")
             .iter()
             .any(|id| id.to_string() == "Resistor_SMD:R_0805_2012Metric")
+    );
+}
+
+#[test]
+fn suggest_adds_the_missing_solder_jumper_pad_shape() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let catalog = suggestion_catalog(
+        tmp.path(),
+        &[
+            "Jumper:SolderJumper-2_P1.3mm_Open_Pad1.0x1.5mm",
+            "Jumper:SolderJumper-2_P1.3mm_Open_RoundedPad1.0x1.5mm",
+            "Jumper:SolderJumper-2_P1.3mm_Open_TrianglePad1.0x1.5mm",
+        ],
+    );
+
+    let suggestions = suggested(&catalog, "Jumper:SolderJumper-2_P1.3mm_Open");
+    assert_eq!(suggestions.len(), 3);
+    assert!(
+        suggestions
+            .iter()
+            .all(|id| id.contains("Jumper:SolderJumper-2_P1.3mm_Open_")),
+        "expected pad-shape suffixed ids, got {suggestions:?}"
+    );
+    let ids = catalog.suggest("Jumper:SolderJumper-2_P1.3mm_Open");
+    let message = unknown_footprint_message("Jumper:SolderJumper-2_P1.3mm_Open", &ids);
+    assert!(
+        message.starts_with(
+            "unknown footprint 'Jumper:SolderJumper-2_P1.3mm_Open'; did you mean \
+             Jumper:SolderJumper-2_P1.3mm_Open_"
+        ),
+        "unexpected diagnostic: {message}"
     );
 }
