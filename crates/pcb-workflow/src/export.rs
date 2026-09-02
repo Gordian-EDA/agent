@@ -36,6 +36,10 @@ pub(super) fn is_zone_self_unconnected(v: &Violation) -> bool {
         })
 }
 
+/// A badly broken board can have hundreds of unconnected items; enough of them
+/// to act on is enough.
+const MAX_UNCONNECTED_PAIRS: usize = 20;
+
 pub(super) fn violation_summaries<'a>(
     violations: impl IntoIterator<Item = &'a Violation>,
     limit: usize,
@@ -193,15 +197,24 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .filter(|v| !is_zone_self_unconnected(v))
         .collect();
-    let unconnected_owned: Vec<kicad::Violation> = meaningful_unconnected
-        .iter()
-        .map(|v| (*v).clone())
-        .collect();
-    // The board's own part list is what turns KiCAD's prose into pad handles.
-    // DRC still stands if the board cannot be read, so this is best-effort.
-    let parts = crate::active_board(ctx)
-        .map(|board| board.imported.parts)
-        .unwrap_or_default();
+    // The board's own part list is what turns KiCAD's prose into pad handles —
+    // read only when there is something to name, since taking a snapshot
+    // reopens the session this function deliberately closed. DRC still stands if
+    // the board cannot be read, so this is best-effort.
+    let unconnected = if meaningful_unconnected.is_empty() {
+        Vec::new()
+    } else {
+        let parts = crate::active_board(ctx)
+            .map(|board| board.imported.parts)
+            .unwrap_or_default();
+        crate::diagnose::unconnected_pairs(
+            &parts,
+            meaningful_unconnected
+                .iter()
+                .copied()
+                .take(MAX_UNCONNECTED_PAIRS),
+        )
+    };
     let blocking_findings = gate.copper_violations + gate.meaningful_unconnected;
     let reported_findings = report.violations.len() + report.unconnected_items.len();
     Ok(json!({
@@ -233,7 +246,7 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "top_unconnected": violation_summaries(meaningful_unconnected.iter().copied(), 5),
         // Never a bare count: the two pads that should be joined are what say
         // which route_track / route_board{nets} call repairs the board.
-        "unconnected": crate::diagnose::unconnected_pairs(&parts, &unconnected_owned),
+        "unconnected": unconnected,
         "note": if gate.is_ok() {
             format!("{note_prefix}KiCAD DRC passed; {silk_warnings} silkscreen warning(s) remain after bounded reference cleanup.")
         } else {

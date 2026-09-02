@@ -116,10 +116,10 @@ pub(crate) fn size_board(parts: &[PartExtent], aspect: f64, demand: RoutingDeman
 
     // The placer rotates parts, so the floor a part imposes is its SHORT side on
     // the board's short side and its long side on the long side.
-    let widest = parts.iter().map(|p| p.w.max(p.h)).fold(0.0, f64::max);
-    let narrowest = parts.iter().map(|p| p.w.min(p.h)).fold(0.0, f64::max);
-    let hard_w = widest + 2.0 * EDGE_CLEAR_MM;
-    let hard_h = narrowest + 2.0 * EDGE_CLEAR_MM;
+    let longest_side = parts.iter().map(|p| p.w.max(p.h)).fold(0.0, f64::max);
+    let deepest_short_side = parts.iter().map(|p| p.w.min(p.h)).fold(0.0, f64::max);
+    let hard_w = longest_side + 2.0 * EDGE_CLEAR_MM;
+    let hard_h = deepest_short_side + 2.0 * EDGE_CLEAR_MM;
     // Courtyards may not overlap, so their bare total area is a floor nothing
     // can beat — which is what makes refusing a smaller board up front honest.
     let (required_w, required_h) = outline_for(courtyard_area_mm2, aspect, hard_w, hard_h);

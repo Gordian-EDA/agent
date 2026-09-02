@@ -405,6 +405,8 @@ pub(super) fn courtyard_extents(
     board: &IpcBoardSnapshot,
     ctx: &AgentRuntime,
 ) -> std::collections::BTreeMap<String, (f64, f64)> {
+    // An unreadable catalog leaves the map empty and the caller falls back to
+    // pad extents — a weaker guard, but never a wrong one.
     let Ok(catalog) = ctx.footprint_catalog() else {
         return Default::default();
     };

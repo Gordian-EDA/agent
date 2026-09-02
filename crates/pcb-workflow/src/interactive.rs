@@ -64,7 +64,8 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(plan.output(&retract))
 }
 
-/// Copper the move invalidates: every trace with an end on a pad that moved.
+/// Copper the move invalidates: every net with a trace ending on a pad that
+/// moved, retracted whole so no stub is left hanging.
 #[derive(Debug, Default, Clone)]
 struct RetractedCopper {
     retained: RouteSolution,
@@ -156,7 +157,10 @@ fn write_retained_copper(
         snapshot.problem.layer_count,
         &snapshot.layer_names,
     )?;
-    std::fs::write(&path, replacement).map_err(|err| format!("could not write the board: {err}"))
+    // The same atomic replace the route path uses: an interrupted move must not
+    // leave a half-written board.
+    super::route::write_board_atomically(&path, replacement.as_bytes())
+        .map_err(|err| format!("could not write the board: {err}"))
 }
 
 /// Reject a move that would land a part on top of another one: the courtyards
@@ -175,12 +179,21 @@ fn overlap_error(board: &MoveBoard, plan: &MovePlan, clearance: f64) -> Option<S
         })
     };
     for position in &plan.positions {
-        let moved = extent(&position.reference)?;
+        // A part whose extent cannot be measured is not evidence of clearance:
+        // refuse rather than wave the move through.
+        let Some(moved) = extent(&position.reference) else {
+            return Some(format!(
+                "move_parts refused: {} has no measurable extent on this board",
+                position.reference
+            ));
+        };
         for (reference, _) in board.parts.iter() {
             if reference == &position.reference {
                 continue;
             }
-            let other = extent(reference)?;
+            let Some(other) = extent(reference) else {
+                continue;
+            };
             if !moved.overlaps(&other) {
                 continue;
             }
@@ -314,6 +327,7 @@ impl MovePlan {
             "changed": self.changed,
             "positions": positions,
             "retracted_tracks": retract.count,
+            "retracted_nets": retract.nets.len(),
             "nets_to_reroute": retract.nets.iter().collect::<Vec<_>>(),
         })
     }
@@ -756,9 +770,9 @@ fn parse_endpoint(
     key: &str,
     ctx: &str,
     parts: &[ImportedPart],
-) -> std::result::Result<Point2, String> {
+) -> std::result::Result<(Point2, Option<LayerRef>), String> {
     let Some(Value::String(reference)) = input.get(key) else {
-        return parse_point(input, key, ctx);
+        return parse_point(input, key, ctx).map(|at| (at, None));
     };
     let (refdes, pad) = reference.split_once('.').ok_or_else(|| {
         format!("{ctx}: `{key}` = \"{reference}\" is not a pad reference; use \"REF.PAD\" (e.g. \"U1.3\") or [x, y] in mm")
@@ -766,8 +780,10 @@ fn parse_endpoint(
     parts
         .iter()
         .find(|part| part.reference == refdes)
+        // A pad knows which layer it is on, so a copy-pasted repair for a
+        // bottom-side pad must not silently lay copper on the top.
         .and_then(|part| part.pads.iter().find(|p| p.number == pad))
-        .map(|p| p.at)
+        .map(|p| (p.at, p.layers.first().cloned()))
         .ok_or_else(|| format!("{ctx}: no pad {reference} on this board"))
 }
 
@@ -783,24 +799,21 @@ fn parse_route_track_request(
                 .to_owned(),
         );
     }
-    let from = parse_endpoint(input, "from", ctx, parts)?;
-    let to = parse_endpoint(input, "to", ctx, parts)?;
+    let (from, from_pad_layer) = parse_endpoint(input, "from", ctx, parts)?;
+    let (to, to_pad_layer) = parse_endpoint(input, "to", ctx, parts)?;
     let net = input
         .get("net")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "route_track needs non-empty string `net`".to_owned())?
         .to_owned();
-    let from_layer = parse_route_layer_ref(
-        input
-            .get("from_layer")
-            .and_then(Value::as_str)
-            .unwrap_or("F.Cu"),
-        problem.layer_count,
-    )?;
+    let from_layer = match input.get("from_layer").and_then(Value::as_str) {
+        Some(layer) => parse_route_layer_ref(layer, problem.layer_count)?,
+        None => from_pad_layer.unwrap_or_else(LayerRef::top),
+    };
     let to_layer = match input.get("to_layer").and_then(Value::as_str) {
         Some(layer) => parse_route_layer_ref(layer, problem.layer_count)?,
-        None => from_layer.clone(),
+        None => to_pad_layer.unwrap_or_else(|| from_layer.clone()),
     };
     let width = optional_num(input, "width", ctx)?.unwrap_or_else(|| problem.net_width(&net));
     if width <= 0.0 {

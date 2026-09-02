@@ -330,6 +330,28 @@ fn route_live_board(
     // alone is as much part of the result as the copper it just made.
     result.solution.traces.extend(kept.traces);
     result.solution.vias.extend(kept.vias);
+    // A net this call was not asked to route, which had no copper to keep, is
+    // still unrouted afterwards — but that is a fact about the board it started
+    // from, not a defect in the copper this call made. Recording it as failed
+    // now is what keeps the whole-board lint from reading it as an engine bug
+    // and refusing the write, and is what puts it in `unrouted` where the caller
+    // can see it is out of scope.
+    if let Some(scope) = &nets {
+        let out_of_scope: Vec<String> = board
+            .problem
+            .connections
+            .iter()
+            .map(|connection| connection.name.clone())
+            .filter(|name| !scope.contains(name) && !has_copper(&result.solution, name))
+            .collect();
+        for net in out_of_scope {
+            append_failed(
+                &mut result,
+                &net,
+                "not in this call's `nets`, and it had no copper to keep",
+            );
+        }
+    }
     // `prune_dangling_spurs_if_safe` reverts its own pruning whenever the lint
     // reads worse afterwards, so a surviving prune is already known clean.
     let pruned_spurs = prune_dangling_spurs_if_safe(&rp, &mut result);
@@ -372,8 +394,15 @@ fn route_live_board(
     let m = result.solution.metrics();
     let total_connections = board.problem.connections.len();
     let routed_connections = total_connections.saturating_sub(failure_summary.connection_count);
+    // Every net's terminals (so an out-of-scope net can still be named by its
+    // pads) over the obstacles the router actually faced (so the copper this
+    // call kept can be named as the thing in the way).
+    let report_view = RoutingView {
+        obstacles: solve_view.obstacles.clone(),
+        ..rp.clone()
+    };
     let unrouted = crate::diagnose::unrouted_report(
-        &rp,
+        &report_view,
         &board.imported.parts,
         &result.failed,
         &board.layer_names,
@@ -488,7 +517,7 @@ fn replace_route_offline(
         .map_err(|error| format!("could not write the board: {error}"))
 }
 
-fn write_board_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+pub(super) fn write_board_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let permissions = std::fs::metadata(path).ok().map(|meta| meta.permissions());
     let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
@@ -527,10 +556,10 @@ fn make_route_honest_with_report(
 ) -> (Vec<String>, Vec<DrcViolation>) {
     let mut dropped = Vec::new();
     let mut violations = lint(rp, &result.solution);
-    // Plane nets are not in `connections` but their stitch vias are in the
-    // solution, so they can be dropped too — the bound must cover both.
-    for _ in 0..=(rp.connections.len() + plane_nets.len()) {
-        let disconnected = defective_nets(&violations, plane_nets, &result.solution);
+    // Each round drops at least one net that still has copper, and copper never
+    // comes back, so the net count bounds the loop.
+    for _ in 0..=rp.connections.len() {
+        let disconnected = defective_nets(&violations, plane_nets);
         let violating: BTreeSet<String> = violations
             .iter()
             .flat_map(geometry_violation_nets)
@@ -579,11 +608,7 @@ fn make_route_honest(
 /// plane's stitch vias to clear another net's stray trace would take the whole
 /// plane's connectivity with it. Only when every side of a short is a plane net
 /// are the planes themselves dropped, so the loop can still make progress.
-fn defective_nets(
-    violations: &[DrcViolation],
-    plane_nets: &BTreeSet<String>,
-    solution: &RouteSolution,
-) -> BTreeSet<String> {
+fn defective_nets(violations: &[DrcViolation], plane_nets: &BTreeSet<String>) -> BTreeSet<String> {
     let mut defective = BTreeSet::new();
     for violation in violations {
         match violation {
@@ -595,14 +620,16 @@ fn defective_nets(
             DrcViolation::Connectivity {
                 violation: ConnViolation::CrossNetMerge { a, b },
             } => {
-                let droppable: Vec<&String> = [a, b]
+                let non_plane: Vec<&String> = [a, b]
                     .into_iter()
-                    .filter(|net| !plane_nets.contains(*net) && has_copper(solution, net))
+                    .filter(|net| !plane_nets.contains(*net))
                     .collect();
-                if droppable.is_empty() {
+                if non_plane.is_empty() {
+                    // Plane against plane: there is no other side to give, so
+                    // the stitching itself has to go.
                     defective.extend([a.clone(), b.clone()]);
                 } else {
-                    defective.extend(droppable.into_iter().cloned());
+                    defective.extend(non_plane.into_iter().cloned());
                 }
             }
             _ => {}
@@ -1809,6 +1836,12 @@ fn prune_dangling_spurs(rp: &RoutingView, solution: &mut RouteSolution) -> usize
         return 0;
     }
     let protected = protected_route_nodes(rp, solution);
+    let own_pads = same_net_pads(rp);
+    let lands_on_own_pad = |connection: &str, at: Point2| {
+        own_pads
+            .iter()
+            .any(|(net, pad)| net == connection && pad.contains(at))
+    };
     let mut alive = vec![true; segments.len()];
     let mut removed = 0usize;
 
@@ -1853,8 +1886,12 @@ fn prune_dangling_spurs(rp: &RoutingView, solution: &mut RouteSolution) -> usize
                 segment.end,
                 rp.layer_count,
             );
-            let a_dangles = degree.get(&a).copied().unwrap_or(0) <= 1 && !protected.contains(&a);
-            let b_dangles = degree.get(&b).copied().unwrap_or(0) <= 1 && !protected.contains(&b);
+            let a_dangles = degree.get(&a).copied().unwrap_or(0) <= 1
+                && !protected.contains(&a)
+                && !lands_on_own_pad(&segment.connection, segment.start);
+            let b_dangles = degree.get(&b).copied().unwrap_or(0) <= 1
+                && !protected.contains(&b)
+                && !lands_on_own_pad(&segment.connection, segment.end);
             if a_dangles || b_dangles {
                 alive[idx] = false;
                 removed += 1;
@@ -1897,6 +1934,32 @@ fn flatten_segments(solution: &RouteSolution) -> Vec<RouteSegment> {
         }
     }
     segments
+}
+
+/// Every pad, with the net it belongs to.
+///
+/// A connection's `points_to_connect` carries one point per pad, but a pad is an
+/// AREA: a track that stops anywhere inside it is joined, and KiCAD agrees. The
+/// spur prune tested the exact point only, so it read a track landing a hair off
+/// pad centre as dangling, tried to remove it, broke the net, and reverted the
+/// whole prune — leaving copper KiCAD then reports as `track_dangling`.
+fn same_net_pads(rp: &RoutingView) -> Vec<(String, geom::Rect)> {
+    rp.obstacles
+        .iter()
+        .filter(|obstacle| obstacle.kind.starts_with("pad:"))
+        .flat_map(|obstacle| {
+            let rect = geom::Rect::new(
+                obstacle.center.x - obstacle.width / 2.0,
+                obstacle.center.y - obstacle.height / 2.0,
+                obstacle.center.x + obstacle.width / 2.0,
+                obstacle.center.y + obstacle.height / 2.0,
+            );
+            obstacle
+                .connected_to
+                .iter()
+                .map(move |net| (net.clone(), rect))
+        })
+        .collect()
 }
 
 fn protected_route_nodes(
@@ -3329,6 +3392,100 @@ mod escape_bottleneck_tests {
         assert_eq!(result.solution.traces.len(), 1);
         assert_eq!(result.solution.vias.len(), 1);
         assert!(result.failed.is_empty());
+    }
+
+    /// A net this call was not asked to route, and which has no copper, is a
+    /// fact about the board the call started from — not a defect in the copper
+    /// it made. Counting it as a real violation made every scoped repair refuse
+    /// the whole board, which is precisely the state the partial-commit path
+    /// creates: the two features would have been mutually exclusive.
+    #[test]
+    fn an_out_of_scope_net_with_no_copper_does_not_condemn_a_scoped_route() {
+        let point = |x: f64| pcb_model::RoutePoint {
+            x,
+            y: 1.0,
+            layer: LayerRef::top(),
+        };
+        let problem = RoutingView {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![
+                pcb_model::Connection {
+                    name: "ROUTED".to_string(),
+                    points_to_connect: vec![point(1.0), point(5.0)],
+                },
+                pcb_model::Connection {
+                    name: "OUT_OF_SCOPE".to_string(),
+                    points_to_connect: vec![point(10.0), point(14.0)],
+                },
+            ],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 20.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+        let mut result = RouteResult {
+            engine: "test".to_string(),
+            failed: vec![],
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "ROUTED".to_string(),
+                    layer: LayerRef::top(),
+                    width: 0.2,
+                    path: vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 5.0, y: 1.0 }],
+                }],
+                vias: vec![],
+            },
+        };
+        let planes = BTreeSet::new();
+
+        // Without the record, the copperless net reads as a real violation.
+        let violations = lint(&problem, &result.solution);
+        assert_eq!(
+            lint_summary_from_violations(&violations, &result.failed, &planes).real,
+            1
+        );
+
+        append_failed(
+            &mut result,
+            "OUT_OF_SCOPE",
+            "not in this call's `nets`, and it had no copper to keep",
+        );
+        let (_, remaining) = make_route_honest_with_report(&problem, &mut result, &planes);
+        let split = lint_summary_from_violations(&remaining, &result.failed, &planes);
+
+        assert_eq!(split.real, 0, "{remaining:?}");
+        assert_eq!(split.expected_gaps, 1);
+        assert_eq!(result.solution.traces.len(), 1, "the routed net is kept");
+
+        let report = crate::diagnose::unrouted_report(
+            &problem,
+            &[],
+            &result.failed,
+            &["F.Cu".to_string()],
+            Some(&BTreeSet::from(["ROUTED".to_string()])),
+        );
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0]["net"], "OUT_OF_SCOPE");
+        assert_eq!(report[0]["in_scope"], false);
+        assert!(
+            report[0]["suggestion"]
+                .as_str()
+                .unwrap()
+                .contains("did not route OUT_OF_SCOPE"),
+            "{}",
+            report[0]["suggestion"]
+        );
     }
 
     /// `route_board{nets}` is the repair loop after a `move_parts`, so the

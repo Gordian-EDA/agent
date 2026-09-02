@@ -347,10 +347,13 @@ fn terminals_of(problem: &RoutingView, parts: &[ImportedPart], net: &str) -> Vec
                 .map(|point| {
                     let at = point.point();
                     Terminal {
+                        // No pad on this point means no handle, so hand back the
+                        // coordinate form `route_track` also accepts rather than
+                        // a label it would reject.
                         pad: pads_at(parts, at)
                             .first()
                             .cloned()
-                            .unwrap_or_else(|| format!("({:.2}, {:.2})", at.x, at.y)),
+                            .unwrap_or_else(|| format!("[{:.3}, {:.3}]", at.x, at.y)),
                         at,
                         layer: point.layer.0.clone(),
                     }
@@ -369,13 +372,35 @@ fn obstruction_between(
     problem: &RoutingView,
     parts: &[ImportedPart],
     net: &str,
-    from: Point2,
-    to: Point2,
+    from: &Terminal,
+    to: &Terminal,
 ) -> Option<Value> {
-    let path = geom::Segment::new(from, to);
+    let path = geom::Segment::new(from.at, to.at);
+    // The two ends sit ON their own pads, whose neighbours are inches from the
+    // line by construction. Naming one of those would tell the caller to move
+    // the very part it is trying to reach, so the parts the route starts and
+    // ends on are not candidates.
+    let endpoints: BTreeSet<&str> = [from, to]
+        .iter()
+        .filter_map(|t| t.pad.split('.').next())
+        .collect();
+    let on_route_layer = |obstacle: &pcb_model::Obstacle| {
+        obstacle.layers.is_empty()
+            || obstacle
+                .layers
+                .iter()
+                .any(|layer| layer.0 == from.layer || layer.0 == to.layer)
+    };
     let mut best: Option<(f64, &pcb_model::Obstacle)> = None;
     for obstacle in &problem.obstacles {
-        if obstacle.connected_to.iter().any(|n| n == net) {
+        if obstacle.connected_to.iter().any(|n| n == net) || !on_route_layer(obstacle) {
+            continue;
+        }
+        if obstacle
+            .kind
+            .strip_prefix("pad:")
+            .is_some_and(|reference| endpoints.contains(reference))
+        {
             continue;
         }
         let gap = path.dist_to_rect(&geom::Rect::new(
@@ -438,6 +463,16 @@ fn obstacle_label(
 }
 
 /// What a caller should do about one unrouted net.
+/// A pad handle is a JSON string; a bare coordinate is a JSON array. Quote only
+/// the former, so the suggestion is valid `route_track` input either way.
+fn endpoint_literal(terminal: &Terminal) -> String {
+    if terminal.pad.starts_with('[') {
+        terminal.pad.clone()
+    } else {
+        format!("\"{}\"", terminal.pad)
+    }
+}
+
 fn unrouted_suggestion(
     net: &str,
     from: &Terminal,
@@ -459,8 +494,11 @@ fn unrouted_suggestion(
             "no channel was found between {} and {}: move those two parts closer with move_parts, \
              give the router another copper layer with regenerate_board \
              {{\"rules\":{{\"layer_count\":4}}}}, or lay it by hand with route_track \
-             {{\"net\":\"{net}\",\"from\":\"{}\",\"to\":\"{}\"}}",
-            from.pad, to.pad, from.pad, to.pad
+             {{\"net\":\"{net}\",\"from\":{},\"to\":{}}}",
+            from.pad,
+            to.pad,
+            endpoint_literal(from),
+            endpoint_literal(to)
         ),
     }
 }
@@ -495,7 +533,7 @@ pub(crate) fn unrouted_report(
             let from = terminals.first();
             let to = terminals.get(1).or(from);
             let obstruction = match (from, to) {
-                (Some(a), Some(b)) => obstruction_between(problem, parts, net, a.at, b.at),
+                (Some(a), Some(b)) => obstruction_between(problem, parts, net, a, b),
                 _ => None,
             };
             let in_scope = scope.is_none_or(|scope| scope.contains(net));
@@ -547,12 +585,12 @@ fn pad_handle(parts: &[ImportedPart], description: &str) -> Option<(String, Poin
 ///
 /// A bare count tells a caller nothing; the two pads that should be joined tell
 /// it exactly which `route_track` or `route_board{nets}` call to make.
-pub(crate) fn unconnected_pairs(
+pub(crate) fn unconnected_pairs<'a>(
     parts: &[ImportedPart],
-    violations: &[kicad::Violation],
+    violations: impl IntoIterator<Item = &'a kicad::Violation>,
 ) -> Vec<Value> {
     violations
-        .iter()
+        .into_iter()
         .map(|violation| {
             let handles: Vec<(String, Point2)> = violation
                 .items
@@ -820,7 +858,7 @@ mod tests {
             ],
         };
 
-        let pairs = unconnected_pairs(&parts, std::slice::from_ref(&violation));
+        let pairs = unconnected_pairs(&parts, &[violation]);
 
         assert_eq!(pairs[0]["net"], "VOUT");
         assert_eq!(pairs[0]["from"]["pad"], "U1.3");

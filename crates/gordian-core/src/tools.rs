@@ -401,10 +401,21 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "route_board".into(),
-            description: "Auto-route board; on failure names every DRC violation (rule, nets, \
-                 pads, mm, measured vs required) and the fix for each."
+            description: "Auto-route the board, committing every net whose copper is DRC-clean. \
+                 Reports routed N/M and, per unrouted net, the two pads, the obstacle in the \
+                 way and the repair. Pass `nets` to re-route only those nets after a \
+                 move_parts, keeping every other net's copper."
                 .into(),
-            input_schema: json!({ "type": "object", "properties": {} }),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "nets": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Route only these nets, keeping all other copper. Omit for the whole board."
+                    }
+                }
+            }),
         },
         Def {
             name: "render_board".into(),
@@ -413,8 +424,8 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "check_board".into(),
-            description: "Run PCB DRC; stop when ok. On failure lists the blocking \
-                 violations and unconnected items."
+            description: "Run PCB DRC; stop when ok. On failure lists the blocking violations \
+                 and every unconnected item as the pad pair it is."
                 .into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },

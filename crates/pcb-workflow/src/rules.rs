@@ -121,16 +121,18 @@ pub(crate) fn footprint_limits(
             limits.min_pad_width = Some(limits.min_pad_width.map_or(width, |m| m.min(width)));
         }
     }
-    // Two pads constrain clearance only when they are known to be different
-    // nodes. A pad with no schematic net is mechanical — a shield tab, a mount,
-    // an NC — and connector shields routinely touch each other, so a pad the
-    // netlist does not mention constrains nothing.
+    // Two pads constrain clearance only when they are different nodes. Same
+    // number, or the same schematic net, is one node — and so is a pair of
+    // UNNUMBERED pads, the shield tabs and mounting lands connector footprints
+    // routinely let touch. A numbered pad the netlist happens not to mention is
+    // still a node KiCAD enforces clearance against, so it keeps constraining.
     let same_node = |a: &FootprintPad, b: &FootprintPad| {
-        a.number == b.number
-            || match (pad_nets.get(&a.number), pad_nets.get(&b.number)) {
-                (Some(x), Some(y)) => x == y,
-                _ => true,
-            }
+        (a.number.is_empty() && b.number.is_empty())
+            || a.number == b.number
+            || matches!(
+                (pad_nets.get(&a.number), pad_nets.get(&b.number)),
+                (Some(x), Some(y)) if x == y
+            )
     };
     for (i, a) in pads.iter().enumerate() {
         for b in &pads[i + 1..] {
@@ -347,19 +349,25 @@ mod tests {
         assert!(pad_limited_rules(0.15, 0.15, 0.0, &limits).2.is_empty());
     }
 
-    /// A connector's shield tabs carry no schematic net and routinely touch.
-    /// Only pads the netlist puts on different nodes constrain clearance.
+    /// A connector's unnumbered shield lands routinely touch and are one node;
+    /// a NUMBERED pad the netlist omits is still a node KiCAD keeps clear.
     #[test]
-    fn pads_the_netlist_never_mentions_constrain_nothing() {
+    fn unnumbered_shield_lands_are_one_node_but_numbered_pads_stay_nodes() {
         const SHIELDS: &str = r#"(footprint "USB_C"
-          (pad "MP1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu"))
-          (pad "MP2" smd rect (at 1.0 0) (size 1.0 1.0) (layers "F.Cu"))
+          (pad "" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu"))
+          (pad "" smd rect (at 1.0 0) (size 1.0 1.0) (layers "F.Cu"))
           (pad "A4" smd rect (at 5.0 0) (size 1.0 1.0) (layers "F.Cu"))
         )"#;
         let nets = BTreeMap::from([("A4".to_owned(), "VBUS".to_owned())]);
         let limits = footprint_limits("Connector_USB:USB_C", SHIELDS, &nets);
-        assert_eq!(limits.min_pad_gap, None);
-        assert!(pad_limited_rules(0.15, 0.15, 0.0, &limits).2.is_empty());
+        approx(limits.min_pad_gap, 3.0);
+
+        const NC_PAD: &str = r#"(footprint "SOT23"
+          (pad "4" smd rect (at 0 0) (size 0.3 1.0) (layers "F.Cu"))
+          (pad "5" smd rect (at 0.5 0) (size 0.3 1.0) (layers "F.Cu"))
+        )"#;
+        let numbered = footprint_limits("Package:SOT23", NC_PAD, &BTreeMap::new());
+        approx(numbered.min_pad_gap, 0.2);
     }
 
     #[test]
