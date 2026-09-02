@@ -487,31 +487,6 @@ pub fn unresolvable_footprints(
     Ok(out)
 }
 
-#[cfg(test)]
-fn pad_number_differences<'a>(
-    symbol_pin_numbers: impl IntoIterator<Item = &'a str>,
-    footprint_pad_numbers: impl IntoIterator<Item = &'a str>,
-) -> (Vec<String>, Vec<String>) {
-    let symbol_pins: BTreeSet<&str> = symbol_pin_numbers
-        .into_iter()
-        .filter(|pin| !pin.is_empty())
-        .collect();
-    let footprint_pads: BTreeSet<&str> = footprint_pad_numbers
-        .into_iter()
-        .filter(|pad| !pad.is_empty())
-        .collect();
-
-    let extra_pads = footprint_pads
-        .difference(&symbol_pins)
-        .map(|pad| (*pad).to_owned())
-        .collect();
-    let missing_pins = symbol_pins
-        .difference(&footprint_pads)
-        .map(|pin| (*pin).to_owned())
-        .collect();
-    (extra_pads, missing_pins)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CapacitorPolarity {
     Polarized,
@@ -581,45 +556,13 @@ fn footprint_capacitor_polarity(footprint_id: &FootprintId) -> Option<CapacitorP
 mod tests {
     use super::{
         best_compatible_footprint, capacitor_polarity_mismatch, footprint_compatibility,
-        pad_number_differences, same_symbol_family, search_compatible_footprints,
+        same_symbol_family, search_compatible_footprints,
     };
     use crate::AgentRuntime;
     use kicad_footprint::FootprintId;
 
     fn footprint(id: &str) -> FootprintId {
         FootprintId::parse(id).expect("valid test footprint id")
-    }
-
-    #[test]
-    fn detects_both_directions_of_numbered_pad_mismatch() {
-        let symbol_pins: Vec<_> = (1..=60).map(|n| n.to_string()).collect();
-        let footprint_pads: Vec<_> = (1..=4).map(|n| n.to_string()).collect();
-        let (extra, missing) = pad_number_differences(
-            symbol_pins.iter().map(String::as_str),
-            footprint_pads.iter().map(String::as_str),
-        );
-
-        assert!(extra.is_empty());
-        assert_eq!(missing.len(), 56);
-        assert_eq!(missing.first().map(String::as_str), Some("10"));
-        assert!(missing.contains(&"60".to_owned()));
-    }
-
-    #[test]
-    fn allows_mechanical_and_repeated_shield_pads() {
-        let (extra, missing) =
-            pad_number_differences(["1", "2", "S1"], ["1", "2", "S1", "S1", "", ""]);
-
-        assert!(extra.is_empty());
-        assert!(missing.is_empty());
-    }
-
-    #[test]
-    fn reports_numbered_footprint_pads_missing_from_symbol() {
-        let (extra, missing) = pad_number_differences(["1", "2"], ["1", "2", "3", "3", ""]);
-
-        assert_eq!(extra, ["3"]);
-        assert!(missing.is_empty());
     }
 
     #[test]
