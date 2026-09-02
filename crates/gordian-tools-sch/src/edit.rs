@@ -704,59 +704,102 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     )
 }
 
-/// Drop the wires and labels that hung off pins which no longer exist.
+/// Retract the drawing that only served pins which no longer exist.
 ///
-/// A wire counts as a stub when one end sat on a removed pin and the other end
-/// meets nothing else; removing it can expose another, so this runs to a
-/// fixpoint.
+/// A removed pin leaves a wire run hanging in the air: KiCAD calls the free end
+/// an `unconnected_wire_endpoint` error, and a run that reached only that pin
+/// carries no connection any more. So the run is peeled back from the orphaned
+/// endpoint up to the first thing that holds it — a live pin, a junction, or a
+/// branch where another wire carries on — and the labels that sat on nothing but
+/// the peeled run go with it. A label at the far end of a stub is *not* an
+/// anchor: it is the other half of the same stub.
+///
+/// A no-connect marker on the orphaned pin goes too; with its pin gone it is
+/// KiCAD's `no_connect_dangling`.
+///
+/// Returns how many items went.
 fn retract_stubs(doc: &mut SchDoc, orphaned: &[Point2]) -> usize {
-    let mut removed = 0;
+    let markers: Vec<String> = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            sch_doc::Item::NoConnect(marker)
+                if orphaned.iter().any(|p| p.near_eq(marker.at, EPS)) =>
+            {
+                Some(marker.uuid.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let mut removed = doc.remove_drawing(&markers);
+    let mut frontier: Vec<Point2> = orphaned.to_vec();
+    let mut peeled: Vec<Point2> = orphaned.to_vec();
     for _ in 0..64 {
+        // A power symbol is placed straight onto the pin it feeds, so a removed
+        // pin's coordinate may still carry a pin that is very much there.
         let live: Vec<Point2> = placed_pins(doc).into_iter().map(|p| p.at).collect();
-        // A power symbol is placed straight onto the pin it feeds, so a
-        // removed pin's coordinate may still carry a pin that is very much
-        // there; nothing hanging off it is a stub.
-        let orphaned: Vec<Point2> = orphaned
-            .iter()
-            .copied()
-            .filter(|p| !live.iter().any(|q| q.near_eq(*p, EPS)))
-            .collect();
-        let ends: Vec<Point2> = doc
+        frontier.retain(|p| !live.iter().any(|q| q.near_eq(*p, EPS)));
+        let runs: Vec<(String, Point2, Point2)> = doc
             .wires()
-            .filter_map(refs::ends)
-            .flat_map(|(a, b)| [a, b])
+            .filter_map(|wire| refs::ends(wire).map(|(a, b)| (wire.uuid.clone(), a, b)))
             .collect();
-        let anchored = |p: Point2| {
-            live.iter().any(|q| q.near_eq(p, EPS))
-                || doc.labels().any(|l| l.at.point().near_eq(p, EPS))
-                || ends.iter().filter(|q| q.near_eq(p, EPS)).count() > 1
+        let degree = |p: Point2| {
+            runs.iter()
+                .filter(|(_, a, b)| a.near_eq(p, EPS) || b.near_eq(p, EPS))
+                .count()
         };
-        let doomed: Vec<String> = doc
-            .wires()
-            .filter(|wire| {
-                let Some((a, b)) = refs::ends(wire) else {
-                    return false;
+        let is_junction = |p: Point2| {
+            doc.items()
+                .iter()
+                .any(|item| matches!(item, sch_doc::Item::Junction(j) if j.at.near_eq(p, EPS)))
+        };
+        let mut doomed = Vec::new();
+        let mut next = Vec::new();
+        for &p in &frontier {
+            if is_junction(p) || degree(p) > 1 {
+                continue;
+            }
+            for (uuid, a, b) in &runs {
+                let far = match (a.near_eq(p, EPS), b.near_eq(p, EPS)) {
+                    (true, _) => *b,
+                    (_, true) => *a,
+                    _ => continue,
                 };
-                let touches = |p: Point2| orphaned.iter().any(|q| q.near_eq(p, EPS));
-                (touches(a) && !anchored(b)) || (touches(b) && !anchored(a))
-            })
-            .map(|wire| wire.uuid.clone())
-            .collect();
-        let dangling_labels: Vec<String> = doc
-            .labels()
-            .filter(|l| {
-                orphaned.iter().any(|q| q.near_eq(l.at.point(), EPS))
-                    && !ends.iter().any(|q| q.near_eq(l.at.point(), EPS))
-            })
-            .map(|l| l.uuid.clone())
-            .collect();
-        let batch: Vec<String> = doomed.into_iter().chain(dangling_labels).collect();
-        if batch.is_empty() {
+                doomed.push(uuid.clone());
+                next.push(far);
+            }
+        }
+        if doomed.is_empty() {
             break;
         }
-        removed += doc.remove_drawing(&batch);
+        removed += doc.remove_drawing(&doomed);
+        peeled.extend(&next);
+        frontier = next;
     }
-    removed
+    removed + doc.remove_drawing(&stranded_labels(doc, &peeled))
+}
+
+/// The labels at `points` that no longer sit on any wire or pin.
+///
+/// A stub's label lives at the far end of its run, so it only becomes stranded
+/// once the run is gone — which is why this is a sweep over everything the
+/// retraction peeled, run after the peeling rather than during it.
+fn stranded_labels(doc: &SchDoc, points: &[Point2]) -> Vec<String> {
+    let pins: Vec<Point2> = placed_pins(doc).into_iter().map(|p| p.at).collect();
+    let held = |p: Point2| {
+        pins.iter().any(|q| q.near_eq(p, EPS))
+            || doc
+                .wires()
+                .filter_map(refs::ends)
+                .any(|(a, b)| geom::Segment::new(a, b).contains_point(p))
+    };
+    doc.labels()
+        .filter(|label| {
+            let at = label.at.point();
+            points.iter().any(|q| q.near_eq(at, EPS)) && !held(at)
+        })
+        .map(|label| label.uuid.clone())
+        .collect()
 }
 
 /// How far a move may slide to clear an obstacle and still be the move that

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::place::{Occupancy, snap_point};
 use crate::refs::{self, Target};
-use crate::session::{Allow, Edit, symbol_source};
+use crate::session::{Allow, Edit, is_auto, symbol_source};
 
 /// The direction a wire leaves a pin, snapped to the nearest axis.
 pub(crate) fn dir_of(out: Point2) -> Dir {
@@ -147,8 +147,11 @@ pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if failures == done.len() {
         return Ok(json!({ "error": "every connection failed", "connected": done }));
     }
+    // Every pair commits, so the sheet is left at the LAST revision — reporting
+    // the first made the log claim nine commits had never happened.
     let revision = done
         .iter()
+        .rev()
         .find_map(|result| result.get("revision").cloned());
     let mut output = json!({ "connected": done, "failed": failures });
     if let Some(revision) = revision {
@@ -186,10 +189,20 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(target) => target,
         Err(error) => return Ok(reference_error(&edit.doc, &input, error)),
     };
+    let (a, b) = (from.at(), to.at());
+    if a.near_eq(b, EPS) {
+        return Ok(json!({ "error": "both ends are the same point; they already touch" }));
+    }
+    // Clearing comes first, before the router looks at the sheet and before the
+    // ends' nets are read: a marker severs its point, so a wire drawn to a still
+    // marked pin joins nothing and the pin reads as belonging to no net at all.
+    let cleared = clear_no_connects(&mut edit.doc, &[(a, from.describe()), (b, to.describe())]);
+    let live = match cleared.is_empty() {
+        true => edit.before().clone(),
+        false => connect::extract(&edit.doc),
+    };
     let existing = |target: &Target| match target {
-        Target::Pin(pin) => {
-            refs::net_of(edit.before(), &pin.refdes, &pin.number).map(str::to_string)
-        }
+        Target::Pin(pin) => refs::net_of(&live, &pin.refdes, &pin.number).map(str::to_string),
         Target::Point(_) => None,
     };
     let (from_net, to_net) = (existing(&from), existing(&to));
@@ -199,10 +212,6 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .map(str::to_string)
         .or_else(|| from_net.clone())
         .or_else(|| to_net.clone());
-    let (a, b) = (from.at(), to.at());
-    if a.near_eq(b, EPS) {
-        return Ok(json!({ "error": "both ends are the same point; they already touch" }));
-    }
     let dir_a = match &from {
         Target::Pin(pin) => dir_of(pin.out),
         Target::Point(_) => dir_of(Point2::new(b.x - a.x, b.y - a.y)),
@@ -236,7 +245,8 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 && from_net.as_deref() != Some(wanted)
                 && to_net.as_deref() != Some(wanted)
             {
-                edit.doc.add_label(LabelKind::Local, wanted, pose(a));
+                let scope = sheet_scope(&edit.doc, wanted).unwrap_or(LabelKind::Local);
+                edit.doc.add_label(scope, wanted, pose(a));
             }
             let changed = format!(
                 "wired {} to {} with {} segment(s)",
@@ -248,7 +258,7 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 ctx,
                 "connect",
                 "Connect schematic pins",
-                json!(changed),
+                with_cleared(changed, cleared),
                 allow,
             )
         }
@@ -267,9 +277,9 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 }));
             }
             let net = net.unwrap_or_else(|| fallback_name(&from, &to));
+            let scope = sheet_scope(&edit.doc, &net).unwrap_or(LabelKind::Local);
             for target in [&from, &to] {
-                edit.doc
-                    .add_label(LabelKind::Local, &net, pose(target.at()));
+                edit.doc.add_label(scope, &net, pose(target.at()));
             }
             edit.warn(format!(
                 "no clear wire path; {} and {} were joined by a `{net}` label at each end",
@@ -280,10 +290,62 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 ctx,
                 "connect",
                 "Connect schematic pins",
-                json!(format!("labelled both ends `{net}` — no clear wire path")),
+                with_cleared(
+                    format!("labelled both ends `{net}` — no clear wire path"),
+                    cleared,
+                ),
                 allow,
             )
         }
+    }
+}
+
+/// The scope the sheet already draws `net` in, if it draws it at all.
+///
+/// A net has ONE scope on a sheet: adding a plain label to a net the sheet names
+/// with a pennant is KiCAD's `same_local_global_label`, and the two do not merge,
+/// so the new label would name a different net that happens to read the same.
+pub(crate) fn sheet_scope(doc: &SchDoc, net: &str) -> Option<LabelKind> {
+    doc.labels()
+        .find(|label| sch_doc::unescape(&label.text) == net)
+        .map(|label| label.kind)
+}
+
+/// Drop the no-connect markers sitting on points a connection just reached,
+/// returning the pins that were cleared.
+///
+/// A marker states that the pin is deliberately left alone. Wiring or naming it
+/// makes that statement false, and KiCAD reports the pair as
+/// `no_connect_connected` — so whichever call makes the connection is the call
+/// that has to take the marker away.
+fn clear_no_connects(doc: &mut SchDoc, reached: &[(Point2, String)]) -> Vec<String> {
+    let mut doomed = Vec::new();
+    let mut cleared = Vec::new();
+    for (at, name) in reached {
+        let hits: Vec<String> = doc
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                sch_doc::Item::NoConnect(marker) if marker.at.near_eq(*at, EPS) => {
+                    Some(marker.uuid.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if !hits.is_empty() && !cleared.contains(name) {
+            cleared.push(name.clone());
+        }
+        doomed.extend(hits);
+    }
+    doc.remove_drawing(&doomed);
+    cleared
+}
+
+/// Fold the no-connect markers a connection cleared into its `changed` report.
+fn with_cleared(changed: String, cleared: Vec<String>) -> Value {
+    match cleared.is_empty() {
+        true => json!(changed),
+        false => json!({ "changed": changed, "removed_no_connects": cleared }),
     }
 }
 
@@ -327,11 +389,12 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     ) else {
         return Ok(json!({ "error": "label needs `pin` and `net`" }));
     };
-    let kind = match input.get("kind").and_then(Value::as_str).unwrap_or("local") {
-        "local" => LabelKind::Local,
-        "global" => LabelKind::Global,
-        "hierarchical" => LabelKind::Hier,
-        other => return Ok(json!({ "error": format!("unknown label kind `{other}`") })),
+    let asked = match input.get("kind").and_then(Value::as_str) {
+        None => None,
+        Some("local") => Some(LabelKind::Local),
+        Some("global") => Some(LabelKind::Global),
+        Some("hierarchical") => Some(LabelKind::Hier),
+        Some(other) => return Ok(json!({ "error": format!("unknown label kind `{other}`") })),
     };
     let mut edit = Edit::open(ctx)?;
     // `@R1.2` names whatever net that pin is on — the only way to join a net whose
@@ -347,13 +410,42 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(pin) => pin,
         Err(error) => return Ok(reference_error(&edit.doc, &input, error)),
     };
-    let was = refs::net_of(edit.before(), &pin.refdes, &pin.number).map(str::to_string);
+    // Naming a pin connects it, so its marker goes — and it goes BEFORE the pin's
+    // net is read, because a marker severs its point and a still-marked pin reads
+    // as belonging to nothing. That is how a name landed on a pin that already had
+    // one and merged two nets in silence.
+    let cleared = clear_no_connects(&mut edit.doc, &[(pin.at, spec.to_string())]);
+    let live = match cleared.is_empty() {
+        true => edit.before().clone(),
+        false => connect::extract(&edit.doc),
+    };
+    let was = refs::net_of(&live, &pin.refdes, &pin.number).map(str::to_string);
+    // Hanging a second authored name on a pin does not rename its net — it merges
+    // two of them, and the merge is invisible in the drawing. Naming a net KiCAD
+    // named for itself is still fine: that partition has no authored name to lose.
+    if let Some(was) = was.as_deref()
+        && was != net
+        && !is_auto(was)
+    {
+        return Ok(json!({
+            "error": format!(
+                "{spec} is already on net `{was}`; naming it `{net}` would merge `{was}` and \
+                 `{net}` into one net. Delete the wiring that puts {spec} on `{was}` first, or \
+                 name a pin that is loose."
+            ),
+        }));
+    }
+    // A net has one scope on the sheet: a plain label on a net the sheet names with
+    // a pennant does not join it, it shadows it. The caller may still say which.
+    let kind = asked
+        .or_else(|| sheet_scope(&edit.doc, net))
+        .unwrap_or(LabelKind::Local);
     edit.doc.add_label(kind, net, pose(pin.at));
     edit.commit(
         ctx,
         "label",
         "Label a schematic net",
-        json!(format!("named {spec} `{net}`")),
+        with_cleared(format!("named {spec} `{net}`"), cleared),
         Allow::nothing()
             .joining_nets([net.to_string()])
             .joining_nets(was)
@@ -434,14 +526,17 @@ pub fn no_connect(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     edit.doc.remove_drawing(&retracted.uuids);
 
+    // "Is this pin already marked?" is a question about the drawing, and the
+    // drawing is what answers it: a pin whose partition a label happens to name
+    // is absent from the extracted `no_connect` list while plainly carrying a
+    // marker, and asking the netlist instead put a second marker on top of it.
     let mut marked = Vec::new();
     for pin in &pins {
-        if edit
-            .before()
-            .no_connect
-            .iter()
-            .any(|member| member.refdes == pin.refdes && member.pin == pin.number)
-        {
+        let already =
+            edit.doc.items().iter().any(
+                |item| matches!(item, sch_doc::Item::NoConnect(m) if m.at.near_eq(pin.at, EPS)),
+            );
+        if already {
             continue;
         }
         edit.doc.add_no_connect(pin.at);

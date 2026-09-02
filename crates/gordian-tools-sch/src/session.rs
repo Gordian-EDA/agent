@@ -129,7 +129,7 @@ impl Allow {
 }
 
 /// Whether a net name was generated rather than authored.
-fn is_auto(name: &str) -> bool {
+pub(crate) fn is_auto(name: &str) -> bool {
     name.starts_with("Net-(")
 }
 
