@@ -175,6 +175,42 @@ fn a_dangling_led_cathode_is_refused_with_the_pin() {
 }
 
 #[test]
+fn a_divider_between_power_rails_is_accepted() {
+    let input: PlacePartsInput = serde_json::from_str(include_str!(
+        "../../../quality/cases/replace-pcb-component/input/seed.place-parts.json"
+    ))
+    .unwrap();
+    let (_, _, audit) = into_design(&input, &provider(), &Default::default());
+
+    assert!(audit.is_valid(), "{audit:?}");
+}
+
+#[test]
+fn a_single_pin_signal_is_refused() {
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "R1", "part": "Device:R", "pins": {"1": "SIG_A"}}]}"#,
+    )
+    .unwrap();
+    let (_, _, audit) = into_design(&input, &provider(), &Default::default());
+
+    assert!(!audit.is_valid());
+    assert_eq!(audit.dangling.len(), 1);
+    assert_eq!(audit.dangling[0].net, "SIG_A");
+}
+
+#[test]
+fn a_declared_port_may_have_one_pin() {
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "R1", "part": "Device:R", "pins": {"1": "SIG_A"}}],
+            "intent": {"ports": {"SIG_A": "left"}}}"#,
+    )
+    .unwrap();
+    let (_, _, audit) = into_design(&input, &provider(), &Default::default());
+
+    assert!(audit.is_valid(), "{audit:?}");
+}
+
+#[test]
 fn an_led_cathode_on_existing_ground_is_accepted() {
     let input: PlacePartsInput = serde_json::from_str(
         r#"{"parts": [{"ref": "D1", "part": "Device:LED",
@@ -190,12 +226,12 @@ fn an_led_cathode_on_existing_ground_is_accepted() {
 fn a_single_pin_gnd_typo_suggests_the_existing_ground_net() {
     let input: PlacePartsInput = serde_json::from_str(
         r#"{"parts": [{"ref": "D1", "part": "Device:LED",
-             "pins": {"A": "+3V3", "K": "GNDD"}}]}"#,
+             "pins": {"A": "+3V3", "K": "GRND"}}]}"#,
     )
     .unwrap();
     let (_, _, audit) = into_design(&input, &provider(), &live_power_nets());
 
-    assert_eq!(audit.did_you_mean["GNDD"], "GND");
+    assert_eq!(audit.did_you_mean["GRND"], "GND");
 }
 
 #[test]

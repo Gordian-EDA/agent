@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use circuit_graph::netclass::is_power_net;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use indexmap::IndexMap;
@@ -228,7 +229,14 @@ fn audit_payload(
             continue;
         };
         for (pin, net) in &spec.pins {
-            if net.eq_ignore_ascii_case("nc") || pins::resolve(&meta, pin).is_empty() {
+            if net.eq_ignore_ascii_case("nc")
+                || is_power_net(net)
+                || input
+                    .intent
+                    .as_ref()
+                    .is_some_and(|intent| intent.ports.contains_key(net))
+                || pins::resolve(&meta, pin).is_empty()
+            {
                 continue;
             }
             let pins_on_net = pin_counts.get(net).copied().unwrap_or_default();
