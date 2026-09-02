@@ -608,7 +608,10 @@ fn coalesced_discovery_call(call: &ToolCall, calls: &[ToolCall]) -> Option<ToolC
 }
 
 fn is_revision_scoped_read(name: &str) -> bool {
-    matches!(name, "project_info" | "diff_schematic" | "render_schematic")
+    matches!(
+        name,
+        "project_info" | "read_schematic" | "diff_schematic" | "render_schematic"
+    )
 }
 
 /// Best-effort emit: a closed receiver (UI gone) is ignored.
@@ -1025,7 +1028,9 @@ impl<P: Provider> Agent<P> {
             }
             let revision_reads_used = revision_read_uses
                 .iter()
-                .filter(|(_, revision)| **revision == tool_state_revision)
+                .filter(|(name, revision)| {
+                    name.as_str() == "read_schematic" || **revision == tool_state_revision
+                })
                 .map(|(name, _)| name.clone())
                 .collect::<HashSet<_>>();
             let mut defs = tool_defs_for_phase(
@@ -1195,7 +1200,11 @@ impl<P: Provider> Agent<P> {
                         .unwrap_or(0)
                         >= budgets.discovery_rounds_per_subturn;
                 let repeated_read = is_revision_scoped_read(&call.fn_name)
-                    && revision_read_uses.get(&call.fn_name) == Some(&tool_state_revision);
+                    && revision_read_uses
+                        .get(&call.fn_name)
+                        .is_some_and(|revision| {
+                            call.fn_name == "read_schematic" || *revision == tool_state_revision
+                        });
                 let mutation_after_clean =
                     schematic_check_complete && is_schematic_mutator(&call.fn_name);
                 let mutation_blocked = timed_out_mutation_name(&timed_out_tool_calls).is_some()
