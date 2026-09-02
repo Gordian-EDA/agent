@@ -987,14 +987,19 @@ impl SchematicWriter {
     /// preserved (everything moves together), so the multi-block composer can
     /// translate a fully-laid-out group writer to its tile in mm — no string
     /// geometry math. Caller keeps the shift grid-aligned to stay on the KiCAD grid.
+    ///
+    /// Connection geometry re-snaps (it is grid-aligned already, so this only
+    /// absorbs float drift), but solved field text does NOT: its anchors are
+    /// deliberately OFF-grid sub-millimetre offsets from their body, and
+    /// re-snapping each one independently slides it up to half a grid step
+    /// relative to the symbols the text solver cleared it against — turning a
+    /// collision-free layout into an overlap. Text moves by the shift, rigidly.
     pub fn translate(&mut self, dx: f64, dy: f64) {
         let sh = |p: &mut Point2| {
             *p = GRID_50_MIL.snap_point(Point2::new(p.x + dx, p.y + dy));
         };
         let sha = |p: &mut [f64; 2]| {
-            *p = GRID_50_MIL
-                .snap_point(Point2::new(p[0] + dx, p[1] + dy))
-                .into();
+            *p = [p[0] + dx, p[1] + dy];
         };
         for i in &mut self.instances {
             sh(&mut i.at);
@@ -1173,6 +1178,26 @@ mod tests {
         assert_eq!(w.wires[0].uuid_key, "13.97:27.94:16.51:27.94");
         assert_eq!(w.junctions[0].uuid_key, "16.51:27.94");
         assert_eq!(w.labels[0].uuid_key, "cluster:SIG:16.51:27.94");
+    }
+
+    /// A shift must not re-grid solved field text: its anchor is a deliberate
+    /// off-grid offset from the body, and snapping it independently slides it
+    /// into the neighbour the text solver had cleared it of.
+    #[test]
+    fn translate_keeps_field_text_rigid_with_its_body() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [101.6, 101.6], 0.0)
+            .unwrap();
+        w.instances[0].ref_pos = Some(crate::write::TextPos {
+            at: [104.78, 98.42],
+            justify: crate::write::Justify::Center,
+        });
+
+        w.translate(12.7, 25.4);
+
+        assert_eq!(w.instances[0].at, Point2::new(114.3, 127.0));
+        assert_eq!(w.instances[0].ref_pos.unwrap().at, [117.48, 123.82]);
     }
 
     #[test]
