@@ -85,12 +85,17 @@ impl SchDoc {
     /// Drop `(lib_symbols)` entries nothing refers to. Called for you on
     /// [`SchDoc::write`] whenever the document has been edited.
     ///
-    /// "Refers to" is transitive: a derived symbol has no body of its own, so
-    /// the parent it `extends` stays even though nothing is placed under the
-    /// parent's own `lib_id`. Dropping it would leave every derived symbol in
-    /// the file with no pins.
+    /// "Refers to" is read the way [`crate::placed_pins`] reads it — an
+    /// instance draws from its `(lib_name …)` when it has one, and only
+    /// otherwise from its `lib_id` — and it is transitive: a derived symbol has
+    /// no body of its own, so the parent it `extends` stays even though nothing
+    /// is placed under the parent's own `lib_id`. Dropping either would leave
+    /// the symbol in the file with no pins and no body.
     pub fn gc_lib_symbols(&mut self) {
-        let mut used: Vec<String> = self.symbols().map(|s| s.lib_id.clone()).collect();
+        let mut used: Vec<String> = self
+            .symbols()
+            .map(|s| crate::pins::lib_key(s).to_string())
+            .collect();
         used.sort();
         used.dedup();
         let Some(libs) = self.items_mut().iter_mut().find_map(|item| match item {
@@ -103,14 +108,14 @@ impl SchDoc {
         while frontier < used.len() {
             let lib_id = used[frontier].clone();
             frontier += 1;
-            let Some((lib, _)) = lib_id.split_once(':') else {
-                continue;
-            };
             let parent = libs
                 .defs
                 .get(&lib_id)
                 .and_then(|def| crate::sexpr::child_text(&def.node, "extends"))
-                .map(|parent| format!("{lib}:{parent}"));
+                .map(|parent| match lib_id.split_once(':') {
+                    Some((lib, _)) => format!("{lib}:{parent}"),
+                    None => parent.to_string(),
+                });
             if let Some(parent) = parent
                 && !used.contains(&parent)
             {

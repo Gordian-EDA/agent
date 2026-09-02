@@ -52,7 +52,7 @@ pub struct PlacedPin {
 }
 
 /// Sub-symbol names inside a definition end in `_<unit>_<style>`.
-fn unit_and_style(name: &str) -> (u32, u32) {
+pub(crate) fn unit_and_style(name: &str) -> (u32, u32) {
     let mut parts = name.rsplitn(3, '_');
     let style = parts.next().and_then(|s| s.parse().ok());
     let unit = parts.next().and_then(|s| s.parse().ok());
@@ -162,7 +162,7 @@ fn out_dir(pin: &LibPin, at: Pose, mirror: Mirror) -> Point2 {
 
 /// The instance's body style; KiCAD defaults to the first. KiCAD 7 and earlier
 /// spelled the field `convert`, and the corpus still holds pre-8 files.
-fn body_style(inst: &SymbolInst) -> u32 {
+pub(crate) fn body_style(inst: &SymbolInst) -> u32 {
     let node = inst.retained().node();
     sexpr::child_text(node, "body_style")
         .or_else(|| sexpr::child_text(node, "convert"))
@@ -172,7 +172,7 @@ fn body_style(inst: &SymbolInst) -> u32 {
 
 /// Whether a definition pin is drawn for this unit and body style. Zero means
 /// "shared by all", which is how KiCAD marks a multi-unit part's common pins.
-fn belongs(pin: &LibPin, unit: u32, style: u32) -> bool {
+pub(crate) fn belongs(pin: &LibPin, unit: u32, style: u32) -> bool {
     (pin.unit == 0 || pin.unit == unit) && (pin.style == 0 || pin.style == style)
 }
 
@@ -194,7 +194,7 @@ pub(crate) fn pin_numbers(def: &Node, unit: u32, style: u32) -> Vec<String> {
 pub(crate) fn pins_of(doc: &SchDoc, inst: &SymbolInst) -> Vec<PlacedPin> {
     let Some(def) = doc
         .lib_symbols()
-        .and_then(|libs| resolve(libs, &inst.lib_id))
+        .and_then(|libs| resolve(libs, lib_key(inst)))
     else {
         return Vec::new();
     };
@@ -227,19 +227,32 @@ pub(crate) fn pins_of(doc: &SchDoc, inst: &SymbolInst) -> Vec<PlacedPin> {
         .collect()
 }
 
+/// The `lib_symbols` entry an instance draws from.
+///
+/// KiCAD writes `(lib_name …)` when the sheet carries its own edited copy of a
+/// symbol: the definition is filed under that name, and the `lib_id` only says
+/// where it came from. Reading the `lib_id` there finds nothing, and a symbol
+/// with no definition has no pins and no body.
+pub(crate) fn lib_key(inst: &SymbolInst) -> &str {
+    sexpr::child_text(inst.retained().node(), "lib_name").unwrap_or(&inst.lib_id)
+}
+
 /// Follow `(extends …)` to the definition that actually carries the geometry.
 ///
 /// A derived symbol has no body of its own, so an unresolved chain is a miss,
 /// not a definition — returning the `extends` node would hand back a symbol
 /// with no pins as if it were the real one.
-pub(crate) fn resolve<'a>(libs: &'a crate::model::LibSymbols, lib_id: &str) -> Option<&'a Node> {
-    let (lib, _) = lib_id.split_once(':')?;
-    let mut def = libs.get(lib_id)?;
+pub(crate) fn resolve<'a>(libs: &'a crate::model::LibSymbols, key: &str) -> Option<&'a Node> {
+    let lib = key.split_once(':').map(|(lib, _)| lib);
+    let mut def = libs.get(key)?;
     for _ in 0..8 {
         let Some(parent) = child_text(def, "extends") else {
             return Some(def);
         };
-        def = libs.get(&format!("{lib}:{parent}"))?;
+        def = match lib {
+            Some(lib) => libs.get(&format!("{lib}:{parent}"))?,
+            None => libs.get(parent)?,
+        };
     }
     None
 }

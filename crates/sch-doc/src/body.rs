@@ -9,7 +9,7 @@ use kiutils_sexpr::Node;
 
 use crate::doc::SchDoc;
 use crate::model::SymbolInst;
-use crate::pins::{lib_pins, to_sheet};
+use crate::pins::{belongs, body_style, lib_key, lib_pins, to_sheet, unit_and_style, unit_count};
 use crate::sexpr::{self, items};
 
 /// Read an `(x y)` pair starting at `at` inside a node's item list.
@@ -52,21 +52,39 @@ fn graphic_points(node: &Node, out: &mut Vec<Point2>) {
 
 /// The body a placed symbol draws, in sheet coordinates.
 ///
+/// Only the graphics of the instance's own unit and body style count: a
+/// multi-unit part draws one unit per placement, and unioning them all would
+/// hand back a box the size of the sheet.
+///
 /// `None` when the definition is not embedded — pin geometry is unknown there
 /// too, so there is nothing to bound.
 pub fn body_rect(doc: &SchDoc, inst: &SymbolInst) -> Option<Rect> {
     let def = doc
         .lib_symbols()
-        .and_then(|libs| crate::pins::resolve(libs, &inst.lib_id))?;
+        .and_then(|libs| crate::pins::resolve(libs, lib_key(inst)))?;
+    let style = body_style(inst);
+    let unit = inst.unit.clamp(1, unit_count(def));
     let mut local = Vec::new();
     graphic_points(def, &mut local);
     for sub in items(def) {
-        if sexpr::head(sub) == Some("symbol") {
+        if sexpr::head(sub) != Some("symbol") {
+            continue;
+        }
+        let (u, s) = items(sub)
+            .get(1)
+            .and_then(sexpr::text)
+            .map_or((1, 1), unit_and_style);
+        if (u == 0 || u == unit) && (s == 0 || s == style) {
             graphic_points(sub, &mut local);
         }
     }
     if local.is_empty() {
-        local.extend(lib_pins(def).iter().map(|p| p.at.point()));
+        local.extend(
+            lib_pins(def)
+                .iter()
+                .filter(|p| belongs(p, unit, style))
+                .map(|p| p.at.point()),
+        );
         local.push(Point2::new(0.0, 0.0));
     }
     let sheet: Vec<Point2> = local

@@ -1167,3 +1167,52 @@ fn renaming_one_of_two_same_named_partitions_is_only_a_rename() {
         "{delta:?}"
     );
 }
+
+/// A sheet-local edited copy of a library symbol: KiCAD files the definition
+/// under a bare `(lib_name …)` and leaves the `lib_id` saying only where the
+/// symbol came from. Nothing in the file is filed under that `lib_id`.
+const LOCAL_COPY: &str = r#"(symbol "R_local"
+    (symbol "R_local_1_1"
+      (pin passive line (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+      (pin passive line (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))))"#;
+
+/// An instance drawing from `(lib_name …)` has pins, and keeps them after an
+/// edit is written back.
+///
+/// Reading the `lib_id` instead finds no definition at all, so the symbol has
+/// no pins and no body; collecting unreferenced definitions on the same
+/// misreading deletes the one it is using, which turns a saved file into a part
+/// wired to nothing.
+#[test]
+fn a_sheet_local_symbol_copy_keeps_its_pins_through_a_write() {
+    let mut doc = sheet(
+        &[LOCAL_COPY],
+        &format!(
+            "{}\n{}",
+            place(
+                "Device:R",
+                "R1",
+                "1k",
+                50.0,
+                50.0,
+                0.0,
+                "(lib_name \"R_local\") (unit 1)"
+            ),
+            wire(50.0, 46.19, 50.0, 40.0)
+        ),
+    );
+    assert_eq!(sch_doc::placed_pins(&doc).len(), 2, "pins before the edit");
+    assert!(sch_doc::body_rect(&doc, doc.symbol_by_ref("R1").expect("R1")).is_some());
+
+    doc.move_symbol("R1", 60.0, 50.0).expect("move");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("out.kicad_sch");
+    doc.write(&path).expect("write");
+
+    let saved = SchDoc::read(&path).expect("read back");
+    assert_eq!(
+        sch_doc::placed_pins(&saved).len(),
+        2,
+        "the definition the instance draws from survived the write"
+    );
+}
