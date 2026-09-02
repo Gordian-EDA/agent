@@ -1,0 +1,12 @@
+The USB-C sink, protected USB data path, CP2102 UART bridge, auto-program circuit, 3.3 V rail, ESP32 boot/reset straps, BME280 I2C mode, and microSD SPI interface must be complete and wired to real pin functions. The schematic should be divided into recognizable blocks, remain legible at normal zoom, and have no label, value, symbol, or wire collisions. The PCB should be compact and deliberate: external connectors and controls on edges, decoupling close to loads, USB routing short, the sensor away from heat sources, and a clearly respected ESP32 antenna keepout. Fabrication outputs must be present.
+expect: agent_exit == 0
+expect: schematic_created == true
+expect: pcb_created == true
+expect: erc_errors == 0
+expect: drc_errors == 0
+expect: partition_matches_kicad == true
+expect: part_count >= 40
+expect: unconnected_pins == []
+expect: unconnected_items == 0
+expect: len(fab_files) >= 3
+expect: elapsed_seconds <= 300

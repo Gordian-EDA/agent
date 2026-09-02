@@ -679,6 +679,7 @@ def run_case(case, output_root):
 
     renders["after"] = render_project(project, artifacts, "after")
     facts, detail = deterministic_facts(project, before_project, artifacts, result)
+    facts["elapsed_seconds"] = round(time.time() - started, 1)
     outcome = evaluate_checks(checks, facts)
     report = {
         "case": case.name,
@@ -747,6 +748,8 @@ def scoreboard(reports):
 def select(available, args):
     if args.cases:
         return args.cases
+    if args.suite == "campaign":
+        return sorted(n for n in available if n.startswith("campaign-"))
     if args.suite == "schematic":
         return sorted(n for n in available if n.startswith("sch-"))
     if args.suite == "pcb":
@@ -760,9 +763,9 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("quality/runs"))
     parser.add_argument(
         "--suite",
-        choices=["schematic", "pcb", "all"],
+        choices=["campaign", "schematic", "pcb", "all"],
         default="all",
-        help="schematic runs every sch-* case, pcb runs the rest",
+        help="campaign runs campaign-*, schematic runs sch-*, pcb runs the rest",
     )
     parser.add_argument("--scoreboard", type=Path, help="write the scoreboard here too")
     parser.add_argument("--list", action="store_true")
