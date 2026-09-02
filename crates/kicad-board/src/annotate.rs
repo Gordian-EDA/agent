@@ -166,6 +166,44 @@ pub fn patch_annotations(text: &str, annotations: &[Annotation]) -> Result<Strin
     Ok(apply_edits(text, edits))
 }
 
+/// Drop whole footprints from a document.
+///
+/// Fabrication output must not carry parts that are not on the board yet, so
+/// the export copy is the board minus its staging row.
+pub fn remove_footprints(text: &str, references: &[String]) -> Result<String, String> {
+    let wanted: BTreeMap<&str, ()> = references
+        .iter()
+        .map(|reference| (reference.as_str(), ()))
+        .collect();
+    let (body_start, body_end) = root_body(text)?;
+    let mut edits = Vec::new();
+    let mut seen = 0usize;
+    for footprint in child_nodes(text, body_start, body_end) {
+        if node_head(text, &footprint) != "footprint" {
+            continue;
+        }
+        let Some(reference) = footprint_reference(text, &footprint) else {
+            continue;
+        };
+        if !wanted.contains_key(reference.as_str()) {
+            continue;
+        }
+        seen += 1;
+        let mut start = footprint.start;
+        while start > body_start && matches!(text.as_bytes()[start - 1], b' ' | b'\t' | b'\n') {
+            start -= 1;
+        }
+        edits.push((start, footprint.end, String::new()));
+    }
+    if seen != wanted.len() {
+        return Err(format!(
+            "matched {seen} of {} footprints to remove",
+            wanted.len()
+        ));
+    }
+    Ok(apply_edits(text, edits))
+}
+
 /// The whitespace a footprint's children are indented by, so an inserted node
 /// reads like the rest of the file.
 fn block_indent(text: &str, footprint: &Node) -> String {
@@ -323,6 +361,14 @@ mod tests {
         assert!(!part.properties.contains_key(LOCKED_REASON));
         assert!(part.properties.contains_key(STAGED_DETAIL));
         assert_eq!(part.reference, "R1", "the Reference property is untouched");
+    }
+
+    #[test]
+    fn removing_a_footprint_takes_the_whole_block() {
+        let stripped = remove_footprints(BOARD, &["R1".to_owned()]).unwrap();
+        assert!(!stripped.contains("footprint"), "{stripped}");
+        assert!(snapshot_of(&stripped).imported.parts.is_empty());
+        assert!(remove_footprints(BOARD, &["R9".to_owned()]).is_err());
     }
 
     #[test]

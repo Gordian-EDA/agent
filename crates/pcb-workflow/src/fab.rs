@@ -35,6 +35,16 @@ pub fn export_fab(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     }
 
+    // A part still in the staging row is not on the board yet, so it must not
+    // reach a board house. Everything below runs against a copy with the row
+    // removed, and the report names what was left out.
+    let (source, staged, staging_dir) = match export_source(ctx, &board) {
+        Ok(source) => source,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
+    let _staging_dir = staging_dir;
+    let board = source;
+
     let cli = ctx.env();
     let drc = match cli.refill_zones(&board, true) {
         Ok(report) => report,
@@ -131,6 +141,15 @@ pub fn export_fab(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
     let note = if files.is_empty() {
         "fab export produced no files — see errors.".to_string()
+    } else if !staged.is_empty() {
+        format!(
+            "Fab bundle written to {} ({} files) WITHOUT the {} staged part(s) ({}): they are \
+             not on the board yet. Place them and export again for a complete bundle.",
+            out_dir.display(),
+            files.len(),
+            staged.len(),
+            staged.join(", "),
+        )
     } else {
         format!(
             "Fab bundle written to {} ({} files: Gerbers + Excellon drill + pick-and-place{}). \
@@ -156,8 +175,36 @@ pub fn export_fab(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "missing_files": missing_files,
         "file_count": files.len(),
         "errors": errors,
+        "staged_excluded": staged,
         "note": note,
     }))
+}
+
+/// The board the exporters run against: the project board itself when nothing
+/// is staged, otherwise a temporary copy with the staging row removed.
+///
+/// The returned directory owns the copy and must outlive the exporters.
+fn export_source(
+    ctx: &AgentRuntime,
+    board: &Path,
+) -> std::result::Result<(PathBuf, Vec<String>, Option<tempfile::TempDir>), String> {
+    let snapshot = crate::active_board(ctx)?;
+    let staged: Vec<String> = crate::staging::staged_references(&snapshot)
+        .into_iter()
+        .collect();
+    if staged.is_empty() {
+        return Ok((board.to_path_buf(), staged, None));
+    }
+    let text = std::fs::read_to_string(board).map_err(|error| error.to_string())?;
+    let stripped = kicad_board::remove_footprints(&text, &staged)?;
+    let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let copy = dir.path().join(
+        board
+            .file_name()
+            .ok_or_else(|| "the board path has no file name".to_owned())?,
+    );
+    std::fs::write(&copy, stripped).map_err(|error| error.to_string())?;
+    Ok((copy, staged, Some(dir)))
 }
 
 fn verify_files(files: &[PathBuf]) -> (Vec<Value>, Vec<String>) {

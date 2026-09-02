@@ -2504,55 +2504,60 @@ fn sizing_report(
     extra
 }
 
+/// The parts a `place_board` call may move, and the ones it must not.
+struct PlacementSubset {
+    /// The references to lay out; `None` is the whole board.
+    refs: Option<Vec<String>>,
+    /// Named parts a lock protects. They stay where they are, and the result
+    /// says so rather than reporting a move that never happened.
+    locked: Vec<Value>,
+}
+
 /// Which parts a `place_board` call may move: the caller's `refs`, or — with no
 /// `refs` — the parts nothing has laid out yet. `None` is the whole board.
 ///
 /// A board fresh from `sync_board` has every part in the seed row, so that is
 /// the whole board; a board that has just gained parts has only those, and
-/// placing them is a subset op that leaves the rest alone. Only when nothing is
-/// outstanding is re-placing a destructive act the caller has to ask for. A
-/// locked footprint is the one thing on a board a tool does not overrule.
+/// placing them is a subset op that leaves the rest alone. Placing a fully
+/// placed board is a no-op, not a refusal — `replace: true` is what re-places
+/// it and loses the layout. A locked footprint is the one thing on a board no
+/// helper overrules, so it is dropped from the subset and reported.
 fn placement_subset(
     refs: Option<Vec<String>>,
     board: &BoardSnapshot,
     replace: bool,
-) -> std::result::Result<Option<Vec<String>>, Value> {
-    let unplaced = kicad_board::seed_row_references(&board.imported);
-    let whole_board = refs.is_none() && unplaced.len() == board.imported.parts.len();
+) -> PlacementSubset {
+    let staged = crate::staging::staged_references(board);
+    let whole_board = refs.is_none() && staged.len() == board.imported.parts.len();
     let refs = match refs {
         Some(refs) => Some(refs),
         None if whole_board || replace => None,
-        None if unplaced.is_empty() => return Err(already_placed_error()),
-        None => Some(unplaced),
+        None => Some(staged.into_iter().collect()),
     };
-    // Placing a set of locked parts would report success and move nothing, and
-    // the caller would be told to call again.
-    if let Some(refs) = &refs {
-        let locked: Vec<&str> = refs
+    let Some(named) = refs else {
+        return PlacementSubset {
+            refs: None,
+            locked: Vec::new(),
+        };
+    };
+    let locked = crate::locks::locked_among(board, named.iter().map(String::as_str));
+    let protected: std::collections::BTreeSet<&str> =
+        locked.iter().map(|(reference, _)| *reference).collect();
+    PlacementSubset {
+        refs: Some(
+            named
+                .iter()
+                .filter(|reference| !protected.contains(reference.as_str()))
+                .cloned()
+                .collect(),
+        ),
+        locked: locked
             .iter()
-            .filter(|reference| {
-                board
-                    .imported
-                    .parts
-                    .iter()
-                    .any(|part| &&part.reference == reference && part.locked)
+            .map(|(reference, reason)| {
+                json!({ "ref": reference, "locked_reason": reason.as_str() })
             })
-            .map(String::as_str)
-            .collect();
-        if locked.len() == refs.len() {
-            return Err(json!({
-                "error": format!(
-                    "{} is locked on the board, so placement has nothing it may move",
-                    locked.join(", ")
-                ),
-                "code": "parts_locked",
-                "placement_applied": false,
-                "locked": locked,
-                "note": "Unlock them in KiCad, or move them deliberately with move_parts.",
-            }));
-        }
+            .collect(),
     }
-    Ok(refs)
 }
 
 /// Whether the parts this call may move seat cleanly: inside the board, clear
@@ -2690,21 +2695,69 @@ fn check_references<'a>(
     ))
 }
 
-/// Whole-board placement moves EVERY unlocked part, so running it on a board
-/// that already has a layout throws that layout away — the exact loss
-/// `sync_board` exists to prevent.
-///
-/// It is only a refusal when there is nothing left to do: a board with parts
-/// still in the seed row has work outstanding, and `place_board()` does that
-/// work (as a subset placement) instead of complaining.
-fn already_placed_error() -> Value {
+/// Lock the parts a caller pinned to a board edge whose position is physical:
+/// a connector faces the outside world and a mounting hole takes a screw, so
+/// once placed they are not a solver's to move again.
+fn write_mechanical_locks(
+    ctx: &AgentRuntime,
+    moves: &[FootprintPlacement],
+    edge_intent: &std::collections::BTreeSet<String>,
+) -> std::result::Result<Vec<String>, String> {
+    let board = crate::active_board(ctx)?;
+    let mechanical: Vec<String> = moves
+        .iter()
+        .map(|placement| placement.reference.as_str())
+        .filter(|reference| edge_intent.contains(*reference))
+        .filter(|reference| {
+            board
+                .imported
+                .parts
+                .iter()
+                .find(|part| part.reference == **reference)
+                .is_some_and(|part| {
+                    is_connector(&part.lib_id, &part.reference)
+                        || is_mounting_hole(&part.lib_id)
+                })
+        })
+        .map(str::to_owned)
+        .collect();
+    if mechanical.is_empty() {
+        return Ok(Vec::new());
+    }
+    let annotations: Vec<kicad_board::Annotation> = mechanical
+        .iter()
+        .map(|reference| {
+            kicad_board::Annotation::new(reference.clone())
+                .locked(true)
+                .set(kicad_board::LOCKED_REASON, "mechanical")
+        })
+        .collect();
+    let path = ctx.pcb_path();
+    let text = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let patched = kicad_board::patch_annotations(&text, &annotations)?;
+    std::fs::write(&path, patched).map_err(|error| error.to_string())?;
+    Ok(mechanical)
+}
+
+/// The report a `place_board` call with nothing to move owes its caller: what
+/// state the board is already in, and what would change it.
+fn nothing_to_place(board: &BoardSnapshot, locked: &[Value]) -> Value {
+    let state = crate::staging::BoardState::of(board);
     json!({
-        "error": "this board is already placed; every part has a position",
-        "code": "board_already_placed",
+        "ok": true,
         "placement_applied": false,
-        "note": "Nothing was moved. Adjust individual parts with move_parts, name the ones to \
-                 re-place with {\"refs\": [...]}, or pass {\"replace\": true} to deliberately \
-                 re-place the whole board and lose the current layout.",
+        "placed": state.placed,
+        "staged": state.staged_json(),
+        "locked": locked,
+        "note": if locked.is_empty() {
+            "Every part already has a pose and nothing was named, so there was nothing to \
+             place. Adjust individual parts with move_parts, name the ones to re-place with \
+             {\"refs\": [...]}, or pass {\"replace\": true} to re-place the whole board and \
+             lose its layout."
+        } else {
+            "Every part this call selected is locked, so nothing moved. unlock_parts({\"refs\": \
+             [...]}) releases them."
+        },
     })
 }
 
@@ -2728,6 +2781,11 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(intent) => intent,
         Err(error) => return Ok(json!({ "error": error })),
     };
+    let edge_intent: std::collections::BTreeSet<String> = intent
+        .edge_references()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     if let Err(error) = check_references(intent.references().into_iter(), &board, "intent") {
         return Ok(json!({ "error": error }));
     }
@@ -2741,10 +2799,16 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         object.remove("bbox");
         object.remove("intent");
     }
-    let refs = match placement_subset(refs, &board, replace) {
-        Ok(refs) => refs,
-        Err(refusal) => return Ok(refusal),
-    };
+    let PlacementSubset {
+        refs,
+        locked: locked_out,
+    } = placement_subset(refs, &board, replace);
+    // Everything is placed and nothing was named: there is no work, and saying
+    // so is the whole answer. `replace: true` is how a caller asks for the
+    // destructive re-place.
+    if refs.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(nothing_to_place(&board, &locked_out));
+    }
 
     let mut problem = match place_problem_from_snapshot(&board, ctx) {
         Ok(p) => p,
@@ -2877,6 +2941,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // other footprint's pose stays byte-identical — the placer's own answer for
     // a locked part is not the same bytes the board already has.
     let mut gate = None;
+    let mut mechanical_locks: Vec<String> = Vec::new();
     let mut retracted = None;
     let mut outline_refit = None;
     // A subset placement answers only for the parts it may move.
@@ -2967,6 +3032,20 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     return Ok(opened.rollback(ctx, error));
                 }
                 retracted = Some(retract);
+                match write_mechanical_locks(ctx, &moves, &edge_intent) {
+                    Ok(locked) => mechanical_locks = locked,
+                    Err(error) => {
+                        return Ok(opened.rollback(
+                            ctx,
+                            json!({
+                                "error": format!(
+                                    "the parts were placed but their mechanical locks were not \
+                                     written: {error}"
+                                ),
+                            }),
+                        ));
+                    }
+                }
             }
             if let Some(plan) = &outline_refit {
                 let path = ctx.pcb_path();
@@ -3093,6 +3172,12 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let retract = retracted.unwrap_or_default();
     out["retracted_tracks"] = json!(retract.count);
     out["nets_to_reroute"] = json!(retract.nets);
+    if !locked_out.is_empty() {
+        out["skipped_locked"] = json!(locked_out);
+    }
+    if !mechanical_locks.is_empty() {
+        out["mechanically_locked"] = json!(mechanical_locks);
+    }
     if let Some(refs) = &refs {
         out["placed_refs"] = json!(refs);
         if let Some(bbox) = bbox {
@@ -3122,7 +3207,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         } else {
             Default::default()
         };
-        let still_unplaced: Vec<String> = kicad_board::seed_row_references(&board.imported)
+        let still_staged: Vec<String> = crate::staging::staged_references(&board)
             .into_iter()
             .filter(|reference| !placed.contains(reference.as_str()))
             .collect();
@@ -3133,9 +3218,9 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             );
             out["next_tool"] = json!("route_board");
         }
-        if !still_unplaced.is_empty() {
-            out["still_unplaced"] = json!(still_unplaced);
-            out["still_unplaced_note"] = json!(
+        if !still_staged.is_empty() {
+            out["still_staged"] = json!(still_staged);
+            out["still_staged_note"] = json!(
                 "these parts are still in the seed row; place them too before routing the board."
             );
         }

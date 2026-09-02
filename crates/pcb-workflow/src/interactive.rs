@@ -62,6 +62,15 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(plan) => plan,
         Err(err) => return Ok(json!({ "error": err })),
     };
+    let locked = crate::locks::locked_among(
+        &snapshot,
+        plan.positions
+            .iter()
+            .map(|position| position.reference.as_str()),
+    );
+    if !locked.is_empty() {
+        return Ok(crate::locks::locked_refusal("move_parts", &locked));
+    }
     if let Some(refusal) = overlap_error(&board, &plan, snapshot.problem.clearance) {
         return Ok(refusal);
     }
