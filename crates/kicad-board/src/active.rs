@@ -1,4 +1,4 @@
-//! Live KiCAD-board views and the explicit bridge-to-domain conversion seam.
+//! Board snapshot types and the explicit live-IPC conversion seam.
 
 use std::path::{Path, PathBuf};
 

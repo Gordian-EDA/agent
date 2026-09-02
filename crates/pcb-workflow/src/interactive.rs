@@ -1,9 +1,9 @@
-//! Interactive IPC board editing.
+//! Interactive saved-board editing with an explicit IPC escape hatch.
 //!
 //! Once the engine has seeded a board (sync_board → place_board → route_board),
-//! `open_board` launches or inspects the live KiCAD session and the geometry
-//! tools edit the REAL board over IPC. This is where the LLM directly controls
-//! geometry (the engine is the assist that produced the starting point).
+//! geometry tools read and atomically patch the durable board file. `open_board`
+//! is the explicit operation that launches or inspects a live KiCad session;
+//! configured attached sessions may also receive edits directly.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -40,7 +40,7 @@ pub fn open_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     super::place::get_board(json!({}), ctx)
 }
 
-/// Move one or more live-board parts in a single KiCAD IPC commit.
+/// Move one or more saved-board parts in one atomic edit, or one attached IPC commit.
 pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let snapshot = match crate::active_board(ctx) {
         Ok(snapshot) => snapshot,
