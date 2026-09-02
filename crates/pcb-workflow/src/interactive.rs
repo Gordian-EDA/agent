@@ -108,29 +108,33 @@ fn retracted_copper(snapshot: &IpcBoardSnapshot, plan: &MovePlan) -> RetractedCo
     // with no unrouted net to explain it. So the unit of retraction is the net:
     // once a move invalidates any of its copper, all of it goes and the net is
     // named for re-routing.
-    let mut retract = RetractedCopper::default();
-    retract.nets = snapshot
+    let nets: BTreeSet<String> = snapshot
         .copper
         .traces
         .iter()
         .filter(|trace| touches_moved_pad(trace))
         .map(|trace| trace.connection.clone())
         .collect();
-    for trace in &snapshot.copper.traces {
-        if retract.nets.contains(&trace.connection) {
-            retract.count += 1;
-        } else {
-            retract.retained.traces.push(trace.clone());
-        }
-    }
-    retract.retained.vias = snapshot
+    let (dropped, kept): (Vec<_>, Vec<_>) = snapshot
         .copper
-        .vias
+        .traces
         .iter()
-        .filter(|via| !retract.nets.contains(&via.connection))
         .cloned()
-        .collect();
-    retract
+        .partition(|trace| nets.contains(&trace.connection));
+    RetractedCopper {
+        count: dropped.len(),
+        retained: RouteSolution {
+            traces: kept,
+            vias: snapshot
+                .copper
+                .vias
+                .iter()
+                .filter(|via| !nets.contains(&via.connection))
+                .cloned()
+                .collect(),
+        },
+        nets,
+    }
 }
 
 fn write_retained_copper(
