@@ -1793,12 +1793,14 @@ pub(crate) fn plan_outline_refit(
         values.iter().sum::<f64>()
             + values.len().saturating_sub(1) as f64 * courtyard_gap
     };
-    let mut width = core.width()
-        + edge_depth[edge_slot(Edge::W)].max(headroom.west)
-        + edge_depth[edge_slot(Edge::E)].max(headroom.east);
-    let mut height = core.height()
-        + edge_depth[edge_slot(Edge::N)].max(headroom.north)
-        + edge_depth[edge_slot(Edge::S)].max(headroom.south);
+    let mut width = core.width() + headroom.west + headroom.east;
+    let mut height = core.height() + headroom.north + headroom.south;
+    width = width
+        .max(edge_depth[edge_slot(Edge::W)] + headroom.east)
+        .max(edge_depth[edge_slot(Edge::E)] + headroom.west);
+    height = height
+        .max(edge_depth[edge_slot(Edge::N)] + headroom.south)
+        .max(edge_depth[edge_slot(Edge::S)] + headroom.north);
     width = width
         .max(span(&edge_spans[edge_slot(Edge::N)]) + headroom.west + headroom.east)
         .max(span(&edge_spans[edge_slot(Edge::S)]) + headroom.west + headroom.east);
@@ -1907,8 +1909,7 @@ fn seated_edge_parts(
                 .get(part.reference.as_str())
                 .copied()
                 .unwrap_or_else(|| nearest_rect_edge(&problem.bounds, &rect));
-            let gap = rect_edge_gap(&problem.bounds, &rect, edge);
-            (gap <= geom::EPS).then_some((index, edge))
+            Some((index, edge))
         })
         .collect()
 }
