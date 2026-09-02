@@ -108,7 +108,7 @@ fn main() -> Result<()> {
                     "ASSIGN_FAULT"
                 };
                 println!(
-                    "{name},{},{},{},{},{},{},{},{},{:.2},0,0,{},mesh-assign,{},,0,{}",
+                    "{name},{},{},{},{},{},{},{},{},{:.2},,,{},mesh-assign,{},,0,{}",
                     board.problem.parts.len(),
                     rp.connections.len(),
                     rp.layer_count,

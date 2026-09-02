@@ -2088,12 +2088,9 @@ fn subset_is_legal(
         })
 }
 
-/// The subset a `place_board` call selects, checked against the board.
-///
-/// Either a `refs` list or a `bbox` window, never both — they are two ways of
-/// naming the same thing, and a caller who passes both means one of them.
-/// Naming a part that is not there is a mistake worth catching: the placer would
-/// otherwise silently lay out nothing and report a legal placement.
+/// The subset a `place_board` call selects: either a `refs` list or a `bbox`
+/// window, never both — they are two ways of naming the same thing, and a
+/// caller who passes both means one of them.
 fn subset_selection(
     input: &Value,
     board: &IpcBoardSnapshot,
@@ -2119,6 +2116,9 @@ fn subset_selection(
     Ok((subset_refs(input, board)?, None))
 }
 
+/// The `refs` a call names, checked against the board. Naming a part that is
+/// not there is a mistake worth catching: the placer would otherwise silently
+/// lay out nothing and report a legal placement.
 fn subset_refs(
     input: &Value,
     board: &IpcBoardSnapshot,
@@ -2238,8 +2238,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let zones = intent.zones.clone();
     intent.merge_into(&mut hints);
-    // A window is a promise as well as a selector: what the caller drew is where
-    // the parts should end up. `region` is a soft containment term, so a part
+    // A window is a promise as well as a selector: soft containment, so a part
     // that genuinely cannot fit still lands legally instead of failing.
     if let (Some(bbox), Some(members)) = (bbox, refs.as_ref()) {
         hints.groups.push(pcb_place::GroupHint {
@@ -2489,8 +2488,13 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         // What a local call did NOT do. A subset placement that leaves parts in
         // the seed row is half a board, and the model has no other way to learn
-        // it short of another `check_board`.
-        let placed: std::collections::BTreeSet<&str> = refs.iter().map(String::as_str).collect();
+        // it short of another `check_board`. An ILLEGAL placement wrote nothing,
+        // so the parts it selected are still in the seed row too.
+        let placed: std::collections::BTreeSet<&str> = if legal {
+            refs.iter().map(String::as_str).collect()
+        } else {
+            Default::default()
+        };
         let still_unplaced: Vec<String> = kicad_board::seed_row_references(&board.imported)
             .into_iter()
             .filter(|reference| !placed.contains(reference.as_str()))

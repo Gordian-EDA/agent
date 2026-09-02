@@ -82,7 +82,6 @@ pub(crate) fn nets_in_bbox(
             .path
             .windows(2)
             .any(|pair| segment_meets_rect(pair[0], pair[1], bbox))
-            || trace.path.iter().any(|point| bbox.contains(*point))
         {
             nets.insert(trace.connection.clone());
         }
@@ -260,6 +259,39 @@ mod tests {
             Point2::new(30.0, 30.0),
             &rect
         ));
+    }
+
+    #[test]
+    fn an_axis_aligned_segment_outside_the_box_is_rejected_by_the_degenerate_slab() {
+        let rect = Rect::new(10.0, 10.0, 20.0, 20.0);
+        // dx == 0 exactly: the vertical slab test divides by zero unless the
+        // p == 0 case is handled.
+        assert!(!segment_meets_rect(
+            Point2::new(5.0, 0.0),
+            Point2::new(5.0, 40.0),
+            &rect
+        ));
+        assert!(segment_meets_rect(
+            Point2::new(15.0, 0.0),
+            Point2::new(15.0, 40.0),
+            &rect
+        ));
+    }
+
+    #[test]
+    fn a_via_inside_the_box_selects_its_net() {
+        let copper = RouteSolution {
+            traces: Vec::new(),
+            vias: vec![pcb_model::Via {
+                connection: "STITCH".to_owned(),
+                at: Point2::new(15.0, 15.0),
+                diameter: 0.6,
+                drill: 0.3,
+                span: pcb_model::ViaSpan::Through,
+            }],
+        };
+        let nets = nets_in_bbox(&board(), &copper, &Rect::new(10.0, 10.0, 20.0, 20.0));
+        assert!(nets.contains("STITCH"));
     }
 
     #[test]
