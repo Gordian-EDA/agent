@@ -10,6 +10,7 @@ fn root_exports_and_existing_modules_remain_importable() {
         pins: vec![PinMeta {
             number: "1".into(),
             name: "A".into(),
+            alternates: vec!["SERCOM0_PAD0".into()],
             etype: PinType::Passive,
             dir: PinDir::Passive,
             unit: 1,
@@ -18,6 +19,7 @@ fn root_exports_and_existing_modules_remain_importable() {
     };
 
     assert_eq!(find_pin(&meta.pins, "1").unwrap().name, "A");
+    assert_eq!(find_pin(&meta.pins, "sercom0_pad0").unwrap().number, "1");
     assert!(SymbolTable::with_basics().symbol("Device:R").is_some());
 
     let _geometry_loader: fn(&std::path::Path, &str) -> std::io::Result<SymbolGeometry> =

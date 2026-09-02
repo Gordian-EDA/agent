@@ -77,37 +77,21 @@ fn looks_like_footprint(part: &str) -> bool {
             || lower.contains("handsolder"))
 }
 
-/// `key` is not a pin of `part`, with the closest pin name or number as a
-/// suggestion.
+/// `key` is not a pin of `part`, with ranked physical and alternate names.
 pub fn unknown_pin(refdes: &str, part: &str, meta: &SymbolMeta, key: &str) -> Diagnostic {
-    let mut available = meta
-        .pins
-        .iter()
-        .map(|pin| {
-            if pins::is_unnamed(&pin.name) || pin.name == pin.number {
-                pin.number.clone()
-            } else {
-                format!("{}={}", pin.number, pin.name)
-            }
-        })
-        .collect::<Vec<_>>();
-    available.sort();
-    available.dedup();
-    let omitted = available.len().saturating_sub(16);
-    available.truncate(16);
-    let suffix = if omitted == 0 {
-        String::new()
+    let suggestions = pins::ranked_suggestions(meta, key, 8);
+    let did_you_mean = if suggestions.is_empty() {
+        "none".to_string()
     } else {
-        format!(", and {omitted} more")
+        suggestions.join(", ")
     };
     let mut e = Diagnostic::error(
         "unknown-pin",
         format!(
-            "pin `{key}` not found on {refdes} ({part}); available pins: {}{suffix}",
-            available.join(", ")
+            "pin `{key}` not found on {refdes} ({part}); did_you_mean: [{did_you_mean}]"
         ),
     );
-    if let Some(name) = pins::nearest(meta, key) {
+    if let Some(name) = suggestions.first() {
         e = e.with_suggestion(name);
     }
     e

@@ -283,10 +283,31 @@ fn resolve_references(
     provider: &SymbolTable,
     existing: &BTreeSet<RefDes>,
 ) -> Vec<DuplicateRef> {
+    assign_references(input, provider, existing);
     let mut occupied = existing.clone();
     let mut counts = BTreeMap::<RefDes, usize>::new();
     for refdes in input.parts.iter().filter_map(|part| part.refdes.as_ref()) {
         *counts.entry(refdes.clone()).or_default() += 1;
+        occupied.insert(refdes.clone());
+    }
+    counts
+        .into_iter()
+        .filter(|(refdes, count)| *count > 1 || existing.contains(refdes))
+        .map(|(refdes, _)| DuplicateRef {
+            next_free: next_free_ref(refdes_prefix(&refdes), &occupied),
+            refdes,
+        })
+        .collect()
+}
+
+/// Fill omitted references with the same deterministic designators lowering uses.
+pub fn assign_references(
+    input: &mut PlacePartsInput,
+    provider: &SymbolTable,
+    existing: &BTreeSet<RefDes>,
+) {
+    let mut occupied = existing.clone();
+    for refdes in input.parts.iter().filter_map(|part| part.refdes.as_ref()) {
         occupied.insert(refdes.clone());
     }
 
@@ -308,15 +329,6 @@ fn resolve_references(
         occupied.insert(refdes.clone());
         part.refdes = Some(refdes);
     }
-
-    counts
-        .into_iter()
-        .filter(|(refdes, count)| *count > 1 || existing.contains(refdes))
-        .map(|(refdes, _)| DuplicateRef {
-            next_free: next_free_ref(refdes_prefix(&refdes), &occupied),
-            refdes,
-        })
-        .collect()
 }
 
 fn refdes_prefix(refdes: &str) -> &str {
@@ -689,8 +701,8 @@ pub fn place_parts_input_schema() -> Value {
                     "flow": {"enum": ["lr", "tb"], "description": "Global signal-flow direction."},
                     "rails": {
                         "type": "object",
-                        "description": "Net -> \"top\"|\"bottom\": nets drawn as spanning rails.",
-                        "additionalProperties": {"enum": ["top", "bottom"]}
+                        "description": "Net -> sheet side: nets drawn as spanning rails. Left/right are mapped to the nearest supported horizontal band.",
+                        "additionalProperties": {"enum": ["left", "right", "top", "bottom"]}
                     },
                     "ports": {
                         "type": "object",
