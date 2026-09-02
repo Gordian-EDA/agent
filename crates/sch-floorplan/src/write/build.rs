@@ -327,32 +327,30 @@ impl SchematicWriter {
         });
     }
 
-    /// Add a junction dot where `net`'s own wires meet. Deduplicated by position.
+    /// Record a tap where `net`'s own wires meet. Deduplicated by position.
     ///
-    /// A junction welds *everything* passing through it, so a dot is only ever
-    /// legitimate on one net. Under [`Self::set_weld_guard`] a dot is refused where a
-    /// foreign net's wire already runs, which would turn a mere crossing into a short.
-    /// Refusing the dot does not make such a point safe — the geometry itself is the
-    /// defect, and [`crate::floorplan::place::net_conflicts`] reports it — but nothing
-    /// the shipped sheet draws may be the thing that welds two nets.
+    /// The tap always splits this net's through-wire at `at` (which is what makes the
+    /// join real in the netlist). It is also DRAWN as a junction dot unless
+    /// [`Self::set_weld_guard`] is on and a foreign net's wire runs through the point: a
+    /// dot welds everything through it, and the shipped sheet must never be the thing
+    /// that merges two nets. Suppressing the dot does not make such a point tidy — the
+    /// geometry is still crowded and [`crate::floorplan::place::net_conflicts`] reports
+    /// anything it does weld — but this net stays whole either way.
     pub fn add_junction_on_net(&mut self, at: impl Into<Point2>, net: &str) {
         let at = GRID_50_MIL.snap_point(at.into());
         let uuid_key = format!("{}:{}", at.x, at.y);
         if self.junctions.iter().any(|j| j.uuid_key == uuid_key) {
             return;
         }
-        if self.weld_guard
-            && self
-                .wires
-                .iter()
-                .any(|w| w.net != net && Segment::new(w.a, w.b).contains_point(at))
-        {
-            return;
-        }
+        let welds_foreign = self
+            .wires
+            .iter()
+            .any(|w| w.net != net && Segment::new(w.a, w.b).contains_point(at));
         self.junctions.push(Junction {
             at,
             uuid_key,
             net: net.to_string(),
+            dot: !(self.weld_guard && welds_foreign),
         });
     }
 
@@ -676,13 +674,17 @@ impl SchematicWriter {
 
     /// Junction-dot count (a routing-quality signal for the refinement scorer).
     pub fn junction_count(&self) -> usize {
-        self.junctions.len()
+        self.junctions.iter().filter(|j| j.dot).count()
     }
 
     /// Junction-dot positions (for the scorer's merge check: a junction sitting
     /// on wires of two different nets fuses them).
     pub fn junction_positions(&self) -> Vec<[f64; 2]> {
-        self.junctions.iter().map(|j| j.at.into()).collect()
+        self.junctions
+            .iter()
+            .filter(|j| j.dot)
+            .map(|j| j.at.into())
+            .collect()
     }
 
     /// The connection point and net of every power symbol (`power:` graphic port),

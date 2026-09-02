@@ -43,7 +43,7 @@ impl SchematicWriter {
         for l in &self.labels {
             acc(l.at[0] + text_width(&l.net), l.at[1]);
         }
-        for j in &self.junctions {
+        for j in self.junctions.iter().filter(|j| j.dot) {
             acc(j.at[0], j.at[1]);
         }
         for nc in &self.no_connects {
@@ -143,6 +143,7 @@ impl SchematicWriter {
 
         // Junction dots, sorted by uuid_key for deterministic order/uuids.
         let mut junctions = self.junctions;
+        junctions.retain(|j| j.dot);
         junctions.sort_by(|a, b| a.uuid_key.cmp(&b.uuid_key));
         for j in &junctions {
             let uuid = stable_uuid("junction", &j.uuid_key);

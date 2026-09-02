@@ -178,15 +178,19 @@ pub(super) struct Wire {
     pub(super) net: String,
 }
 
-/// One `(junction …)` dot marking a deliberate ≥3-way wire join.
+/// One tap: a point where `net`'s own wires meet.
 ///
-/// A junction welds every wire passing through it, so it carries the net it was
-/// placed for: a dot is only ever legitimate where segments of ONE net meet.
+/// A tap is what the finalize split cuts a through-wire at, so the three ends coincide
+/// and KiCAD joins them. `dot` is whether it is also DRAWN as a `(junction …)`: a dot
+/// welds every wire passing through it, so where a foreign net's wire runs through the
+/// tap the dot is suppressed — the split still keeps this net whole, and the foreign
+/// wire, meeting only wire ENDS on its interior, stays separate.
 pub(super) struct Junction {
     pub(super) at: Point2,
     /// Stable key for the junction uuid (content-derived from the position).
     pub(super) uuid_key: String,
     pub(super) net: String,
+    pub(super) dot: bool,
 }
 
 /// Free-standing sheet text annotation.
