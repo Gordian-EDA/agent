@@ -1,1 +1,7 @@
 The filter should be a recognizable active low-pass topology around one op-amp unit, biased for single-supply operation. The unused unit and power pins must be handled safely, component values should plausibly target about 1 kHz, and the drawing should be readable.
+expect: agent_exit == 0
+expect: schematic_created == true
+expect: part_count >= 9
+expect: erc_errors == 0
+expect: schematic_critic_score >= 8
+expect: human_look_schematic_score >= 8

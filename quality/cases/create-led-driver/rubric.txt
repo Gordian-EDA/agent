@@ -1,1 +1,7 @@
 The transistor must switch the LED current on the low side, the base must have both series drive and pulldown resistors, and the connectors must expose only power and CTRL. Values, polarity, references, and signal flow should be readable.
+expect: agent_exit == 0
+expect: schematic_created == true
+expect: part_count >= 7
+expect: erc_errors == 0
+expect: schematic_critic_score >= 8
+expect: human_look_schematic_score >= 8
