@@ -769,6 +769,7 @@ mod tests {
                     drill: None,
                 })
                 .collect(),
+            properties: Default::default(),
         }
     }
 

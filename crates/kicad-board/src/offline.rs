@@ -229,6 +229,7 @@ fn read_footprint(
             BoardSide::Front
         },
         locked,
+        properties: crate::annotate::gordian_properties(text, node),
         courtyard: courtyard_bounds(text, &children),
         pads,
     })

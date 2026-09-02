@@ -1586,6 +1586,7 @@ mod tests {
                     locked: false,
                     courtyard: None,
                     pads: vec![],
+                    properties: Default::default(),
                 }],
                 placement_keepouts: vec![],
                 keepout_count: 0,
@@ -2086,6 +2087,7 @@ mod tests {
                     drill: None,
                 },
             ],
+            properties: Default::default(),
         }];
         let problem = route_problem(vec![]);
 

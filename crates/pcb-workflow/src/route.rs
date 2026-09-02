@@ -2464,6 +2464,7 @@ mod escape_bottleneck_tests {
                     drill: None,
                 })
                 .collect(),
+            properties: Default::default(),
         }
     }
     fn failed(nets: &[&str]) -> Vec<FailedNet> {

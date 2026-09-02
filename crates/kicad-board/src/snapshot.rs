@@ -29,8 +29,18 @@ pub struct ImportedPart {
     pub rotation: i32,
     pub side: BoardSide,
     pub locked: bool,
+    /// The `gordian:` properties this footprint carries — why it is staged, who
+    /// locked it. The board file is the only place this state lives.
+    pub properties: std::collections::BTreeMap<String, String>,
     pub courtyard: Option<Rect>,
     pub pads: Vec<ImportedPad>,
+}
+
+impl ImportedPart {
+    /// The value of one `gordian:` property.
+    pub fn property(&self, name: &str) -> Option<&str> {
+        self.properties.get(name).map(String::as_str)
+    }
 }
 
 /// Side of the board carrying a footprint.
@@ -106,6 +116,7 @@ mod tests {
             rotation,
             side: BoardSide::Front,
             locked: false,
+            properties: std::collections::BTreeMap::new(),
             courtyard: None,
             pads: vec![],
         }

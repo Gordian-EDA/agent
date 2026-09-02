@@ -707,6 +707,7 @@ mod tests {
                 size: Point2::new(1.0, 1.0),
                 drill: None,
             }],
+            properties: Default::default(),
         }];
         let same_net = Violation {
             severity: "error".to_owned(),

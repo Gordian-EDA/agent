@@ -3245,6 +3245,7 @@ mod tests {
                     drill: None,
                 })
                 .collect(),
+            properties: Default::default(),
         }
     }
 
@@ -4318,6 +4319,7 @@ mod tests {
                         size: Point2::new(1.0, 1.0),
                         drill: None,
                     }],
+                    properties: Default::default(),
                 }],
                 placement_keepouts: vec![],
                 keepout_count: 0,
@@ -4428,6 +4430,7 @@ mod tests {
                             drill: None,
                         },
                     ],
+                    properties: Default::default(),
                 }],
                 placement_keepouts: vec![],
                 keepout_count: 0,
@@ -4471,6 +4474,7 @@ mod tests {
                 at: at(x),
                 layers: vec![LayerRef::top()],
             }],
+            properties: Default::default(),
         };
         let bounds = Rect::new(0.0, 0.0, 40.0, 20.0);
         BoardSnapshot {
@@ -4935,6 +4939,7 @@ mod tests {
             locked: false,
             courtyard: Some(Rect::new(-1.0, -0.5, 1.0, 0.5)),
             pads: vec![],
+            properties: Default::default(),
         }];
         let result = PlaceResult {
             placements: vec![Placement {
