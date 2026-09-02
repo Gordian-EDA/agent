@@ -36,16 +36,11 @@ pub fn export_fab(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 
     let cli = ctx.env();
-    if let Err(error) = super::export::materialize_zones_for_drc(&board, cli) {
-        return Ok(
-            json!({ "error": format!("could not refill zones before fab export: {error}") }),
-        );
-    }
-    let drc = match cli.drc(&board) {
+    let drc = match cli.refill_zones(&board, true) {
         Ok(report) => report,
         Err(e) => {
             return Ok(
-                json!({ "error": format!("kicad-cli pcb drc failed before fab export: {e}") }),
+                json!({ "error": format!("kicad-cli pcb drc --refill-zones --save-board failed before fab export: {e}") }),
             );
         }
     };
