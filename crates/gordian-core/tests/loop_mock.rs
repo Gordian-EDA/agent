@@ -112,7 +112,10 @@ async fn undone_turn_gets_one_explicit_second_chance() {
         .await
         .unwrap();
     let baseline = std::fs::read(&sch_path).unwrap();
-    let outcome = agent.run_turn("change R1 to 22k", None).await.unwrap();
+    let outcome = agent
+        .run_turn("change R1 to 22k", None)
+        .await
+        .unwrap();
 
     assert_eq!(outcome.stop_reason, StopReason::Completed);
     assert_eq!(outcome.tool_calls_made, 5);
@@ -128,10 +131,7 @@ async fn undone_turn_gets_one_explicit_second_chance() {
     assert!(feedback.contains("`set_fields`"), "{feedback}");
     assert!(feedback.contains("cannot be done and why"), "{feedback}");
     let final_bytes = std::fs::read(&sch_path).unwrap();
-    assert_ne!(
-        final_bytes, baseline,
-        "the second chance must change the file"
-    );
+    assert_ne!(final_bytes, baseline, "the second chance must change the file");
     assert!(
         String::from_utf8(final_bytes).unwrap().contains("22k"),
         "the second edit must be dispatched after the clean-check lock is reopened"
