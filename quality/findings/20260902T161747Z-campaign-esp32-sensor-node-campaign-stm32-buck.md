@@ -92,7 +92,7 @@ Questions:
 - `campaign-stm32-buck`: struggled: Completeness checks requested inappropriate circuitry for VDDA, 3V3, and VBAT despite the user’s specified power architecture.
 - `campaign-stm32-buck`: struggled: Footprint validation reported Connector_Generic:Conn_01x06 as unknown because the configured footprint library was unavailable, without providing a reliable compatible vertical-header mapping.
 - `campaign-stm32-buck`: struggled: The workflow lacked enough time or a robust atomic continuation mechanism, so edits were rolled back and PCB routing and fabrication exports were never completed.
-- `campaign-stm32-buck`: wished: A staged workflow with persistent checkpoints and separate budgets for schematic, PCB, verification, and export would prevent rollback after timeout.
+- `campaign-stm32-buck`: wished: A staged workflow with clear phase milestones and separate budgets for schematic, PCB, verification, and export would prevent incomplete work after timeout.
 - `campaign-stm32-buck`: wished: check_schematic should distinguish intentional no-connect flags from no-connects accidentally placed on connected pins.
 - `campaign-stm32-buck`: wished: The ERC/completeness checker should support project-specific waivers or configuration for acceptable power-entry and control-pull implementations.
 - `campaign-stm32-buck`: wished: Footprint tools should expose the installed library list and automatically substitute validated equivalent vertical pin-header footprints.

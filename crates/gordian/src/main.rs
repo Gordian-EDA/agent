@@ -943,7 +943,7 @@ mod tests {
                 summary: "written".into(),
                 image_path: Some(".gordian/renders/render-001.png".into()),
                 elapsed_ms: 1_200,
-                result: serde_json::json!({"changed": true}),
+                result: serde_json::json!({}),
             }),
             Some(
                 "tool <- sync_board (elapsed 1.2s): written (image: .gordian/renders/render-001.png)"

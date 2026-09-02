@@ -218,7 +218,7 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
         engine.place(&mut place, &RoutedEvaluator::new(realizer, design))
     };
 
-    // Undo the engines' whole-sheet `normalize` translation so the caller gets poses in
+    // Reverse the engines' whole-sheet `normalize` translation so the caller gets poses in
     // its own frame, then restore the neighbours bit-for-bit.
     let d = engine_offset(&place.items[movable..], &fixed);
     if d[0].abs() > EPS || d[1].abs() > EPS {
@@ -232,7 +232,7 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
     }
 
     // With nothing to avoid, the engine's own overlap handling is authoritative — walking
-    // parts apart here would only undo the placement it spent its whole search tuning.
+    // parts apart here would only reverse the placement it spent its whole search tuning.
     if !obstacles.is_empty() || !fixed.is_empty() {
         let (moved, held) = place.items.split_at_mut(movable);
         legalize(moved, held, &obstacles);

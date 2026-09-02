@@ -563,7 +563,7 @@ impl<'a> Router<'a> {
         self.net_plans[pos].paths = paths;
     }
 
-    /// Rip up a previously-routed net: undo its usage and clear its plan/edges.
+    /// Rip up a previously-routed net: release its usage and clear its plan/edges.
     fn rip_up(&mut self, pos: usize) {
         let paths = std::mem::take(&mut self.net_plans[pos].paths);
         for path in &paths {

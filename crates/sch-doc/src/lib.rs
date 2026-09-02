@@ -44,11 +44,11 @@
 //!
 //! let mut doc = SchDoc::read("board.kicad_sch")?;
 //! let before = connect::extract(&doc);
-//! let undo = doc.snapshot();
+//! let snapshot = doc.snapshot();
 //! doc.move_symbol("R1", 127.0, 63.5)?;
 //! let delta = connect::Netlist::diff(&before, &connect::extract(&doc));
 //! if !delta.is_empty() {
-//!     doc.restore(undo)?;
+//!     doc.restore(snapshot)?;
 //! }
 //! doc.write("board.kicad_sch")?;
 //! # Ok(()) }

@@ -379,7 +379,7 @@ fn schema_describes_the_accepted_shape() {
     let example: serde_json::Value = serde_json::from_str(TEN_PARTS).unwrap();
     for part in example["parts"].as_array().unwrap() {
         for key in part.as_object().unwrap().keys() {
-            assert!(item["properties"][key].is_object(), "undocumented {key}");
+            assert!(item["properties"][key].is_object(), "missing schema for {key}");
         }
     }
 }
