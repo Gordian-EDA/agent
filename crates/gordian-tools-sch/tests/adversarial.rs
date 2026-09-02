@@ -144,6 +144,26 @@ fn wrong_footprint_is_refused_and_its_suggestion_closes_the_loop() {
         "assignment failed: {assigned}"
     );
 
+    let source = std::fs::read_to_string(ctx.sch_path()).unwrap();
+    let broken = source.replacen(repaired, wrong, 1);
+    assert_ne!(broken, source, "fixture footprint was not written");
+    std::fs::write(ctx.sch_path(), broken).unwrap();
+    let checked = call(&ctx, "check_schematic", json!({"detail": true}));
+    let finding = checked["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["code"] == "footprint-pins")
+        .expect("checker missed the incompatible footprint");
+    assert_eq!(finding["fix"]["tool"], "assign_footprints");
+    assert_eq!(finding["fix"]["args"]["assignments"][0]["reference"], "C1");
+    let fixed = call(
+        &ctx,
+        finding["fix"]["tool"].as_str().unwrap(),
+        finding["fix"]["args"].clone(),
+    );
+    assert!(fixed.get("error").is_none(), "inline fix failed: {fixed}");
+
     let checked = call(&ctx, "check_schematic", json!({"detail": true}));
     assert!(
         checked["findings"]
