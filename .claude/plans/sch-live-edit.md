@@ -95,11 +95,16 @@ every file of that revision atomically (default: the latest) and reloads any liv
 session; `history{limit?}` lists revisions (id, tool, summary, files, when). Replaces
 `.gordian/sch-undo` + `SnapshotId` plumbing in `gordian-tools-sch/src/session.rs`; the
 tools' `snapshot` result field becomes `revision`. Bounded retention (keep last N, prune).
-Start after `lane/pcb-diagnostics` merges (shared pcb-workflow write paths).
+Start after `lane/pcb-diagnostics` merges (shared pcb-workflow write paths). `sync_board` already
+writes `.gordian/pcb-undo/pcb-<n>.kicad_pcb` in the `sch-undo` shape and returns it as `revision`;
+nothing reads it yet, so this system is what makes that token redeemable.
 
 ## PCB architecture (user approved 2026-09-01): mirror the schematic side
-Order: (1) `sync_board` replaces destructive `regenerate_board` — netlist diff schematic↔board,
-add/remove/retarget only the delta, auto-sized outline on an empty board; (2) `place_board{refs?}`
+Order: (1) ✅ DONE (`lane/sync-board`) — `sync_board` replaced `regenerate_board`: netlist diff
+schematic↔board, add/remove/retarget/reseed only the delta, auto-sized outline on an empty board,
+`.gordian/pcb-undo/` snapshot + a differential connectivity guard. `place_board` now refuses an
+already-placed board unless `replace: true`, which is what makes the kept placement stick;
+(2) `place_board{refs?}`
 / `route_board{nets?}` as subset ops with the rest locked / fixed copper (whole = all selected);
 (3) one guard: every board mutator snapshot → edit → pcb-drc on the touched region → refuse with
 violations or write; invariant = copper connectivity ⊆ schematic netlist; (4) board intent
