@@ -624,7 +624,9 @@ pub(crate) fn route_signal(
     let global_fallback_root = if port_root.is_some() && !port_attached {
         roots
             .iter()
-            .find_map(|(root, pin)| pin.as_ref().map(|_| *root))
+            .filter(|(_, pin)| pin.is_some())
+            .max_by_key(|(root, _)| score.get(root).copied())
+            .map(|(root, _)| *root)
     } else {
         None
     };
