@@ -259,6 +259,9 @@ fn refine_items(problem: &SchematicPlaceProblem, eval: &RoutedEvaluator, items: 
     let mut best = greedy_score(eval, items);
     const MAX_ROUNDS: usize = 6;
     for _ in 0..MAX_ROUNDS {
+        if problem.out_of_time() {
+            break;
+        }
         let mut improved = false;
         for &i in &satellites {
             for d in [
@@ -775,7 +778,9 @@ pub fn anneal_place(
         // misses but the refinement's true routed-cost objective fixes (it's kept only if the
         // amplified score improves). Cheap on a small sheet. A big board still skips when clean.
         let small_port_heavy = use_fast_lane && pins <= FAST_PINS;
-        if !small_port_heavy && bb == 0 && bw == 0 && bx <= 6 {
+        // Out of time: the picked candidate is already a complete, gated placement — ship
+        // it rather than start a routed refinement that would overrun.
+        if problem.out_of_time() || (!small_port_heavy && bb == 0 && bw == 0 && bx <= 6) {
             problem.items.clone_from_slice(&candidates[best]);
             return report(engine, problem, &eval);
         }
@@ -850,7 +855,7 @@ pub fn anneal_place(
         // small path too and keep whichever has fewer (breaks, warnings, crossings) via the same
         // `score` — so a congested sheet still gets the fast lane's refinement (io 16→13) while a
         // simple sheet gets the small path's cleaner routing.
-        if small_port_heavy {
+        if small_port_heavy && !problem.out_of_time() {
             let sp = small_path_search(
                 problem, &realizer, &eval, &bases[0], inc, ir, seed, timed_top,
             );
@@ -1152,6 +1157,13 @@ fn anneal_items(
     // A patience small enough to save time would cut those late improvements (a
     // measured 555/uart/mcp tidiness regression); a safe patience saves ~nothing.
     for it in 0..iters {
+        // The deadline is a BACKSTOP, not a schedule: `best_items` is applied after the
+        // loop, so stopping early costs convergence and nothing else. Polled every 32nd
+        // iteration — a routed iteration costs milliseconds, an `Instant::now` nanoseconds,
+        // but the poll must not show up in a profile of a deadline-free run.
+        if it % 32 == 0 && problem.out_of_time() {
+            break;
+        }
         let t = (t0 * (1.0 - it as f64 / iters as f64)).max(0.05);
         // Snapshot the item(s) a move touches (at + angle) so it can be rolled back.
         let m = rng.below(10);
@@ -1376,6 +1388,9 @@ fn anneal_locality(
     let mut best_items: Vec<Item> = items.to_vec();
 
     for it in 0..iters {
+        if it % 32 == 0 && problem.out_of_time() {
+            break;
+        }
         let p = it as f64 / iters as f64;
         let t = (t0 * (1.0 - p)).max(0.05);
         let m = rng.below(10);

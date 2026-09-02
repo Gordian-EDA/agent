@@ -113,7 +113,7 @@ fn placing_a_two_pin_part_honours_every_authored_orientation() {
 
             let mut doc = live::blank_sheet().unwrap();
             let report =
-                live::place_parts(&env, &mut doc, &input, &cluster_place::ClusterPlace).unwrap();
+                live::place_parts(&env, &mut doc, &input, &cluster_place::ClusterPlace, None).unwrap();
             if !report.mismatch.is_empty() {
                 wrong.push(format!("{orient}/mirror={mirror}: {:?}", report.mismatch));
                 continue;

@@ -93,7 +93,7 @@ fn place_parts_keeps_numbered_pin_assignments_distinct() {
     assert!(!diagnostics.has_errors(), "{diagnostics:#?}");
 
     let mut doc = live::blank_sheet().unwrap();
-    let report = live::place_parts(&env, &mut doc, &input, &cluster_place::ClusterPlace).unwrap();
+    let report = live::place_parts(&env, &mut doc, &input, &cluster_place::ClusterPlace, None).unwrap();
     assert!(report.committed, "{:?}", report.mismatch);
     assert!(live::verify(&doc, &design).is_empty());
 

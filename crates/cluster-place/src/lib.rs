@@ -85,7 +85,10 @@ impl PlacementEngine for ClusterPlace {
         // huge board (hundreds of parts) that text-solve cost dominates and can time out, for a
         // de-sprawl the floorplanner rarely lands there anyway. Ship the (already-computed)
         // anneal result directly above a size cap so the engine never regresses on latency.
-        if problem.items.is_empty() || problem.items.len() > 70 {
+        // Out of time: the anneal result above is already a complete placement. Each
+        // polish stage below realizes the sheet several times, so entering one with no
+        // budget left is how the whole call overruns.
+        if problem.items.is_empty() || problem.items.len() > 70 || problem.out_of_time() {
             return out;
         }
         let realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir);
@@ -111,21 +114,23 @@ impl PlacementEngine for ClusterPlace {
         //    moved rigidly), keeping a pose only when it strictly cuts shipped crossings. Pose
         //    can only REDUCE crossings, so when the anneal already routed the sheet crossing-free
         //    (the common case) the whole search is wasted realizes — skip it.
-        if sa_crossings > 0 {
+        if sa_crossings > 0 && !problem.out_of_time() {
             pose::search_hub_poses(&eval, &mut problem.items, &problem.inc, &out.ir);
         }
         // 3. De-sprawl floorplanner: lay each module
         //    out in isolation + pack, kept only when it strictly out-de-sprawls the SA on both
         //    sprawl measures without regressing warnings/crossings — else it reverts.
-        compact::compact_clusters(
-            &eval,
-            design,
-            &mut problem.items,
-            &problem.inc,
-            &out.ir,
-            baseline_rendered,
-            sa_warnings,
-        );
+        if !problem.out_of_time() {
+            compact::compact_clusters(
+                &eval,
+                design,
+                &mut problem.items,
+                &problem.inc,
+                &out.ir,
+                baseline_rendered,
+                sa_warnings,
+            );
+        }
         // 4. SAFETY NET: pose gates on gate-time (truthfulness, warnings, crossings), which is
         //    blind to the emit's orphan label-columns — so it can chase a phantom gate-time win
         //    that ships a MORE-SPRAWLED or MORE-COLLIDING sheet (a dense board: 54→78 sprawl, or
@@ -163,8 +168,9 @@ impl PlacementEngine for ClusterPlace {
         //    keep it only if the SHIPPED rendered sheet (with the trunk forced) shrinks with no
         //    new warnings or crossings — a colliding trunk reverts. Gate measures via a fresh
         //    realizer that carries `rail_force`; anneal never sets it ⇒ references unaffected.
-        let cur = eval
-            .shipped(design, &problem.items)
+        let cur = (!problem.out_of_time())
+            .then(|| eval.shipped(design, &problem.items))
+            .flatten()
             .map(|(cr, w, r)| (cr.total(), w, compact::rendered_sprawl(&r, n)));
         // `eval`/`realizer` borrow `out.ir`; their last use is the shipped measurement above,
         // so NLL frees that borrow here and the rail step may replace `out.ir`.

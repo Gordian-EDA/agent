@@ -874,6 +874,7 @@ dependencies = [
  "kicad-symbol",
  "resvg",
  "sch-check",
+ "sch-place",
  "serde",
  "serde_json",
  "tempfile",

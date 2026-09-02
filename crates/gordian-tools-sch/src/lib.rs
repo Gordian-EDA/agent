@@ -18,6 +18,10 @@
 //! so; that is the only way copper is drawn.
 
 mod bulk;
+
+/// The wall-clock promise `place_parts` / `arrange` keep — the agent loop sizes its
+/// own timeout from it.
+pub use sch_floorplan::live::PlacementBudget;
 mod check;
 mod edit;
 mod place;

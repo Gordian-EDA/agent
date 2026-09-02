@@ -24,7 +24,7 @@ use kicad::KicadInstallation;
 use sch_check::Design;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
-use sch_place::place::{PlaceOptions, PlaceResult};
+use sch_place::place::{Deadline, PlaceOptions, PlaceResult};
 
 use crate::contract::{PlacementEngine, RoutedEvaluator, RoutedSheetRealizer};
 use crate::floorplan::place::{SchematicPlaceProblem, incidence, item_rect};
@@ -52,6 +52,8 @@ pub struct RegionProblem<'a> {
     pub ir: LayoutIr,
     pub engine: &'a dyn PlacementEngine,
     pub options: PlaceOptions,
+    /// When the search must stop; `None` searches to its full iteration budget.
+    pub deadline: Option<Deadline>,
 }
 
 /// The pose of one placed part, in the CALLER's coordinate frame.
@@ -83,6 +85,7 @@ impl<'a> RegionProblem<'a> {
         obstacles: Vec<Rect>,
         ir: LayoutIr,
         engine: &'a dyn PlacementEngine,
+        deadline: Option<Deadline>,
     ) -> Self {
         let mut all = items.clone();
         all.extend(fixed.iter().cloned());
@@ -97,6 +100,7 @@ impl<'a> RegionProblem<'a> {
             ir,
             engine,
             options: PlaceOptions::default(),
+            deadline,
         }
     }
 }
@@ -175,6 +179,7 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
         ir,
         engine,
         options,
+        deadline,
     } = problem;
 
     let movable = items.len();
@@ -194,6 +199,7 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
         inc: incidence,
         seed: crate::floorplan::place::SEARCH_SEED,
         options,
+        deadline,
     };
     let out = engine.place(env, design, &mut place, Some(ir));
 

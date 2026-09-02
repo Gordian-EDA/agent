@@ -41,14 +41,22 @@ struct Entry {
 
 /// Name index over every symbol in every installed library.
 pub struct SymbolIndex {
-    entries: Vec<Entry>,
+    names: SymbolNames,
     table: SymbolTable,
 }
 
-impl SymbolIndex {
-    /// Scan all KiCad symbol libraries under the environment's symbol directory
-    /// and index their top-level symbol names. Names only — no AST parsing.
-    pub fn build(symbol_dir: &Path) -> io::Result<SymbolIndex> {
+/// Every `Lib:Name` in every installed library, with nothing else — the ranking
+/// substrate [`SymbolIndex::search`] serves the agent from and
+/// [`SymbolTable::suggest`](crate::SymbolTable::suggest) reaches for when a lib_id
+/// names a library that does not exist.
+pub struct SymbolNames {
+    entries: Vec<Entry>,
+}
+
+impl SymbolNames {
+    /// Scan all KiCad symbol libraries under `symbol_dir` and index their top-level
+    /// symbol names. Names only — no AST parsing.
+    pub fn scan(symbol_dir: &Path) -> io::Result<SymbolNames> {
         let mut entries = Vec::new();
         for lib in discover_libraries(symbol_dir)? {
             for path in lib.symbol_files() {
@@ -65,14 +73,16 @@ impl SymbolIndex {
                 }
             }
         }
-
-        Ok(SymbolIndex {
-            entries,
-            table: SymbolTable::from_symbol_dir(symbol_dir.to_path_buf()),
-        })
+        Ok(SymbolNames { entries })
     }
 
-    /// Number of indexed symbols.
+    /// An index over no libraries — what an unreadable symbol directory yields.
+    pub fn empty() -> SymbolNames {
+        SymbolNames {
+            entries: Vec::new(),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -81,22 +91,51 @@ impl SymbolIndex {
         self.entries.is_empty()
     }
 
+    /// The `n` best-matching lib_ids for `query`, best first.
+    pub fn best(&self, query: &str, n: usize) -> Vec<&str> {
+        let needle = normalize(query);
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        rank(&self.entries, &needle, n)
+            .into_iter()
+            .map(|i| self.entries[i].lib_id.as_str())
+            .collect()
+    }
+}
+
+impl SymbolIndex {
+    /// Index `symbol_dir`'s names and pair them with a table that resolves them.
+    pub fn build(symbol_dir: &Path) -> io::Result<SymbolIndex> {
+        Ok(SymbolIndex {
+            names: SymbolNames::scan(symbol_dir)?,
+            table: SymbolTable::from_symbol_dir(symbol_dir.to_path_buf()),
+        })
+    }
+
+    /// Number of indexed symbols.
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
     /// Return the `n` best matches for `query`.
     ///
     /// Ranking is fzf-style subsequence scoring (see `rank`). Pin counts are
     /// resolved lazily, for the returned hits only.
     pub fn search(&self, query: &str, n: usize) -> Vec<Hit> {
-        let needle = normalize(query);
-        if needle.is_empty() {
-            return Vec::new();
-        }
-
-        rank(&self.entries, &needle, n.saturating_mul(4))
+        self.names
+            .best(query, n.saturating_mul(4))
             .into_iter()
-            .filter_map(|i| {
-                let lib_id = self.entries[i].lib_id.clone();
-                let pin_count = self.table.symbol(&lib_id)?.pins.len();
-                Some(Hit { lib_id, pin_count })
+            .filter_map(|lib_id| {
+                let pin_count = self.table.symbol(lib_id)?.pins.len();
+                Some(Hit {
+                    lib_id: lib_id.to_string(),
+                    pin_count,
+                })
             })
             .take(n)
             .collect()
@@ -348,10 +387,10 @@ mod tests {
         .expect("write lib");
         let index = SymbolIndex::build(dir.path()).expect("build");
 
-        assert_eq!(index.entries.len(), 1);
-        assert_eq!(index.entries[0].lib_id, "Device:R");
+        assert_eq!(index.names.entries.len(), 1);
+        assert_eq!(index.names.entries[0].lib_id, "Device:R");
         assert_eq!(
-            index.entries[0].normalized, "device r",
+            index.names.entries[0].normalized, "device r",
             "the library name must be part of the searchable field"
         );
     }
@@ -368,7 +407,7 @@ mod tests {
 
         let index = SymbolIndex::build(dir.path()).expect("build");
         let lib_ids: std::collections::BTreeSet<_> =
-            index.entries.iter().map(|e| e.lib_id.as_str()).collect();
+            index.names.entries.iter().map(|e| e.lib_id.as_str()).collect();
 
         assert!(lib_ids.contains("Device:R"), "{lib_ids:?}");
         assert!(lib_ids.contains("Device:C"), "{lib_ids:?}");

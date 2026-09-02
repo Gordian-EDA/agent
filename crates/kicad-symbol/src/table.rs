@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
+use crate::search::SymbolNames;
 use crate::symlib;
 use crate::types::{PinDir, PinMeta, PinType, SymbolMeta};
 
@@ -31,6 +32,9 @@ pub struct SymbolTable {
     libs: Mutex<HashMap<String, Option<HashMap<String, SymbolMeta>>>>,
     /// In-memory symbols (test fixtures), keyed by full `Lib:Name`.
     inline: HashMap<String, SymbolMeta>,
+    /// Every installed `Lib:Name`, scanned on the first cross-library suggestion.
+    /// Only the diagnostic path pays for it.
+    names: OnceLock<SymbolNames>,
 }
 
 impl SymbolTable {
@@ -119,6 +123,14 @@ impl SymbolTable {
     }
 
     /// Closest known `lib_id`s for an unknown one (for diagnostics).
+    ///
+    /// Two tiers, because the two ways of getting a lib_id wrong are different. A
+    /// misspelt *symbol* in a real library (`Device:Resistr`) is a typo, and edit
+    /// distance within that library names it precisely. A lib_id whose *library* does
+    /// not exist (`Fuse:Fuse`) is a guess at where a part lives, so there is no
+    /// library to search — the fallback ranks the whole install with the project's
+    /// fuzzy matcher, exactly as `search_symbols` does, and returns `Device:Fuse`,
+    /// `Device:Fuse_Small`, `Device:Polyfuse`.
     pub fn suggest(&self, lib_id: &str) -> Vec<String> {
         if !self.inline.is_empty() {
             return suggest_inline(&self.inline, lib_id);
@@ -127,7 +139,7 @@ impl SymbolTable {
             return Vec::new();
         };
         let needle = name.to_lowercase();
-        self.with_lib(lib, |syms| {
+        let within = self.with_lib(lib, |syms| {
             let mut hits: Vec<(usize, &str)> = syms
                 .keys()
                 .map(|n| (strsim::levenshtein(&needle, &n.to_lowercase()), n.as_str()))
@@ -137,9 +149,25 @@ impl SymbolTable {
             hits.into_iter()
                 .take(SUGGEST_LIMIT)
                 .map(|(_, n)| format!("{lib}:{n}"))
-                .collect()
-        })
-        .unwrap_or_default()
+                .collect::<Vec<_>>()
+        });
+        match within {
+            Some(hits) if !hits.is_empty() => hits,
+            _ => self.suggest_across_libraries(name),
+        }
+    }
+
+    /// Fuzzy-rank `name` against every installed symbol, whatever library it is in.
+    fn suggest_across_libraries(&self, name: &str) -> Vec<String> {
+        let Some(dir) = self.symbol_dir.as_ref() else {
+            return Vec::new();
+        };
+        self.names
+            .get_or_init(|| SymbolNames::scan(dir).unwrap_or_else(|_| SymbolNames::empty()))
+            .best(name, SUGGEST_LIMIT)
+            .into_iter()
+            .map(str::to_string)
+            .collect()
     }
 
     /// Run `f` against the parsed library `lib`, loading it on first reference.

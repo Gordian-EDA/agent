@@ -42,11 +42,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "place-parts" => {
             let source = std::fs::read_to_string(rest.first().ok_or("missing input.json")?)?;
             let input: PlacePartsInput = serde_json::from_str(&source)?;
-            let report = live::place_parts(&env, &mut doc, &input, engine.as_ref())?;
+            let report = live::place_parts(&env, &mut doc, &input, engine.as_ref(), None)?;
             (serde_json::to_string_pretty(&report)?, report.committed)
         }
         "arrange" => {
-            let report = live::arrange(&env, &mut doc, &selection(rest)?, engine.as_ref())?;
+            let report = live::arrange(&env, &mut doc, &selection(rest)?, engine.as_ref(), None)?;
             (serde_json::to_string_pretty(&report)?, report.committed)
         }
         "rewire" => {

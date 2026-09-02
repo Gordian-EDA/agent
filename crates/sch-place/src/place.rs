@@ -1,9 +1,72 @@
 //! The placement vocabulary shared by schematic engines: caller knobs
-//! ([`PlaceOptions`]), emitted crossing counts ([`Crossings`]), and engine diagnostics
-//! ([`PlaceResult`]). The neutral placement+routing problem itself lives in
-//! `sch-floorplan`, beside the routing/measurement library it uses.
+//! ([`PlaceOptions`]), the search's wall-clock ceiling ([`Deadline`]), which engine
+//! to run ([`PlacementEngineKind`]), emitted crossing counts ([`Crossings`]), and
+//! engine diagnostics ([`PlaceResult`]). The neutral placement+routing problem
+//! itself lives in `sch-floorplan`, beside the routing/measurement library it uses.
+
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+/// Which placement engine to run. Named here, below every engine crate, so the
+/// config, the tool schema and the deadline policy all speak of the same three.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlacementEngineKind {
+    /// Annealing followed by cluster-pose and compaction polish.
+    #[default]
+    Cluster,
+    /// Simulated annealing only.
+    #[serde(alias = "sa")]
+    Anneal,
+    /// Deterministic grammar placement only.
+    Spine,
+}
+
+/// The wall-clock instant a placement search must stop by.
+///
+/// A search is stochastic and unbounded in principle; every engine here keeps its
+/// best-so-far, so honouring a deadline costs convergence, never correctness. Checks
+/// are cooperative — an engine polls [`Deadline::expired`] at its loop heads and
+/// returns what it has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deadline(Instant);
+
+impl Deadline {
+    /// A deadline `budget` from now.
+    pub fn after(budget: Duration) -> Self {
+        Deadline(Instant::now() + budget)
+    }
+
+    /// A deadline at `at`.
+    pub fn at(at: Instant) -> Self {
+        Deadline(at)
+    }
+
+    pub fn instant(&self) -> Instant {
+        self.0
+    }
+
+    pub fn expired(&self) -> bool {
+        Instant::now() >= self.0
+    }
+
+    /// Time left, zero once passed.
+    pub fn remaining(&self) -> Duration {
+        self.0.saturating_duration_since(Instant::now())
+    }
+
+    /// A deadline `fraction` of the way through this one's remaining time — how a
+    /// stage reserves room for the stages after it.
+    pub fn fraction(&self, fraction: f64) -> Self {
+        Deadline(Instant::now() + self.remaining().mul_f64(fraction))
+    }
+}
+
+/// Whether an optional deadline has passed. `None` means unbounded.
+pub fn expired(deadline: Option<Deadline>) -> bool {
+    deadline.is_some_and(|d| d.expired())
+}
 
 /// Caller-chosen knobs an engine reads from the placement problem. The caller
 /// sets these fields when it constructs the placement problem; engines never

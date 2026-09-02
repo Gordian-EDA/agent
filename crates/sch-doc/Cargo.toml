@@ -11,6 +11,7 @@ geom = { path = "../geom" }
 kicad-symbol = { path = "../kicad-symbol" }
 kiutils_sexpr.workspace = true
 indexmap.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

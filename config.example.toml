@@ -40,5 +40,6 @@ defaultSearchLimit = 8
 renderMaxPx = 1600
 
 [engines]
-# Schematic placement implementation: cluster | anneal | spine
-schematicPlacer = "cluster"
+# Force a schematic placement engine: cluster | anneal | spine.
+# Unset, the deadline policy picks one that keeps the call inside its budget.
+# schematicPlacer = "cluster"

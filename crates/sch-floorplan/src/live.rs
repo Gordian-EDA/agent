@@ -20,8 +20,14 @@
 //! never commit a sheet that silently mis-wires. `arrange` and `rewire` promise more:
 //! the partition must be *identical*, since moving a part is not supposed to mean
 //! anything.
+//!
+//! ## The budget
+//!
+//! Every edit is also a promise about *time*: see [`PlacementBudget`]. Nothing is
+//! written until the gate passes, so overrunning is always safe to refuse.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::time::Duration;
 
 use geom::{Point2, Rect};
 use kicad::KicadInstallation;
@@ -32,6 +38,7 @@ use sch_check::{Diagnostics, ExistingSheet, PayloadAudit, PlacePartsInput};
 use sch_doc::{Netlist, SchDoc, connect};
 use sch_place::ir::LayoutIr;
 use sch_place::item::Item;
+use sch_place::place::{Deadline, PlacementEngineKind};
 use sch_place::result::IdiomReport;
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +53,101 @@ const SHEET_BLOCK: &str = "$sheet";
 /// Clearance added around a selected part when deciding which wires belong to it.
 const TOUCH_MARGIN: f64 = 1.27;
 
+/// Part count at or above which the deterministic engine is the default.
+///
+/// Below it, `cluster`'s pose search and de-sprawl polish — each of which re-routes
+/// and re-text-solves the whole sheet several times — still fit comfortably; above it
+/// they are what turns a 20-second placement into a two-minute one.
+const SPINE_ABOVE_PARTS: usize = 32;
+
+/// Share of the budget the search may spend, leaving the rest for realising the
+/// sheet, extracting its connectivity and gating it.
+const SEARCH_SHARE: f64 = 0.7;
+
+/// The wall-clock promise a live placement call makes, and the engine choice that
+/// keeps it.
+///
+/// A placement search is unbounded in principle, so "how long may this take" is a
+/// caller's decision, not the engine's. [`plan`](Self::plan) turns the promise into
+/// the two things that keep it: which engine to run, and the [`Deadline`] the search
+/// stops at. Nothing is written before the truthfulness gate, so a call that
+/// overruns anyway is refused with the document untouched.
+///
+/// ## Why this shape
+///
+/// Wall time is driven by sheet *topology* — pins routed per candidate — far more
+/// than by part count, so a part-count rule alone cannot bound it. Measured on an
+/// empty sheet, release build (seconds to `place_parts` returning a committed sheet;
+/// `cluster` is the historical default):
+///
+/// | fixture                     | parts | cluster | anneal | spine |
+/// |-----------------------------|-------|---------|--------|-------|
+/// | 555-blinker                 |     9 |     1.3 |   73.1 |   1.3 |
+/// | hbridge-nmos                |    13 |     0.6 |    0.4 |   0.6 |
+/// | bga-fpga-ice40              |    30 |    25.3 |   18.5 |  12.5 |
+/// | bedrock-selfrepair-bluepill |    39 |    67.5 |   52.8 |  26.6 |
+/// | bms-10s (BQ76930, 30-pin)   |    46 |    19.7 |   16.7 |  14.5 |
+/// | openmyo-emg                 |    63 |   114.2 |   30.6 |  12.2 |
+/// | stm32f4-buck                |    75 |    69.7 |   57.0 |  27.5 |
+/// | esp32-multifunction         |    92 |    37.5 |   35.6 |  15.3 |
+///
+/// Every run was truthful (committed) and every sheet ERC-clean, so the choice is
+/// purely one of time. Two readings drive it. `cluster` and `anneal` are
+/// non-monotonic and unbounded — 73 s on a nine-part blinker, 114 s on a 63-part
+/// sheet — so neither can be the default at size. `spine` is deterministic and
+/// stayed under 30 s everywhere. Hence: `cluster` below [`SPINE_ABOVE_PARTS`],
+/// `spine` at or above it, and a real deadline underneath both so no topology can
+/// escape the promise.
+#[derive(Debug, Clone, Copy)]
+pub struct PlacementBudget {
+    /// Wall time the whole call — search, realise, gate — may take.
+    pub budget: Duration,
+    /// How many parts the call places.
+    pub parts: usize,
+}
+
+impl PlacementBudget {
+    /// The budget a placement tool call gets when the caller states none.
+    pub const DEFAULT: Duration = Duration::from_secs(60);
+
+    pub fn new(parts: usize) -> Self {
+        Self {
+            budget: Self::DEFAULT,
+            parts,
+        }
+    }
+
+    pub fn within(budget: Duration, parts: usize) -> Self {
+        Self { budget, parts }
+    }
+
+    /// The engine that keeps this budget, honouring an explicit `requested` one.
+    /// The caller builds it and hands it back to [`place_parts`] / [`arrange`].
+    pub fn engine(&self, requested: Option<PlacementEngineKind>) -> PlacementEngineKind {
+        requested.unwrap_or(if self.parts >= SPINE_ABOVE_PARTS {
+            PlacementEngineKind::Spine
+        } else {
+            PlacementEngineKind::Cluster
+        })
+    }
+
+    /// `(search, hard)` — when the engine stops, and when the call is refused.
+    fn deadlines(&self) -> (Deadline, Deadline) {
+        (
+            Deadline::after(self.budget.mul_f64(SEARCH_SHARE)),
+            Deadline::after(self.budget),
+        )
+    }
+
+    /// The refusal a caller reports when the call overran: nothing was written.
+    pub fn overrun(&self) -> Error {
+        Error::Budget {
+            seconds: self.budget.as_secs(),
+            parts: self.parts,
+        }
+    }
+}
+
 /// Everything that can stop a live edit.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -59,6 +161,11 @@ pub enum Error {
     EmptySelection,
     #[error("input is not buildable: {0}")]
     Input(String),
+    #[error(
+        "placement exceeded its budget of {seconds}s ({parts} parts) — nothing was written; \
+         retry with a smaller block or `engine: spine`"
+    )]
+    Budget { seconds: u64, parts: usize },
     #[error("invalid payload")]
     InvalidPayload(PayloadAudit),
 }
@@ -123,6 +230,12 @@ pub enum Selection {
 }
 
 impl Selection {
+    /// How many symbols this selection matches — the part count a
+    /// [`PlacementBudget`] is built from.
+    pub fn size(&self, doc: &SchDoc) -> usize {
+        self.resolve(doc).len()
+    }
+
     fn resolve(&self, doc: &SchDoc) -> BTreeSet<String> {
         match self {
             Selection::Refs(refs) => refs.iter().cloned().collect(),
@@ -149,12 +262,24 @@ pub fn blank_sheet() -> Result<SchDoc> {
 /// An empty sheet is laid out whole; a sheet with content keeps every symbol it has and
 /// the new parts are placed around them, avoiding their wires and labels. Either way the
 /// result is gated (see the module docs) before it is kept.
+///
+/// `budget` is the promise the caller chose `engine` under (see [`PlacementBudget`]):
+/// the search stops with time left to realise and gate, and a call still running past
+/// the budget is refused with the document restored. `None` searches unbounded.
 pub fn place_parts(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     input: &PlacePartsInput,
     engine: &dyn PlacementEngine,
+    budget: Option<PlacementBudget>,
 ) -> Result<PlaceReport> {
+    let (search, hard) = match budget {
+        Some(b) => {
+            let (s, h) = b.deadlines();
+            (Some(s), Some(h))
+        }
+        None => (None, None),
+    };
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let before = connect::extract(doc);
     let existing = ExistingSheet {
@@ -215,6 +340,7 @@ pub fn place_parts(
         obstacles(doc, &[]),
         ir,
         engine,
+        search,
     ));
     let placed = posed(movable, &out.poses);
     let inc = incidence(&placed);
@@ -235,6 +361,10 @@ pub fn place_parts(
 
     let mut mismatch = verify(doc, &design);
     mismatch.disturbed = disturbed(&before, &connect::extract(doc));
+    if hard.is_some_and(|h| h.expired()) {
+        doc.restore(snapshot)?;
+        return Err(budget.expect("hard deadline implies a budget").overrun());
+    }
     let committed = mismatch.is_empty();
     if !committed {
         doc.restore(snapshot)?;
@@ -249,17 +379,20 @@ pub fn place_parts(
     })
 }
 
-/// Re-place `selection` among the parts around it, redrawing only its own wiring.
+/// Re-place `selection` among the parts around it, redrawing only its own wiring,
+/// under the same budget promise as [`place_parts`].
 pub fn arrange(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     selection: &Selection,
     engine: &dyn PlacementEngine,
+    budget: Option<PlacementBudget>,
 ) -> Result<ArrangeReport> {
-    rearrange(env, doc, selection, Some(engine))
+    rearrange(env, doc, selection, Some((engine, budget)))
 }
 
-/// Redraw `selection`'s wiring where it stands, moving nothing.
+/// Redraw `selection`'s wiring where it stands, moving nothing. No search runs, so
+/// there is nothing to bound.
 pub fn rewire(
     env: &KicadInstallation,
     doc: &mut SchDoc,
@@ -272,8 +405,13 @@ fn rearrange(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     selection: &Selection,
-    engine: Option<&dyn PlacementEngine>,
+    engine: Option<(&dyn PlacementEngine, Option<PlacementBudget>)>,
 ) -> Result<ArrangeReport> {
+    let budget = engine.and_then(|(_, b)| b);
+    let (search, hard) = budget.map_or((None, None), |b| {
+        let (s, h) = b.deadlines();
+        (Some(s), Some(h))
+    });
     let chosen = selection.resolve(doc);
     let before = connect::extract(doc);
     let mut design = Design::default();
@@ -299,7 +437,7 @@ fn rearrange(
     let ir = crate::floorplan::infer_ir(env, &design);
     let snapshot = doc.snapshot();
     let (placed, ir) = match engine {
-        Some(engine) => {
+        Some((engine, _)) => {
             let out = region_arrange(RegionProblem::new(
                 env,
                 &design,
@@ -308,6 +446,7 @@ fn rearrange(
                 obstacles(doc, &owned),
                 ir,
                 engine,
+                search,
             ));
             (posed(movable, &out.poses), out.ir)
         }
@@ -340,6 +479,10 @@ fn rearrange(
         disturbed: disturbed(&before, &connect::extract(doc)),
         ..Default::default()
     };
+    if hard.is_some_and(|h| h.expired()) {
+        doc.restore(snapshot)?;
+        return Err(budget.expect("hard deadline implies a budget").overrun());
+    }
     let committed = mismatch.is_empty();
     if !committed {
         doc.restore(snapshot)?;
