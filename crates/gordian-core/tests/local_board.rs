@@ -87,6 +87,11 @@ fn a_window_places_only_what_is_inside_it() {
         Value::Null,
         "every part already has a pose"
     );
+    assert_eq!(
+        placed["landed_outside_bbox"],
+        Value::Null,
+        "the window held what it selected: {placed:#}"
+    );
 
     let after = footprints(&ctx);
     for reference in ["R1", "R3"] {

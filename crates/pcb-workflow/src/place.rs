@@ -2484,6 +2484,18 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "min_x": bbox.min_x, "min_y": bbox.min_y,
                 "max_x": bbox.max_x, "max_y": bbox.max_y,
             });
+            // A window is soft containment, so say which parts it did not hold
+            // rather than leaving the caller to compare coordinates itself.
+            let escaped: Vec<&str> = result
+                .placements
+                .iter()
+                .filter(|placement| refs.iter().any(|r| r == &placement.reference))
+                .filter(|placement| !bbox.contains(placement.at))
+                .map(|placement| placement.reference.as_str())
+                .collect();
+            if !escaped.is_empty() {
+                out["landed_outside_bbox"] = json!(escaped);
+            }
         }
         // What a local call did NOT do. A subset placement that leaves parts in
         // the seed row is half a board, and the model has no other way to learn
