@@ -431,8 +431,10 @@ pub fn build_writer(
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
     fan_risers: bool,
+    beside: sch_model::route::RouteScene,
 ) -> io::Result<SchematicWriter> {
     let mut w = SchematicWriter::new();
+    w.set_beside(beside);
     if let Some(name) = title {
         w.set_title(name);
     }
@@ -650,12 +652,26 @@ pub(crate) fn add_orphan_label_columns(w: &mut SchematicWriter, design: &Design,
     }
     // A readable single column: even vertical pitch, each pennant pointing right
     // (text reads outward). PITCH leaves a clear gap between the 1.27 mm-tall rows.
+    //
+    // The column's coordinates are nominal — `reframe` shifts it to the page margin on
+    // a whole sheet, but a block placed INTO an existing sheet is never reframed, so the
+    // column can be dropped straight onto drawn geometry. An orphan net has no pin to
+    // reach for, so its label is whatever it lands on: step each row down until its
+    // anchor is on nobody else's net.
     const X: f64 = 25.4;
     const Y0: f64 = 25.4;
     const PITCH: f64 = 7.62;
+    let mut scene = w.route_scene();
     for (i, net) in orphans.iter().enumerate() {
-        let y = Y0 + i as f64 * PITCH;
-        w.add_cluster_label(net, [X, y], Dir::East, true);
+        let mut at = [X, Y0 + i as f64 * PITCH];
+        for _ in 0..orphans.len().max(16) {
+            if !crate::floorplan::place::route::anchor_merges(&scene, at.into(), net) {
+                break;
+            }
+            at[1] += PITCH;
+        }
+        w.add_cluster_label(net, at, Dir::East, true);
+        scene.points.push((at.into(), net.clone()));
     }
 }
 

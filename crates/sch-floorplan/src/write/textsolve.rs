@@ -108,6 +108,11 @@ impl SchematicWriter {
             add_point(w.a, &w.net, &mut points);
             add_point(w.b, &w.net, &mut points);
         }
+        // The sheet this block is being added beside is foreign in exactly the same way.
+        for (p, net) in &self.beside.points {
+            add_point(*p, net, &mut points);
+        }
+        segments.extend(self.beside.segments.iter().cloned());
 
         // Deterministic processing order for stub labels.
         let mut order: Vec<usize> = (0..self.labels.len())

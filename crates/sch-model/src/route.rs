@@ -36,6 +36,7 @@ impl DrawnSegment {
 }
 
 /// Routing obstacles, all coordinates sheet mm.
+#[derive(Debug, Default, Clone)]
 pub struct RouteScene {
     /// Solid rects (symbol bodies): a path segment may not pass through one
     /// (edge-touching is tolerated).

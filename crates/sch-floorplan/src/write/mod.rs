@@ -267,6 +267,12 @@ pub struct SchematicWriter {
     /// point with a wired one — and a marker severs that point for KiCAD's netlister,
     /// splitting the rail into islands.
     pub(super) connected: BTreeSet<(i64, i64)>,
+    /// The drawing this one is being added BESIDE — the sheet's existing pins, wire ends,
+    /// label anchors and junctions, with the nets they already carry. The writer owns
+    /// none of it and draws none of it, but every net here is FOREIGN: a wire, riser or
+    /// label of this block that lands on one welds the block's net onto the sheet's.
+    /// Empty for a whole-sheet build, which has no neighbours.
+    pub(super) beside: sch_model::route::RouteScene,
 }
 
 impl SchematicWriter {

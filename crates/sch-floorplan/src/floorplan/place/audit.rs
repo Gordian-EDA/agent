@@ -88,6 +88,10 @@ fn terminals(
     }
     out.extend(w.power_pins().into_iter().map(|(p, n)| (p.into(), n)));
     out.extend(w.label_anchors().into_iter().map(|(p, n)| (p.into(), n)));
+    // The sheet a block is drawn beside is not the realiser's to draw, but its
+    // terminals are exactly as merge-able — and this audit is blind to them otherwise,
+    // which is why an incremental short reached the gate with nothing reported.
+    out.extend(w.beside_terminals());
     out
 }
 
@@ -107,6 +111,7 @@ pub fn net_conflicts(
         .wires_with_nets()
         .into_iter()
         .filter_map(|seg| Some((seg.segment, seg.net?)))
+        .chain(w.beside_wires())
         .collect();
     let junctions = w.junction_positions();
     let mut found: BTreeSet<NetConflict> = BTreeSet::new();

@@ -479,6 +479,7 @@ fn place_parts_inner(
                     title: design.name.as_deref(),
                     frame: fresh,
                     driven: &driven_nets(doc, &before),
+                    beside: (!fresh).then(|| beside_scene(doc)).as_ref(),
                 },
             )?;
             let warnings = writer.layout_warnings();
@@ -647,6 +648,7 @@ fn rearrange_inner(
                 &ir,
                 crate::realize::Draw {
                     driven: &driven_nets(doc, &before),
+                    beside: Some(&beside_scene(doc)),
                     ..Default::default()
                 },
             )?;
@@ -1037,6 +1039,26 @@ fn footprints(items: &[Item]) -> Vec<Rect> {
 /// What a placement must not land on: the drawing already on the sheet — wires, label
 /// text, generated rail terminals — minus whatever falls inside `owned`, which the
 /// caller is about to erase and draw again.
+/// What `doc` already carries, as foreign routing geometry for a block about to be drawn
+/// beside it: every connection point and wire segment with the net it is on.
+///
+/// The realiser holds only the block it is drawing, so without this it routes as though
+/// the sheet were blank — across the existing pins, and onto the existing labels. Empty
+/// for a blank sheet, which makes a whole-sheet build byte-identical.
+fn beside_scene(doc: &SchDoc) -> sch_model::route::RouteScene {
+    let scene = connect::scene(doc);
+    sch_model::route::RouteScene {
+        solids: Vec::new(),
+        points: scene.points,
+        segments: scene
+            .segments
+            .into_iter()
+            .map(|(a, b, net)| sch_model::route::NetSegment::new(a, b, net))
+            .collect(),
+        label_solids: Vec::new(),
+    }
+}
+
 fn obstacles(doc: &SchDoc, owned: &[Rect]) -> Vec<Rect> {
     let mut out = Vec::new();
     for wire in doc.wires() {
