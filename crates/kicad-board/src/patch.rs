@@ -33,8 +33,14 @@ pub(crate) fn child_nodes(text: &str, body_start: usize, body_end: usize) -> Vec
         match bytes[i] {
             b'"' if !in_str => in_str = true,
             b'"' if in_str => {
-                // KiCAD escapes quotes as \"; skip escaped.
-                if i == 0 || bytes[i - 1] != b'\\' {
+                // KiCAD escapes quotes as \". A quote closes the string only
+                // when an EVEN number of backslashes precede it — `"C:\\"` ends
+                // there, and mis-reading it de-syncs the rest of the document.
+                let mut slashes = 0usize;
+                while i > slashes && bytes[i - 1 - slashes] == b'\\' {
+                    slashes += 1;
+                }
+                if slashes.is_multiple_of(2) {
                     in_str = false;
                 }
             }

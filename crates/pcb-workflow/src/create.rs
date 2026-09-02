@@ -782,6 +782,7 @@ pub(super) fn emit_board_footprint(
     part: &SeedPart,
     at: Point2,
     rotation: f64,
+    locked: bool,
     catalog: &FootprintCatalog,
     net_codes: &BTreeMap<String, i32>,
 ) -> std::result::Result<String, String> {
@@ -807,7 +808,7 @@ pub(super) fn emit_board_footprint(
         pad_nets: part.pad_nets.clone(),
         at,
         rotation,
-        locked: false,
+        locked,
     };
     emit_seed_footprint(&seed, net_codes).map_err(|e| format!("part {}: {e}", part.reference))
 }
@@ -1421,8 +1422,57 @@ pub(super) fn parse_seed_bounds(v: Option<&Value>) -> std::result::Result<SeedBo
     }
 }
 
-pub(super) fn parse_seed_rules(v: Option<&Value>) -> std::result::Result<SeedRules, String> {
-    parse_rules(v).map(|rules| SeedRules::from(&rules))
+/// Overlay the caller's `rules` on a starting point rather than on the defaults.
+///
+/// A board being rebuilt keeps every rule the caller did not name: asking for
+/// four layers must not silently reset the clearance a dense board was built
+/// with.
+pub(super) fn parse_seed_rules_over(
+    base: SeedRules,
+    v: Option<&Value>,
+) -> std::result::Result<SeedRules, String> {
+    let parsed = SeedRules::from(&parse_rules(v)?);
+    let named = |key: &str| {
+        v.and_then(Value::as_object)
+            .is_some_and(|object| object.contains_key(key))
+    };
+    Ok(SeedRules {
+        clearance: if named("clearance") {
+            parsed.clearance
+        } else {
+            base.clearance
+        },
+        min_trace_width: if named("min_trace_width") {
+            parsed.min_trace_width
+        } else {
+            base.min_trace_width
+        },
+        via_diameter: if named("via_diameter") {
+            parsed.via_diameter
+        } else {
+            base.via_diameter
+        },
+        via_drill: if named("via_drill") {
+            parsed.via_drill
+        } else {
+            base.via_drill
+        },
+        layer_count: if named("layer_count") {
+            parsed.layer_count
+        } else {
+            base.layer_count
+        },
+        net_widths: if named("net_widths") {
+            parsed.net_widths
+        } else {
+            base.net_widths
+        },
+        pours: if named("pours") {
+            parsed.pours
+        } else {
+            base.pours
+        },
+    })
 }
 
 fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String> {
@@ -1598,6 +1648,11 @@ const KICAD_MIN_ANNULAR: f64 = 0.1;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The overlay applied to the defaults, which is what a fresh board gets.
+    fn parse_seed_rules(v: Option<&Value>) -> std::result::Result<SeedRules, String> {
+        parse_seed_rules_over(SeedRules::default(), v)
+    }
 
     #[test]
     fn parse_seed_rules_accepts_plain_and_object_net_widths() {

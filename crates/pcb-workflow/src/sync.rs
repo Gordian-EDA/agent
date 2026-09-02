@@ -31,10 +31,12 @@ use pcb_drc::connectivity::Violation;
 use pcb_model::Point2;
 use pcb_place::{LockedAt, PlacementHints};
 
+use crate::seed::{PourPadConnection, PourSpec};
+
 use crate::create::{
-    BoardSeedSpec, SeedPart, add_default_power_pours, apply_complexity_default_layer_count,
-    emit_board_footprint, merge, parse_seed_bounds, parse_seed_rules, plan_seed_board,
-    write_seed_plan,
+    BoardSeedSpec, SeedPart, SeedRules, add_default_power_pours,
+    apply_complexity_default_layer_count, emit_board_footprint, merge, parse_seed_bounds,
+    parse_seed_rules_over, plan_seed_board, write_seed_plan,
 };
 
 /// One schematic part as the exported netlist has it.
@@ -355,6 +357,18 @@ fn seed_parts(parts: &[SchematicPart]) -> Vec<SeedPart> {
 /// Create the board a project does not have yet. Every part is "added", and the
 /// outline is sized from the parts' own courtyards unless the caller names one.
 fn create_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> Value {
+    seed_board(parts, input, None, ctx)
+}
+
+/// Synthesize the board file. `base` is the rule set the caller's `rules`
+/// overlay — `None` on a fresh board (the defaults), the board's own rules when
+/// one is being rebuilt.
+fn seed_board(
+    parts: &[SchematicPart],
+    input: &Value,
+    base: Option<SeedRules>,
+    ctx: &AgentRuntime,
+) -> Value {
     let catalog = match ctx.footprint_catalog() {
         Ok(catalog) => catalog,
         Err(e) => return json!({ "error": format!("footprint catalog unavailable: {e}") }),
@@ -363,13 +377,16 @@ fn create_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         Ok(bounds) => bounds,
         Err(e) => return json!({ "error": e }),
     };
-    let mut rules = match parse_seed_rules(input.get("rules")) {
+    let rebuilding = base.is_some();
+    let mut rules = match parse_seed_rules_over(base.unwrap_or_default(), input.get("rules")) {
         Ok(rules) => rules,
         Err(e) => return json!({ "error": e }),
     };
     let seed = seed_parts(parts);
-    apply_complexity_default_layer_count(&mut rules, input.get("rules"), seed.len());
-    add_default_power_pours(&mut rules, &seed);
+    if !rebuilding {
+        apply_complexity_default_layer_count(&mut rules, input.get("rules"), seed.len());
+        add_default_power_pours(&mut rules, &seed);
+    }
 
     let spec = BoardSeedSpec {
         bounds,
@@ -460,7 +477,11 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         Ok(catalog) => catalog,
         Err(e) => return json!({ "error": format!("footprint catalog unavailable: {e}") }),
     };
-    let _ = ctx.kicad().save_if_open();
+    if let Err(e) = ctx.kicad().save_if_open() {
+        return json!({
+            "error": format!("could not save the open KiCAD board before syncing: {e}"),
+        });
+    }
     let before = match crate::active_board(ctx) {
         Ok(board) => board,
         Err(e) => return json!({ "error": e }),
@@ -475,6 +496,16 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         Err(e) => return json!({ "error": format!("could not read the board document: {e}") }),
     };
 
+    let duplicates = doc.duplicate_references();
+    if !duplicates.is_empty() {
+        return json!({
+            "error": format!(
+                "the board has more than one footprint for {}; a part-by-part sync cannot tell \
+                 them apart. Delete the duplicates in pcbnew first.",
+                duplicates.join(", ")
+            ),
+        });
+    }
     let delta = diff(parts, &doc.footprints());
     if delta.is_empty() {
         return json!({
@@ -491,16 +522,27 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         Err(e) => return json!({ "error": format!("could not snapshot the board: {e}") }),
     };
 
-    let poses: BTreeMap<String, (Point2, f64)> = doc
+    let existing: BTreeMap<String, BoardFootprint> = doc
         .footprints()
         .into_iter()
-        .map(|fp| (fp.reference, (fp.at, fp.rotation)))
+        .map(|fp| (fp.reference.clone(), fp))
         .collect();
     let by_reference: BTreeMap<&str, &SchematicPart> = parts
         .iter()
         .map(|part| (part.reference.as_str(), part))
         .collect();
-    if let Err(e) = apply(&mut doc, &delta, &by_reference, &poses, catalog) {
+    let seed_origin = Point2::new(
+        before.imported.bounds.min_x + 2.0,
+        before.imported.bounds.min_y + 2.0,
+    );
+    if let Err(e) = apply(
+        &mut doc,
+        &delta,
+        &by_reference,
+        &existing,
+        seed_origin,
+        catalog,
+    ) {
         return json!({ "error": e, "revision": revision });
     }
 
@@ -545,7 +587,7 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
                  and its copper, and anything sync added is already placed. Do NOT run \
                  place_board — it re-places the whole board and would undo that.",
     });
-    if let Some(refusal) = guard(ctx, &path, &original, &revision) {
+    if let Some(refusal) = guard(ctx, &path, &original, &revision, &shorts(&before)) {
         result = refusal;
     }
     result
@@ -560,7 +602,15 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
 /// So a rules change re-synthesizes the board and restores the placement — the
 /// layout survives, the copper does not, and the model re-routes.
 fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> Value {
-    let _ = ctx.kicad().save_if_open();
+    if let Err(e) = ctx.kicad().save_if_open() {
+        return json!({
+            "error": format!("could not save the open KiCAD board before rebuilding it: {e}"),
+        });
+    }
+    let before = match crate::active_board(ctx) {
+        Ok(board) => board,
+        Err(e) => return json!({ "error": e }),
+    };
     let path = ctx.pcb_path();
     let original = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -570,6 +620,13 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         Ok(doc) => doc,
         Err(e) => return json!({ "error": format!("could not read the board document: {e}") }),
     };
+    if !doc.outline_is_rectangular() {
+        return json!({
+            "error": "this board has a drawn outline, which a rules rebuild cannot reproduce. \
+                      Change the rules in pcbnew, or square the outline with update_board_outline \
+                      first.",
+        });
+    }
     let delta = diff(parts, &doc.footprints());
     let poses: Vec<kicad_ipc::FootprintMove> = doc
         .footprints()
@@ -599,7 +656,7 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
             max_y,
         });
     }
-    let mut result = create_board(parts, &seed_input, ctx);
+    let mut result = seed_board(parts, &seed_input, Some(board_rules(&before)), ctx);
     if result.get("ok").and_then(Value::as_bool) != Some(true) {
         return result;
     }
@@ -617,6 +674,9 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
             });
         }
     }
+    if let Some(refusal) = guard(ctx, &path, &original, &revision, &shorts(&before)) {
+        return refusal;
+    }
     merge(
         &mut result,
         json!({
@@ -624,14 +684,45 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
             "reseeded": true,
             "delta": delta.to_json(),
             "revision": revision,
-            "retracted_tracks": null,
+            "retracted_tracks": original.matches("(segment").count(),
             "nets_to_reroute": delta_nets(parts),
+            "next_tool": "route_board",
+            "next": "call route_board(), then check_board",
             "note": "the board was rebuilt under the new rules with every part kept at its \
                      position; all copper was dropped because the old route is not honest under \
                      the new rules — run route_board, then check_board",
         }),
     );
     result
+}
+
+/// The rules the board is already built with, as the starting point a rules
+/// change overlays. Everything here is what the board file itself declares.
+fn board_rules(board: &kicad_board::IpcBoardSnapshot) -> SeedRules {
+    let layer_count = board.problem.layer_count;
+    let pours = board
+        .problem
+        .plane_nets
+        .iter()
+        .map(|(net, layer)| PourSpec {
+            net: net.clone(),
+            layer: match *layer {
+                0 => "top".to_owned(),
+                n if n + 1 == layer_count => "bottom".to_owned(),
+                n => format!("inner{n}"),
+            },
+            pad_connection: PourPadConnection::Thermal,
+        })
+        .collect();
+    SeedRules {
+        clearance: board.problem.clearance,
+        min_trace_width: board.problem.min_trace_width,
+        via_diameter: board.problem.via_diameter,
+        via_drill: board.problem.via_drill,
+        layer_count,
+        net_widths: board.problem.net_widths.clone(),
+        pours,
+    }
 }
 
 /// Every net the schematic gives more than one pad — what a full re-route covers.
@@ -665,7 +756,8 @@ fn apply(
     doc: &mut BoardDoc,
     delta: &BoardDelta,
     schematic: &BTreeMap<&str, &SchematicPart>,
-    poses: &BTreeMap<String, (Point2, f64)>,
+    existing: &BTreeMap<String, BoardFootprint>,
+    seed_origin: Point2,
     catalog: &FootprintCatalog,
 ) -> std::result::Result<(), String> {
     let wanted: BTreeSet<&str> = schematic
@@ -674,21 +766,35 @@ fn apply(
         .collect();
     let codes = doc.ensure_nets(wanted)?;
 
+    // A swapped part is re-emitted from the new library footprint, which the
+    // emitter only knows how to place on the front. Refuse rather than quietly
+    // flip a back-side part to the front with front-side pads.
+    if let Some(change) = delta.footprint_changed.iter().find(|c| {
+        existing
+            .get(&c.reference)
+            .is_some_and(BoardFootprint::on_back)
+    }) {
+        return Err(format!(
+            "{} sits on the back of the board, and sync_board can only re-emit a swapped \
+             footprint on the front. Move it to the front, or change the package in pcbnew.",
+            change.reference
+        ));
+    }
+
     for reference in delta
         .removed
         .iter()
         .chain(delta.footprint_changed.iter().map(|c| &c.reference))
     {
-        doc.remove_footprint(reference)?;
+        if !doc.remove_footprint(reference)? {
+            return Err(format!(
+                "{reference} is not on the board; nothing was written"
+            ));
+        }
     }
 
-    // A swap keeps the part where it sat; a new part starts just inside the
-    // board and is placed properly below.
-    let origin = doc
-        .footprints()
-        .first()
-        .map(|fp| fp.at)
-        .unwrap_or(Point2::new(2.0, 2.0));
+    // A swap keeps the part where it sat, lock and all; a new part starts in the
+    // board's own seed row and is placed properly below.
     for (index, reference) in delta
         .footprint_changed
         .iter()
@@ -699,10 +805,14 @@ fn apply(
         let part = schematic
             .get(reference)
             .ok_or_else(|| format!("part {reference} vanished from the schematic mid-sync"))?;
-        let (at, rotation) = poses
-            .get(reference)
-            .copied()
-            .unwrap_or((Point2::new(origin.x + 2.54 * index as f64, origin.y), 0.0));
+        let was = existing.get(reference);
+        let (at, rotation) = was.map_or(
+            (
+                Point2::new(seed_origin.x + 2.54 * index as f64, seed_origin.y),
+                0.0,
+            ),
+            |fp| (fp.at, fp.rotation),
+        );
         let seed = SeedPart {
             reference: part.reference.clone(),
             value: Some(part.value.clone()),
@@ -710,7 +820,8 @@ fn apply(
             pad_nets: part.pad_nets.clone(),
             locked: None,
         };
-        let block = emit_board_footprint(&seed, at, rotation, catalog, &codes)?;
+        let locked = was.is_some_and(|fp| fp.locked);
+        let block = emit_board_footprint(&seed, at, rotation, locked, catalog, &codes)?;
         doc.insert_footprint(&block)?;
     }
 
@@ -725,13 +836,52 @@ fn apply(
                     .ok_or_else(|| format!("net {name} is missing from the board net table"))
             })
             .transpose()?;
-        doc.set_pad_net(&retarget.reference, &retarget.pad, net)?;
+        if !doc.set_pad_net(&retarget.reference, &retarget.pad, net)? {
+            return Err(format!(
+                "{}.{} is a schematic pin with no pad on the board footprint — assign a package \
+                 whose pads match the symbol's pins, then sync again",
+                retarget.reference, retarget.pad
+            ));
+        }
     }
 
     for change in &delta.value_changed {
-        doc.set_value(&change.reference, &change.to)?;
+        if !doc.set_value(&change.reference, &change.to)? {
+            return Err(format!(
+                "{}'s board footprint has no Value field to update",
+                change.reference
+            ));
+        }
     }
     Ok(())
+}
+
+/// Bounding boxes of the copper still on the board, as placement keep-outs.
+fn copper_keepouts(copper: &pcb_model::RouteSolution) -> Vec<Rect> {
+    let mut out = Vec::new();
+    for trace in &copper.traces {
+        let half = trace.width / 2.0;
+        for pair in trace.path.windows(2) {
+            if let Some(rect) = Rect::bounding(pair) {
+                out.push(Rect::new(
+                    rect.min_x - half,
+                    rect.min_y - half,
+                    rect.max_x + half,
+                    rect.max_y + half,
+                ));
+            }
+        }
+    }
+    for via in &copper.vias {
+        let half = via.diameter / 2.0;
+        out.push(Rect::new(
+            via.at.x - half,
+            via.at.y - half,
+            via.at.x + half,
+            via.at.y + half,
+        ));
+    }
+    out
 }
 
 /// Place the parts the sync added, with every part already on the board locked.
@@ -741,6 +891,10 @@ fn place_added(added: &[String], ctx: &AgentRuntime) -> std::result::Result<Vec<
     }
     let board = crate::active_board(ctx)?;
     let mut problem = crate::place::place_problem_from_snapshot(&board, ctx)?;
+    // Copper the sync kept is as real an obstacle as a part: a new footprint
+    // dropped on a live trace shorts it, and the guard would then revert the
+    // whole sync.
+    problem.keepouts.extend(copper_keepouts(&board.copper));
     let new: BTreeSet<&str> = added.iter().map(String::as_str).collect();
     let existing: BTreeMap<&str, &kicad_board::ImportedPart> = board
         .imported
@@ -821,18 +975,35 @@ fn snapshot(ctx: &AgentRuntime, original: &str) -> std::io::Result<String> {
     Ok(id)
 }
 
+/// Pairs of nets the board's copper electrically merges.
+fn shorts(board: &kicad_board::IpcBoardSnapshot) -> BTreeSet<(String, String)> {
+    pcb_drc::connectivity::check(&board.problem, &board.copper)
+        .into_iter()
+        .filter_map(|violation| match violation {
+            Violation::CrossNetMerge { a, b } => Some((a, b)),
+            Violation::Unconnected { .. } => None,
+        })
+        .collect()
+}
+
 /// The one board invariant: copper may connect less than the schematic asks,
 /// never more. Returns the refusal when the synced board shorts two nets, after
 /// restoring the snapshot; `None` when the board is honest or the check could
 /// not run.
-fn guard(ctx: &AgentRuntime, path: &Path, original: &str, revision: &str) -> Option<Value> {
+fn guard(
+    ctx: &AgentRuntime,
+    path: &Path,
+    original: &str,
+    revision: &str,
+    before: &BTreeSet<(String, String)>,
+) -> Option<Value> {
     let board = crate::active_board(ctx).ok()?;
-    let shorts: Vec<Value> = pcb_drc::connectivity::check(&board.problem, &board.copper)
-        .into_iter()
-        .filter_map(|violation| match violation {
-            Violation::CrossNetMerge { a, b } => Some(json!({ "a": a, "b": b })),
-            Violation::Unconnected { .. } => None,
-        })
+    // Only shorts the sync INTRODUCED are the sync's to answer for. A board that
+    // arrived already shorted stays the agent's problem, not a reason to refuse
+    // every future edit.
+    let shorts: Vec<Value> = shorts(&board)
+        .difference(before)
+        .map(|(a, b)| json!({ "a": a, "b": b }))
         .collect();
     if shorts.is_empty() {
         return None;
@@ -877,6 +1048,8 @@ mod tests {
             value: value.into(),
             at: Point2::new(10.0, 10.0),
             rotation: 0.0,
+            layer: "F.Cu".into(),
+            locked: false,
             pad_nets: pads
                 .iter()
                 .map(|(pad, net)| ((*pad).to_owned(), (*net).to_owned()))

@@ -26,8 +26,20 @@ pub struct BoardFootprint {
     pub value: String,
     pub at: Point2,
     pub rotation: f64,
-    /// Pad number → net name, for pads that carry a net.
+    /// The copper layer the footprint sits on: `F.Cu` (front) or `B.Cu` (back).
+    pub layer: String,
+    /// The board file's `(locked yes)`: this part is not the placer's to move.
+    pub locked: bool,
+    /// Pad number → net name, for pads that carry a net. Pads with no number or
+    /// no net are absent; pads that share a number share one entry.
     pub pad_nets: BTreeMap<String, String>,
+}
+
+impl BoardFootprint {
+    /// Whether the footprint is mounted on the back copper layer.
+    pub fn on_back(&self) -> bool {
+        self.layer.eq_ignore_ascii_case("B.Cu")
+    }
 }
 
 /// A `.kicad_pcb` document open for incremental edits.
@@ -67,6 +79,40 @@ impl BoardDoc {
             .collect()
     }
 
+    /// Whether the board's Edge.Cuts is the single rectangle the seed writer
+    /// emits. A hand-drawn or polygon outline cannot be re-synthesized from the
+    /// board file, so anything that would rebuild the document must refuse.
+    pub fn outline_is_rectangular(&self) -> bool {
+        let Ok((body_start, body_end)) = root_body(&self.text) else {
+            return false;
+        };
+        let mut rects = 0usize;
+        for node in child_nodes(&self.text, body_start, body_end) {
+            let block = &self.text[node.start..node.end];
+            if !block.contains("(layer \"Edge.Cuts\")") {
+                continue;
+            }
+            match node_head(&self.text, &node) {
+                "gr_rect" => rects += 1,
+                _ => return false,
+            }
+        }
+        rects == 1
+    }
+
+    /// References that appear on more than one footprint. A board cannot be
+    /// synced part-by-part while two footprints answer to the same name.
+    pub fn duplicate_references(&self) -> Vec<String> {
+        let mut seen = BTreeMap::<String, usize>::new();
+        for fp in self.footprints() {
+            *seen.entry(fp.reference).or_default() += 1;
+        }
+        seen.into_iter()
+            .filter(|(_, count)| *count > 1)
+            .map(|(reference, _)| reference)
+            .collect()
+    }
+
     /// Net name → net code from the top-level `(net N "NAME")` table.
     pub fn net_codes(&self) -> BTreeMap<String, i32> {
         crate::patch::parse_net_codes(&self.text).unwrap_or_default()
@@ -90,7 +136,10 @@ impl BoardDoc {
         }
         let mut declarations = String::new();
         for name in &missing {
-            declarations.push_str(&format!("\t(net {next} \"{name}\")\n"));
+            declarations.push_str(&format!(
+                "\t(net {next} \"{}\")\n",
+                kicad::sexpr_escape(name)
+            ));
             codes.insert((*name).to_string(), next);
             next += 1;
         }
@@ -123,6 +172,8 @@ impl BoardDoc {
 
     /// Point one pad at `net` (code and name must agree with the net table), or
     /// clear it with `None`. Returns false when the pad does not exist.
+    /// A footprint may carry the pad number more than once (a thermal tab, a
+    /// split pad); they are one electrical node, so they all move together.
     pub fn set_pad_net(
         &mut self,
         reference: &str,
@@ -132,29 +183,28 @@ impl BoardDoc {
         let Some((fp_start, fp_end)) = self.footprint_span(reference)? else {
             return Ok(false);
         };
-        let Some((pad_start, pad_end)) = self.pad_span(fp_start, fp_end, pad) else {
+        let pads = self.pad_spans(fp_start, fp_end, pad);
+        if pads.is_empty() {
             return Ok(false);
-        };
-        let replacement = net.map(|(name, code)| format!("(net {code} \"{name}\")"));
-        let edit = match self.child_span(pad_start, pad_end, "net") {
-            Some((start, end)) => match replacement {
-                Some(node) => (start, end, node),
-                None => (line_start(&self.text, start), end, String::new()),
-            },
-            None => match replacement {
-                Some(node) => {
-                    let close = pad_end - 1;
-                    let indent = child_indent(&self.text, pad_start);
-                    (
-                        close,
-                        close,
-                        format!("{indent}{node}\n{}", tabs_of(&indent)),
-                    )
+        }
+        let replacement =
+            net.map(|(name, code)| format!("(net {code} \"{}\")", kicad::sexpr_escape(name)));
+        let mut edits = Vec::new();
+        for (pad_start, pad_end) in pads {
+            match (self.child_span(pad_start, pad_end, "net"), &replacement) {
+                (Some((start, end)), Some(node)) => edits.push((start, end, node.clone())),
+                (Some((start, end)), None) => {
+                    edits.push((line_start(&self.text, start), end, String::new()))
                 }
-                None => return Ok(true),
-            },
-        };
-        self.text = apply_edits(&self.text, vec![edit]);
+                (None, Some(node)) => {
+                    let close = line_start(&self.text, pad_end - 1);
+                    let indent = child_indent(&self.text, pad_start);
+                    edits.push((close, close, format!("{indent}{node}\n")));
+                }
+                (None, None) => {}
+            }
+        }
+        self.text = apply_edits(&self.text, edits);
         Ok(true)
     }
 
@@ -190,6 +240,13 @@ impl BoardDoc {
         let block = &self.text[start..end];
         let lib_id = quoted_field(block, "footprint")?.to_string();
         let reference = property(block, "Reference")?;
+        let layer = self
+            .child_span(start, end, "layer")
+            .and_then(|(s, e)| first_quoted(&self.text[s..e]))
+            .unwrap_or_else(|| "F.Cu".to_owned());
+        let locked = self
+            .child_span(start, end, "locked")
+            .is_some_and(|(s, e)| self.text[s..e].contains("yes"));
         let (at, rotation) = self
             .child_span(start, end, "at")
             .and_then(|(s, e)| parse_at(&self.text[s..e]))?;
@@ -201,6 +258,9 @@ impl BoardDoc {
             else {
                 continue;
             };
+            if number.is_empty() || name.is_empty() {
+                continue;
+            }
             pad_nets.insert(number, name);
         }
         Some(BoardFootprint {
@@ -209,6 +269,8 @@ impl BoardDoc {
             value: property(block, "Value").unwrap_or_default(),
             at,
             rotation,
+            layer,
+            locked,
             pad_nets,
         })
     }
@@ -232,10 +294,11 @@ impl BoardDoc {
             .map(|node| (node.start, node.end)))
     }
 
-    fn pad_span(&self, fp_start: usize, fp_end: usize, pad: &str) -> Option<(usize, usize)> {
+    fn pad_spans(&self, fp_start: usize, fp_end: usize, pad: &str) -> Vec<(usize, usize)> {
         self.children(fp_start, fp_end, "pad")
             .into_iter()
-            .find(|(start, end)| first_quoted(&self.text[*start..*end]).as_deref() == Some(pad))
+            .filter(|(start, end)| first_quoted(&self.text[*start..*end]).as_deref() == Some(pad))
+            .collect()
     }
 
     /// Depth-1 children of the node spanning `[start, end)` whose head is `head`.
@@ -278,11 +341,13 @@ impl BoardDoc {
         let indent = child_indent(&self.text, class.start);
         let mut added = String::new();
         for net in nets {
-            added.push_str(&format!("{indent}(add_net \"{net}\")\n"));
+            added.push_str(&format!(
+                "{indent}(add_net \"{}\")\n",
+                kicad::sexpr_escape(net)
+            ));
         }
-        let close = class.end - 1;
-        let tail = tabs_of(&indent);
-        self.text = apply_edits(&self.text, vec![(close, close, format!("{added}{tail}"))]);
+        let close = line_start(&self.text, class.end - 1);
+        self.text = apply_edits(&self.text, vec![(close, close, added)]);
     }
 }
 
@@ -442,6 +507,61 @@ mod tests {
         assert_eq!(doc.footprints()[0].value, "4.7k");
         assert_eq!(doc.footprints()[0].at, Point2::new(10.0, 20.0));
         assert_eq!(doc.text().len(), BOARD.len() + 1);
+    }
+
+    #[test]
+    fn a_footprint_carries_its_side_and_its_lock() {
+        let back = BOARD.replace(
+            "\t\t(layer \"F.Cu\")",
+            "\t\t(locked yes)\n\t\t(layer \"B.Cu\")",
+        );
+        let fp = BoardDoc::parse(back).unwrap().footprints().remove(0);
+        assert!(fp.on_back());
+        assert!(fp.locked);
+        let front = doc().footprints().remove(0);
+        assert!(!front.on_back() && !front.locked);
+    }
+
+    #[test]
+    fn a_repeated_pad_number_retargets_every_pad_that_carries_it() {
+        // A thermal tab sharing pad 2 is one electrical node; both must move.
+        let tab = BOARD.replace(
+            "\t\t(pad \"2\" smd roundrect\n\t\t\t(at 1 0 90)\n\t\t\t(net 1 \"GND\")\n\t\t)\n",
+            "\t\t(pad \"2\" smd roundrect\n\t\t\t(at 1 0 90)\n\t\t\t(net 1 \"GND\")\n\t\t)\n\
+             \t\t(pad \"2\" smd roundrect\n\t\t\t(at 1 2 90)\n\t\t\t(net 1 \"GND\")\n\t\t)\n",
+        );
+        let mut doc = BoardDoc::parse(tab).unwrap();
+        let codes = doc.ensure_nets(["SENSE"]).unwrap();
+        assert!(
+            doc.set_pad_net("R1", "2", Some(("SENSE", codes["SENSE"])))
+                .unwrap()
+        );
+        // Two pads plus the one top-level declaration.
+        assert_eq!(doc.text().matches("(net 3 \"SENSE\")").count(), 3);
+        // GND keeps only its declaration; no pad points at it any more.
+        assert_eq!(doc.text().matches("(net 1 \"GND\")").count(), 1);
+    }
+
+    #[test]
+    fn a_string_ending_in_an_escaped_backslash_does_not_desync_the_scan() {
+        let tricky = BOARD.replace("\"10k\"", "\"10k\\\\\"");
+        let parts = BoardDoc::parse(tricky).unwrap().footprints();
+        assert_eq!(parts.len(), 1, "the scan must not swallow the document");
+        assert_eq!(parts[0].reference, "R1");
+    }
+
+    #[test]
+    fn a_rectangular_outline_is_recognised_and_a_drawn_one_is_not() {
+        let rect = BOARD.replace(
+            "(kicad_pcb\n",
+            "(kicad_pcb\n\t(gr_rect\n\t\t(start 0 0)\n\t\t(end 10 10)\n\t\t(layer \"Edge.Cuts\")\n\t)\n",
+        );
+        assert!(BoardDoc::parse(rect).unwrap().outline_is_rectangular());
+        let drawn = BOARD.replace(
+            "(kicad_pcb\n",
+            "(kicad_pcb\n\t(gr_line\n\t\t(start 0 0)\n\t\t(end 10 0)\n\t\t(layer \"Edge.Cuts\")\n\t)\n",
+        );
+        assert!(!BoardDoc::parse(drawn).unwrap().outline_is_rectangular());
     }
 
     #[test]
