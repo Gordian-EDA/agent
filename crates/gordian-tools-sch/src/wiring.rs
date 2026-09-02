@@ -422,7 +422,7 @@ fn power_candidates(net: &str) -> Vec<String> {
         .collect()
 }
 
-/// Drop a power symbol straight onto a pin.
+/// Drop a rail symbol onto a loose pin, or a PWR_FLAG onto an existing rail.
 pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let (Some(net), Some(spec)) = (
         input.get("net").and_then(Value::as_str),
@@ -436,18 +436,18 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Err(error) => return Ok(json!({ "error": error })),
     };
     let was = refs::net_of(edit.before(), &pin.refdes, &pin.number).map(str::to_string);
-    if was.as_deref() == Some(net) {
-        return Ok(json!({
-            "changed": format!("{spec} is already on `{net}`; nothing to add"),
-            "net_delta": "connectivity unchanged",
-        }));
-    }
     let source = symbol_source(ctx);
     let candidates: Vec<String> = match input.get("lib_id").and_then(Value::as_str) {
         Some(lib_id) => vec![lib_id.to_string()],
+        None if was.as_deref() == Some(net) => vec!["power:PWR_FLAG".to_string()],
         None => power_candidates(net),
     };
-    let refdes = crate::edit::next_refdes(&edit.doc, "#PWR");
+    let prefix = if candidates.first().is_some_and(|id| id == "power:PWR_FLAG") {
+        "#FLG"
+    } else {
+        "#PWR"
+    };
+    let refdes = crate::edit::next_refdes(&edit.doc, prefix);
     let mut placed = None;
     for lib_id in &candidates {
         if edit

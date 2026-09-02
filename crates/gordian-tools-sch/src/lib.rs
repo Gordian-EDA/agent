@@ -351,7 +351,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "add_power",
-            "Drop a power/ground symbol straight onto a pin, which puts that pin on the rail.",
+            "Put a loose pin on a named rail, or add a PWR_FLAG when the pin is already on that rail so KiCad sees it as driven.",
             json!({
                 "type": "object",
                 "properties": {

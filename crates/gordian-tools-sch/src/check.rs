@@ -943,7 +943,9 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
             sch_check::Diagnostic::error(defect.code, defect.line)
         } else {
             sch_check::Diagnostic::warning(defect.code, defect.line)
-        };
+        }
+        .with_refs(defect.refs)
+        .with_nets(defect.nets);
         findings.push(diagnostic_finding(
             &locator,
             &diagnostic,
