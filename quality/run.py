@@ -725,6 +725,48 @@ An empty issues array means no actionable issue was found."""
     return {"score": score, "issues": issues}
 
 
+def self_diagnose(prompt, transcript, llm):
+    """Ask the agent's own model what it struggled with, given its transcript.
+
+    Cheap and pointed: tool gaps, confusing results and missing information
+    surface here long before they show up as a score."""
+    base, key, model = llm
+    trimmed = transcript[-24000:]
+    text = f"""You are the Gordian agent reviewing your own run. The user asked:
+
+{prompt}
+
+Your transcript (tool calls, their results, your messages):
+
+{trimmed}
+
+What did you struggle with in the current toolset during this task? List concrete
+tool gaps, tool results that were confusing or insufficient, information you needed
+and could not get, refusals you did not understand, and what would have made the
+task faster or the result better. Return only JSON:
+{{"struggles": ["..."], "wishes": ["..."]}}
+Each entry one short, specific sentence naming the tool or the missing capability."""
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": text}],
+        "max_tokens": 1500,
+    }
+    request = urllib.request.Request(
+        f"{base}/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=240) as response:
+        payload = json.loads(response.read())
+    answer = extract_object(payload["choices"][0]["message"].get("content") or "")
+    struggles = answer.get("struggles") or []
+    wishes = answer.get("wishes") or []
+    return {
+        "struggles": [str(item) for item in struggles],
+        "wishes": [str(item) for item in wishes],
+    }
+
+
 def critic(kind, rendered, prompt, facts, llm):
     """Run one dedicated visual critic with the judge's gateway credentials."""
     path = rendered.get("path")
@@ -1035,6 +1077,14 @@ def run_case(case, output_root):
             except Exception as error:
                 report[key] = {"score": None, "issues": [], "error": str(error)}
 
+    if llm is None:
+        report["self_diagnosis"] = {"error": "judge credentials unavailable"}
+    else:
+        try:
+            report["self_diagnosis"] = self_diagnose(prompt, result.stderr, llm)
+        except Exception as error:
+            report["self_diagnosis"] = {"error": str(error)}
+
     report["judge_score"] = report["judge"]["score"]
     if report["judge_score"] is not None:
         report["score"] = (
@@ -1095,6 +1145,14 @@ def findings_for(report):
         )
     if judge.get("error"):
         findings.append(("harness", f"judge unavailable: {judge['error']}"))
+
+    diagnosis = report.get("self_diagnosis", {})
+    for struggle in diagnosis.get("struggles", []):
+        findings.append(("self-diagnosis", f"struggled: {struggle}"))
+    for wish in diagnosis.get("wishes", []):
+        findings.append(("self-diagnosis", f"wished: {wish}"))
+    if diagnosis.get("error"):
+        findings.append(("harness", f"self-diagnosis unavailable: {diagnosis['error']}"))
 
     for kind in ("schematic", "pcb"):
         result = report.get(f"critic_{kind}", {})
