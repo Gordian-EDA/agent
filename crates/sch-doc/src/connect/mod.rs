@@ -492,6 +492,10 @@ fn emit<'a>(
     for (root, members) in groups {
         let named = anchors.name.get(&root);
         let mut pins: Vec<PinRef> = members.iter().map(|p| PinRef::of(p)).collect();
+        // A named lone pin is a net even under a marker: `kicad-cli` reports it
+        // as `/SWDIO`, not as `unconnected-(R1-Pad1)`, and this crate answers to
+        // `kicad-cli`. Whether the pin already carries a marker is a question
+        // about the drawing, so the tools ask the document, not the netlist.
         if pins.len() < 2 && named.is_none() {
             match anchors.settled.contains(&root) {
                 true => no_connect.append(&mut pins),
