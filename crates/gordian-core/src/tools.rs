@@ -185,18 +185,14 @@ pub fn tool_defs() -> Vec<Tool> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "from": {
-                        "type": "array",
-                        "items": {"type":"number"},
-                        "minItems": 2,
-                        "maxItems": 2,
-                    },
-                    "to": {
-                        "type": "array",
-                        "items": {"type":"number"},
-                        "minItems": 2,
-                        "maxItems": 2,
-                    },
+                    "from": { "oneOf": [
+                        { "type": "string", "description": "Pad reference, e.g. \"U1.3\"." },
+                        { "type": "array", "items": {"type":"number"}, "minItems": 2, "maxItems": 2 }
+                    ] },
+                    "to": { "oneOf": [
+                        { "type": "string", "description": "Pad reference, e.g. \"R1.1\"." },
+                        { "type": "array", "items": {"type":"number"}, "minItems": 2, "maxItems": 2 }
+                    ] },
                     "net": { "type": "string" },
                     "from_layer": { "type": "string", "description": "Layer; default F.Cu." },
                     "to_layer": { "type": "string" },
@@ -249,8 +245,9 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "set_net_width".into(),
-            description: "Set one existing board net's net-class width; prefer sync rules pre-route."
-                .into(),
+            description:
+                "Set one existing board net's net-class width; prefer sync rules pre-route."
+                    .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -297,16 +294,28 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "sync_board".into(),
-            description: "Sync PCB to schematic: creates it, else applies only the delta; bounds/rules on creation only.".into(),
+            description: "Sync the PCB to the schematic: creates the board when absent, \
+                 else applies only the delta and keeps placement and copper. bounds/rules \
+                 apply on creation only; omit bounds to size the outline from the footprints \
+                 (the result reports required_bounds and recommended_bounds). \
+                 clearance/min_trace_width are lowered to what those footprints permit \
+                 (reported in design_rules)."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "bounds": {
-                        "type": "object",
-                        "properties": {
-                            "min_x": { "type": "number" }, "max_x": { "type": "number" },
-                            "min_y": { "type": "number" }, "max_y": { "type": "number" }
-                        }
+                        "description": "Omit (or \"auto\") to size the board from its parts. Bounds smaller than required_bounds are refused before anything is written.",
+                        "oneOf": [
+                            { "type": "string", "enum": ["auto"] },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "min_x": { "type": "number" }, "max_x": { "type": "number" },
+                                    "min_y": { "type": "number" }, "max_y": { "type": "number" }
+                                }
+                            }
+                        ]
                     },
                     "rules": {
                         "type": "object",
@@ -356,11 +365,16 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "place_board".into(),
-            description: "Auto-place PCB; groups steer regions, grids, surrounds, and edges."
+            description: "Auto-place a newly created PCB; groups steer regions, grids, \
+                 surrounds, and edges. Refuses an already-placed board unless replace:true."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "replace": {
+                        "type": "boolean",
+                        "description": "Re-place an already-placed board, losing its layout."
+                    },
                     "groups": {
                         "type": "array",
                         "items": {
@@ -394,8 +408,21 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "route_board".into(),
-            description: "Auto-route board; reports exact failed connections.".into(),
-            input_schema: json!({ "type": "object", "properties": {} }),
+            description: "Auto-route the board, committing every net whose copper is DRC-clean. \
+                 Reports routed N/M and, per unrouted net, the two pads, the obstacle in the \
+                 way and the repair. Pass `nets` to re-route only those nets after a \
+                 move_parts, keeping every other net's copper."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "nets": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Route only these nets, keeping all other copper. Omit for the whole board."
+                    }
+                }
+            }),
         },
         Def {
             name: "render_board".into(),
@@ -404,7 +431,9 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "check_board".into(),
-            description: "Run PCB DRC; stop when ok.".into(),
+            description: "Run PCB DRC; stop when ok. On failure lists the blocking violations \
+                 and every unconnected item as the pad pair it is."
+                .into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         Def {

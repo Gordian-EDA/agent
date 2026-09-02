@@ -26,14 +26,15 @@ use serde_json::{Value, json};
 use geom::Rect;
 use gordian_runtime::AgentRuntime;
 use kicad_board::{BoardDoc, BoardFootprint};
-use kicad_footprint::{FootprintCatalog, FootprintId};
+use kicad_footprint::FootprintCatalog;
 use pcb_drc::connectivity::Violation;
 use pcb_model::Point2;
 use pcb_place::{LockedAt, PlacementHints};
 
 use crate::create::{
     BoardSeedSpec, SeedPart, add_default_power_pours, apply_complexity_default_layer_count,
-    emit_board_footprint, emit_seed_board, parse_bounds, parse_seed_rules, write_board,
+    emit_board_footprint, merge, parse_seed_bounds, parse_seed_rules, plan_seed_board,
+    write_seed_plan,
 };
 
 /// One schematic part as the exported netlist has it.
@@ -351,24 +352,22 @@ fn seed_parts(parts: &[SchematicPart]) -> Vec<SeedPart> {
 
 // ── the empty board ─────────────────────────────────────────────────────────
 
-/// Create the board a project does not have yet. Every part is "added".
+/// Create the board a project does not have yet. Every part is "added", and the
+/// outline is sized from the parts' own courtyards unless the caller names one.
 fn create_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> Value {
     let catalog = match ctx.footprint_catalog() {
         Ok(catalog) => catalog,
         Err(e) => return json!({ "error": format!("footprint catalog unavailable: {e}") }),
     };
-    let seed = seed_parts(parts);
-    let bounds = match input.get("bounds") {
-        Some(_) => match parse_bounds(input.get("bounds")) {
-            Ok(bounds) => bounds,
-            Err(e) => return json!({ "error": e }),
-        },
-        None => auto_bounds(&seed, catalog),
+    let bounds = match parse_seed_bounds(input.get("bounds")) {
+        Ok(bounds) => bounds,
+        Err(e) => return json!({ "error": e }),
     };
     let mut rules = match parse_seed_rules(input.get("rules")) {
         Ok(rules) => rules,
         Err(e) => return json!({ "error": e }),
     };
+    let seed = seed_parts(parts);
     apply_complexity_default_layer_count(&mut rules, input.get("rules"), seed.len());
     add_default_power_pours(&mut rules, &seed);
 
@@ -378,59 +377,68 @@ fn create_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         parts: seed,
         outline: None,
     };
-    let text = match emit_seed_board(&spec, catalog) {
-        Ok(text) => text,
+    let plan = match plan_seed_board(&spec, catalog) {
+        Ok(plan) => plan,
         Err(e) => return json!({ "error": e }),
     };
-    if let Err(e) = write_board(ctx, &text) {
-        return json!({ "error": e });
+    let sizing = plan.sizing.clone();
+    let width = plan.bounds.max_x - plan.bounds.min_x;
+    let height = plan.bounds.max_y - plan.bounds.min_y;
+    let sizes = json!({
+        "required_bounds": { "width": sizing.required_w, "height": sizing.required_h },
+        "recommended_bounds": { "width": sizing.recommended_w, "height": sizing.recommended_h },
+        "applied_bounds": { "width": width, "height": height },
+        "parts_courtyard_area_mm2": sizing.courtyard_area_mm2,
+    });
+    if plan.bounds_were_explicit && !sizing.fits(width, height) {
+        let mut out = json!({
+            "ok": false,
+            "code": "bounds_below_required",
+            "error": format!(
+                "the requested {width} x {height} mm board is smaller than its own parts require: \
+                 {} mm² of courtyards need at least {} x {} mm to pack legally. Call sync_board \
+                 with bounds {{\"min_x\":0,\"min_y\":0,\"max_x\":{},\"max_y\":{}}} \
+                 (recommended, with routing room), or omit bounds to size the board \
+                 automatically. No board was written.",
+                sizing.courtyard_area_mm2,
+                sizing.required_w,
+                sizing.required_h,
+                sizing.recommended_w,
+                sizing.recommended_h,
+            ),
+        });
+        merge(&mut out, sizes);
+        return out;
     }
-    json!({
+    let outline = plan.bounds;
+    let seeded = match write_seed_plan(plan, ctx) {
+        Ok(seeded) => seeded,
+        Err(e) => return json!({ "error": e }),
+    };
+    let mut out = json!({
         "ok": true,
         "created": true,
+        "changed": true,
         "delta": BoardDelta {
             added: parts.iter().map(|p| p.reference.clone()).collect(),
             ..BoardDelta::default()
         }.to_json(),
         "part_count": parts.len(),
-        "layer_count": spec.rules.layer_count,
-        "outline": bounds_json(&bounds),
+        "layer_count": seeded.rules.layer_count,
+        "outline": bounds_json(&outline),
+        "design_rules": {
+            "clearance": seeded.rules.clearance,
+            "min_trace_width": seeded.rules.min_trace_width,
+            "via_diameter": seeded.rules.via_diameter,
+            "via_drill": seeded.rules.via_drill,
+        },
+        "rules_from_footprints": seeded.rule_notes,
         "path": ctx.pcb_path().display().to_string(),
+        "next_tool": "place_board",
         "note": "board created from the schematic — run place_board, then route_board, then check_board",
-    })
-}
-
-/// Size a fresh outline from the parts: roughly twice the total courtyard area
-/// (packing plus routing channels), square, never smaller than the largest part
-/// with a margin.
-fn auto_bounds(parts: &[SeedPart], catalog: &FootprintCatalog) -> Rect {
-    const MARGIN: f64 = 2.0;
-    let (mut area, mut max_w, mut max_h) = (0.0f64, 0.0f64, 0.0f64);
-    for part in parts {
-        let Some(courtyard) = FootprintId::parse(&part.footprint)
-            .ok()
-            .and_then(|id| catalog.footprint(&id).ok())
-            .map(|fp| fp.courtyard)
-        else {
-            continue;
-        };
-        let (w, h) = (
-            courtyard.max_x - courtyard.min_x,
-            courtyard.max_y - courtyard.min_y,
-        );
-        area += w * h;
-        max_w = max_w.max(w);
-        max_h = max_h.max(h);
-    }
-    let side = (area * 2.0).sqrt();
-    let width = side.max(max_w + 2.0 * MARGIN).max(20.0).ceil();
-    let height = side.max(max_h + 2.0 * MARGIN).max(16.0).ceil();
-    Rect {
-        min_x: 0.0,
-        min_y: 0.0,
-        max_x: width,
-        max_y: height,
-    }
+    });
+    merge(&mut out, sizes);
+    out
 }
 
 fn bounds_json(bounds: &Rect) -> Value {
@@ -445,12 +453,8 @@ fn bounds_json(bounds: &Rect) -> Value {
 // ── the incremental edit ────────────────────────────────────────────────────
 
 fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> Value {
-    if input.get("bounds").is_some() || input.get("rules").is_some() {
-        return json!({
-            "error": "sync_board takes `bounds`/`rules` only when it creates the board; \
-                      change an existing board's outline with update_board_outline and its \
-                      widths with set_net_width",
-        });
+    if input.get("rules").is_some() || input.get("bounds").is_some() {
+        return reseed_board(parts, input, ctx);
     }
     let catalog = match ctx.footprint_catalog() {
         Ok(catalog) => catalog,
@@ -477,7 +481,8 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
             "ok": true,
             "delta": delta.to_json(),
             "changed": false,
-            "note": "the board already matches the schematic; nothing was written",
+            "note": "the board already matches the schematic; nothing was written. Do NOT run \
+                     place_board on a board that is already placed — it would move every part.",
         });
     }
 
@@ -534,12 +539,125 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         "retracted_tracks": retract.count,
         "nets_to_reroute": nets_to_reroute,
         "revision": revision,
-        "note": "only the delta was applied; every other part kept its position and copper — run route_board on nets_to_reroute, then check_board",
+        "next_tool": "route_board",
+        "next": "call route_board({nets: nets_to_reroute}), then check_board",
+        "note": "only the delta was applied; every part the delta did not name kept its position \
+                 and its copper, and anything sync added is already placed. Do NOT run \
+                 place_board — it re-places the whole board and would undo that.",
     });
     if let Some(refusal) = guard(ctx, &path, &original, &revision) {
         result = refusal;
     }
     result
+}
+
+/// Rebuild the board under new rules or a new outline, keeping every part where
+/// it sits.
+///
+/// Clearance, trace width, via size and layer count are the board's fabric, not
+/// its netlist: they cannot be patched into an existing document one node at a
+/// time, and copper routed under the old rules is not honest under the new ones.
+/// So a rules change re-synthesizes the board and restores the placement — the
+/// layout survives, the copper does not, and the model re-routes.
+fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> Value {
+    let _ = ctx.kicad().save_if_open();
+    let path = ctx.pcb_path();
+    let original = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) => return json!({ "error": format!("could not read the board: {e}") }),
+    };
+    let doc = match BoardDoc::parse(original.clone()) {
+        Ok(doc) => doc,
+        Err(e) => return json!({ "error": format!("could not read the board document: {e}") }),
+    };
+    let delta = diff(parts, &doc.footprints());
+    let poses: Vec<kicad_ipc::FootprintMove> = doc
+        .footprints()
+        .into_iter()
+        .filter(|fp| parts.iter().any(|part| part.reference == fp.reference))
+        .map(|fp| kicad_ipc::FootprintMove {
+            reference: fp.reference,
+            x_nm: kicad_ipc::units::mm_to_nm(fp.at.x),
+            y_nm: kicad_ipc::units::mm_to_nm(fp.at.y),
+            rotation_deg: Some(fp.rotation),
+        })
+        .collect();
+    let revision = match snapshot(ctx, &original) {
+        Ok(revision) => revision,
+        Err(e) => return json!({ "error": format!("could not snapshot the board: {e}") }),
+    };
+
+    // Keep the outline the board already has unless the caller asked for another.
+    let mut seed_input = input.clone();
+    if seed_input.get("bounds").is_none()
+        && let Some((min_x, min_y, max_x, max_y)) = kicad_board::board_outline_bbox(&original)
+    {
+        seed_input["bounds"] = bounds_json(&Rect {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        });
+    }
+    let mut result = create_board(parts, &seed_input, ctx);
+    if result.get("ok").and_then(Value::as_bool) != Some(true) {
+        return result;
+    }
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) => return json!({ "error": format!("could not read the reseeded board: {e}") }),
+    };
+    match kicad_board::patch_placements(&text, &poses).and_then(|placed| write_board(ctx, &placed))
+    {
+        Ok(()) => {}
+        Err(e) => {
+            return json!({
+                "error": format!("the board was reseeded but its placement was not restored: {e}"),
+                "revision": revision,
+            });
+        }
+    }
+    merge(
+        &mut result,
+        json!({
+            "created": false,
+            "reseeded": true,
+            "delta": delta.to_json(),
+            "revision": revision,
+            "retracted_tracks": null,
+            "nets_to_reroute": delta_nets(parts),
+            "note": "the board was rebuilt under the new rules with every part kept at its \
+                     position; all copper was dropped because the old route is not honest under \
+                     the new rules — run route_board, then check_board",
+        }),
+    );
+    result
+}
+
+/// Every net the schematic gives more than one pad — what a full re-route covers.
+fn delta_nets(parts: &[SchematicPart]) -> Vec<String> {
+    let mut pads: BTreeMap<&str, usize> = BTreeMap::new();
+    for part in parts {
+        for net in part.pad_nets.values() {
+            *pads.entry(net.as_str()).or_default() += 1;
+        }
+    }
+    pads.into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(net, _)| net.to_owned())
+        .collect()
+}
+
+/// Replace the board document on disk.
+///
+/// The write is atomic — an interrupted sync must not leave half a board — and
+/// the live session is dropped first: a cached pcbnew otherwise keeps serving
+/// the old in-memory document for the same pathname and could save it back.
+fn write_board(ctx: &AgentRuntime, text: &str) -> std::result::Result<(), String> {
+    ctx.close_kicad_session();
+    let path = ctx.pcb_path();
+    crate::route::write_board_atomically(&path, text.as_bytes())
+        .map_err(|e| format!("could not write {}: {e}", path.display()))
 }
 
 /// Write the delta into the board document.

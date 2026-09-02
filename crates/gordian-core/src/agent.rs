@@ -2289,9 +2289,12 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             },
         );
     }
-    // `check_schematic` reports `ok: false` as a verdict on the sheet, not as a
-    // refusal to act; its own arm below says what the verdict was.
-    if name != "check_schematic" && result.get("ok").and_then(Value::as_bool) == Some(false) {
+    // `check_schematic` and `check_board` report `ok: false` as a verdict on the
+    // artifact they inspected, not as a refusal to act; their own arms below say
+    // what the verdict was.
+    if !matches!(name, "check_schematic" | "check_board")
+        && result.get("ok").and_then(Value::as_bool) == Some(false)
+    {
         let code = result
             .get("code")
             .and_then(Value::as_str)
@@ -2430,7 +2433,35 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                     "DRC copper clean, but {silk} silkscreen warning(s) block quality acceptance"
                 )
             } else {
-                format!("DRC failed: {blocking} blocking findings")
+                // The reported order, not a ranking: check_board lists findings
+                // as KiCAD produced them.
+                let first = ["top_violations", "top_unconnected"]
+                    .iter()
+                    .filter_map(|key| result.get(key).and_then(Value::as_array))
+                    .flatten()
+                    .find_map(|v| {
+                        let kind = v.get("type").and_then(Value::as_str)?;
+                        let items = v
+                            .get("items")
+                            .and_then(Value::as_array)
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join(" ↔ ")
+                            })
+                            .filter(|items| !items.is_empty());
+                        Some(match items {
+                            Some(items) => format!("{kind}: {items}"),
+                            None => kind.to_owned(),
+                        })
+                    })
+                    .map(|first| format!(" — first is {first}"))
+                    .unwrap_or_default();
+                format!(
+                    "DRC failed: {blocking} blocking findings{first}; fix them, then check_board again"
+                )
             }
         }
         "assign_footprints" => {
@@ -2723,6 +2754,32 @@ mod tests {
         assert_eq!(
             tool_summary("check_schematic", &json!({}), &result),
             "1 errors, 9 warnings, 3 ERC errors, 2 completeness gaps"
+        );
+    }
+
+    /// `check_board` is the same shape: `ok: false` is DRC's verdict on the
+    /// board, and a summary reading "refused: refused" told the model neither
+    /// what failed nor what to do about it.
+    #[test]
+    fn a_failing_board_check_names_the_finding_it_reported_first() {
+        let result = json!({
+            "ok": false,
+            "blocking_findings": 3,
+            "reported_findings": 4,
+            "silk_warnings": 1,
+            "top_violations": [{
+                "type": "clearance",
+                "severity": "error",
+                "description": "Clearance violation",
+                "items": ["Pad 3 of U1", "Pad 4 of U1"],
+            }],
+            "top_unconnected": [],
+        });
+
+        assert_eq!(
+            tool_summary("check_board", &json!({}), &result),
+            "DRC failed: 3 blocking findings — first is clearance: Pad 3 of U1 ↔ Pad 4 of U1; \
+             fix them, then check_board again"
         );
     }
 }

@@ -11,10 +11,9 @@ use std::path::Path;
 use kicad_footprint::{FootprintCatalog, FootprintId};
 use kicad_ipc::FootprintMove;
 use pcb_model::{
-    LayerRef, Obstacle, PcbProblem, Point2, Polygon, Rect, RouteSolution, RoutingView,
+    Edge, GroupHint, LayerRef, LockedAt, Obstacle, Placement, PlacementHints, PlacementView,
+    Point2, Polygon, Rect, RouteSolution, RoutingView,
 };
-use pcb_place::{Edge, GroupHint, Placement, PlacementHints};
-use pcb_place::{LockedAt, PlacementView};
 use serde::Deserialize;
 
 use super::place::{is_connector, is_mounting_hole, part_from_footprint_layers, routing_bounds};
@@ -81,44 +80,6 @@ pub struct CorpusKeepout {
     pub layers: Vec<LayerRef>,
 }
 
-pub fn pcb_problem(board: &CorpusBoard) -> PcbProblem {
-    let obstacles = board
-        .keepouts
-        .iter()
-        .map(|keepout| Obstacle {
-            kind: "rect".to_owned(),
-            layers: keepout.layers.clone(),
-            center: Point2::new(
-                (keepout.rect.min_x + keepout.rect.max_x) / 2.0,
-                (keepout.rect.min_y + keepout.rect.max_y) / 2.0,
-            ),
-            width: keepout.rect.max_x - keepout.rect.min_x,
-            height: keepout.rect.max_y - keepout.rect.min_y,
-            connected_to: Vec::new(),
-        })
-        .collect();
-    let net_counts = pcb_place::derive_nets(&board.problem)
-        .into_iter()
-        .map(|net| (net.name, net.pins.len()));
-    PcbProblem {
-        bounds: board.problem.bounds,
-        layer_count: board.rules.layer_count,
-        clearance: board.rules.clearance,
-        edge_clearance: 0.5,
-        min_trace_width: board.rules.min_trace_width,
-        via_diameter: board.rules.via_diameter,
-        via_drill: board.rules.via_drill,
-        parts: board.problem.parts.clone(),
-        obstacles,
-        connections: Vec::new(),
-        net_widths: board.rules.net_widths.clone(),
-        outline: board.problem.outline.clone(),
-        plane_nets: pcb_model::default_plane_nets(board.rules.layer_count, net_counts),
-        escape_layers: Default::default(),
-        fixed_copper: RouteSolution::default(),
-    }
-}
-
 pub fn load_corpus_board(
     path: &Path,
     catalog: &FootprintCatalog,
@@ -170,7 +131,7 @@ pub fn routed_board_text(
     catalog: &FootprintCatalog,
 ) -> std::result::Result<String, String> {
     let spec = super::create::BoardSeedSpec {
-        bounds: board.board_bounds,
+        bounds: super::create::SeedBounds::Fixed(board.board_bounds),
         rules: super::create::SeedRules {
             clearance: board.rules.clearance,
             min_trace_width: board.rules.min_trace_width,
@@ -193,7 +154,7 @@ pub fn routed_board_text(
             .collect(),
         outline: board.problem.outline.clone(),
     };
-    let seed = super::create::emit_seed_board(&spec, catalog)?;
+    let seed = super::create::emit_seed_board(&spec, catalog)?.text;
     let moves = placements
         .iter()
         .map(|placement| FootprintMove {

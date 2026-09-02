@@ -395,6 +395,38 @@ fn snapshot_net_pin_counts(board: &IpcBoardSnapshot) -> BTreeMap<String, usize> 
 
 // ── IPC snapshot to engine problem ───────────────────────────────────────────
 
+/// Each part's COURTYARD extent (mm), by reference.
+///
+/// KiCAD's DRC checks courtyards, not pads, so a caller reasoning about whether
+/// two parts may sit next to each other must use these. Rotation-aware: a part
+/// turned a quarter-turn presents its courtyard the other way round. A part
+/// whose footprint no longer resolves is simply absent.
+pub(super) fn courtyard_extents(
+    board: &IpcBoardSnapshot,
+    ctx: &AgentRuntime,
+) -> std::collections::BTreeMap<String, (f64, f64)> {
+    // An unreadable catalog leaves the map empty and the caller falls back to
+    // pad extents — a weaker guard, but never a wrong one.
+    let Ok(catalog) = ctx.footprint_catalog() else {
+        return Default::default();
+    };
+    board
+        .imported
+        .parts
+        .iter()
+        .filter_map(|part| {
+            let id = FootprintId::parse(&part.lib_id).ok()?;
+            let footprint = catalog.footprint(&id).ok()?;
+            let (w, h) = enclosing_courtyard(&footprint);
+            let swapped = part.rotation.rem_euclid(180) == 90;
+            Some((
+                part.reference.clone(),
+                if swapped { (h, w) } else { (w, h) },
+            ))
+        })
+        .collect()
+}
+
 pub(super) fn place_problem_from_snapshot(
     board: &IpcBoardSnapshot,
     ctx: &AgentRuntime,
@@ -1587,6 +1619,99 @@ fn align_817_field_connector_datums(problem: &mut PlacementView, hints: &Placeme
     }
 }
 
+/// A connector is only useful if a cable can reach it. The placer edge-seeks
+/// them, but a crowded board can still strand one in the interior — and a legal
+/// placement says nothing about that, so the caller never learns why the render
+/// looks wrong. Names each connector left more than its own width from any edge,
+/// with the `move_parts` call that seats it.
+fn connectors_off_edge(
+    problem: &PlacementView,
+    imported: &[kicad_board::ImportedPart],
+    result: &pcb_place::PlaceResult,
+) -> Vec<Value> {
+    let placed: std::collections::BTreeMap<&str, _> = result
+        .placements
+        .iter()
+        .map(|placement| (placement.reference.as_str(), placement))
+        .collect();
+    let mut out = Vec::new();
+    for part in &problem.parts {
+        let lib_id = imported
+            .iter()
+            .find(|p| p.reference == part.reference)
+            .map_or("", |p| p.lib_id.as_str());
+        if !is_connector(lib_id, &part.reference) {
+            continue;
+        }
+        let Some(placement) = placed.get(part.reference.as_str()) else {
+            continue;
+        };
+        let half = pcb_place::rotated_courtyard_half(part, placement.rotation);
+        let rect = Rect::from_center_half(placement.at, half);
+        let gaps = [
+            ("left", rect.min_x - problem.bounds.min_x),
+            ("right", problem.bounds.max_x - rect.max_x),
+            ("top", rect.min_y - problem.bounds.min_y),
+            ("bottom", problem.bounds.max_y - rect.max_y),
+        ];
+        let (edge, gap) = gaps
+            .into_iter()
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("four edges");
+        // Its own width of clear board behind it means it is not on the rim.
+        if gap <= rect.width().min(rect.height()) {
+            continue;
+        }
+        out.push(json!({
+            "reference": part.reference,
+            "nearest_edge": edge,
+            "gap_to_edge_mm": (gap * 10.0).round() / 10.0,
+            "fix": format!(
+                "move_parts {{\"moves\":[{{\"reference\":\"{}\",\"edge\":\"{edge}\",\"gap\":0.5}}]}}",
+                part.reference
+            ),
+        }));
+    }
+    out
+}
+
+/// The board this placement's parts require, in [`crate::sizing`]'s terms — the
+/// same law `sync_board` sizes an auto board with, so both tools quote one
+/// pair of numbers.
+fn board_sizing(
+    problem: &PlacementView,
+    imported: &[kicad_board::ImportedPart],
+    routing: &pcb_model::RoutingView,
+) -> crate::sizing::BoardSizing {
+    let lib_id = |reference: &str| {
+        imported
+            .iter()
+            .find(|part| part.reference == reference)
+            .map_or("", |part| part.lib_id.as_str())
+    };
+    let extents: Vec<_> = problem
+        .parts
+        .iter()
+        .map(|part| crate::sizing::PartExtent {
+            w: part.courtyard_w,
+            h: part.courtyard_h,
+            edge_seeking: is_connector(lib_id(&part.reference), &part.reference),
+        })
+        .collect();
+    let w = (problem.bounds.max_x - problem.bounds.min_x).max(0.1);
+    let h = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
+    crate::sizing::size_board(
+        &extents,
+        w / h,
+        crate::sizing::RoutingDemand {
+            clearance: routing.clearance,
+            track_width: routing.min_trace_width,
+            layer_count: routing.layer_count,
+            net_count: routing.connections.len(),
+        },
+    )
+}
+
 /// Estimate a one-retry board size from packing area and the largest footprint.
 /// The 817 plan requests a landscape result because its continuous horizontal
 /// isolation row is the dominant shape; generic failures preserve the caller's
@@ -1666,8 +1791,25 @@ fn placement_existing_copper_error(tracks: usize, vias: usize) -> Option<Value> 
     })
 }
 
+/// Automatic placement moves EVERY unlocked part, so running it on a board that
+/// already has a layout throws that layout away — the exact loss `sync_board`
+/// exists to prevent. A board still at its seed row has no layout to lose, and a
+/// caller who means it says so.
+fn already_placed_error(board: &IpcBoardSnapshot, replace: bool) -> Option<Value> {
+    (!replace && !kicad_board::is_seed_imported_board(&board.imported)).then(|| {
+        json!({
+            "error": "this board is already placed; automatic placement would move every part",
+            "code": "board_already_placed",
+            "placement_applied": false,
+            "note": "Nothing was moved. Adjust individual parts with move_parts, or pass \
+                     {\"replace\": true} to deliberately re-place the whole board and lose the \
+                     current layout.",
+        })
+    })
+}
+
 #[tracing::instrument(skip_all, fields(project = %ctx.project_dir().display()))]
-pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let board = match crate::active_board(ctx) {
         Ok(board) => board,
         Err(live_err) => return Ok(json!({ "error": live_err })),
@@ -1675,6 +1817,16 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Some(error) =
         placement_existing_copper_error(board.copper.traces.len(), board.copper.vias.len())
     {
+        return Ok(error);
+    }
+    let replace = input
+        .get("replace")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if let Some(object) = input.as_object_mut() {
+        object.remove("replace");
+    }
+    if let Some(error) = already_placed_error(&board, replace) {
         return Ok(error);
     }
 
@@ -1842,19 +1994,24 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     }
 
-    // On a failed placement, give the agent a CONCRETE minimum board size so it can
-    // retry deterministically instead of guessing. Estimate from the parts' total
-    // courtyard area (with packing + routing overhead) and the largest single part.
+    // On a failed placement, give the agent a CONCRETE board size so it can retry
+    // deterministically instead of guessing — in the one vocabulary
+    // `sync_board` also uses, grown past the outline that just failed so a
+    // retry can never propose it again. `suggested_min_bounds_mm` carries the
+    // same recommendation under the name the auto-resize path already reads.
     let mut extra = json!({});
     if !result.legal {
-        let estimate = placement_size_estimate(&problem, 0.0, 0.0, false);
         let cw = (problem.bounds.max_x - problem.bounds.min_x).max(0.1);
         let ch = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
+        let sizing =
+            board_sizing(&problem, &board.imported.parts, &board.problem).grown_past(cw, ch);
         extra = json!({
             "overlap_pairs": placement_overlap_pairs(&problem, &result),
-            "parts_courtyard_area_mm2": (estimate.total_area * 10.0).round() / 10.0,
+            "parts_courtyard_area_mm2": sizing.courtyard_area_mm2,
             "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
-            "suggested_min_bounds_mm": { "w": estimate.width.ceil(), "h": estimate.height.ceil() },
+            "required_bounds": { "width": sizing.required_w, "height": sizing.required_h },
+            "recommended_bounds": { "width": sizing.recommended_w, "height": sizing.recommended_h },
+            "suggested_min_bounds_mm": { "w": sizing.recommended_w, "h": sizing.recommended_h },
         });
     } else {
         // A legal placement on an oversized canvas reads as wasted board: report
@@ -1898,6 +2055,7 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
                 "fit_bounds_mm": { "w": fresh.width.ceil(), "h": fresh.height.ceil() },
                 "canvas_utilization_percent": (utilization * 100.0).round().min(100.0),
+                "connectors_off_edge": connectors_off_edge(&problem, &board.imported.parts, &result),
             });
         }
     }
@@ -1931,6 +2089,8 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(out)
 }
 
+/// The refusal a caller can act on in one move: how much copper area the parts
+/// need against how much the board offers, and the exact bounds that would fit.
 fn illegal_placement_error(result: &Value) -> String {
     let current_w = result
         .pointer("/current_bounds_mm/w")
@@ -1940,19 +2100,32 @@ fn illegal_placement_error(result: &Value) -> String {
         .pointer("/current_bounds_mm/h")
         .and_then(Value::as_f64)
         .unwrap_or_default();
-    let suggested_w = result
-        .pointer("/suggested_min_bounds_mm/w")
-        .and_then(Value::as_f64)
-        .unwrap_or(current_w);
-    let suggested_h = result
-        .pointer("/suggested_min_bounds_mm/h")
-        .and_then(Value::as_f64)
-        .unwrap_or(current_h);
+    let at = |pointer: &str, fallback: f64| {
+        result
+            .pointer(pointer)
+            .and_then(Value::as_f64)
+            .unwrap_or(fallback)
+    };
+    // The 817 rejection publishes only `suggested_min_bounds_mm`; the generic
+    // path publishes all three, with the suggestion equal to the recommendation.
+    let suggested_w = at("/suggested_min_bounds_mm/w", current_w);
+    let suggested_h = at("/suggested_min_bounds_mm/h", current_h);
+    let required_w = at("/required_bounds/width", suggested_w);
+    let required_h = at("/required_bounds/height", suggested_h);
+    let recommended_w = at("/recommended_bounds/width", suggested_w);
+    let recommended_h = at("/recommended_bounds/height", suggested_h);
+    let courtyard = at("/parts_courtyard_area_mm2", 0.0);
+    let board_area = current_w * current_h;
     format!(
         "placement failed and no positions were written: the placer could not legally pack the \
-         selected footprints in {current_w} x {current_h} mm. Choose smaller appropriate \
-         footprints to preserve that board size, or resize the outline to at least \
-         {suggested_w} x {suggested_h} mm, then run place_board once."
+         selected footprints in {current_w} x {current_h} mm ({board_area:.0} mm² of board for \
+         {courtyard:.0} mm² of part courtyards, and packing plus routing needs roughly twice the \
+         courtyard area). This board requires at least {required_w} x {required_h} mm; \
+         {recommended_w} x {recommended_h} mm is recommended (it leaves routing room). Call \
+         update_board_outline with \
+         bounds {{\"min_x\":0,\"min_y\":0,\"max_x\":{recommended_w},\"max_y\":{recommended_h}}}, \
+         then place_board once. Choosing smaller footprints is the other way to keep the current \
+         board size."
     )
 }
 
@@ -2156,6 +2329,8 @@ mod tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let parts = imported
             .iter()
@@ -3065,6 +3240,8 @@ mod tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let board = IpcBoardSnapshot {
             imported: ImportedBoard {
@@ -3140,6 +3317,8 @@ mod tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let board = IpcBoardSnapshot {
             imported: ImportedBoard {
@@ -3193,11 +3372,128 @@ mod tests {
         let message = illegal_placement_error(&json!({
             "current_bounds_mm": {"w": 45.0, "h": 30.0},
             "suggested_min_bounds_mm": {"w": 69.0, "h": 46.0},
+            "parts_courtyard_area_mm2": 1580.0,
         }));
 
-        assert!(message.contains("no positions were written"));
-        assert!(message.contains("smaller appropriate footprints"));
-        assert!(message.contains("69 x 46 mm"));
+        assert!(message.contains("no positions were written"), "{message}");
+        assert!(message.contains("smaller footprints"), "{message}");
+        // Area budget: what the parts need against what the board offers.
+        assert!(message.contains("1350 mm² of board"), "{message}");
+        assert!(message.contains("1580 mm² of part courtyards"), "{message}");
+        // The one call that fixes it, spelled out.
+        assert!(message.contains("\"max_x\":69,\"max_y\":46"), "{message}");
+    }
+
+    /// The nine-part board from the failure report: a USB-C receptacle, a
+    /// SOT-23-5 LDO and seven 0603 passives. `sync_board` sizes a board
+    /// like this before anything is placed, and the size it picks must place
+    /// legally on the FIRST call — otherwise the caller is back to guessing.
+    /// A legal placement says nothing about whether a cable can reach the
+    /// connectors. One stranded in the interior is the single most common
+    /// complaint about these boards, and the caller never learns of it.
+    #[test]
+    fn a_connector_stranded_in_the_board_interior_is_named_with_its_fix() {
+        let part = |reference: &str| Part {
+            reference: reference.to_string(),
+            courtyard_w: 3.0,
+            courtyard_h: 3.0,
+            pads: vec![],
+            edge_datum: None,
+            locked: None,
+        };
+        let problem = PlacementView {
+            bounds: Rect::new(0.0, 0.0, 40.0, 40.0),
+            clearance: 0.15,
+            layer_count: 2,
+            min_trace_width: 0.15,
+            parts: vec![part("J1"), part("J2"), part("R1")],
+            keepouts: vec![],
+            outline: None,
+        };
+        let at = |reference: &str, x: f64, y: f64| pcb_place::Placement {
+            reference: reference.to_string(),
+            at: Point2::new(x, y),
+            rotation: 0.0,
+        };
+        let result = pcb_place::PlaceResult {
+            // J1 sits on the left edge; J2 is stranded mid-board; R1 is not a
+            // connector and is never asked to seek an edge.
+            placements: vec![
+                at("J1", 2.0, 20.0),
+                at("J2", 20.0, 20.0),
+                at("R1", 30.0, 30.0),
+            ],
+            legal: true,
+            report: pcb_place::PlaceReport::default(),
+        };
+
+        let off = connectors_off_edge(&problem, &[], &result);
+
+        assert_eq!(off.len(), 1, "{off:?}");
+        assert_eq!(off[0]["reference"], "J2");
+        assert_eq!(off[0]["gap_to_edge_mm"], 18.5);
+        assert!(
+            off[0]["fix"]
+                .as_str()
+                .unwrap()
+                .contains("\"reference\":\"J2\""),
+            "{off:?}"
+        );
+    }
+
+    #[test]
+    fn an_auto_sized_nine_part_board_places_legally_on_the_first_try() {
+        let part = |reference: &str, w: f64, h: f64| Part {
+            reference: reference.to_string(),
+            courtyard_w: w,
+            courtyard_h: h,
+            pads: vec![],
+            edge_datum: None,
+            locked: None,
+        };
+        let mut parts = vec![part("J1", 9.2, 7.6), part("U1", 3.0, 3.0)];
+        for i in 1..=7 {
+            parts.push(part(&format!("C{i}"), 2.0, 1.5));
+        }
+        let extents: Vec<_> = parts
+            .iter()
+            .map(|p| crate::sizing::PartExtent {
+                w: p.courtyard_w,
+                h: p.courtyard_h,
+                edge_seeking: is_connector("", &p.reference),
+            })
+            .collect();
+        let sizing = crate::sizing::size_board(
+            &extents,
+            1.0,
+            crate::sizing::RoutingDemand {
+                clearance: 0.15,
+                track_width: 0.15,
+                layer_count: 2,
+                net_count: 8,
+            },
+        );
+
+        assert!(
+            sizing.required_w < sizing.recommended_w && sizing.required_h < sizing.recommended_h,
+            "recommended must leave routing room over required: {sizing:?}"
+        );
+
+        let problem = PlacementView {
+            bounds: Rect::new(0.0, 0.0, sizing.recommended_w, sizing.recommended_h),
+            clearance: 0.15,
+            layer_count: 2,
+            min_trace_width: 0.15,
+            parts,
+            keepouts: vec![],
+            outline: None,
+        };
+        assert!(
+            pcb_engine::place_tuned(&problem, &PlacementHints::default()).legal,
+            "auto-sized {} x {} mm did not place legally",
+            sizing.recommended_w,
+            sizing.recommended_h
+        );
     }
 
     #[test]

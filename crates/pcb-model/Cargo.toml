@@ -4,13 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared geometry + place/route problem & solution types for the PCB engine."
+description = "Shared geometry and contracts for PCB placement and routing phases."
 
 [dependencies]
 geom = { path = "../geom" }
 serde = { workspace = true, features = ["derive"] }
-uuid = { workspace = true }
-rayon.workspace = true
 
 [dev-dependencies]
 serde_json = { workspace = true }

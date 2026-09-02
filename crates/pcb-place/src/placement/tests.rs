@@ -3382,6 +3382,8 @@ fn grid_ranker_weights_failed_net_by_pin_count() {
         outline: None,
         escape_layers: Default::default(),
         plane_nets: Default::default(),
+        fixed_copper: Default::default(),
+        nets: None,
     };
 
     let faults = GridAstarRanker.faults(&rp);
@@ -3428,6 +3430,8 @@ fn grid_ranker_uses_best_orthogonal_strictness_key() {
         outline: None,
         escape_layers: Default::default(),
         plane_nets: Default::default(),
+        fixed_copper: Default::default(),
+        nets: None,
     };
     let strict_key = route_rank_key(&rp, &pcb_route_grid::router::route_orthogonal(&rp));
     let lenient_key = route_rank_key(&rp, &pcb_route_grid::router::route_orthogonal_lenient(&rp));
@@ -3469,6 +3473,8 @@ fn grid_ranker_bounds_high_terminal_candidate_work() {
         outline: None,
         escape_layers: Default::default(),
         plane_nets: Default::default(),
+        fixed_copper: Default::default(),
+        nets: None,
     };
 
     assert!(!placement_ranker_uses_bounded_pass(&with_terminals(40)));
@@ -3586,6 +3592,8 @@ fn ranker_gate_problem(connection_count: usize) -> RoutingView {
         outline: None,
         escape_layers: Default::default(),
         plane_nets: Default::default(),
+        fixed_copper: Default::default(),
+        nets: None,
     }
 }
 

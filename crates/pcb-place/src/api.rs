@@ -1,161 +1,12 @@
-//! Placement views, hints, geometry helpers, and intermediate results used by
-//! Gordian's concrete [`PcbEngine`](pcb_model::PcbEngine) implementation.
+//! Placement geometry and derived-net helpers used by the concrete placer.
 
-use geom::{Point2, Polygon, Rect};
+use geom::{Point2, Rect};
 use pcb_model::{Connection, Obstacle, RoutePoint, RoutingView};
-pub use pcb_model::{EdgeDatum, LayerRef, LockedAt, Part, PartPad, Placement};
-use serde::{Deserialize, Serialize};
+pub use pcb_model::{
+    Edge, EdgeDatum, GroupHint, LayerRef, LockedAt, Part, PartPad, PlaceReport, PlaceResult,
+    Placement, PlacementHints, PlacementView,
+};
 use std::collections::BTreeMap;
-
-// ── problem ──────────────────────────────────────────────────────────────────
-
-/// The placement phase's borrowed projection of a complete PCB problem.
-///
-/// Logical nets are **not** a field — they are derived from per-pad net names
-/// ([`derive_nets`]); pads are the single canonical net source. Unknown JSON
-/// fields are rejected (schema drift fails loudly), like `RoutingView`'s
-/// solution types.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PlacementView {
-    /// Board outline (mm, y-down).
-    pub bounds: Rect,
-    /// Copper-to-copper clearance (mm); also floors the courtyard margin.
-    #[serde(default = "default_clearance")]
-    pub clearance: f64,
-    /// Number of copper layers (carried into the emitted [`RoutingView`]).
-    #[serde(default = "default_layer_count")]
-    pub layer_count: u32,
-    /// Minimum trace width (mm), carried into the emitted [`RoutingView`].
-    #[serde(default = "default_min_trace_width")]
-    pub min_trace_width: f64,
-    /// The parts to place.
-    pub parts: Vec<Part>,
-    /// Rectangular keep-out regions on the SIGNAL layers (top/bottom) the placer
-    /// must keep parts OUT of — a part dropped inside one would have its pads
-    /// trapped (no track can leave without crossing the keep-out). Inner-only
-    /// (plane) keep-outs are not included here. Empty for most boards.
-    #[serde(default)]
-    pub keepouts: Vec<Rect>,
-    /// Optional custom board OUTLINE (closed polygon, mm). When set, a part is illegal if
-    /// its courtyard falls outside the polygon — so concave shapes (a star) keep parts
-    /// inside the TRUE outline, not just its bounding box. Carried into the [`RoutingView`].
-    #[serde(default)]
-    pub outline: Option<Polygon>,
-}
-
-fn default_clearance() -> f64 {
-    0.2
-}
-fn default_layer_count() -> u32 {
-    2
-}
-fn default_min_trace_width() -> f64 {
-    0.2
-}
-
-// ── hints ──────────────────────────────────────────────────────────────────────
-
-/// LLM-authored placement hints. **Empty hints are valid** and must produce a
-/// legal placement (hints improve, never gate). Data only — slice 5's LLM
-/// integration is a serde/prompt problem, not an engine change.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PlacementHints {
-    /// Grouping/region/edge hints.
-    #[serde(default)]
-    pub groups: Vec<GroupHint>,
-    /// References that should be pulled to their NEAREST board edge (connectors,
-    /// headers, mounting holes — parts a cable or the enclosure reaches from
-    /// outside). Unlike a group `edge` hint, the engine picks each part's nearest
-    /// edge automatically, so the caller need not know the final layout. A
-    /// professional board puts these at the perimeter, not stranded in the
-    /// interior with copper wrapping around them.
-    #[serde(default)]
-    pub edge_seek: Vec<String>,
-    /// References pulled to their NEAREST board CORNER (mounting holes — mechanical
-    /// fixings belong at the corners, where screws clear the components). Stronger
-    /// and more specific than [`Self::edge_seek`] (a corner, not anywhere along an
-    /// edge), so a board's 2–4 mounting holes settle one per corner instead of
-    /// stranding in the interior or bunching mid-edge.
-    #[serde(default)]
-    pub corner_seek: Vec<String>,
-}
-
-/// A group of parts that should cohere, optionally pulled into a region and/or
-/// toward a board edge.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct GroupHint {
-    /// Human label (for provenance/debug; not load-bearing).
-    pub name: String,
-    /// References of the parts in this group.
-    pub members: Vec<String>,
-    /// Optional rectangle the members should land inside.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region: Option<Rect>,
-    /// Optional board edge the group should hug.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub edge: Option<Edge>,
-    /// Tile the members in a regular GRID filling [`Self::region`] (row-major, in
-    /// member order), locking each at its cell. For repetitive arrays the agent
-    /// wants laid out tidily (LED matrices, resistor networks) rather than the
-    /// general annealer's scatter. Requires `region`; ignored without it.
-    #[serde(default)]
-    pub grid: bool,
-    /// Optional quadrant rotation applied to every locked grid member.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rotation: Option<f64>,
-    /// Ring the members tightly around the perimeter of this target part (by
-    /// reference) — the decoupling-cap pattern: caps hug their IC instead of
-    /// scattering. The target must be LOCKED (the agent fixes the IC first) so its
-    /// position is known when the ring is laid out. Ignored otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub surround: Option<String>,
-}
-
-/// A board edge for edge-affinity hints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Edge {
-    N,
-    S,
-    E,
-    W,
-}
-
-// ── result ───────────────────────────────────────────────────────────────────
-
-/// The result of the engine's placement phase: per-part placements, a legality
-/// verdict (verified by exact geometry), and a quality/diagnostic report.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PlaceResult {
-    /// Placed parts (one per input part, in input order).
-    pub placements: Vec<Placement>,
-    /// True iff no courtyard overlap (with margin) and all parts in bounds —
-    /// verified by exact geometry at the end, not trusted from the algorithm.
-    pub legal: bool,
-    /// Diagnostics + the HPWL quality number.
-    pub report: PlaceReport,
-}
-
-/// Placement diagnostics: how much legalization happened and the HPWL metric.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PlaceReport {
-    /// How many parts the spiral legalizer had to move off their snapped cell.
-    pub overlaps_resolved: usize,
-    /// How many parts were clamped because the force layout pushed them out of
-    /// bounds.
-    pub out_of_bounds_clamps: usize,
-    /// Half-perimeter wirelength over net bounding boxes (mm) — the cheap
-    /// placement-quality number (lower is tighter).
-    pub hpwl: f64,
-    /// The full layout cost of the final placement (overlap + wirelength +
-    /// compaction + decoupling cohesion + silk gap).
-    pub layout_cost: f64,
-}
 
 // ── derived nets ─────────────────────────────────────────────────────────────
 
@@ -195,14 +46,6 @@ pub fn derive_nets(problem: &PlacementView) -> Vec<LogicalNet> {
         .map(|(name, pins)| LogicalNet { name, pins })
         .collect()
 }
-
-// ── shared geometry ────────────────────────────────────────────────────────────
-//
-// The PURE placement geometry the SDK functions ([`is_legal`], [`compute_hpwl`],
-// [`routing_view`]) and a third-party placer both need. Quadrant rotation,
-// centered-rect overlap, bounds fit — all deterministic, no problem-mutating state.
-// (The engine's own search-only scaffold — grid snap, spiral, edge pulls — stays
-// private to `pcb-place`.)
 
 /// Minimum courtyard-to-courtyard gap (mm). The effective margin is
 /// `max(clearance, COURTYARD_MARGIN_MIN)`.
@@ -703,7 +546,7 @@ pub fn routing_view(problem: &PlacementView, placements: &[Placement]) -> Routin
         outline: problem.outline.clone(),
         escape_layers: Default::default(),
         plane_nets: Default::default(),
+        fixed_copper: Default::default(),
+        nets: None,
     }
 }
-
-// ── engine-SDK trait seam ────────────────────────────────────────────────────

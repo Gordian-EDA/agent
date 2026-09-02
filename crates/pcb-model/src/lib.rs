@@ -1,25 +1,29 @@
-//! Framework-level PCB problem, solution, and engine contract.
+//! Shared contracts for the independently invokable PCB placement and routing phases.
 //!
-//! [`PcbEngine`] accepts one complete [`PcbProblem`] and returns one complete
-//! [`PcbSolution`]. `RoutingView` is an internal phase projection which remains
-//! wire-compatible with tscircuit's `SimpleRouteJson`
+//! Placement consumes [`PlacementView`] plus [`PlacementHints`] and returns
+//! [`PlaceResult`]. Routing consumes [`RoutingView`] and returns [`RouteResult`].
+//! Interactive tools may edit the board between either phase; the saved
+//! `.kicad_pcb` is the authoritative state passed between invocations, mirroring
+//! the schematic workflow.
+//!
+//! `RoutingView` remains wire-compatible with tscircuit's `SimpleRouteJson`
 //! (camelCase, same field names/shapes) so the archived benchmark dataset
-//! parses without transformation.  Extension fields (`clearance`,
-//! `via_diameter`, `via_drill`) are optional with sane defaults so upstream
-//! fixtures that omit them still parse.
+//! parses without transformation. Extension fields, including incremental
+//! routing state, have defaults so upstream fixtures that omit them still parse.
 //!
 //! `RouteSolution` is the copper portion of a solution; unknown fields are rejected so any
 //! schema drift is caught immediately.
 
 use serde::{Deserialize, Serialize};
 
-mod engine;
+pub mod place;
 pub mod route;
-pub use engine::{
-    EdgeDatum, LockedAt, Part, PartPad, PcbEngine, PcbProblem, PcbSolution, Placement,
-};
 pub use geom::UnionFind;
 pub use geom::{Point2, Polygon, Rect, Segment};
+pub use place::{
+    Edge, EdgeDatum, GroupHint, LockedAt, Part, PartPad, PlaceReport, PlaceResult, Placement,
+    PlacementHints, PlacementView,
+};
 pub use route::{RouteMetrics, RouteQuality, RouteResult, RoutingCapabilities, failed_pad_weight};
 
 // ── defaults for extension fields ────────────────────────────────────────────
@@ -172,6 +176,13 @@ pub struct RoutingView {
     /// layer assignment holds. Empty (the default) = the old surface-only escape.
     #[serde(default)]
     pub escape_layers: std::collections::BTreeMap<String, u32>,
+    /// Existing traces and vias that routing must preserve as fixed obstacles.
+    /// They are not repeated in the routing result.
+    #[serde(default)]
+    pub fixed_copper: RouteSolution,
+    /// Net names to route. `None` routes all connections.
+    #[serde(default)]
+    pub nets: Option<Vec<String>>,
 }
 
 impl RoutingView {
@@ -444,5 +455,21 @@ mod tests {
             ],
         };
         assert_eq!(conn.half_perimeter(), 10.0);
+    }
+
+    #[test]
+    fn simple_route_json_defaults_incremental_fields() {
+        let json = r#"{
+            "layerCount": 2,
+            "minTraceWidth": 0.2,
+            "obstacles": [],
+            "connections": [],
+            "bounds": {"minX": 0.0, "minY": 0.0, "maxX": 10.0, "maxY": 10.0}
+        }"#;
+
+        let view: RoutingView = serde_json::from_str(json).unwrap();
+
+        assert_eq!(view.fixed_copper, RouteSolution::default());
+        assert_eq!(view.nets, None);
     }
 }

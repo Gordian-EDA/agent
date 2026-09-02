@@ -47,33 +47,49 @@ pub(crate) fn pad_extents<'a>(
         .collect()
 }
 
-/// Drop every trace that touches one of `pads` or carries one of `nets`.
+/// Retract every net with a trace touching one of `pads`, plus every net in
+/// `nets`.
 ///
-/// Vias are retained: they are net-local stitches, not pad attachments, and a
-/// re-route of the named nets replaces them where needed.
+/// The unit of retraction is the NET, not the trace. A net whose copper is only
+/// partly removed is left with a stub hanging off nothing — KiCAD reports it as
+/// `track_dangling`, and the board fails DRC with no unrouted net to explain it.
+/// So once an edit invalidates any of a net's copper, all of it goes and the net
+/// is named for re-routing.
 pub(crate) fn retract(
     copper: &RouteSolution,
     pads: &[Rect],
     nets: &BTreeSet<String>,
 ) -> RetractedCopper {
-    let invalidated = |trace: &Trace| {
-        nets.contains(&trace.connection)
-            || trace
-                .path
-                .iter()
-                .any(|point| pads.iter().any(|pad| pad.contains(*point)))
+    let touches_pad = |trace: &Trace| {
+        trace
+            .path
+            .iter()
+            .any(|point| pads.iter().any(|pad| pad.contains(*point)))
     };
-    let mut retract = RetractedCopper::default();
-    for trace in &copper.traces {
-        if invalidated(trace) {
-            retract.nets.insert(trace.connection.clone());
-            retract.count += 1;
-        } else {
-            retract.retained.traces.push(trace.clone());
-        }
+    let dropped: BTreeSet<String> = copper
+        .traces
+        .iter()
+        .filter(|trace| nets.contains(&trace.connection) || touches_pad(trace))
+        .map(|trace| trace.connection.clone())
+        .collect();
+    let (out, kept): (Vec<_>, Vec<_>) = copper
+        .traces
+        .iter()
+        .cloned()
+        .partition(|trace| dropped.contains(&trace.connection));
+    RetractedCopper {
+        count: out.len(),
+        retained: RouteSolution {
+            traces: kept,
+            vias: copper
+                .vias
+                .iter()
+                .filter(|via| !dropped.contains(&via.connection))
+                .cloned()
+                .collect(),
+        },
+        nets: dropped,
     }
-    retract.retained.vias = copper.vias.clone();
-    retract
 }
 
 /// Rewrite the board file so it carries only the retained copper. A retraction
@@ -94,7 +110,10 @@ pub(crate) fn write_retained(
     let (stripped, _, _) = kicad_board::strip_copper(&text)?;
     let replacement =
         kicad_board::append_copper(&stripped, &retract.retained, layer_count, layer_names)?;
-    std::fs::write(&path, replacement).map_err(|err| format!("could not write the board: {err}"))
+    // The same atomic replace the route path uses: an interrupted edit must not
+    // leave a half-written board.
+    crate::route::write_board_atomically(&path, replacement.as_bytes())
+        .map_err(|err| format!("could not write the board: {err}"))
 }
 
 #[cfg(test)]
@@ -132,6 +151,8 @@ mod tests {
             outline: None,
             plane_nets: Default::default(),
             escape_layers: Default::default(),
+            nets: Default::default(),
+            fixed_copper: Default::default(),
         }
     }
 
@@ -154,6 +175,29 @@ mod tests {
         );
         assert_eq!(out.retained.traces.len(), 1);
         assert_eq!(out.retained.traces[0].connection, "GND");
+    }
+
+    #[test]
+    fn a_nets_copper_comes_out_whole() {
+        // The far trace never touches R1; it goes anyway, because half a net of
+        // copper is a dangling stub, not a partial route.
+        let copper = RouteSolution {
+            traces: vec![
+                trace("VIN", &[(10.0, 10.0), (20.0, 10.0)]),
+                trace("VIN", &[(30.0, 30.0), (40.0, 30.0)]),
+            ],
+            vias: vec![pcb_model::Via {
+                connection: "VIN".into(),
+                at: Point2::new(30.0, 30.0),
+                diameter: 0.6,
+                drill: 0.3,
+                span: pcb_model::ViaSpan::Through,
+            }],
+        };
+        let out = retract(&copper, &pad_extents(&problem(), ["R1"]), &BTreeSet::new());
+        assert_eq!(out.count, 2);
+        assert!(out.retained.traces.is_empty());
+        assert!(out.retained.vias.is_empty(), "the net's vias go with it");
     }
 
     #[test]

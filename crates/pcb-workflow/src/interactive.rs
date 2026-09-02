@@ -21,7 +21,7 @@ use pcb_model::{
 use gordian_runtime::AgentRuntime;
 use gordian_runtime::tool::require_str;
 
-use kicad_board::IpcBoardSnapshot;
+use kicad_board::{ImportedPart, IpcBoardSnapshot};
 
 use crate::copper::RetractedCopper;
 
@@ -45,7 +45,8 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(snapshot) => snapshot,
         Err(err) => return Ok(json!({ "error": err })),
     };
-    let mut board = MoveBoard::from_snapshot(&snapshot);
+    let mut board =
+        MoveBoard::from_snapshot(&snapshot, &crate::place::courtyard_extents(&snapshot, ctx));
     let plan = match resolve_move_parts(&input, &mut board) {
         Ok(plan) => plan,
         Err(err) => return Ok(json!({ "error": err })),
@@ -70,7 +71,8 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(plan.output(&retract))
 }
 
-/// Copper the move invalidates: every trace with an end on a pad that moved.
+/// Copper the move invalidates: every net with a trace ending on a pad that
+/// moved, retracted whole so no stub is left hanging.
 fn retracted_copper(snapshot: &IpcBoardSnapshot, plan: &MovePlan) -> RetractedCopper {
     let moved = plan
         .positions
@@ -80,8 +82,10 @@ fn retracted_copper(snapshot: &IpcBoardSnapshot, plan: &MovePlan) -> RetractedCo
     crate::copper::retract(&snapshot.copper, &pads, &BTreeSet::new())
 }
 
-/// Reject a move that would land a part on top of another one: the pad extents
-/// plus the board clearance must not overlap.
+/// Reject a move that would land a part on top of another one: the courtyards
+/// plus the board clearance must not overlap. Courtyards are what KiCAD's DRC
+/// checks, so a move this accepts cannot leave the board failing
+/// `courtyards_overlap`.
 fn overlap_error(board: &MoveBoard, plan: &MovePlan, clearance: f64) -> Option<String> {
     let extent = |reference: &str| {
         board.parts.get(reference).map(|part| {
@@ -94,18 +98,27 @@ fn overlap_error(board: &MoveBoard, plan: &MovePlan, clearance: f64) -> Option<S
         })
     };
     for position in &plan.positions {
-        let moved = extent(&position.reference)?;
+        // A part whose extent cannot be measured is not evidence of clearance:
+        // refuse rather than wave the move through.
+        let Some(moved) = extent(&position.reference) else {
+            return Some(format!(
+                "move_parts refused: {} has no measurable extent on this board",
+                position.reference
+            ));
+        };
         for (reference, _) in board.parts.iter() {
             if reference == &position.reference {
                 continue;
             }
-            let other = extent(reference)?;
+            let Some(other) = extent(reference) else {
+                continue;
+            };
             if !moved.overlaps(&other) {
                 continue;
             }
             return Some(format!(
                 "move_parts refused: {} at [{:.3}, {:.3}] would overlap {} — leave at least \
-                 {:.3} mm between their pad extents",
+                 {:.3} mm between their courtyards",
                 position.reference, position.at.x, position.at.y, reference, clearance
             ));
         }
@@ -158,7 +171,14 @@ enum Edge {
 }
 
 impl MoveBoard {
-    fn from_snapshot(snapshot: &IpcBoardSnapshot) -> Self {
+    /// `courtyards` is the KiCAD courtyard extent per reference — what DRC
+    /// actually checks. Pads alone underestimate it, so a move judged by pads
+    /// could report success and leave the board failing `courtyards_overlap`.
+    /// A part missing from the map falls back to its pad bounding box.
+    fn from_snapshot(
+        snapshot: &IpcBoardSnapshot,
+        courtyards: &BTreeMap<String, (f64, f64)>,
+    ) -> Self {
         let mut sizes = BTreeMap::new();
         for part in &snapshot.imported.parts {
             let points: Vec<Point2> = snapshot
@@ -176,6 +196,10 @@ impl MoveBoard {
             let (width, height) = Rect::bounding(&points)
                 .map(|r| (r.max_x - r.min_x, r.max_y - r.min_y))
                 .unwrap_or((1.0, 1.0));
+            let (width, height) = courtyards
+                .get(&part.reference)
+                .copied()
+                .unwrap_or((width, height));
             sizes.insert(part.reference.clone(), (width.max(1.0), height.max(1.0)));
         }
         let parts = snapshot
@@ -222,6 +246,7 @@ impl MovePlan {
             "changed": self.changed,
             "positions": positions,
             "retracted_tracks": retract.count,
+            "retracted_nets": retract.nets.len(),
             "nets_to_reroute": retract.nets.iter().collect::<Vec<_>>(),
         })
     }
@@ -495,7 +520,8 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // duplicate copper. Use the resilient, read-only snapshot path (including
     // its timeout reconnect) and then commit offline.
     let prepared = crate::active_board(ctx).and_then(|snapshot| {
-        let request = parse_route_track_request(&input, &snapshot.problem)?;
+        let request =
+            parse_route_track_request(&input, &snapshot.problem, &snapshot.imported.parts)?;
         let (problem, solution) = manual_route_solution(&snapshot.problem, &request)?;
         Ok((problem, solution, request, snapshot.layer_names))
     });
@@ -656,9 +682,34 @@ struct RouteViaAnchor {
     to_layer: LayerRef,
 }
 
+/// A `route_track` endpoint: a point in mm, or the `"R1.1"` pad reference that
+/// `route_board`'s `unrouted` report hands back, so a repair is copy-paste.
+fn parse_endpoint(
+    input: &Value,
+    key: &str,
+    ctx: &str,
+    parts: &[ImportedPart],
+) -> std::result::Result<(Point2, Option<LayerRef>), String> {
+    let Some(Value::String(reference)) = input.get(key) else {
+        return parse_point(input, key, ctx).map(|at| (at, None));
+    };
+    let (refdes, pad) = reference.split_once('.').ok_or_else(|| {
+        format!("{ctx}: `{key}` = \"{reference}\" is not a pad reference; use \"REF.PAD\" (e.g. \"U1.3\") or [x, y] in mm")
+    })?;
+    parts
+        .iter()
+        .find(|part| part.reference == refdes)
+        // A pad knows which layer it is on, so a copy-pasted repair for a
+        // bottom-side pad must not silently lay copper on the top.
+        .and_then(|part| part.pads.iter().find(|p| p.number == pad))
+        .map(|p| (p.at, p.layers.first().cloned()))
+        .ok_or_else(|| format!("{ctx}: no pad {reference} on this board"))
+}
+
 fn parse_route_track_request(
     input: &Value,
     problem: &RoutingView,
+    parts: &[ImportedPart],
 ) -> std::result::Result<RouteTrackRequest, String> {
     let ctx = "route_track";
     if input.get("start").is_some() || input.get("end").is_some() || input.get("layer").is_some() {
@@ -667,24 +718,21 @@ fn parse_route_track_request(
                 .to_owned(),
         );
     }
-    let from = parse_point(input, "from", ctx)?;
-    let to = parse_point(input, "to", ctx)?;
+    let (from, from_pad_layer) = parse_endpoint(input, "from", ctx, parts)?;
+    let (to, to_pad_layer) = parse_endpoint(input, "to", ctx, parts)?;
     let net = input
         .get("net")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "route_track needs non-empty string `net`".to_owned())?
         .to_owned();
-    let from_layer = parse_route_layer_ref(
-        input
-            .get("from_layer")
-            .and_then(Value::as_str)
-            .unwrap_or("F.Cu"),
-        problem.layer_count,
-    )?;
+    let from_layer = match input.get("from_layer").and_then(Value::as_str) {
+        Some(layer) => parse_route_layer_ref(layer, problem.layer_count)?,
+        None => from_pad_layer.unwrap_or_else(LayerRef::top),
+    };
     let to_layer = match input.get("to_layer").and_then(Value::as_str) {
         Some(layer) => parse_route_layer_ref(layer, problem.layer_count)?,
-        None => from_layer.clone(),
+        None => to_pad_layer.unwrap_or_else(|| from_layer.clone()),
     };
     let width = optional_num(input, "width", ctx)?.unwrap_or_else(|| problem.net_width(&net));
     if width <= 0.0 {
@@ -1218,6 +1266,50 @@ fn layer_name_from_index(idx: u32, layer_names: &[String]) -> String {
 mod tests {
     use super::*;
 
+    /// KiCAD's DRC checks courtyards, which are wider than the pads inside them.
+    /// A move judged by pads alone reported success and left the board failing
+    /// `courtyards_overlap`, so the guard must measure what DRC measures.
+    #[test]
+    fn a_move_is_judged_by_courtyards_not_by_the_pads_inside_them() {
+        let pad = |number: &str, x: f64| pcb_model::Obstacle {
+            kind: "pad:C1".to_owned(),
+            layers: vec![LayerRef::top()],
+            center: Point2::new(x, 5.0),
+            width: 0.9,
+            height: 1.0,
+            connected_to: vec![number.to_owned()],
+        };
+        let snapshot = IpcBoardSnapshot {
+            imported: kicad_board::ImportedBoard {
+                layer_count: 2,
+                bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
+                parts: vec![ImportedPart {
+                    reference: "C1".to_owned(),
+                    lib_id: "Capacitor_SMD:C_0603_1608Metric".to_owned(),
+                    at: Point2::new(5.0, 5.0),
+                    rotation: 0,
+                    locked: false,
+                    pads: vec![],
+                }],
+                placement_keepouts: vec![],
+                keepout_count: 0,
+            },
+            problem: route_problem(vec![pad("GND", 4.2), pad("VCC", 5.8)]),
+            copper: RouteSolution::default(),
+            layer_names: vec!["F.Cu".to_owned(), "B.Cu".to_owned()],
+        };
+
+        let pads_only = MoveBoard::from_snapshot(&snapshot, &BTreeMap::new());
+        let c1 = &pads_only.parts["C1"];
+        assert!((c1.width - 2.5).abs() < 1e-6, "pad bbox: {c1:?}");
+
+        let courtyards = BTreeMap::from([("C1".to_owned(), (3.1, 1.8))]);
+        let with_courtyards = MoveBoard::from_snapshot(&snapshot, &courtyards);
+        let c1 = &with_courtyards.parts["C1"];
+        assert!((c1.width - 3.1).abs() < 1e-6, "courtyard: {c1:?}");
+        assert!((c1.height - 1.8).abs() < 1e-6, "courtyard: {c1:?}");
+    }
+
     fn fixture_board() -> MoveBoard {
         MoveBoard {
             bounds: Rect::new(0.0, 0.0, 100.0, 50.0),
@@ -1448,6 +1540,8 @@ mod tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         }
     }
 
@@ -1484,6 +1578,7 @@ mod tests {
                 "width": 0.2
             }),
             &problem,
+            &[],
         )
         .unwrap();
 
@@ -1513,6 +1608,7 @@ mod tests {
                 "vias": [{ "at": [5.0, 1.0], "to_layer": "B.Cu" }]
             }),
             &problem,
+            &[],
         )
         .unwrap();
 
@@ -1543,6 +1639,7 @@ mod tests {
                 "vias": [{ "at": [5.0, 1.0], "to_layer": "B.Cu" }]
             }),
             &problem,
+            &[],
         )
         .unwrap();
 
@@ -1569,6 +1666,7 @@ mod tests {
                 "net": "SIG"
             }),
             &problem,
+            &[],
         )
         .unwrap();
 
@@ -1654,10 +1752,57 @@ mod tests {
                 "net": "SIG"
             }),
             &problem,
+            &[],
         )
         .unwrap_err();
 
         assert!(err.contains("legacy `start`/`end`/`layer`"), "{err}");
+    }
+
+    /// `route_board`'s `unrouted` report hands back `"U1.3"`-style pad handles;
+    /// a repair is only copy-paste if `route_track` takes them as they are.
+    #[test]
+    fn route_track_takes_the_pad_handles_the_unrouted_report_hands_back() {
+        let parts = vec![ImportedPart {
+            reference: "U1".to_owned(),
+            lib_id: "Package_TO_SOT_SMD:SOT-23-5".to_owned(),
+            at: Point2::new(0.0, 0.0),
+            rotation: 0,
+            locked: false,
+            pads: vec![
+                kicad_board::ImportedPad {
+                    number: "3".to_owned(),
+                    net: Some("SIG".to_owned()),
+                    at: Point2::new(4.0, 2.0),
+                    layers: vec![LayerRef::top()],
+                },
+                kicad_board::ImportedPad {
+                    number: "5".to_owned(),
+                    net: Some("SIG".to_owned()),
+                    at: Point2::new(9.0, 2.0),
+                    layers: vec![LayerRef::top()],
+                },
+            ],
+        }];
+        let problem = route_problem(vec![]);
+
+        let request = parse_route_track_request(
+            &json!({ "from": "U1.3", "to": "U1.5", "net": "SIG" }),
+            &problem,
+            &parts,
+        )
+        .unwrap();
+
+        assert_eq!(request.from, Point2::new(4.0, 2.0));
+        assert_eq!(request.to, Point2::new(9.0, 2.0));
+
+        let err = parse_route_track_request(
+            &json!({ "from": "U1.9", "to": "U1.5", "net": "SIG" }),
+            &problem,
+            &parts,
+        )
+        .unwrap_err();
+        assert!(err.contains("no pad U1.9 on this board"), "{err}");
     }
 
     #[test]

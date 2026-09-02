@@ -11,6 +11,5 @@ geom = { path = "../geom" }
 kicad = { path = "../kicad" }
 kicad-ipc = { path = "../kicad-ipc" }
 pcb-model = { path = "../pcb-model" }
-pcb-place = { path = "../pcb-place" }
 serde_json.workspace = true
 tempfile.workspace = true
