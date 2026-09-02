@@ -787,16 +787,19 @@ pub(super) fn emit_board_footprint(
     net_codes: &BTreeMap<String, i32>,
 ) -> std::result::Result<String, String> {
     let id = FootprintId::parse(&part.footprint).map_err(|e| {
-        let clause = footprint_suggestion_clause(&catalog.suggest_text(&part.footprint));
-        format!(
-            "part {}: invalid footprint id `{}`: {e}{clause}",
-            part.reference, part.footprint
-        )
+        let hint = kicad_footprint::unknown_footprint_message(
+            &part.footprint,
+            &catalog.suggest(&part.footprint),
+        );
+        format!("part {}: invalid footprint id: {e}; {hint}", part.reference)
     })?;
     let source = catalog.source(&id).map_err(|e| {
-        let clause = footprint_suggestion_clause(&catalog.suggest(&id));
+        let hint = kicad_footprint::unknown_footprint_message(
+            &part.footprint,
+            &catalog.suggest(&part.footprint),
+        );
         format!(
-            "part {}: footprint `{}` is not usable: {e}{clause}",
+            "part {}: footprint `{}` is not usable: {e}; {hint}",
             part.reference, part.footprint
         )
     })?;
