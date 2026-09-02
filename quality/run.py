@@ -750,10 +750,12 @@ def closest_demo(kind, target_count):
         for path in KICAD_DEMOS.rglob(f"*{suffix}"):
             count = demo_instance_count(path, kind)
             if count:
-                candidates.append((abs(count - target_count), count, str(path), path))
+                candidates.append(
+                    (abs(count - target_count), path.stat().st_size, count, str(path), path)
+                )
     if not candidates:
         raise RuntimeError(f"no KiCad demo {kind} references found under {KICAD_DEMOS}")
-    _, count, _, path = min(candidates)
+    _, _, count, _, path = min(candidates)
     return path, count
 
 
@@ -763,7 +765,8 @@ def reference_render(kind, target_count):
     digest = hashlib.sha256(str(source).encode()).hexdigest()[:10]
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", source.stem).strip("-")
     REFERENCES.mkdir(parents=True, exist_ok=True)
-    png = REFERENCES / f"{kind}-{count}-{stem}-{digest}.png"
+    render_style = "" if kind == "schematic" else "-plot"
+    png = REFERENCES / f"{kind}-{count}-{stem}-{digest}{render_style}.png"
     svg = REFERENCES / f"{kind}-{count}-{stem}-{digest}.svg"
     if not png.is_file():
         if kind == "schematic":
@@ -782,27 +785,38 @@ def reference_render(kind, target_count):
                     detail = (result.stderr or result.stdout).strip()
                     raise RuntimeError(f"KiCad demo schematic render failed: {detail}")
                 shutil.copy2(rendered[0], svg)
-            command(
-                [
-                    "magick", str(svg), "-background", "white", "-alpha", "remove",
-                    "-alpha", "off", str(png),
-                ],
-                timeout=180,
-            )
+                # Keep the required KiCad SVG as the reference source. Poppler
+                # rasterizes an equivalent KiCad PDF for gateways that reject
+                # SVG image inputs; ImageMagick cannot reliably parse KiCad's
+                # deeply nested text and embedded bitmap constructs.
+                pdf = export / "reference.pdf"
+                pdf_result = command(
+                    [
+                        kicad_cli(), "sch", "export", "pdf", "--output", str(pdf),
+                        "--exclude-drawing-sheet", str(source),
+                    ],
+                    timeout=180,
+                    check=False,
+                )
+                if pdf_result.returncode or not pdf.is_file():
+                    detail = (pdf_result.stderr or pdf_result.stdout).strip()
+                    raise RuntimeError(f"KiCad demo schematic PDF render failed: {detail}")
+                raster = export / "reference"
+                command(
+                    ["pdftoppm", "-png", "-singlefile", "-r", "144", str(pdf), str(raster)],
+                    timeout=180,
+                )
+                shutil.copy2(export / "reference.png", png)
         else:
-            result = command(
-                [
-                    kicad_cli(), "pcb", "render", "--output", str(png),
-                    "--width", "1600", "--height", "900", "--side", "top",
-                    "--quality", "basic", "--preset", "follow_plot_settings",
-                    str(source),
-                ],
-                timeout=300,
-                check=False,
-            )
-            if result.returncode or not png.is_file():
-                detail = (result.stderr or result.stdout).strip()
-                raise RuntimeError(f"KiCad demo PCB render failed: {detail}")
+            with tempfile.TemporaryDirectory(prefix="gordian-quality-reference-") as temporary:
+                project = Path(temporary)
+                shutil.copy2(source, project / "design.kicad_pcb")
+                rendered = capture_render(project, "render_board", project / "reference.png")
+                if not rendered.get("path"):
+                    raise RuntimeError(
+                        f"KiCad demo PCB render failed: {rendered.get('error', 'no image')}"
+                    )
+                shutil.copy2(rendered["path"], png)
     return {"path": str(png), "source": str(source), "part_count": count}
 
 
