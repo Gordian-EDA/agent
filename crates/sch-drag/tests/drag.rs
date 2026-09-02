@@ -180,8 +180,8 @@ fn a_welded_power_flag_travels_with_the_pin() {
     );
     let before = partition(&Sheet::of(&doc));
     assert!(
-        before.iter().any(|net| net.contains(&"R1.2".to_string())),
-        "the fixture starts with R1 pin 2 on the ground symbol"
+        before.iter().any(|net| net.contains(&"r1.2".to_string())),
+        "the fixture starts with R1 pin 2 on the ground symbol: {before:?}"
     );
 
     drag(

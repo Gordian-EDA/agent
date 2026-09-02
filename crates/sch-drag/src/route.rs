@@ -269,16 +269,30 @@ fn dedup(mut path: Path) -> Path {
     out
 }
 
-/// What the router pays for a path: its length, its turns, and a penalty for
-/// leaving the pin sideways instead of the way the pin faces.
+/// Whether a coordinate sits on [`GRID`].
+fn on_grid(v: f64) -> bool {
+    (v - snap(v)).abs() < 1e-6
+}
+
+/// What the router pays for a path: its length, its turns, a corner that misses
+/// the grid, and leaving the pin sideways instead of the way the pin faces.
+///
+/// The grid term matters where a symbol puts its pin tip off the 50-mil lattice:
+/// an L drawn straight from such a pin carries the offset into its corner, which
+/// KiCAD reports as an off-grid endpoint. Stepping onto the grid first costs a
+/// couple of millimetres and reads the way a person draws it.
 pub fn path_cost(path: &Path, out_dir: Point2) -> f64 {
     let length: f64 = path.windows(2).map(|w| w[0].manhattan(w[1])).sum();
     let bends = path.len().saturating_sub(2) as f64;
+    let off_grid = path[1..path.len().saturating_sub(1)]
+        .iter()
+        .filter(|c| !on_grid(c.x) || !on_grid(c.y))
+        .count() as f64;
     let leaves_along_pin = path.len() > 1 && {
         let d = Point2::new(path[1].x - path[0].x, path[1].y - path[0].y);
         d.x * out_dir.x + d.y * out_dir.y > geom::EPS
     };
-    length + 6.0 * bends + if leaves_along_pin { 0.0 } else { 12.0 }
+    length + 6.0 * bends + 20.0 * off_grid + if leaves_along_pin { 0.0 } else { 12.0 }
 }
 
 /// Route from a pin to a point on its own net.
@@ -340,11 +354,21 @@ pub fn route(
 /// a window generous enough to go around a part and tight enough to stay cheap.
 pub fn maze(
     obstacles: &Obstacles,
-    from: Point2,
+    pin: Point2,
     out_dir: Point2,
     to: Point2,
     net: &str,
 ) -> Option<Path> {
+    let from = pin;
+    // The lattice is the sheet's own grid, not one hung off the pin: a symbol
+    // whose pin tip misses the 50-mil grid would otherwise put every corner of
+    // every route off it too, which is what KiCAD reports as an off-grid end.
+    let origin = snap_point(from);
+    let escape = !origin.near_eq(from, 1e-6);
+    if escape && (origin.x - from.x).abs() > 1e-6 && (origin.y - from.y).abs() > 1e-6 {
+        return None;
+    }
+    let from = origin;
     let steps = |v: f64| (v / GRID).round() as i32;
     let (dx, dy) = (to.x - from.x, to.y - from.y);
     if (dx - steps(dx) as f64 * GRID).abs() > 1e-6 || (dy - steps(dy) as f64 * GRID).abs() > 1e-6 {
@@ -441,5 +465,8 @@ pub fn maze(
         state = previous;
     }
     cells.reverse();
+    if escape {
+        cells.insert(0, pin);
+    }
     Some(dedup(cells))
 }

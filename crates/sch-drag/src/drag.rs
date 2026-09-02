@@ -106,6 +106,9 @@ enum Anchor {
 #[derive(Debug, Clone)]
 struct Stub {
     pin: PinId,
+    /// The net the pin was on before the drag. The anchor's own name is gone
+    /// once the retraction has erased it, and this is what says what to re-draw.
+    net: String,
     anchor: Anchor,
 }
 
@@ -130,15 +133,15 @@ fn retract(sheet: &Sheet, moving: &HashSet<String>) -> Retraction {
     let mut taken: HashSet<usize> = HashSet::new();
     let mut kept: Vec<(Point2, Point2)> = Vec::new();
     let mut stubs = Vec::new();
-    // A dot or a sheet pin part-way along a wire is a connection the wire is
-    // holding up, so the rubber band stops there and the far half stays drawn.
-    let tapped = |seg: &crate::sheet::WireSeg| {
-        sheet
-            .junctions
+    // Anything attached part-way along a wire — a dot, a sheet pin, a label, a
+    // no-connect — is a connection the wire is holding up, so the rubber band
+    // stops at the nearest one and the far half stays drawn.
+    let tapped = |seg: &crate::sheet::WireSeg, from: Point2| {
+        let mut taps: Vec<Point2> = sheet
+            .fixtures
             .iter()
-            .chain(&sheet.sheet_pins)
             .map(point_of)
-            .find(|p| {
+            .filter(|p| {
                 let inside =
                     |v: f64, a: f64, b: f64| v > a.min(b) + geom::EPS && v < a.max(b) - geom::EPS;
                 if seg.horizontal() {
@@ -147,6 +150,13 @@ fn retract(sheet: &Sheet, moving: &HashSet<String>) -> Retraction {
                     (seg.a.x - p.x).abs() < geom::EPS && inside(p.y, seg.a.y, seg.b.y)
                 }
             })
+            .collect();
+        taps.sort_by(|a, b| {
+            from.manhattan(*a)
+                .partial_cmp(&from.manhattan(*b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        taps.first().copied()
     };
 
     for pin in sheet.pins.iter().filter(|p| moving.contains(&p.owner)) {
@@ -162,15 +172,22 @@ fn retract(sheet: &Sheet, moving: &HashSet<String>) -> Retraction {
             let mut edge = first;
             let anchor = loop {
                 let seg = &sheet.wires[edge];
-                // A wire KiCAD wrote with more than two points cannot be cut
-                // piecewise; `move_attached_many` carries its end instead.
-                if seg.polyline {
-                    break Anchor::Dangling;
-                }
                 taken.insert(edge);
                 removed.insert(seg.uuid.clone());
+                // A wire KiCAD wrote with more than two points goes as one item,
+                // so the parts of it this drag is not cutting are drawn again.
+                if seg.polyline {
+                    kept.extend(
+                        sheet
+                            .wires
+                            .iter()
+                            .enumerate()
+                            .filter(|(other, w)| w.uuid == seg.uuid && *other != edge)
+                            .map(|(_, w)| (w.a, w.b)),
+                    );
+                }
                 let far = if key(seg.a) == node { seg.b } else { seg.a };
-                if let Some(tap) = tapped(seg) {
+                if let Some(tap) = tapped(seg, point_of(&node)) {
                     kept.push((tap, far));
                     break Anchor::Fixed(tap);
                 }
@@ -198,6 +215,7 @@ fn retract(sheet: &Sheet, moving: &HashSet<String>) -> Retraction {
             };
             stubs.push(Stub {
                 pin: (pin.owner.clone(), pin.number.clone()),
+                net: sheet.net_at(pin.at).unwrap_or_default().to_string(),
                 anchor,
             });
         }
@@ -240,17 +258,6 @@ fn glued_symbols(sheet: &Sheet, moving: &HashSet<String>) -> Vec<(String, PinId)
 pub fn drag(doc: &mut SchDoc, id: &str, to: Placement) -> Result<DragReport, DragError> {
     let before = Sheet::of(doc);
     drag_many(doc, &[(id.to_string(), to)], &before).map(|(report, _)| report)
-}
-
-/// [`drag`] over a sheet view the caller already has, returning the view of the
-/// result — the form a search wants, where rebuilding either view is the cost.
-pub fn drag_from(
-    doc: &mut SchDoc,
-    id: &str,
-    to: Placement,
-    before: &Sheet,
-) -> Result<(DragReport, Sheet), DragError> {
-    drag_many(doc, &[(id.to_string(), to)], before)
 }
 
 /// Move several symbols at once, carrying their connections.
@@ -443,10 +450,13 @@ pub fn partition(sheet: &Sheet) -> Vec<Vec<String>> {
     let mut groups: HashMap<&str, Vec<String>> = HashMap::new();
     for pin in &sheet.pins {
         if let Some(net) = sheet.net_at(pin.at) {
+            // Keyed by the owning symbol, not by a reference designator: an
+            // unannotated sheet repeats `R?`, and a gate that cannot tell two
+            // pins apart is not a gate.
             groups
                 .entry(net)
                 .or_default()
-                .push(format!("{}.{}", pin.refdes, pin.number));
+                .push(format!("{}.{}", pin.owner, pin.number));
         }
     }
     let mut out: Vec<Vec<String>> = groups
@@ -608,15 +618,10 @@ fn redraw(
                 };
                 (p, sheet.net_at(from).unwrap_or_default())
             }
-            Anchor::Fixed(p) => match sheet.net_at(*p) {
-                Some(net) => (*p, net),
-                // The anchor stopped being a connection point, which the
-                // retraction can do to a bare wire end: reconnect it by name.
-                None => {
-                    fallbacks.push((from, out, *p));
-                    continue;
-                }
-            },
+            // The anchor may itself have been erased by this retraction, when
+            // every wire holding it belonged to a pin that moved. Routing to it
+            // brings it back, so the pin's own net is what says where to go.
+            Anchor::Fixed(p) => (*p, sheet.net_at(*p).unwrap_or(stub.net.as_str())),
         };
         if from.near_eq(target, geom::EPS) {
             continue;
@@ -640,6 +645,16 @@ fn redraw(
         for pair in path.windows(2) {
             doc.add_wire(pair[0], pair[1]);
             redrawn_segments += 1;
+            // A same-net point the new wire runs straight through needs the dot
+            // that says so, and would otherwise never be reconsidered.
+            let span = geom::Segment::new(pair[0], pair[1]);
+            touched.extend(
+                sheet
+                    .node_net
+                    .keys()
+                    .filter(|node| span.contains_point(point_of(node)))
+                    .copied(),
+            );
         }
         touched.extend(path.iter().map(|p| key(*p)));
     }

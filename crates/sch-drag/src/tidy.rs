@@ -59,12 +59,6 @@ pub struct TidyReport {
     pub seconds: f64,
 }
 
-impl TidyReport {
-    pub fn gain(&self, w: &Weights) -> f64 {
-        self.before.score(w) - self.after.score(w)
-    }
-}
-
 /// One step of the search.
 #[derive(Debug, Clone)]
 enum Step {
@@ -109,26 +103,34 @@ impl Board<'_> {
     /// Where a symbol's body would land, without doing the drag: the same box,
     /// carried and turned. Enough to rule out a pose that lands on another part
     /// before paying for a route.
+    /// Where a symbol's body would land, without doing the drag: the same box,
+    /// carried. Enough to rule out a translation that drops a part on another
+    /// one before paying for a route.
+    ///
+    /// `None` when the pose turns or mirrors the part — the body then moves
+    /// *about the symbol's origin*, which this cannot say without re-deriving
+    /// the definition's geometry, and a wrong rectangle would block legal poses
+    /// and admit overlapping ones. Those steps go to the evaluator instead.
     fn body_after(&self, id: &str, to: Placement) -> Option<Rect> {
         let (here, rect) = (self.poses.get(id)?, self.bodies.get(id)?);
-        let quarter_turn = ((to.rot - here.rot) / 90.0).round() as i64 % 2 != 0;
-        let half = if quarter_turn {
-            (rect.height() / 2.0, rect.width() / 2.0)
-        } else {
-            (rect.width() / 2.0, rect.height() / 2.0)
-        };
+        if to.rot != here.rot || to.mirror != here.mirror {
+            return None;
+        }
         let centre = Point2::new(
             rect.center().x + to.at.x - here.at.x,
             rect.center().y + to.at.y - here.at.y,
         );
-        Some(Rect::from_center_half(centre, half))
+        Some(Rect::from_center_half(
+            centre,
+            (rect.width() / 2.0, rect.height() / 2.0),
+        ))
     }
 
     /// Whether a step can be ruled out on geometry alone.
     fn obstructed(&self, moves: &Moves) -> bool {
         let moving: Vec<&String> = moves.iter().map(|(id, _)| id).collect();
         moves.iter().any(|(id, to)| match self.body_after(id, *to) {
-            None => true,
+            None => false,
             Some(rect) => {
                 !self.bounds.contains_rect_eps(&rect, 0.0)
                     || self
@@ -215,12 +217,14 @@ fn teleport(board: &Board, rng: &mut fastrand::Rng, id: &str, here: Placement) -
         .map(|p| p.at)
         .collect();
     let anchor = *board.choose(rng, &partners)?;
-    let reach = 7.62 + rng.f64() * 12.7;
-    let (dx, dy) = NUDGES[rng.usize(..4)];
-    let at = Point2::new(
-        snap(anchor.x + dx.signum() * reach),
-        snap(anchor.y + dy.signum() * reach),
-    );
+    let reach = (7.62 + rng.f64() * 12.7) * if rng.bool() { 1.0 } else { -1.0 };
+    // Beside means beside: one axis moves, so the wire that follows can be a
+    // straight run rather than a dog-leg.
+    let at = if rng.bool() {
+        Point2::new(snap(anchor.x + reach), snap(anchor.y))
+    } else {
+        Point2::new(snap(anchor.x), snap(anchor.y + reach))
+    };
     Some(vec![(id.to_string(), Placement { at, ..here })])
 }
 
@@ -350,6 +354,18 @@ fn board_of<'a>(doc: &SchDoc, sheet: &'a Sheet, movable: &'a [String], bounds: R
 /// `doc` is left exactly as it was.
 pub fn tidy(doc: &mut SchDoc, movable: &[String], options: &TidyOptions) -> TidyReport {
     let weights = options.weights;
+    let movable: Vec<String> = movable
+        .iter()
+        .filter_map(|id| {
+            Some(
+                doc.symbol(id)
+                    .or_else(|| doc.symbol_by_ref(id))?
+                    .uuid
+                    .clone(),
+            )
+        })
+        .collect();
+    let movable = movable.as_slice();
     let bounds = page_bounds(doc);
     let mut rng = fastrand::Rng::with_seed(options.seed);
     let start = Instant::now();
