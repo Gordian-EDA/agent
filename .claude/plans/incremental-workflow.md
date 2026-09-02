@@ -110,3 +110,10 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   budget stop, `--input -` multi-turn continuation, `phase-render:` lines; auto-finish-PCB stages
   deleted (the model owns the loop). Observed: led-driver now DRC 0 + 17 fab files; stm32 48 parts
   ERC 2 then a clean handoff at 270 s (blocked by `place_parts` "disturbed existing GND" → W3/W0).
+- W1 merged: staging = seed row (`staged_reason`), the three preconditions deleted, one ratsnest shape
+  (`open|routed|blocked` + blocker geometry) shared by get_board/check_board/route_board, native locks
+  + `locked_reason`, revisions `{tool, refs_touched, label}` + `checkpoint` + `expect_revision` +
+  `reserve_refs`, `sync_board` stages footprint-mismatched parts. Quality: local-board-move 10,
+  replace-pcb-component 9, finish-existing-pcb 7/7; led-driver fails only on schematic looks.
+  Open: `next_refdes` must consult the `reserve_refs` store (W3); human-look PCB reference board fails
+  to render (harness fix).
