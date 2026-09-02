@@ -139,3 +139,10 @@ constraints, courtyard-true packing, connector-on-edge, decoupling adjacency; ro
 aesthetics (45° escapes, minimal bends, no meanders, via minimisation, bus-like parallel
 runs), region rip-up/re-route, honest partial results. Baseline critic before, target ≥9.
 Starts after `lane/board-guard` merges.
+
+## Queued (self-diagnosis, 2026-09-02): findings relative to the turn's baseline
+`check_schematic` (and `check_board`) must classify each finding as `introduced` (absent at
+the turn's first revision) or `pre-existing`, and the loop summary must say "N new, M
+pre-existing"; the model then fixes what it broke and leaves inherited warnings alone
+unless asked. Same for `render_schematic`'s `visual` facts (`_added` is already computed
+by the harness — move it into the tool).
