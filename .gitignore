@@ -35,3 +35,6 @@ tools/vendor/freerouting.jar
 logs/
 freerouting.json
 tools/vendor/freerouting-2.2.4.jar
+
+# Human-look reference renders are regenerated from the KiCAD demos by quality/run.py
+quality/references/

@@ -100,7 +100,7 @@ pub fn tool_defs() -> Vec<Tool> {
     let defs: Vec<(&str, &str, Value)> = vec![
         (
             "place_parts",
-            "The ONLY way to create a new design or add a multi-part block. Submit a COMPLETE electrically finished functional block in one call, including its support, protection, decoupling, bias, termination, indicator, and connector parts. If the call would leave 60 or more parts on the sheet, split the design into named functional blocks and set `block` on every payload; add one block per call. Those later calls use region placement and freeze every existing symbol. State connectivity only: real KiCAD parts and pin-to-net mappings, never coordinates or wires. Before placement, the complete payload is validated and writes nothing on failure: explicit refs must be unused, and every new named signal pin must land on a net with at least one other pin across the payload and existing sheet; power rails, declared ports, and `nc` are terminal nets. Omit `ref` to auto-assign the lowest unused designator from the library symbol. The result reports extractor-verified `connectivity` and `unconnected` pins; trust it instead of re-reading. Its `gaps` are deterministic missing-support findings; add the listed parts in a coherent follow-up block. They are advisory for deliberately minimal designs and focused edits. Use `intent.relations` for relative placement: kinds `left_of`/`right_of`/`above`/`below` {a, b}, `group` {name, members, side?: [left|right|top|bottom, anchor]}, `align` {members, axis}. If rejected, correct every reported diagnostic before retrying; unknown-pin errors list valid physical pins.",
+            "The ONLY way to create a new design or add a multi-part block. Submit a COMPLETE electrically finished functional block in one call, including its support, protection, decoupling, bias, termination, indicator, and connector parts. If the call would leave 60 or more parts on the sheet, split the design into named functional blocks and set `block` on every payload; add one block per call. Those later calls use region placement and freeze every existing symbol. State connectivity only: real KiCAD parts and pin-to-net mappings, never coordinates or wires. Pin keys accept physical numbers, names, or alternate functions case-insensitively; `PH0-OSC_IN` selects PH0 by its alternate. Before placement, the complete payload is validated and writes nothing on electrical failure: explicit refs must be unused, and every new named signal pin must land on a net with at least one other pin across the payload and existing sheet; power rails, declared ports, and `nc` are terminal nets. Unknown or pad-incompatible footprints do not block placement: they are cleared and returned under `footprints_unresolved` for one `assign_footprints` repair call. Omit `ref` to auto-assign the lowest unused designator from the library symbol. The result reports extractor-verified `connectivity` and `unconnected` pins; trust it instead of re-reading. Its `gaps` are deterministic missing-support findings; add the listed parts in a coherent follow-up block. They are advisory for deliberately minimal designs and focused edits. Rails and ports accept left, right, top, or bottom. Use `intent.relations` for relative placement: kinds `left_of`/`right_of`/`above`/`below` {a, b}, `group` {name, members, side?: [left|right|top|bottom, anchor]}, `align` {members, axis}. If rejected, correct every reported diagnostic before retrying; unknown-pin errors return ranked suggestions.",
             sch_check::place_parts_input_schema(),
         ),
         (
@@ -247,8 +247,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "set_fields",
-            "Set properties on one part (Value, Reference, user fields), on every unit of it. \
-             Footprints go through assign_footprints so compatibility is validated. Moves nothing.",
+            "Set properties on one part (Value, Reference, Footprint, user fields), on every unit of it. Footprints are resolved and checked for symbol compatibility before anything is written. Moves nothing.",
             json!({
                 "type": "object",
                 "properties": {
@@ -262,7 +261,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "assign_footprints",
-            "Set footprints on one or more live schematic parts. The complete batch is checked against each symbol and written atomically; an incompatible assignment is refused with a compatible catalog suggestion inline.",
+            "Set footprints on one or more live schematic parts. The complete batch is resolved, checked against each symbol, and written atomically; a refusal includes the closest same-library, same-family pad-set suggestion.",
             json!({
                 "type": "object",
                 "properties": {
@@ -369,11 +368,14 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "no_connect",
-            "Mark a pin deliberately unconnected, so ERC stops reporting it.",
+            "Mark one or many pins deliberately unconnected, so ERC stops reporting them. A single-pin labelled net is retracted automatically; a net shared with another pin is refused.",
             json!({
                 "type": "object",
-                "properties": { "pin": { "type": "string", "description": PIN } },
-                "required": ["pin"],
+                "properties": {
+                    "pin": { "type": "string", "description": PIN },
+                    "pins": { "type": "array", "items": { "type": "string", "description": PIN }, "minItems": 1 }
+                },
+                "anyOf": [{"required": ["pin"]}, {"required": ["pins"]}],
                 "additionalProperties": false
             }),
         ),

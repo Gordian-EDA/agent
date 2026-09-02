@@ -1,2 +1,14 @@
 The schematic must follow the chosen regulator's topology and plausibly regulate to 5 V. The PCB should keep the switching power loop compact, separate feedback from the switch node, use credible power copper, route every net, pass DRC, and include fabrication files.
+expect: agent_exit == 0
+expect: schematic_created == true
+expect: pcb_created == true
+expect: part_count >= 10
+expect: erc_errors == 0
+expect: drc_errors == 0
+expect: unconnected_items == 0
 expect: unrouted == []
+expect: len(fab_files) >= 3
+expect: schematic_critic_score >= 8
+expect: pcb_critic_score >= 8
+expect: human_look_schematic_score >= 8
+expect: human_look_pcb_score >= 8

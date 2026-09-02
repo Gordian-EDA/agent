@@ -24,8 +24,8 @@ fn detects_installed_kicad() {
         .and_then(|m| m.parse().ok())
         .unwrap_or(0);
     assert!(
-        matches!(major, 9 | 10),
-        "unsupported KiCAD {}; Gordian supports majors 9 and 10",
+        major >= 10,
+        "unsupported KiCAD {}; Gordian requires KiCad 10 or newer",
         env.version()
     );
 }
@@ -44,7 +44,7 @@ fn explicit_library_dirs_are_preserved() {
 
 #[cfg(unix)]
 #[test]
-fn explicit_cli_selects_its_sibling_pcbnew() {
+fn explicit_cli_and_library_paths_are_selected() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let root = tempfile::tempdir().unwrap();
@@ -55,22 +55,18 @@ fn explicit_cli_selects_its_sibling_pcbnew() {
     std::fs::create_dir_all(&footprints).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
     let cli = bin.join("kicad-cli");
-    let pcbnew = bin.join("pcbnew");
     std::fs::write(&cli, "#!/bin/sh\necho 10.0.5\n").unwrap();
     std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::write(&pcbnew, "fixture").unwrap();
 
-    let env = KicadInstallation::detect_with(Some(&symbols), Some(&footprints), Some(&cli), None)
-        .unwrap();
+    let env = KicadInstallation::detect_with(Some(&symbols), Some(&footprints), Some(&cli)).unwrap();
 
     assert_eq!(env.version(), "10.0.5");
     assert_eq!(env.major_version(), Some(10));
-    assert_eq!(env.pcbnew_path(), pcbnew);
 }
 
 #[cfg(unix)]
 #[test]
-fn unsupported_cli_major_is_not_detected() {
+fn kicad_nine_is_rejected_with_configuration_guidance() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let root = tempfile::tempdir().unwrap();
@@ -79,18 +75,14 @@ fn unsupported_cli_major_is_not_detected() {
     std::fs::create_dir_all(&symbols).unwrap();
     std::fs::create_dir_all(&footprints).unwrap();
     let cli = root.path().join("kicad-cli");
-    let pcbnew = root.path().join("pcbnew");
-    std::fs::write(&cli, "#!/bin/sh\necho 8.0.9\n").unwrap();
+    std::fs::write(&cli, "#!/bin/sh\necho 9.0.9\n").unwrap();
     std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::write(&pcbnew, "fixture").unwrap();
 
-    assert!(
-        KicadInstallation::detect_with(
-            Some(&symbols),
-            Some(&footprints),
-            Some(&cli),
-            Some(&pcbnew),
-        )
-        .is_none()
-    );
+    let error = KicadInstallation::detect_with(Some(&symbols), Some(&footprints), Some(&cli))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("version 9.0.9"), "{error}");
+    for key in ["kicad.cliPath", "kicad.symbolDir", "kicad.footprintDir"] {
+        assert!(error.contains(key), "{error}");
+    }
 }

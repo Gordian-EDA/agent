@@ -5,7 +5,7 @@ use gordian_runtime::AgentRuntime;
 use gordian_runtime::config::PlacementEngineKind;
 use sch_floorplan::live::{ArrangeReport, PlaceReport, PlacementBudget, Selection};
 use sch_model::engine::PlacementEngine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
@@ -47,6 +47,14 @@ struct SelectionInput {
     engine: Option<PlacementEngineKind>,
 }
 
+#[derive(Debug, Serialize)]
+struct UnresolvedFootprint {
+    #[serde(rename = "ref")]
+    refdes: String,
+    requested: String,
+    did_you_mean: Vec<String>,
+}
+
 pub(crate) fn selection_schema(engine: bool) -> Value {
     let mut properties = json!({
         "refs": {
@@ -81,6 +89,8 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
 }
 
 pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let mut input = input;
+    let warnings = sanitize_place_parts_input(&mut input);
     let mut payload: sch_check::PlacePartsInput = typed(input, "place_parts")?;
     // The exact payload is what reproduces a placement; nothing else in the log does.
     tracing::debug!(
@@ -94,7 +104,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let minted = match resolve_pin_net_refs(&mut payload, &mut edit)? {
         Ok(minted) => minted,
-        Err(error) => return Ok(error),
+        Err(error) => return Ok(with_warnings(error, &warnings)),
     };
     let existing_netlist = sch_doc::connect::extract(&edit.doc);
     let existing = sch_check::ExistingSheet {
@@ -109,20 +119,31 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .map(|symbol| symbol.refdes().to_string())
             .collect(),
     };
-    let (design, diags, mut audit) = sch_check::into_design(&payload, ctx.provider(), &existing);
-    audit.footprint_mismatch =
-        gordian_runtime::footprint_compat::design_pin_mismatches(ctx, &design)?
-            .iter()
-            .map(gordian_runtime::footprint_compat::FootprintPinMismatch::payload)
-            .collect::<Vec<_>>();
+    sch_check::place_parts::assign_references(&mut payload, ctx.provider(), &existing.refs);
+    let mut footprints_unresolved = clear_unknown_footprints(ctx, &mut payload)?;
+    let (design, _, _) = sch_check::into_design(&payload, ctx.provider(), &existing);
+    for mismatch in gordian_runtime::footprint_compat::design_pin_mismatches(ctx, &design)? {
+        let did_you_mean = mismatch.suggestion.into_iter().collect();
+        footprints_unresolved.push(UnresolvedFootprint {
+            refdes: mismatch.reference.clone(),
+            requested: mismatch.footprint,
+            did_you_mean,
+        });
+        for part in &mut payload.parts {
+            if part.refdes.as_deref() == Some(&mismatch.reference) {
+                part.footprint = None;
+            }
+        }
+    }
+    let (_, diags, mut audit) = sch_check::into_design(&payload, ctx.provider(), &existing);
+    audit.input_errors = diags
+        .0
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == sch_check::Severity::Error)
+        .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
+        .collect();
     if !audit.is_valid() || diags.has_errors() {
-        audit.input_errors = diags
-            .0
-            .iter()
-            .filter(|diagnostic| diagnostic.severity == sch_check::Severity::Error)
-            .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
-            .collect();
-        return Ok(invalid_payload_response(audit));
+        return Ok(invalid_payload_response(audit, &warnings));
     }
     let derived: Vec<String> = payload
         .parts
@@ -209,7 +230,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 return Ok(budget_refusal(&error));
             }
             Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
-                return Ok(invalid_payload_response(*audit));
+                return Ok(invalid_payload_response(*audit, &warnings));
             }
             Err(error) => return Err(error.into()),
         }
@@ -253,12 +274,72 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     value["engines_skipped"] = json!(skipped);
     let refs = report.placed.join(" ");
     attach_connectivity(&mut value, ctx, report.placed, &format!("PLACED  {refs}"))?;
-    with_check(value, ctx).context("checking placed parts")
+    let value = with_check(value, ctx).context("checking placed parts")?;
+    let value = with_unresolved_footprints(value, &footprints_unresolved);
+    Ok(with_warnings(value, &warnings))
+}
+
+fn clear_unknown_footprints(
+    ctx: &AgentRuntime,
+    payload: &mut sch_check::PlacePartsInput,
+) -> Result<Vec<UnresolvedFootprint>> {
+    let mut unresolved = Vec::new();
+    for part in &mut payload.parts {
+        let Some(requested) = part
+            .footprint
+            .as_deref()
+            .filter(|footprint| !footprint.is_empty())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let Some(did_you_mean) =
+            gordian_runtime::footprint_compat::unresolved_footprint_suggestions(
+                ctx,
+                &part.part,
+                &requested,
+            )?
+        else {
+            continue;
+        };
+        unresolved.push(UnresolvedFootprint {
+            refdes: part
+                .refdes
+                .clone()
+                .unwrap_or_else(|| format!("unassigned {}", part.part)),
+            requested,
+            did_you_mean,
+        });
+        part.footprint = None;
+    }
+    Ok(unresolved)
+}
+
+fn with_unresolved_footprints(
+    mut value: Value,
+    unresolved: &[UnresolvedFootprint],
+) -> Value {
+    if unresolved.is_empty() {
+        return value;
+    }
+    value["footprints_unresolved"] = json!(unresolved);
+    let gaps = value["gaps"].as_array_mut().expect("place_parts gaps array");
+    gaps.extend(unresolved.iter().map(|issue| {
+        json!({
+            "kind": "footprint_unresolved",
+            "refdes": issue.refdes,
+            "suggestion": format!(
+                "assign a compatible footprint to {} with assign_footprints",
+                issue.refdes
+            ),
+        })
+    }));
+    value
 }
 
 /// Render the one exhaustive refusal shape used by both audit phases.
-fn invalid_payload_response(audit: sch_check::PayloadAudit) -> Value {
-    json!({
+fn invalid_payload_response(audit: sch_check::PayloadAudit, warnings: &[String]) -> Value {
+    with_warnings(json!({
         "ok": false,
         "code": "invalid_payload",
         "input_errors": audit.input_errors,
@@ -273,9 +354,85 @@ fn invalid_payload_response(audit: sch_check::PayloadAudit) -> Value {
                  here, not the whole payload. `input_errors` are unresolvable lib_ids \
                  and pin conflicts; `duplicate_refs` give the next free refdes; \
                  `unknown_pins` name a key the symbol does not have; `footprint_mismatch` \
-                 includes a compatible assignment when the catalog has one. `dangling` pins \
+                 includes the closest same-library pad-set repair. `dangling` pins \
                  are NOT fatal on their own — they are listed so you can finish them.",
-    })
+    }), warnings)
+}
+
+fn with_warnings(mut value: Value, warnings: &[String]) -> Value {
+    if !warnings.is_empty() {
+        value["warnings"] = json!(warnings);
+    }
+    value
+}
+
+/// Drop isolated layout-hint defects without weakening the electrical part schema.
+fn sanitize_place_parts_input(input: &mut Value) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Some(parts) = input.get_mut("parts").and_then(Value::as_array_mut) {
+        for (index, part) in parts.iter_mut().enumerate() {
+            if part
+                .as_object_mut()
+                .and_then(|part| part.remove(""))
+                .is_some()
+            {
+                warnings.push(format!("dropped empty field at parts[{index}]."));
+            }
+        }
+    }
+    let Some(intent) = input.get_mut("intent").and_then(Value::as_object_mut) else {
+        return warnings;
+    };
+    if let Some(ports) = intent.get_mut("ports").and_then(Value::as_object_mut) {
+        ports.retain(|net, side| {
+            if serde_json::from_value::<sch_model::ir::Side>(side.clone()).is_ok() {
+                true
+            } else {
+                warnings.push(format!(
+                    "dropped malformed intent.ports.{net}: expected left, right, top, or bottom"
+                ));
+                false
+            }
+        });
+    }
+    if let Some(rails) = intent.get_mut("rails").and_then(Value::as_object_mut) {
+        rails.retain(|net, side| match side.as_str() {
+            Some("top" | "bottom") => true,
+            Some("left") => {
+                *side = json!("top");
+                warnings.push(format!(
+                    "mapped intent.rails.{net} from left to the engine-supported top band"
+                ));
+                true
+            }
+            Some("right") => {
+                *side = json!("bottom");
+                warnings.push(format!(
+                    "mapped intent.rails.{net} from right to the engine-supported bottom band"
+                ));
+                true
+            }
+            _ => {
+                warnings.push(format!(
+                    "dropped malformed intent.rails.{net}: expected left, right, top, or bottom"
+                ));
+                false
+            }
+        });
+    }
+    if let Some(relations) = intent.get_mut("relations").and_then(Value::as_array_mut) {
+        let mut valid = Vec::with_capacity(relations.len());
+        for (index, relation) in relations.drain(..).enumerate() {
+            match serde_json::from_value::<sch_model::ir::Relation>(relation.clone()) {
+                Ok(_) => valid.push(relation),
+                Err(error) => warnings.push(format!(
+                    "dropped malformed intent.relations[{index}]: {error}"
+                )),
+            }
+        }
+        *relations = valid;
+    }
+    warnings
 }
 
 enum GuardedPlacement {

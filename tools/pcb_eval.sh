@@ -12,6 +12,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT=/tmp/pcb-harness
 SCALE=16
+KICAD_CLI="$(python3 "$ROOT/tools/kicad_cli.py")" || exit 1
 
 declare -A DESC=(
   [rc-divider]="resistive voltage divider with a 2-pin power/ground header"
@@ -29,7 +30,7 @@ for board in "$OUT"/*/board.kicad_pcb; do
   python3 "$ROOT/tools/render_pcb.py" "$board" -o "$png" --scale "$SCALE" >/dev/null 2>&1 || continue
   # DRC clean = 0 error-severity violations AND 0 unconnected items (KiCAD reports
   # unconnected separately from violations, so both must be checked).
-  kicad-cli pcb drc --format json --severity-error -o /tmp/_drc.json "$board" >/dev/null 2>&1
+  "$KICAD_CLI" pcb drc --format json --severity-error -o /tmp/_drc.json "$board" >/dev/null 2>&1
   drc=$(python3 -c "import json;d=json.load(open('/tmp/_drc.json'));print(len(d['violations'])+len(d.get('unconnected_items',[])))" 2>/dev/null || echo "?")
   flag=""; [ "$drc" = "0" ] && flag="--drc-clean"
   echo "########## $name (drc errors: $drc) ##########"

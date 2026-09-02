@@ -163,3 +163,14 @@ board I/O, multi-turn transcript. Campaign: bms ERC 0 in 15 requests; audio ERC 
 created; stopping on the 270 s wall clock now, not the cap. Running: engine-opens (UART
 field overlap; scattered-GND opens), footprint-compat (compatibility before placement).
 Next: full campaign run on the integrated tree → accounting round 2 → lanes.
+
+## Status 2026-09-02 (afternoon): three lanes + a contaminated campaign
+- main @4c36d4e0: explicit `sync_board{bounds}` never re-fitted; engine-opens, footprint-compat, pcb-regress merged.
+- USER DECISION: KiCAD 10 CLI-only, IPC deleted → `lane/kicad10-cli-only` (codex).
+- `lane/engine-shorts` (Opus): `shorted 3V3+NRST` (26-part MCU block, spine) and `I2C_SCL+I2C_SDA` (59-part, spine+cluster).
+- Campaign run camp3 is NOT a measurement: the k10 lane switched `~/.config/gordian/config.toml` to the KiCAD 10 libraries mid-run,
+  so kicad-cli 9 on PATH could not load the schematics ("Failed to load schematic"; KiCAD 10 loads all four). Rerun after k10 merges.
+- Version-independent harvest → `lane/refusal-ergo3` (codex): no_connect on a single-pin net retracts label+stub (32 refusals in one run),
+  `delete_wires{net}` must remove labels-on-pin ("no wire matched" while connected), footprint existence + same-library did-you-mean at
+  place_parts (C_1206_3216Metric_Polarized reached sync_board; microSD → DSUB-9 suggestion), refusal headline names the fatal category.
+- Still true in every case: the 270 s wall clock is the binding bound; sch cleanup consumes it before the board phase.

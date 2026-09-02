@@ -523,7 +523,6 @@ fn is_pcb_stage_tool(name: &str) -> bool {
             | "refill_zones"
             | "check_board"
             | "export_fab"
-            | "open_board"
             | "get_board"
             | "render_board"
             | "update_board_outline"
@@ -2377,7 +2376,6 @@ fn tool_effect(name: &str) -> ToolEffect {
         | "place_board"
         | "route_board"
         | "refill_zones"
-        | "open_board"
         | "move_parts"
         | "route_track"
         | "delete_copper"
@@ -2492,7 +2490,6 @@ async fn run_kicad_tool(ctx: &Arc<AgentRuntime>, call: &ToolCall) -> ToolOutcome
 
 async fn run_blocking(ctx: &Arc<AgentRuntime>, name: &str, input: Value) -> Result<Value> {
     let ctx = Arc::clone(ctx);
-    let timeout_ctx = Arc::clone(&ctx);
     let name = name.to_string();
     let timeout = tool_timeout(&name);
     let handle = tokio::task::spawn_blocking({
@@ -2501,19 +2498,14 @@ async fn run_blocking(ctx: &Arc<AgentRuntime>, name: &str, input: Value) -> Resu
     });
     match tokio::time::timeout(timeout, handle).await {
         Ok(joined) => joined.map_err(|e| anyhow::anyhow!("tool execution task failed: {e}"))?,
-        Err(_) => {
-            if is_kicad_session_tool(&name) {
-                timeout_ctx.close_kicad_session();
-            }
-            anyhow::bail!(tool_timeout_message(&name, timeout));
-        }
+        Err(_) => anyhow::bail!(tool_timeout_message(&name, timeout)),
     }
 }
 
 fn tool_timeout_message(name: &str, timeout: Duration) -> String {
     let recovery = if enforces_own_deadline(name) {
         "it holds itself to a budget well inside this timeout, so the project is intact; inspect it before retrying a smaller request"
-    } else if is_kicad_session_tool(name) {
+    } else if is_board_tool(name) {
         "close any KiCad dialogs/processes touching the project, then inspect project state before trying a changed call"
     } else {
         "the operation may still be finishing; do not immediately retry identical arguments — inspect project state or simplify/batch the request"
@@ -2521,7 +2513,7 @@ fn tool_timeout_message(name: &str, timeout: Duration) -> String {
     format!("{name} timed out after {}s; {recovery}", timeout.as_secs())
 }
 
-fn is_kicad_session_tool(name: &str) -> bool {
+fn is_board_tool(name: &str) -> bool {
     matches!(
         name,
         "sync_board"
@@ -2530,7 +2522,6 @@ fn is_kicad_session_tool(name: &str) -> bool {
             | "refill_zones"
             | "check_board"
             | "export_fab"
-            | "open_board"
             | "render_board"
             | "move_parts"
             | "route_track"
@@ -2550,9 +2541,9 @@ fn tool_timeout(name: &str) -> Duration {
         // These enforce their own budget and return cleanly; the loop timeout is a
         // backstop for a hang, not the mechanism.
         name if enforces_own_deadline(name) => PlacementBudget::DEFAULT + DEADLINE_MARGIN,
-        // KiCAD IPC/CLI paths can legitimately take longer on first launch.
+        // KiCad CLI paths can legitimately take longer on first use.
         "sync_board" | "place_board" | "route_board" | "refill_zones" | "check_board"
-        | "export_fab" | "open_board" => Duration::from_secs(180),
+        | "export_fab" => Duration::from_secs(180),
         _ => Duration::from_secs(90),
     }
 }
@@ -2752,8 +2743,8 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             .get("code")
             .and_then(Value::as_str)
             .unwrap_or("refused");
-        // Lead with what actually refused the payload; `dangling` pins are reported
-        // but no longer fatal, so they come last.
+        // Lead with the first fatal category. Dangling pins are advisory and
+        // therefore never appear in a refusal headline.
         let first_str = |key: &str| {
             result
                 .get(key)
@@ -2762,7 +2753,8 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 .map(str::to_string)
         };
         let detail = first_str("input_errors")
-            .or_else(|| first_str("unknown_pins"))
+            .map(|item| format!("input_errors: {item}"))
+            .or_else(|| first_str("unknown_pins").map(|item| format!("unknown_pins: {item}")))
             .or_else(|| {
                 result
                     .get("duplicate_refs")
@@ -2770,32 +2762,26 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                     .and_then(|items| items.first())
                     .and_then(|item| {
                         Some(format!(
-                            "{} is already used; use {}",
+                            "duplicate_refs: {} is already used; use {}",
                             item.get("ref")?.as_str()?,
                             item.get("next_free")?.as_str()?
                         ))
                     })
             })
-            .or_else(|| first_str("nets"))
             .or_else(|| {
                 result
-                    .get("dangling")
+                    .get("footprint_mismatch")
                     .and_then(Value::as_array)
                     .and_then(|items| items.first())
                     .and_then(|item| {
-                        let net = item.get("net")?.as_str()?;
-                        let whereabouts = if item.get("on_sheet")?.as_bool()? {
-                            format!("{net} is on the sheet but has no other pin")
-                        } else {
-                            format!("no net {net} on the sheet")
-                        };
-                        Some(format!(
-                            "{}.{} on {net} is dangling ({whereabouts})",
-                            item.get("ref")?.as_str()?,
-                            item.get("pin")?.as_str()?,
-                        ))
+                        let reference = item.get("ref")?.as_str()?;
+                        let message = item.get("message").and_then(Value::as_str).unwrap_or(
+                            "the symbol and footprint have different electrical pin sets",
+                        );
+                        Some(format!("footprint_mismatch: {reference}: {message}"))
                     })
-            });
+            })
+            .or_else(|| first_str("nets").map(|item| format!("nets: {item}")));
         return detail.map_or_else(
             || format!("refused: {code}"),
             |detail| format!("refused: {code} — {}", compact_summary_text(&detail, 160)),
@@ -3230,7 +3216,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn invalid_payload_summary_is_not_reported_as_placed() {
+    fn dangling_never_headlines_a_refusal() {
         let result = json!({
             "ok": false,
             "code": "invalid_payload",
@@ -3243,7 +3229,50 @@ mod tests {
 
         assert_eq!(
             tool_summary("place_parts", &json!({}), &result),
-            "refused: invalid_payload — D1.K on LED_K is dangling (no net LED_K on the sheet)"
+            "refused: invalid_payload"
+        );
+    }
+
+    #[test]
+    fn invalid_payload_headline_uses_the_first_fatal_category() {
+        let result = json!({
+            "ok": false,
+            "code": "invalid_payload",
+            "input_errors": ["J1: unknown footprint 'Connector_Card:invented'"],
+            "unknown_pins": ["J1 has no pin 12"],
+            "duplicate_refs": [{"ref": "J1", "next_free": "J2"}],
+            "footprint_mismatch": [{
+                "ref": "J1",
+                "message": "symbol pin(s) 10 have no footprint pad"
+            }],
+            "dangling": [{
+                "ref": "J1", "pin": "1", "net": "SD_DAT2",
+                "pins_on_net": 1, "on_sheet": false
+            }]
+        });
+        assert_eq!(
+            tool_summary("place_parts", &json!({}), &result),
+            "refused: invalid_payload — input_errors: J1: unknown footprint 'Connector_Card:invented'"
+        );
+
+        let footprint_only = json!({
+            "ok": false,
+            "code": "invalid_payload",
+            "input_errors": [],
+            "unknown_pins": [],
+            "duplicate_refs": [],
+            "footprint_mismatch": [{
+                "ref": "J2",
+                "message": "symbol pin(s) 10 have no footprint pad"
+            }],
+            "dangling": [{
+                "ref": "J2", "pin": "1", "net": "SD_DAT2",
+                "pins_on_net": 1, "on_sheet": false
+            }]
+        });
+        assert_eq!(
+            tool_summary("place_parts", &json!({}), &footprint_only),
+            "refused: invalid_payload — footprint_mismatch: J2: symbol pin(s) 10 have no footprint pad"
         );
     }
 
@@ -3260,7 +3289,7 @@ mod tests {
 
         assert_eq!(
             tool_summary("place_parts", &json!({}), &result),
-            "refused: invalid_payload — C2 is already used; use C3"
+            "refused: invalid_payload — duplicate_refs: C2 is already used; use C3"
         );
     }
 

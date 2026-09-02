@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 pub(crate) struct Allow {
     nets: BTreeSet<String>,
     joined_nets: BTreeSet<String>,
+    unnamed_nets: BTreeSet<String>,
     refs: BTreeSet<String>,
     /// The call may bring nets into existence it could not name in advance —
     /// a new part's hidden power pin, or a wire that names its own net.
@@ -44,6 +45,15 @@ impl Allow {
         let names: Vec<String> = names.into_iter().map(Into::into).collect();
         self.nets.extend(names.iter().cloned());
         self.joined_nets.extend(names);
+        self
+    }
+
+    /// Permit these authored names to disappear while their surviving pin
+    /// partition receives a KiCad-generated name.
+    pub fn unname_nets<I: Into<String>>(mut self, names: impl IntoIterator<Item = I>) -> Allow {
+        let names = names.into_iter().map(Into::into).collect::<Vec<_>>();
+        self.nets.extend(names.iter().cloned());
+        self.unnamed_nets.extend(names);
         self
     }
 
@@ -79,7 +89,7 @@ impl Allow {
             // KiCAD names an unnamed net after its strongest pin, so joining a
             // pin to one re-derives that name. The partition did not change,
             // and no name the design authored did either.
-            if is_auto(from) && is_auto(to) {
+            if is_auto(from) && is_auto(to) || self.unnamed_nets.contains(from) && is_auto(to) {
                 continue;
             }
             offenders.extend([from, to].into_iter().filter(|n| unnamed(n)).cloned());

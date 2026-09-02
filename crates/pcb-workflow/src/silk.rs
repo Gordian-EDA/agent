@@ -325,13 +325,12 @@ fn is_silk_warning(violation: &Violation) -> bool {
 
 /// Movable texts implicated by the report.
 ///
-/// References come straight from violation items. KiCad 9 omits `PCB_FIELD`
-/// items other than Reference/Value from DRC reports, so a violation caused by
-/// a generated Function legend surfaces with empty items or only its partner
-/// (e.g. the clipped segment, or the Edge.Cuts outline). Whenever such an
-/// unattributed silk violation exists, every visible Function legend on the
-/// board becomes a relocation candidate; the DRC oracle keeps only moves that
-/// reduce warnings.
+/// References come straight from violation items. KiCad 10.0.4 omits
+/// `PCB_FIELD` items other than Reference/Value from some DRC reports, so a
+/// violation caused by a generated Function legend can surface with no items
+/// or only its collision partner. Whenever a silk violation has no movable
+/// attribution, every visible Function legend becomes a relocation candidate;
+/// the DRC oracle keeps only moves that reduce warnings.
 fn offending_targets(report: &DrcReport, board_text: &str) -> BTreeSet<SilkTarget> {
     let mut targets = BTreeSet::new();
     let mut unattributed = false;
@@ -531,7 +530,7 @@ mod tests {
 
     #[test]
     fn unattributed_silk_violations_enqueue_function_legends() {
-        // KiCad 9 reports Function-field collisions with empty items or only
+        // KiCad reports some Function-field collisions with empty items or only
         // the partner item, never the field itself.
         let report = DrcReport {
             violations: vec![

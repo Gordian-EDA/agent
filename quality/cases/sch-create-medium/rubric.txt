@@ -7,3 +7,5 @@ expect: partition_matches_kicad == true
 expect: part_count >= 18
 expect: extractor_warnings == []
 expect: text_collisions == []
+expect: schematic_critic_score >= 8
+expect: human_look_schematic_score >= 8

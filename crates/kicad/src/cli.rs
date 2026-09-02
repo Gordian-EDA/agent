@@ -5,7 +5,6 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::KicadInstallation;
 
@@ -25,7 +24,8 @@ impl KicadInstallation {
             .suffix(".json")
             .tempfile()?;
 
-        let output = Command::new(self.cli_path())
+        let output = self
+            .command()
             .args(["sch", "erc", "--format", "json"])
             .arg("--output")
             .arg(out.path())
@@ -56,6 +56,16 @@ impl KicadInstallation {
     /// process failure, as long as the JSON report is parseable.
     #[tracing::instrument(skip_all, fields(board = %pcb.display()))]
     pub fn drc(&self, pcb: &Path) -> io::Result<DrcReport> {
+        self.run_drc(pcb, false)
+    }
+
+    /// Refill every copper zone and optionally persist the updated board.
+    #[tracing::instrument(skip_all, fields(board = %pcb.display(), save_board))]
+    pub fn refill_zones(&self, pcb: &Path, save_board: bool) -> io::Result<DrcReport> {
+        self.run_drc(pcb, save_board)
+    }
+
+    fn run_drc(&self, pcb: &Path, save_board: bool) -> io::Result<DrcReport> {
         let out = tempfile::Builder::new()
             .prefix("gordian-drc-")
             .suffix(".json")
@@ -64,10 +74,13 @@ impl KicadInstallation {
         let board_has_zones = std::fs::read_to_string(pcb)
             .map(|text| text.contains("\n\t(zone") || text.contains("\n  (zone"))
             .unwrap_or(false);
-        let mut cmd = Command::new(self.cli_path());
+        let mut cmd = self.command();
         cmd.args(["pcb", "drc", "--format", "json", "--all-track-errors"]);
-        if board_has_zones && self.supports_pcb_drc_refill_zones() {
+        if board_has_zones {
             cmd.arg("--refill-zones");
+            if save_board {
+                cmd.arg("--save-board");
+            }
         }
         let output = cmd
             .arg("--exit-code-violations")
@@ -92,18 +105,6 @@ impl KicadInstallation {
         }
     }
 
-    fn supports_pcb_drc_refill_zones(&self) -> bool {
-        Command::new(self.cli_path())
-            .args(["pcb", "drc", "--help"])
-            .output()
-            .ok()
-            .map(|output| {
-                String::from_utf8_lossy(&output.stdout).contains("--refill-zones")
-                    || String::from_utf8_lossy(&output.stderr).contains("--refill-zones")
-            })
-            .unwrap_or(false)
-    }
-
     /// Run `kicad-cli sch export netlist --format kicadxml` on `schematic`.
     pub fn netlist(&self, schematic: &Path) -> io::Result<Netlist> {
         let out = tempfile::Builder::new()
@@ -111,7 +112,8 @@ impl KicadInstallation {
             .suffix(".xml")
             .tempfile()?;
 
-        let output = Command::new(self.cli_path())
+        let output = self
+            .command()
             .args(["sch", "export", "netlist", "--format", "kicadxml"])
             .arg("--output")
             .arg(out.path())
@@ -146,7 +148,7 @@ impl KicadInstallation {
         exclude_sheet: bool,
     ) -> io::Result<PathBuf> {
         std::fs::create_dir_all(out_dir)?;
-        let mut cmd = Command::new(self.cli_path());
+        let mut cmd = self.command();
         cmd.args(["sch", "export", "svg"])
             .arg("--output")
             .arg(out_dir);
@@ -187,11 +189,12 @@ impl KicadInstallation {
         if let Some(parent) = out_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut cmd = Command::new(self.cli_path());
+        let mut cmd = self.command();
         cmd.args([
             "pcb",
             "export",
             "svg",
+            "--check-zones",
             "--mode-single",
             "--exclude-drawing-sheet",
             "--page-size-mode",
@@ -219,8 +222,15 @@ impl KicadInstallation {
     /// Run `kicad-cli pcb export gerbers` on `pcb`.
     pub fn export_gerbers(&self, pcb: &Path, out_dir: &Path) -> io::Result<Vec<PathBuf>> {
         std::fs::create_dir_all(out_dir)?;
-        let output = Command::new(self.cli_path())
-            .args(["pcb", "export", "gerbers", "--no-protel-ext"])
+        let output = self
+            .command()
+            .args([
+                "pcb",
+                "export",
+                "gerbers",
+                "--check-zones",
+                "--no-protel-ext",
+            ])
             .arg("--output")
             .arg(out_dir)
             .arg(pcb)
@@ -239,7 +249,8 @@ impl KicadInstallation {
     /// Run `kicad-cli pcb export drill` on `pcb`.
     pub fn export_drill(&self, pcb: &Path, out_dir: &Path) -> io::Result<Vec<PathBuf>> {
         std::fs::create_dir_all(out_dir)?;
-        let output = Command::new(self.cli_path())
+        let output = self
+            .command()
             .args([
                 "pcb",
                 "export",
@@ -269,7 +280,8 @@ impl KicadInstallation {
         if let Some(parent) = out_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let output = Command::new(self.cli_path())
+        let output = self
+            .command()
             .args([
                 "pcb", "export", "pos", "--format", "csv", "--side", "both", "--units", "mm",
             ])
@@ -293,7 +305,8 @@ impl KicadInstallation {
         if let Some(parent) = out_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let output = Command::new(self.cli_path())
+        let output = self
+            .command()
             .args([
                 "sch",
                 "export",

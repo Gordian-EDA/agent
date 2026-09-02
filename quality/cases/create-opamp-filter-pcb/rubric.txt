@@ -1,2 +1,14 @@
 The active filter and biasing must be electrically plausible and the unused op-amp must be safe. The PCB must be fully routed and DRC-clean, with the signal path ordered from input through filter to output and decoupling close to the op-amp.
+expect: agent_exit == 0
+expect: schematic_created == true
+expect: pcb_created == true
+expect: part_count >= 9
+expect: erc_errors == 0
+expect: drc_errors == 0
+expect: unconnected_items == 0
 expect: unrouted == []
+expect: len(fab_files) >= 3
+expect: schematic_critic_score >= 8
+expect: pcb_critic_score >= 8
+expect: human_look_schematic_score >= 8
+expect: human_look_pcb_score >= 8

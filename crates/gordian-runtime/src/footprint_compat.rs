@@ -1,7 +1,7 @@
 //! Symbol/footprint electrical-pad compatibility checks shared by schematic
 //! authoring and PCB regeneration.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result, anyhow};
 use fuzzy_matcher::FuzzyMatcher;
@@ -24,6 +24,8 @@ pub struct FootprintPinMismatch {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extra_pins: Vec<String>,
     pub suggestion: Option<String>,
+    #[serde(skip)]
+    pub suggestion_compatible: bool,
     pub symbol_suggestion: Option<String>,
 }
 
@@ -36,9 +38,27 @@ impl FootprintPinMismatch {
             footprint: self.footprint.clone(),
             missing_pads: self.missing_pads.clone(),
             extra_pins: self.extra_pins.clone(),
+            message: mismatch_message(&self.missing_pads, &self.extra_pins),
             suggestion: self.suggestion.clone(),
         }
     }
+}
+
+fn mismatch_message(missing_pads: &[String], extra_pins: &[String]) -> String {
+    let mut clauses = Vec::new();
+    if !missing_pads.is_empty() {
+        clauses.push(format!(
+            "symbol pin(s) {} have no footprint pad; use no_connect only when those pins are intentionally unused",
+            missing_pads.join(", ")
+        ));
+    }
+    if !extra_pins.is_empty() {
+        clauses.push(format!(
+            "footprint pad(s) {} have no symbol pin",
+            extra_pins.join(", ")
+        ));
+    }
+    clauses.join("; ")
 }
 
 /// Electrical compatibility of one installed symbol/footprint pair.
@@ -66,6 +86,7 @@ struct Assignment<'a> {
     reference: &'a str,
     symbol: &'a str,
     footprint: &'a str,
+    ignored_pins: BTreeSet<String>,
 }
 
 /// Decide one symbol/footprint pair using the shared electrical policy.
@@ -87,11 +108,60 @@ pub fn footprint_compatibility(
     )
 }
 
+fn footprint_compatibility_ignoring(
+    ctx: &AgentRuntime,
+    symbol_id: &str,
+    footprint_id: &str,
+    ignored_pins: &BTreeSet<String>,
+) -> Result<FootprintCompatibility> {
+    let symbol = ctx
+        .provider()
+        .symbol(symbol_id)
+        .or_else(|| ctx.index().ok()?.symbol(symbol_id))
+        .ok_or_else(|| anyhow!("unknown symbol `{symbol_id}`"))?;
+    let all_pins = symbol
+        .pins
+        .iter()
+        .map(|pin| pin.number.as_str())
+        .filter(|number| !number.is_empty())
+        .collect::<BTreeSet<_>>();
+    footprint_compatibility_for_required_pins(
+        ctx,
+        symbol_id,
+        all_pins
+            .iter()
+            .copied()
+            .filter(|number| !ignored_pins.contains(*number)),
+        all_pins.iter().copied(),
+        footprint_id,
+    )
+}
+
 /// Decide a pair when the live schematic, rather than the provider, owns its pins.
 pub fn footprint_compatibility_for_pins<'a>(
     ctx: &AgentRuntime,
     symbol_id: &str,
     symbol_pin_numbers: impl IntoIterator<Item = &'a str>,
+    footprint_id: &str,
+) -> Result<FootprintCompatibility> {
+    let symbol_pins = symbol_pin_numbers
+        .into_iter()
+        .filter(|number| !number.is_empty())
+        .collect::<BTreeSet<_>>();
+    footprint_compatibility_for_required_pins(
+        ctx,
+        symbol_id,
+        symbol_pins.iter().copied(),
+        symbol_pins.iter().copied(),
+        footprint_id,
+    )
+}
+
+fn footprint_compatibility_for_required_pins<'a>(
+    ctx: &AgentRuntime,
+    symbol_id: &str,
+    required_pin_numbers: impl IntoIterator<Item = &'a str>,
+    all_symbol_pin_numbers: impl IntoIterator<Item = &'a str>,
     footprint_id: &str,
 ) -> Result<FootprintCompatibility> {
     let id = FootprintId::parse(footprint_id)
@@ -101,7 +171,11 @@ pub fn footprint_compatibility_for_pins<'a>(
         .footprint(&id)
         .with_context(|| format!("loading footprint `{id}`"))?;
 
-    let symbol_pins = symbol_pin_numbers
+    let required_pins = required_pin_numbers
+        .into_iter()
+        .filter(|number| !number.is_empty())
+        .collect::<BTreeSet<_>>();
+    let symbol_pins = all_symbol_pin_numbers
         .into_iter()
         .filter(|number| !number.is_empty())
         .collect::<BTreeSet<_>>();
@@ -112,7 +186,7 @@ pub fn footprint_compatibility_for_pins<'a>(
         .map(|pad| pad.number.as_str())
         .filter(|number| !number.is_empty())
         .collect::<BTreeSet<_>>();
-    let missing_pads = symbol_pins
+    let missing_pads = required_pins
         .difference(&footprint_pads)
         .map(|number| (*number).to_owned())
         .collect::<Vec<_>>();
@@ -233,23 +307,7 @@ pub fn best_compatible_footprint(
     if nearby.is_some() {
         return Ok(nearby);
     }
-
-    let search_text = preferred
-        .filter(|text| !text.trim().is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| footprint_query_for_symbol(symbol_id));
-    let matcher = SkimMatcherV2::default().ignore_case();
-    let catalog = ctx.footprint_catalog()?;
-    let mut compatible = Vec::new();
-    for entry in catalog.entries() {
-        let id = entry.id().to_string();
-        if footprint_compatibility(ctx, symbol_id, &id).is_ok_and(|verdict| verdict.compatible) {
-            let score = matcher.fuzzy_match(&id, &search_text).unwrap_or(0);
-            compatible.push((score, id));
-        }
-    }
-    compatible.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-    Ok(compatible.into_iter().next().map(|(_, id)| id))
+    Ok(None)
 }
 
 /// Best nearby symbol variant whose pins agree with an installed footprint.
@@ -300,11 +358,33 @@ pub fn assignment_pin_mismatch(
     symbol_id: &str,
     footprint_id: &str,
 ) -> Result<Option<FootprintPinMismatch>> {
-    let verdict = footprint_compatibility(ctx, symbol_id, footprint_id)?;
+    assignment_pin_mismatch_ignoring(ctx, reference, symbol_id, footprint_id, &BTreeSet::new())
+}
+
+/// Audit one assignment while allowing explicitly no-connected symbol pins to
+/// be absent from the physical package.
+pub fn assignment_pin_mismatch_ignoring(
+    ctx: &AgentRuntime,
+    reference: &str,
+    symbol_id: &str,
+    footprint_id: &str,
+    ignored_pins: &BTreeSet<String>,
+) -> Result<Option<FootprintPinMismatch>> {
+    let verdict = footprint_compatibility_ignoring(ctx, symbol_id, footprint_id, ignored_pins)?;
     if verdict.compatible {
         return Ok(None);
     }
-    let suggestion = best_compatible_footprint(ctx, symbol_id, Some(footprint_id))?;
+    let suggestion = best_same_library_footprint(
+        ctx,
+        symbol_id,
+        footprint_id,
+        ignored_pins,
+        Some(footprint_id),
+    )?;
+    let suggestion_compatible = suggestion.as_deref().is_some_and(|candidate| {
+        footprint_compatibility_ignoring(ctx, symbol_id, candidate, ignored_pins)
+            .is_ok_and(|candidate| candidate.compatible)
+    });
     let symbol_suggestion = if suggestion.is_none() {
         best_compatible_symbol(ctx, symbol_id, footprint_id)?
     } else {
@@ -318,8 +398,147 @@ pub fn assignment_pin_mismatch(
         missing_pads: verdict.missing_pads,
         extra_pins: verdict.extra_pins,
         suggestion,
+        suggestion_compatible,
         symbol_suggestion,
     }))
+}
+
+fn best_same_library_footprint(
+    ctx: &AgentRuntime,
+    symbol_id: &str,
+    preferred: &str,
+    ignored_pins: &BTreeSet<String>,
+    exclude: Option<&str>,
+) -> Result<Option<String>> {
+    let Ok(preferred_id) = FootprintId::parse(preferred) else {
+        return Ok(None);
+    };
+    let matcher = SkimMatcherV2::default().ignore_case();
+    let preferred_tokens = preferred_id.name().split('_').collect::<Vec<_>>();
+    let mut text_candidates = ctx
+        .footprint_catalog()?
+        .entries_in(preferred_id.library())
+        .filter_map(|entry| {
+            let id = entry.id().to_string();
+            if exclude == Some(id.as_str()) {
+                return None;
+            }
+            (1..=preferred_tokens.len()).rev().find_map(|token_count| {
+                let query = preferred_tokens[..token_count].join("_");
+                matcher
+                    .fuzzy_match(entry.id().name(), &query)
+                    .map(|score| (token_count, score, id.clone()))
+            })
+        })
+        .collect::<Vec<_>>();
+    text_candidates.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.cmp(&left.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    text_candidates.truncate(32);
+
+    let mut candidates = Vec::new();
+    for (_, score, id) in text_candidates {
+        let Ok(verdict) = footprint_compatibility_ignoring(ctx, symbol_id, &id, ignored_pins)
+        else {
+            continue;
+        };
+        let mismatch = verdict.missing_pads.len()
+            + verdict.extra_pins.len()
+            + usize::from(verdict.polarity_mismatch.is_some());
+        candidates.push((mismatch, score, id));
+    }
+    candidates.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| right.1.cmp(&left.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    Ok(candidates.into_iter().next().map(|(_, _, id)| id))
+}
+
+/// Diagnose a footprint ID that cannot be loaded and rank compatible repairs
+/// from its own library before the caller mutates a schematic.
+pub fn footprint_input_error(
+    ctx: &AgentRuntime,
+    reference: &str,
+    symbol_id: &str,
+    footprint: &str,
+) -> Result<Option<String>> {
+    let catalog = ctx.footprint_catalog()?;
+    let id = match FootprintId::parse(footprint) {
+        Ok(id) => id,
+        Err(_) => {
+            let suggestions = catalog.suggest(footprint);
+            return Ok(Some(format!(
+                "{reference}: {}",
+                kicad_footprint::unknown_footprint_message(footprint, &suggestions)
+            )));
+        }
+    };
+    match catalog.footprint(&id) {
+        Ok(_) => Ok(None),
+        Err(error) if error.is_not_found() => {
+            let suggestions =
+                best_same_library_footprint(ctx, symbol_id, footprint, &BTreeSet::new(), None)?
+                    .and_then(|candidate| FootprintId::parse(&candidate).ok())
+                    .into_iter()
+                    .collect::<Vec<_>>();
+            Ok(Some(format!(
+                "{reference}: {}",
+                kicad_footprint::unknown_footprint_message(footprint, &suggestions)
+            )))
+        }
+        Err(error) => Ok(Some(format!(
+            "{reference}: footprint `{footprint}` could not be read: {error}"
+        ))),
+    }
+}
+
+/// Ranked catalog repairs when a requested footprint cannot be loaded.
+pub fn unresolved_footprint_suggestions(
+    ctx: &AgentRuntime,
+    symbol_id: &str,
+    footprint: &str,
+) -> Result<Option<Vec<String>>> {
+    let catalog = ctx.footprint_catalog()?;
+    let id = match FootprintId::parse(footprint) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(Some(
+                catalog
+                    .suggest(footprint)
+                    .into_iter()
+                    .map(|candidate| candidate.to_string())
+                    .collect(),
+            ));
+        }
+    };
+    match catalog.footprint(&id) {
+        Ok(_) => Ok(None),
+        Err(_) => {
+            let same_library = best_same_library_footprint(
+                ctx,
+                symbol_id,
+                footprint,
+                &BTreeSet::new(),
+                None,
+            )?;
+            let mut suggestions = same_library.into_iter().collect::<Vec<_>>();
+            suggestions.extend(
+                catalog
+                    .suggest(footprint)
+                    .into_iter()
+                    .map(|candidate| candidate.to_string()),
+            );
+            let mut seen = BTreeSet::new();
+            suggestions.retain(|candidate| seen.insert(candidate.clone()));
+            Ok(Some(suggestions))
+        }
+    }
 }
 
 /// Validate explicit footprint assignments in a compiled circuit design.
@@ -338,6 +557,14 @@ pub fn design_pin_mismatches(
                         reference,
                         symbol: &component.part,
                         footprint,
+                        ignored_pins: component
+                            .pins
+                            .iter()
+                            .filter(|(_, target)| {
+                                matches!(target, sch_check::model::PinTarget::NoConnect)
+                            })
+                            .map(|(pin, _)| pin.clone())
+                            .collect(),
                     })
                 })
         }),
@@ -348,6 +575,7 @@ pub fn design_pin_mismatches(
 pub fn netlist_pin_mismatches(
     ctx: &AgentRuntime,
     netlist: &kicad::Netlist,
+    ignored_pins: &BTreeMap<String, BTreeSet<String>>,
 ) -> Result<Vec<FootprintPinMismatch>> {
     assignment_mismatches(
         ctx,
@@ -359,6 +587,10 @@ pub fn netlist_pin_mismatches(
                     reference: &component.reference,
                     symbol: &component.lib_id,
                     footprint,
+                    ignored_pins: ignored_pins
+                        .get(&component.reference)
+                        .cloned()
+                        .unwrap_or_default(),
                 })
         }),
     )
@@ -385,11 +617,12 @@ fn assignment_mismatches<'a>(
         if catalog.footprint(&footprint_id).is_err() {
             continue; // footprint discovery/regeneration reports lookup failures
         }
-        if let Some(mismatch) = assignment_pin_mismatch(
+        if let Some(mismatch) = assignment_pin_mismatch_ignoring(
             ctx,
             assignment.reference,
             assignment.symbol,
             &footprint_id.to_string(),
+            &assignment.ignored_pins,
         )? {
             mismatches.push(mismatch);
         }

@@ -1,6 +1,14 @@
 The schematic must implement a correct low-side transistor LED driver with appropriate resistor values. The routed PCB must be DRC-clean with no unconnected items, group the transistor and resistors tightly, and place both headers accessibly at edges.
+expect: agent_exit == 0
+expect: schematic_created == true
+expect: pcb_created == true
+expect: part_count >= 7
+expect: erc_errors == 0
 expect: unrouted == []
 expect: drc_errors == 0
 expect: unconnected_items == 0
-expect: len(refused_geometry_tools) == 0
-expect: len(board_tool_calls) <= 8
+expect: len(fab_files) >= 3
+expect: schematic_critic_score >= 8
+expect: pcb_critic_score >= 8
+expect: human_look_schematic_score >= 8
+expect: human_look_pcb_score >= 8

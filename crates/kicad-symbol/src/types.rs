@@ -27,6 +27,8 @@ pub enum PinDir {
 pub struct PinMeta {
     pub number: String,
     pub name: String,
+    /// KiCad alternate-function names declared on this physical pin.
+    pub alternates: Vec<String>,
     pub etype: PinType,
     /// Signal direction (KiCAD electrical type), for dataflow layout.
     pub dir: PinDir,
@@ -50,10 +52,16 @@ pub struct SymbolMeta {
 }
 
 /// Resolve a pin reference (`id`) within a pin list, matching by **number
-/// first, then by name**. This is `sch-check`'s canonical pin-resolution
-/// order; reuse it instead of hand-rolling the same `find().or_else(find())`.
+/// first, then by name or alternate function**, case-insensitively.
 pub fn find_pin<'a>(pins: &'a [PinMeta], id: &str) -> Option<&'a PinMeta> {
     pins.iter()
-        .find(|p| p.number == id)
-        .or_else(|| pins.iter().find(|p| p.name == id))
+        .find(|p| p.number.eq_ignore_ascii_case(id))
+        .or_else(|| {
+            pins.iter().find(|p| {
+                p.name.eq_ignore_ascii_case(id)
+                    || p.alternates
+                        .iter()
+                        .any(|alternate| alternate.eq_ignore_ascii_case(id))
+            })
+        })
 }

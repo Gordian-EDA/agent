@@ -36,6 +36,20 @@ fn stm32h743vitx_has_100_pins_with_correct_types() {
 }
 
 #[test]
+fn stm32f405rg_exposes_oscillator_alternates() {
+    let Some(table) = installed() else {
+        eprintln!("SKIP");
+        return;
+    };
+    let symbol = table
+        .symbol("MCU_ST_STM32F4:STM32F405RGTx")
+        .unwrap();
+    let ph0 = symbol.pins.iter().find(|pin| pin.number == "5").unwrap();
+    assert_eq!(ph0.name, "PH0");
+    assert!(ph0.alternates.iter().any(|name| name == "RCC_OSC_IN"));
+}
+
+#[test]
 fn library_no_connect_pin_type_is_preserved() {
     let lib_text = r#"(kicad_symbol_lib
 	(version 20231120)
@@ -55,6 +69,30 @@ fn library_no_connect_pin_type_is_preserved() {
     let symbol = table.symbol("Test:MCU").unwrap();
 
     assert_eq!(symbol.pins[0].etype, PinType::NoConnect);
+}
+
+#[test]
+fn pin_alternate_functions_are_preserved() {
+    let lib_text = r#"(kicad_symbol_lib
+	(version 20231120)
+	(generator "test")
+	(symbol "MCU"
+		(symbol "MCU_1_1"
+			(pin bidirectional line (at 0 0 0) (length 2.54)
+				(name "PH0" (effects (font (size 1.27 1.27))))
+				(number "5" (effects (font (size 1.27 1.27))))
+				(alternate "RCC_OSC_IN" bidirectional line)
+				(alternate "MCO_1" output line))
+		)
+	)
+)
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Test.kicad_sym"), lib_text).unwrap();
+    let table = SymbolTable::from_symbol_dir(dir.path().to_path_buf());
+    let symbol = table.symbol("Test:MCU").unwrap();
+
+    assert_eq!(symbol.pins[0].alternates, ["MCO_1", "RCC_OSC_IN"]);
 }
 
 #[test]

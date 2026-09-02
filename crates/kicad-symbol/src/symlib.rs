@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use crate::types::{PinDir, PinMeta, PinType, SymbolMeta};
 use kiutils_kicad::{SymPin, Symbol, SymbolLibFile};
+use kiutils_sexpr::{Atom, CstDocument, Node};
 
 /// Load and fully resolve one `.kicad_sym` file into `bare name → SymbolMeta`
 /// (extends chains followed, multi-unit pins merged, sub-blocks hidden).
@@ -64,6 +65,7 @@ impl LibReader {
             kiutils_kicad::Error::Io(io) => io,
             other => io::Error::new(io::ErrorKind::InvalidData, other.to_string()),
         })?;
+        let alternates = alternate_functions(doc.cst());
 
         // First pass: own pins/properties + extends target per top-level symbol.
         self.raw.extend(doc.ast().symbols.iter().filter_map(|sym| {
@@ -78,7 +80,7 @@ impl LibReader {
             Some((
                 name,
                 RawSymbol {
-                    pins: own_pins(sym),
+                    pins: own_pins(sym, alternates.get(sym.name.as_deref()?)),
                     extends: sym.extends.clone(),
                     reference: property("Reference"),
                     description: property("Description"),
@@ -105,8 +107,17 @@ impl LibReader {
 
 /// Pins owned by a symbol: direct pins plus pins of all
 /// `<NAME>_<unit>_<bodystyle>` sub-blocks, tagged with their unit number.
-fn own_pins(sym: &Symbol) -> Vec<PinMeta> {
-    let mut pins: Vec<PinMeta> = sym.pins.iter().filter_map(|p| pin_meta(p, 1)).collect();
+fn own_pins(
+    sym: &Symbol,
+    alternates: Option<&HashMap<String, Vec<String>>>,
+) -> Vec<PinMeta> {
+    let empty = HashMap::new();
+    let alternates = alternates.unwrap_or(&empty);
+    let mut pins: Vec<PinMeta> = sym
+        .pins
+        .iter()
+        .filter_map(|p| pin_meta(p, 1, alternates))
+        .collect();
     for unit in &sym.units {
         let unit_no = unit
             .name
@@ -115,7 +126,11 @@ fn own_pins(sym: &Symbol) -> Vec<PinMeta> {
             // Unit 0 holds graphics / pins common to all units; PinMeta units
             // are 1-based, so fold it into unit 1.
             .map_or(1, |u| u.max(1));
-        pins.extend(unit.pins.iter().filter_map(|p| pin_meta(p, unit_no)));
+        pins.extend(
+            unit.pins
+                .iter()
+                .filter_map(|p| pin_meta(p, unit_no, alternates)),
+        );
     }
     pins
 }
@@ -128,7 +143,11 @@ fn unit_number(block_name: &str) -> Option<u8> {
     parts.next()?.parse().ok()
 }
 
-fn pin_meta(pin: &SymPin, unit: u8) -> Option<PinMeta> {
+fn pin_meta(
+    pin: &SymPin,
+    unit: u8,
+    alternates: &HashMap<String, Vec<String>>,
+) -> Option<PinMeta> {
     let etype = match pin.electrical_type.as_deref() {
         Some("power_in") => PinType::PowerInput,
         Some("power_out") => PinType::PowerOutput,
@@ -147,13 +166,78 @@ fn pin_meta(pin: &SymPin, unit: u8) -> Option<PinMeta> {
         Some("passive") => PinDir::Passive,
         _ => PinDir::Unknown,
     };
+    let number = pin.number.clone()?;
     Some(PinMeta {
-        number: pin.number.clone()?,
+        alternates: alternates.get(&number).cloned().unwrap_or_default(),
+        number,
         name: pin.name.clone()?,
         etype,
         dir,
         unit,
     })
+}
+
+/// Recover KiCad 10 alternate pin functions that `kiutils_kicad` does not yet
+/// expose in its symbol AST.
+fn alternate_functions(doc: &CstDocument) -> HashMap<String, HashMap<String, Vec<String>>> {
+    let Some(Node::List { items, .. }) = doc.nodes.first() else {
+        return HashMap::new();
+    };
+    let mut symbols = HashMap::new();
+    for node in items.iter().skip(1).filter(|node| head(node) == Some("symbol")) {
+        let Some(name) = positional_text(node, 1) else {
+            continue;
+        };
+        let mut pins = HashMap::new();
+        collect_pin_alternates(node, &mut pins);
+        for names in pins.values_mut() {
+            names.sort();
+            names.dedup();
+        }
+        symbols.insert(name.to_owned(), pins);
+    }
+    symbols
+}
+
+fn collect_pin_alternates(node: &Node, pins: &mut HashMap<String, Vec<String>>) {
+    let Node::List { items, .. } = node else {
+        return;
+    };
+    if head(node) == Some("pin") {
+        let number = items
+            .iter()
+            .find(|child| head(child) == Some("number"))
+            .and_then(|child| positional_text(child, 1));
+        if let Some(number) = number {
+            let names = items
+                .iter()
+                .filter(|child| head(child) == Some("alternate"))
+                .filter_map(|child| positional_text(child, 1))
+                .map(str::to_owned);
+            pins.entry(number.to_owned()).or_default().extend(names);
+        }
+        return;
+    }
+    for child in items.iter().skip(1) {
+        collect_pin_alternates(child, pins);
+    }
+}
+
+fn head(node: &Node) -> Option<&str> {
+    positional_text(node, 0)
+}
+
+fn positional_text(node: &Node, index: usize) -> Option<&str> {
+    let Node::List { items, .. } = node else {
+        return None;
+    };
+    match items.get(index)? {
+        Node::Atom {
+            atom: Atom::Symbol(value) | Atom::Quoted(value),
+            ..
+        } => Some(value),
+        Node::List { .. } => None,
+    }
 }
 
 /// Resolve a symbol's metadata, following `extends` for inherited properties

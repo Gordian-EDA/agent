@@ -1,0 +1,107 @@
+# Incremental, agent-driven design workflow (2026-09-02)
+
+User decision: "instead of having super powerful deterministic algorithms, the Agent should take more
+charge. A large PCB board is not created one shot but incrementally. Encourage partial states.
+Direct the agent with workflows like human engineers: place important parts first, try route, if not,
+re-place." Quality first; time later via parallel subagents; schematic too.
+
+## Principles
+1. The unit of work is a small step against a visible partial state. The agent runs the loop.
+2. Deterministic code = local helpers: fast, scoped, honest. No global one-shot solver decides a board.
+3. Partial states are legal and first-class: staging area for unplaced parts, ratsnest for unrouted
+   nets, a bench for unplaced schematic symbols. Nothing refuses "because incomplete".
+4. Every tool returns what it did AND what it could not, with the blocker and a way out. Refusal is
+   reserved for edits that would silently change connectivity.
+5. Progress, not pass/fail: `check_*` reports routed 34/52, three blocked by X, and what frees each.
+6. The workflow lives in the prompt as phases a human follows, with a render + check after each phase.
+7. Time is recorded, not gated. The wall clock hands back the partial state and the next step; the
+   next turn continues. Speed comes later from batching per call, parallel tool calls, short outputs
+   and parallel subagents.
+
+## PCB state model
+- Board file is the state. Unplaced parts live in a staging row outside the outline (`gordian:staged`
+  property); `get_board` lists `staged`, `placed`, `locked`.
+- Ratsnest = unrouted connections from the netlist minus copper connectivity; `get_board{net}` shows
+  pads, existing copper, and, when a route attempt failed, the blocking geometry (pad/track/zone,
+  layer, cell) and suggestions (move X, drop to layer, widen channel).
+- Locks: `lock_parts{refs}` — locked parts never move in any helper; outline and mechanical parts are
+  locked by default once placed.
+
+## PCB tool surface (final)
+- `sync_board` — schematic→board delta only; new parts land staged.
+- `place_parts_pcb{refs, intent}` (rename of `place_board{refs}`) — local placement of the named refs
+  around anchors/edges by intent; whole-board form gone. Returns placed/unplaced with reasons.
+- `move_parts`, `rotate_parts`, `lock_parts`, `unlock_parts`.
+- `route_nets{nets, layer?, width?}` — routes the named nets; partial success is success; returns
+  routed/blocked with blockers. `route_track` for a hand-drawn track. `delete_copper{nets|bbox}`.
+- `pour{nets}` explicit; `check_board` = DRC + progress; `render_board` each phase; `export_fab`.
+- Every mutator: guard against connectivity change, revision captured, undo.
+
+## PCB workflow (prompt phases)
+1. Outline + connectors/mechanical placed by intent and locked.
+2. Big ICs placed by intent; render.
+3. Satellites (decoupling, crystal, feedback, pull-ups) placed tight to their anchors.
+4. Critical nets routed while the board is empty: power, crystal, diff pairs; check; adjust placement
+   if blocked (move + re-route the blocked nets only).
+5. Remaining parts placed around what exists; remaining nets routed in batches; pours; DRC loop.
+6. Fab export only when `check_board` is clean; otherwise report the partial state honestly.
+
+## Schematic: same treatment
+- `add_parts{parts}` puts symbols on the bench (unplaced) with pins wired by NAME (nets), no layout.
+- `connect`/`label`/`no_connect` edit connectivity incrementally; never touch layout.
+- `arrange{refs|block|region, intent}` lays out a set of symbols locally and draws their wires FROM
+  THE NETLIST (so it cannot change connectivity, hence never refuses on that ground); reports overlap
+  and unrouted nets it left as labels.
+- `place_parts` = `add_parts` + `arrange` convenience; unresolved footprints/aliases never block.
+- Workflow phases: power entry → regulator → MCU core (decoupling, crystal, reset, boot) → interfaces →
+  connectors/indicators; render after each; the VLM critic judges against human references.
+- Later lever for looks: idiom tiles (hand-designed sub-layouts with pre-drawn wires for common
+  motifs) arranged as rigid units.
+
+## Harness (quality first)
+- Rubric: complete (all requested parts), ERC 0 / DRC 0 / unconnected 0, fab files, sch critic ≥ 8,
+  pcb critic ≥ 8, human-look judge on the render. `agent_seconds` recorded, not a check.
+- Multi-turn continuation: when a turn ends on the wall clock the harness sends "continue" (bounded
+  number of turns) and grades the final state; the transcript shows the phases.
+- Per-phase render gallery in artifacts; findings harvest per phase.
+
+## Lanes
+- W1 (Opus) PCB partial-state model + progress checks + blockers report + locks; whole-board forms
+  removed; tests on corpus boards incl. mcu-board (27) and soc-system (69).
+- W2 (codex) PCB workflow prompt + continuation across turns + per-phase render; harness rubric.
+- W3 (Opus) Schematic bench/`add_parts` + netlist-drawn `arrange` + `place_parts` as convenience.
+- W4 (codex) Harness: quality-first rubric, multi-turn continuation, phase gallery, human-look judge.
+- Later: idiom tiles; parallel subagents per block for speed.
+
+## Review deltas (fresh-context Opus, 2026-09-02) — adopted
+- FIRST (W0): partial commit + progress on `place_parts` and `sync_board`. `place_parts` never rejects a
+  whole payload: malformed intent entries dropped with warnings; parts whose pins cannot resolve go to
+  the bench and are reported; `dangling` NEVER refuses (bulk.rs:287 contradicts prompts.rs:23); an
+  engine short (`refused_place`) commits connectivity and leaves the symbols on the bench instead of
+  discarding the netlist. `sync_board` syncs compatible parts and stages mismatched ones (sync.rs:359).
+- Delete the three PCB preconditions: `route_board` refusing on any DRC violation (route.rs:500) and
+  while parts are unplaced (route.rs:254); `place_board` refusing when nothing is unplaced (place.rs:2517).
+  Keep `place_board{refs|bbox}` / `route_board{nets|bbox}` signatures (no rename; whole-board = all).
+- Staging = the existing seed row (snapshot.rs:79) + `staged_reason`; staged parts excluded from DRC and
+  gerbers; `check_board` reports `staged: n` as progress. No second `gordian:staged` property.
+- Ratsnest shape, one for `get_board{net}` and `route_board`: `{net, from:{ref,pad,x,y,layer}, to:{…},
+  status: open|routed|blocked, blocker?:{kind: pad|track|via|zone|courtyard, owner_ref, net, layer, at,
+  gap_mm, need_mm}, escapes:[…]}` built on diagnose.rs unrouted_report/obstruction_between.
+- Locks = KiCAD native `locked` + `locked_reason: mechanical|agent|user` (revocable).
+- Revisions carry `{id, tool, refs_touched, label}`; `checkpoint{label}`; every mutator accepts
+  `expect_revision` (optimistic concurrency) → parallel subagents later; `reserve_refs{prefix,count}`;
+  each block gets its own bench rectangle; no tool may depend on in-process session memory.
+- Bench (schematic) = reserved rectangle + `gordian:bench=1`; excluded from check/critic/render; bench
+  pins carry net labels; `export_fab`/done FAIL while non-empty.
+- Workflow: pour GND + fan out vias EARLY (phase 3/4, not last); add explicit layer-count choice and
+  header/GPIO pin-swap back into the schematic as phase-4 levers (the 2×20-header + QFN board fails at
+  the QFN escape otherwise; `escape_bottleneck` already detects it).
+- Cut: `place_parts_pcb` rename; idiom tiles deferred until the first typesetter is honest.
+
+## Status 2026-09-02 (evening)
+- Merged: place-accept (pin aliases, non-blocking footprints, lenient intent, shared footprint policy;
+  refusals 9/11→3/10 stm32, 12/15→2/6 esp32), W4 harness (quality-first gates, `--max-turns`
+  continuation, `turns[]`, gallery.html, human-look judge vs KiCAD demos — small cases score 4–5/10).
+- Running: W1 PCB partial state (Opus), W2 workflow phases + handoff (codex), engine-shorts (Opus),
+  bluepill-erc (Opus). Next: W3 schematic bench + netlist-drawn arrange + place_parts partial commit
+  (after bluepill merges); then a full campaign under the new rubric.

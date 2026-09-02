@@ -19,6 +19,8 @@ at 3 whatever the judge thought.
 import argparse
 import base64
 from datetime import datetime, timezone
+import hashlib
+import html
 import json
 import math
 import mimetypes
@@ -38,6 +40,11 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = Path(__file__).resolve().parent / "cases"
+REFERENCES = Path(__file__).resolve().parent / "references"
+KICAD_DEMOS = Path(
+    "/home/mimi/agent/.local/kicad-10.0.4/AppDir/usr/share/kicad/demos"
+)
+VALIDATED_KICAD_CLIS = set()
 CAPPED_SCORE = 3
 FINDING_TAGS = (
     "tool-contract",
@@ -48,6 +55,40 @@ FINDING_TAGS = (
     "self-diagnosis",
     "variance",
 )
+
+
+def platform_config():
+    """The same platform configuration used by Gordian itself."""
+    config_root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    config_path = config_root / "gordian" / "config.toml"
+    try:
+        return tomllib.loads(config_path.read_text(encoding="utf-8")), config_path
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise RuntimeError(f"cannot read Gordian configuration from {config_path}: {error}") from error
+
+
+def kicad_cli():
+    """Configured KiCad 10 command-line executable."""
+    cli = os.environ.get("KICAD_CLI")
+    if not cli:
+        config, config_path = platform_config()
+        cli = config.get("kicad", {}).get("cliPath")
+        if not cli:
+            raise RuntimeError(f"set kicad.cliPath to KiCad 10 in {config_path}")
+    cli = str(Path(cli).expanduser())
+    if cli in VALIDATED_KICAD_CLIS:
+        return cli
+    try:
+        version = subprocess.run(
+            [cli, "--version"], text=True, capture_output=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f"cannot run configured KiCad CLI {cli}: {error}") from error
+    if version.returncode or not version.stdout.strip().startswith("10."):
+        detail = (version.stdout or version.stderr).strip()
+        raise RuntimeError(f"configured KiCad CLI must be version 10, got {detail!r}")
+    VALIDATED_KICAD_CLIS.add(cli)
+    return cli
 
 
 def command(args, *, timeout=600, check=True, env=None, input_text=None):
@@ -272,7 +313,7 @@ def kicad_partition(schematic, out_path):
     where a wire passing behind a symbol reads as a short that is not there."""
     result = command(
         [
-            "kicad-cli", "sch", "export", "netlist",
+            kicad_cli(), "sch", "export", "netlist",
             "--format", "kicadxml", "-o", str(out_path), str(schematic),
         ],
         check=False,
@@ -452,7 +493,7 @@ def run_check(kind, design, report_path):
         return None
     result = command(
         [
-            "kicad-cli", kind, "erc" if kind == "sch" else "drc",
+            kicad_cli(), kind, "erc" if kind == "sch" else "drc",
             "--format", "json", "--severity-all", "--output", str(report_path),
             str(design),
         ],
@@ -492,7 +533,7 @@ def severity_counts(report, prefix):
 BOARD_TOOLS = {
     "sync_board", "place_board", "route_board", "check_board", "export_fab",
     "move_parts", "route_track", "delete_copper", "set_net_width",
-    "update_board_outline", "render_board", "open_board",
+    "update_board_outline", "render_board",
 }
 
 # The tools that own board geometry. A refusal here is the board contract
@@ -683,11 +724,10 @@ def extract_object(text, key="score"):
 
 
 def llm_config():
-    config_root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    config_path = config_root / "gordian" / "config.toml"
+    config, config_path = platform_config()
     try:
-        llm = tomllib.loads(config_path.read_text(encoding="utf-8"))["llm"]
-    except (OSError, KeyError, tomllib.TOMLDecodeError) as error:
+        llm = config["llm"]
+    except KeyError as error:
         raise RuntimeError(
             f"cannot read judge configuration from {config_path}: {error}"
         ) from error
@@ -697,6 +737,161 @@ def llm_config():
     if not base or not key or not model:
         raise RuntimeError(f"set llm.endpoint, llm.apiKey, and llm.model in {config_path}")
     return base, key, model
+
+
+def demo_instance_count(path, kind):
+    """Cheap size proxy for choosing a similarly dense human demo."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    pattern = r"^\s*\(symbol\s*$" if kind == "schematic" else r"^\s*\(footprint\s+"
+    return len(re.findall(pattern, text, re.M))
+
+
+def closest_demo(kind, target_count):
+    suffix = ".kicad_sch" if kind == "schematic" else ".kicad_pcb"
+    candidates = []
+    if KICAD_DEMOS.is_dir():
+        for path in KICAD_DEMOS.rglob(f"*{suffix}"):
+            count = demo_instance_count(path, kind)
+            if count:
+                candidates.append(
+                    (abs(count - target_count), path.stat().st_size, count, str(path), path)
+                )
+    if not candidates:
+        raise RuntimeError(f"no KiCad demo {kind} references found under {KICAD_DEMOS}")
+    _, _, count, _, path = min(candidates)
+    return path, count
+
+
+def reference_render(kind, target_count):
+    """Render and cache the closest-size KiCad demo using configured KiCad 10."""
+    source, count = closest_demo(kind, target_count)
+    digest = hashlib.sha256(str(source).encode()).hexdigest()[:10]
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", source.stem).strip("-")
+    REFERENCES.mkdir(parents=True, exist_ok=True)
+    render_style = "" if kind == "schematic" else "-plot"
+    png = REFERENCES / f"{kind}-{count}-{stem}-{digest}{render_style}.png"
+    svg = REFERENCES / f"{kind}-{count}-{stem}-{digest}.svg"
+    if not png.is_file():
+        if kind == "schematic":
+            with tempfile.TemporaryDirectory(prefix="gordian-quality-reference-") as temporary:
+                export = Path(temporary)
+                result = command(
+                    [
+                        kicad_cli(), "sch", "export", "svg", "--output", str(export),
+                        "--exclude-drawing-sheet", str(source),
+                    ],
+                    timeout=180,
+                    check=False,
+                )
+                rendered = sorted(export.glob("*.svg"))
+                if result.returncode or not rendered:
+                    detail = (result.stderr or result.stdout).strip()
+                    raise RuntimeError(f"KiCad demo schematic render failed: {detail}")
+                shutil.copy2(rendered[0], svg)
+                # Keep the required KiCad SVG as the reference source. Poppler
+                # rasterizes an equivalent KiCad PDF for gateways that reject
+                # SVG image inputs; ImageMagick cannot reliably parse KiCad's
+                # deeply nested text and embedded bitmap constructs.
+                pdf = export / "reference.pdf"
+                pdf_result = command(
+                    [
+                        kicad_cli(), "sch", "export", "pdf", "--output", str(pdf),
+                        "--exclude-drawing-sheet", str(source),
+                    ],
+                    timeout=180,
+                    check=False,
+                )
+                if pdf_result.returncode or not pdf.is_file():
+                    detail = (pdf_result.stderr or pdf_result.stdout).strip()
+                    raise RuntimeError(f"KiCad demo schematic PDF render failed: {detail}")
+                raster = export / "reference"
+                command(
+                    ["pdftoppm", "-png", "-singlefile", "-r", "144", str(pdf), str(raster)],
+                    timeout=180,
+                )
+                shutil.copy2(export / "reference.png", png)
+        else:
+            with tempfile.TemporaryDirectory(prefix="gordian-quality-reference-") as temporary:
+                project = Path(temporary)
+                shutil.copy2(source, project / "design.kicad_pcb")
+                rendered = capture_render(project, "render_board", project / "reference.png")
+                if not rendered.get("path"):
+                    raise RuntimeError(
+                        f"KiCad demo PCB render failed: {rendered.get('error', 'no image')}"
+                    )
+                shutil.copy2(rendered["path"], png)
+    return {"path": str(png), "source": str(source), "part_count": count}
+
+
+def human_look_judge(kind, rendered, target_count, llm):
+    """Compare one final render with a closest-size human-authored KiCad demo."""
+    path = rendered.get("path")
+    if not path:
+        return {
+            "score": None,
+            "worst_three": [],
+            "what_a_human_would_change": [],
+            "error": rendered.get("error", f"no {kind} render"),
+        }
+    reference = reference_render(kind, target_count)
+    base, key, model = llm
+    text = f"""Compare the FIRST image, an agent-created KiCad {kind}, with the SECOND
+image, a human-authored KiCad demo chosen only because it has a comparable part
+count. Judge visual organization and drafting/layout craft, not whether the two
+circuits implement the same function. Be strict but size-aware. A score of 8 means
+the agent result looks like competent human engineering work; 10 means exemplary.
+
+Return only JSON with this exact shape:
+{{"score": 0, "worst_three": [], "what_a_human_would_change": []}}
+
+Score must be an integer from 1 to 10. Both arrays must contain short, concrete,
+actionable strings, with at most three entries each. Do not report electrical,
+ERC, DRC, or connectivity claims from pixels."""
+    body = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a senior electronics drafter comparing visual workmanship.",
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": text},
+                    {"type": "text", "text": f"Agent {kind} under review"},
+                    image_part(path),
+                    {"type": "text", "text": f"Human demo reference ({reference['part_count']} parts)"},
+                    image_part(reference["path"]),
+                ],
+            },
+        ],
+        "max_tokens": 3000,
+    }
+    request = urllib.request.Request(
+        f"{base}/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=240) as response:
+        payload = json.loads(response.read())
+    verdict = extract_object(
+        payload["choices"][0]["message"].get("content") or ""
+    )
+    score = verdict.get("score")
+    worst = verdict.get("worst_three")
+    changes = verdict.get("what_a_human_would_change")
+    if not isinstance(score, int) or isinstance(score, bool) or not 1 <= score <= 10:
+        raise ValueError(f"invalid human-look score: {score!r}")
+    if not isinstance(worst, list) or not all(isinstance(item, str) for item in worst):
+        raise ValueError(f"invalid human-look worst_three: {worst!r}")
+    if not isinstance(changes, list) or not all(isinstance(item, str) for item in changes):
+        raise ValueError(f"invalid human-look changes: {changes!r}")
+    return {
+        "score": score,
+        "worst_three": worst[:3],
+        "what_a_human_would_change": changes[:3],
+        "reference": reference,
+    }
 
 
 def judge(prompt, rubric, facts, checks, renders, llm):
@@ -954,6 +1149,11 @@ REQUEST_CAP = re.compile(r"ProviderRequestLimit\s*\{\s*requests:\s*(\d+)\s*\}")
 REFUSAL = re.compile(r"\brefus(?:e|ed|al|ing)\b", re.IGNORECASE)
 TURN_STARTED = re.compile(r"^turn (?P<turn>\d+): (?P<prompt>.*)$")
 TURN_DONE = re.compile(r"^turn (?P<turn>\d+) done:")
+ASSISTANT_TEXT = re.compile(r"^assistant:\s*(.+)$", re.M)
+BUDGET_STOP = re.compile(
+    r"^Stopped after (?:the turn spent its \d+s wall-clock budget|"
+    r"the model exhausted the per-turn request safety limit)\b"
+)
 
 
 def parse_agent_stderr(stderr):
@@ -1061,6 +1261,8 @@ def parse_agent_stderr(stderr):
         index = end
 
     cap = REQUEST_CAP.search(text)
+    assistant_messages = ASSISTANT_TEXT.findall(text)
+    final_assistant = assistant_messages[-1].strip() if assistant_messages else ""
     return {
         "tool_calls": calls,
         "requests": requests,
@@ -1074,6 +1276,142 @@ def parse_agent_stderr(stderr):
         "errors": errors,
         "repeated_calls": repeated,
         "request_cap_hit": int(cap.group(1)) if cap else None,
+        "final_assistant": final_assistant,
+        "budget_stop": bool(BUDGET_STOP.match(final_assistant)),
+    }
+
+
+def phase_health(project, artifacts, number):
+    schematic = first_schematic(project)
+    board = next(iter(sorted(project.glob("*.kicad_pcb"))), None)
+    erc = run_check("sch", schematic, artifacts / f"phase-{number}-erc.json")
+    drc = run_check("pcb", board, artifacts / f"phase-{number}-drc.json")
+    health = {
+        "schematic_created": schematic is not None,
+        "pcb_created": board is not None,
+        **severity_counts(erc, "erc"),
+        **severity_counts(drc, "drc"),
+    }
+    if isinstance(drc, dict) and "error" not in drc:
+        health["unconnected_items"] = len(drc.get("unconnected_items", []))
+    return health
+
+
+def requested_outputs(prompt):
+    lowered = prompt.lower()
+    return {
+        "pcb": bool(re.search(r"\bpcb\b|\bboard\b", lowered)),
+        "fab": "fabrication" in lowered or "gerber" in lowered,
+    }
+
+
+def missing_deliverable(project, prompt, health):
+    requested = requested_outputs(prompt)
+    missing = []
+    if not health.get("schematic_created"):
+        missing.append("the schematic is missing")
+    elif health.get("erc_check_error") or health.get("erc_errors") != 0:
+        missing.append("a clean ERC check is missing")
+    if requested["pcb"]:
+        if not health.get("pcb_created"):
+            missing.append("the PCB is missing")
+        else:
+            if health.get("drc_check_error") or health.get("drc_errors") != 0:
+                missing.append("a clean DRC check is missing")
+            if health.get("unconnected_items") != 0:
+                missing.append("the PCB still has unconnected items")
+    if requested["fab"]:
+        fab = project / "fab"
+        if not fab.is_dir() or len(list(fab.glob("*"))) < 3:
+            missing.append("fabrication files are missing")
+    return missing
+
+
+def write_gallery(artifacts, phases):
+    cards = []
+    for phase in phases:
+        caption = (
+            f"Turn {phase['turn']} · {phase['tool_call_count']} tool calls · "
+            f"ERC {phase['health'].get('erc_errors', '?')} errors · "
+            f"DRC {phase['health'].get('drc_errors', '?')} errors"
+        )
+        images = []
+        for kind in ("schematic", "pcb"):
+            rendered = phase.get("renders", {}).get(kind, {})
+            if rendered.get("path"):
+                relative = Path(rendered["path"]).relative_to(artifacts)
+                images.append(
+                    f'<figure><img src="{html.escape(str(relative))}" '
+                    f'alt="Turn {phase["turn"]} {kind}"><figcaption>{kind}</figcaption></figure>'
+                )
+            else:
+                images.append(
+                    f'<figure class="missing"><div>No {kind} render</div><figcaption>{kind}</figcaption></figure>'
+                )
+        cards.append(
+            f'<section><h2>{html.escape(caption)}</h2><div class="pair">'
+            + "".join(images)
+            + "</div></section>"
+        )
+    document = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Gordian phase gallery</title>
+<style>
+body{font:15px system-ui,sans-serif;margin:24px;background:#17191d;color:#eee}
+section{margin:0 0 32px}h1,h2{font-weight:600}h2{font-size:16px;color:#bbb}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}figure{margin:0;background:#fff;padding:8px;color:#222}
+img{display:block;width:100%;height:auto}.missing div{display:grid;min-height:220px;place-items:center;color:#777}
+figcaption{text-align:center;padding-top:6px;text-transform:capitalize}@media(max-width:800px){.pair{grid-template-columns:1fr}}
+</style></head><body><h1>Design phases</h1>""" + "".join(cards) + "</body></html>\n"
+    (artifacts / "gallery.html").write_text(document, encoding="utf-8")
+
+
+def turn_record(number, prompt, result, seconds, parsed, phase):
+    transcript = parsed.get("turns", [])
+    transcript = transcript[-1].get("transcript", []) if transcript else []
+    return {
+        "turn": number,
+        "prompt": prompt,
+        "exit": result.returncode,
+        "seconds": seconds,
+        "requests": parsed["request_count"],
+        "request_details": parsed["requests"],
+        "tool_calls": parsed["tool_calls"],
+        "refusals": parsed["refusals"],
+        "errors": parsed["errors"],
+        "repeated_calls": parsed["repeated_calls"],
+        "request_cap_hit": parsed["request_cap_hit"],
+        "final_assistant": parsed["final_assistant"],
+        "budget_stop": parsed["budget_stop"],
+        "health": phase["health"],
+        "renders": phase["renders"],
+        "transcript": transcript,
+    }
+
+
+def aggregate_turn_facts(turns):
+    requests = []
+    calls = []
+    refusals = []
+    errors = []
+    repeated = []
+    for turn in turns:
+        requests.extend({"turn": turn["turn"], **item} for item in turn["request_details"])
+        calls.extend({"turn": turn["turn"], **item} for item in turn["tool_calls"])
+        refusals.extend({"turn": turn["turn"], **item} for item in turn["refusals"])
+        errors.extend({"turn": turn["turn"], **item} for item in turn["errors"])
+        repeated.extend({"turn": turn["turn"], **item} for item in turn["repeated_calls"])
+    return {
+        "turns": turns,
+        "request_count": sum(turn["requests"] for turn in turns),
+        "requests": requests,
+        "tool_call_details": calls,
+        "refusals": refusals,
+        "errors": errors,
+        "repeated_calls": repeated,
+        "request_cap_hit": next(
+            (turn["request_cap_hit"] for turn in reversed(turns) if turn["request_cap_hit"]),
+            None,
+        ),
     }
 
 
@@ -1095,12 +1433,23 @@ def run_agent(project, prompt, timeout, env, multiple=False):
         return subprocess.CompletedProcess(args, 124, stdout, stderr)
 
 
-def run_case(case, output_root):
+def prompt_lines(path):
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and line.strip() != "---" and not line.lstrip().startswith("#")
+    ]
+
+
+def run_case(case, output_root, max_turns):
     started = time.time()
     prompts_path = case / "prompts.txt"
-    multiple = prompts_path.is_file()
-    prompt_path = prompts_path if multiple else case / "prompt.txt"
-    prompt = prompt_path.read_text(encoding="utf-8").strip()
+    queued_prompts = (
+        prompt_lines(prompts_path)
+        if prompts_path.is_file()
+        else [(case / "prompt.txt").read_text(encoding="utf-8").strip()]
+    )
+    prompt = "\n".join(queued_prompts)
     rubric, checks = parse_rubric((case / "rubric.txt").read_text(encoding="utf-8"))
     run_dir = output_root / case.name
     if run_dir.exists():
@@ -1125,45 +1474,81 @@ def run_case(case, output_root):
     shutil.copytree(project, before_project)
     renders = {"before": render_project(project, artifacts, "before")}
 
-    agent_started = time.time()
-    result = run_agent(
-        project,
-        prompt,
-        int(os.environ.get("QUALITY_TIMEOUT", "900")),
-        {**os.environ, "GORDIAN_THREAD_ID": f"quality-{case.name}-{int(started)}"},
-        multiple=multiple,
-    )
-    agent_seconds = round(time.time() - agent_started, 1)
-    (artifacts / "agent.stdout.txt").write_text(result.stdout, encoding="utf-8")
-    (artifacts / "agent.stderr.txt").write_text(result.stderr, encoding="utf-8")
-    transcript_facts = parse_agent_stderr(result.stderr)
-    result_path.write_text(
-        json.dumps(
-            {
-                "case": case.name,
-                "started_utc": started_utc,
-                "_started_epoch": started,
-                "agent_exit": result.returncode,
-                "agent_seconds": agent_seconds,
-                "elapsed_seconds": round(time.time() - started, 1),
-                **transcript_facts,
-            },
-            indent=2,
+    turns = []
+    phases = []
+    stdout_parts = []
+    stderr_parts = []
+    result = None
+    thread_id = f"quality-{case.name}-{int(started)}"
+    current_prompt = queued_prompts.pop(0)
+    while current_prompt and len(turns) < max_turns:
+        number = len(turns) + 1
+        agent_started = time.time()
+        result = run_agent(
+            project,
+            current_prompt,
+            int(os.environ.get("QUALITY_TIMEOUT", "900")),
+            {**os.environ, "GORDIAN_THREAD_ID": thread_id},
+            multiple=number > 1 or prompts_path.is_file(),
         )
-        + "\n",
-        encoding="utf-8",
+        seconds = round(time.time() - agent_started, 1)
+        (artifacts / f"agent.turn-{number}.stdout.txt").write_text(
+            result.stdout, encoding="utf-8"
+        )
+        (artifacts / f"agent.turn-{number}.stderr.txt").write_text(
+            result.stderr, encoding="utf-8"
+        )
+        stdout_parts.append(result.stdout)
+        stderr_parts.append(result.stderr)
+        parsed = parse_agent_stderr(result.stderr)
+        phase = {
+            "turn": number,
+            "tool_call_count": len(parsed["tool_calls"]),
+            "health": phase_health(project, artifacts, number),
+            "renders": render_project(project, artifacts, f"phase-{number}"),
+        }
+        phases.append(phase)
+        turns.append(turn_record(number, current_prompt, result, seconds, parsed, phase))
+        write_gallery(artifacts, phases)
+        partial = {
+            "case": case.name,
+            "started_utc": started_utc,
+            "_started_epoch": started,
+            "agent_exit": result.returncode,
+            "agent_seconds": round(sum(turn["seconds"] for turn in turns), 1),
+            "elapsed_seconds": round(time.time() - started, 1),
+            **aggregate_turn_facts(turns),
+        }
+        result_path.write_text(json.dumps(partial, indent=2) + "\n", encoding="utf-8")
+
+        if queued_prompts:
+            current_prompt = queued_prompts.pop(0)
+            continue
+        missing = missing_deliverable(project, prompt, phase["health"])
+        if parsed["budget_stop"] and missing and len(turns) < max_turns:
+            current_prompt = "continue from the current state: " + "; ".join(missing)
+            continue
+        current_prompt = None
+
+    if result is None:
+        raise RuntimeError("case supplied no agent prompts")
+    agent_seconds = round(sum(turn["seconds"] for turn in turns), 1)
+    (artifacts / "agent.stdout.txt").write_text(
+        "\n".join(stdout_parts), encoding="utf-8"
     )
+    (artifacts / "agent.stderr.txt").write_text(
+        "\n".join(stderr_parts), encoding="utf-8"
+    )
+    turn_facts = aggregate_turn_facts(turns)
 
     facts, detail = deterministic_facts(project, before_project, artifacts, result)
-    renders["after"] = render_project(project, artifacts, "after")
+    renders["after"] = phases[-1]["renders"]
     facts.update(schematic_visual_facts(renders) if first_schematic(project) else {})
-    facts.update(transcript_facts)
+    facts.update(turn_facts)
     facts["elapsed_seconds"] = round(time.time() - started, 1)
-    outcome = evaluate_checks(checks, facts)
     report = {
         "case": case.name,
         "started_utc": started_utc,
-        "checks": outcome,
         "agent_seconds": agent_seconds,
         "elapsed_seconds": round(time.time() - started, 1),
         **facts,
@@ -1177,12 +1562,6 @@ def run_case(case, output_root):
         llm = llm_config()
     except Exception as error:
         llm = None
-        report["judge"] = {"score": None, "issues": [], "error": str(error)}
-    else:
-        try:
-            report["judge"] = judge(prompt, rubric, facts, outcome, renders, llm)
-        except Exception as error:
-            report["judge"] = {"score": None, "issues": [], "error": str(error)}
 
     for kind in ("schematic", "pcb"):
         key = f"critic_{kind}"
@@ -1201,13 +1580,73 @@ def run_case(case, output_root):
             except Exception as error:
                 report[key] = {"score": None, "issues": [], "error": str(error)}
 
+    human_look = {}
+    for kind, count_name in (
+        ("schematic", "symbol_count"),
+        ("pcb", "board_part_count"),
+    ):
+        rendered = renders.get("after", {}).get(kind, {})
+        if not rendered.get("path"):
+            human_look[kind] = human_look_judge(
+                kind, rendered, int(facts.get(count_name, 0)), llm
+            )
+        elif llm is None:
+            human_look[kind] = {
+                "score": None,
+                "worst_three": [],
+                "what_a_human_would_change": [],
+                "error": "judge credentials unavailable",
+            }
+        else:
+            try:
+                human_look[kind] = human_look_judge(
+                    kind, rendered, int(facts.get(count_name, 0)), llm
+                )
+            except Exception as error:
+                human_look[kind] = {
+                    "score": None,
+                    "worst_three": [],
+                    "what_a_human_would_change": [],
+                    "error": str(error),
+                }
+    facts["human_look"] = human_look
+    facts["schematic_critic_score"] = report["critic_schematic"].get("score")
+    facts["pcb_critic_score"] = report["critic_pcb"].get("score")
+    facts["human_look_schematic_score"] = human_look["schematic"].get("score")
+    facts["human_look_pcb_score"] = human_look["pcb"].get("score")
+    report.update(facts)
+    outcome = evaluate_checks(checks, facts)
+    report["checks"] = outcome
+
     if llm is None:
-        report["self_diagnosis"] = {"error": "judge credentials unavailable"}
+        report["judge"] = {"score": None, "issues": [], "error": "judge credentials unavailable"}
     else:
         try:
-            report["self_diagnosis"] = self_diagnose(prompt, result.stderr, llm)
+            report["judge"] = judge(prompt, rubric, facts, outcome, renders, llm)
         except Exception as error:
-            report["self_diagnosis"] = {"error": str(error)}
+            report["judge"] = {"score": None, "issues": [], "error": str(error)}
+
+    aggregate_diagnosis = {"struggles": [], "wishes": []}
+    for turn in turns:
+        if llm is None:
+            diagnosis = {"error": "judge credentials unavailable"}
+        else:
+            try:
+                transcript = (
+                    artifacts / f"agent.turn-{turn['turn']}.stderr.txt"
+                ).read_text(encoding="utf-8", errors="replace")
+                diagnosis = self_diagnose(turn["prompt"], transcript, llm)
+            except Exception as error:
+                diagnosis = {"error": str(error)}
+        turn["self_diagnosis"] = diagnosis
+        aggregate_diagnosis["struggles"].extend(
+            f"turn {turn['turn']}: {item}" for item in diagnosis.get("struggles", [])
+        )
+        aggregate_diagnosis["wishes"].extend(
+            f"turn {turn['turn']}: {item}" for item in diagnosis.get("wishes", [])
+        )
+    report["turns"] = turns
+    report["self_diagnosis"] = aggregate_diagnosis
 
     report["judge_score"] = report["judge"]["score"]
     if report["judge_score"] is not None:
@@ -1218,6 +1657,7 @@ def run_case(case, output_root):
         )
     report["elapsed_seconds"] = round(time.time() - started, 1)
     result_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    write_gallery(artifacts, phases)
     write_case_findings(run_dir, report)
     return report
 
@@ -1296,19 +1736,27 @@ def findings_for(report):
         if result.get("error"):
             findings.append(("harness", f"{kind} critic unavailable: {result['error']}"))
 
+        human = report.get("human_look", {}).get(kind, {})
+        for issue in human.get("worst_three", []):
+            findings.append(("judge", f"{kind} human-look: {issue}"))
+        if human.get("error") and not human.get("error", "").startswith(f"no {kind} render"):
+            findings.append(("harness", f"{kind} human-look unavailable: {human['error']}"))
+
     for signal_name, label in (("errors", "error"), ("refusals", "refusal")):
         for signal in report.get(signal_name, []):
+            turn = f"turn {signal['turn']} " if signal.get("turn") else ""
             findings.append(
                 (
                     "tool-contract",
-                    f"tool `{signal['tool']}` {label}: {signal['message']}",
+                    f"{turn}tool `{signal['tool']}` {label}: {signal['message']}",
                 )
             )
     for smell in report.get("repeated_calls", []):
+        turn = f"turn {smell['turn']} " if smell.get("turn") else ""
         findings.append(
             (
                 "prompt",
-                f"loop smell: tool `{smell['tool']}` called {smell['count']} times in a row",
+                f"{turn}loop smell: tool `{smell['tool']}` called {smell['count']} times in a row",
             )
         )
 
@@ -1332,8 +1780,32 @@ def findings_for(report):
 
 
 def write_case_findings(run_dir, report):
-    lines = [f"# Findings: {report['case']}", ""]
+    lines = [
+        f"# Findings: {report['case']}",
+        "",
+        "[Phase gallery](artifacts/gallery.html)",
+        "",
+    ]
     lines.extend(f"- [{tag}] {text}" for tag, text in findings_for(report))
+    human_look = report.get("human_look", {})
+    lines.extend(["", "## Human look", ""])
+    for kind in ("schematic", "pcb"):
+        verdict = human_look.get(kind, {})
+        lines.extend([
+            f"### {kind.title()}",
+            "",
+            f"Score: {verdict.get('score', '-')} / 10",
+            "",
+        ])
+        if verdict.get("reference"):
+            lines.append(f"Reference: `{verdict['reference']['source']}`")
+            lines.append("")
+        for issue in verdict.get("worst_three", []):
+            lines.append(f"- Worst: {issue}")
+        for change in verdict.get("what_a_human_would_change", []):
+            lines.append(f"- Human change: {change}")
+        if verdict.get("error"):
+            lines.append(f"- Unavailable: {verdict['error']}")
     for turn in report.get("turns", []):
         lines.extend([
             "",
@@ -1406,8 +1878,8 @@ def aggregate_findings(reports, output_root, suite, questions):
 
 
 COLUMNS = [
-    "case", "score", "sch critic", "pcb critic", "checks", "erc e/w", "moved",
-    "lost", "added", "pcb moved", "elapsed",
+    "case", "score", "sch critic", "pcb critic", "human look", "checks", "erc e/w",
+    "moved", "lost", "added", "pcb moved", "turns", "agent s", "elapsed s",
 ]
 
 
@@ -1420,12 +1892,19 @@ def critic_score(report, kind):
     return "-" if score is None else str(score)
 
 
+def human_look_score(report):
+    verdicts = report.get("human_look", {})
+    values = []
+    for kind in ("schematic", "pcb"):
+        score = verdicts.get(kind, {}).get("score")
+        values.append("-" if score is None else str(score))
+    return "/".join(values)
+
+
 def row(report):
     if "error" in report:
-        return [
-            report["case"], "-", "-", "-", "-", "-", "-", "-", "-", "-",
-            report["error"][:60],
-        ]
+        values = [report["case"]] + ["-"] * (len(COLUMNS) - 2)
+        return values + [report["error"][:60]]
     checks = report["checks"]
     total = len(checks["pass"]) + len(checks["fail"])
     return [
@@ -1433,12 +1912,15 @@ def row(report):
         str(report.get("score", "-")),
         critic_score(report, "schematic"),
         critic_score(report, "pcb"),
+        human_look_score(report),
         f"{len(checks['pass'])}/{total}" if total else "-",
         f"{report.get('erc_errors', '?')}/{report.get('erc_warnings', '?')}",
         count(report, "unchanged_symbols_moved"),
         count(report, "fields_lost"),
         count(report, "symbols_added"),
         count(report, "board_parts_moved"),
+        str(len(report.get("turns", []))),
+        f"{report.get('agent_seconds', 0):.0f}s",
         f"{report['elapsed_seconds']:.0f}s",
     ]
 
@@ -1477,6 +1959,12 @@ def main():
     )
     parser.add_argument("--scoreboard", type=Path, help="write the scoreboard here too")
     parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=4,
+        help="maximum agent turns per case, including budget continuations (default: 4)",
+    )
+    parser.add_argument(
         "--question",
         action="append",
         default=[],
@@ -1484,6 +1972,8 @@ def main():
     )
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
+    if args.max_turns < 1:
+        parser.error("--max-turns must be at least 1")
 
     available = {path.name: path for path in CASES.iterdir() if path.is_dir()}
     if args.list:
@@ -1503,7 +1993,7 @@ def main():
     reports = []
     for name in selected:
         try:
-            report = run_case(available[name], output)
+            report = run_case(available[name], output, args.max_turns)
         except Exception as error:
             report = recover_failed_report(output, name, error)
             print(f"{name}: {error}", file=sys.stderr)
@@ -1526,6 +2016,11 @@ def main():
         or report.get("judge", {}).get("error")
         or report.get("critic_schematic", {}).get("error")
         or report.get("critic_pcb", {}).get("error")
+        or any(
+            verdict.get("error")
+            and not verdict["error"].startswith(f"no {kind} render")
+            for kind, verdict in report.get("human_look", {}).items()
+        )
         for report in reports
     )
     raise SystemExit(1 if broken else 0)

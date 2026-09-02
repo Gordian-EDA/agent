@@ -1,4 +1,4 @@
-//! Routing orchestration for the active KiCAD board: route generation, IPC copper
+//! Routing orchestration for saved KiCad boards: route generation, copper
 //! write-back, and route-result lint/triage.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -632,12 +632,7 @@ fn validate_written_plane_routes(
         return Ok(BTreeSet::new());
     }
     let path = ctx.pcb_path();
-    crate::export::materialize_zones_for_drc(
-        &path,
-        ctx.env(),
-        ctx.kicad(),
-        ctx.config().kicad.attach_running,
-    )
+    crate::export::materialize_zones_for_drc(&path, ctx.env())
     .map_err(|error| refusal(format!("could not refill routed copper zones: {error}")))?;
     let report = ctx
         .env()
@@ -651,12 +646,7 @@ fn validate_written_plane_routes(
     let fallback = route_rejected_planes(solve_view, result, &rejected);
     replace_route_atomically(ctx, full_view, &result.solution, layer_names, (1, 0))
         .map_err(|error| refusal(format!("could not replace rejected plane fanout: {error}")))?;
-    crate::export::materialize_zones_for_drc(
-        &path,
-        ctx.env(),
-        ctx.kicad(),
-        ctx.config().kicad.attach_running,
-    )
+    crate::export::materialize_zones_for_drc(&path, ctx.env())
     .map_err(|error| {
         refusal(format!(
             "could not refill zones after plane fallback: {error}"
@@ -824,22 +814,8 @@ fn replace_route_atomically(
     let original = std::fs::read(&path).map_err(|error| {
         format!("could not snapshot existing board before replacement: {error}")
     })?;
-    let replace = if ctx.config().kicad.attach_running {
-        let ipc_route = kicad_board::bridge_route(rp, solution);
-        match ctx.kicad().with_session(&path, |session| {
-            session
-                .kicad()
-                .replace_route_solution(&ipc_route, layer_names)
-        }) {
-            Ok(_) => Ok(()),
-            Err(live_error) => replace_route_offline(ctx, rp, solution, layer_names)
-                .map_err(|offline| format!("{live_error}; offline replacement failed: {offline}")),
-        }
-    } else {
-        replace_route_offline(ctx, rp, solution, layer_names)
-    };
+    let replace = replace_route_file(ctx, rp, solution, layer_names);
     if let Err(error) = replace {
-        ctx.close_kicad_session();
         write_board_atomically(&path, &original).map_err(|restore| {
             format!("{error}; restoring the prior board also failed: {restore}")
         })?;
@@ -850,13 +826,12 @@ fn replace_route_atomically(
     Ok(())
 }
 
-fn replace_route_offline(
+fn replace_route_file(
     ctx: &AgentRuntime,
     rp: &RoutingView,
     solution: &RouteSolution,
     layer_names: &[String],
 ) -> std::result::Result<(), String> {
-    ctx.close_kicad_session();
     let path = ctx.pcb_path();
     let text = std::fs::read_to_string(&path)
         .map_err(|error| format!("could not read the board: {error}"))?;
@@ -2419,7 +2394,7 @@ fn node_key(
 }
 
 fn quantize_mm(v: f64) -> i64 {
-    kicad_ipc::units::mm_to_nm(v)
+    (v * 1_000_000.0).round() as i64
 }
 
 fn write_route(
@@ -2428,30 +2403,16 @@ fn write_route(
     solution: &RouteSolution,
     layer_names: &[String],
 ) -> std::result::Result<(), String> {
-    if !ctx.config().kicad.attach_running {
-        return write_route_offline(ctx, rp, solution, layer_names);
-    }
-    let ipc_route = kicad_board::bridge_route(rp, solution);
-    let path = ctx.pcb_path();
-    let live = ctx.kicad().with_session(&path, |session| {
-        session
-            .kicad()
-            .create_route_solution(&ipc_route, layer_names)
-    });
-    let Err(live_err) = live else { return Ok(()) };
-    write_route_offline(ctx, rp, solution, layer_names)
-        .map_err(|err| format!("{live_err}; offline route write failed: {err}"))
+    write_route_file(ctx, rp, solution, layer_names)
 }
 
-/// Append one solution directly to the board file while preserving its copper.
-/// Drop the live session first so stale KiCad state cannot later overwrite it.
-pub(super) fn write_route_offline(
+/// Append one solution to the board file while preserving its copper.
+pub(super) fn write_route_file(
     ctx: &AgentRuntime,
     rp: &RoutingView,
     solution: &RouteSolution,
     layer_names: &[String],
 ) -> std::result::Result<(), String> {
-    ctx.close_kicad_session();
     kicad_board::append_copper_file(&ctx.pcb_path(), solution, rp.layer_count, layer_names)
 }
 
