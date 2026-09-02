@@ -116,7 +116,7 @@ fn segment_rect(a: Point2, b: Point2) -> Rect {
 }
 
 /// Perpendicular wire crossings, which are not connections.
-pub fn crossings(sheet: &Sheet) -> usize {
+fn crossings(sheet: &Sheet) -> usize {
     let boxes: Vec<Rect> = sheet.wires.iter().map(|w| segment_rect(w.a, w.b)).collect();
     geom::candidate_pairs(&boxes)
         .into_iter()
@@ -128,7 +128,7 @@ pub fn crossings(sheet: &Sheet) -> usize {
 }
 
 /// Wire segments that run through a part's body without terminating on it.
-pub fn through_bodies(sheet: &Sheet) -> usize {
+fn through_bodies(sheet: &Sheet) -> usize {
     let mut hits = 0;
     for body in sheet.part_bodies() {
         let rect = body.rect.inflate(-0.05);
@@ -152,7 +152,7 @@ pub fn through_bodies(sheet: &Sheet) -> usize {
 
 /// Corners: a point where exactly two wire ends meet at a right angle and
 /// nothing else is going on.
-pub fn bends(sheet: &Sheet) -> usize {
+fn bends(sheet: &Sheet) -> usize {
     let mut count = 0;
     for (node, wires) in &sheet.incident {
         if wires.len() != 2 || sheet.fixtures.contains(node) || sheet.pins_at.contains_key(node) {
@@ -167,8 +167,8 @@ pub fn bends(sheet: &Sheet) -> usize {
 }
 
 /// Text that overlaps other text, a part body, or a wire.
-pub fn text_collisions(sheet: &Sheet) -> usize {
-    let mut boxes: Vec<Rect> = sheet.texts.iter().map(|t| t.rect).collect();
+fn text_collisions(sheet: &Sheet) -> usize {
+    let mut boxes: Vec<Rect> = sheet.texts.clone();
     let text_count = boxes.len();
     boxes.extend(sheet.part_bodies().map(|b| b.rect));
     let mut count = 0;
@@ -182,14 +182,14 @@ pub fn text_collisions(sheet: &Sheet) -> usize {
             sheet
                 .wires
                 .iter()
-                .any(|w| Segment::new(w.a, w.b).axis_aligned_hits_rect_interior(&text.rect)),
+                .any(|w| Segment::new(w.a, w.b).axis_aligned_hits_rect_interior(text)),
         );
     }
     count
 }
 
 /// Part bodies that overlap, and part bodies too close for a wire to pass.
-pub fn spacing(sheet: &Sheet) -> (usize, usize) {
+fn spacing(sheet: &Sheet) -> (usize, usize) {
     let boxes: Vec<Rect> = sheet.part_bodies().map(|b| b.rect).collect();
     let near: Vec<Rect> = boxes.iter().map(|r| r.inflate(1.27)).collect();
     let (mut overlaps, mut crowded) = (0, 0);
@@ -205,7 +205,7 @@ pub fn spacing(sheet: &Sheet) -> (usize, usize) {
 
 /// Local labels standing in for a wire: a name used exactly twice, which is
 /// what a two-ended connection drawn as a name looks like.
-pub fn substitute_labels(sheet: &Sheet) -> usize {
+fn substitute_labels(sheet: &Sheet) -> usize {
     let mut uses: HashMap<&str, usize> = HashMap::new();
     for (node, name) in &sheet.label_names {
         if sheet.local_labels.contains(node) {
@@ -216,7 +216,7 @@ pub fn substitute_labels(sheet: &Sheet) -> usize {
 }
 
 /// Sum over small nets of the half-perimeter of the box their pins span.
-pub fn net_spread(sheet: &Sheet) -> f64 {
+fn net_spread(sheet: &Sheet) -> f64 {
     let mut by_net: HashMap<&str, Vec<Point2>> = HashMap::new();
     for pin in &sheet.pins {
         if let Some(net) = sheet.net_at(pin.at)
@@ -239,7 +239,7 @@ pub fn net_spread(sheet: &Sheet) -> f64 {
 ///
 /// A bank of decoupling caps or pull-ups a human drew is flush; the same parts
 /// scattered are not, and no wire-length term notices the difference.
-pub fn misalignment(sheet: &Sheet) -> f64 {
+fn misalignment(sheet: &Sheet) -> f64 {
     let mut banks: HashMap<&str, Vec<Point2>> = HashMap::new();
     for body in sheet.part_bodies() {
         banks

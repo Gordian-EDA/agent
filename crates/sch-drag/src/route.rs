@@ -114,7 +114,7 @@ impl<'a> Obstacles<'a> {
             .bodies
             .iter()
             .map(|b| b.rect.inflate(-0.05))
-            .chain(sheet.texts.iter().map(|t| t.rect.inflate(-0.05)))
+            .chain(sheet.texts.iter().map(|t| t.inflate(-0.05)))
             .collect();
 
         let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();

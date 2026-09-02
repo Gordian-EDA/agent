@@ -58,12 +58,6 @@ impl WireSeg {
     }
 }
 
-/// A text run drawn on the sheet, for the collision term.
-#[derive(Debug, Clone)]
-pub struct TextBox {
-    pub rect: Rect,
-}
-
 /// Everything derived once per sheet state.
 ///
 /// Building it costs one [`connect::scene`] pass; every query below is then a
@@ -73,7 +67,8 @@ pub struct Sheet {
     pub pins: Vec<PlacedPin>,
     pub bodies: Vec<Body>,
     pub wires: Vec<WireSeg>,
-    pub texts: Vec<TextBox>,
+    /// Text runs drawn on the sheet, for the collision term.
+    pub texts: Vec<Rect>,
     /// Net carried by each connection point on the sheet.
     pub node_net: HashMap<NodeKey, String>,
     /// Wire indices incident to a node.
@@ -166,13 +161,9 @@ impl Sheet {
                     if l.kind == LabelKind::Local {
                         local_labels.insert(key(l.at.point()));
                     }
-                    texts.push(TextBox {
-                        rect: label_extent(&l.text, l.at.point(), l.at.rot),
-                    });
+                    texts.push(label_extent(&l.text, l.at.point(), l.at.rot));
                 }
-                Item::Text(t) => texts.push(TextBox {
-                    rect: label_extent(&t.text, t.at.point(), t.at.rot),
-                }),
+                Item::Text(t) => texts.push(label_extent(&t.text, t.at.point(), t.at.rot)),
                 Item::Sheet(s) => {
                     for pin in &s.pins {
                         fixtures.insert(key(pin.at.point()));
@@ -201,9 +192,7 @@ impl Sheet {
                     && !field.hidden
                     && let Some(at) = field.at
                 {
-                    texts.push(TextBox {
-                        rect: field_extent(&field.value, at.point(), at.rot),
-                    });
+                    texts.push(field_extent(&field.value, at.point(), at.rot));
                 }
             }
         }
