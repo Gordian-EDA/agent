@@ -1196,13 +1196,12 @@ impl<P: Provider> Agent<P> {
                 let summary =
                     tool_summary(&call.fn_name, &call.fn_arguments, &parse_or_null(&content));
                 let result = parse_or_null(&content);
-                tracing::debug!(parent: &span, result = %result, "tool result payload");
+                tracing::debug!(parent: &span, content = %content, "tool result payload");
                 let elapsed_ms = millis(started.elapsed());
                 let revision = result.get("revision").and_then(serde_json::Value::as_u64);
                 span.record("elapsed_ms", elapsed_ms);
                 tracing::info!(
                     parent: &span,
-                    elapsed_ms,
                     revision,
                     "tool finished"
                 );
@@ -1562,7 +1561,7 @@ impl<P: Provider> Agent<P> {
         let summary = tool_summary(name, &input, &parsed);
         let elapsed_ms = millis(started.elapsed());
         span.record("elapsed_ms", elapsed_ms);
-        tracing::info!(parent: &span, elapsed_ms, "tool finished");
+        tracing::info!(parent: &span, "tool finished");
         emit_result_diagnostic(events, name, &parsed);
         emit(
             events,

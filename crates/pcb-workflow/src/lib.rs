@@ -96,7 +96,7 @@ impl Drop for WorkflowPhase {
             .as_millis()
             .min(u128::from(u64::MAX)) as u64;
         self.span.record("elapsed_ms", elapsed_ms);
-        tracing::info!(parent: &self.span, elapsed_ms, "PCB workflow phase finished");
+        tracing::info!(parent: &self.span, "PCB workflow phase finished");
     }
 }
 

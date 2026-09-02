@@ -431,7 +431,7 @@ fn live_phase<T>(phase: &'static str, parts: usize, nets: usize, run: impl FnOnc
         .as_millis()
         .min(u128::from(u64::MAX)) as u64;
     span.record("elapsed_ms", elapsed_ms);
-    tracing::info!(parent: &span, elapsed_ms, "schematic engine phase finished");
+    tracing::info!(parent: &span, "schematic engine phase finished");
     result
 }
 
