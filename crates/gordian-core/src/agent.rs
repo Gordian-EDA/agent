@@ -591,6 +591,19 @@ pub struct Agent<P: Provider = GenaiProvider> {
     /// Highest project phase observed in this session. Tool availability only
     /// expands, avoiding stale-history/provider mismatches.
     tool_phase: ToolPhase,
+    /// When the user's turn began, and what it has already spent. A turn is one
+    /// or more subturns — the model's own work plus each review round — and the
+    /// five-minute promise is made about all of them together, so the clock and
+    /// the request ceiling belong to the turn, not to whichever subturn is
+    /// running. `None` until a turn starts one.
+    turn_budget: Option<TurnClock>,
+}
+
+/// What a whole user turn has spent so far, shared by its subturns.
+#[derive(Clone, Copy)]
+struct TurnClock {
+    started: std::time::Instant,
+    provider_requests: usize,
 }
 
 impl<P: Provider> Agent<P> {
@@ -605,6 +618,7 @@ impl<P: Provider> Agent<P> {
             history: Vec::new(),
             turn_starts: Vec::new(),
             tool_phase,
+            turn_budget: None,
         }
     }
 
@@ -727,9 +741,18 @@ impl<P: Provider> Agent<P> {
     /// repeat, until the model returns a final text with no pending tool calls.
     #[tracing::instrument(skip_all, fields(history_messages = self.history.len()))]
     pub async fn run_turn(&mut self, user_msg: &str, events: Events<'_>) -> Result<TurnOutcome> {
+        self.begin_turn();
         let outcome = self.run_agent_subturn(user_msg, user_msg, events).await?;
         emit(events, AgentEvent::TurnDone);
         Ok(outcome)
+    }
+
+    /// Start a fresh whole-turn clock and request budget.
+    fn begin_turn(&mut self) {
+        self.turn_budget = Some(TurnClock {
+            started: std::time::Instant::now(),
+            provider_requests: 0,
+        });
     }
 
     async fn run_agent_subturn(
@@ -757,8 +780,12 @@ impl<P: Provider> Agent<P> {
         let mut successful_place_parts = 0usize;
         let mut check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
-        let started = std::time::Instant::now();
-        let mut provider_requests = 0usize;
+        let clock = *self.turn_budget.get_or_insert(TurnClock {
+            started: std::time::Instant::now(),
+            provider_requests: 0,
+        });
+        let started = clock.started;
+        let mut provider_requests = clock.provider_requests;
         let mut wrap_up_sent = false;
         let mut provider_error_retries_left = MAX_PROVIDER_ERROR_RETRIES;
         let mut stream_transport_available = true;
@@ -820,6 +847,9 @@ impl<P: Provider> Agent<P> {
                 }));
             }
             provider_requests += 1;
+            if let Some(budget) = self.turn_budget.as_mut() {
+                budget.provider_requests = provider_requests;
+            }
 
             self.tool_phase = self.tool_phase.max(ToolPhase::observe(&self.runtime));
             let revision_reads_used = revision_read_uses
@@ -872,6 +902,9 @@ impl<P: Provider> Agent<P> {
                             });
                         }
                         provider_requests += 1;
+            if let Some(budget) = self.turn_budget.as_mut() {
+                budget.provider_requests = provider_requests;
+            }
                         let end = self
                             .client
                             .complete(&self.system, &self.history, &defs)
@@ -1182,6 +1215,7 @@ impl<P: Provider> Agent<P> {
         events: Events<'_>,
         max_fix: usize,
     ) -> Result<TurnOutcome> {
+        self.begin_turn();
         let mut outcome = self.run_agent_subturn(user_msg, intent, events).await?;
         if !outcome.applied || outcome.stop_reason != StopReason::Completed {
             emit(events, AgentEvent::TurnDone);

@@ -503,3 +503,32 @@ fn place_parts_explains_the_relation_shapes_when_one_is_malformed() {
     assert!(message.contains("\"kind\":\"group\""), "{message}");
     assert!(message.contains("\"kind\":\"align\""), "{message}");
 }
+
+#[test]
+fn place_parts_accepts_the_engine_its_own_refusal_recommends() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    // The placement-failure refusal names an engine override as the way out, so
+    // the payload has to accept one; `deny_unknown_fields` used to reject it.
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({"engine": "anneal", "parts": [
+            {"ref": "R1", "part": "Device:R", "value": "10k", "pins": {"1": "A", "2": "B"}},
+            {"ref": "R2", "part": "Device:R", "value": "10k", "pins": {"1": "A", "2": "B"}}
+        ]}),
+    );
+    assert!(result.get("error").is_none(), "{result}");
+
+    let unknown = call(
+        &ctx,
+        "place_parts",
+        json!({"engine": "nonsense", "parts": [
+            {"ref": "R3", "part": "Device:R", "pins": {"1": "A", "2": "B"}}
+        ]}),
+    );
+    let message = unknown["error"].as_str().unwrap_or_default();
+    assert!(message.contains("nonsense") && message.contains("anneal"), "{unknown}");
+}

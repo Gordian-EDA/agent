@@ -37,6 +37,10 @@ pub struct PlacePartsInput {
     pub layout: BTreeMap<BlockName, LayoutGrid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<Intent>,
+    /// Placement engine override. The refusal a placement-engine failure returns
+    /// names this as the way out, so it has to exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
 }
 
 /// One part and its pin connections.
@@ -526,6 +530,55 @@ fn expand_decouple(
 /// JSON Schema for the tool's `input_schema`. Deliberately terse: the LLM needs
 /// the shape and the rules that are not obvious (`"nc"`, that a pin key may be a
 /// name or a number, and that anything left out is a no-connect).
+/// The `intent.relations` schema: every accepted entry shape, with an example.
+///
+/// Split out because the whole payload schema is one `json!` literal and the
+/// macro's recursion limit is real; it also keeps the grammar in one readable place.
+fn relations_schema() -> Value {
+    json!({
+                        "type": "array",
+                        "description":
+                            "Relative placement. `b` and `anchor` may name a part already \
+                             on the sheet. Example: \
+                             {\"kind\":\"group\",\"name\":\"leds\",\"members\":[\"R3\",\"D1\"],\
+                             \"side\":\"right\",\"anchor\":\"U1\"}",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["left_of", "right_of", "above", "below",
+                                             "group", "align"]
+                                },
+                                "a": {"type": "string"},
+                                "b": {"type": "string"},
+                                "name": {"type": "string"},
+                                "members": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1
+                                },
+                                "side": {
+                                    "description":
+                                        "An edge, or an [edge, anchor] pair, or \
+                                         {side, anchor}.",
+                                    "anyOf": [
+                                        {"type": "string",
+                                         "enum": ["left", "right", "top", "bottom"]},
+                                        {"type": "array", "minItems": 2, "maxItems": 2},
+                                        {"type": "object"}
+                                    ]
+                                },
+                                "anchor": {"type": "string"},
+                                "axis": {
+                                    "type": "string",
+                                    "enum": ["horizontal", "vertical"]
+                                }
+                            },
+                            "required": ["kind"]
+                        }})
+}
+
 pub fn place_parts_input_schema() -> Value {
     json!({
         "type": "object",
@@ -600,6 +653,13 @@ pub fn place_parts_input_schema() -> Value {
                     }
                 }
             },
+            "engine": {
+                "type": "string",
+                "enum": ["anneal", "spine", "cluster"],
+                "description":
+                    "Placement engine override. Only worth setting after a placement-engine \
+                     failure; the default is chosen from the sheet's size."
+            },
             "intent": {
                 "type": "object",
                 "description": "Optional layout intent. Hints only; the solver owns all geometry.",
@@ -634,49 +694,7 @@ pub fn place_parts_input_schema() -> Value {
                         "description": "Refdes to flip left-to-right.",
                         "items": {"type": "string"}
                     },
-                    "relations": {
-                        "type": "array",
-                        "description":
-                            "Relative placement. `b` and `anchor` may name a part already \
-                             on the sheet. Example: \
-                             {\"kind\":\"group\",\"name\":\"leds\",\"members\":[\"R3\",\"D1\"],\
-                             \"side\":\"right\",\"anchor\":\"U1\"}",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "kind": {
-                                    "type": "string",
-                                    "enum": ["left_of", "right_of", "above", "below",
-                                             "group", "align"]
-                                },
-                                "a": {"type": "string"},
-                                "b": {"type": "string"},
-                                "name": {"type": "string"},
-                                "members": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "minItems": 1
-                                },
-                                "side": {
-                                    "description":
-                                        "An edge, or an [edge, anchor] pair, or \
-                                         {side, anchor}.",
-                                    "anyOf": [
-                                        {"type": "string",
-                                         "enum": ["left", "right", "top", "bottom"]},
-                                        {"type": "array", "minItems": 2, "maxItems": 2},
-                                        {"type": "object"}
-                                    ]
-                                },
-                                "anchor": {"type": "string"},
-                                "axis": {
-                                    "type": "string",
-                                    "enum": ["horizontal", "vertical"]
-                                }
-                            },
-                            "required": ["kind"]
-                        }
-                    }
+                    "relations": relations_schema()
                 }
             }
         }

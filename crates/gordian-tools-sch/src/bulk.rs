@@ -105,20 +105,47 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !derived.is_empty() {
         return Ok(json!({ "ok": false, "code": "derived_net_name", "nets": derived }));
     }
-    let (budget, engine) = budgeted(ctx, edit.doc.symbols().count() + payload.parts.len(), None);
-    let timing = Timing::start("place_parts", &budget, engine.name());
-    let report = match sch_floorplan::live::place_parts(
-        ctx.env(),
-        &mut edit.doc,
-        &payload,
-        engine.as_ref(),
-        Some(budget),
-    ) {
-        Ok(report) => report,
-        Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
-            timing.done("overran");
-            return Ok(json!({ "error": error.to_string() }));
+    let requested = match payload.engine.as_deref().map(engine_named) {
+        Some(Some(kind)) => Some(kind),
+        Some(None) => {
+            return Ok(json!({
+                "error": format!(
+                    "unknown engine `{}`; use \"anneal\", \"spine\" or \"cluster\"",
+                    payload.engine.clone().unwrap_or_default()
+                ),
+            }));
         }
+        None => None,
+    };
+    let sheet_parts = edit.doc.symbols().count() + payload.parts.len();
+    // A mismatch restores the document, so trying another engine costs only time.
+    // The engines fail on different sheets, and the model has no way to tell which
+    // will work — leaving it to guess turned one campaign case into a dead end.
+    let mut tried = Vec::new();
+    let mut report = None;
+    for kind in engines_to_try(requested) {
+        let (budget, engine) = budgeted(ctx, sheet_parts, Some(kind));
+        let timing = Timing::start("place_parts", &budget, engine.name());
+        match sch_floorplan::live::place_parts(
+            ctx.env(),
+            &mut edit.doc,
+            &payload,
+            engine.as_ref(),
+            Some(budget),
+        ) {
+            Ok(placed) => {
+                timing.done(if placed.committed { "committed" } else { "refused" });
+                tried.push(engine.name());
+                let committed = placed.committed;
+                report = Some(placed);
+                if committed {
+                    break;
+                }
+            }
+            Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
+                timing.done("overran");
+                return Ok(json!({ "error": error.to_string() }));
+            }
         Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
             return Ok(json!({
                 "ok": false,
@@ -137,15 +164,15 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                          NOT fatal on their own — they are listed so you can finish them.",
             }));
         }
-        Err(error) => return Err(error.into()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let report = match report {
+        Some(report) => report,
+        None => return Err(anyhow!("no placement engine ran")),
     };
-    timing.done(if report.committed {
-        "committed"
-    } else {
-        "refused"
-    });
     if !report.committed {
-        return Ok(refused_place(report));
+        return Ok(refused_place(report, &payload, &tried));
     }
     let refs = report.placed.clone();
     let value = edit
@@ -291,7 +318,34 @@ fn resolve_pin_net_refs(
     Ok(Ok(minted))
 }
 
-fn refused_place(report: PlaceReport) -> Value {
+/// The engine a payload named, if it named a real one.
+fn engine_named(name: &str) -> Option<PlacementEngineKind> {
+    match name {
+        "anneal" => Some(PlacementEngineKind::Anneal),
+        "spine" => Some(PlacementEngineKind::Spine),
+        "cluster" => Some(PlacementEngineKind::Cluster),
+        _ => None,
+    }
+}
+
+/// The engines to attempt, in order: the one asked for, else the sheet's default
+/// followed by the others as fallbacks.
+fn engines_to_try(requested: Option<PlacementEngineKind>) -> Vec<PlacementEngineKind> {
+    if let Some(kind) = requested {
+        return vec![kind];
+    }
+    vec![
+        PlacementEngineKind::Spine,
+        PlacementEngineKind::Cluster,
+        PlacementEngineKind::Anneal,
+    ]
+}
+
+fn refused_place(
+    report: PlaceReport,
+    payload: &sch_check::PlacePartsInput,
+    tried: &[&str],
+) -> Value {
     let m = &report.mismatch;
     let mut why = Vec::new();
     if !m.shorted.is_empty() {
@@ -304,11 +358,31 @@ fn refused_place(report: PlaceReport) -> Value {
     if !m.disturbed.is_empty() {
         why.push(format!("disturbed existing {}", m.disturbed.join(", ")));
     }
+    let mut blocks: std::collections::BTreeMap<&str, usize> = Default::default();
+    for part in &payload.parts {
+        let block = part
+            .block
+            .as_deref()
+            .or(payload.block.as_deref())
+            .unwrap_or(sch_check::place_parts::DEFAULT_BLOCK);
+        *blocks.entry(block).or_default() += 1;
+    }
+    let split: Vec<String> = blocks
+        .iter()
+        .map(|(name, count)| format!("{name} ({count} parts)"))
+        .collect();
     json!({
         "error": format!(
-            "refused: the placed result does not match the requested connectivity ({}); nothing was written. This is a placement-engine failure, not a payload error — retrying the same payload will not help; report it and try `engine: \"anneal\"` or a smaller block",
-            why.join("; ")
+            "refused: the placed result does not match the requested connectivity ({}); nothing \
+             was written. This is a placement-engine failure, not a payload error — {} already \
+             tried it. Send one payload per block instead ({}); a smaller block is what has \
+             recovered this every time.",
+            why.join("; "),
+            tried.join(", then "),
+            split.join(", ")
         ),
+        "engines_tried": tried,
+        "split_into": split,
         "report": report,
     })
 }
