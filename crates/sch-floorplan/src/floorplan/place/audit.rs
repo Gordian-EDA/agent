@@ -19,15 +19,22 @@ use sch_model::item::{Incidence, Item};
 use crate::write::SchematicWriter;
 
 /// How two nets came to share a point.
+///
+/// Only the geometry KiCAD actually WELDS counts. A wire crossing another wire, or
+/// passing over a foreign pin, mid-span is not a connection on its own — it becomes one
+/// when a junction dot sits there, or when the realiser splits the through-wire at the
+/// contact (which [`crate::write::SchematicWriter::prepare`] now does only for a wire's
+/// own net).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConflictKind {
     /// Two connection points (pin tips, power-symbol pins, label anchors) coincide.
     Terminals,
-    /// A connection point of one net lies on another net's wire.
+    /// A connection point of one net lands on the END of another net's wire, or on its
+    /// interior under a junction.
     TerminalOnWire,
     /// Two nets' wires run along the same line over a shared stretch.
     Overlap,
-    /// Two nets' wires meet at a point that ends at least one of them.
+    /// Two nets' wires meet end to end, or one ends on the other under a junction.
     WireTouch,
     /// A junction dot sits where two nets' wires pass, welding them.
     Junction,
@@ -36,7 +43,8 @@ pub enum ConflictKind {
 /// Two nets the realiser drew onto one point.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NetConflict {
-    /// The two net names, sorted, so the same defect reports identically.
+    /// The two net names. Sorted for the symmetric kinds, so the same defect reports
+    /// identically; for [`ConflictKind::TerminalOnWire`] the terminal's net comes first.
     pub nets: (String, String),
     /// Where they meet, to 1 µm.
     pub at: (i64, i64),
@@ -47,9 +55,13 @@ impl std::fmt::Display for NetConflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{:?}: {} + {} at [{:.2},{:.2}]",
+            "{:?}: {} {} {} at [{:.2},{:.2}]",
             self.kind,
             self.nets.0,
+            match self.kind {
+                ConflictKind::TerminalOnWire => "on wire of",
+                _ => "+",
+            },
             self.nets.1,
             self.at.0 as f64 / 1000.0,
             self.at.1 as f64 / 1000.0
@@ -99,7 +111,11 @@ pub fn net_conflicts(
     let junctions = w.junction_positions();
     let mut found: BTreeSet<NetConflict> = BTreeSet::new();
     let mut note = |a: &str, b: &str, at: Point2, kind: ConflictKind| {
-        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let (lo, hi) = match kind {
+            ConflictKind::TerminalOnWire => (a, b),
+            _ if a <= b => (a, b),
+            _ => (b, a),
+        };
         found.insert(NetConflict {
             nets: (lo.to_string(), hi.to_string()),
             at: (
@@ -119,9 +135,14 @@ pub fn net_conflicts(
             }
         }
     }
+    let welded = |p: Point2, seg: &Segment| {
+        p.near_eq(seg.a, EPS)
+            || p.near_eq(seg.b, EPS)
+            || (seg.contains_point(p) && junctions.iter().any(|j| p.near_eq((*j).into(), EPS)))
+    };
     for (p, net) in &terminals {
         for (seg, wnet) in &wires {
-            if wnet != net && seg.contains_point(*p) {
+            if wnet != net && welded(*p, seg) {
                 note(net, wnet, *p, ConflictKind::TerminalOnWire);
             }
         }
@@ -135,7 +156,11 @@ pub fn net_conflicts(
             }
             if s.axis_aligned_collinear_overlap(*t) {
                 note(a, b, s.a, ConflictKind::Overlap);
-            } else if let Some(p) = touching_point(*s, *t) {
+            } else if let Some(p) = [s.a, s.b]
+                .into_iter()
+                .find(|&p| welded(p, t))
+                .or_else(|| [t.a, t.b].into_iter().find(|&p| welded(p, s)))
+            {
                 note(a, b, p, ConflictKind::WireTouch);
             }
         }
@@ -153,14 +178,4 @@ pub fn net_conflicts(
         }
     }
     found.into_iter().collect()
-}
-
-/// Where two non-collinear segments meet, when the meeting point ENDS at least one of
-/// them — the geometry KiCAD connects without a junction. A pure interior crossing
-/// returns `None`: those wires only cross over (a dot there is [`ConflictKind::Junction`]).
-fn touching_point(s: Segment, t: Segment) -> Option<Point2> {
-    [s.a, s.b]
-        .into_iter()
-        .find(|&p| t.contains_point(p))
-        .or_else(|| [t.a, t.b].into_iter().find(|&p| s.contains_point(p)))
 }
