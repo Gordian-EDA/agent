@@ -113,11 +113,11 @@ fn suggest_recovers_from_wrong_or_invented_library() {
 
 #[test]
 fn suggest_recovers_live_mistakes_against_system_library() {
-    let root = std::path::Path::new("/usr/share/kicad/footprints");
-    if !root.is_dir() {
-        eprintln!("SKIP: no system KiCAD footprint library");
+    let Some(installation) = kicad::KicadInstallation::detect() else {
+        eprintln!("SKIP: no configured KiCad 10 footprint library");
         return;
-    }
+    };
+    let root = installation.footprint_dir();
     let catalog = FootprintCatalog::from_root(root).expect("system catalog");
 
     assert_eq!(

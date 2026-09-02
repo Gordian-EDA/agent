@@ -340,9 +340,9 @@ pub fn patch_field_hidden(text: &str, reference: &str, field: &str) -> Result<St
 
 /// Footprints carrying a visible silkscreen text field named `field`.
 ///
-/// KiCad DRC reports may omit `PCB_FIELD` items other than Reference/Value, so
-/// violations caused by generated fields arrive without attribution; this scan
-/// recovers the candidate owners directly from the board text.
+/// KiCad 10.0.4 DRC omits `PCB_FIELD` items other than Reference/Value from
+/// some silk violations, reporting no item or only the collision partner. This
+/// scan recovers the candidate owners directly from the board text.
 pub fn silk_field_owners(text: &str, field: &str) -> Vec<String> {
     let prefix = field_prefix(field);
     let Ok((body_start, body_end)) = root_body(text) else {

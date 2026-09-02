@@ -70,6 +70,9 @@ impl SchematicWriter {
     /// `lib_symbols` are emitted sorted by `lib_id` (via the backing
     /// `BTreeMap`); symbol instances are emitted sorted by refdes. All uuids are
     /// content-derived, so the same placements always produce identical bytes.
+    /// The `20250114` schema token matches the emitted body: KiCad 10.0.4 reads
+    /// it without conversion and rewrites it as `20260306` only when explicitly
+    /// upgraded, together with a full canonical schema rewrite.
     pub fn finish(mut self) -> String {
         self.prepare();
 
