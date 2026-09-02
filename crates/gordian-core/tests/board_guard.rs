@@ -1,9 +1,7 @@
-//! The board guard and subset placement, over a real project.
+//! The offline board guard and subset placement, over a real project.
 //!
 //! Real `kicad-cli`, a real `.kicad_sch` and a real `.kicad_pcb` on disk — no
-//! network, no mocks. Skips when no KiCAD is installed.
-
-mod common;
+//! pcbnew, network, or mocks. Skips when no KiCAD installation is available.
 
 use gordian_core::AgentRuntime;
 use gordian_core::tools::run_tool;
@@ -58,11 +56,10 @@ fn divider(ctx: &AgentRuntime) {
     );
 }
 
-/// One project, one live KiCAD session: subset placement, the guard's refusal,
+/// One project on disk: subset placement, the guard's refusal,
 /// and what `check_board` says about a board nothing has laid out yet.
 #[test]
 fn the_board_guard_and_its_subset_placement() {
-    let _kicad = common::KicadLock::acquire();
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -143,7 +140,6 @@ fn the_board_guard_and_its_subset_placement() {
         unknown["error"].as_str().unwrap_or_default().contains("R9"),
         "{unknown:#}"
     );
-    ctx.close_kicad_session();
 }
 
 
@@ -152,7 +148,6 @@ fn the_board_guard_and_its_subset_placement() {
 /// box centred on that origin — the phantom half refuses moves that clear.
 #[test]
 fn move_parts_measures_the_real_courtyards() {
-    let _kicad = common::KicadLock::acquire();
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -220,5 +215,4 @@ fn move_parts_measures_the_real_courtyards() {
         refused["moved"]["courtyard_mm"].as_array().is_some_and(|r| r.len() == 4),
         "the refusal must show both courtyards: {refused:#}"
     );
-    ctx.close_kicad_session();
 }

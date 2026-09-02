@@ -1,10 +1,8 @@
-//! `sync_board` over a real project: create, edit the schematic, sync again,
+//! Offline `sync_board` over a real project: create, edit the schematic, sync again,
 //! and check that only what changed changed.
 //!
 //! Real `kicad-cli`, a real `.kicad_sch` and a real `.kicad_pcb` on disk — no
-//! network, no mocks. Skips when no KiCAD is installed.
-
-mod common;
+//! pcbnew, network, or mocks. Skips when no KiCAD installation is available.
 
 use gordian_core::AgentRuntime;
 use gordian_core::tools::run_tool;
@@ -63,7 +61,6 @@ const R0603: &str = "Resistor_SMD:R_0603_1608Metric";
 
 #[test]
 fn sync_board_creates_then_edits_a_board_without_disturbing_it() {
-    let _kicad = common::KicadLock::acquire();
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -156,5 +153,4 @@ fn sync_board_creates_then_edits_a_board_without_disturbing_it() {
     let checked = tool(&ctx, "check_board", json!({}));
     assert_eq!(checked["drc_clean"], json!(true), "{checked:#}");
     assert_eq!(checked["unconnected_items"], json!(0), "{checked:#}");
-    ctx.close_kicad_session();
 }
