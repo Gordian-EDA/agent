@@ -13,7 +13,7 @@
 //! looks.
 
 use geom::Point2;
-use pcb_model::{Drc, Finding, RouteSolution, RoutingView};
+use pcb_model::{Drc, Finding, RouteSolution, RoutingView, octilinear_path};
 
 /// How many oracle calls one pass may spend before giving up on a solution.
 const LINT_BUDGET: usize = 256;
@@ -124,7 +124,7 @@ pub enum Corners {
 /// because its endpoints did not line up.
 pub fn leg(from: Point2, to: Point2, corners: Corners) -> Vec<Point2> {
     match corners {
-        Corners::Octilinear => geom::octilinear_path(from, to),
+        Corners::Octilinear => octilinear_path(from, to),
         Corners::Orthogonal => {
             if (from.x - to.x).abs() < geom::EPS || (from.y - to.y).abs() < geom::EPS {
                 vec![from, to]
@@ -139,7 +139,7 @@ pub fn leg(from: Point2, to: Point2, corners: Corners) -> Vec<Point2> {
 /// 45°-knee forms (shortest, when allowed), then the two Manhattan L-corners,
 /// which can still win on a genuine detour.
 fn replacements(a: Point2, b: Point2, corners: Corners) -> Vec<Vec<Point2>> {
-    let interior = |from: Point2, to: Point2| geom::octilinear_path(from, to)[1..].to_vec();
+    let interior = |from: Point2, to: Point2| octilinear_path(from, to)[1..].to_vec();
     let mut out = Vec::new();
     if corners == Corners::Octilinear {
         let forward = interior(a, b);
