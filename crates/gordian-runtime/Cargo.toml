@@ -18,6 +18,7 @@ tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 resvg = { workspace = true }
 sch-check = { path = "../sch-check" }
+sch-place = { path = "../sch-place" }
 gordian-llm = { path = "../gordian-llm" }
 kicad = { path = "../kicad" }
 kicad-ipc = { path = "../kicad-ipc" }

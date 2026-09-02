@@ -7,6 +7,7 @@
 //! the resulting values into core constructors.
 
 pub use gordian_llm::{DEFAULT_MAX_TOKENS, LlmConfig, LlmReasoningEffort};
+pub use sch_place::place::PlacementEngineKind;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -275,39 +276,19 @@ impl ToolConfig {
 }
 
 /// Deterministic engine selection.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct EngineConfig {
-    /// Schematic placement engine.
-    pub schematic_placer: SchematicPlacementEngine,
-}
-
-impl Default for EngineConfig {
-    fn default() -> Self {
-        Self {
-            schematic_placer: SchematicPlacementEngine::Cluster,
-        }
-    }
+    /// Force a schematic placement engine. Unset — the default — lets
+    /// `sch_floorplan::live::PlacementBudget` pick the engine that keeps the call
+    /// inside its deadline.
+    pub schematic_placer: Option<PlacementEngineKind>,
 }
 
 impl EngineConfig {
     fn validate(&self, _path: &'static str) -> Result<(), ConfigError> {
         Ok(())
     }
-}
-
-/// Schematic placement engine selected at the application composition root.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum SchematicPlacementEngine {
-    /// Annealing followed by cluster-pose and compaction polish.
-    #[default]
-    Cluster,
-    /// Simulated annealing only.
-    #[serde(alias = "sa")]
-    Anneal,
-    /// Deterministic grammar placement only.
-    Spine,
 }
 
 /// One config validation failure.
@@ -562,7 +543,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             cfg.engines.schematic_placer,
-            SchematicPlacementEngine::Anneal
+            Some(PlacementEngineKind::Anneal)
         );
     }
 

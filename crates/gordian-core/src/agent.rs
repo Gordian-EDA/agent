@@ -33,6 +33,7 @@ use crate::AgentRuntime;
 use crate::tools::{run_tool, tool_defs};
 use gordian_runtime::tool::IMAGE_PATH_KEY;
 use gordian_runtime::tool::{ReviewOutcome, ToolEffect, ToolOutcome};
+use gordian_tools_sch::PlacementBudget;
 
 /// After this many route attempts with failed nets, block further blind PCB
 /// regenerate/place/route retries in the same turn and force an honest report.
@@ -759,7 +760,8 @@ impl<P: Provider> Agent<P> {
             let remaining = budgets.provider_requests - provider_requests;
             if !wrap_up_sent && remaining <= PROVIDER_REQUEST_WRAP_UP_RESERVE {
                 wrap_up_sent = true;
-                self.history.push(ChatMessage::user(wrap_up_nudge(remaining)));
+                self.history
+                    .push(ChatMessage::user(wrap_up_nudge(remaining)));
             }
             provider_requests += 1;
 
@@ -1733,10 +1735,14 @@ fn request_requires_fabrication(user_msg: &str) -> bool {
         || request.contains("board house")
 }
 
+/// The timed-out call whose edit may still be in flight — the reason the turn cannot
+/// safely continue. A mutation that enforces its own deadline is not one of those.
 fn timed_out_mutation_name(timed_out: &[(String, Value, u64)]) -> Option<&str> {
     timed_out
         .iter()
-        .find(|(name, _, _)| tool_effect(name) == ToolEffect::Mutating)
+        .find(|(name, _, _)| {
+            tool_effect(name) == ToolEffect::Mutating && !enforces_own_deadline(name)
+        })
         .map(|(name, _, _)| name.as_str())
 }
 
@@ -2096,7 +2102,9 @@ async fn run_blocking(ctx: &Arc<AgentRuntime>, name: &str, input: Value) -> Resu
 }
 
 fn tool_timeout_message(name: &str, timeout: Duration) -> String {
-    let recovery = if is_kicad_session_tool(name) {
+    let recovery = if enforces_own_deadline(name) {
+        "it holds itself to a budget well inside this timeout, so the project is intact; inspect it before retrying a smaller request"
+    } else if is_kicad_session_tool(name) {
         "close any KiCad dialogs/processes touching the project, then inspect project state before trying a changed call"
     } else {
         "the operation may still be finishing; do not immediately retry identical arguments — inspect project state or simplify/batch the request"
@@ -2121,14 +2129,30 @@ fn is_kicad_session_tool(name: &str) -> bool {
     )
 }
 
+/// Margin over a self-deadlining tool's own budget. The budget covers the search and
+/// the gate; the payload audit before it and the atomic write plus the post-commit
+/// ERC after it are outside it, and ERC shells out to `kicad-cli`. Generous, because
+/// this timeout only ever fires on a genuine hang.
+const DEADLINE_MARGIN: Duration = Duration::from_secs(60);
+
 fn tool_timeout(name: &str) -> Duration {
     match name {
-        "place_parts" | "arrange" => Duration::from_secs(180),
+        // These enforce their own budget and return cleanly; the loop timeout is a
+        // backstop for a hang, not the mechanism.
+        name if enforces_own_deadline(name) => PlacementBudget::DEFAULT + DEADLINE_MARGIN,
         // KiCAD IPC/CLI paths can legitimately take longer on first launch.
         "regenerate_board" | "place_board" | "route_board" | "check_board" | "export_fab"
         | "open_board" => Duration::from_secs(180),
         _ => Duration::from_secs(90),
     }
+}
+
+/// Tools that hold themselves to a wall-clock budget and write nothing once it has
+/// passed (`sch_floorplan::live::PlacementBudget`): the search is cooperatively
+/// cancelled and the document restored, so timing one out cannot leave a half-applied
+/// edit and the turn need not be abandoned.
+fn enforces_own_deadline(name: &str) -> bool {
+    matches!(name, "place_parts" | "arrange")
 }
 
 async fn check_schematic_review(ctx: &Arc<AgentRuntime>) -> ReviewOutcome {

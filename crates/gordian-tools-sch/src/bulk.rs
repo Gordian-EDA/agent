@@ -2,9 +2,9 @@
 
 use anyhow::{Context, Result, anyhow};
 use gordian_runtime::AgentRuntime;
-use gordian_runtime::config::SchematicPlacementEngine;
+use gordian_runtime::config::PlacementEngineKind;
 use sch_floorplan::contract::PlacementEngine;
-use sch_floorplan::live::{ArrangeReport, PlaceReport, Selection};
+use sch_floorplan::live::{ArrangeReport, PlaceReport, PlacementBudget, Selection};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -26,7 +26,7 @@ fn typed<T: serde::de::DeserializeOwned>(input: Value, tool: &str) -> Result<T> 
 struct SelectionInput {
     refs: Option<Vec<String>>,
     bbox: Option<[f64; 4]>,
-    engine: Option<SchematicPlacementEngine>,
+    engine: Option<PlacementEngineKind>,
 }
 
 pub(crate) fn selection_schema(engine: bool) -> Value {
@@ -85,13 +85,20 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !derived.is_empty() {
         return Ok(json!({ "ok": false, "code": "derived_net_name", "nets": derived }));
     }
+    let (budget, engine) = budgeted(ctx, edit.doc.symbols().count() + payload.parts.len(), None);
+    let timing = Timing::start("place_parts", &budget, engine.name());
     let report = match sch_floorplan::live::place_parts(
         ctx.env(),
         &mut edit.doc,
         &payload,
-        placement_engine(ctx.config().engines.schematic_placer).as_ref(),
+        engine.as_ref(),
+        Some(budget),
     ) {
         Ok(report) => report,
+        Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
+            timing.done("overran");
+            return Ok(json!({ "error": error.to_string() }));
+        }
         Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
             return Ok(json!({
                 "ok": false,
@@ -109,6 +116,11 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         Err(error) => return Err(error.into()),
     };
+    timing.done(if report.committed {
+        "committed"
+    } else {
+        "refused"
+    });
     if !report.committed {
         return Ok(refused_place(report));
     }
@@ -126,17 +138,27 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let input: SelectionInput = typed(input, "arrange")?;
     let selection = selection(&input)?;
     let mut edit = Edit::open(ctx)?;
-    let report = sch_floorplan::live::arrange(
+    let (budget, engine) = budgeted(ctx, edit.doc.symbols().count(), input.engine);
+    let timing = Timing::start("arrange", &budget, engine.name());
+    let report = match sch_floorplan::live::arrange(
         ctx.env(),
         &mut edit.doc,
         &selection,
-        placement_engine(
-            input
-                .engine
-                .unwrap_or(ctx.config().engines.schematic_placer),
-        )
-        .as_ref(),
-    )?;
+        engine.as_ref(),
+        Some(budget),
+    ) {
+        Ok(report) => report,
+        Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
+            timing.done("overran");
+            return Ok(json!({ "error": error.to_string() }));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    timing.done(if report.committed {
+        "committed"
+    } else {
+        "refused"
+    });
     finish_arrangement(edit, report, ctx)
 }
 
@@ -207,10 +229,58 @@ fn with_check(mut value: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(value)
 }
 
-fn placement_engine(selected: SchematicPlacementEngine) -> Box<dyn PlacementEngine> {
+fn placement_engine(selected: PlacementEngineKind) -> Box<dyn PlacementEngine> {
     match selected {
-        SchematicPlacementEngine::Anneal => Box::new(anneal_place::Anneal),
-        SchematicPlacementEngine::Spine => Box::new(spine_place::SpinePlace),
-        SchematicPlacementEngine::Cluster => Box::new(cluster_place::ClusterPlace),
+        PlacementEngineKind::Anneal => Box::new(anneal_place::Anneal),
+        PlacementEngineKind::Spine => Box::new(spine_place::SpinePlace),
+        PlacementEngineKind::Cluster => Box::new(cluster_place::ClusterPlace),
     }
+}
+
+/// One placement call's wall time, logged when it ends — the record that says
+/// whether the deadline policy is holding on real designs.
+struct Timing {
+    tool: &'static str,
+    engine: &'static str,
+    budget_secs: u64,
+    parts: usize,
+    started: std::time::Instant,
+}
+
+impl Timing {
+    fn start(tool: &'static str, budget: &PlacementBudget, engine: &'static str) -> Self {
+        Self {
+            tool,
+            engine,
+            budget_secs: budget.budget.as_secs(),
+            parts: budget.parts,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn done(self, outcome: &str) {
+        tracing::info!(
+            tool = self.tool,
+            engine = self.engine,
+            parts = self.parts,
+            budget_s = self.budget_secs,
+            elapsed_s = self.started.elapsed().as_secs_f64(),
+            outcome,
+            "placement finished"
+        );
+    }
+}
+
+/// The deadline policy for a call that leaves `parts` on the sheet, with the engine
+/// it chose — honouring an explicit `engine` on the call, then the configured
+/// override. The engine routes the WHOLE sheet per candidate, so the sheet's size is
+/// what the budget must be read against, never the size of the block being placed.
+fn budgeted(
+    ctx: &AgentRuntime,
+    parts: usize,
+    engine: Option<PlacementEngineKind>,
+) -> (PlacementBudget, Box<dyn PlacementEngine>) {
+    let budget = PlacementBudget::new(parts);
+    let engine = budget.engine(engine.or(ctx.config().engines.schematic_placer));
+    (budget, placement_engine(engine))
 }

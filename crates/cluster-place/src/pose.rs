@@ -18,6 +18,8 @@
 
 use std::collections::BTreeMap;
 
+use sch_place::place::{Deadline, expired};
+
 use geom::Point2;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
@@ -156,11 +158,15 @@ fn candidate_poses(it: &Item) -> Vec<(f64, bool)> {
 /// which the readability cost alone would miss), iterate to a fixpoint. The whole
 /// cluster moves rigidly, so a satellite never strands — and `decongest` clears any
 /// body overlap the rotation introduces before scoring.
+/// `deadline` bounds the sweep: every pose trial routes the whole sheet, so a hub
+/// list entered with time left can still run out partway. Stopping keeps the poses
+/// already accepted — each was kept only because it strictly improved.
 pub(crate) fn search_hub_poses(
     eval: &RoutedEvaluator,
     items: &mut [Item],
     inc: &Incidence,
     ir: &LayoutIr,
+    deadline: Option<Deadline>,
 ) {
     let hubs: Vec<usize> = (0..items.len())
         .filter(|&i| items[i].geom.pins.len() >= 3 && !items[i].frozen)
@@ -178,6 +184,9 @@ pub(crate) fn search_hub_poses(
     for _ in 0..MAX_SWEEPS {
         let mut improved = false;
         for &h in &hubs {
+            if expired(deadline) {
+                return;
+            }
             // The rigid unit: the hub plus the satellites that tap it.
             let mut members = vec![h];
             if let Some(b) = blocks.get(&h) {

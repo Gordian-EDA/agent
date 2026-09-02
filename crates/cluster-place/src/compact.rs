@@ -31,6 +31,7 @@ use geom::{Point2, Rect};
 use sch_check::model::Design;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
+use sch_place::place::{Deadline, expired};
 
 use sch_floorplan::contract::RoutedEvaluator;
 use sch_floorplan::engine_support::{
@@ -731,15 +732,30 @@ pub(crate) fn rail_relayout(
 /// before its labels collide is board-specific (a loosely-coupled board packs dense; a dense
 /// signal-coupled one balloons). So sweep the inter-module gutter tight→loose and keep the
 /// TIGHTEST rendering that ships no new warnings, no routed regression, and a real de-sprawl.
+/// `deadline` bounds the gutter sweep: each trial renders the whole sheet, so a sweep
+/// entered with time left can still run out inside it. Stopping keeps whatever the
+/// sweep has already accepted (or the SA baseline), never a half-packed sheet.
+/// The SA result a compaction must beat outright: its rendered sprawl and its
+/// readability-warning count.
+#[derive(Clone, Copy)]
+pub(crate) struct Bar {
+    pub rendered: f64,
+    pub warnings: usize,
+}
+
 pub(crate) fn compact_clusters(
     eval: &RoutedEvaluator,
     design: &Design,
     items: &mut [Item],
     inc: &Incidence,
     ir: &LayoutIr,
-    baseline_rendered: f64,
-    sa_warnings: usize,
+    bar: Bar,
+    deadline: Option<Deadline>,
 ) {
+    let Bar {
+        rendered: baseline_rendered,
+        warnings: sa_warnings,
+    } = bar;
     use circuit_graph::netclass::is_power_net;
     let force = false;
     let debug = super::DEBUG_DIAGNOSTICS;
@@ -780,6 +796,9 @@ pub(crate) fn compact_clusters(
         .into_iter()
         .enumerate()
     {
+        if expired(deadline) {
+            break;
+        }
         restore(items, &base);
         if !holistic_relayout(items, inc, ir, gut) {
             return; // fewer than 2 modules — nothing to pack, on any gutter

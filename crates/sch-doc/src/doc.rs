@@ -123,11 +123,27 @@ impl SchDoc {
 
     /// Write the document to `path`, collecting `(lib_symbols)` entries that
     /// edits left unreferenced.
+    ///
+    /// Atomic: the text lands in a sibling temp file that is renamed over `path`,
+    /// so a reader — or a crashed, killed or abandoned writer — never sees a
+    /// half-written schematic, only the old one or the new one.
     pub fn write(&mut self, path: impl AsRef<Path>) -> Result<()> {
         if self.edited {
             self.gc_lib_symbols();
         }
-        std::fs::write(path, self.to_text())?;
+        let path = path.as_ref();
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let mut temp = tempfile::Builder::new()
+            .prefix(".kicad_sch-")
+            .tempfile_in(dir)?;
+        std::io::Write::write_all(&mut temp, self.to_text().as_bytes())?;
+        temp.as_file().sync_all()?;
+        // The temp file is created 0600; a schematic the user could read before the
+        // edit must still be readable after it.
+        if let Ok(existing) = std::fs::metadata(path) {
+            temp.as_file().set_permissions(existing.permissions())?;
+        }
+        temp.persist(path).map_err(|e| e.error)?;
         Ok(())
     }
 

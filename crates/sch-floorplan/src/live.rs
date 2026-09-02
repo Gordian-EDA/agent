@@ -20,8 +20,14 @@
 //! never commit a sheet that silently mis-wires. `arrange` and `rewire` promise more:
 //! the partition must be *identical*, since moving a part is not supposed to mean
 //! anything.
+//!
+//! ## The budget
+//!
+//! Every edit is also a promise about *time*: see [`PlacementBudget`]. Nothing is
+//! written until the gate passes, so overrunning is always safe to refuse.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::time::Duration;
 
 use geom::{Point2, Rect};
 use kicad::KicadInstallation;
@@ -32,6 +38,7 @@ use sch_check::{Diagnostics, ExistingSheet, PayloadAudit, PlacePartsInput};
 use sch_doc::{Netlist, SchDoc, connect};
 use sch_place::ir::LayoutIr;
 use sch_place::item::Item;
+use sch_place::place::{Deadline, PlacementEngineKind};
 use sch_place::result::IdiomReport;
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +53,128 @@ const SHEET_BLOCK: &str = "$sheet";
 /// Clearance added around a selected part when deciding which wires belong to it.
 const TOUCH_MARGIN: f64 = 1.27;
 
+/// Sheet size at or above which the deterministic engine is the default.
+///
+/// Below it, `cluster`'s pose search and de-sprawl polish — each of which re-routes
+/// and re-text-solves the whole sheet several times — still fit comfortably; above it
+/// they are what turns a 20-second placement into a two-minute one.
+const SPINE_ABOVE_PARTS: usize = 32;
+
+/// Share of the budget the search may spend, leaving the rest for realising the
+/// sheet, extracting its connectivity and gating it.
+const SEARCH_SHARE: f64 = 0.7;
+
+/// The wall-clock promise a live placement call makes, and the engine choice that
+/// keeps it.
+///
+/// A placement search is unbounded in principle, so "how long may this take" is a
+/// caller's decision, not the engine's. [`engine`](Self::engine) says which engine
+/// keeps the promise; the deadlines behind it stop the search with room to spare.
+///
+/// `parts` is the size of the WHOLE SHEET the call leaves behind, not the size of
+/// the block being placed. Every engine routes and text-solves the entire sheet per
+/// candidate, so two new parts added to a 40-part sheet cost what 42 parts cost —
+/// measured at 45 s for a two-part call the old block-sized rule sent to `cluster`.
+///
+/// ## Why this shape
+///
+/// `place_parts` on a blank sheet, release build, per engine: unbounded seconds,
+/// then `tools/schematic_critic.py` on the rendered result. Every run was truthful
+/// (committed) and every engine produced the same ERC error count on a given
+/// fixture — the sheets differ only in time and in how they read.
+///
+/// | fixture                     | parts | ERC | cluster    | anneal     | spine     |
+/// |-----------------------------|-------|-----|------------|------------|-----------|
+/// | 555-blinker                 |     9 |   0 |   1.3s / 9 |  73.1s / 4 |  1.3s / 9 |
+/// | hbridge-nmos                |    13 |   4 |   0.6s / 9 |   0.4s / 9 |  0.6s / 8 |
+/// | bga-fpga-ice40              |    30 |   0 |  25.3s / 6 |  18.5s / 6 | 12.5s / 6 |
+/// | bedrock-selfrepair-bluepill |    39 |   1 |  67.5s / 6 |  52.8s / 6 | 26.6s / 7 |
+/// | bms-10s (BQ76930, 30-pin)   |    46 |   0 |  19.7s / 6 |  16.7s / 5 | 14.5s / 8 |
+/// | openmyo-emg                 |    63 |   0 | 114.2s / 5 |  30.6s / 6 | 12.2s / 6 |
+/// | stm32f4-buck                |    75 |   0 |  69.7s / 5 |  57.0s / 5 | 26.8s / 6 |
+/// | esp32-multifunction         |    92 |   1 |  37.5s / 5 |  35.6s / 6 | 15.3s / 6 |
+///
+/// Three readings drive the policy. Wall time follows sheet *topology* — pins routed
+/// per candidate — not part count, so `cluster` and `anneal` are non-monotonic and
+/// unbounded: 73 s on a nine-part blinker, 114 s on a 63-part sheet. `spine` is
+/// deterministic and stayed under 30 s everywhere. And above ~30 parts `spine` also
+/// *reads* at least as well as the search engines (7/6, 8/6, 6/5, 6/5), so
+/// preferring it at size costs nothing. Below that, `cluster` either takes its own
+/// spine fast path or has room for the polish that earns its 9s.
+///
+/// Hence: `cluster` below [`SPINE_ABOVE_PARTS`], `spine` at or above it, and a real
+/// deadline underneath both so no topology can escape the promise. Re-measured under
+/// a 60 s budget, all 24 cells commit inside it — the worst are `bedrock` on
+/// `cluster` (49.8 s) and a forced `anneal` on the blinker (48.5 s), and the two that
+/// most overran are now `openmyo`/`cluster` 114.2 → 44.5 s and `stm32f4-buck`/
+/// `cluster` 69.7 → 47.9 s.
+///
+/// Reproduce with `cargo run --release --example place_bench -- <dir> [--budget 60]
+/// <fixture>...`.
+#[derive(Debug, Clone, Copy)]
+pub struct PlacementBudget {
+    /// Wall time the whole call — search, realise, gate — may take.
+    pub budget: Duration,
+    /// Parts on the sheet the call leaves behind.
+    pub parts: usize,
+}
+
+/// The two instants a [`PlacementBudget`] resolves to, or `None` for an unbounded
+/// call. Built once at the top of an operation and consulted at its two decision
+/// points: when the search must stop, and whether there is still time to realise.
+#[derive(Debug, Clone, Copy, Default)]
+struct Deadlines {
+    search: Option<Deadline>,
+    hard: Option<Deadline>,
+}
+
+impl PlacementBudget {
+    /// The budget a placement tool call gets when the caller states none.
+    pub const DEFAULT: Duration = Duration::from_secs(60);
+
+    pub fn new(parts: usize) -> Self {
+        Self {
+            budget: Self::DEFAULT,
+            parts,
+        }
+    }
+
+    pub fn within(budget: Duration, parts: usize) -> Self {
+        Self { budget, parts }
+    }
+
+    /// The engine that keeps this budget, honouring an explicit `requested` one.
+    /// The caller builds it and hands it back to [`place_parts`] / [`arrange`].
+    pub fn engine(&self, requested: Option<PlacementEngineKind>) -> PlacementEngineKind {
+        requested.unwrap_or(if self.parts >= SPINE_ABOVE_PARTS {
+            PlacementEngineKind::Spine
+        } else {
+            PlacementEngineKind::Cluster
+        })
+    }
+
+    /// The refusal a caller reports when the call overran: nothing was written.
+    pub fn overrun(&self) -> Error {
+        Error::Budget {
+            seconds: self.budget.as_secs(),
+            parts: self.parts,
+        }
+    }
+}
+
+impl Deadlines {
+    fn of(budget: Option<PlacementBudget>) -> Self {
+        budget.map_or(Deadlines::default(), |b| Deadlines {
+            search: Some(Deadline::after(b.budget.mul_f64(SEARCH_SHARE))),
+            hard: Some(Deadline::after(b.budget)),
+        })
+    }
+
+    fn out_of_time(&self) -> bool {
+        sch_place::place::expired(self.hard)
+    }
+}
+
 /// Everything that can stop a live edit.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -59,6 +188,11 @@ pub enum Error {
     EmptySelection,
     #[error("input is not buildable: {0}")]
     Input(String),
+    #[error(
+        "placement exceeded its budget of {seconds}s ({parts} parts on the sheet) — nothing \
+         was written; retry with a smaller block, or split the sheet"
+    )]
+    Budget { seconds: u64, parts: usize },
     #[error("invalid payload")]
     InvalidPayload(PayloadAudit),
 }
@@ -149,12 +283,18 @@ pub fn blank_sheet() -> Result<SchDoc> {
 /// An empty sheet is laid out whole; a sheet with content keeps every symbol it has and
 /// the new parts are placed around them, avoiding their wires and labels. Either way the
 /// result is gated (see the module docs) before it is kept.
+///
+/// `budget` is the promise the caller chose `engine` under (see [`PlacementBudget`]):
+/// the search stops with time left to realise and gate, and a call still running past
+/// the budget is refused with the document restored. `None` searches unbounded.
 pub fn place_parts(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     input: &PlacePartsInput,
     engine: &dyn PlacementEngine,
+    budget: Option<PlacementBudget>,
 ) -> Result<PlaceReport> {
+    let deadlines = Deadlines::of(budget);
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let before = connect::extract(doc);
     let existing = ExistingSheet {
@@ -207,15 +347,26 @@ pub fn place_parts(
     }
     let held = seated_items(doc, &before);
 
-    let out = region_arrange(RegionProblem::new(
-        env,
-        &design,
-        movable.clone(),
-        held,
-        obstacles(doc, &[]),
-        ir,
-        engine,
-    ));
+    let out = region_arrange(
+        RegionProblem::new(
+            env,
+            &design,
+            movable.clone(),
+            held,
+            obstacles(doc, &[]),
+            ir,
+            engine,
+        )
+        .by(deadlines.search),
+    );
+    // The only point where refusing is worth it: the search is done but the sheet is
+    // not drawn, so nothing is thrown away that realising and gating would not cost
+    // again. Past here a truthful placement always commits — a finished sheet is worth
+    // more than a punctual refusal.
+    if deadlines.out_of_time() {
+        doc.restore(snapshot)?;
+        return Err(budget.expect("a hard deadline implies a budget").overrun());
+    }
     let placed = posed(movable, &out.poses);
     let inc = incidence(&placed);
     let writer = crate::realize::realize_block(
@@ -249,17 +400,20 @@ pub fn place_parts(
     })
 }
 
-/// Re-place `selection` among the parts around it, redrawing only its own wiring.
+/// Re-place `selection` among the parts around it, redrawing only its own wiring,
+/// under the same budget promise as [`place_parts`].
 pub fn arrange(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     selection: &Selection,
     engine: &dyn PlacementEngine,
+    budget: Option<PlacementBudget>,
 ) -> Result<ArrangeReport> {
-    rearrange(env, doc, selection, Some(engine))
+    rearrange(env, doc, selection, Some((engine, budget)))
 }
 
-/// Redraw `selection`'s wiring where it stands, moving nothing.
+/// Redraw `selection`'s wiring where it stands, moving nothing. No search runs, so
+/// there is nothing to bound.
 pub fn rewire(
     env: &KicadInstallation,
     doc: &mut SchDoc,
@@ -272,8 +426,10 @@ fn rearrange(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     selection: &Selection,
-    engine: Option<&dyn PlacementEngine>,
+    engine: Option<(&dyn PlacementEngine, Option<PlacementBudget>)>,
 ) -> Result<ArrangeReport> {
+    let budget = engine.and_then(|(_, b)| b);
+    let deadlines = Deadlines::of(budget);
     let chosen = selection.resolve(doc);
     let before = connect::extract(doc);
     let mut design = Design::default();
@@ -299,20 +455,27 @@ fn rearrange(
     let ir = crate::floorplan::infer_ir(env, &design);
     let snapshot = doc.snapshot();
     let (placed, ir) = match engine {
-        Some(engine) => {
-            let out = region_arrange(RegionProblem::new(
-                env,
-                &design,
-                movable.clone(),
-                held.clone(),
-                obstacles(doc, &owned),
-                ir,
-                engine,
-            ));
+        Some((engine, _)) => {
+            let out = region_arrange(
+                RegionProblem::new(
+                    env,
+                    &design,
+                    movable.clone(),
+                    held.clone(),
+                    obstacles(doc, &owned),
+                    ir,
+                    engine,
+                )
+                .by(deadlines.search),
+            );
             (posed(movable, &out.poses), out.ir)
         }
         None => (movable, ir),
     };
+    // Refuse before the sheet is redrawn, for the reason `place_parts` gives.
+    if deadlines.out_of_time() {
+        return Err(budget.expect("a hard deadline implies a budget").overrun());
+    }
     for part in &placed {
         seat(doc, part)?;
     }
@@ -779,4 +942,46 @@ fn diagnostic_summary(diags: &Diagnostics) -> String {
         .map(|d| format!("{}: {}", d.code, d.message))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_picks_the_engine_that_keeps_the_budget() {
+        let small = PlacementBudget::new(SPINE_ABOVE_PARTS - 1);
+        let large = PlacementBudget::new(SPINE_ABOVE_PARTS);
+        assert_eq!(small.engine(None), PlacementEngineKind::Cluster);
+        assert_eq!(large.engine(None), PlacementEngineKind::Spine);
+        assert_eq!(
+            large.engine(Some(PlacementEngineKind::Anneal)),
+            PlacementEngineKind::Anneal,
+            "an explicit engine overrides the policy"
+        );
+    }
+
+    #[test]
+    fn the_search_stops_with_room_to_realise_and_gate() {
+        let d = Deadlines::of(Some(PlacementBudget::new(40)));
+        let (search, hard) = (d.search.unwrap(), d.hard.unwrap());
+        assert!(
+            hard.remaining() - search.remaining() > Duration::from_secs(10),
+            "realising and gating need real room"
+        );
+        assert!(Deadlines::of(None).search.is_none(), "unbounded stays so");
+    }
+
+    #[test]
+    fn overrun_names_the_budget_and_the_way_out() {
+        let message = PlacementBudget::within(Duration::from_secs(60), 46)
+            .overrun()
+            .to_string();
+        assert!(
+            message.contains("budget of 60s (46 parts on the sheet)"),
+            "{message}"
+        );
+        assert!(message.contains("nothing was written"), "{message}");
+        assert!(message.contains("smaller block"), "{message}");
+    }
 }

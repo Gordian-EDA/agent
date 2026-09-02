@@ -31,6 +31,10 @@ use gordian_llm::Tool;
 use gordian_runtime::AgentRuntime;
 use serde_json::{Value, json};
 
+/// The wall-clock promise `place_parts` / `arrange` keep — the agent loop sizes its
+/// own timeout from it.
+pub use sch_floorplan::live::PlacementBudget;
+
 /// Hash the live schematic bytes, distinguishing a missing file from an empty one.
 pub fn schematic_content_hash(ctx: &AgentRuntime) -> Result<Option<u64>> {
     match std::fs::read(ctx.sch_path()) {

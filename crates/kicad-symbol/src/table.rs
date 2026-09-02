@@ -2,13 +2,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
+use crate::search::SymbolNames;
 use crate::symlib;
 use crate::types::{PinDir, PinMeta, PinType, SymbolMeta};
 
-/// Maximum levenshtein distance for a real-library name to qualify as a suggestion.
-const SUGGEST_MAX_DISTANCE: usize = 6;
 /// Maximum number of suggestions returned.
 const SUGGEST_LIMIT: usize = 3;
 
@@ -31,6 +30,9 @@ pub struct SymbolTable {
     libs: Mutex<HashMap<String, Option<HashMap<String, SymbolMeta>>>>,
     /// In-memory symbols (test fixtures), keyed by full `Lib:Name`.
     inline: HashMap<String, SymbolMeta>,
+    /// Every installed `Lib:Name`, scanned on the first cross-library suggestion.
+    /// Only the diagnostic path pays for it.
+    names: OnceLock<SymbolNames>,
 }
 
 impl SymbolTable {
@@ -119,27 +121,26 @@ impl SymbolTable {
     }
 
     /// Closest known `lib_id`s for an unknown one (for diagnostics).
+    ///
+    /// Ranked across the WHOLE install, on the whole `Lib:Name`, by the project's
+    /// fuzzy matcher — the same ranking `search_symbols` serves. Both ways of getting
+    /// a lib_id wrong then answer from one place: a misspelt symbol
+    /// (`Regulator:AMS1117-3.3`) and a guessed library (`Fuse:Fuse`) are the same
+    /// query, and keeping the library half in the needle is what lets the first find
+    /// `Regulator_Linear:AMS1117-3.3` and the second `Device:Fuse`.
     pub fn suggest(&self, lib_id: &str) -> Vec<String> {
         if !self.inline.is_empty() {
             return suggest_inline(&self.inline, lib_id);
         }
-        let Some((lib, name)) = lib_id.split_once(':') else {
+        let Some(dir) = self.symbol_dir.as_ref() else {
             return Vec::new();
         };
-        let needle = name.to_lowercase();
-        self.with_lib(lib, |syms| {
-            let mut hits: Vec<(usize, &str)> = syms
-                .keys()
-                .map(|n| (strsim::levenshtein(&needle, &n.to_lowercase()), n.as_str()))
-                .filter(|(d, _)| *d <= SUGGEST_MAX_DISTANCE)
-                .collect();
-            hits.sort();
-            hits.into_iter()
-                .take(SUGGEST_LIMIT)
-                .map(|(_, n)| format!("{lib}:{n}"))
-                .collect()
-        })
-        .unwrap_or_default()
+        self.names
+            .get_or_init(|| SymbolNames::scan(dir).unwrap_or_else(|_| SymbolNames::empty()))
+            .best(lib_id, SUGGEST_LIMIT)
+            .into_iter()
+            .map(str::to_string)
+            .collect()
     }
 
     /// Run `f` against the parsed library `lib`, loading it on first reference.
@@ -218,6 +219,23 @@ mod tests {
         assert_eq!(r.pins.len(), 2);
         assert!(t.symbol("Device:Q").is_none());
         assert_eq!(t.suggest("Device:r"), vec!["Device:R".to_string()]);
+    }
+
+    #[test]
+    fn suggest_reaches_across_libraries_for_an_unknown_library() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Device.kicad_sym"),
+            "(kicad_symbol_lib (symbol \"Fuse\") (symbol \"Fuse_Small\") (symbol \"R\"))",
+        )
+        .expect("write lib");
+        let t = SymbolTable::from_symbol_dir(dir.path().to_path_buf());
+
+        // `Fuse:Fuse` names a library that does not exist, so there is nothing to
+        // search WITHIN — the whole install is ranked instead.
+        let hits = t.suggest("Fuse:Fuse");
+        assert!(hits.contains(&"Device:Fuse".to_string()), "{hits:?}");
+        assert!(hits.contains(&"Device:Fuse_Small".to_string()), "{hits:?}");
     }
 
     #[test]

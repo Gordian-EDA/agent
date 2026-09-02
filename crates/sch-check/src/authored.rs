@@ -29,14 +29,22 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
     diags
 }
 
-/// `refdes` names a symbol no library has, with the closest lib_id as a
-/// suggestion.
+/// `refdes` names a symbol no library has.
+///
+/// The message carries the closest real lib_ids — a caller that guessed the library
+/// (`Fuse:Fuse`) needs the whole shortlist, not just the single best, to pick the
+/// part it meant. The first is also attached as the machine-readable suggestion.
 pub fn unknown_part(refdes: &str, part: &str, provider: &SymbolTable) -> Diagnostic {
+    let near = provider.suggest(part);
+    let did_you_mean = match near.first() {
+        Some(_) => format!("; did you mean {}?", near.join(", ")),
+        None => String::new(),
+    };
     let mut e = Diagnostic::error(
         "unknown-part",
-        format!("{refdes}: symbol `{part}` not found in any library"),
+        format!("{refdes}: {part} not found in any library{did_you_mean}"),
     );
-    if let Some(s) = provider.suggest(part).into_iter().next() {
+    if let Some(s) = near.into_iter().next() {
         e = e.with_suggestion(s);
     }
     e
