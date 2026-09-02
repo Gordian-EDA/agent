@@ -95,3 +95,11 @@ fn a_pullup_network_seats_one_pennant_per_anchor() {
 fn a_pullup_network_beside_existing_content_is_truthful() {
     assert_no_shorts(&["campaign-stm32-power", "i2c-pullup-network"]);
 }
+
+/// A multi-unit 100-pin MCU whose ports are its GPIO bank, added to a populated sheet —
+/// the shape `campaign-stm32-buck` refused as `shorted GND+PA7`, where the SAME net was
+/// labelled twice and one of the two anchors landed on a ground pin.
+#[test]
+fn a_multiunit_mcu_beside_existing_content_is_truthful() {
+    assert_no_shorts(&["campaign-stm32-power", "stm32-multiunit-core"]);
+}

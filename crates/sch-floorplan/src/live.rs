@@ -479,10 +479,19 @@ fn place_parts_inner(
                     title: design.name.as_deref(),
                     frame: fresh,
                     driven: &driven_nets(doc, &before),
-                    beside: (!fresh).then(|| beside_scene(doc)).as_ref(),
+                    beside: (!fresh).then(|| beside_scene(doc, &placed)).as_ref(),
                 },
             )?;
-            let warnings = writer.layout_warnings();
+            let mut warnings = writer.layout_warnings();
+            // The truthfulness invariant of the drawn geometry, checked before the graft
+            // and reported WITH the refusal: `mismatch.shorted` names the two nets, and
+            // this names the point and the geometry that welded them. Without it a
+            // refusal is an engine failure with no cause attached.
+            warnings.extend(
+                crate::floorplan::place::net_conflicts(env, &writer, &placed, &inc)
+                    .into_iter()
+                    .map(|conflict| format!("realised block shorts nets — {conflict}")),
+            );
             crate::realize::graft(doc, writer)?;
             Ok(warnings)
         },
@@ -648,7 +657,7 @@ fn rearrange_inner(
                 &ir,
                 crate::realize::Draw {
                     driven: &driven_nets(doc, &before),
-                    beside: Some(&beside_scene(doc)),
+                    beside: Some(&beside_scene(doc, &placed)),
                     ..Default::default()
                 },
             )?;
@@ -1045,11 +1054,23 @@ fn footprints(items: &[Item]) -> Vec<Rect> {
 /// The realiser holds only the block it is drawing, so without this it routes as though
 /// the sheet were blank — across the existing pins, and onto the existing labels. Empty
 /// for a blank sheet, which makes a whole-sheet build byte-identical.
-fn beside_scene(doc: &SchDoc) -> sch_model::route::RouteScene {
+fn beside_scene(doc: &SchDoc, redrawn: &[Item]) -> sch_model::route::RouteScene {
+    let own: Vec<geom::Point2> = redrawn
+        .iter()
+        .flat_map(|item| {
+            item.geom.pins.iter().map(move |pin| {
+                sch_model::geometry::pin_endpoint(pin, item.at, item.angle, item.mirror).into()
+            })
+        })
+        .collect();
+    // A pin this call is about to wire is not foreign, whatever the sheet currently
+    // says it is on: `arrange` erases the selection's drawing first, which leaves its
+    // own pins looking like unnamed one-pin nets.
+    let mine = |p: geom::Point2| own.iter().any(|q| q.dist2(p) < 0.01);
     let scene = connect::scene(doc);
     sch_model::route::RouteScene {
         solids: Vec::new(),
-        points: scene.points,
+        points: scene.points.into_iter().filter(|(p, _)| !mine(*p)).collect(),
         segments: scene
             .segments
             .into_iter()
