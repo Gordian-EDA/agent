@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 
 use geom::{Point2, Rect};
 use pcb_model::{
-    Connection, LayerRef, Obstacle, RoutePoint, RouteSolution, RoutingView, Trace, Via,
-    ViaSpan,
+    Connection, LayerRef, Obstacle, RoutePoint, RouteSolution, RoutingView, Trace, Via, ViaSpan,
 };
 
 /// Domain view consumed by placement and routing tools.
@@ -369,16 +368,41 @@ fn reconcile_file_stackup(
     Ok(())
 }
 
+/// The seed row's pitch: one part every 2.54 mm, running right from the inset.
+pub const SEED_ROW_PITCH: f64 = 2.54;
+
+/// Half the placement lattice, so the seed row can sit BETWEEN its lines.
+const SEED_ROW_OFF_LATTICE: f64 = 0.25;
+
+/// The y a seeded part sits at on a board whose top edge is `min_y`.
+///
+/// Deliberately off the placer's 0.5 mm lattice: "still in the seed row" is a
+/// question answered from coordinates, and it is only sound if a laid-out part
+/// can never land on the row by accident. Rounding the inset onto the lattice
+/// and then stepping half a division off it makes that a property of the
+/// geometry rather than a coincidence — a placed part's y is always a whole
+/// multiple of the lattice, so it is never this.
+pub fn seed_row_y(min_y: f64) -> f64 {
+    let lattice = 2.0 * SEED_ROW_OFF_LATTICE;
+    ((min_y + 2.0) / lattice).round() * lattice + SEED_ROW_OFF_LATTICE
+}
+
+/// The x of the `index`-th seeded part on a board whose left edge is `min_x`.
+pub fn seed_row_x(min_x: f64, index: usize) -> f64 {
+    min_x + 2.0 + index as f64 * SEED_ROW_PITCH
+}
+
 /// References still sitting in the board's seed row: a part that was written to
-/// the board but never laid out. They sit unrotated on the 2.54 mm lattice
-/// running right from the top-left inset, which nothing but seeding produces.
+/// the board but never laid out. They sit unrotated on the [`SEED_ROW_PITCH`]
+/// lattice running right from the top-left inset, at a y ([`seed_row_y`]) no
+/// placement can produce.
 pub fn seed_row_references(board: &ImportedBoard) -> Vec<String> {
-    let row_y = board.bounds.min_y + 2.0;
+    let row_y = seed_row_y(board.bounds.min_y);
     let mut refs: Vec<String> = board
         .parts
         .iter()
         .filter(|part| {
-            let lattice = (part.at.x - board.bounds.min_x - 2.0) / 2.54;
+            let lattice = (part.at.x - board.bounds.min_x - 2.0) / SEED_ROW_PITCH;
             (part.at.y - row_y).abs() < geom::EPS
                 && part.rotation == 0
                 && lattice >= -geom::EPS
@@ -424,21 +448,42 @@ mod tests {
 
     #[test]
     fn the_seed_row_is_not_a_placement() {
-        let seeded = board_of(vec![part("C1", 14.54, 7.0, 0), part("R1", 12.0, 7.0, 0)]);
+        let row = seed_row_y(5.0);
+        let seeded = board_of(vec![
+            part("C1", seed_row_x(10.0, 1), row, 0),
+            part("R1", seed_row_x(10.0, 0), row, 0),
+        ]);
         assert_eq!(seed_row_references(&seeded), ["C1", "R1"]);
 
         // Off the row, off the lattice, or rotated: all laid out.
         let laid_out = board_of(vec![
             part("C1", 16.0, 9.0, 90),
-            part("R1", 13.0, 7.0, 0),
+            part("R1", 13.0, row, 0),
             part("R2", 12.0, 7.5, 0),
         ]);
         assert!(seed_row_references(&laid_out).is_empty());
     }
 
     #[test]
+    fn no_placement_on_the_lattice_can_sit_in_the_seed_row() {
+        // The placer snaps to whole 0.5 mm, so it cannot express the row's y.
+        // This is what makes "still seeded" answerable from coordinates at all.
+        for min_y in [0.0, 5.0, 5.25, -3.5, 12.7] {
+            let row = seed_row_y(min_y);
+            let steps = row / 0.5;
+            assert!(
+                (steps - steps.round()).abs() > 0.1,
+                "seed row {row} sits on the placement lattice (min_y {min_y})"
+            );
+        }
+    }
+
+    #[test]
     fn a_half_placed_board_names_only_what_is_still_seeded() {
-        let board = board_of(vec![part("C1", 14.54, 7.0, 0), part("R1", 16.0, 12.0, 0)]);
+        let board = board_of(vec![
+            part("C1", seed_row_x(10.0, 1), seed_row_y(5.0), 0),
+            part("R1", 16.0, 12.0, 0),
+        ]);
         assert_eq!(seed_row_references(&board), ["C1"]);
     }
 

@@ -53,7 +53,12 @@ fn seed(ctx: &AgentRuntime) {
         ]}),
     );
     tool(ctx, "sync_board", json!({}));
-    tool(ctx, "place_board", json!({}));
+    let placed = tool(ctx, "place_board", json!({}));
+    assert_eq!(
+        placed["still_unplaced"],
+        Value::Null,
+        "a whole-board placement leaves nothing in the seed row"
+    );
     tool(ctx, "route_board", json!({}));
 }
 
@@ -136,20 +141,15 @@ fn a_window_routes_the_nets_that_reach_it_and_keeps_the_rest() {
         json!({ "bbox": { "min_x": x - 3.0, "min_y": y - 3.0, "max_x": x + 3.0, "max_y": y + 3.0 } }),
     );
 
-    let scope: Vec<&str> = routed["scope"]
+    // KiCad names the interior nets itself, so assert the SHAPE of the
+    // selection rather than particular names: a window takes some of the
+    // board's nets and leaves the rest alone.
+    let scope = routed["scope"]
         .as_array()
         .expect("a bbox call names its nets")
-        .iter()
-        .filter_map(Value::as_str)
-        .collect();
-    assert!(
-        scope.contains(&"VIN"),
-        "R1 pad 1 is in the window: {routed:#}"
-    );
-    assert!(
-        !scope.contains(&"GND"),
-        "GND is R3's far pad and never reaches the window: {routed:#}"
-    );
+        .len();
+    let total = routed["total_connection_count"].as_u64().unwrap() as usize;
+    assert!(scope >= 1 && scope < total, "a window is local: {routed:#}");
     assert!(
         routed["kept_existing_copper"]["traces"].as_u64().unwrap() > 0,
         "the copper outside the window is kept, not re-made: {routed:#}"

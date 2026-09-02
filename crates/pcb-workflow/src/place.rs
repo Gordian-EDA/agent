@@ -2096,12 +2096,6 @@ fn subset_selection(
     board: &IpcBoardSnapshot,
 ) -> std::result::Result<(Option<Vec<String>>, Option<Rect>), String> {
     let bbox = crate::selection::parse_bbox(input)?;
-    if bbox.is_some() && input.get("refs").is_some() {
-        return Err(
-            "pass refs or bbox, not both — a box is just another way to name the parts to place"
-                .to_owned(),
-        );
-    }
     if let Some(bbox) = bbox {
         let refs = crate::selection::parts_in_bbox(board, &bbox);
         if refs.is_empty() {
@@ -2187,6 +2181,11 @@ fn already_placed_error() -> Value {
 
 #[tracing::instrument(skip_all, fields(project = %ctx.project_dir().display()))]
 pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    // An argument error is the caller's, not the board's: answer it before
+    // asking whether a board exists at all.
+    if let Err(error) = crate::selection::check_one_selector(&input, "refs") {
+        return Ok(json!({ "error": error }));
+    }
     let board = match crate::active_board(ctx) {
         Ok(board) => board,
         Err(live_err) => return Ok(json!({ "error": live_err })),

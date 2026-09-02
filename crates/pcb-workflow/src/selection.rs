@@ -13,6 +13,17 @@ use pcb_model::RouteSolution;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+/// A caller names a subset one way or the other. Passing a box AND a list means
+/// one of them, so neither is safe to act on.
+pub(crate) fn check_one_selector(input: &Value, list: &str) -> std::result::Result<(), String> {
+    if input.get("bbox").is_some() && input.get(list).is_some() {
+        return Err(format!(
+            "pass {list} or bbox, not both — a box is just another way to name what to work on"
+        ));
+    }
+    Ok(())
+}
+
 /// Read the optional `bbox` field. An absent box is a whole-board call.
 pub(crate) fn parse_bbox(input: &Value) -> std::result::Result<Option<Rect>, String> {
     let Some(value) = input.get("bbox") else {

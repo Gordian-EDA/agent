@@ -10,8 +10,8 @@ mod patch;
 mod sexpr;
 
 pub use active::{
-    ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot, board_problem, bridge_route,
-    from_bridge, save_live_board, seed_row_references,
+    ImportedBoard, ImportedPad, ImportedPart, IpcBoardSnapshot, SEED_ROW_PITCH, board_problem,
+    bridge_route, from_bridge, save_live_board, seed_row_references, seed_row_x, seed_row_y,
 };
 pub use edit::{BoardDoc, BoardFootprint};
 pub use netclass::{

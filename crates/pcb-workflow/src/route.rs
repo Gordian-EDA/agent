@@ -205,10 +205,8 @@ pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(bbox) => bbox,
         Err(message) => return Ok(refusal(message)),
     };
-    if bbox.is_some() && nets.is_some() {
-        return Ok(refusal(
-            "pass nets or bbox, not both — a box is just another way to name the nets to route",
-        ));
+    if let Err(error) = crate::selection::check_one_selector(&input, "nets") {
+        return Ok(refusal(error));
     }
     if let Some(refusal) = unplaced_refusal(ctx) {
         return Ok(refusal);
