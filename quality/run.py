@@ -38,7 +38,15 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 CASES = Path(__file__).resolve().parent / "cases"
 CAPPED_SCORE = 3
-FINDING_TAGS = ("tool-contract", "prompt", "engine", "harness", "judge", "variance")
+FINDING_TAGS = (
+    "tool-contract",
+    "prompt",
+    "engine",
+    "harness",
+    "judge",
+    "self-diagnosis",
+    "variance",
+)
 
 
 def command(args, *, timeout=600, check=True, env=None):
