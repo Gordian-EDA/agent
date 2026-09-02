@@ -11,13 +11,16 @@ Usage:
     python3 tools/render_pcb.py BOARD.kicad_pcb [-o OUT.png] [--scale N]
                                 [--layers L1,L2,...] [--side front|back]
 
-Requires: `kicad-cli` (KiCad 9 or 10) on PATH, and `cairosvg` (pip/uv install).
+Requires: KiCad 10 configured through `KICAD_CLI` or `kicad.cliPath`, and
+`cairosvg` (pip/uv install).
 """
 import argparse
 import os
 import subprocess
 import sys
 import tempfile
+
+from kicad_cli import configured_kicad_cli
 
 # Front-side artifact layers: top copper, top silk (refs + outlines), and the
 # board edge. Bottom copper is included so two-layer routing is fully visible;
@@ -30,7 +33,7 @@ def render_3d(board: str, out: str, side: str, width: int, height: int) -> None:
     """Photorealistic 3D 'beauty' render via KiCAD's raytracer — green soldermask,
     ENIG pads, white silk. No SVG/cairosvg step (`kicad-cli` writes the PNG)."""
     cmd = [
-        "kicad-cli", "pcb", "render",
+        configured_kicad_cli(), "pcb", "render",
         "--side", side,
         "--quality", "high",
         "--background", "opaque",
@@ -54,7 +57,7 @@ def render(board: str, out: str, scale: float, layers: str, side: str) -> None:
     with tempfile.TemporaryDirectory() as td:
         svg = os.path.join(td, "board.svg")
         cmd = [
-            "kicad-cli", "pcb", "export", "svg",
+            configured_kicad_cli(), "pcb", "export", "svg",
             "--mode-single",
             "--exclude-drawing-sheet",
             "--page-size-mode", "2",   # board area only

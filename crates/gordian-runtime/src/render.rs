@@ -434,7 +434,7 @@ fn thicken_schematic_wires(svg: &str) -> String {
         "stroke:#009600; stroke-width:0.1524;",
         "stroke:#009600; stroke-width:0.2540;",
     );
-    // KiCad 9.0.3 may emit the entire schematic-wire layer as `stroke:none`
+    // KiCad may emit the entire schematic-wire layer as `stroke:none`
     // even though its paths are the real committed wires. Older exports put
     // the green stroke on the group. In either form give each path an explicit
     // stroke: resvg then cannot lose it through absent/broken inheritance.

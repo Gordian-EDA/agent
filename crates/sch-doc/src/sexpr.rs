@@ -262,7 +262,7 @@ fn flat_into(node: &Node, out: &mut String) {
     }
 }
 
-/// Pretty-print `node` in the KiCAD 9/10 printer dialect at `indent` tabs.
+/// Pretty-print `node` in the KiCad printer dialect at `indent` tabs.
 ///
 /// Three rules reproduce the shape KiCAD writes: a list whose children are all
 /// atoms stays on one line; `(pts …)` puts every point on a single indented

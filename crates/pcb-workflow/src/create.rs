@@ -1631,7 +1631,7 @@ fn parse_net_width_value(net: &str, value: &Value) -> std::result::Result<f64, S
     ))
 }
 
-/// KiCAD 9 built-in (standard-fab) minimums, verified against `kicad-cli pcb drc`:
+/// KiCad built-in standard-fabrication minimums, verified against `kicad-cli pcb drc`:
 /// a via below these trips `via_diameter` / `drill_out_of_range` / `annular_width`.
 const KICAD_MIN_VIA_DIAMETER: f64 = 0.5;
 const KICAD_MIN_VIA_DRILL: f64 = 0.3;

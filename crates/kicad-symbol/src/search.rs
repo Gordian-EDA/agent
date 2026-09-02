@@ -1,7 +1,7 @@
 //! Fast cross-library symbol search — backs the agent's `search_symbols`
 //! anti-hallucination tool.
 //!
-//! [`SymbolIndex::build`] scans symbol *names only* across every KiCad 9 flat
+//! [`SymbolIndex::build`] scans symbol *names only* across every flat
 //! `*.kicad_sym` or KiCad 10 split `*.kicad_symdir` library. Libraries are not
 //! parsed into ASTs at build time; instead the raw s-expression text is
 //! walked once per file, tracking paren depth (string-literal aware), and

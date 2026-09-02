@@ -14,7 +14,7 @@ const SUGGEST_LIMIT: usize = 3;
 /// The single concrete symbol oracle: resolves `Lib:Name` ids to pin metadata.
 ///
 /// Backed either by installed KiCAD symbol libraries
-/// ([`from_symbol_dir`](SymbolTable::from_symbol_dir)) -- each KiCad 9 flat
+/// ([`from_symbol_dir`](SymbolTable::from_symbol_dir)) -- each flat
 /// `.kicad_sym` or KiCad 10 split `.kicad_symdir` library is parsed once on
 /// first reference and cached -- or by an in-memory fixture set for tests
 /// ([`mock`](SymbolTable::mock) / [`with_basics`](SymbolTable::with_basics)).

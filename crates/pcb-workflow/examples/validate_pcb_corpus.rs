@@ -46,7 +46,9 @@ const REQUIRED_BOARDS: &[&str] = &[
 fn main() -> Result<()> {
     let args = Args::parse(std::env::args().skip(1))?;
     let env = KicadInstallation::detect()
-        .ok_or_else(|| anyhow!("KiCad 9 or 10 was not found in the standard installation paths"))?;
+        .ok_or_else(|| anyhow!(
+            "KiCad 10 or newer was not found; set kicad.cliPath, kicad.symbolDir, and kicad.footprintDir"
+        ))?;
     let catalog =
         FootprintCatalog::from_root(env.footprint_dir()).context("loading footprint catalog")?;
     let corpus_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/pcb_circuits");
