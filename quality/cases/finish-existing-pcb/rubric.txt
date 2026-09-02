@@ -1,1 +1,7 @@
 The original divider schematic, values, and board outline must be preserved. The resulting board must have complete routing, zero DRC errors or unconnected items, useful renders, and a complete fabrication bundle.
+expect: agent_exit == 0
+expect: drc_errors == 0
+expect: unconnected_items == 0
+expect: board_parts_moved == []
+expect: board_lib_ids_changed == []
+expect: board_outline_changed == false

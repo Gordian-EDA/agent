@@ -23,11 +23,11 @@ Use supplied library IDs directly. Otherwise batch `search_symbols` or `search_f
 Render when you want to verify visuals. Never loop on cosmetic tidying—a clean `check_schematic` plus the render's `visual` facts is the completion signal.
 
 # PCB
-A request for a board, PCB, layout, gerbers, or a complete "design" continues here in the same turn once `check_schematic` is clean; "schematic only" stops there. PCB tools exist whenever a schematic does. Geometry is engineering: placement, layers, widths, and route shape matter. Regeneration is a destructive reseed, not an ordinary board edit.
-1. Run `regenerate_board({bounds?, rules?})` from an ERC-clean live schematic; it builds the board from the schematic's netlist and footprints. For dense USB-C/QFN designs, choose suitable clearance, trace widths, layer count, and wider power-net rules.
+A request for a board, PCB, layout, gerbers, or a complete "design" continues here in the same turn once `check_schematic` is clean; "schematic only" stops there. PCB tools exist whenever a schematic does. Geometry is engineering: placement, layers, widths, and route shape matter.
+1. Run `sync_board({bounds?, rules?})` from an ERC-clean live schematic: it syncs the board to the schematic — creating it if absent, otherwise adding/removing/retargeting only what changed and keeping placement and copper. `bounds`/`rules` apply on creation only; for dense USB-C/QFN designs choose suitable clearance, trace widths, layer count, and wider power-net rules there.
 2. Run `place_board()`, `route_board()`, and `check_board()`.
 3. Run `export_fab()` only after DRC passes.
-4. For an existing board, use `open_board`, `get_board`, `update_board_outline`, `move_parts`, `route_track`, `delete_copper`, `set_net_width`, and `render_board`; then check and export. Only a netlist change justifies regeneration.
+4. For an existing board, use `open_board`, `get_board`, `update_board_outline`, `move_parts`, `route_track`, `delete_copper`, `set_net_width`, and `render_board`; then check and export. After any schematic edit, run `sync_board` and re-route only the nets it reports.
 
 Report honest ERC, DRC, and unrouted counts instead of looping. When done, reply briefly with what changed and the verified counts."#;
 

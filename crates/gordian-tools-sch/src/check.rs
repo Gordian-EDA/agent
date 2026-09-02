@@ -123,7 +123,7 @@ pub fn check_schematic(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         });
     }
     // A symbol whose pins no pad on its footprint carries cannot be seeded onto a
-    // board. `regenerate_board` refuses it, so the schematic gate must say so first
+    // board. `sync_board` refuses it, so the schematic gate must say so first
     // rather than letting the PCB stage discover it.
     for mismatch in gordian_runtime::footprint_compat::design_pin_mismatches(ctx, &design)? {
         diagnostics.push(sch_check::Diagnostic::error(

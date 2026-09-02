@@ -1476,7 +1476,7 @@ fn undersized_817_result(problem: &PlacementView, required: Opto817Requirements)
             "h": estimate.height.ceil(),
         },
         "parts_courtyard_area_mm2": (estimate.total_area * 10.0).round() / 10.0,
-        "note": "placement is NOT legal, so no footprint positions were written and the board remains at its previous positions. The verified 817 isolation bank requires one continuous single-row barrier; regenerate_board with at least suggested_min_bounds_mm, then run place_board once.",
+        "note": "placement is NOT legal, so no footprint positions were written and the board remains at its previous positions. The verified 817 isolation bank requires one continuous single-row barrier; update_board_outline with at least suggested_min_bounds_mm, then run place_board once.",
     });
     out["error"] = Value::String(illegal_placement_error(&out));
     out
@@ -1834,7 +1834,7 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     "note": format!(
                         "{ic_ref} has {} decoupling caps the placer scattered. Render the board \
                          and, if the cluster is still poor, use `move_parts` for deliberate live \
-                         refinement rather than regenerating unchanged.",
+                         refinement rather than resyncing unchanged.",
                         caps.len()
                     ),
                 }));
@@ -1858,7 +1858,7 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         });
     } else {
         // A legal placement on an oversized canvas reads as wasted board: report
-        // the tight courtyard envelope so callers can regenerate at fit_bounds_mm
+        // the tight courtyard envelope so callers can resize to fit_bounds_mm
         // and re-place instead of shipping empty acreage.
         let by_ref: std::collections::BTreeMap<&str, _> = result
             .placements
@@ -1914,8 +1914,8 @@ pub fn place_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
              Call route_board next, or render_board to see it."
         } else {
             "placement is NOT legal, so no footprint positions were written and the board remains at \
-             its previous (usually regeneration-seed) positions. To keep the requested board size, \
-             choose smaller appropriate footprints; otherwise regenerate_board with bounds at least \
+             its previous (usually sync-seed) positions. To keep the requested board size, \
+             choose smaller appropriate footprints; otherwise update_board_outline with bounds at least \
              suggested_min_bounds_mm, then run place_board once."
         },
     });
@@ -1951,7 +1951,7 @@ fn illegal_placement_error(result: &Value) -> String {
     format!(
         "placement failed and no positions were written: the placer could not legally pack the \
          selected footprints in {current_w} x {current_h} mm. Choose smaller appropriate \
-         footprints to preserve that board size, or regenerate with at least \
+         footprints to preserve that board size, or resize the outline to at least \
          {suggested_w} x {suggested_h} mm, then run place_board once."
     )
 }

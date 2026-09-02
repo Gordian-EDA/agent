@@ -52,7 +52,7 @@ struct ToolServices {
     /// Cross-library name index, built on first `search_symbols` and reused.
     index: OnceLock<SymbolIndex>,
     /// Cross-library footprint catalog, built on first `search_footprints` /
-    /// `get_footprint_info` / `regenerate_board` and reused.
+    /// `get_footprint_info` / `sync_board` and reused.
     footprint_catalog: OnceLock<FootprintCatalog>,
     /// Test override: when set, build the footprint catalog from this directory
     /// of `.pretty` libraries instead of the installed KiCAD footprint share dir.

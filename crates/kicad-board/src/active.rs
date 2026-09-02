@@ -206,7 +206,7 @@ pub fn save_live_board(
     sessions: &kicad_ipc::SessionManager,
 ) -> std::result::Result<PathBuf, String> {
     if !path.exists() {
-        return Err("no board exists yet — run regenerate_board first".to_owned());
+        return Err("no board exists yet — run sync_board first".to_owned());
     }
     // A wedged live session must not block file-based consumers: the offline
     // write paths keep the on-disk board current, so drop the session and hand
@@ -233,7 +233,7 @@ fn read_snapshot(
     sessions: &kicad_ipc::SessionManager,
 ) -> std::result::Result<IpcBoardSnapshot, String> {
     if !path.exists() {
-        return Err("no board exists yet — run regenerate_board first".to_owned());
+        return Err("no board exists yet — run sync_board first".to_owned());
     }
     let mut last_ready_err = None;
     for _ in 0..6 {

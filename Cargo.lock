@@ -865,6 +865,7 @@ dependencies = [
  "gordian-tools-sch",
  "indexmap 2.14.0",
  "kicad",
+ "kicad-board",
  "pcb-workflow",
  "prost",
  "prost-types",

@@ -1,6 +1,6 @@
 //! Interactive IPC board editing.
 //!
-//! Once the engine has seeded a board (regenerate_board → place_board → route_board),
+//! Once the engine has seeded a board (sync_board → place_board → route_board),
 //! `open_board` launches or inspects the live KiCAD session and the geometry
 //! tools edit the REAL board over IPC. This is where the LLM directly controls
 //! geometry (the engine is the assist that produced the starting point).

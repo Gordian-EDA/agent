@@ -27,7 +27,7 @@ pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let pcb_path = ctx.pcb_path();
     if !pcb_path.exists() {
         return Ok(json!({
-            "error": "no board exists yet — run regenerate_board first"
+            "error": "no board exists yet — run sync_board first"
         }));
     }
     // Mutating board tools save every successful operation. If this process already

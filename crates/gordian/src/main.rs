@@ -573,19 +573,17 @@ mod tests {
         );
         assert_eq!(
             log.observe(&AgentEvent::ToolStarted {
-                name: "regenerate_board".into()
+                name: "sync_board".into()
             }),
-            Some("tool -> regenerate_board".into())
+            Some("tool -> sync_board".into())
         );
         assert_eq!(
             log.observe(&AgentEvent::ToolFinished {
-                name: "regenerate_board".into(),
+                name: "sync_board".into(),
                 summary: "written".into(),
                 image_path: Some(".gordian/renders/render-001.png".into()),
             }),
-            Some(
-                "tool <- regenerate_board: written (image: .gordian/renders/render-001.png)".into()
-            )
+            Some("tool <- sync_board: written (image: .gordian/renders/render-001.png)".into())
         );
         assert_eq!(
             log.observe(&AgentEvent::Reviewed {

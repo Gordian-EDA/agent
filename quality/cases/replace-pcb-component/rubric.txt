@@ -1,1 +1,8 @@
 R1 should become 4.7k in an 0603 footprint and remain connected between VIN and SENSE. R2 and the board outline should be preserved. The edit should be local: unrelated placement and routing should not be regenerated gratuitously.
+expect: agent_exit == 0
+expect: erc_errors == 0
+expect: drc_errors == 0
+expect: unconnected_items == 0
+expect: board_parts_moved == []
+expect: board_lib_ids_changed == ["R1"]
+expect: board_outline_changed == false

@@ -36,7 +36,7 @@ use gordian_runtime::tool::{ReviewOutcome, ToolEffect, ToolOutcome};
 use gordian_tools_sch::PlacementBudget;
 
 /// After this many route attempts with failed nets, block further blind PCB
-/// regenerate/place/route retries in the same turn and force an honest report.
+/// sync/place/route retries in the same turn and force an honest report.
 const MAX_FAILED_ROUTE_RETRIES: usize = 3;
 
 const MAX_ERC_CLEANUP_NUDGES: usize = 2;
@@ -348,8 +348,7 @@ fn tool_defs_for_phase(
         .filter(|tool| match phase {
             ToolPhase::BoardActive => true,
             ToolPhase::BoardSeed => {
-                is_schematic_phase_tool(tool.name.as_str())
-                    || tool.name.as_str() == "regenerate_board"
+                is_schematic_phase_tool(tool.name.as_str()) || tool.name.as_str() == "sync_board"
             }
             ToolPhase::Schematic => is_schematic_phase_tool(tool.name.as_str()),
         })
@@ -373,7 +372,7 @@ fn is_schematic_phase_tool(name: &str) -> bool {
 fn is_pcb_stage_tool(name: &str) -> bool {
     matches!(
         name,
-        "regenerate_board"
+        "sync_board"
             | "place_board"
             | "route_board"
             | "check_board"
@@ -985,8 +984,7 @@ impl<P: Provider> Agent<P> {
                             .entry(call.fn_name.clone())
                             .or_default() += 1;
                     }
-                    let effective = authoritative_regenerate_call(call, authoritative_intent)
-                        .or_else(|| coalesced_discovery_call(call, &tool_calls));
+                    let effective = coalesced_discovery_call(call, &tool_calls);
                     self.run_tool_call(effective.as_ref().unwrap_or(call)).await
                 };
                 let parsed = parse_or_null(&content);
@@ -1195,17 +1193,17 @@ impl<P: Provider> Agent<P> {
                     stages,
                 };
             };
-            let regenerated = self
+            let resized = self
                 .run_pcb_finish_stage(
-                    "regenerate_board",
+                    "update_board_outline",
                     json!({"bounds": bounds}),
                     pcb_recovery,
                     events,
                 )
                 .await;
-            let regenerated_ok = regenerate_board_succeeded(&parse_or_null(&regenerated.content));
-            stages.push(regenerated);
-            if !regenerated_ok {
+            let resized_ok = board_tool_succeeded(&parse_or_null(&resized.content));
+            stages.push(resized);
+            if !resized_ok {
                 return PcbFinishRun {
                     completed: false,
                     stages,
@@ -1455,14 +1453,16 @@ fn parse_or_null(result_json: &str) -> Value {
     serde_json::from_str(result_json).unwrap_or(Value::Null)
 }
 
-fn regenerate_board_succeeded(value: &Value) -> bool {
+/// A board mutator reports success as `ok: true` with no error and nothing
+/// deferred.
+fn board_tool_succeeded(value: &Value) -> bool {
     value.get("ok").and_then(Value::as_bool) == Some(true)
         && value.get("error").is_none()
         && value.get("executed").and_then(Value::as_bool) != Some(false)
 }
 
 fn should_auto_finish_pcb(pcb_only_stage: bool, name: &str, value: &Value) -> bool {
-    pcb_only_stage && name == "regenerate_board" && regenerate_board_succeeded(value)
+    pcb_only_stage && name == "sync_board" && board_tool_succeeded(value)
 }
 
 fn placement_resize_bounds(value: &Value) -> Option<Value> {
@@ -1609,7 +1609,7 @@ fn visual_review_ran(value: &Value) -> bool {
 fn pcb_quality_invalidated_by(name: &str) -> bool {
     matches!(
         name,
-        "regenerate_board"
+        "sync_board"
             | "place_board"
             | "route_board"
             | "move_parts"
@@ -1627,7 +1627,7 @@ struct PcbRecoveryState {
     // Becomes true only once route_board actually runs. Recovery mutations
     // preserve it; only an authoritative clean DRC clears it. This makes a
     // failed post-route check sticky without blocking the first route when a
-    // user checks a newly regenerated, still-unrouted board.
+    // user checks a newly synced, still-unrouted board.
     awaiting_clean_drc: bool,
     verification_failed: bool,
 }
@@ -1803,11 +1803,11 @@ fn route_retry_budget_reset_by_fix(fn_name: &str, value: &Value) -> bool {
 }
 
 fn route_retry_budget_note() -> &'static str {
-    "PCB routing or post-route DRC has failed. Do not call route_board or regenerate_board again until you make one concrete recovery change: move parts, edit copper, change net width or outline, or apply a schematic fix. Deterministic regenerate_board/place_board replay is not a recovery; run check_board after the changed route, then report the honest status."
+    "PCB routing or post-route DRC has failed. Do not call route_board or sync_board again until you make one concrete recovery change: move parts, edit copper, change net width or outline, or apply a schematic fix. Deterministic sync_board/place_board replay is not a recovery; run check_board after the changed route, then report the honest status."
 }
 
 fn drc_verification_retry_note() -> &'static str {
-    "Post-route check_board failed to complete, so the routed board is unverified. Do not regenerate, reroute, or mutate the board to bypass verification. Retry check_board once after inspecting the reported tool error; if verification remains unavailable, report that status honestly."
+    "Post-route check_board failed to complete, so the routed board is unverified. Do not resync, reroute, or mutate the board to bypass verification. Retry check_board once after inspecting the reported tool error; if verification remains unavailable, report that status honestly."
 }
 
 fn route_failure_context(value: &Value) -> Value {
@@ -1926,7 +1926,7 @@ fn is_image_only_message(msg: &ChatMessage) -> bool {
 /// The effect class of a KiCAD tool name.
 fn tool_effect(name: &str) -> ToolEffect {
     match name {
-        "regenerate_board"
+        "sync_board"
         | "place_board"
         | "route_board"
         | "open_board"
@@ -2036,46 +2036,6 @@ fn fix_prompt(defects: &[String]) -> String {
     )
 }
 
-fn authoritative_regenerate_call(call: &ToolCall, user_msg: &str) -> Option<ToolCall> {
-    if call.fn_name != "regenerate_board" {
-        return None;
-    }
-    let request = user_msg.to_ascii_lowercase();
-    let exact_one_ground_pour = request.contains("exactly one")
-        && request.contains("gnd")
-        && (request.contains("pour") || request.contains("plane"));
-    let explicit_two_layer = request.contains("two-layer") || request.contains("two layer");
-    if !exact_one_ground_pour && !explicit_two_layer {
-        return None;
-    }
-
-    let mut effective = call.clone();
-    if !effective.fn_arguments["rules"].is_object() {
-        effective.fn_arguments["rules"] = json!({});
-    }
-    if explicit_two_layer {
-        effective.fn_arguments["rules"]["layer_count"] = json!(2);
-    }
-    if exact_one_ground_pour {
-        let layer = if request.contains("top pour") || request.contains("top-layer pour") {
-            "top"
-        } else {
-            "bottom"
-        };
-        let connect = if request.contains("solid") {
-            "solid"
-        } else {
-            "thermal"
-        };
-        effective.fn_arguments["rules"]["pours"] = json!([{
-            "net": "GND",
-            "layer": layer,
-            "connect": connect,
-        }]);
-    }
-    Some(effective)
-}
-
 /// Run one KiCAD tool on the blocking pool.
 async fn run_kicad_tool(ctx: &Arc<AgentRuntime>, call: &ToolCall) -> ToolOutcome {
     into_outcome(run_blocking(ctx, &call.fn_name, call.fn_arguments.clone()).await)
@@ -2115,7 +2075,7 @@ fn tool_timeout_message(name: &str, timeout: Duration) -> String {
 fn is_kicad_session_tool(name: &str) -> bool {
     matches!(
         name,
-        "regenerate_board"
+        "sync_board"
             | "place_board"
             | "route_board"
             | "check_board"
@@ -2141,7 +2101,7 @@ fn tool_timeout(name: &str) -> Duration {
         // backstop for a hang, not the mechanism.
         name if enforces_own_deadline(name) => PlacementBudget::DEFAULT + DEADLINE_MARGIN,
         // KiCAD IPC/CLI paths can legitimately take longer on first launch.
-        "regenerate_board" | "place_board" | "route_board" | "check_board" | "export_fab"
+        "sync_board" | "place_board" | "route_board" | "check_board" | "export_fab"
         | "open_board" => Duration::from_secs(180),
         _ => Duration::from_secs(90),
     }

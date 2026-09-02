@@ -95,10 +95,66 @@ def prepare_project(case, project):
         return
     tool(project, "place_parts", json.loads(seed.read_text(encoding="utf-8")))
     if (source / "seed-board").exists():
-        tool(project, "regenerate_board")
+        tool(project, "sync_board")
         tool(project, "place_board")
         tool(project, "route_board")
         tool(project, "check_board")
+
+
+# --- deterministic board facts ---------------------------------------------
+
+
+def pcb_facts(project):
+    """Where every footprint sits, read from the `.kicad_pcb` itself."""
+    configured = os.environ.get("PCB_FACTS_BIN")
+    binary = configured or example("kicad-board", "pcb_facts")
+    result = command([binary, str(project)], check=False)
+    if result.returncode:
+        return {"error": (result.stderr or result.stdout).strip()}
+    return json.loads(result.stdout)
+
+
+def board_facts(project, before_project):
+    """The board before against after: what moved, what changed identity, and
+    whether the outline survived. A fact is recorded only when both sides were
+    actually measured, so a rubric line about them fails rather than passing on
+    a run that never produced a board."""
+    after = pcb_facts(project)
+    if not after.get("board"):
+        return {"pcb_facts_error": after.get("error")}
+    before = pcb_facts(before_project)
+    facts = {
+        "pcb_facts_error": None,
+        "board_part_count": len(after["parts"]),
+        "board_nets": after["nets"],
+    }
+    if not before.get("board"):
+        return facts
+    poses = {part["reference"]: part for part in before["parts"]}
+    now = {part["reference"]: part for part in after["parts"]}
+    reidentified = {
+        reference
+        for reference, part in now.items()
+        if reference in poses and poses[reference]["lib_id"] != part["lib_id"]
+    }
+    facts.update(
+        {
+            "board_parts_added": sorted(set(now) - set(poses)),
+            "board_parts_removed": sorted(set(poses) - set(now)),
+            "board_lib_ids_changed": sorted(reidentified),
+            # A part that changed package legitimately moves with it; "moved"
+            # is about the parts nobody asked to touch.
+            "board_parts_moved": sorted(
+                reference
+                for reference, part in now.items()
+                if reference in poses
+                and reference not in reidentified
+                and poses[reference]["pose"] != part["pose"]
+            ),
+            "board_outline_changed": before["outline"] != after["outline"],
+        }
+    )
+    return facts
 
 
 # --- deterministic schematic facts -----------------------------------------
@@ -354,9 +410,11 @@ def deterministic_facts(project, before_project, artifacts, agent_result):
         else []
     )
     sch, detail = schematic_facts(project, before_project, artifacts)
+    pcb = board_facts(project, before_project) if board is not None else {}
     facts = {
         "agent_exit": agent_result.returncode,
         "pcb_created": board is not None,
+        **pcb,
         **severity_counts(erc, "erc"),
         **severity_counts(drc, "drc"),
         "unconnected_items": len(unconnected),
@@ -649,7 +707,9 @@ def run_case(case, output_root):
 # --- scoreboard -------------------------------------------------------------
 
 
-COLUMNS = ["case", "score", "checks", "erc e/w", "moved", "lost", "added", "elapsed"]
+COLUMNS = [
+    "case", "score", "checks", "erc e/w", "moved", "lost", "added", "pcb moved", "elapsed",
+]
 
 
 def count(report, name):
@@ -658,7 +718,7 @@ def count(report, name):
 
 def row(report):
     if "error" in report:
-        return [report["case"], "-", "-", "-", "-", "-", "-", report["error"][:60]]
+        return [report["case"], "-", "-", "-", "-", "-", "-", "-", report["error"][:60]]
     checks = report["checks"]
     total = len(checks["pass"]) + len(checks["fail"])
     return [
@@ -669,6 +729,7 @@ def row(report):
         count(report, "unchanged_symbols_moved"),
         count(report, "fields_lost"),
         count(report, "symbols_added"),
+        count(report, "board_parts_moved"),
         f"{report['elapsed_seconds']:.0f}s",
     ]
 

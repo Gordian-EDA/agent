@@ -11,16 +11,20 @@
 //! snapshot and save it through IPC; headless operations use `kicad-board`'s
 //! atomic file-edit fallback and invalidate any stale live session.
 //!
-//! `regenerate_board` synthesizes the initial `.kicad_pcb` file. Active
-//! placement, routing, rendering, and `get_board` read the live IPC board.
+//! `sync_board` writes the `.kicad_pcb`: it creates the file when absent and
+//! otherwise applies only the schematic delta. Active placement, routing,
+//! rendering, and `get_board` read the live IPC board.
 //!
 //! ## Tool families (one module each)
 //!
 //! - [`seed`] — board-construction rule/extra input types.
 //! - [`footprints`] — footprint discovery + assignment: `search_footprints`,
 //!   `get_footprint_info`.
-//! - [`create`] — board construction + input parsing: `regenerate_board`,
+//! - [`create`] — board synthesis + input parsing: the seed-board writer,
 //!   rules and bounds parsing.
+//! - [`sync`] — `sync_board`: the schematic↔board netlist diff and its
+//!   incremental application.
+//! - [`copper`] — copper retraction shared by the board mutators.
 //! - [`place`] — `get_board`, IPC snapshot→`PlacementView`, and `place_board`.
 //! - [`route`] — `route_board` IPC copper write-back + triage.
 //! - [`export`] — `check_board`.
@@ -49,7 +53,6 @@ pub(crate) fn fmt_num(v: f64) -> String {
     format!("{v}")
 }
 
-pub use create::regenerate_board;
 pub use export::check_board;
 pub use fab::export_fab;
 pub use footprints::{get_footprint_info, search_footprints};

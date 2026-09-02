@@ -33,7 +33,7 @@ use pcb_place::{LockedAt, PlacementHints};
 
 use crate::create::{
     BoardSeedSpec, SeedPart, add_default_power_pours, apply_complexity_default_layer_count,
-    emit_board_footprint, emit_seed_board, parse_bounds, parse_seed_rules,
+    emit_board_footprint, emit_seed_board, parse_bounds, parse_seed_rules, write_board,
 };
 
 /// One schematic part as the exported netlist has it.
@@ -382,9 +382,8 @@ fn create_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         Ok(text) => text,
         Err(e) => return json!({ "error": e }),
     };
-    ctx.close_kicad_session();
-    if let Err(e) = std::fs::write(ctx.pcb_path(), text) {
-        return json!({ "error": format!("could not write {}: {e}", ctx.pcb_path().display()) });
+    if let Err(e) = write_board(ctx, &text) {
+        return json!({ "error": e });
     }
     json!({
         "ok": true,
@@ -500,9 +499,8 @@ fn update_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
         return json!({ "error": e, "revision": revision });
     }
 
-    ctx.close_kicad_session();
-    if let Err(e) = std::fs::write(&path, doc.into_text()) {
-        return json!({ "error": format!("could not write the board: {e}") });
+    if let Err(e) = write_board(ctx, &doc.into_text()) {
+        return json!({ "error": e, "revision": revision });
     }
 
     // Only copper the edit invalidated comes out: traces touching a pad that

@@ -5,21 +5,19 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io;
 
-use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use geom::Rect;
 use kicad_footprint::{FootprintCatalog, FootprintId};
 use pcb_model::{Point2, Polygon};
 use pcb_place::LockedAt;
 
-use gordian_runtime::AgentRuntime;
 use gordian_runtime::tool::footprint_suggestion_clause;
 
 use super::fmt_num;
 use super::seed::{BoardSeedRules, PourPadConnection, PourSpec};
 
-// ── regenerate_board ──────────────────────────────────────────────────────────────
+// ── board synthesis ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub(super) struct BoardSeedSpec {
@@ -96,164 +94,6 @@ fn resolve_pour_layer(layer: &str, layer_count: u32) -> Option<(u32, String)> {
     }
 }
 
-/// `regenerate_board` — seed the PCB from KiCAD's own schematic netlist export.
-///
-/// Footprints must already be assigned in the live schematic. Missing footprints are
-/// a hard error: the agent assigns them before regenerating the board again.
-///
-/// The schematic gate is exactly `check_schematic`'s: ERC errors block, ERC warnings do
-/// not. One policy, so a schematic the agent was told is finished is one the board can
-/// be seeded from.
-pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    if !ctx.sch_path().exists() {
-        return Ok(json!({
-            "error": "no .kicad_sch yet — create the schematic with place_parts first"
-        }));
-    }
-    let netlist = match ctx.env().netlist(ctx.sch_path()) {
-        Ok(netlist) => netlist,
-        Err(e) => {
-            return Ok(json!({ "error": format!("could not export the schematic netlist: {e}") }));
-        }
-    };
-    let erc = match ctx.env().erc(ctx.sch_path()) {
-        Ok(report) => report,
-        Err(e) => {
-            return Ok(
-                json!({ "error": format!("could not run ERC before regenerating the board: {e}") }),
-            );
-        }
-    };
-    if erc.error_count() > 0 {
-        let violations: Vec<Value> = erc
-            .violations
-            .iter()
-            .filter(|v| v.severity == "error")
-            .map(|v| {
-                json!({
-                    "type": v.kind,
-                    "description": v.description,
-                })
-            })
-            .collect();
-        return Ok(json!({
-            "ok": false,
-            "error": format!(
-                "schematic ERC has {} error(s); fix the live schematic before regenerate_board",
-                erc.error_count()
-            ),
-            "erc": {
-                "errors": erc.error_count(),
-                "warnings": erc.warning_count(),
-                "violations": violations,
-            },
-        }));
-    }
-    let mut pad_nets_by_ref: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    for net in &netlist.nets {
-        if net.name.is_empty() {
-            continue;
-        }
-        for (reference, pin) in &net.nodes {
-            if reference.is_empty() || pin.is_empty() {
-                continue;
-            }
-            pad_nets_by_ref
-                .entry(reference.clone())
-                .or_default()
-                .insert(pin.clone(), net.name.clone());
-        }
-    }
-
-    let mut parts = Vec::with_capacity(netlist.components.len());
-    let mut missing_footprints = Vec::new();
-    for component in &netlist.components {
-        let footprint = component
-            .properties
-            .get("Footprint")
-            .cloned()
-            .unwrap_or_default();
-        if footprint.is_empty() {
-            missing_footprints.push(component.reference.clone());
-        }
-        parts.push(SeedPart {
-            reference: component.reference.clone(),
-            value: Some(component.value.clone()),
-            footprint,
-            pad_nets: pad_nets_by_ref
-                .remove(&component.reference)
-                .unwrap_or_default(),
-            locked: None,
-        });
-    }
-
-    let bounds = if input.get("bounds").is_some() {
-        match parse_bounds(input.get("bounds")) {
-            Ok(b) => b,
-            Err(e) => return Ok(json!({ "error": e })),
-        }
-    } else {
-        Rect {
-            min_x: 0.0,
-            min_y: 0.0,
-            max_x: 50.0,
-            max_y: 40.0,
-        }
-    };
-    let mut rules = match parse_seed_rules(input.get("rules")) {
-        Ok(r) => r,
-        Err(msg) => return Ok(json!({ "error": msg })),
-    };
-
-    let part_count = parts.len();
-    apply_complexity_default_layer_count(&mut rules, input.get("rules"), part_count);
-
-    if !missing_footprints.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "part_count": part_count,
-            "missing_footprints": missing_footprints,
-            "next_tool": "assign_footprints",
-            "next": "call assign_footprints({assignments:[{reference, footprint}, ...]}), then regenerate_board again",
-            "note": "some live schematic symbols have no footprint field — do not retry regenerate_board until footprints are assigned",
-        }));
-    }
-
-    let footprint_pin_mismatches =
-        gordian_runtime::footprint_compat::netlist_pin_mismatches(ctx, &netlist)?;
-    if !footprint_pin_mismatches.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "error": "schematic symbol and assigned footprint have incompatible numbered pins/pads",
-            "footprint_pin_mismatches": footprint_pin_mismatches,
-            "next_tool": "swap_symbol",
-            "next": "make the two agree: swap_symbol to a part whose pin numbers are the footprint's pad numbers, or assign_footprints a package whose pads match the pins — then regenerate_board again",
-            "note": "Every named electrical pad must match a symbol pin and every symbol pin must have a physical pad. Unnumbered mechanical pads and repeated pads with a valid shared number are allowed.",
-        }));
-    }
-
-    add_default_power_pours(&mut rules, &parts);
-
-    let spec = BoardSeedSpec {
-        bounds,
-        rules,
-        parts,
-        outline: None,
-    };
-
-    match write_seed_board(&spec, ctx) {
-        Ok(()) => {}
-        Err(msg) => return Ok(json!({ "error": msg })),
-    }
-    Ok(json!({
-        "ok": true,
-        "part_count": part_count,
-        "layer_count": spec.rules.layer_count,
-        "path": ctx.pcb_path().display().to_string(),
-        "note": "board regenerated from the committed schematic file (not F8 sync; existing placement/routing may be replaced) — run place_board, then route_board, then check_board",
-    }))
-}
-
 pub(super) fn apply_complexity_default_layer_count(
     rules: &mut SeedRules,
     input: Option<&Value>,
@@ -267,16 +107,16 @@ pub(super) fn apply_complexity_default_layer_count(
     }
 }
 
-fn write_seed_board(spec: &BoardSeedSpec, ctx: &AgentRuntime) -> std::result::Result<(), String> {
-    let catalog = ctx
-        .footprint_catalog()
-        .map_err(|e| format!("footprint catalog unavailable: {e}"))?;
-    let text = emit_seed_board(spec, catalog)?;
-    // Regeneration replaces the document, not merely its on-disk bytes. A
-    // cached pcbnew session otherwise keeps serving the old in-memory board for
-    // the same pathname, so the next tool sees stale bounds and footprints.
-    // Close before overwrite to prevent that process from later saving stale
-    // state back over the fresh seed.
+/// Replace the board document on disk.
+///
+/// A replacement changes the document, not merely its on-disk bytes. A cached
+/// pcbnew session otherwise keeps serving the old in-memory board for the same
+/// pathname, so the next tool would see stale bounds and footprints. Close
+/// before overwriting to stop that process saving stale state back over it.
+pub(super) fn write_board(
+    ctx: &gordian_runtime::AgentRuntime,
+    text: &str,
+) -> std::result::Result<(), String> {
     ctx.close_kicad_session();
     std::fs::write(ctx.pcb_path(), text)
         .map_err(|e| format!("could not write {}: {e}", ctx.pcb_path().display()))
@@ -284,9 +124,8 @@ fn write_seed_board(spec: &BoardSeedSpec, ctx: &AgentRuntime) -> std::result::Re
 
 /// Synthesize the production seed-board representation without writing it.
 ///
-/// Keeping the emitter independent of [`AgentRuntime`] lets offline validation
-/// compose the exact same seed writer with the production placement/copper
-/// patchers.
+/// Keeping the emitter free of the runtime lets offline validation compose the
+/// exact same seed writer with the production placement/copper patchers.
 pub(super) fn emit_seed_board(
     spec: &BoardSeedSpec,
     catalog: &FootprintCatalog,
@@ -1591,6 +1430,7 @@ const KICAD_MIN_ANNULAR: f64 = 0.1;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gordian_runtime::AgentRuntime;
     use serde_json::json;
 
     #[test]
@@ -2236,13 +2076,21 @@ mod tests {
             outline: None,
         };
 
-        write_seed_board(&spec(20.0, 10.0), &ctx).unwrap();
+        write_board(
+            &ctx,
+            &emit_seed_board(&spec(20.0, 10.0), ctx.footprint_catalog().unwrap()).unwrap(),
+        )
+        .unwrap();
         let first = crate::active_board(&ctx).unwrap();
         assert_eq!(first.imported.bounds, Rect::new(0.0, 0.0, 20.0, 10.0));
 
         // `first` opened and cached a pcbnew session. Replacing the same path
         // must force the next snapshot to open the new document, not reuse it.
-        write_seed_board(&spec(40.0, 30.0), &ctx).unwrap();
+        write_board(
+            &ctx,
+            &emit_seed_board(&spec(40.0, 30.0), ctx.footprint_catalog().unwrap()).unwrap(),
+        )
+        .unwrap();
         let second = crate::active_board(&ctx).unwrap();
         assert_eq!(second.imported.bounds, Rect::new(0.0, 0.0, 40.0, 30.0));
         ctx.close_kicad_session();
