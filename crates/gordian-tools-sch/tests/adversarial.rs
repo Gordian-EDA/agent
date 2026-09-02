@@ -176,6 +176,50 @@ fn wrong_footprint_is_refused_and_its_suggestion_closes_the_loop() {
 }
 
 #[test]
+fn footprint_assignment_uses_embedded_pins_for_project_local_symbols() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "Device:R", "ref": "R1"}]}),
+    );
+    assert!(placed.get("error").is_none(), "fixture failed: {placed}");
+    let source = std::fs::read_to_string(ctx.sch_path()).unwrap();
+    let project_local = source.replace("Device:R", "project-local:R");
+    assert_ne!(project_local, source, "fixture did not embed Device:R");
+    std::fs::write(ctx.sch_path(), project_local).unwrap();
+    let footprint = "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal";
+
+    let assigned = call(
+        &ctx,
+        "assign_footprints",
+        json!({"assignments": [{"reference": "R1", "footprint": footprint}]}),
+    );
+
+    assert!(
+        assigned.get("error").is_none(),
+        "embedded symbol assignment failed: {assigned}"
+    );
+    let written = std::fs::read_to_string(ctx.sch_path()).unwrap();
+    assert!(written.contains(&format!("(property \"Footprint\" \"{footprint}\"")));
+
+    let bypass = call(
+        &ctx,
+        "set_fields",
+        json!({"ref": "R1", "fields": {"footprint": footprint}}),
+    );
+    assert!(
+        bypass["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("assign_footprints")),
+        "lowercase footprint bypass was accepted: {bypass}"
+    );
+}
+
+#[test]
 fn add_symbols_cannot_bypass_footprint_compatibility() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCad detected");

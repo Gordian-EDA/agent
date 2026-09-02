@@ -1048,7 +1048,10 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     ) else {
         return Ok(json!({ "error": "set_fields needs `ref` and `fields`" }));
     };
-    if fields.contains_key("Footprint") {
+    if fields
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("Footprint"))
+    {
         return Ok(json!({
             "error": "set_fields does not set Footprint; use assign_footprints so symbol compatibility is validated",
         }));
@@ -1177,9 +1180,49 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .and_then(|(_, uuid)| edit.doc.symbol(uuid))
             .map(|symbol| symbol.lib_id.clone())
             .expect("validated schematic reference has a symbol");
-        if let Some(mismatch) = gordian_runtime::footprint_compat::assignment_pin_mismatch(
-            ctx, reference, &symbol, footprint,
-        )? {
+        let installed = ctx
+            .provider()
+            .symbol(&symbol)
+            .or_else(|| ctx.index().ok()?.symbol(&symbol))
+            .is_some();
+        let mismatch = if installed {
+            gordian_runtime::footprint_compat::assignment_pin_mismatch(
+                ctx, reference, &symbol, footprint,
+            )?
+        } else {
+            let pin_numbers = placed_pins(&edit.doc)
+                .into_iter()
+                .filter(|pin| pin.refdes == *reference)
+                .map(|pin| pin.number)
+                .collect::<Vec<_>>();
+            if pin_numbers.is_empty() {
+                return Ok(json!({
+                    "error": format!(
+                        "unknown symbol `{symbol}` and its embedded schematic definition has no pins"
+                    ),
+                }));
+            }
+            let verdict =
+                gordian_runtime::footprint_compat::footprint_compatibility_for_pins(
+                    ctx,
+                    &symbol,
+                    pin_numbers.iter().map(String::as_str),
+                    footprint,
+                )?;
+            (!verdict.compatible).then_some(
+                gordian_runtime::footprint_compat::FootprintPinMismatch {
+                    reference: reference.clone(),
+                    symbol: symbol.clone(),
+                    footprint: footprint.clone(),
+                    polarity_mismatch: verdict.polarity_mismatch,
+                    missing_pads: verdict.missing_pads,
+                    extra_pins: verdict.extra_pins,
+                    suggestion: None,
+                    symbol_suggestion: None,
+                },
+            )
+        };
+        if let Some(mismatch) = mismatch {
             footprint_mismatch.push(mismatch.payload());
         }
     }
