@@ -850,7 +850,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let landing = Point2::new(at.x + offset.x, at.y + offset.y);
         let occupancy = Occupancy::skipping(&edit.doc, &pending);
         let mut nudge = None;
-        if !occupancy.free(landing, w, h) {
+        if !reverse_polarity && !occupancy.free(landing, w, h) {
             // The spot the caller picked is taken, but the intent — put this
             // part about here — still holds: slide to the nearest grid spot
             // that fits and say where it went.
@@ -877,7 +877,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let straightened = if reverse_polarity {
             let nets = refs::nets_touching(edit.before(), std::slice::from_ref(&refdes));
             allow = std::mem::take(&mut allow)
-                .nets(nets)
+                .joining_nets(nets)
                 .part(refdes.clone())
                 .creating();
             0

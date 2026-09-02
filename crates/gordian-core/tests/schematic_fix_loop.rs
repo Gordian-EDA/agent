@@ -106,13 +106,21 @@ fn returned_fix_closes_reversed_led_polarity_verbatim() {
         })
     );
 
-    tool(
+    let applied = tool(
         &ctx,
         finding.pointer("/fix/tool").unwrap().as_str().unwrap(),
         finding.pointer("/fix/args").unwrap().clone(),
     );
+    assert!(
+        applied.pointer("/changed/moved/0/nudged_to").is_none(),
+        "an in-place polarity fix must not move off its fixed nets: {applied:#}"
+    );
     let repaired = tool(&ctx, "check_schematic", json!({"detail": true}));
 
+    assert_eq!(
+        repaired["erc_clean"], true,
+        "repair was not clean: {repaired:#}"
+    );
     assert!(
         repaired["findings"]
             .as_array()
