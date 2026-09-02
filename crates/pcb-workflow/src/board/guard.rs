@@ -25,8 +25,8 @@ use serde_json::{Value, json};
 use gordian_runtime::AgentRuntime;
 use gordian_runtime::revisions::RevisionId;
 use kicad_board::IpcBoardSnapshot;
-use pcb_model::Violation;
 use pcb_model::Finding as DrcViolation;
+use pcb_model::Violation;
 
 use crate::diagnose::{Fault, FaultKey, faults};
 

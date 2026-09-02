@@ -2088,10 +2088,37 @@ fn subset_is_legal(
         })
 }
 
-/// The `refs` subset a `place_board` call names, checked against the board.
+/// The subset a `place_board` call selects, checked against the board.
 ///
+/// Either a `refs` list or a `bbox` window, never both — they are two ways of
+/// naming the same thing, and a caller who passes both means one of them.
 /// Naming a part that is not there is a mistake worth catching: the placer would
 /// otherwise silently lay out nothing and report a legal placement.
+fn subset_selection(
+    input: &Value,
+    board: &IpcBoardSnapshot,
+) -> std::result::Result<(Option<Vec<String>>, Option<Rect>), String> {
+    let bbox = crate::selection::parse_bbox(input)?;
+    if bbox.is_some() && input.get("refs").is_some() {
+        return Err(
+            "pass refs or bbox, not both — a box is just another way to name the parts to place"
+                .to_owned(),
+        );
+    }
+    if let Some(bbox) = bbox {
+        let refs = crate::selection::parts_in_bbox(board, &bbox);
+        if refs.is_empty() {
+            return Err(format!(
+                "no footprint has its courtyard centre inside that box \
+                 ({:.2},{:.2})-({:.2},{:.2}); get_board lists where the parts are",
+                bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y
+            ));
+        }
+        return Ok((Some(refs), Some(bbox)));
+    }
+    Ok((subset_refs(input, board)?, None))
+}
+
 fn subset_refs(
     input: &Value,
     board: &IpcBoardSnapshot,
@@ -2164,8 +2191,8 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(board) => board,
         Err(live_err) => return Ok(json!({ "error": live_err })),
     };
-    let refs = match subset_refs(&input, &board) {
-        Ok(refs) => refs,
+    let (refs, bbox) = match subset_selection(&input, &board) {
+        Ok(selection) => selection,
         Err(error) => return Ok(json!({ "error": error })),
     };
     let intent = match crate::intent::parse(&input) {
@@ -2182,6 +2209,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Some(object) = input.as_object_mut() {
         object.remove("replace");
         object.remove("refs");
+        object.remove("bbox");
         object.remove("intent");
     }
     let refs = match placement_subset(refs, &board, replace) {
@@ -2210,6 +2238,20 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let zones = intent.zones.clone();
     intent.merge_into(&mut hints);
+    // A window is a promise as well as a selector: what the caller drew is where
+    // the parts should end up. `region` is a soft containment term, so a part
+    // that genuinely cannot fit still lands legally instead of failing.
+    if let (Some(bbox), Some(members)) = (bbox, refs.as_ref()) {
+        hints.groups.push(pcb_place::GroupHint {
+            name: "bbox".to_owned(),
+            members: members.clone(),
+            region: Some(bbox),
+            edge: None,
+            grid: false,
+            rotation: None,
+            surround: None,
+        });
+    }
     let explicitly_edged: std::collections::BTreeSet<&str> = hints
         .groups
         .iter()
@@ -2439,12 +2481,32 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     out["nets_to_reroute"] = json!(retract.nets);
     if let Some(refs) = &refs {
         out["placed_refs"] = json!(refs);
+        if let Some(bbox) = bbox {
+            out["bbox"] = json!({
+                "min_x": bbox.min_x, "min_y": bbox.min_y,
+                "max_x": bbox.max_x, "max_y": bbox.max_y,
+            });
+        }
+        // What a local call did NOT do. A subset placement that leaves parts in
+        // the seed row is half a board, and the model has no other way to learn
+        // it short of another `check_board`.
+        let placed: std::collections::BTreeSet<&str> = refs.iter().map(String::as_str).collect();
+        let still_unplaced: Vec<String> = kicad_board::seed_row_references(&board.imported)
+            .into_iter()
+            .filter(|reference| !placed.contains(reference.as_str()))
+            .collect();
         if legal {
             out["note"] = json!(
-                "placed only the named parts; every other footprint kept its pose and its \
+                "placed only the selected parts; every other footprint kept its pose and its \
                  copper. Call route_board({nets: nets_to_reroute}), then check_board."
             );
             out["next_tool"] = json!("route_board");
+        }
+        if !still_unplaced.is_empty() {
+            out["still_unplaced"] = json!(still_unplaced);
+            out["still_unplaced_note"] = json!(
+                "these parts are still in the seed row; place them too before routing the board."
+            );
         }
     }
     if !zones.is_empty() {
@@ -3725,6 +3787,94 @@ mod tests {
         assert_eq!(out["items"][0]["x"], json!(8.75));
         assert_eq!(out["items"][0]["y"], json!(9.5));
         assert_eq!(out["items"][0]["layers"], json!(["F.Cu"]));
+    }
+
+    /// Three parts spread along x, so a window can pick out the middle one.
+    fn spread_board() -> IpcBoardSnapshot {
+        let at = |x: f64| Point2::new(x, 10.0);
+        let part = |reference: &str, x: f64| ImportedPart {
+            reference: reference.to_owned(),
+            lib_id: "Resistor_SMD:R_0603".to_owned(),
+            at: at(x),
+            rotation: 0,
+            locked: false,
+            pads: vec![ImportedPad {
+                number: "1".to_owned(),
+                net: Some(format!("N_{reference}")),
+                at: at(x),
+                layers: vec![LayerRef::top()],
+            }],
+        };
+        let bounds = Rect::new(0.0, 0.0, 40.0, 20.0);
+        IpcBoardSnapshot {
+            imported: ImportedBoard {
+                layer_count: 2,
+                bounds,
+                parts: vec![part("R1", 5.0), part("R2", 20.0), part("R3", 35.0)],
+                placement_keepouts: vec![],
+                keepout_count: 0,
+            },
+            problem: RoutingView {
+                layer_count: 2,
+                min_trace_width: 0.2,
+                obstacles: vec![],
+                connections: vec![],
+                bounds,
+                clearance: 0.2,
+                via_diameter: 0.6,
+                via_drill: 0.3,
+                net_widths: Default::default(),
+                outline: None,
+                escape_layers: Default::default(),
+                plane_nets: Default::default(),
+                fixed_copper: Default::default(),
+                nets: None,
+            },
+            copper: RouteSolution::default(),
+            layer_names: vec!["F.Cu".to_owned(), "B.Cu".to_owned()],
+        }
+    }
+
+    #[test]
+    fn a_window_selects_the_parts_whose_centres_are_inside_it() {
+        let board = spread_board();
+        let (refs, bbox) = subset_selection(
+            &json!({ "bbox": { "min_x": 15.0, "min_y": 0.0, "max_x": 25.0, "max_y": 20.0 } }),
+            &board,
+        )
+        .unwrap();
+        assert_eq!(refs.as_deref(), Some(["R2".to_owned()].as_slice()));
+        assert_eq!(bbox, Some(Rect::new(15.0, 0.0, 25.0, 20.0)));
+    }
+
+    #[test]
+    fn an_empty_window_is_refused_with_its_own_coordinates() {
+        let error = subset_selection(
+            &json!({ "bbox": { "min_x": 38.0, "min_y": 18.0, "max_x": 39.0, "max_y": 19.0 } }),
+            &spread_board(),
+        )
+        .unwrap_err();
+        assert!(error.contains("courtyard centre"), "{error}");
+        assert!(error.contains("38.00"), "{error}");
+    }
+
+    #[test]
+    fn refs_and_bbox_together_are_refused() {
+        let error = subset_selection(
+            &json!({
+                "refs": ["R1"],
+                "bbox": { "min_x": 0.0, "min_y": 0.0, "max_x": 10.0, "max_y": 10.0 }
+            }),
+            &spread_board(),
+        )
+        .unwrap_err();
+        assert!(error.contains("not both"), "{error}");
+    }
+
+    #[test]
+    fn no_selection_at_all_is_a_whole_board_call() {
+        let (refs, bbox) = subset_selection(&json!({}), &spread_board()).unwrap();
+        assert!(refs.is_none() && bbox.is_none());
     }
 
     #[test]

@@ -9,15 +9,15 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use kicad_board::ImportedPart;
-use pcb_model::Violation as ConnViolation;
 use pcb_engine::check as lint;
+use pcb_engine::{postroute_cleanup, prepare_wide_terminal_escapes};
 use pcb_model::Finding as DrcViolation;
+use pcb_model::Violation as ConnViolation;
 use pcb_model::{
     FailedNet, LayerRef, Point2, RouteResult, RouteSolution, RoutingView, Trace, Via, ViaSpan,
 };
 use pcb_route_mesh::copper::copper_obstacles;
 use pcb_route_mesh::pathing::GlobalRouteResult;
-use pcb_engine::{postroute_cleanup, prepare_wide_terminal_escapes};
 use pcb_route_mesh::pipeline::RoutePassReport;
 
 use gordian_runtime::AgentRuntime;
@@ -201,6 +201,15 @@ pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(nets) => nets,
         Err(message) => return Ok(refusal(message)),
     };
+    let bbox = match crate::selection::parse_bbox(&input) {
+        Ok(bbox) => bbox,
+        Err(message) => return Ok(refusal(message)),
+    };
+    if bbox.is_some() && nets.is_some() {
+        return Ok(refusal(
+            "pass nets or bbox, not both — a box is just another way to name the nets to route",
+        ));
+    }
     if let Some(refusal) = unplaced_refusal(ctx) {
         return Ok(refusal);
     }
@@ -213,7 +222,7 @@ pub fn route_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
-    match route_live_board(ctx, nets) {
+    match route_live_board(ctx, nets, bbox) {
         Ok(out) => Ok(gate.commit(ctx, out)),
         Err(out) => Ok(gate.rollback(ctx, out)),
     }
@@ -295,6 +304,7 @@ fn requested_nets(input: &Value) -> std::result::Result<Option<BTreeSet<String>>
 fn route_live_board(
     ctx: &AgentRuntime,
     nets: Option<BTreeSet<String>>,
+    bbox: Option<geom::Rect>,
 ) -> std::result::Result<Value, Value> {
     let board = crate::active_board(ctx).map_err(refusal)?;
     if is_seed_placement(&board.imported.bounds, &board.imported.parts) {
@@ -302,6 +312,23 @@ fn route_live_board(
             "board has only the initial seed-row footprint positions — run place_board before route_board",
         ));
     }
+
+    // A window selects nets; from here on a local route is the `nets` route, so
+    // one code path rips, re-routes and reports.
+    let nets = match bbox {
+        None => nets,
+        Some(bbox) => {
+            let selected = crate::selection::nets_in_bbox(&board, &board.copper, &bbox);
+            if selected.is_empty() {
+                return Err(refusal(format!(
+                    "no net has a pad or copper inside that box \
+                     ({:.2},{:.2})-({:.2},{:.2}); check_board lists what is unrouted",
+                    bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y
+                )));
+            }
+            Some(selected)
+        }
+    };
 
     let existing = (board.copper.traces.len(), board.copper.vias.len());
     let mut rp = board.problem.clone();
@@ -476,6 +503,9 @@ fn route_live_board(
             Some(nets) => json!(nets.iter().collect::<Vec<_>>()),
             None => json!("whole board"),
         },
+        "bbox": bbox.map(|b| json!({
+            "min_x": b.min_x, "min_y": b.min_y, "max_x": b.max_x, "max_y": b.max_y,
+        })),
         "router_attempts": route_attempts_json(&router_attempts),
         "failed": failure_summary.records,
         "failed_record_count": failure_summary.record_count,
@@ -1610,9 +1640,7 @@ fn simplify_candidate_paths(solution: &mut RouteSolution) {
 }
 
 fn direct_candidate_layers(layer_count: u32) -> Vec<LayerRef> {
-    let plane_layers: BTreeSet<u32> = pcb_model::plane_layers(layer_count)
-        .into_iter()
-        .collect();
+    let plane_layers: BTreeSet<u32> = pcb_model::plane_layers(layer_count).into_iter().collect();
     let mut layers = Vec::new();
     for idx in 0..layer_count.max(1) {
         if plane_layers.contains(&idx) {

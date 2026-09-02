@@ -10,8 +10,8 @@
 use std::collections::BTreeSet;
 
 use kicad_board::ImportedPart;
-use pcb_model::Violation as ConnViolation;
 use pcb_model::Finding as DrcViolation;
+use pcb_model::Violation as ConnViolation;
 use pcb_model::{Point2, RoutingView};
 use serde_json::{Value, json};
 

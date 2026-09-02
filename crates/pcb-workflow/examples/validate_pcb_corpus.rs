@@ -15,8 +15,8 @@ use anyhow::{Context, Result, anyhow};
 use kicad::KicadInstallation;
 use kicad_footprint::FootprintCatalog;
 use pcb_engine::check as lint;
-use pcb_model::{Point2, RouteResult, RoutingView};
 use pcb_engine::geometry_violations;
+use pcb_model::{Point2, RouteResult, RoutingView};
 use pcb_route_mesh::crossing::{
     AssignedCrossing, AssignmentFailure, CellJob, CrossingAssignment, TerminalKind,
     assign_crossings,
@@ -289,7 +289,14 @@ fn main() -> Result<()> {
             .map(|count| count.to_string())
             .unwrap_or_default();
         if let Some(dir) = &args.emit_dir {
-            emit_board(dir, name, &board, &placed.placements, &routed.result, &catalog)?;
+            emit_board(
+                dir,
+                name,
+                &board,
+                &placed.placements,
+                &routed.result,
+                &catalog,
+            )?;
         }
         println!(
             "{name},{},{},{},{},{},{},{},{},{:.2},{},{},{},{},{},{},{},{}",
@@ -554,7 +561,8 @@ fn dump_detail_job_inspection(
         assignment.failures.len(),
         max_terms
     );
-    let (_, diagnostics) = detail::route_cells_with_diagnostics(&pcb_engine::DRC, problem, mesh, assignment);
+    let (_, diagnostics) =
+        detail::route_cells_with_diagnostics(&pcb_engine::DRC, problem, mesh, assignment);
     dump_detail_pass_diagnostics(board_name, &diagnostics);
 
     let selected_nets = selected_detail_job_nets(problem, assignment, net_names);

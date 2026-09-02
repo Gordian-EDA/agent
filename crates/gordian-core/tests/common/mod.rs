@@ -28,7 +28,11 @@ impl KicadLock {
             }
             if std::fs::metadata(&path)
                 .and_then(|meta| meta.modified())
-                .and_then(|at| SystemTime::now().duration_since(at).map_err(std::io::Error::other))
+                .and_then(|at| {
+                    SystemTime::now()
+                        .duration_since(at)
+                        .map_err(std::io::Error::other)
+                })
                 .is_ok_and(|age| age > STALE_AFTER)
             {
                 let _ = std::fs::remove_file(&path);

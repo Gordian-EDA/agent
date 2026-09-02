@@ -30,6 +30,8 @@
 //! - [`diagnose`] — actionable payloads for a refused route.
 //! - [`intent`] — board intent (edges, proximity, groups, zones) → placement
 //!   constraints. The model states intent; solvers own coordinates.
+//! - [`selection`] — `bbox` board-window selection, lowered to the `refs` /
+//!   `nets` subsets the local tools take.
 //! - [`sizing`] — how big a board its own parts require.
 //! - [`place`] — `get_board`, IPC snapshot→`PlacementView`, and `place_board`.
 //! - [`route`] — `route_board` IPC copper write-back + triage.
@@ -55,6 +57,7 @@ mod render;
 mod route;
 mod rules;
 mod seed;
+mod selection;
 mod silk;
 mod sizing;
 mod sync;
