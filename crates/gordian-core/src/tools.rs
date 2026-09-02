@@ -14,9 +14,9 @@
 //! The live schematic surface — the queries and pin-level mutators the model
 //! edits an existing board with — lives in `gordian-tools-sch` and is spliced
 //! in by [`tool_defs`] / [`run_tool`]. This module keeps what is left: symbol
-//! discovery (`search_symbols` / `get_symbol_info`), `project_info` and
-//! `render_schematic`; `pcb-workflow` covers the footprint
-//! search/info, `sync_board`, and the place/route/export/interactive flow.
+//! discovery (`search_symbols` / `get_symbol_info` / `search_footprints`),
+//! `project_info` and `render_schematic`; `pcb-workflow` covers footprint info,
+//! `sync_board`, and the place/route/export/interactive flow.
 //!
 //! ## Symbol-index caching
 //!
@@ -103,7 +103,7 @@ pub fn tool_defs() -> Vec<Tool> {
             name: "search_symbols".into(),
             description: "Find symbol `Lib:Name`; batch up to 10 queries in one call. The \
                  best hit for each query comes back with its full pin list and default \
-                 footprint inline, so get_symbol_info is only needed for a hit further down."
+                 compatible footprint inline, so get_symbol_info is only needed for a hit further down."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -180,26 +180,29 @@ pub fn tool_defs() -> Vec<Tool> {
         // ── PCB tools (slice 5) ─────────────────────────────────────────
         Def {
             name: "search_footprints".into(),
-            description: "Find footprint `Lib:Name` IDs; batch 4 queries.".into(),
+            description: "Find footprint `Lib:Name` IDs ranked for an electrical symbol. Pass the symbol so results are usable; compatible pad-number matches rank before query text. Batch up to 4 searches."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "minLength": 1 },
+                    "symbol": { "type": "string", "minLength": 1, "description": "KiCAD symbol Lib:Name whose electrical pins the footprint must fit." },
+                    "query": { "type": "string", "minLength": 1, "description": "Optional physical package or footprint-name preference." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 25 },
                     "queries": {
-                        "type": "array", "minItems": 1, "maxItems": 10,
+                        "type": "array", "minItems": 1, "maxItems": 4,
                         "items": {
                             "type": "object",
                             "properties": {
+                                "symbol": { "type": "string", "minLength": 1 },
                                 "query": { "type": "string", "minLength": 1 },
                                 "limit": { "type": "integer", "minimum": 1, "maximum": 25 }
                             },
-                            "required": ["query"],
+                            "required": ["symbol"],
                             "additionalProperties": false
                         }
                     }
                 },
-                "anyOf": [{ "required": ["query"] }, { "required": ["queries"] }],
+                "oneOf": [{ "required": ["symbol"] }, { "required": ["queries"] }],
                 "additionalProperties": false
             }),
         },
@@ -595,7 +598,7 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "undo" => undo(input, ctx),
         "history" => history(input, ctx),
         "render_schematic" => render_schematic(ctx),
-        "search_footprints" => pcb_workflow::search_footprints(input, ctx),
+        "search_footprints" => search_footprints(input, ctx),
         "get_footprint_info" => pcb_workflow::get_footprint_info(input, ctx),
         "sync_board" => pcb_workflow::sync_board(input, ctx),
         "get_board" => pcb_workflow::get_board(input, ctx),
@@ -675,27 +678,30 @@ fn search_limit(input: &Value, ctx: &AgentRuntime) -> usize {
 }
 
 fn search_symbols_one(query: &str, limit: usize, ctx: &AgentRuntime) -> Result<Value> {
-    if let Some((lib_id, pin_count)) = common_connector_symbol_alias(query) {
-        return Ok(json!({
-            "hits": [{ "lib_id": lib_id, "pin_count": pin_count }],
-            "note": "Connector symbols and physical footprints are separate choices. Use this symbol for the schematic pins; use search_footprints for the physical connector footprint.",
-        }));
-    }
-    if let Some((lib_id, pin_count)) = builtin_symbol_alias(query) {
-        return Ok(json!({
-            "hits": [{ "lib_id": lib_id, "pin_count": pin_count }],
-            "note": "built-in alias/canonical symbol; use it directly and do not repeat this search",
-        }));
-    }
+    let (mut hits, note) = if let Some((lib_id, pin_count)) = common_connector_symbol_alias(query) {
+        (
+            vec![json!({ "lib_id": lib_id, "pin_count": pin_count })],
+            Some(
+                "Connector symbols and physical footprints are separate choices; the inline footprint is electrically compatible.",
+            ),
+        )
+    } else if let Some((lib_id, pin_count)) = builtin_symbol_alias(query) {
+        (
+            vec![json!({ "lib_id": lib_id, "pin_count": pin_count })],
+            Some("built-in alias/canonical symbol; use it directly and do not repeat this search"),
+        )
+    } else {
+        (
+            ctx.index()?
+                .search(query, limit)
+                .into_iter()
+                .map(|h| json!({ "lib_id": h.lib_id, "pin_count": h.pin_count }))
+                .collect(),
+            None,
+        )
+    };
 
-    let mut hits: Vec<Value> = ctx
-        .index()?
-        .search(query, limit)
-        .into_iter()
-        .map(|h| json!({ "lib_id": h.lib_id, "pin_count": h.pin_count }))
-        .collect();
-
-    // The best hit carries its pins and default footprint, so the common case —
+    // The best hit carries its pins and compatible footprint, so the common case —
     // "find this part, then write its pin map" — is one request instead of two.
     if let Some(top) = hits.first_mut()
         && let Some(lib_id) = top["lib_id"].as_str().map(str::to_string)
@@ -705,11 +711,71 @@ fn search_symbols_one(query: &str, limit: usize, ctx: &AgentRuntime) -> Result<V
             .or_else(|| ctx.index().ok()?.symbol(&lib_id))
     {
         top["pins"] = json!(pin_digest(&meta));
-        top["default_footprint"] = json!(meta.footprint);
+        top["footprint"] = json!(validated_symbol_footprint(ctx, &lib_id, &meta)?);
         top["description"] = json!(meta.description);
     }
 
-    Ok(json!({ "hits": hits }))
+    let mut result = json!({ "hits": hits });
+    if let Some(note) = note {
+        result["note"] = json!(note);
+    }
+    Ok(result)
+}
+
+fn validated_symbol_footprint(
+    ctx: &AgentRuntime,
+    symbol_id: &str,
+    meta: &sch_check::SymbolMeta,
+) -> Result<Option<String>> {
+    if symbol_id.starts_with("power:") {
+        return Ok(None);
+    }
+    if let Some(footprint) = meta.footprint.as_deref()
+        && gordian_runtime::footprint_compat::footprint_compatibility(ctx, symbol_id, footprint)
+            .is_ok_and(|verdict| verdict.compatible)
+    {
+        return Ok(Some(footprint.to_owned()));
+    }
+    gordian_runtime::footprint_compat::best_compatible_footprint(
+        ctx,
+        symbol_id,
+        meta.footprint.as_deref(),
+    )
+}
+
+const MAX_FOOTPRINT_QUERIES: usize = 4;
+
+fn search_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    if let Some(queries) = input.get("queries") {
+        let queries = queries
+            .as_array()
+            .ok_or_else(|| anyhow!("`queries` must be an array"))?;
+        if queries.is_empty() || queries.len() > MAX_FOOTPRINT_QUERIES {
+            bail!("`queries` must contain 1 to {MAX_FOOTPRINT_QUERIES} searches");
+        }
+        let results = queries
+            .iter()
+            .map(|item| search_footprints_one(item, ctx))
+            .collect::<Result<Vec<_>>>()?;
+        return Ok(json!({ "results": results }));
+    }
+    search_footprints_one(&input, ctx)
+}
+
+fn search_footprints_one(input: &Value, ctx: &AgentRuntime) -> Result<Value> {
+    let symbol = require_str(input, "symbol")?;
+    let query = input.get("query").and_then(Value::as_str);
+    let hits = gordian_runtime::footprint_compat::search_compatible_footprints(
+        ctx,
+        &symbol,
+        query,
+        search_limit(input, ctx),
+    )?;
+    Ok(json!({
+        "symbol": symbol,
+        "query": query,
+        "hits": hits,
+    }))
 }
 
 fn builtin_symbol_alias(query: &str) -> Option<(&'static str, usize)> {

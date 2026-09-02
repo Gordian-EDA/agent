@@ -157,11 +157,6 @@ pub fn search_compatible_footprints(
         .unwrap_or_else(|| footprint_query_for_symbol(symbol_id));
     let text_hits = catalog.search(SearchQuery::new(&search_text).limit(TEXT_POOL));
     let matcher = SkimMatcherV2::default().ignore_case();
-    let mut scored = HashMap::<FootprintId, i64>::new();
-    for hit in &text_hits {
-        scored.insert(hit.id.clone(), hit.score);
-    }
-
     let mut libraries = Vec::new();
     let explicit_family = FootprintId::parse(&search_text).ok();
     if let Some(preferred) = &explicit_family {
@@ -172,6 +167,12 @@ pub fn search_compatible_footprints(
             if !libraries.contains(hit.id.library()) {
                 libraries.push(hit.id.library().clone());
             }
+        }
+    }
+    let mut scored = HashMap::<FootprintId, i64>::new();
+    for hit in &text_hits {
+        if libraries.contains(hit.id.library()) {
+            scored.insert(hit.id.clone(), hit.score);
         }
     }
     for library in &libraries {
@@ -528,7 +529,7 @@ fn footprint_capacitor_polarity(footprint_id: &FootprintId) -> Option<CapacitorP
 mod tests {
     use super::{
         best_compatible_footprint, capacitor_polarity_mismatch, footprint_compatibility,
-        pad_number_differences,
+        pad_number_differences, search_compatible_footprints,
     };
     use crate::AgentRuntime;
     use kicad_footprint::FootprintId;
@@ -690,5 +691,32 @@ mod tests {
                 "suggested {suggestion} does not fit {symbol}: {suggested:?}"
             );
         }
+    }
+
+    #[test]
+    fn compatibility_tier_precedes_a_closer_text_match() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCad detected");
+            return;
+        };
+        let hits = search_compatible_footprints(
+            &ctx,
+            "Connector:Barrel_Jack",
+            Some("Connector_BarrelJack:BarrelJack_Horizontal"),
+            usize::MAX,
+        )
+        .unwrap();
+        let incompatible = hits
+            .iter()
+            .position(|hit| hit.lib_id == "Connector_BarrelJack:BarrelJack_Horizontal")
+            .expect("exact text match remains visible");
+        assert!(incompatible > 0);
+        assert!(hits[..incompatible].iter().all(|hit| hit.compatible));
+        assert!(!hits[incompatible].compatible);
+        assert_eq!(hits[incompatible].pads, ["1", "2", "3"]);
+        assert!(
+            hits.iter()
+                .all(|hit| hit.lib_id.starts_with("Connector_BarrelJack:"))
+        );
     }
 }
