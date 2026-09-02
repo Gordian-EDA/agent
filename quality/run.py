@@ -650,7 +650,8 @@ def image_part(path):
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
 
 
-def extract_object(text):
+def extract_object(text, key="score"):
+    """The last JSON object in `text` that carries `key` — a model's verdict."""
     decoder = json.JSONDecoder()
     objects = []
     for match in re.finditer(r"\{", text):
@@ -660,9 +661,9 @@ def extract_object(text):
                 objects.append(value)
         except json.JSONDecodeError:
             pass
-    verdicts = [value for value in objects if "score" in value]
+    verdicts = [value for value in objects if key in value]
     if not verdicts:
-        raise ValueError(f"judge returned no verdict object: {text!r}")
+        raise ValueError(f"model returned no object with {key!r}: {text!r}")
     return verdicts[-1]
 
 
@@ -797,7 +798,9 @@ capability."""
     )
     with urllib.request.urlopen(request, timeout=240) as response:
         payload = json.loads(response.read())
-    answer = extract_object(payload["choices"][0]["message"].get("content") or "")
+    answer = extract_object(
+        payload["choices"][0]["message"].get("content") or "", key="struggles"
+    )
     struggles = answer.get("struggles") or []
     wishes = answer.get("wishes") or []
     return {
