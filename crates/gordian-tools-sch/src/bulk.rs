@@ -10,6 +10,17 @@ use serde_json::{Value, json};
 
 use crate::session::{Allow, Edit};
 
+/// Every accepted shape of an `intent.relations` entry, with an example of each.
+///
+/// Serde can only report the first malformed field and says nothing about what it
+/// wanted, so a caller who mis-shapes a relation has to guess. Relations are the
+/// field that is actually guessed wrong, so the refusal carries the whole grammar.
+const RELATION_SHAPES: &str = "each entry is an object tagged by `kind`: \
+     {\"kind\":\"left_of\",\"a\":\"R1\",\"b\":\"U1\"} (also right_of, above, below); \
+     {\"kind\":\"group\",\"name\":\"leds\",\"members\":[\"R3\",\"D1\"],\"side\":\"right\",\"anchor\":\"U1\"} \
+     (`side` alone is fine; [\"right\",\"U1\"] and {\"side\":\"right\",\"anchor\":\"U1\"} also parse); \
+     {\"kind\":\"align\",\"members\":[\"C1\",\"C2\"],\"axis\":\"horizontal\"}";
+
 /// Deserialize a tool's arguments, naming the field that was wrong.
 ///
 /// Serde's own message says what is malformed but not where; without the path a caller
@@ -17,7 +28,12 @@ use crate::session::{Allow, Edit};
 fn typed<T: serde::de::DeserializeOwned>(input: Value, tool: &str) -> Result<T> {
     serde_path_to_error::deserialize(input).map_err(|e| {
         let path = e.path().to_string();
-        anyhow!("invalid {tool} input at `{path}`: {}", e.into_inner())
+        let help = if path.contains("relations") {
+            format!(" — {RELATION_SHAPES}")
+        } else {
+            String::new()
+        };
+        anyhow!("invalid {tool} input at `{path}`: {}{help}", e.into_inner())
     })
 }
 
@@ -63,7 +79,7 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
 }
 
 pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let payload: sch_check::PlacePartsInput = typed(input, "place_parts")?;
+    let mut payload: sch_check::PlacePartsInput = typed(input, "place_parts")?;
     // The exact payload is what reproduces a placement; nothing else in the log does.
     tracing::debug!(
         payload = %serde_json::to_string(&payload).unwrap_or_default(),
@@ -73,6 +89,10 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Edit::open(ctx).context("opening the existing schematic")?
     } else {
         Edit::create(ctx, sch_floorplan::live::blank_sheet()?)
+    };
+    let minted = match resolve_pin_net_refs(&mut payload, &mut edit)? {
+        Ok(minted) => minted,
+        Err(error) => return Ok(error),
     };
     let derived: Vec<String> = payload
         .parts
@@ -134,7 +154,9 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "place_parts",
             "Place schematic parts",
             json!(report),
-            Allow::nothing().parts(refs).creating(),
+            // Naming a previously auto-named net renames it; that is the point of an
+            // `@ref.pin` target, so the guard is told rather than surprised.
+            Allow::nothing().parts(refs).joining_nets(minted).creating(),
         )
         .context("committing placed parts")?;
     if value.get("error").is_some() {
@@ -204,6 +226,69 @@ fn finish_arrangement(
         return Ok(value);
     }
     with_check(value, ctx)
+}
+
+/// Rewrite every `"@R1.2"` pin target to a real net name, labelling the referenced
+/// pin first when its net has only a KiCAD-generated name.
+///
+/// This is what makes a net reachable that has no name of its own: the model can
+/// say "join whatever P3 pin 1 is on" instead of guessing at `Net-(P3-Pad1)`,
+/// which is regenerated from the net's own pins and forks it if written as a label.
+#[allow(clippy::type_complexity)]
+fn resolve_pin_net_refs(
+    payload: &mut sch_check::PlacePartsInput,
+    edit: &mut Edit,
+) -> Result<std::result::Result<Vec<String>, Value>> {
+    let specs: std::collections::BTreeSet<String> = payload
+        .parts
+        .iter()
+        .flat_map(|part| part.pins.values())
+        .filter(|net| net.starts_with(crate::refs::NET_OF_PIN))
+        .cloned()
+        .collect();
+    if specs.is_empty() {
+        return Ok(Ok(Vec::new()));
+    }
+    let mut minted = Vec::new();
+    let mut resolved = std::collections::BTreeMap::new();
+    for spec in specs {
+        match crate::refs::net_of_pin(&edit.doc, edit.before(), &spec) {
+            Ok(found) => {
+                if let crate::refs::PinNet::Mint {
+                    refdes,
+                    number,
+                    net,
+                } = &found
+                    && let Ok(pin) = crate::refs::pin(&edit.doc, &format!("{refdes}.{number}"))
+                {
+                    edit.doc
+                        .add_label(sch_doc::LabelKind::Local, net, crate::wiring::pose(pin.at));
+                    minted.push(net.clone());
+                    if let Some(was) =
+                        crate::refs::net_of(edit.before(), refdes, number).map(str::to_string)
+                    {
+                        minted.push(was);
+                    }
+                }
+                resolved.insert(spec, found.net().to_string());
+            }
+            Err(error) => {
+                return Ok(Err(json!({
+                    "ok": false,
+                    "code": "unknown_pin_net_ref",
+                    "error": format!("{spec}: {error}"),
+                })));
+            }
+        }
+    }
+    for part in &mut payload.parts {
+        for net in part.pins.values_mut() {
+            if let Some(found) = resolved.get(net.as_str()) {
+                *net = found.clone();
+            }
+        }
+    }
+    Ok(Ok(minted))
 }
 
 fn refused_place(report: PlaceReport) -> Value {

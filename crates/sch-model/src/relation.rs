@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{EPS, Point2, Rect};
 
-use crate::ir::{Axis, GroupSide, LayoutIr, Relation, Side};
+use crate::ir::{Axis, LayoutIr, Relation, Side};
 use crate::item::Item;
 
 use crate::geometry::item_rect;
@@ -132,7 +132,12 @@ pub fn relation_viol(items: &[Item], ir: &LayoutIr) -> usize {
                     viol += 1;
                 }
             }
-            Relation::Group { members, side, .. } => {
+            Relation::Group {
+                members,
+                side,
+                anchor,
+                ..
+            } => {
                 let set: BTreeSet<&str> = members.iter().map(String::as_str).collect();
                 if let Some(bbox) = members_bbox(items, &set) {
                     viol += items
@@ -140,7 +145,8 @@ pub fn relation_viol(items: &[Item], ir: &LayoutIr) -> usize {
                         .filter(|it| !set.contains(it.refdes.as_str()) && bbox.contains(it.at))
                         .count();
                 }
-                if let Some((side, Some(anchor))) = side.as_ref().map(GroupSide::parts)
+                if let Some((side, Some(anchor))) =
+                    crate::ir::group_placement(side.as_ref(), anchor.as_deref())
                     && let Some(pa) = pos.get(anchor)
                 {
                     let (ix, sign) = side_axis(side);
@@ -206,13 +212,16 @@ fn repair_group_sides(items: &mut [Item], ir: &LayoutIr) {
     for rel in &ir.relations {
         let Relation::Group {
             members,
-            side: Some(side),
+            side,
+            anchor,
             ..
         } = rel
         else {
             continue;
         };
-        let (side, Some(anchor)) = side.parts() else {
+        let Some((side, Some(anchor))) =
+            crate::ir::group_placement(side.as_ref(), anchor.as_deref())
+        else {
             continue;
         };
         let pos = centroids(items);

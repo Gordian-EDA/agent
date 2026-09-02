@@ -62,7 +62,8 @@ pub struct PartSpec {
     pub props: IndexMap<String, String>,
     /// Pin name or number → net name, or `"nc"` for an explicit no-connect. Pin
     /// numbers are unique across a multi-unit symbol's units, so this one map
-    /// reaches every unit.
+    /// reaches every unit. A value of `"@R1.2"` means the net that pin already
+    /// carries, whatever it is called.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub pins: IndexMap<String, String>,
     /// Decoupling sugar: cap value → count, expanded across this part's rails.
@@ -563,7 +564,9 @@ pub fn place_parts_input_schema() -> Value {
                                  A name shared by several physical pins connects all of them; every \
                                  signal pin left out becomes a no-connect. Every named signal net must \
                                  land on at least two pins across these parts and the existing sheet; \
-                                 power rails and nets declared under intent.ports may be terminal.",
+                                 power rails and nets declared under intent.ports may be terminal. \
+                                 Write \"@R1.2\" to join whatever net that existing pin is on, which \
+                                 is the only way to reach a net KiCAD named for itself.",
                             "additionalProperties": {"type": "string"}
                         },
                         "decouple": {
@@ -634,12 +637,45 @@ pub fn place_parts_input_schema() -> Value {
                     "relations": {
                         "type": "array",
                         "description":
-                            "Relative placement. Each entry is tagged by \"kind\": \
-                             left_of|right_of|above|below with {a, b}; \
-                             group with {name, members, side: [edge, anchor]}; \
-                             align with {members, axis}. `b` and `anchor` may name a \
-                             part that is already on the sheet.",
-                        "items": {"type": "object"}
+                            "Relative placement. `b` and `anchor` may name a part already \
+                             on the sheet. Example: \
+                             {\"kind\":\"group\",\"name\":\"leds\",\"members\":[\"R3\",\"D1\"],\
+                             \"side\":\"right\",\"anchor\":\"U1\"}",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["left_of", "right_of", "above", "below",
+                                             "group", "align"]
+                                },
+                                "a": {"type": "string"},
+                                "b": {"type": "string"},
+                                "name": {"type": "string"},
+                                "members": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1
+                                },
+                                "side": {
+                                    "description":
+                                        "An edge, or an [edge, anchor] pair, or \
+                                         {side, anchor}.",
+                                    "anyOf": [
+                                        {"type": "string",
+                                         "enum": ["left", "right", "top", "bottom"]},
+                                        {"type": "array", "minItems": 2, "maxItems": 2},
+                                        {"type": "object"}
+                                    ]
+                                },
+                                "anchor": {"type": "string"},
+                                "axis": {
+                                    "type": "string",
+                                    "enum": ["horizontal", "vertical"]
+                                }
+                            },
+                            "required": ["kind"]
+                        }
                     }
                 }
             }

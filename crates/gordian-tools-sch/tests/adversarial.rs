@@ -398,3 +398,60 @@ fn labelling_a_node_with_a_generated_net_name_is_refused() {
         "the original net was forked anyway"
     );
 }
+
+#[test]
+fn place_parts_joins_a_net_named_only_by_a_pin_reference() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    // P3's pins land on nets KiCAD names itself, so there is no text a later call
+    // could write to join them. `@P3.1` is how the caller says which net it means.
+    let seeded = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {"ref": "P3", "part": "Device:R", "value": "10k", "pins": {"1": "RAW", "2": "GND"}},
+            {"ref": "R9", "part": "Device:R", "value": "1k", "pins": {"1": "RAW", "2": "GND"}}
+        ]}),
+    );
+    assert!(seeded.get("error").is_none(), "fixture failed: {seeded}");
+
+    let joined = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {"ref": "C7", "part": "Device:C", "value": "100nF",
+             "pins": {"1": "@P3.1", "2": "GND"}}
+        ]}),
+    );
+    assert!(joined.get("error").is_none(), "{joined}");
+    assert_ne!(joined["code"], "invalid_payload", "{joined}");
+
+    // C7 pin 1 must now share a net with P3 pin 1 — not sit on a second one.
+    let nets = call(&ctx, "get_net", json!({"name": "N_P3_1"}));
+    let text = serde_json::to_string(&nets).unwrap();
+    assert!(text.contains("C7") && text.contains("P3"), "not one net: {text}");
+}
+
+#[test]
+fn place_parts_explains_the_relation_shapes_when_one_is_malformed() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let error = gordian_tools_sch::run(
+        "place_parts",
+        json!({"parts": [{"ref": "R1", "part": "Device:R", "pins": {"1": "A", "2": "B"}}],
+               "intent": {"relations": [["R1", "U1", "left"]]}}),
+        &ctx,
+    )
+    .expect("place_parts is a schematic tool")
+    .expect_err("a malformed relation must be refused");
+    let message = format!("{error:#}");
+
+    assert!(message.contains("relations"), "{message}");
+    assert!(message.contains("\"kind\":\"left_of\""), "{message}");
+    assert!(message.contains("\"kind\":\"group\""), "{message}");
+    assert!(message.contains("\"kind\":\"align\""), "{message}");
+}

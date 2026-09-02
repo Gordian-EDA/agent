@@ -300,7 +300,7 @@ fn fallback_name(from: &Target, to: &Target) -> String {
     format!("N_{}_{}", part(from), part(to)).to_uppercase()
 }
 
-fn pose(at: Point2) -> sch_doc::Pose {
+pub(crate) fn pose(at: Point2) -> sch_doc::Pose {
     sch_doc::Pose::new(at.x, at.y, 0.0)
 }
 
@@ -319,6 +319,12 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         other => return Ok(json!({ "error": format!("unknown label kind `{other}`") })),
     };
     let mut edit = Edit::open(ctx)?;
+    // `@R1.2` names whatever net that pin is on — the only way to join a net whose
+    // own name KiCAD generated.
+    let net = &match refs::net_of_pin_name(&edit.doc, edit.before(), net) {
+        Ok(resolved) => resolved,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
     if let Some(error) = refs::derived_name_refusal(edit.before(), net) {
         return Ok(json!({ "error": error }));
     }
