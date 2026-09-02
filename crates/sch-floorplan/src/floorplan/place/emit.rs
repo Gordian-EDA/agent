@@ -329,15 +329,27 @@ pub fn emit_strategy(
 ) -> io::Result<EmitOutput> {
     let (w, mut out) = prepare_writer(env, design, ir, engine)?;
     out.sch = w.finish();
+    // The OPEN half of truthfulness, read off the finished document with the same
+    // extractor the live-edit gate uses — so a whole-sheet emit can never ship a rail
+    // in islands that only `live::verify` would have caught. `net_shorts` above is the
+    // other half.
+    out.net_opens = match sch_doc::SchDoc::parse(&out.sch) {
+        Ok(doc) => crate::live::verify(&doc, design).scattered,
+        Err(e) => vec![format!("could not re-read the emitted sheet: {e}")],
+    };
+    for net in &out.net_opens {
+        tracing::warn!(
+            "{}: realised sheet leaves net {net} in islands",
+            design.name.as_deref().unwrap_or("<unnamed>")
+        );
+    }
     Ok(out)
 }
 
-/// Lay out `design` under `strategy` and build its FINALIZED writer (placed,
-/// routed, text-solved, reframed) WITHOUT rendering it. Returns the prepared
-/// writer plus the readability metadata; `EmitOutput.sch` is left empty (the
-/// caller either `finish`es this single writer or composes several into one).
-/// This is the shared body of `emit_strategy` and the multi-block
-/// `emit_anneal_writer` compose entry, so both judge the same geometry.
+/// Lay out `design` under `engine` and build its FINALIZED writer (placed, routed,
+/// text-solved, reframed) WITHOUT rendering it. Returns the prepared writer plus the
+/// readability metadata; `EmitOutput.sch` and `net_opens` are left empty because both
+/// need the finished document — [`emit_strategy`] fills them in.
 #[tracing::instrument(
     skip_all,
     fields(
@@ -398,6 +410,7 @@ pub(crate) fn prepare_writer(
             crossings,
             detected_idioms,
             net_shorts,
+            net_opens: Vec::new(),
         },
     ))
 }
@@ -445,6 +458,15 @@ pub fn build_writer(
             w.set_mirror_last();
         }
     }
+    // Only a net with a SECOND pin gets wiring drawn to it, so only those endpoints are
+    // ones a no-connect marker could sever. A lone pin on a net of its own is exactly
+    // what the singleton no-connect in `route::route_signal` is for.
+    let wired = inc
+        .values()
+        .filter(|pins| pins.len() >= 2)
+        .flatten()
+        .map(|(i, num)| (items[*i].refdes.as_str(), num.as_str()));
+    w.declare_connected(env, wired)?;
     for it in items {
         for (num, _name, net) in &it.pins {
             if net.is_none() {

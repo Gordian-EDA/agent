@@ -1,0 +1,655 @@
+{
+  "parts": [
+    {
+      "ref": "J1",
+      "part": "Connector:USB_C_Receptacle_USB2.0_16P",
+      "value": "USB-C",
+      "footprint": "Connector_USB:USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal",
+      "pins": {
+        "A1": "GND",
+        "A12": "GND",
+        "A4": "VBUS_RAW",
+        "A5": "CC1",
+        "A6": "USB_DP",
+        "A7": "USB_DM",
+        "A8": "nc",
+        "A9": "VBUS_RAW",
+        "B1": "GND",
+        "B12": "GND",
+        "B4": "VBUS_RAW",
+        "B5": "CC2",
+        "B6": "USB_DP",
+        "B7": "USB_DM",
+        "B8": "nc",
+        "B9": "VBUS_RAW",
+        "S1": "GND"
+      }
+    },
+    {
+      "ref": "F1",
+      "part": "Device:Polyfuse",
+      "value": "500mA",
+      "footprint": "Fuse:Fuse_1206_3216Metric",
+      "pins": {
+        "1": "VBUS_RAW",
+        "2": "VBUS_5V"
+      }
+    },
+    {
+      "ref": "R1",
+      "part": "Device:R",
+      "value": "5.1k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "CC1",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R2",
+      "part": "Device:R",
+      "value": "5.1k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "CC2",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C1",
+      "part": "Device:C",
+      "value": "10uF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "VBUS_5V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C2",
+      "part": "Device:C",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "VBUS_5V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "D1",
+      "part": "Power_Protection:USBLC6-2SC6",
+      "value": "USB ESD",
+      "footprint": "Package_TO_SOT_SMD:SOT-23-6",
+      "pins": {
+        "1": "USB_DP",
+        "2": "GND",
+        "3": "USB_DM",
+        "4": "USB_DM",
+        "5": "GND",
+        "6": "USB_DP"
+      }
+    },
+    {
+      "ref": "U2",
+      "part": "Interface_USB:CP2102N-Axx-xQFN20",
+      "value": "CP2102N",
+      "footprint": "Package_DFN_QFN:SiliconLabs_QFN-20-1EP_3x3mm_P0.5mm_EP1.8x1.8mm",
+      "pins": {
+        "1": "CP_VDD",
+        "10": "nc",
+        "11": "nc",
+        "12": "nc",
+        "13": "nc",
+        "14": "ESP_RXD0",
+        "15": "ESP_TXD0",
+        "16": "nc",
+        "17": "DTR",
+        "18": "nc",
+        "19": "VBUS_5V",
+        "2": "CP_VREGIN",
+        "20": "GND",
+        "21": "GND",
+        "3": "GND",
+        "4": "USB_DP",
+        "5": "USB_DM",
+        "6": "RTS",
+        "7": "nc",
+        "8": "nc",
+        "9": "nc"
+      }
+    },
+    {
+      "ref": "C3",
+      "part": "Device:C",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "CP_VDD",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C4",
+      "part": "Device:C",
+      "value": "1uF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "CP_VREGIN",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "U3",
+      "part": "Regulator_Linear:AP2112K-3.3",
+      "value": "AP2112K-3.3",
+      "footprint": "Package_TO_SOT_SMD:SOT-23-5",
+      "pins": {
+        "1": "VBUS_5V",
+        "2": "GND",
+        "3": "VBUS_5V",
+        "4": "nc",
+        "5": "+3V3"
+      }
+    },
+    {
+      "ref": "C6",
+      "part": "Device:C",
+      "value": "10uF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "VBUS_5V",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C7",
+      "part": "Device:C",
+      "value": "10uF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C8",
+      "part": "Device:C",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "U1",
+      "part": "RF_Module:ESP32-WROOM-32",
+      "value": "ESP32-WROOM-32",
+      "footprint": "RF_Module:ESP32-WROOM-32",
+      "pins": {
+        "1": "GND",
+        "10": "IO25",
+        "11": "IO26",
+        "12": "IO27",
+        "13": "nc",
+        "14": "nc",
+        "15": "GND",
+        "16": "nc",
+        "17": "nc",
+        "18": "nc",
+        "19": "nc",
+        "2": "+3V3",
+        "20": "nc",
+        "21": "nc",
+        "22": "nc",
+        "23": "nc",
+        "24": "nc",
+        "25": "IO0",
+        "26": "IO4",
+        "27": "nc",
+        "28": "IO5",
+        "29": "IO18",
+        "3": "EN",
+        "30": "IO19",
+        "31": "nc",
+        "32": "nc",
+        "33": "ESP_RXD0",
+        "34": "ESP_TXD0",
+        "35": "I2C_SCL",
+        "36": "IO23",
+        "37": "GND",
+        "38": "GND",
+        "4": "nc",
+        "5": "nc",
+        "6": "IO34",
+        "7": "IO35",
+        "8": "IO32",
+        "9": "IO33"
+      }
+    },
+    {
+      "ref": "C9",
+      "part": "Device:C",
+      "value": "10uF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C10",
+      "part": "Device:C",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C11",
+      "part": "Device:C",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R3",
+      "part": "Device:R",
+      "value": "10k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "EN"
+      }
+    },
+    {
+      "ref": "C12",
+      "part": "Device:C",
+      "value": "1uF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "EN",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "SW1",
+      "part": "Switch:SW_Push",
+      "value": "RESET",
+      "footprint": "Button_Switch_SMD:SW_SPST_TL3342",
+      "pins": {
+        "1": "EN",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R4",
+      "part": "Device:R",
+      "value": "10k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "IO0"
+      }
+    },
+    {
+      "ref": "SW2",
+      "part": "Switch:SW_Push",
+      "value": "BOOT",
+      "footprint": "Button_Switch_SMD:SW_SPST_TL3342",
+      "pins": {
+        "1": "IO0",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "Q1",
+      "part": "Transistor_BJT:Q_NPN_BCE",
+      "value": "NPN AUTO EN",
+      "footprint": "Package_TO_SOT_SMD:SOT-23",
+      "pins": {
+        "1": "EN_BASE",
+        "2": "GND",
+        "3": "EN"
+      }
+    },
+    {
+      "ref": "Q2",
+      "part": "Transistor_BJT:Q_NPN_BCE",
+      "value": "NPN AUTO IO0",
+      "footprint": "Package_TO_SOT_SMD:SOT-23",
+      "pins": {
+        "1": "IO0_BASE",
+        "2": "GND",
+        "3": "IO0"
+      }
+    },
+    {
+      "ref": "R20",
+      "part": "Device:R",
+      "value": "10k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "EN"
+      }
+    },
+    {
+      "ref": "R21",
+      "part": "Device:R",
+      "value": "1k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "RTS",
+        "2": "EN_BASE"
+      }
+    },
+    {
+      "ref": "R22",
+      "part": "Device:R",
+      "value": "10k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "EN_BASE",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R23",
+      "part": "Device:R",
+      "value": "1k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "DTR",
+        "2": "IO0_BASE"
+      }
+    },
+    {
+      "ref": "R24",
+      "part": "Device:R",
+      "value": "10k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "IO0_BASE",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R25",
+      "part": "Device:R",
+      "value": "10k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "IO0"
+      }
+    },
+    {
+      "ref": "U5",
+      "part": "Sensor:BME280",
+      "value": "BME280 0x76",
+      "footprint": "Package_LGA:Bosch_LGA-8_2.5x2.5mm_P0.65mm_ClockwisePinNumbering",
+      "pins": {
+        "1": "GND",
+        "2": "BME_CSB",
+        "3": "BME_SDO",
+        "4": "BME_VDDIO",
+        "5": "I2C_SCL",
+        "6": "I2C_SDA",
+        "7": "+3V3",
+        "8": "GND"
+      }
+    },
+    {
+      "ref": "R30",
+      "part": "Device:R",
+      "value": "4.7k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "I2C_SDA"
+      }
+    },
+    {
+      "ref": "R31",
+      "part": "Device:R",
+      "value": "4.7k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "I2C_SCL"
+      }
+    },
+    {
+      "ref": "R32",
+      "part": "Device:R",
+      "value": "0R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "BME_SDO",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R33",
+      "part": "Device:R",
+      "value": "0R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "BME_CSB"
+      }
+    },
+    {
+      "ref": "C20",
+      "part": "Device:C",
+      "value": "100nF",
+      "footprint": "Device:C",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C21",
+      "part": "Device:C",
+      "value": "100nF",
+      "footprint": "Device:C",
+      "pins": {
+        "1": "BME_VDDIO",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "J2",
+      "part": "Connector:Micro_SD_Card_Det1",
+      "value": "microSD",
+      "footprint": "Connector_Card:micro_SD_Card_Det1",
+      "pins": {
+        "1": "nc",
+        "10": "GND",
+        "2": "SD_CS",
+        "3": "SD_MOSI",
+        "4": "+3V3",
+        "5": "SD_SCK",
+        "6": "GND",
+        "7": "IO19",
+        "8": "nc",
+        "9": "SD_DETECT"
+      }
+    },
+    {
+      "ref": "C30",
+      "part": "Device:C",
+      "value": "10uF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "C31",
+      "part": "Device:C",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R40",
+      "part": "Device:R",
+      "value": "33R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "IO18",
+        "2": "SD_SCK"
+      }
+    },
+    {
+      "ref": "R41",
+      "part": "Device:R",
+      "value": "33R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "IO23",
+        "2": "SD_MOSI"
+      }
+    },
+    {
+      "ref": "R42",
+      "part": "Device:R",
+      "value": "33R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "IO5",
+        "2": "SD_CS"
+      }
+    },
+    {
+      "ref": "R43",
+      "part": "Device:R",
+      "value": "10k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "SD_CS"
+      }
+    },
+    {
+      "ref": "R44",
+      "part": "Device:R",
+      "value": "10k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "SD_MOSI"
+      }
+    },
+    {
+      "ref": "R45",
+      "part": "Device:R",
+      "value": "10k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "SD_DETECT"
+      }
+    },
+    {
+      "ref": "D2",
+      "part": "Device:LED",
+      "value": "RED POWER",
+      "footprint": "LED_SMD:LED_0603_1608Metric",
+      "pins": {
+        "1": "+3V3",
+        "2": "LED_RED"
+      }
+    },
+    {
+      "ref": "R50",
+      "part": "Device:R",
+      "value": "1k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "LED_RED",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "D3",
+      "part": "Device:LED",
+      "value": "BLUE STATUS",
+      "footprint": "LED_SMD:LED_0603_1608Metric",
+      "pins": {
+        "1": "LED_BLUE",
+        "2": "GND"
+      }
+    },
+    {
+      "ref": "R51",
+      "part": "Device:R",
+      "value": "1k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "pins": {
+        "1": "IO27",
+        "2": "LED_BLUE"
+      }
+    },
+    {
+      "ref": "J3",
+      "part": "Connector_Generic:Conn_01x04",
+      "value": "GPIO A",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND",
+        "3": "IO25",
+        "4": "IO26"
+      }
+    },
+    {
+      "ref": "J4",
+      "part": "Connector_Generic:Conn_01x05",
+      "value": "GPIO B",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical",
+      "pins": {
+        "1": "IO27",
+        "2": "IO32",
+        "3": "IO33",
+        "4": "GND",
+        "5": "+3V3"
+      }
+    }
+  ],
+  "name": "USB-C ESP32 Environmental Sensor Node",
+  "block": "node",
+  "intent": {
+    "flow": "lr",
+    "rails": {
+      "+3V3": "top",
+      "GND": "bottom",
+      "VBUS_5V": "top"
+    },
+    "ports": {
+      "+3V3": "right",
+      "GND": "bottom",
+      "IO25": "right",
+      "IO26": "right",
+      "IO27": "right",
+      "IO32": "right",
+      "IO33": "right",
+      "IO34": "right",
+      "IO35": "right",
+      "IO4": "right",
+      "VBUS_5V": "left"
+    }
+  }
+}

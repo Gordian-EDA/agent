@@ -1,8 +1,9 @@
-//! Realiser-level clearance oracle: on a finished sheet no point may be shared by two
-//! nets. This is the geometry behind the `place_parts` refusal "the placed result does
-//! not match the requested connectivity (shorted A+B)" — checked here directly on the
-//! realised writer, with no kicad netlist round-trip, so a regression is a failing unit
-//! test rather than a refused tool call a whole engine-run later.
+//! Realiser-level truthfulness oracle. Two halves, both invisible on the rendered sheet:
+//! no point may be shared by two nets (a SHORT), and no authored net may come back in
+//! more than one piece (an OPEN). This is the geometry behind the `place_parts` refusals
+//! "the placed result does not match the requested connectivity (shorted A+B)" and
+//! "(scattered GND)" — checked here directly on the emitted sheet, so a regression is a
+//! failing unit test rather than a refused tool call a whole engine-run later.
 //!
 //! Runs over every `place-parts` fixture in the validation corpus under the SPINE engine —
 //! the one the agent places with, and the one `floorplan_netlist` (which asserts the same
@@ -37,8 +38,9 @@ fn fixtures() -> Vec<String> {
     out
 }
 
-/// Realise `name` and report every point two nets share.
-fn shorts_of(env: &KicadInstallation, provider: &SymbolTable, name: &str) -> Vec<String> {
+/// Realise `name` and report both halves of untruthfulness: every point two nets share,
+/// and every authored net the sheet leaves in islands.
+fn defects_of(env: &KicadInstallation, provider: &SymbolTable, name: &str) -> Vec<String> {
     let src = std::fs::read_to_string(corpus().join(format!("{name}.place-parts.json"))).unwrap();
     let input: sch_check::PlacePartsInput = serde_json::from_str(&src).unwrap();
     let (design, diags, _) = sch_check::into_design(&input, provider, &Default::default());
@@ -49,13 +51,16 @@ fn shorts_of(env: &KicadInstallation, provider: &SymbolTable, name: &str) -> Vec
         .map(sch_check::Intent::into_layout_ir)
         .unwrap_or_else(|| floorplan::baseline_ir(&design));
     let engine: Box<dyn PlacementEngine> = Box::new(spine_place::SpinePlace);
-    floorplan::emit_strategy(env, &design, engine, Some(ir))
-        .unwrap_or_else(|e| panic!("{name}: {e}"))
-        .net_shorts
+    let out = floorplan::emit_strategy(env, &design, engine, Some(ir))
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+    out.net_shorts
+        .into_iter()
+        .chain(out.net_opens.into_iter().map(|net| format!("OPEN {net}")))
+        .collect()
 }
 
 #[test]
-fn realised_corpus_sheets_never_share_a_point_between_two_nets() {
+fn realised_corpus_sheets_are_truthful() {
     if !corpus().is_dir() {
         eprintln!("SKIP: validation corpus not present");
         return;
@@ -74,14 +79,14 @@ fn realised_corpus_sheets_never_share_a_point_between_two_nets() {
         if !only.is_empty() && !only.contains(&name.as_str()) {
             continue;
         }
-        let found = shorts_of(&env, &provider, &name);
+        let found = defects_of(&env, &provider, &name);
         if !found.is_empty() {
             offenders.push(format!("{name}: {found:#?}"));
         }
     }
     assert!(
         offenders.is_empty(),
-        "realised sheets share points between nets:\n{}",
+        "realised sheets are untruthful (shared points, or a net left in islands):\n{}",
         offenders.join("\n")
     );
 }

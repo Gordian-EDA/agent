@@ -48,4 +48,9 @@ pub struct EmitOutput {
     /// netlist would show. Empty is the invariant; a non-empty list is an engine
     /// defect, not a payload one.
     pub net_shorts: Vec<String>,
+    /// One name per authored net whose pins did NOT all land on one net of the
+    /// finished sheet — an OPEN. The dual of [`Self::net_shorts`]: a short welds two
+    /// nets, an open leaves one in islands, and both are invisible on the render.
+    /// Empty is the invariant; a non-empty list is an engine defect.
+    pub net_opens: Vec<String>,
 }
