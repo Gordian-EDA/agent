@@ -300,7 +300,17 @@ pub(crate) fn connectivity_report(
         });
         let mut connected = Vec::new();
         for pin in part_pins {
-            match crate::refs::net_of(&netlist, reference, &pin.number) {
+            let net = netlist.nets.iter().find_map(|net| {
+                net.pins
+                    .iter()
+                    .any(|candidate| {
+                        candidate.refdes == *reference
+                            && candidate.unit == pin.unit
+                            && candidate.pin == pin.number
+                    })
+                    .then_some(net.name.as_str())
+            });
+            match net {
                 Some(net) => connected.push(format!("{}={net}", pin.number)),
                 None => unconnected.push(format!("{reference}.{}", pin.number)),
             }

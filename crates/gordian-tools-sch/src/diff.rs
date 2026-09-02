@@ -192,6 +192,53 @@ fn quote_optional(value: &Option<String>) -> String {
         .map_or_else(|| "<missing>".to_owned(), |value| format!("{value:?}"))
 }
 
+fn net_delta_lines(delta: &NetDelta) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.extend(
+        delta
+            .created
+            .iter()
+            .map(|net| format!("created       {net}")),
+    );
+    lines.extend(
+        delta
+            .removed
+            .iter()
+            .map(|net| format!("removed       {net}")),
+    );
+    lines.extend(
+        delta
+            .renamed
+            .iter()
+            .map(|(from, to)| format!("renamed       {from} → {to}")),
+    );
+    lines.extend(
+        delta
+            .merged
+            .iter()
+            .map(|(from, to)| format!("merged        {} → {to}", from.join(" + "))),
+    );
+    lines.extend(
+        delta
+            .split
+            .iter()
+            .map(|(from, to)| format!("split         {from} → {}", to.join(" + "))),
+    );
+    lines.extend(
+        delta
+            .pins_now_connected
+            .iter()
+            .map(|pin| format!("connected     {}.{}", pin.refdes, pin.pin)),
+    );
+    lines.extend(
+        delta
+            .pins_now_unconnected
+            .iter()
+            .map(|pin| format!("unconnected   {}.{}", pin.refdes, pin.pin)),
+    );
+    lines
+}
+
 fn compact(revision: RevisionId, changes: &Changes) -> String {
     let mut out = format!("SCHEMATIC DIFF  revision {revision} → live\n");
     if changes.is_empty() {
@@ -240,9 +287,7 @@ fn compact(revision: RevisionId, changes: &Changes) -> String {
         .collect::<Vec<_>>();
     write_list(&mut out, "SWAPPED", &swapped);
     if !changes.net_delta.is_empty() {
-        let delta = serde_json::to_string(&delta_json(&changes.net_delta))
-            .expect("net delta is serializable");
-        write_list(&mut out, "NET DELTA", &[delta]);
+        write_list(&mut out, "NET DELTA", &net_delta_lines(&changes.net_delta));
     }
     let counts = [
         ("wires", changes.wires.as_ref()),
