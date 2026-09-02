@@ -1823,8 +1823,8 @@ pub(crate) fn plan_outline_refit(
         height = height.max(2.0 * (copper.min_y - center.y).abs() + 2.0 * EDGE_CLEAR_MM);
         height = height.max(2.0 * (copper.max_y - center.y).abs() + 2.0 * EDGE_CLEAR_MM);
     }
-    let width = width.ceil().max(1.0);
-    let height = height.ceil().max(1.0);
+    let width = width.ceil().max(1.0).min(from.width());
+    let height = height.ceil().max(1.0).min(from.height());
     let candidate = Rect::from_center_half(center, (width / 2.0, height / 2.0));
     let mut compact = problem.clone();
     compact.bounds = candidate;
