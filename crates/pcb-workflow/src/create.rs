@@ -462,6 +462,12 @@ impl<'a> SeedBoardWriter<'a> {
         }
     }
 
+    /// Emit the board schema this writer actually implements.
+    ///
+    /// KiCad 10.0.4 reads the `20241229` form directly and rewrites it as
+    /// `20260206` when DRC saves a refilled board. Keeping the older token is
+    /// deliberate because that save also performs structural schema changes;
+    /// changing only the token would mislabel this writer's output.
     fn emit(&self) -> io::Result<String> {
         let mut out = String::with_capacity(4096 + self.parts.len() * 1024);
         out.push_str("(kicad_pcb\n");

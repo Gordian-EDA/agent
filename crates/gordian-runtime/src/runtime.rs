@@ -328,6 +328,13 @@ fn write_project_file(sch_path: &Path) -> Result<()> {
     std::fs::write(&path, format!("{out}\n")).with_context(|| format!("writing {}", path.display()))
 }
 
+/// Write the project's KiCad 10 standard-library tables.
+///
+/// URIs deliberately use KiCad's `KICAD10_*_DIR` variables rather than the
+/// installation paths Gordian discovered. Stock KiCad 10 defines those
+/// variables for its own libraries when a user opens the project on another
+/// machine, while Gordian binds them to its configured installation on every
+/// CLI call.
 fn write_sym_lib_table(env: &KicadInstallation, project_dir: &Path) -> Result<()> {
     let path = project_dir.join("sym-lib-table");
     if path.exists() {
@@ -339,21 +346,26 @@ fn write_sym_lib_table(env: &KicadInstallation, project_dir: &Path) -> Result<()
     {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("kicad_sym") {
-            continue;
-        }
-        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+        let Some(filename) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        libs.push((name.to_string(), path));
+        let name = if path.is_dir() {
+            filename.strip_suffix(".kicad_symdir")
+        } else if path.is_file() {
+            filename.strip_suffix(".kicad_sym")
+        } else {
+            None
+        };
+        let Some(name) = name else { continue };
+        libs.push((name.to_string(), filename.to_string()));
     }
     libs.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut out = String::from("(sym_lib_table\n");
-    for (name, path) in libs {
+    let mut out = String::from("(sym_lib_table\n  (version 7)\n");
+    for (name, filename) in libs {
         out.push_str(&format!(
-            "  (lib (name \"{}\") (type \"KiCad\") (uri \"{}\") (options \"\") (descr \"\"))\n",
+            "  (lib (name \"{}\") (type \"KiCad\") (uri \"${{KICAD10_SYMBOL_DIR}}/{}\") (options \"\") (descr \"\"))\n",
             sexpr_escape(&name),
-            sexpr_escape(&path.display().to_string())
+            sexpr_escape(&filename)
         ));
     }
     out.push_str(")\n");
@@ -374,18 +386,24 @@ fn write_fp_lib_table(env: &KicadInstallation, project_dir: &Path) -> Result<()>
         if path.extension().and_then(|s| s.to_str()) != Some("pretty") {
             continue;
         }
-        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(filename) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        libs.push((name.to_string(), path));
+        let Some(name) = filename.strip_suffix(".pretty") else {
+            continue;
+        };
+        libs.push((name.to_string(), filename.to_string()));
     }
     libs.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut out = String::from("(fp_lib_table\n");
-    for (name, path) in libs {
+    let mut out = String::from("(fp_lib_table\n  (version 7)\n");
+    for (name, filename) in libs {
         out.push_str(&format!(
-            "  (lib (name \"{}\") (type \"KiCad\") (uri \"{}\") (options \"\") (descr \"\"))\n",
+            "  (lib (name \"{}\") (type \"KiCad\") (uri \"${{KICAD10_FOOTPRINT_DIR}}/{}\") (options \"\") (descr \"\"))\n",
             sexpr_escape(&name),
-            sexpr_escape(&path.display().to_string())
+            sexpr_escape(&filename)
         ));
     }
     out.push_str(")\n");
@@ -474,7 +492,8 @@ mod tests {
         let footprints = libs.join("footprints");
         std::fs::create_dir_all(&symbols).expect("symbols dir");
         std::fs::create_dir_all(&footprints).expect("footprints dir");
-        std::fs::write(symbols.join("Device.kicad_sym"), "").expect("symbol lib");
+        std::fs::create_dir_all(symbols.join("Device.kicad_symdir")).expect("symbol lib");
+        std::fs::write(symbols.join("power.kicad_sym"), "").expect("flat symbol lib");
         std::fs::create_dir_all(footprints.join("Resistor_SMD.pretty")).expect("fp lib");
 
         let project = temp.path().join("project");
@@ -487,9 +506,18 @@ mod tests {
         let pro = std::fs::read_to_string(project.join("design.kicad_pro")).expect("project file");
         assert!(pro.contains("\"filename\": \"design.kicad_pro\""));
         let sym = std::fs::read_to_string(project.join("sym-lib-table")).expect("sym table");
-        assert!(sym.contains("(name \"Device\")"));
+        assert!(sym.contains("(version 7)"));
+        assert!(sym.contains(
+            "(name \"Device\") (type \"KiCad\") (uri \"${KICAD10_SYMBOL_DIR}/Device.kicad_symdir\")"
+        ));
+        assert!(sym.contains("(uri \"${KICAD10_SYMBOL_DIR}/power.kicad_sym\")"));
+        assert!(!sym.contains(&libs.display().to_string()));
         let fp = std::fs::read_to_string(project.join("fp-lib-table")).expect("fp table");
-        assert!(fp.contains("(name \"Resistor_SMD\")"));
+        assert!(fp.contains("(version 7)"));
+        assert!(fp.contains(
+            "(name \"Resistor_SMD\") (type \"KiCad\") (uri \"${KICAD10_FOOTPRINT_DIR}/Resistor_SMD.pretty\")"
+        ));
+        assert!(!fp.contains(&libs.display().to_string()));
     }
 
     #[test]
