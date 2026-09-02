@@ -615,7 +615,7 @@ def schematic_visual_facts(renders):
             continue
         measured[name] = visual[name]
         introduced = visual.get(f"{name}_introduced")
-        has_tool_baseline = isinstance(visual.get("baseline_revision"), int)
+        has_tool_baseline = visual.get("baseline") == "turn-start"
         if isinstance(introduced, list) and (has_tool_baseline or not before):
             measured[f"{name}_added"] = introduced
         else:
@@ -1160,7 +1160,7 @@ TOOL_STARTED = re.compile(
 )
 TOOL_FINISHED = re.compile(
     r"^tool <- (?P<tool>[A-Za-z0-9_]+)"
-    r"(?: \(elapsed (?P<elapsed>[0-9.]+)s(?:, revision (?P<revision>\d+))?\))?"
+    r"(?: \(elapsed (?P<elapsed>[0-9.]+)s\))?"
     r":\s?(?P<summary>.*)$"
 )
 USAGE_REQUESTS = re.compile(r"^usage: provider_requests=(\d+)\b")
@@ -1239,9 +1239,6 @@ def parse_agent_stderr(stderr):
             target["elapsed_ms"] = (
                 round(float(match.group("elapsed")) * 1000)
                 if match.group("elapsed") else None
-            )
-            target["revision"] = (
-                int(match.group("revision")) if match.group("revision") else None
             )
             if " | refusal=" in summary:
                 target["refusal_reason"] = summary.split(" | refusal=", 1)[1]
