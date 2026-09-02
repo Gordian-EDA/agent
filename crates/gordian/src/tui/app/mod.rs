@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(last.level, NoticeLevel::Plain);
         assert!(!a.running && a.turn_started.is_none());
 
-        // Safety cutoff → red, distinct from a clean completion.
+        // Per-turn budget → resumable partial state, distinct from a clean completion.
         let mut a = app();
         type_str(&mut a, "go");
         a.update(Msg::Submit);
@@ -844,8 +844,8 @@ mod tests {
         }));
         let last = a.transcript.last().unwrap();
         assert!(last.text.contains("32 model requests"), "{}", last.text);
-        assert!(last.text.contains("safety limit"), "{}", last.text);
-        assert_eq!(last.level, NoticeLevel::Error);
+        assert!(last.text.contains("continue when ready"), "{}", last.text);
+        assert_eq!(last.level, NoticeLevel::Plain);
 
         // Artifact/review quality failure → red and explicit, never "completed".
         let mut a = app();

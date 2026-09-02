@@ -216,14 +216,16 @@ impl App {
                 format!("Worked for {elapsed}"),
             )),
             TurnEndReason::ProviderRequestLimit { requests } => Some(Entry::notice(
-                NoticeLevel::Error,
+                NoticeLevel::Plain,
                 format!(
-                    "Worked for {elapsed} — stopped after {requests} model requests (safety limit)"
+                    "Worked for {elapsed} — partial state handed back after {requests} model requests; continue when ready"
                 ),
             )),
             TurnEndReason::TimeLimit { elapsed_secs } => Some(Entry::notice(
-                NoticeLevel::Error,
-                format!("Worked for {elapsed} — stopped after {elapsed_secs}s (wall-clock limit)"),
+                NoticeLevel::Plain,
+                format!(
+                    "Worked for {elapsed} — partial state handed back after {elapsed_secs}s; continue when ready"
+                ),
             )),
             TurnEndReason::MutationTimedOut => Some(Entry::notice(
                 NoticeLevel::Error,
