@@ -28,7 +28,10 @@ pub use place::{
     Edge, EdgeDatum, GroupHint, LockedAt, Part, PartPad, PlaceReport, PlaceResult, Placement,
     PlacementHints, PlacementView,
 };
-pub use route::{RouteMetrics, RouteQuality, RouteResult, RoutingCapabilities, failed_pad_weight};
+pub use route::{
+    RouteMetrics, RouteQuality, RouteResult, RoutingCapabilities, failed_pad_weight, is_bend,
+    is_octilinear,
+};
 
 /// Floor on the routing grid pitch (mm), so loose design rules on a large board
 /// cannot produce a grid too coarse to resolve its channels.

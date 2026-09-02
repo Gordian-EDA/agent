@@ -52,23 +52,62 @@ pub struct RouteMetrics {
     pub via_count: usize,
     /// Number of trace polylines in the solution.
     pub trace_count: usize,
+    /// Corners in the emitted copper: vertices where the direction changes.
+    /// The tidiness number a human reads first — a straight run has none.
+    pub bend_count: usize,
+    /// Segments whose direction is neither axis-aligned nor 45°. Zero is the
+    /// house style; anything else is a route no board editor would draw.
+    pub off_angle_segments: usize,
 }
+
+/// Tolerance (radians) within which a segment counts as being on one of the
+/// eight octilinear directions.
+const ANGLE_EPS: f64 = 1e-6;
 
 impl RouteSolution {
     /// Compute [`RouteMetrics`] (wirelength = Σ polyline segment lengths).
     pub fn metrics(&self) -> RouteMetrics {
         let mut wirelength = 0.0;
+        let mut bend_count = 0;
+        let mut off_angle_segments = 0;
         for t in &self.traces {
             for w in t.path.windows(2) {
                 wirelength += w[1].dist(w[0]);
+                if !is_octilinear(w[0], w[1]) {
+                    off_angle_segments += 1;
+                }
+            }
+            for w in t.path.windows(3) {
+                if is_bend(w[0], w[1], w[2]) {
+                    bend_count += 1;
+                }
             }
         }
         RouteMetrics {
             wirelength,
             via_count: self.vias.len(),
             trace_count: self.traces.len(),
+            bend_count,
+            off_angle_segments,
         }
     }
+}
+
+/// Is the segment `a`→`b` horizontal, vertical, or exactly diagonal?
+pub fn is_octilinear(a: crate::Point2, b: crate::Point2) -> bool {
+    let (dx, dy) = ((b.x - a.x).abs(), (b.y - a.y).abs());
+    dx < ANGLE_EPS || dy < ANGLE_EPS || (dx - dy).abs() < ANGLE_EPS
+}
+
+/// Does the polyline turn at `b`? Zero-length steps are not corners.
+pub fn is_bend(a: crate::Point2, b: crate::Point2, c: crate::Point2) -> bool {
+    let (ux, uy) = (b.x - a.x, b.y - a.y);
+    let (vx, vy) = (c.x - b.x, c.y - b.y);
+    let (un, vn) = ((ux * ux + uy * uy).sqrt(), (vx * vx + vy * vy).sqrt());
+    if un < ANGLE_EPS || vn < ANGLE_EPS {
+        return false;
+    }
+    (ux * vy - uy * vx).abs() / (un * vn) > ANGLE_EPS
 }
 
 // ── RoutingCapabilities ─────────────────────────────────────────────────────────────
@@ -244,6 +283,41 @@ mod tests {
         assert!((m.wirelength - 7.0).abs() < 1e-9, "3 + 4 = 7mm");
         assert_eq!(m.via_count, 1);
         assert_eq!(m.trace_count, 1);
+        assert_eq!(m.bend_count, 1, "one right-angle corner");
+        assert_eq!(m.off_angle_segments, 0, "both segments are axis-aligned");
+    }
+
+    #[test]
+    fn tidiness_counts_corners_and_off_angle_segments() {
+        let p = |x: f64, y: f64| Point2 { x, y };
+        let s = RouteSolution {
+            traces: vec![Trace {
+                connection: "A".into(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                // straight, then 45°, then an arbitrary angle.
+                path: vec![p(0.0, 0.0), p(2.0, 0.0), p(4.0, 2.0), p(5.0, 5.0)],
+            }],
+            vias: vec![],
+        };
+        let m = s.metrics();
+        assert_eq!(m.bend_count, 2);
+        assert_eq!(m.off_angle_segments, 1, "only the last segment is off-angle");
+    }
+
+    #[test]
+    fn a_collinear_vertex_is_not_a_bend() {
+        let p = |x: f64, y: f64| Point2 { x, y };
+        let s = RouteSolution {
+            traces: vec![Trace {
+                connection: "A".into(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![p(0.0, 0.0), p(1.0, 0.0), p(3.0, 0.0)],
+            }],
+            vias: vec![],
+        };
+        assert_eq!(s.metrics().bend_count, 0);
     }
 
     #[test]
