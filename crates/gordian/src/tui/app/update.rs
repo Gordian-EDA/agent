@@ -112,6 +112,8 @@ pub enum Action {
     Compact,
     /// `/context` — the shell gathers agent stats and prints them.
     ShowContext,
+    /// `/preview` — open the latest render in the system viewer.
+    OpenPreview(String),
     /// Tear down the TUI and exit.
     Quit,
 }
@@ -416,7 +418,7 @@ impl App {
             "/context" => Action::ShowContext,
             "/preview" => {
                 match self.latest_render_path() {
-                    Some(path) => self.push_image(path, "preview"),
+                    Some(path) => return Action::OpenPreview(path),
                     None => self.transcript.push(Entry::system(
                         "no render yet — ask me to render the board first",
                     )),

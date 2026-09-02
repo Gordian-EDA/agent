@@ -419,8 +419,8 @@ fn tui_screenshots() {
     app.turn_tool_calls = 1;
     shoot("09_streaming", 96, 32, &mut app);
 
-    // 10. A board render preview: a clickable link row that opens the PNG in
-    //     the system viewer (no inline terminal graphics).
+    // 10. A board render preview: the tool row's inline link opens the PNG in
+    //     the system viewer.
     let mut app = App::new(status());
     push(
         &mut app,

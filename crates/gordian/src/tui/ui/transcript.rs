@@ -11,26 +11,45 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::super::app::{App, Entry, NoticeLevel, PreviewZone, Speaker};
+use super::super::app::{App, Entry, ImageCell, NoticeLevel, PreviewZone, Speaker};
 use super::super::md::{self, LineKind, MdLine, WrapMode};
 use super::super::theme;
 use super::body;
 
 const TOP_PADDING_ROWS: u16 = 1;
 
-/// One vertical band of the transcript document: a run of styled text rows, or
-/// a one-row render-preview link (indexed into [`App::images`]).
-enum Block {
-    Text(Vec<Line<'static>>),
-    Image { idx: usize },
+/// A clickable span's position within one transcript block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreviewLink {
+    line: usize,
+    col: u16,
+    width: u16,
+    idx: usize,
+}
+
+/// One vertical band of styled transcript rows and its inline preview links.
+#[derive(Default)]
+struct Block {
+    lines: Vec<Line<'static>>,
+    links: Vec<PreviewLink>,
 }
 
 impl Block {
     fn height(&self) -> u16 {
-        match self {
-            Block::Text(lines) => lines.len() as u16,
-            Block::Image { .. } => 1,
+        self.lines.len() as u16
+    }
+
+    fn push_line(&mut self, line: Line<'static>) {
+        self.lines.push(line);
+    }
+
+    fn extend(&mut self, mut other: Self) {
+        let line_offset = self.lines.len();
+        for link in &mut other.links {
+            link.line += line_offset;
         }
+        self.lines.append(&mut other.lines);
+        self.links.append(&mut other.links);
     }
 }
 
@@ -84,14 +103,20 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
             width: inner.width,
             height: visible_end - visible_start,
         };
-        match block {
-            Block::Text(lines) => {
-                let skip = visible_start - b_start;
-                f.render_widget(Paragraph::new(lines.clone()).scroll((skip, 0)), rect);
+        let skip = visible_start - b_start;
+        f.render_widget(Paragraph::new(block.lines.clone()).scroll((skip, 0)), rect);
+        for link in &block.links {
+            let line = link.line as u16;
+            if line < skip || line >= skip + rect.height || link.col >= rect.width {
+                continue;
             }
-            Block::Image { idx } => {
-                draw_preview_link(f, rect, app, *idx);
-            }
+            app.preview_zones.push(PreviewZone {
+                x: rect.x + link.col,
+                y: rect.y + line - skip,
+                width: link.width.min(rect.width - link.col),
+                height: 1,
+                idx: link.idx,
+            });
         }
     }
 }
@@ -108,93 +133,54 @@ fn transcript_body(area: Rect) -> Rect {
     }
 }
 
-/// Build the interleaved [`Block`] document: text entries wrapped into rows (with
-/// the inter-turn rhythm and the live-stream cursor), broken by preview links
-/// pinned after their transcript position.
+/// Build the transcript document with wrapped text and per-row preview links.
 fn layout_blocks(app: &App, body_w: usize) -> Vec<Block> {
-    let mut blocks: Vec<Block> = Vec::new();
-    let mut text: Vec<Line<'static>> = Vec::new();
+    let mut block = Block::default();
     let mut prev: Option<Speaker> = None;
-    let mut img = 0usize; // next un-emitted preview (previews are sorted by `after`)
 
     let mut i = 0usize;
     while i < app.transcript.len() {
         let e = &app.transcript[i];
-        // Emit any previews pinned at this transcript position (after == i) before
-        // the entry that now sits at index i.
-        flush_images_after(app, i, &mut img, &mut blocks, &mut text);
         if e.speaker == Speaker::Tool {
             if gap_above(prev, e) {
-                text.push(Line::from(""));
+                block.push_line(Line::from(""));
             }
 
             let mut end = i + 1;
-            while end < app.transcript.len()
-                && app.transcript[end].speaker == Speaker::Tool
-                && !(img < app.images.len() && app.images[img].after <= end)
-            {
+            while end < app.transcript.len() && app.transcript[end].speaker == Speaker::Tool {
                 end += 1;
             }
-            text.extend(render_tool_group(&app.transcript[i..end], body_w));
+            block.extend(render_tool_group(
+                &app.transcript[i..end],
+                i,
+                &app.images,
+                body_w,
+            ));
             prev = Some(Speaker::Tool);
             i = end;
             continue;
         }
 
         if gap_above(prev, e) {
-            text.push(Line::from(""));
+            block.push_line(Line::from(""));
         }
-        text.extend(render_entry(e, body_w));
+        block.lines.extend(render_entry(e, body_w));
         // The divider is usually followed by the next turn, whose own leading
         // gap already separates the two — but when it's still the newest thing
         // in the transcript (the common moment right after a turn finishes),
         // nothing follows to open that gap, and the rule would otherwise sit
         // flush against the composer below it.
         if is_worked_divider(e) && i + 1 == app.transcript.len() {
-            text.push(Line::from(""));
+            block.push_line(Line::from(""));
         }
         prev = Some(e.speaker);
         i += 1;
     }
-    // Trailing previews pinned at or after the transcript tail.
-    flush_images_after(app, app.transcript.len(), &mut img, &mut blocks, &mut text);
-    if !text.is_empty() {
-        blocks.push(Block::Text(text));
+    if block.lines.is_empty() {
+        Vec::new()
+    } else {
+        vec![block]
     }
-    blocks
-}
-
-fn flush_images_after(
-    app: &App,
-    n: usize,
-    img: &mut usize,
-    blocks: &mut Vec<Block>,
-    text: &mut Vec<Line<'static>>,
-) {
-    while *img < app.images.len() && app.images[*img].after <= n {
-        if !text.is_empty() {
-            blocks.push(Block::Text(std::mem::take(text)));
-        }
-        blocks.push(Block::Image { idx: *img });
-        *img += 1;
-    }
-}
-
-/// Render one preview link row into `rect` and publish its screen rect as a
-/// click zone, so the shell can open the PNG when the row is clicked.
-fn draw_preview_link(f: &mut Frame, rect: Rect, app: &mut App, idx: usize) {
-    let label = app.images[idx].label();
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(label, theme::LINK))),
-        rect,
-    );
-    app.preview_zones.push(PreviewZone {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-        idx,
-    });
 }
 
 /// The first-launch splash, shown in the transcript pane until the first turn:
@@ -425,18 +411,26 @@ fn render_worked_divider(text: &str, width: usize, level: NoticeLevel) -> Line<'
     ])
 }
 
-fn render_tool_group(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
+fn render_tool_group(
+    entries: &[Entry],
+    first_entry: usize,
+    images: &[ImageCell],
+    width: usize,
+) -> Block {
     let title = tool_group_title(entries);
-    let mut lines = vec![Line::from(vec![
+    let mut block = Block::default();
+    block.push_line(Line::from(vec![
         Span::styled("• ", theme::TOOL_GUTTER),
         Span::styled(title, theme::TOOL_GROUP),
-    ])];
+    ]));
 
     for (idx, e) in entries.iter().enumerate() {
         let last = idx + 1 == entries.len();
-        lines.extend(render_tool_row(e, last, width));
+        let tool_entry = first_entry + idx;
+        let preview = images.iter().position(|cell| cell.tool_entry == tool_entry);
+        block.extend(render_tool_row(e, last, width, preview));
     }
-    lines
+    block
 }
 
 fn tool_group_title(entries: &[Entry]) -> &'static str {
@@ -472,27 +466,46 @@ fn tool_title_for_name(name: &str) -> &'static str {
     }
 }
 
-fn render_tool_row(e: &Entry, last: bool, width: usize) -> Vec<Line<'static>> {
+fn render_tool_row(e: &Entry, last: bool, width: usize, preview: Option<usize>) -> Block {
     let first_prefix = if last { "  └ " } else { "  ├ " };
     let cont_prefix = if last { "    " } else { "  │ " };
     let (name, detail) = split_tool_text(&e.text);
     let action = human_tool_name(name);
     let mut segments = vec![(action, theme::TOOL_NAME)];
-    if !detail.is_empty() {
+    if preview.is_some() {
+        segments.push((" → ".to_string(), theme::SUBTLE));
+        segments.push(("preview".to_string(), theme::LINK));
+    } else if !detail.is_empty() {
         segments.push((format!(" {detail}"), theme::SUBTLE));
     }
 
     let body_w = width.saturating_sub(first_prefix.chars().count()).max(1);
-    wrap_segments(&segments, body_w, false)
+    let mut block = Block::default();
+    for (row, spans) in wrap_segments(&segments, body_w, false)
         .into_iter()
         .enumerate()
-        .map(|(row, spans)| {
-            let prefix = if row == 0 { first_prefix } else { cont_prefix };
-            let mut out = vec![Span::styled(prefix, theme::TOOL_GUTTER)];
-            out.extend(spans);
-            Line::from(out)
-        })
-        .collect()
+    {
+        let prefix = if row == 0 { first_prefix } else { cont_prefix };
+        if let Some(idx) = preview {
+            let mut col = prefix.chars().count() as u16;
+            for span in &spans {
+                let width = span.content.chars().count() as u16;
+                if span.style == theme::LINK {
+                    block.links.push(PreviewLink {
+                        line: row,
+                        col,
+                        width,
+                        idx,
+                    });
+                }
+                col += width;
+            }
+        }
+        let mut out = vec![Span::styled(prefix, theme::TOOL_GUTTER)];
+        out.extend(spans);
+        block.push_line(Line::from(out));
+    }
+    block
 }
 
 fn split_tool_text(text: &str) -> (&str, String) {
@@ -714,6 +727,34 @@ mod tests {
             ]),
             "Used tools"
         );
+    }
+
+    #[test]
+    fn tool_group_attaches_preview_to_its_render_row() {
+        let entries = [Entry::tool("render_schematic → rendered schematic to PNG")];
+        let images = [ImageCell::new(4, "/tmp/renders/schematic.png")];
+        let block = render_tool_group(&entries, 4, &images, 80);
+
+        assert_eq!(
+            row_text(&block.lines[1].spans),
+            "  └ Render schematic → preview"
+        );
+        assert_eq!(
+            block.links,
+            vec![PreviewLink {
+                line: 1,
+                col: 23,
+                width: 7,
+                idx: 0,
+            }]
+        );
+        assert!(
+            !block
+                .lines
+                .iter()
+                .any(|line| row_text(&line.spans).contains("schematic.png"))
+        );
+        assert_eq!(block.lines[1].spans.last().unwrap().style, theme::LINK);
     }
 
     #[test]
