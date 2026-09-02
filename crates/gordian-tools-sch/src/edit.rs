@@ -608,7 +608,7 @@ pub fn add_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "ok": false,
             "code": "invalid_payload",
             "footprint_mismatch": footprint_mismatch,
-            "note": "symbol/footprint compatibility is checked before symbols are added; use each compatible suggestion directly",
+            "note": "symbol/footprint compatibility is checked before symbols are added; suggestions preserve the requested footprint library and package family",
         }));
     }
     let mut edit = Edit::open(ctx)?;
@@ -1048,11 +1048,6 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     ) else {
         return Ok(json!({ "error": "set_fields needs `ref` and `fields`" }));
     };
-    if fields.contains_key("Footprint") {
-        return Ok(json!({
-            "error": "set_fields does not set Footprint; use assign_footprints so symbol compatibility is validated",
-        }));
-    }
     let mut edit = Edit::open(ctx)?;
     // Address the symbol by UUID: setting `Reference` renames it, and every
     // later field in the same call would then be looking for a part that is
@@ -1061,6 +1056,46 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let units = refs::units(&edit.doc, refdes);
     if units.is_empty() {
         return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
+    }
+    if let Some(footprint) = fields
+        .get("Footprint")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        let symbol = units
+            .first()
+            .and_then(|(_, uuid)| edit.doc.symbol(uuid))
+            .map(|symbol| symbol.lib_id.clone())
+            .expect("validated schematic reference has a symbol");
+        if let Some(error) = gordian_runtime::footprint_compat::footprint_input_error(
+            ctx, refdes, &symbol, footprint,
+        )? {
+            return Ok(json!({
+                "ok": false,
+                "code": "invalid_payload",
+                "input_errors": [error],
+            }));
+        }
+        let ignored_pins = edit
+            .before()
+            .no_connect
+            .iter()
+            .filter(|pin| pin.refdes == refdes)
+            .map(|pin| pin.pin.clone())
+            .collect();
+        if let Some(mismatch) = gordian_runtime::footprint_compat::assignment_pin_mismatch_ignoring(
+            ctx,
+            refdes,
+            &symbol,
+            footprint,
+            &ignored_pins,
+        )? {
+            return Ok(json!({
+                "ok": false,
+                "code": "invalid_payload",
+                "footprint_mismatch": [mismatch.payload()],
+            }));
+        }
     }
     let renamed_to = fields.get("Reference").and_then(Value::as_str);
     if let Some(new_refdes) = renamed_to
@@ -1118,7 +1153,6 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if assignments.is_empty() {
         return Ok(json!({ "error": "assign_footprints needs a non-empty `assignments` array" }));
     }
-    let catalog = ctx.footprint_catalog()?;
     let mut requested = Vec::with_capacity(assignments.len());
     for assignment in assignments {
         let (Some(reference), Some(footprint)) = (
@@ -1127,28 +1161,6 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         ) else {
             return Ok(json!({ "error": "every assignment needs `reference` and `footprint`" }));
         };
-        let id = match kicad_footprint::FootprintId::parse(footprint) {
-            Ok(id) => id,
-            Err(_) => {
-                let suggestions = catalog.suggest(footprint);
-                return Ok(json!({
-                    "error": format!("{reference}: {}", kicad_footprint::unknown_footprint_message(footprint, &suggestions)),
-                    "suggestions": suggestions,
-                }));
-            }
-        };
-        if let Err(error) = catalog.footprint(&id) {
-            if !error.is_not_found() {
-                return Ok(json!({
-                    "error": format!("{reference}: footprint `{footprint}` could not be used: {error}"),
-                }));
-            }
-            let suggestions = catalog.suggest(footprint);
-            return Ok(json!({
-                "error": format!("{reference}: {}", kicad_footprint::unknown_footprint_message(footprint, &suggestions)),
-                "suggestions": suggestions,
-            }));
-        }
         requested.push((reference.to_string(), footprint.to_string()));
     }
 
@@ -1169,6 +1181,27 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }));
         }
     }
+    let mut input_errors = Vec::new();
+    for (reference, footprint) in &requested {
+        let units = refs::units(&edit.doc, reference);
+        let symbol = units
+            .first()
+            .and_then(|(_, uuid)| edit.doc.symbol(uuid))
+            .map(|symbol| symbol.lib_id.clone())
+            .expect("validated schematic reference has a symbol");
+        if let Some(error) = gordian_runtime::footprint_compat::footprint_input_error(
+            ctx, reference, &symbol, footprint,
+        )? {
+            input_errors.push(error);
+        }
+    }
+    if !input_errors.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "code": "invalid_payload",
+            "input_errors": input_errors,
+        }));
+    }
     let mut footprint_mismatch = Vec::new();
     for (reference, footprint) in &requested {
         let units = refs::units(&edit.doc, reference);
@@ -1177,8 +1210,19 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .and_then(|(_, uuid)| edit.doc.symbol(uuid))
             .map(|symbol| symbol.lib_id.clone())
             .expect("validated schematic reference has a symbol");
-        if let Some(mismatch) = gordian_runtime::footprint_compat::assignment_pin_mismatch(
-            ctx, reference, &symbol, footprint,
+        let ignored_pins = edit
+            .before()
+            .no_connect
+            .iter()
+            .filter(|pin| pin.refdes == *reference)
+            .map(|pin| pin.pin.clone())
+            .collect();
+        if let Some(mismatch) = gordian_runtime::footprint_compat::assignment_pin_mismatch_ignoring(
+            ctx,
+            reference,
+            &symbol,
+            footprint,
+            &ignored_pins,
         )? {
             footprint_mismatch.push(mismatch.payload());
         }

@@ -247,8 +247,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "set_fields",
-            "Set properties on one part (Value, Reference, user fields), on every unit of it. \
-             Footprints go through assign_footprints so compatibility is validated. Moves nothing.",
+            "Set properties on one part (Value, Reference, Footprint, user fields), on every unit of it. Footprints are resolved and checked for symbol compatibility before anything is written. Moves nothing.",
             json!({
                 "type": "object",
                 "properties": {
@@ -262,7 +261,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "assign_footprints",
-            "Set footprints on one or more live schematic parts. The complete batch is checked against each symbol and written atomically; an incompatible assignment is refused with a compatible catalog suggestion inline.",
+            "Set footprints on one or more live schematic parts. The complete batch is resolved, checked against each symbol, and written atomically; a refusal includes the closest same-library, same-family pad-set suggestion.",
             json!({
                 "type": "object",
                 "properties": {
@@ -369,11 +368,14 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "no_connect",
-            "Mark a pin deliberately unconnected, so ERC stops reporting it.",
+            "Mark one or many pins deliberately unconnected, so ERC stops reporting them. A single-pin labelled net is retracted automatically; a net shared with another pin is refused.",
             json!({
                 "type": "object",
-                "properties": { "pin": { "type": "string", "description": PIN } },
-                "required": ["pin"],
+                "properties": {
+                    "pin": { "type": "string", "description": PIN },
+                    "pins": { "type": "array", "items": { "type": "string", "description": PIN }, "minItems": 1 }
+                },
+                "anyOf": [{"required": ["pin"]}, {"required": ["pins"]}],
                 "additionalProperties": false
             }),
         ),

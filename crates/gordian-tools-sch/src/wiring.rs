@@ -382,37 +382,84 @@ fn reference_error(doc: &SchDoc, input: &Value, error: String) -> Value {
 
 /// Mark a pin deliberately unconnected.
 pub fn no_connect(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let Some(spec) = input.get("pin").and_then(Value::as_str) else {
-        return Ok(json!({ "error": "no_connect needs `pin`" }));
-    };
+    let mut specs = input
+        .get("pins")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if let Some(spec) = input.get("pin").and_then(Value::as_str) {
+        specs.push(spec.to_owned());
+    }
+    specs.sort();
+    specs.dedup();
+    if specs.is_empty() {
+        return Ok(json!({ "error": "no_connect needs `pin` or a non-empty `pins` list" }));
+    }
     let mut edit = Edit::open(ctx)?;
-    let pin = match refs::pin(&edit.doc, spec) {
-        Ok(pin) => pin,
-        Err(error) => return Ok(json!({ "error": error })),
-    };
-    if let Some(net) = refs::net_of(edit.before(), &pin.refdes, &pin.number) {
-        return Ok(json!({
-            "error": format!(
-                "{spec} is connected to `{net}`; a no-connect marker on a wired pin is ignored. \
-                 Disconnect it first if that is what you meant."
-            ),
-        }));
+    let mut pins = Vec::with_capacity(specs.len());
+    let mut nets = Vec::new();
+    for spec in &specs {
+        let pin = match refs::pin(&edit.doc, spec) {
+            Ok(pin) => pin,
+            Err(error) => return Ok(json!({ "error": error })),
+        };
+        if let Some(net) = edit.before().nets.iter().find(|net| {
+            net.pins
+                .iter()
+                .any(|member| member.refdes == pin.refdes && member.pin == pin.number)
+        }) {
+            if let Some(other) = net
+                .pins
+                .iter()
+                .find(|member| member.refdes != pin.refdes || member.pin != pin.number)
+            {
+                return Ok(json!({
+                    "error": format!(
+                        "{spec} is connected to `{}` with {}.{}; a no-connect marker would sever a real net. Disconnect it first if that is what you meant.",
+                        net.name, other.refdes, other.pin,
+                    ),
+                }));
+            }
+            nets.push(net.name.clone());
+        }
+        pins.push(pin);
     }
-    if edit
-        .before()
-        .no_connect
+
+    let mut retracted = NetDrawing::default();
+    for net in &nets {
+        retracted.extend(drawing_on_net(&edit.doc, net));
+    }
+    edit.doc.remove_drawing(&retracted.uuids);
+
+    let mut marked = Vec::new();
+    for pin in &pins {
+        if edit
+            .before()
+            .no_connect
+            .iter()
+            .any(|member| member.refdes == pin.refdes && member.pin == pin.number)
+        {
+            continue;
+        }
+        edit.doc.add_no_connect(pin.at);
+        marked.push(format!("{}.{}", pin.refdes, pin.number));
+    }
+    let refs = pins
         .iter()
-        .any(|p| p.refdes == pin.refdes && p.pin == pin.number)
-    {
-        return Ok(json!({ "changed": format!("{spec} was already marked no-connect") }));
-    }
-    edit.doc.add_no_connect(pin.at);
+        .map(|pin| pin.refdes.clone())
+        .collect::<Vec<_>>();
     edit.commit(
         ctx,
         "no_connect",
-        "Mark a schematic pin unconnected",
-        json!(format!("marked {spec} no-connect")),
-        Allow::nothing().part(&pin.refdes),
+        "Mark schematic pins unconnected",
+        json!({
+            "pins": marked,
+            "retracted": {"labels": retracted.labels, "wires": retracted.wires},
+        }),
+        Allow::nothing().parts(refs).nets(nets).creating(),
     )
 }
 
@@ -658,6 +705,73 @@ pub(crate) fn floating_wires(doc: &SchDoc) -> Vec<String> {
         .collect()
 }
 
+#[derive(Default)]
+struct NetDrawing {
+    uuids: Vec<String>,
+    labels: usize,
+    wires: usize,
+    junctions: usize,
+}
+
+impl NetDrawing {
+    fn extend(&mut self, other: NetDrawing) {
+        for uuid in other.uuids {
+            if !self.uuids.contains(&uuid) {
+                self.uuids.push(uuid);
+            }
+        }
+        self.labels += other.labels;
+        self.wires += other.wires;
+        self.junctions += other.junctions;
+    }
+}
+
+/// Every wire, label and junction whose extracted partition carries `net`.
+fn drawing_on_net(doc: &SchDoc, net: &str) -> NetDrawing {
+    let live = connect::scene(doc);
+    let point_is_on_net = |at: Point2| {
+        live.points
+            .iter()
+            .any(|(point, name)| name == net && point.near_eq(at, EPS))
+    };
+    let segment_is_on_net = |a: Point2, b: Point2| {
+        live.segments.iter().any(|(from, to, name)| {
+            name == net
+                && ((from.near_eq(a, EPS) && to.near_eq(b, EPS))
+                    || (from.near_eq(b, EPS) && to.near_eq(a, EPS)))
+        })
+    };
+    let mut drawing = NetDrawing::default();
+    for item in doc.items() {
+        let uuid = match item {
+            sch_doc::Item::Wire(wire)
+                if wire
+                    .points
+                    .windows(2)
+                    .any(|pair| segment_is_on_net(pair[0], pair[1])) =>
+            {
+                drawing.wires += 1;
+                Some(&wire.uuid)
+            }
+            sch_doc::Item::Label(label)
+                if sch_doc::unescape(&label.text) == net || point_is_on_net(label.at.point()) =>
+            {
+                drawing.labels += 1;
+                Some(&label.uuid)
+            }
+            sch_doc::Item::Junction(junction) if point_is_on_net(junction.at) => {
+                drawing.junctions += 1;
+                Some(&junction.uuid)
+            }
+            _ => None,
+        };
+        if let Some(uuid) = uuid {
+            drawing.uuids.push(uuid.clone());
+        }
+    }
+    drawing
+}
+
 /// Remove drawn wires by pin, by net, by the parts they touch, or by UUID.
 pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut edit = Edit::open(ctx)?;
@@ -740,6 +854,9 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         })
         .map(|wire| wire.uuid.clone())
         .collect();
+    if let Some(net) = wanted_net {
+        doomed.extend(drawing_on_net(&edit.doc, net).uuids);
+    }
     doomed.extend(
         edit.doc
             .labels()
@@ -771,15 +888,15 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .flat_map(|net| net.pins.iter().map(|p| p.refdes.clone()))
         .collect();
     let allow = Allow::nothing()
-        .nets(nets)
+        .unname_nets(nets)
         .parts(named)
         .parts(loosened)
         .creating();
     let loose = refs::newly_loose(edit.before(), &connect::extract(&edit.doc));
     let changed = match loose.is_empty() {
-        true => format!("deleted {removed} wire(s)"),
+        true => format!("deleted {removed} wiring item(s)"),
         false => format!(
-            "deleted {removed} wire(s); these pins are now loose and need reconnecting: {}",
+            "deleted {removed} wiring item(s); these pins are now loose and need reconnecting: {}",
             loose.join(", ")
         ),
     };

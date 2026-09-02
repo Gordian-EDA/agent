@@ -139,6 +139,7 @@ pub struct FootprintMismatch {
     pub missing_pads: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_pins: Vec<String>,
+    pub message: String,
     pub suggestion: Option<String>,
 }
 
@@ -151,7 +152,8 @@ impl PayloadAudit {
     /// is what holds the board back until it is closed. Refusing a whole 50-part
     /// payload for it only forces the caller to resend everything.
     pub fn is_valid(&self) -> bool {
-        self.duplicate_refs.is_empty()
+        self.input_errors.is_empty()
+            && self.duplicate_refs.is_empty()
             && self.unknown_pins.is_empty()
             && self.footprint_mismatch.is_empty()
     }

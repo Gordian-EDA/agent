@@ -4,6 +4,7 @@
 //! Skips when no KiCAD is installed: the mutators embed library definitions.
 
 use gordian_runtime::AgentRuntime;
+use sch_doc::{LabelKind, Pose};
 use serde_json::{Value, json};
 
 const EMPTY_SHEET: &str = "(kicad_sch\n\
@@ -38,6 +39,191 @@ fn listing(ctx: &AgentRuntime) -> String {
         Value::String(text) => text,
         other => panic!("read_schematic returned {other}"),
     }
+}
+
+fn labelled_resistor(ctx: &AgentRuntime) {
+    let added = call(
+        ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "Device:R", "ref": "R1", "value": "DNP"}]}),
+    );
+    assert!(added.get("error").is_none(), "fixture failed: {added}");
+}
+
+#[test]
+fn no_connect_retracts_single_pin_nets_in_one_batch() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    labelled_resistor(&ctx);
+    let mut doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let mut pins = sch_doc::placed_pins(&doc);
+    pins.sort_by(|left, right| left.number.cmp(&right.number));
+    let first = pins[0].at;
+    let stub = geom::Point2::new(first.x + 2.54, first.y);
+    doc.add_wire(first, stub);
+    doc.add_junction(stub);
+    doc.add_label(LabelKind::Local, "PC13", Pose::new(stub.x, stub.y, 0.0));
+    let second = pins[1].at;
+    doc.add_label(LabelKind::Local, "PC14", Pose::new(second.x, second.y, 0.0));
+    doc.write(ctx.sch_path()).unwrap();
+    let before = sch_doc::connect::extract(&doc);
+    assert_eq!(
+        before
+            .nets
+            .iter()
+            .find(|net| net.name == "PC13")
+            .unwrap()
+            .pins
+            .len(),
+        1
+    );
+    assert_eq!(
+        before
+            .nets
+            .iter()
+            .find(|net| net.name == "PC14")
+            .unwrap()
+            .pins
+            .len(),
+        1
+    );
+
+    let result = call(&ctx, "no_connect", json!({"pins": ["R1.1", "R1.2"]}));
+
+    assert!(result.get("error").is_none(), "no_connect failed: {result}");
+    assert_eq!(
+        result["changed"]["retracted"],
+        json!({"labels": 2, "wires": 1})
+    );
+    let after_doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let after = sch_doc::connect::extract(&after_doc);
+    assert!(
+        after
+            .nets
+            .iter()
+            .all(|net| net.name != "PC13" && net.name != "PC14")
+    );
+    assert_eq!(after.no_connect.len(), 2);
+    assert_eq!(after_doc.wires().count(), 0);
+    assert_eq!(after_doc.labels().count(), 0);
+    assert!(
+        after_doc
+            .items()
+            .iter()
+            .all(|item| !matches!(item, sch_doc::Item::Junction(_)))
+    );
+}
+
+#[test]
+fn delete_wires_by_net_removes_a_label_directly_on_a_pin() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    labelled_resistor(&ctx);
+    let labelled = call(&ctx, "label", json!({"pin": "R1.1", "net": "PC13"}));
+    assert!(
+        labelled.get("error").is_none(),
+        "fixture failed: {labelled}"
+    );
+    let mut doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let at = sch_doc::placed_pins(&doc)
+        .into_iter()
+        .find(|pin| pin.refdes == "R1" && pin.number == "1")
+        .unwrap()
+        .at;
+    doc.add_junction(at);
+    doc.write(ctx.sch_path()).unwrap();
+    let before = sch_doc::connect::extract(&doc);
+    assert_eq!(
+        before
+            .nets
+            .iter()
+            .find(|net| net.name == "PC13")
+            .unwrap()
+            .pins
+            .len(),
+        1
+    );
+    assert_eq!(doc.wires().count(), 0, "fixture must have no wire to match");
+
+    let result = call(&ctx, "delete_wires", json!({"net": "PC13"}));
+
+    assert!(
+        result.get("error").is_none(),
+        "delete_wires failed: {result}"
+    );
+    let changed = result["changed"].as_str().unwrap();
+    assert!(
+        changed.contains("R1.1"),
+        "loose pin was not reported: {result}"
+    );
+    assert!(
+        !changed.contains("no wire matched"),
+        "net label was invisible: {result}"
+    );
+    let after_doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let after = sch_doc::connect::extract(&after_doc);
+    assert!(after.nets.iter().all(|net| net.name != "PC13"));
+    assert!(
+        after
+            .unconnected
+            .iter()
+            .any(|pin| pin.refdes == "R1" && pin.pin == "1")
+    );
+    assert_eq!(after_doc.labels().count(), 0);
+    assert!(
+        after_doc
+            .items()
+            .iter()
+            .all(|item| !matches!(item, sch_doc::Item::Junction(_)))
+    );
+}
+
+#[test]
+fn delete_wires_accepts_an_auto_name_left_by_stacked_pins() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let added = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{
+            "lib_id": "Connector:USB_C_Receptacle_PowerOnly_6P",
+            "ref": "J1"
+        }]}),
+    );
+    assert!(added.get("error").is_none(), "fixture failed: {added}");
+    let labelled = call(&ctx, "label", json!({"pin": "J1.A9", "net": "VBUS_RAW"}));
+    assert!(
+        labelled.get("error").is_none(),
+        "fixture failed: {labelled}"
+    );
+
+    let result = call(&ctx, "delete_wires", json!({"net": "VBUS_RAW"}));
+
+    assert!(result.get("error").is_none(), "delete failed: {result}");
+    assert!(
+        result["net_delta"]["renamed"]
+            .as_array()
+            .is_some_and(|renamed| renamed.iter().any(|pair| {
+                pair[0] == "VBUS_RAW"
+                    && pair[1]
+                        .as_str()
+                        .is_some_and(|name| name.starts_with("Net-("))
+            })),
+        "the stacked pins did not reproduce the auto-name transition: {result}"
+    );
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    assert!(
+        sch_doc::connect::extract(&doc)
+            .nets
+            .iter()
+            .all(|net| net.name != "VBUS_RAW")
+    );
 }
 
 #[test]
@@ -172,6 +358,137 @@ fn wrong_footprint_is_refused_and_its_suggestion_closes_the_loop() {
             .iter()
             .all(|finding| finding["code"] != "footprint-pins"),
         "compatible repair left a footprint-pins finding: {checked}"
+    );
+}
+
+#[test]
+fn nonexistent_footprints_are_input_errors_with_same_library_repairs() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let invented = "Capacitor_SMD:C_1206_3216Metric_Polarized";
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [{
+            "ref": "C1",
+            "part": "Device:C",
+            "footprint": invented,
+            "pins": {"1": "VIN", "2": "GND"}
+        }]}),
+    );
+    assert_eq!(result["code"], "invalid_payload");
+    let error = result["input_errors"][0].as_str().unwrap();
+    assert!(
+        error.contains("did you mean Capacitor_SMD:C_1206_3216Metric?"),
+        "wrong repair: {result}"
+    );
+    assert!(!listing(&ctx).contains("C1"), "refusal wrote the part");
+
+    labelled_resistor(&ctx);
+    for (tool, input) in [
+        (
+            "assign_footprints",
+            json!({"assignments": [{"reference": "R1", "footprint": invented}]}),
+        ),
+        (
+            "set_fields",
+            json!({"ref": "R1", "fields": {"Footprint": invented}}),
+        ),
+    ] {
+        let refused = call(&ctx, tool, input);
+        assert_eq!(refused["code"], "invalid_payload", "{tool}: {refused}");
+        assert!(
+            refused["input_errors"][0]
+                .as_str()
+                .is_some_and(|message| message.contains("Capacitor_SMD:C_1206_3216Metric")),
+            "{tool} gave an unrelated suggestion: {refused}"
+        );
+    }
+}
+
+#[test]
+fn footprint_mismatch_suggestions_preserve_the_package_family() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let cases = [
+        (
+            "J1",
+            "Connector:Micro_SD_Card_Det1",
+            "Connector_Card:microSD_HC_Hirose_DM3D-SF",
+            "Connector_Card:microSD_",
+        ),
+        (
+            "J2",
+            "Connector_Audio:AudioJack2_Switch",
+            "Connector_Audio:Jack_3.5mm_CUI_SJ1-3514N_Horizontal",
+            "Connector_Audio:Jack_3.5mm_",
+        ),
+    ];
+    for (reference, symbol, footprint, family) in cases {
+        let result = call(
+            &ctx,
+            "place_parts",
+            json!({"parts": [{
+                "ref": reference,
+                "part": symbol,
+                "footprint": footprint,
+                "pins": {}
+            }]}),
+        );
+        let mismatch = &result["footprint_mismatch"][0];
+        assert_eq!(result["code"], "invalid_payload", "{result}");
+        assert!(
+            mismatch["suggestion"]
+                .as_str()
+                .is_some_and(|suggestion| suggestion.starts_with(family)),
+            "suggestion escaped {family}: {result}"
+        );
+        assert!(
+            mismatch["message"].as_str().is_some_and(
+                |message| message.contains("symbol pin") || message.contains("footprint pad")
+            ),
+            "mismatch did not identify the unmatched pin or pad: {result}"
+        );
+    }
+
+    let without_detect_pad = "Connector_Card:microSD_HC_Molex_47219-2001";
+    let refused = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [{
+            "ref": "J3",
+            "part": "Connector:Micro_SD_Card_Det1",
+            "footprint": without_detect_pad,
+            "pins": {"10": "SD_DETECT"}
+        }]}),
+    );
+    assert!(
+        refused["footprint_mismatch"][0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("symbol pin(s) 10 have no footprint pad")),
+        "missing symbol pin was not explained: {refused}"
+    );
+    let accepted = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [{
+            "ref": "J3",
+            "part": "Connector:Micro_SD_Card_Det1",
+            "footprint": without_detect_pad,
+            "pins": {"10": "nc"}
+        }]}),
+    );
+    assert!(
+        accepted.get("footprint_mismatch").is_none(),
+        "explicit no-connect pin still required a pad: {accepted}"
+    );
+    assert!(
+        accepted.get("error").is_none(),
+        "placement failed: {accepted}"
     );
 }
 
