@@ -1967,6 +1967,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: [("GND".to_owned(), 1)].into_iter().collect(),
+            fixed_copper: Default::default(),
+            nets: None,
         }
     }
 
@@ -2043,6 +2045,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: [("GND".to_owned(), 1)].into_iter().collect(),
+            fixed_copper: Default::default(),
+            nets: None,
         }
     }
 
@@ -2253,6 +2257,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
 
         let run = route_with_engine(&problem);
@@ -2297,6 +2303,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -2360,6 +2368,8 @@ mod escape_bottleneck_tests {
                 outline: None,
                 escape_layers: Default::default(),
                 plane_nets: Default::default(),
+                fixed_copper: Default::default(),
+                nets: None,
             },
             RouteResult {
                 solution: RouteSolution {
@@ -2480,6 +2490,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -2529,6 +2541,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -2597,6 +2611,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -2664,6 +2680,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -2737,6 +2755,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -2808,6 +2828,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -2878,6 +2900,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -2930,6 +2954,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -2985,6 +3011,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -3035,6 +3063,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -3150,6 +3180,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: BTreeMap::from([("GND".to_string(), 1)]),
+            fixed_copper: Default::default(),
+            nets: None,
         }
     }
 
@@ -3238,6 +3270,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let mut solution = RouteSolution {
             traces: vec![
@@ -3319,6 +3353,8 @@ mod escape_bottleneck_tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         };
         let mut result = RouteResult {
             engine: "test".to_string(),

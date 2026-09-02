@@ -1049,6 +1049,8 @@ mod tests {
             outline: None,
             escape_layers: Default::default(),
             plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
         }
     }
 

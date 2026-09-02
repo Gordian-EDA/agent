@@ -5,8 +5,7 @@
 
 use anyhow::{Context, Result};
 use kicad_board::{sexpr_end, sexpr_point};
-use pcb_model::{Point2, Polygon, Rect, RouteSolution};
-use pcb_place::{Part, PlacementView};
+use pcb_model::{Part, PlacementView, Point2, Polygon, Rect, RouteSolution};
 use serde_json::{Value, json};
 
 use gordian_runtime::AgentRuntime;
@@ -395,8 +394,8 @@ fn suffix(kind: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pcb_model::PartPad;
     use pcb_model::{LayerRef, Trace, Via, ViaSpan};
-    use pcb_place::PartPad;
 
     #[test]
     fn fit_bounds_include_rotated_courtyard_and_off_center_pad_extents() {

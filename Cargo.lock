@@ -1422,7 +1422,6 @@ dependencies = [
  "geom",
  "kicad-ipc",
  "pcb-model",
- "pcb-place",
  "serde_json",
  "tempfile",
 ]
@@ -1787,7 +1786,6 @@ dependencies = [
 name = "pcb-engine"
 version = "0.1.0"
 dependencies = [
- "pcb-drc",
  "pcb-model",
  "pcb-place",
  "pcb-route-mesh",
@@ -1798,10 +1796,8 @@ name = "pcb-model"
 version = "0.1.0"
 dependencies = [
  "geom",
- "rayon",
  "serde",
  "serde_json",
- "uuid",
 ]
 
 [[package]]
@@ -1813,7 +1809,6 @@ dependencies = [
  "pcb-drc",
  "pcb-model",
  "pcb-route-grid",
- "serde",
  "serde_json",
 ]
 

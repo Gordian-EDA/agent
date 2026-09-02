@@ -61,8 +61,9 @@ cargo run --release -p gordian -- agent --project ./my_board "a 3.3V buck conver
 cargo run --release -p gordian -- tui --project ./my_board
 ```
 
-PCB physical design uses one tuned place-then-route engine. Schematic placement
-remains independently selectable:
+PCB physical design exposes independently invokable tuned placement and routing
+phases, with the saved board as their shared state. Schematic placement remains
+independently selectable:
 
 ```toml
 [engines]
@@ -86,9 +87,9 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | `sch-floorplan` / `sch-place` | Deterministic live schematic placement, arrangement, rewiring, and shared placement model |
 | `anneal-place` / `cluster-place` / `spine-place` | Interchangeable schematic placement engines |
 | `kicad-symbol` / `kicad-footprint` | KiCAD library discovery, metadata, and geometry |
-| `pcb-model` | Unified `PcbProblem -> PcbSolution` framework contract |
-| `pcb-engine` | Gordian's single tuned place-then-route PCB engine |
-| `pcb-place` | Placement views and the engine's tuned placement phase |
+| `pcb-model` | Shared geometry and contracts for independently invoked PCB placement and routing phases |
+| `pcb-engine` | Production policy facade for tuned placement and routing |
+| `pcb-place` | Concrete placement algorithms |
 | `pcb-route-grid` | Grid/A\* primitives for the tuned routing phase |
 | `pcb-route-mesh` | Tuned routing pipeline and lower-level mesh diagnostics |
 | `pcb-drc` | Extensible PCB geometry and connectivity DRC |

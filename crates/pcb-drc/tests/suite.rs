@@ -37,6 +37,8 @@ fn problem(connections: Vec<Connection>, obstacles: Vec<Obstacle>) -> RoutingVie
         outline: None,
         escape_layers: Default::default(),
         plane_nets: Default::default(),
+        fixed_copper: Default::default(),
+        nets: None,
     }
 }
 
