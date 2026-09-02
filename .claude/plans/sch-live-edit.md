@@ -117,3 +117,14 @@ completion signal; (6) delete the `PcbEngine` monolith, the destructive regenera
 Auto-route works but is "kinda ugly": next router lane — fewer bends/meanders, 45° escapes,
 straight pad exits, via minimisation, no wandering around obstacles when a channel exists;
 judged by `tools/pcb_critic.py` before/after on the PCB corpus with DRC 0 kept.
+
+## NORTH STAR (user, 2026-09-02)
+Near-perfect sch+pcb for 30+ component designs in <5 min end to end; selected QC runs
+perfect (checks, critics ≥9, judge ≥9, ERC/DRC/unrouted 0, no refusals/loops). Campaign
+set to define: sch-create-large→PCB, create-hard-pcb, bms-10s (46 parts), esp32-multifunction
+(92). Loop: run with named questions → findings → lanes → rerun.
+
+**Self-diagnosis (user tip):** after every QC case, the runner asks the agent one more turn
+in the same session — "What did you struggle with in the current toolset during this task?
+List concrete tool gaps, confusing results, missing information, and what would have made it
+faster." — and records the answer as `self_diagnosis` in result.json and the findings file.
