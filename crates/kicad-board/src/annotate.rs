@@ -223,8 +223,7 @@ fn block_indent(text: &str, footprint: &Node) -> String {
 fn insertion_point(text: &str, footprint: &Node, children: &[Node]) -> usize {
     children
         .iter()
-        .filter(|node| node_head(text, node) == "property")
-        .next_back()
+        .rfind(|node| node_head(text, node) == "property")
         .map(|last| last.end)
         .or_else(|| children.first().map(|first| first.start))
         .unwrap_or(footprint.end - 1)
