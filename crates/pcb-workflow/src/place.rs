@@ -1794,15 +1794,11 @@ pub(crate) fn plan_outline_refit(
             + values.len().saturating_sub(1) as f64 * courtyard_gap
     };
     let mut width = core.width()
-        + edge_depth[edge_slot(Edge::W)]
-        + edge_depth[edge_slot(Edge::E)]
-        + headroom.west
-        + headroom.east;
+        + edge_depth[edge_slot(Edge::W)].max(headroom.west)
+        + edge_depth[edge_slot(Edge::E)].max(headroom.east);
     let mut height = core.height()
-        + edge_depth[edge_slot(Edge::N)]
-        + edge_depth[edge_slot(Edge::S)]
-        + headroom.north
-        + headroom.south;
+        + edge_depth[edge_slot(Edge::N)].max(headroom.north)
+        + edge_depth[edge_slot(Edge::S)].max(headroom.south);
     width = width
         .max(span(&edge_spans[edge_slot(Edge::N)]) + headroom.west + headroom.east)
         .max(span(&edge_spans[edge_slot(Edge::S)]) + headroom.west + headroom.east);
