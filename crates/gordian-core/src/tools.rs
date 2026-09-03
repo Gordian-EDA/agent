@@ -605,7 +605,7 @@ pub fn tool_defs() -> Vec<Tool> {
             description: "Progress and DRC for the board as it stands: `routed N/M`, `blocked` \
                  (the same ratsnest entries route_board returns), `staged` (the parts still in \
                  the staging row, with reason and extent), outline bounds, grouped top_violations, \
-                 and every live DRC finding. `ok` considers \
+                 and representative live DRC findings with an explicit truncation flag. `ok` considers \
                  every blocking finding. A staged part is never a violation."
                 .into(),
             input_schema: json!({ "type": "object", "properties": {} }),

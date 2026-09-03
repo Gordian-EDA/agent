@@ -42,6 +42,7 @@ pub(super) fn is_zone_self_unconnected(v: &Violation) -> bool {
 /// A badly broken board can have hundreds of unconnected items; enough of them
 /// to act on is enough.
 const MAX_UNCONNECTED_PAIRS: usize = 20;
+const MAX_REPORTED_FINDINGS: usize = 20;
 
 pub(super) fn violation_summaries<'a>(
     violations: impl IntoIterator<Item = &'a Violation>,
@@ -508,9 +509,11 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .iter()
             .map(|finding| finding.violation),
     );
+    let finding_count = violations.len() + unconnected_findings.len() + outline_blocking;
     let mut findings = violations
         .iter()
         .chain(&unconnected_findings)
+        .take(MAX_REPORTED_FINDINGS.saturating_sub(outline_blocking))
         .copied()
         .map(finding_json)
         .collect::<Vec<_>>();
@@ -653,6 +656,8 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "drc": drc,
         "silk": silk,
         "findings": findings,
+        "finding_count": finding_count,
+        "findings_truncated": finding_count > MAX_REPORTED_FINDINGS,
         "diagnostics": diagnostics,
         "text": text,
         // Never a bare count: the two pads that should be joined are what say
