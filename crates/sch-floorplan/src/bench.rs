@@ -14,10 +14,9 @@
 //! that did not mean what the payload said — those symbols are benched rather than
 //! the whole netlist discarded. [`crate::live::arrange`] is how they leave.
 //!
-//! A requested name that cannot identify a distinct net is replaced with a stable
-//! authored name. That includes KiCAD-derived names (`Net-(R1-Pad1)`) and two
-//! requested names the existing drawing has already shorted together. The report
-//! exposes every replacement instead of discarding the new connectivity.
+//! Authored names are written exactly as requested. KiCAD-derived names such as
+//! `Net-(R1-Pad1)` are the sole exception: they change with their pin partition, so
+//! the bench mints a stable label and exposes that replacement in its report.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -88,10 +87,9 @@ pub fn unbench(doc: &mut SchDoc, refs: &BTreeSet<String>) -> Vec<String> {
 pub struct BenchReport {
     /// Symbols now on the bench, in refdes order.
     pub benched: Vec<Benched>,
-    /// Requested net name → stable authored name used when the requested name
-    /// could not identify a distinct net on this sheet.
+    /// KiCAD-derived net name → stable authored label written in its place.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub authored_nets: BTreeMap<String, String>,
+    pub minted_for_derived: BTreeMap<String, String>,
 }
 
 /// Put `parts` on `block`'s bench, wiring each pin by name.
@@ -104,10 +102,10 @@ pub fn bench(
     source: &SymbolSource,
     block: &str,
     parts: &[BenchPart],
-    authored_nets: &BTreeMap<String, String>,
+    minted_for_derived: &BTreeMap<String, String>,
 ) -> sch_doc::Result<BenchReport> {
     let mut report = BenchReport {
-        authored_nets: authored_nets.clone(),
+        minted_for_derived: minted_for_derived.clone(),
         ..BenchReport::default()
     };
     let global = global_nets(doc);
@@ -126,7 +124,7 @@ pub fn bench(
             refdes: part.refdes.clone(),
             why: part.why.clone(),
         });
-        name_pins(doc, part, &global, authored_nets);
+        name_pins(doc, part, &global, minted_for_derived);
     }
     report.benched.sort_by(|a, b| a.refdes.cmp(&b.refdes));
     Ok(report)
@@ -138,7 +136,7 @@ fn name_pins(
     doc: &mut SchDoc,
     part: &BenchPart,
     global: &BTreeSet<String>,
-    authored_nets: &BTreeMap<String, String>,
+    minted_for_derived: &BTreeMap<String, String>,
 ) {
     let placed: Vec<(String, Point2)> = sch_doc::placed_pins(doc)
         .into_iter()
@@ -150,7 +148,7 @@ fn name_pins(
             doc.add_no_connect(at);
             continue;
         };
-        let net = authored_nets.get(net).unwrap_or(net);
+        let net = minted_for_derived.get(net).unwrap_or(net);
         let kind = match global.contains(net) {
             true => LabelKind::Global,
             false => LabelKind::Local,
@@ -159,9 +157,8 @@ fn name_pins(
     }
 }
 
-/// Choose stable authored names for requested names that cannot safely label a
-/// distinct partition on `doc`.
-pub fn authored_net_names(doc: &SchDoc, parts: &[&BenchPart]) -> BTreeMap<String, String> {
+/// Mint stable authored labels for the KiCAD-derived names in `parts`.
+pub fn minted_net_names(doc: &SchDoc, parts: &[&BenchPart]) -> BTreeMap<String, String> {
     let mut first_pin = BTreeMap::new();
     for part in parts {
         for (pin, net) in &part.pins {
@@ -171,29 +168,6 @@ pub fn authored_net_names(doc: &SchDoc, parts: &[&BenchPart]) -> BTreeMap<String
         }
     }
     let requested: BTreeSet<&str> = first_pin.keys().copied().collect();
-    let aliases = existing_aliases(doc, &requested);
-    let mut rename = BTreeSet::new();
-    for net in &requested {
-        if is_derived_name(net) {
-            rename.insert(*net);
-        }
-    }
-    let mut by_partition: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for (net, partition) in &aliases {
-        by_partition.entry(partition).or_default().push(net);
-    }
-    for (partition, mut nets) in by_partition {
-        if nets.len() < 2 {
-            continue;
-        }
-        nets.sort_unstable();
-        let keep = nets
-            .iter()
-            .copied()
-            .find(|net| *net == partition)
-            .unwrap_or(nets[0]);
-        rename.extend(nets.into_iter().filter(|net| *net != keep));
-    }
 
     let mut occupied: BTreeSet<String> = doc
         .labels()
@@ -201,7 +175,7 @@ pub fn authored_net_names(doc: &SchDoc, parts: &[&BenchPart]) -> BTreeMap<String
         .chain(requested.iter().map(|net| (*net).to_string()))
         .collect();
     let mut out = BTreeMap::new();
-    for net in rename {
+    for net in requested.iter().copied().filter(|net| is_derived_name(net)) {
         let (refdes, pin) = first_pin[net];
         let base = format!("N_{}_{}", identifier(refdes), identifier(pin));
         let authored = unique_name(&base, &occupied);
@@ -209,39 +183,6 @@ pub fn authored_net_names(doc: &SchDoc, parts: &[&BenchPart]) -> BTreeMap<String
         out.insert(net.to_string(), authored);
     }
     out
-}
-
-/// Requested label name → the existing extracted partition it reaches.
-fn existing_aliases<'a>(doc: &SchDoc, requested: &BTreeSet<&'a str>) -> BTreeMap<&'a str, String> {
-    let scene = sch_doc::connect::scene(doc);
-    let point_names: BTreeMap<(i64, i64), &str> = scene
-        .points
-        .iter()
-        .map(|(point, name)| (point_key(*point), name.as_str()))
-        .collect();
-    let mut out = BTreeMap::new();
-    for label in doc.labels() {
-        let name = sch_doc::unescape(&label.text);
-        let Some(requested_name) = requested.iter().copied().find(|net| **net == name) else {
-            continue;
-        };
-        if let Some(partition) = point_names.get(&point_key(label.at.point())) {
-            out.insert(requested_name, (*partition).to_string());
-        }
-    }
-    for net in sch_doc::connect::extract(doc).nets {
-        if let Some(requested_name) = requested.iter().copied().find(|name| **name == net.name) {
-            out.entry(requested_name).or_insert(net.name);
-        }
-    }
-    out
-}
-
-fn point_key(point: Point2) -> (i64, i64) {
-    (
-        (point.x * 1000.0).round() as i64,
-        (point.y * 1000.0).round() as i64,
-    )
 }
 
 fn identifier(text: &str) -> String {

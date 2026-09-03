@@ -16,6 +16,9 @@
 //!   scattered across two, no two nets fused into one;
 //! - nothing that was already on the sheet may be split, dropped or shorted.
 //!
+//! A bench addition attributes an already-fused pair to the sheet it received: its
+//! authored labels still have to be exact, and the draw may not introduce a merge.
+//!
 //! A failure restores the snapshot and comes back as [`Mismatch`], so a caller can
 //! never commit a sheet that silently mis-wires. `arrange` and `rewire` promise more:
 //! the partition must be *identical*, since moving a part is not supposed to mean
@@ -552,10 +555,9 @@ pub struct AddReport {
     pub benched: Vec<crate::bench::Benched>,
     /// Nets the benched symbols connect to, in name order.
     pub nets: Vec<String>,
-    /// Requested net name → stable authored name used when the requested name
-    /// could not identify a distinct net on this sheet.
+    /// KiCAD-derived net name → stable authored label written in its place.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub authored_nets: BTreeMap<String, String>,
+    pub minted_for_derived: BTreeMap<String, String>,
     /// Parts nothing could resolve, so not even the bench can hold them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unplaced: Vec<sch_check::place_parts::Unplaced>,
@@ -589,6 +591,7 @@ pub fn add_parts(
 ) -> Result<AddReport> {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let before = connect::extract(doc);
+    let names_before = named_partitions(doc);
     let existing = ExistingSheet {
         net_pins: before
             .nets
@@ -617,27 +620,26 @@ pub fn add_parts(
     let mut nets = BTreeSet::new();
     let parts_by_block = bench_parts(&design, only, why);
     let all_parts: Vec<&crate::bench::BenchPart> = parts_by_block.values().flatten().collect();
-    let authored_nets = crate::bench::authored_net_names(doc, &all_parts);
+    let minted_for_derived = crate::bench::minted_net_names(doc, &all_parts);
     for (block, parts) in parts_by_block {
-        let benched = crate::bench::bench(doc, &source, &block, &parts, &authored_nets)?;
+        let benched = crate::bench::bench(doc, &source, &block, &parts, &minted_for_derived)?;
         report.benched.extend(benched.benched);
         nets.extend(parts.iter().flat_map(|part| {
             part.pins
                 .values()
-                .map(|net| authored_nets.get(net).unwrap_or(net).clone())
+                .map(|net| minted_for_derived.get(net).unwrap_or(net).clone())
         }));
     }
-    report.authored_nets = authored_nets;
+    report.minted_for_derived = minted_for_derived;
     if report.benched.is_empty() {
         doc.restore(snapshot)?;
         return Err(Error::Nothing);
     }
     report.benched.sort_by(|a, b| a.refdes.cmp(&b.refdes));
     report.nets = nets.into_iter().collect();
-    report.mismatch = Mismatch {
-        disturbed: disturbed(&before, &connect::extract(doc)),
-        ..verify(doc, &design)
-    };
+    let after = connect::extract(doc);
+    report.mismatch = verify_addition(doc, &design, &names_before, &report.minted_for_derived);
+    report.mismatch.disturbed = disturbed(&before, &after);
     report.committed = report.mismatch.is_empty();
     if !report.committed {
         doc.restore(snapshot)?;
@@ -1651,6 +1653,103 @@ pub fn verify(doc: &SchDoc, design: &Design) -> Mismatch {
         }
     }
     mismatch
+}
+
+/// Gate a bench draw against both its requested labels and the sheet it received.
+///
+/// Two requested nets may share the result only when their names already resolved
+/// to one partition before the draw. This attributes an inherited alias correctly
+/// while still refusing a merge made by the newly benched pins.
+fn verify_addition(
+    doc: &SchDoc,
+    design: &Design,
+    names_before: &BTreeMap<String, String>,
+    minted_for_derived: &BTreeMap<String, String>,
+) -> Mismatch {
+    let after = connect::extract(doc);
+    let home = homes(&after);
+    let names_after = named_partitions(doc);
+    let mut mismatch = Mismatch::default();
+    let mut owner: HashMap<String, String> = HashMap::new();
+
+    for (requested, pins) in intended(design) {
+        let effective = minted_for_derived.get(&requested).unwrap_or(&requested);
+        let target = names_after.get(effective).and_then(|partition| {
+            after
+                .nets
+                .iter()
+                .position(|net| net.name == *partition)
+                .map(|index| index.to_string())
+        });
+        let landed: BTreeSet<String> = pins
+            .iter()
+            .map(|pin| home.get(pin).cloned().unwrap_or_else(|| format!("~{pin}")))
+            .collect();
+        let Some(target) = target.filter(|target| {
+            landed.len() == 1 && landed.first().is_some_and(|landed| landed == target)
+        }) else {
+            mismatch.scattered.push(requested);
+            continue;
+        };
+
+        if let Some(other) = owner.insert(target, requested.clone()) {
+            let inherited = names_before
+                .get(&other)
+                .zip(names_before.get(&requested))
+                .is_some_and(|(a, b)| a == b);
+            if !inherited {
+                mismatch.shorted.push((other, requested));
+            }
+        }
+    }
+    mismatch
+}
+
+/// Every authored name on a sheet mapped to the extracted partition it reaches.
+fn named_partitions(doc: &SchDoc) -> BTreeMap<String, String> {
+    let scene = connect::scene(doc);
+    let points: BTreeMap<(i64, i64), String> = scene
+        .points
+        .into_iter()
+        .map(|(point, partition)| (coord(point), partition))
+        .collect();
+    let mut out = BTreeMap::new();
+    let mut note = |name: String, point: Point2| {
+        if let Some(partition) = points.get(&coord(point)) {
+            out.insert(name, partition.clone());
+        }
+    };
+    for label in doc.labels() {
+        note(sch_doc::unescape(&label.text), label.at.point());
+    }
+    let power_values: BTreeMap<String, String> = doc
+        .symbols()
+        .map(|symbol| (symbol.uuid.clone(), symbol.value().to_string()))
+        .collect();
+    for pin in sch_doc::placed_pins(doc)
+        .into_iter()
+        .filter(|pin| pin.etype == "power_in")
+    {
+        if pin.power_symbol {
+            if let Some(value) = power_values.get(&pin.owner) {
+                note(sch_doc::unescape(value), pin.at);
+            }
+        } else if pin.hidden {
+            note(sch_doc::unescape(&pin.name), pin.at);
+        }
+    }
+    for sheet in doc.items().iter().filter_map(|item| match item {
+        sch_doc::Item::Sheet(sheet) => Some(sheet),
+        _ => None,
+    }) {
+        for pin in &sheet.pins {
+            note(sch_doc::unescape(&pin.name), pin.at.point());
+        }
+    }
+    for net in connect::extract(doc).nets {
+        out.entry(net.name.clone()).or_insert(net.name);
+    }
+    out
 }
 
 /// Where each pin of `netlist` ended up, as a comparable key: the net it is on, or a
