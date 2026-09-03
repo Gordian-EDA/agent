@@ -333,7 +333,7 @@ mod tests {
         let mut doc = off_page_sheet();
         let fit = doc.refit_page().expect("content to fit");
         assert!(fit.standard, "this content belongs on a standard page");
-        assert_eq!(fit.page, [297.0, 210.0]);
+        assert_eq!(fit.page, [210.0, 148.0], "a 35 mm sketch takes the smallest standard page");
         let bbox = doc.content_bbox().expect("content");
         assert!(
             bbox.min_x >= PAGE_MARGIN - 1.27 && bbox.min_y >= PAGE_MARGIN - 1.27,
