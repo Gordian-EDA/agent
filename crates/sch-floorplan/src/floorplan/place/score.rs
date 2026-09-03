@@ -1,12 +1,8 @@
-//! `place::score` — the routed-sheet COUNT/geometry primitives an engine measures
-//! against: the `count_*` neatness/truthfulness terms (crossings, corners, merges,
-//! shorts, congestion, body-crossings), the orientation/spine/stray/grid-order
-//! classifiers, and the geometry primitives (`item_rect`, `body_overlap_count`).
-//! The MEASUREMENT library [`super::measure`] assembles these
-//! into the raw 18 terms; each ENGINE then weights them into its own objective. This
-//! module bakes in NO weights and NO `premium` policy — those are engine-owned.
+//! `place::score` — the `count_*` truthfulness terms [`super::measure`] reads off a
+//! routed sheet: wire-through-body crossings, foreign taps, net merges, visual wire
+//! crossings, and placement shorts.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use geom::{EPS, Point2, Segment};
 use kicad::KicadInstallation;
@@ -14,12 +10,7 @@ use kicad::KicadInstallation;
 use crate::write::SchematicWriter;
 use sch_model::route::DrawnSegment;
 
-use circuit_graph::netclass::is_ground;
 use sch_model::item::{Incidence, Item};
-
-// The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `geom::union_find`, shared with the desugar pin reconciler.
-use sch_model::ir::LayoutIr;
 
 /// Wires that run straight THROUGH a 2-pin part's body — a foreign (or trunk)
 /// segment crossing the pin-to-pin axis at a point strictly interior to it,
@@ -168,28 +159,6 @@ pub fn count_parallel_body_crossings(
     n
 }
 
-/// Wire corners (L-bends): points where exactly two perpendicular same-net
-/// segments meet. Length alone treats a jiggly L-jog path and a straight run as
-/// equal; this penalises the BENDS, so the optimiser prefers straight drops and
-/// straight runs along rails — the single term that most separates a clean
-/// reference layout from a compact-but-jiggly diagonal staircase. A ≥3-way meet
-/// (a junction/tap) is not a corner and is excluded by the exact-two test.
-pub fn count_corners(wires: &[DrawnSegment]) -> usize {
-    // (net, point) -> orientations of the segments ending there (true = horizontal).
-    let mut at: BTreeMap<(String, u64, u64), Vec<bool>> = BTreeMap::new();
-    for wire in wires {
-        let Some(net) = &wire.net else { continue };
-        let seg = wire.segment;
-        let horiz = (seg.a.y - seg.b.y).abs() < EPS;
-        for p in [seg.a, seg.b] {
-            at.entry((net.clone(), p.x.to_bits(), p.y.to_bits()))
-                .or_default()
-                .push(horiz);
-        }
-    }
-    at.values().filter(|o| o.len() == 2 && o[0] != o[1]).count()
-}
-
 /// Foreign taps = the post-split short class: a wire endpoint of one net lying
 /// strictly interior to a wire of a DIFFERENT net. The finalize wire-split makes
 /// such a contact a real connection in the netlist (KiCAD splits the through-wire
@@ -212,187 +181,6 @@ pub fn count_foreign_taps(wires: &[DrawnSegment]) -> usize {
             if strict_interior(endpoint_wire.segment.a, through_wire.segment)
                 || strict_interior(endpoint_wire.segment.b, through_wire.segment)
             {
-                n += 1;
-            }
-        }
-    }
-    n
-}
-
-/// "Stay near your pin": total Manhattan distance from each satellite (2-pin
-/// part) to the centroid of the ANCHOR pins it wires to. A pull-up belongs by the
-/// SIGNAL pin it pulls, not the rail, so signal (non-rail) anchor pins are used
-/// when present; only a part that touches no signal anchor (a decoupling cap, two
-/// rails) falls back to its rail anchor pins (→ the IC power pin). This stops a
-/// satellite drifting across the chip to dodge a spacing penalty. A part with no
-/// anchor pin at all (e.g. an IC-less divider) contributes nothing.
-pub fn count_stray(
-    env: &KicadInstallation,
-    w: &SchematicWriter,
-    items: &[Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-) -> f64 {
-    items
-        .iter()
-        .filter(|s| s.geom.pins.len() < 3)
-        .filter_map(|s| {
-            signal_anchor_centroid(env, w, items, inc, ir, s, true)
-                .map(|c| (s.at[0] - c[0]).abs() + (s.at[1] - c[1]).abs())
-        })
-        .sum()
-}
-
-/// Centroid of the anchor pins a satellite `s` should sit by: its SIGNAL
-/// (non-rail) anchor pins if it has any (a pull-up belongs by the pin it pulls).
-/// With `rail_fallback`, a part touching no signal anchor (a decoupling cap, two
-/// rails) falls back to its rail anchor pins (→ the IC power pin) — wanted for
-/// the gentle stray pull, but NOT for hard pin-alignment (which would snap every
-/// decoupling cap onto one power pin and cram them). `None` if no anchor applies.
-pub fn signal_anchor_centroid(
-    env: &KicadInstallation,
-    w: &SchematicWriter,
-    items: &[Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-    s: &Item,
-    rail_fallback: bool,
-) -> Option<[f64; 2]> {
-    let is_anchor = |i: usize| items[i].geom.pins.len() >= 3;
-    let collect = |rails: bool| -> ([f64; 2], f64) {
-        let (mut sum, mut cnt) = ([0.0f64, 0.0f64], 0.0f64);
-        for (_, _, net) in &s.pins {
-            let Some(net) = net else { continue };
-            if ir.rails.contains_key(net) != rails {
-                continue;
-            }
-            for (j, num) in inc.get(net).into_iter().flatten() {
-                if is_anchor(*j)
-                    && let Ok(eps) = w.pin_dirs(env, &items[*j].refdes, num)
-                {
-                    for (p, _) in &eps {
-                        sum[0] += p[0];
-                        sum[1] += p[1];
-                        cnt += 1.0;
-                    }
-                }
-            }
-        }
-        (sum, cnt)
-    };
-    let (sum, cnt) = match collect(false) {
-        (_, 0.0) if rail_fallback => collect(true),
-        signal => signal,
-    };
-    (cnt > 0.0).then(|| [sum[0] / cnt, sum[1] / cnt])
-}
-
-/// The position of the IC supply pin a decoupling cap bypasses, to hug it. The
-/// cap's non-ground rail net (its V+ side) names the supply; among the IC pins on
-/// that net, pick the one nearest the cap so it slides to the closest supply pin
-/// (the relevant IC when several share the rail). `None` if the cap touches no
-/// non-ground rail with an IC pin (e.g. a pure rail-to-rail divider leg, left to
-/// the rail spread).
-pub fn supply_pin_target(
-    env: &KicadInstallation,
-    w: &SchematicWriter,
-    items: &[Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-    s: &Item,
-) -> Option<[f64; 2]> {
-    let mut best: Option<([f64; 2], f64)> = None;
-    for (_, _, net) in &s.pins {
-        let Some(net) = net else { continue };
-        // V+ side only: the rail that is NOT ground (a GND-hung cap aligns by its
-        // supply pin, not its ground return).
-        if !ir.rails.contains_key(net) || is_ground(net) {
-            continue;
-        }
-        for (j, num) in inc.get(net).into_iter().flatten() {
-            if items[*j].geom.pins.len() < 3 {
-                continue; // only IC/connector pins anchor a cap
-            }
-            if let Ok(eps) = w.pin_dirs(env, &items[*j].refdes, num) {
-                for (p, _) in eps {
-                    let d = (p[0] - s.at[0]).abs() + (p[1] - s.at[1]).abs();
-                    if best.is_none_or(|(_, bd)| d < bd) {
-                        best = Some((p, d));
-                    }
-                }
-            }
-        }
-    }
-    best.map(|(p, _)| p)
-}
-
-/// Two parallel axis-aligned segments running too close for a sustained length —
-/// nearly on top of each other, which reads as cramped. Returns true past the
-/// per-call `near` cutoff: wire-vs-wire uses 1 grid (a 2-grid gap, e.g. risers
-/// off adjacent IC pins, is fine), but wire-vs-body uses a wider cutoff because a
-/// part's body has width, so a wire hugging the *edge* sits ~2 grid off the
-/// pin-to-pin *centre line*.
-pub(crate) fn parallel_too_close(a: Segment, b: Segment, near: f64) -> bool {
-    const MIN_OVERLAP: f64 = 6.35; // only a sustained parallel run reads as cramped
-    let (a1, a2, b1, b2) = (a.a, a.b, b.a, b.b);
-    let horiz = |segment: Segment| (segment.a.y - segment.b.y).abs() < EPS;
-    let vert = |segment: Segment| (segment.a.x - segment.b.x).abs() < EPS;
-    let (perp, lo, hi) = if horiz(a) && horiz(b) {
-        (
-            (a1.y - b1.y).abs(),
-            a1.x.min(a2.x).max(b1.x.min(b2.x)),
-            a1.x.max(a2.x).min(b1.x.max(b2.x)),
-        )
-    } else if vert(a) && vert(b) {
-        (
-            (a1.x - b1.x).abs(),
-            a1.y.min(a2.y).max(b1.y.min(b2.y)),
-            a1.y.max(a2.y).min(b1.y.max(b2.y)),
-        )
-    } else {
-        return false;
-    };
-    perp > EPS && perp < near - EPS && hi - lo > MIN_OVERLAP
-}
-
-/// Cramped-spacing count: parallel wires hugging each other (1-grid cutoff) AND
-/// wires hugging a 2-pin part's body axis (wider 1.5-grid cutoff — see
-/// [`parallel_too_close`]). One rule covers wire-vs-wire and wire-vs-body.
-pub fn count_close_wires(wires: &[DrawnSegment], bodies: &[([f64; 2], [f64; 2])]) -> usize {
-    const NEAR_WIRE: f64 = 2.54; // wires closer than 2 grid (i.e. 1 grid) are too close
-    const NEAR_BODY: f64 = 3.81; // a body's width pushes the hug ~1 grid further off centre
-    let mut n = 0;
-    for i in 0..wires.len() {
-        for j in (i + 1)..wires.len() {
-            if parallel_too_close(wires[i].segment, wires[j].segment, NEAR_WIRE) {
-                n += 1;
-            }
-        }
-    }
-    for wire in wires {
-        for (b1, b2) in bodies {
-            if parallel_too_close(
-                wire.segment,
-                Segment::new((*b1).into(), (*b2).into()),
-                NEAR_BODY,
-            ) {
-                n += 1;
-            }
-        }
-    }
-    n
-}
-
-/// Congestion: pairs of junction dots crammed within `TIGHT` mm of each other —
-/// the cramped node a human would spread out (e.g. a pull-up's tap landing right
-/// on a series resistor's pin). Unavoidable IC-pin-spacing pairs add a constant
-/// baseline that does not bias the search; only the avoidable cramming varies.
-pub fn count_congestion(junctions: &[[f64; 2]]) -> usize {
-    const TIGHT: f64 = 3.81;
-    let mut n = 0;
-    for i in 0..junctions.len() {
-        for j in (i + 1)..junctions.len() {
-            if ::geom::Point2::from(junctions[i]).dist(junctions[j].into()) < TIGHT - EPS {
                 n += 1;
             }
         }
