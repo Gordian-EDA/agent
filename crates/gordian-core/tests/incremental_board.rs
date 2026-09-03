@@ -179,7 +179,6 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
     // ── route a few nets on a board that is only half placed ────────────────
     // Only VIN joins two placed parts; every other net reaches the staging row.
     let routed = tool(&ctx, "route_board", json!({ "nets": ["VIN"] }));
-    let mut routed_so_far = routed["routed_connection_count"].as_u64().unwrap();
     let entries = routed["ratsnest"].as_array().unwrap();
     assert_eq!(
         entries.len() as u64,
@@ -208,7 +207,7 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
         "deleting copper reports the net it intentionally opened: {deleted:#}"
     );
     let rerouted = tool(&ctx, "route_board", json!({ "nets": ["VIN"] }));
-    routed_so_far = rerouted["routed_connection_count"].as_u64().unwrap();
+    let mut routed_so_far = rerouted["routed_connection_count"].as_u64().unwrap();
     // A net that reaches a part nobody has placed is open, and its way out is
     // to place that part — not to move copper that does not exist yet.
     let staged_now: Vec<String> =
