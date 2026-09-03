@@ -71,14 +71,14 @@ Questions:
 ## [self-diagnosis]
 
 - `sch-create-large`: struggled: turn 1: The per-turn time limit stopped the workflow during placement, leaving the schematic with unresolved completeness gaps and no rendered final result.
-- `sch-create-large`: struggled: turn 1: check_schematic reported 12 introduced findings, including one blocking error, while the final ERC summary reported zero errors and warnings, making the actual final state unclear.
+- `sch-create-large`: struggled: turn 1: check_schematic reported 12 findings, including one blocking error, while the final ERC summary reported zero errors and warnings, making the actual final state unclear.
 - `sch-create-large`: struggled: turn 1: place_parts accepted a support block but left control-pull and I2C-pullup gaps despite the requested circuitry being specified.
 - `sch-create-large`: struggled: turn 1: The toolset provided no safe automatic repair for dangling labels, off-grid endpoints, missing pull-ups, or conflicting net names.
 - `sch-create-large`: struggled: turn 1: The rollback message said the schematic was restored to revision 7 even though later tool output reported revision 16 and a written schematic, creating uncertainty about which revision was delivered.
 - `sch-create-large`: struggled: turn 1: There was no timely integrated inspect-render-check loop after the final edits, so visual quality, connectivity, and requested component coverage could not be verified together.
 - `sch-create-large`: wished: turn 1: Provide a single atomic schematic-build operation that places, wires, validates, and renders a complete design within the turn budget.
 - `sch-create-large`: wished: turn 1: Add targeted mutators for adding pull-up resistors, control-pin bias resistors, power-entry protection, and reconnecting dangling labels.
-- `sch-create-large`: wished: turn 1: Make check_schematic return one authoritative final status with clear separation between live revision, rolled-back revision, baseline findings, and ERC findings.
+- `sch-create-large`: wished: turn 1: Make check_schematic return one authoritative final status aligned with the live revision and ERC findings.
 - `sch-create-large`: wished: turn 1: Allow automatic grid-snapping and repair of off-grid symbol pins and wire endpoints.
 - `sch-create-large`: wished: turn 1: Add a compact schematic summary showing every requested functional block, component reference, value, and connected net.
 - `sch-create-large`: wished: turn 1: Support incremental rendering or previews during placement so layout problems can be corrected before the time limit.
