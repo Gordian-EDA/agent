@@ -7,10 +7,9 @@
 //! A wire joins its own two ends, and *only* its ends. Touching a wire partway
 //! along is not a connection: KiCAD leaves a pin sitting in the middle of a
 //! wire unconnected, and leaves a wire that ends on another wire's middle
-//! unconnected too. A junction and a sheet pin do attach anywhere along a wire,
-//! and a junction is how two crossing wires are joined; a label attaches that
-//! way only where there is no pin — on a pin tip it binds to the pin and leaves
-//! the wire running past alone.
+//! unconnected too. A junction and a sheet pin do attach anywhere along a wire.
+//! A label attaches that way unless it shares a pin tip touched by just one
+//! segment; at a wire crossing the label makes the pin a junction.
 //!
 //! A no-connect marker makes its point inert: nothing joins through it, which
 //! is what severs the pin it settles rather than merely excusing it.
@@ -183,6 +182,13 @@ struct Segment {
     to: Point2,
 }
 
+/// A point that may attach to wire interiors once enough segments touch it.
+#[derive(Clone, Copy)]
+struct Attachment {
+    node: usize,
+    required_segments: usize,
+}
+
 /// Extract the net partition of a single sheet.
 ///
 /// Scope is the file: hierarchical sheet pins are connection points but do not
@@ -305,8 +311,8 @@ pub fn scene(doc: &SchDoc) -> Scene {
 struct Interned {
     nodes: Nodes,
     segments: Vec<Segment>,
-    /// Nodes that join a wire anywhere along its length, not just at its ends.
-    attachments: Vec<usize>,
+    /// Points that join wires anywhere along their length, not just at ends.
+    attachments: Vec<Attachment>,
     /// Nodes a no-connect marker made inert.
     severed: HashSet<usize>,
 }
@@ -332,19 +338,26 @@ fn intern(doc: &SchDoc, placed: &[PlacedPin]) -> Interned {
     let mut severed = HashSet::new();
     for item in doc.items() {
         match item {
-            Item::Junction(junction) => attachments.push(nodes.intern(junction.at)),
+            Item::Junction(junction) => attachments.push(Attachment {
+                node: nodes.intern(junction.at),
+                required_segments: 1,
+            }),
             Item::Label(label) => {
-                // A label on a pin tip binds to the pin; the wire running past
-                // the pin is not part of that net.
                 let node = nodes.intern(label.at.point());
-                if !pin_nodes.contains(&node) {
-                    attachments.push(node);
-                }
+                // One passing segment stays separate from a coincident pin;
+                // at a crossing KiCad makes the labelled pin a junction.
+                attachments.push(Attachment {
+                    node,
+                    required_segments: if pin_nodes.contains(&node) { 2 } else { 1 },
+                });
             }
             Item::Sheet(sheet) => {
                 // A sheet pin's `at` is already in sheet coordinates.
                 for pin in &sheet.pins {
-                    attachments.push(nodes.intern(pin.at.point()));
+                    attachments.push(Attachment {
+                        node: nodes.intern(pin.at.point()),
+                        required_segments: 1,
+                    });
                 }
             }
             Item::NoConnect(no_connect) => {
@@ -496,6 +509,15 @@ fn emit<'a>(
         // as `/SWDIO`, not as `unconnected-(R1-Pad1)`, and this crate answers to
         // `kicad-cli`. Whether the pin already carries a marker is a question
         // about the drawing, so the tools ask the document, not the netlist.
+        if named.is_none() && members.iter().all(|pin| pin.etype == "no_connect") {
+            // Coincident NC-type pins remain electrically separate. A marker
+            // settles the whole stack; without one each is a loose end.
+            match anchors.settled.contains(&root) {
+                true => no_connect.append(&mut pins),
+                false => unconnected.append(&mut pins),
+            }
+            continue;
+        }
         if pins.len() < 2 && named.is_none() {
             match anchors.settled.contains(&root) {
                 true => no_connect.append(&mut pins),
@@ -642,30 +664,36 @@ fn unit_letter(pin: &PlacedPin) -> String {
 
 /// Join each attaching node to every wire whose length passes through it.
 ///
-/// Only junctions, sheet pins, and labels away from a pin attach this way; a
-/// pin or a wire end that merely touches a wire partway along is not connected
-/// to it, which is what makes a junction meaningful. Axis-aligned wires — everything KiCAD
-/// normally draws — are answered from a row/column index over the attachment
-/// points, so this stays near-linear on boards with tens of thousands of wires;
-/// the rare diagonal wire falls back to a scan.
+/// Junctions, sheet pins, and labels attach this way. A label coincident with a
+/// pin requires two touching segments: one passing wire stays separate, while a
+/// crossing becomes a junction. Axis-aligned wires — everything KiCAD normally
+/// draws — are answered from a row/column index over the attachment points, so
+/// this stays near-linear on boards with tens of thousands of wires; the rare
+/// diagonal wire falls back to a scan.
 fn attach(
     nodes: &Nodes,
     segments: &[Segment],
-    attachments: &[usize],
+    attachments: &[Attachment],
     severed: &HashSet<usize>,
     sets: &mut UnionFind,
 ) {
-    let attachments: Vec<usize> = attachments
+    let mut required: HashMap<usize, usize> = HashMap::new();
+    for attachment in attachments
         .iter()
         .copied()
-        .filter(|node| !severed.contains(node))
-        .collect();
-    if attachments.is_empty() {
+        .filter(|attachment| !severed.contains(&attachment.node))
+    {
+        required
+            .entry(attachment.node)
+            .and_modify(|held| *held = (*held).min(attachment.required_segments))
+            .or_insert(attachment.required_segments);
+    }
+    if required.is_empty() {
         return;
     }
     let mut rows: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
     let mut cols: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
-    for &idx in &attachments {
+    for &idx in required.keys() {
         let (x, y) = key(nodes.points[idx]);
         rows.entry(y).or_default().push((x, idx));
         cols.entry(x).or_default().push((y, idx));
@@ -674,6 +702,14 @@ fn attach(
         bucket.sort_unstable();
     }
 
+    let mut pending: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut touch = |idx: usize, segment: usize, sets: &mut UnionFind| {
+        if required[&idx] == 1 {
+            sets.union(idx, segment);
+        } else {
+            pending.entry(idx).or_default().push(segment);
+        }
+    };
     for seg in segments {
         let (from, to) = (key(seg.from), key(seg.to));
         let bucket = if from.1 == to.1 {
@@ -681,9 +717,9 @@ fn attach(
         } else if from.0 == to.0 {
             cols.get(&from.0).map(|b| (b, from.1, to.1))
         } else {
-            for &idx in &attachments {
+            for &idx in required.keys() {
                 if inside(nodes.points[idx], seg.from, seg.to) {
-                    sets.union(idx, seg.a);
+                    touch(idx, seg.a, sets);
                 }
             }
             continue;
@@ -697,7 +733,14 @@ fn attach(
             if v > hi {
                 break;
             }
-            sets.union(idx, seg.a);
+            touch(idx, seg.a, sets);
+        }
+    }
+    for (idx, segments) in pending {
+        if segments.len() >= required[&idx] {
+            for segment in segments {
+                sets.union(idx, segment);
+            }
         }
     }
 }

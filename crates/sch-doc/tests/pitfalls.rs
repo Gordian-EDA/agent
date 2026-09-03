@@ -7,8 +7,6 @@
 
 mod corpus;
 
-use std::collections::BTreeMap;
-
 use sch_doc::{NetSource, SchDoc, connect};
 
 const ROOT: &str = "00000000-0000-4000-8000-000000000001";
@@ -28,6 +26,15 @@ const GROUND: &str = r#"(symbol "power:GND" (power)
 const FLAG: &str = r#"(symbol "power:PWR_FLAG" (power)
     (symbol "PWR_FLAG_1_1"
       (pin power_out line (at 0 0 90) (length 0) (hide yes) (name "pwr_flag") (number "1"))))"#;
+
+const POINT: &str = r#"(symbol "Test:Point"
+    (symbol "Point_1_1"
+      (pin passive line (at 0 0 0) (length 0) (name "~") (number "1"))))"#;
+
+const STACKED: &str = r#"(symbol "Test:Stacked"
+    (symbol "Stacked_1_1"
+      (pin no_connect line (at 0 0 0) (length 0) (name "NC") (number "1"))
+      (pin no_connect line (at 0 0 0) (length 0) (name "NC") (number "2"))))"#;
 
 /// A derived symbol: no body of its own, only a pointer at the parent that has
 /// one. No corpus file uses this, so it is only ever covered here.
@@ -142,8 +149,8 @@ fn is_virtual(refdes: &str) -> bool {
 
 /// Nets as `name -> pins`, in the shape both sides can be compared in: KiCAD
 /// omits `#`-prefixed symbols and qualifies sheet-scoped names with a path.
-fn our_view(netlist: &connect::Netlist) -> BTreeMap<String, Vec<String>> {
-    netlist
+fn our_view(netlist: &connect::Netlist) -> Vec<(String, Vec<String>)> {
+    let mut nets: Vec<_> = netlist
         .nets
         .iter()
         .map(|net| {
@@ -157,11 +164,13 @@ fn our_view(netlist: &connect::Netlist) -> BTreeMap<String, Vec<String>> {
             (net.name.trim_start_matches('/').to_string(), pins)
         })
         .filter(|(_, pins)| !pins.is_empty())
-        .collect()
+        .collect();
+    nets.sort();
+    nets
 }
 
-fn oracle_view(netlist: &kicad::Netlist) -> BTreeMap<String, Vec<String>> {
-    netlist
+fn oracle_view(netlist: &kicad::Netlist) -> Vec<(String, Vec<String>)> {
+    let mut nets: Vec<_> = netlist
         .nets
         .iter()
         .filter(|net| !net.name.starts_with("unconnected-"))
@@ -176,7 +185,9 @@ fn oracle_view(netlist: &kicad::Netlist) -> BTreeMap<String, Vec<String>> {
             (net.name.trim_start_matches('/').to_string(), pins)
         })
         .filter(|(_, pins)| !pins.is_empty())
-        .collect()
+        .collect();
+    nets.sort();
+    nets
 }
 
 /// A placed symbol. `extra` carries whatever the case needs — `(mirror y)`,
@@ -472,6 +483,64 @@ fn a_no_connect_settles_a_pin() {
     assert_eq!(marked.unconnected[0].pin, "2");
     assert_eq!(marked.no_connect.len(), 1);
     assert_eq!(marked.no_connect[0].pin, "1");
+}
+
+/// A marker on several coincident pins settles each separately; their shared
+/// drawing coordinate does not make an electrical net between them.
+#[test]
+fn a_no_connect_keeps_stacked_pins_electrically_separate() {
+    let doc = sheet(
+        &[STACKED],
+        &format!(
+            "{}\n(no_connect (at 100 100) (uuid \"nc\"))",
+            place(
+                "Test:Stacked",
+                "U1",
+                "stacked",
+                100.0,
+                100.0,
+                0.0,
+                "(unit 1)"
+            ),
+        ),
+    );
+    let netlist = connect::extract(&doc);
+    assert!(netlist.nets.is_empty(), "{:?}", netlist.nets);
+    assert_eq!(
+        netlist
+            .no_connect
+            .iter()
+            .map(|pin| pin.pin.as_str())
+            .collect::<Vec<_>>(),
+        ["1", "2"]
+    );
+}
+
+/// Without a marker, the same stack is several loose ends rather than a net.
+#[test]
+fn stacked_nc_pins_without_a_marker_are_separate_loose_ends() {
+    let doc = sheet(
+        &[STACKED],
+        &place(
+            "Test:Stacked",
+            "U1",
+            "stacked",
+            100.0,
+            100.0,
+            0.0,
+            "(unit 1)",
+        ),
+    );
+    let netlist = connect::extract(&doc);
+    assert!(netlist.nets.is_empty(), "{:?}", netlist.nets);
+    assert_eq!(
+        netlist
+            .unconnected
+            .iter()
+            .map(|pin| pin.pin.as_str())
+            .collect::<Vec<_>>(),
+        ["1", "2"]
+    );
 }
 
 /// A wire is not a connection. `kicad-cli` calls a lone pin on a dangling wire
@@ -927,6 +996,28 @@ fn a_label_on_a_pin_tip_leaves_the_passing_wire_alone() {
     );
     let joined = connect::extract(&dotted);
     assert_eq!(net_named(&joined, "SIG").pins.len(), 3);
+}
+
+/// A label and pin at two crossing wire interiors make a junction. A lone pin
+/// or two bare crossing wires do not; the combination is the distinguishing
+/// KiCad rule exercised here.
+#[test]
+fn a_pin_and_global_label_at_a_wire_crossing_join_the_wires() {
+    let doc = sheet(
+        &[POINT],
+        &format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n\
+             (global_label \"SIG\" (at 140 100 0) (uuid \"l1\"))",
+            place("Test:Point", "P1", "p", 100.0, 100.0, 0.0, "(unit 1)"),
+            place("Test:Point", "P2", "p", 180.0, 100.0, 0.0, "(unit 1)"),
+            place("Test:Point", "P3", "p", 140.0, 60.0, 0.0, "(unit 1)"),
+            place("Test:Point", "P4", "p", 140.0, 140.0, 0.0, "(unit 1)"),
+            place("Test:Point", "P5", "p", 140.0, 100.0, 0.0, "(unit 1)"),
+            wire(100.0, 100.0, 180.0, 100.0),
+            wire(140.0, 60.0, 140.0, 140.0),
+        ),
+    );
+    assert_eq!(net_named(&connect::extract(&doc), "SIG").pins.len(), 5);
 }
 
 /// A no-connect marker severs its point: it does not merely excuse a pin, it
