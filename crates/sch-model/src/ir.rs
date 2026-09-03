@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::result::IdiomReport;
 use crate::tree::Trees;
 
 /// Global signal-flow direction.
@@ -44,40 +43,6 @@ pub enum Side {
     Bottom,
 }
 
-/// Orientation of a 2-pin part, stated as the direction its pins run — from its
-/// first connected net (pin 1) toward its second (pin 2). The engine works out
-/// the exact rotation from the symbol's own pin geometry, so the LLM never
-/// reasons about a symbol's native axis or KiCAD angles; it just says which way
-/// the part points. `down` (pin 1 on top, e.g. a divider leg from VCC down to
-/// GND) is the common default. ICs/connectors ignore this (they stay at 0°; use
-/// `mirror` to flip them left-to-right).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum Orient {
-    /// Pin 1 at the bottom, pin 2 at the top.
-    Up,
-    /// Pin 1 at the top, pin 2 at the bottom (the usual passive orientation).
-    #[default]
-    Down,
-    /// Pin 1 on the right, pin 2 on the left.
-    Left,
-    /// Pin 1 on the left, pin 2 on the right (a series element along the flow).
-    Right,
-}
-
-/// A coarse, unitless placement cell + orientation. The engine maps the
-/// (col,row) grid to mm — each column sized to its widest part, each row to its
-/// tallest — and places the symbol at the cell centre. `col` grows right, `row`
-/// grows down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Cell {
-    pub col: i32,
-    pub row: i32,
-    #[serde(default)]
-    pub orient: Orient,
-}
-
-
 /// The geometry-free floorplan. Four keys; everything else is inferred from
 /// connectivity by the compiler's fixed rule set.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -87,26 +52,9 @@ pub struct LayoutIr {
     /// Net → band. Nets drawn as spanning rails.
     #[serde(default)]
     pub rails: BTreeMap<String, Band>,
-    /// Refdes → coarse cell. Usually only ICs; any refdes may be pinned.
-    #[serde(default)]
-    pub place: BTreeMap<String, Cell>,
     /// Net → edge side. Nets that exit as labelled ports.
     #[serde(default)]
     pub ports: BTreeMap<String, Side>,
-    /// Anchors (ICs) to flip left-to-right, so the pins facing their neighbours
-    /// point the right way (e.g. a level translator's B-side toward a connector).
-    #[serde(default)]
-    pub mirror: BTreeSet<String>,
-    /// Idioms the engine recognized from connectivity and co-placed as cohesive
-    /// clusters (crystal+load-caps, decoupling bank, op-amp feedback). Surfaced to
-    /// the agent via `EmitOutput.detected_idioms`. `#[serde(default)]` so existing
-    /// sidecar `layout.json` files (which never carry it) still deserialize.
-    #[serde(default)]
-    pub idioms: Vec<IdiomReport>,
-    /// Refdes the placement search must NOT move — an idiom cluster's members,
-    /// pinned so their recognized arrangement ships intact.
-    #[serde(default)]
-    pub frozen: BTreeSet<String>,
     /// Power nets the author wants drawn as DISTRIBUTED LOCAL grounds/supplies — one
     /// power symbol per pin (the professional "drop a GND triangle at each pin" style)
     /// — instead of one sheet-spanning rail. The signal is the author declaring ≥2
@@ -122,14 +70,6 @@ pub struct LayoutIr {
     /// elsewhere ⇒ references byte-identical.
     #[serde(default)]
     pub rail_force: BTreeSet<String>,
-    /// HYBRID VLM placement: refdes → a COARSE target position as a fraction of the
-    /// board bbox, `[fx, fy]` in 0..1 (fx: 0=left,1=right; fy: 0=top,1=bottom). A vision
-    /// LLM is good at rough DIRECTION ("power left, MCU centre") but not millimetre
-    /// positions, so this is applied as a SOFT bias in the annealer's placement cost (its
-    /// `zbias` term), NOT a forced cell — the engine still does the precise placement, just
-    /// nudged toward the LLM's zones. Empty on every existing path ⇒ no bias ⇒ unchanged.
-    #[serde(default)]
-    pub zone: BTreeMap<String, [f64; 2]>,
     /// Block name → the row/col arrangement its author composed
     /// ([`crate::tree::Tree`]). This is the layout: the typesetter measures the
     /// symbols and computes every coordinate from it. A block absent here is

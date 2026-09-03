@@ -12,7 +12,7 @@ use circuit_graph::netclass::is_power_net;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use indexmap::IndexMap;
-use sch_model::ir::{Band, Cell, Flow, LayoutIr, Side};
+use sch_model::ir::{Band, Flow, LayoutIr, Side};
 use sch_model::tree::Tree;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -254,12 +254,6 @@ pub struct Intent {
     /// Net → the sheet edge it exits toward.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ports: BTreeMap<NetName, Side>,
-    /// Refdes → coarse unitless cell. Usually only the anchors.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub place: BTreeMap<RefDes, Cell>,
-    /// Anchors to flip left-to-right.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub mirror: BTreeSet<RefDes>,
 }
 
 impl Intent {
@@ -269,36 +263,10 @@ impl Intent {
             flow: self.flow.unwrap_or_default(),
             rails: self.rails,
             ports: self.ports,
-            place: self.place,
-            mirror: self.mirror,
             ..Default::default()
         }
     }
 
-    /// The engine-facing IR after dropping hints that name no available part.
-    pub fn into_layout_ir_for(self, available: &BTreeSet<String>) -> (LayoutIr, Vec<String>) {
-        let mut ir = self.into_layout_ir();
-        let mut warnings = Vec::new();
-        ir.place.retain(|reference, _| {
-            let keep = available.contains(reference);
-            if !keep {
-                warnings.push(format!(
-                    "dropped intent.place.{reference}: no arrangeable part has that reference"
-                ));
-            }
-            keep
-        });
-        ir.mirror.retain(|reference| {
-            let keep = available.contains(reference);
-            if !keep {
-                warnings.push(format!(
-                    "dropped intent.mirror entry `{reference}`: no arrangeable part has that reference"
-                ));
-            }
-            keep
-        });
-        (ir, warnings)
-    }
 }
 
 /// The sheet a payload without an explicit `block` fills.
@@ -1025,7 +993,7 @@ pub fn place_parts_input_schema() -> Value {
             },
             "intent": {
                 "type": "object",
-                "description": "Optional layout intent. Hints only; the solver owns all geometry.",
+                "description": "What the sheet does with a NET: which are rails and which exit as ports. Where the PARTS go is the `layout` tree.",
                 "additionalProperties": false,
                 "properties": {
                     "flow": {"enum": ["lr", "tb"], "description": "Global signal-flow direction."},
@@ -1039,24 +1007,6 @@ pub fn place_parts_input_schema() -> Value {
                         "description": "Net -> the sheet edge it exits toward.",
                         "additionalProperties": {"enum": ["left", "right", "top", "bottom"]}
                     },
-                    "place": {
-                        "type": "object",
-                        "description": "Refdes -> coarse unitless cell (col grows right, row grows down).",
-                        "additionalProperties": {
-                            "type": "object",
-                            "required": ["col", "row"],
-                            "properties": {
-                                "col": {"type": "integer"},
-                                "row": {"type": "integer"},
-                                "orient": {"enum": ["up", "down", "left", "right"]}
-                            }
-                        }
-                    },
-                    "mirror": {
-                        "type": "array",
-                        "description": "Refdes to flip left-to-right.",
-                        "items": {"type": "string"}
-                    }
                 }
             }
         }

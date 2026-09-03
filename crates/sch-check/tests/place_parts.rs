@@ -593,8 +593,8 @@ fn intent_becomes_a_layout_ir() {
     let ir = parse().intent.expect("intent").into_layout_ir();
     assert_eq!(ir.rails.len(), 2);
     assert_eq!(ir.ports.len(), 2);
-    // The engine's own derived fields are not input.
-    assert!(ir.idioms.is_empty() && ir.frozen.is_empty() && ir.zone.is_empty());
+    // What inference derives for itself is not input.
+    assert!(ir.trees.is_empty() && ir.rail_locals.is_empty());
 }
 
 #[test]

@@ -44,7 +44,6 @@ use sch_check::{ExistingSheet, PayloadAudit, PlacePartsInput};
 use sch_doc::{LabelKind, NetSource, Netlist, Pose, SchDoc, connect};
 use sch_model::ir::LayoutIr;
 use sch_model::item::{Incidence, Item};
-use sch_model::result::IdiomReport;
 use serde::{Deserialize, Serialize};
 
 use crate::floorplan::place::incidence;
@@ -99,8 +98,6 @@ pub struct PlaceReport {
     pub nets: Vec<String>,
     /// Readability warnings of the drawn sheet, plus any input diagnostics.
     pub warnings: Vec<String>,
-    /// Circuit idioms the engine recognized and co-placed.
-    pub idioms: Vec<IdiomReport>,
     /// Parts nothing could resolve. They are not on the sheet; every other part
     /// is, and a net that only touched one of these is simply open.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -272,21 +269,8 @@ fn place_parts_inner(
     sch_check::nets::derive_attrs(&mut design);
 
     let mut ir = crate::floorplan::infer_ir(env, &design);
-    let available = design
-        .blocks
-        .values()
-        .flat_map(|block| block.components.keys().cloned())
-        .chain(
-            doc.symbols()
-                .filter(|symbol| !placement_ignores(symbol))
-                .map(|symbol| symbol.refdes().to_string()),
-        )
-        .collect();
-    let mut intent_warnings = Vec::new();
     if let Some(intent) = input.intent.clone() {
-        let (intent, warnings) = intent.into_layout_ir_for(&available);
-        intent_warnings = warnings;
-        apply_intent(&mut ir, intent);
+        apply_intent(&mut ir, intent.into_layout_ir());
     }
     // An unfinished single-pin net must not take the port convenience: a global label
     // reads as deliberate board I/O and silences KiCAD's own ERC, hiding the very gap
@@ -335,8 +319,7 @@ fn place_parts_inner(
                     beside: (!fresh).then(|| beside_scene(doc)).as_ref(),
                 },
             )?;
-            let mut warnings = intent_warnings;
-            warnings.extend(writer.layout_warnings());
+            let mut warnings = writer.layout_warnings();
             warnings.extend(net_conflict_warnings(env, &writer, &placed, &inc));
             crate::realize::graft(doc, writer)?;
             Ok(warnings)
@@ -356,7 +339,6 @@ fn place_parts_inner(
         placed: new_refs.into_iter().collect(),
         nets: inc.keys().cloned().collect(),
         warnings,
-        idioms: out.ir.idioms,
         unplaced: audit.unplaced,
         dangling: audit.dangling,
         did_you_mean: audit.did_you_mean.into_iter().collect(),
@@ -610,16 +592,8 @@ fn rearrange_inner(
     // constrain the placement: obstacles are what is left once it is discounted.
     let mut owned = footprints(&movable);
     let mut ir = crate::floorplan::infer_ir(env, &design);
-    let available = design
-        .blocks
-        .values()
-        .flat_map(|block| block.components.keys().cloned())
-        .collect();
-    let mut intent_warnings = Vec::new();
     if let Some(intent) = intent {
-        let (intent, warnings) = intent.into_layout_ir_for(&available);
-        intent_warnings = warnings;
-        apply_intent(&mut ir, intent);
+        apply_intent(&mut ir, intent.into_layout_ir());
     }
     if let Some(tree) = layout {
         // The selection is drawn from the caller's tree. It is one arrangement, so it
@@ -697,8 +671,7 @@ fn rearrange_inner(
                     ..Default::default()
                 },
             )?;
-            let mut warnings = intent_warnings;
-            warnings.extend(writer.layout_warnings());
+            let mut warnings = writer.layout_warnings();
             warnings.extend(net_conflict_warnings(env, &writer, &placed, &inc));
             let labelled = writer.signal_label_count();
             crate::realize::graft_drawing(doc, writer)?;
@@ -992,8 +965,6 @@ fn apply_intent(ir: &mut LayoutIr, intent: LayoutIr) {
     ir.flow = intent.flow;
     ir.rails.extend(intent.rails);
     ir.ports.extend(intent.ports);
-    ir.place.extend(intent.place);
-    ir.mirror.extend(intent.mirror);
 }
 
 /// Move `items` onto the poses the typesetter chose, matched by part identity rather

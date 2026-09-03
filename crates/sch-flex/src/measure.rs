@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 
 use geom::{Dir, Point2};
-use sch_model::tree::{Align, Axis, Container, DEFAULT_GAP, Tree, UNIT_MM, WRAP};
+use sch_model::tree::{Align, Axis, Container, DEFAULT_GAP, Tree, UNIT_MM, WRAP_HEIGHT, WRAP_WIDTH};
 
 use crate::orient::{authored_pose, default_pose};
 use crate::part::{Part, Pose};
@@ -178,7 +178,7 @@ fn container_node(c: &Container, parts: &[Part], index: &dyn Fn(&str, u8) -> Opt
         .iter()
         .map(|child| measure(child, parts, index, c.axis))
         .collect();
-    if let Some(wrapped) = wrap_row(c, &children) {
+    if let Some(wrapped) = wrap(c, &children) {
         return container_node(&wrapped, parts, index);
     }
     face_neighbours(&mut children, &c.children, parts, c.axis);
@@ -222,42 +222,47 @@ fn container_node(c: &Container, parts: &[Part], index: &dyn Fn(&str, u8) -> Opt
     }
 }
 
-/// A row wider than a sheet column is not a path a reader can follow: break it into
-/// stacked rows of the same children, in order. `None` when it already fits.
-fn wrap_row(c: &Container, children: &[Node]) -> Option<Container> {
-    if c.axis != Axis::Row || c.children.len() < 2 {
+/// A container longer than a page is not something a reader can follow: break it into
+/// bands of the same children, in order, stacked across its own axis. A row wraps into
+/// stacked rows, a column into side-by-side columns. `None` when it already fits.
+fn wrap(c: &Container, children: &[Node]) -> Option<Container> {
+    if c.children.len() < 2 {
         return None;
     }
-    let limit = c.wrap.unwrap_or(WRAP) * UNIT_MM;
+    let limit = c.wrap.unwrap_or(match c.axis {
+        Axis::Row => WRAP_WIDTH,
+        Axis::Col => WRAP_HEIGHT,
+    }) * UNIT_MM;
     let gap = c.gap.unwrap_or(DEFAULT_GAP) * UNIT_MM;
-    let width: f64 =
-        children.iter().map(|k| k.w).sum::<f64>() + gap * (children.len() - 1) as f64;
-    if width <= limit {
+    let span: f64 = children.iter().map(|k| main(k, c.axis)).sum::<f64>()
+        + gap * (children.len() - 1) as f64;
+    if span <= limit {
         return None;
     }
-    let mut rows: Vec<Vec<Tree>> = vec![Vec::new()];
+    let mut bands: Vec<Vec<Tree>> = vec![Vec::new()];
     let mut used = 0.0;
     for (child, node) in c.children.iter().zip(children) {
-        let last = rows.last_mut().expect("one row exists");
-        if !last.is_empty() && used + gap + node.w > limit {
-            rows.push(vec![child.clone()]);
-            used = node.w;
+        let size = main(node, c.axis);
+        let band = bands.last_mut().expect("one band exists");
+        if !band.is_empty() && used + gap + size > limit {
+            bands.push(vec![child.clone()]);
+            used = size;
         } else {
-            used += if last.is_empty() { node.w } else { gap + node.w };
-            last.push(child.clone());
+            used += if band.is_empty() { size } else { gap + size };
+            band.push(child.clone());
         }
     }
-    if rows.len() < 2 {
+    if bands.len() < 2 {
         return None;
     }
     Some(Container {
-        axis: Axis::Col,
-        children: rows
+        axis: flip(c.axis),
+        children: bands
             .into_iter()
-            .map(|row| {
+            .map(|band| {
                 Tree::Container(Container {
-                    axis: Axis::Row,
-                    children: row,
+                    axis: c.axis,
+                    children: band,
                     gap: c.gap,
                     align: c.align,
                     // Already sized to the limit: a second pass must not split it again.

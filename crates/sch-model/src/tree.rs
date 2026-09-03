@@ -27,9 +27,11 @@ pub const UNIT_MM: f64 = 1.27;
 /// Default gap between siblings, in grid units.
 pub const DEFAULT_GAP: f64 = 8.0;
 
-/// How wide a row may grow (grid units) before it wraps into stacked rows. A row longer
-/// than a sheet column is not a signal path any reader can follow.
-pub const WRAP: f64 = 150.0;
+/// How wide a row may grow (grid units) before it wraps into stacked rows, and how tall a
+/// column may grow before it wraps into side-by-side columns. A container longer than the
+/// page is not something a reader can follow.
+pub const WRAP_WIDTH: f64 = 150.0;
+pub const WRAP_HEIGHT: f64 = 90.0;
 
 /// How a container lines its children up on its CROSS axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -74,7 +76,8 @@ pub struct Container {
     /// Space between children in grid units; `None` = [`DEFAULT_GAP`].
     pub gap: Option<f64>,
     pub align: Align,
-    /// Width (grid units) past which a row wraps into stacked rows; `None` = [`WRAP`].
+    /// Length (grid units) past which the container wraps into bands; `None` = the
+    /// default for its axis ([`WRAP_WIDTH`] / [`WRAP_HEIGHT`]).
     pub wrap: Option<f64>,
 }
 

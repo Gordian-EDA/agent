@@ -302,7 +302,6 @@ pub(crate) fn prepare_writer(
     sch_flex::typeset(&mut problem.items, &problem.ir.trees);
     let ir = problem.ir.clone();
 
-    let detected_idioms = ir.idioms.clone();
     let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
     let evaluator = RoutedEvaluator::new(realizer, design);
     let mut w = realizer.realize_writer(
@@ -333,7 +332,6 @@ pub(crate) fn prepare_writer(
             sch: String::new(),
             layout_warnings: warnings,
             crossings,
-            detected_idioms,
             net_shorts,
             net_opens: Vec::new(),
         },

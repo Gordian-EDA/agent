@@ -50,9 +50,6 @@ pub struct EmitOutput {
     /// `fan_risers=true` measure the engines pick on). A vision critic systematically
     /// over-reports these, so they are the objective signal behind its complaints.
     pub crossings: crate::place::Crossings,
-    /// Idioms the engine recognized + co-placed (crystal, decoupling, feedback),
-    /// surfaced to the agent loop by schematic mutators.
-    pub detected_idioms: Vec<IdiomReport>,
     /// One line per point where the realised sheet puts two nets — the shorts the
     /// netlist would show. Empty is the invariant; a non-empty list is an engine
     /// defect, not a payload one.

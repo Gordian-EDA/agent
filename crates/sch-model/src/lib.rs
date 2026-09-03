@@ -19,16 +19,12 @@
 //! disjoint-set helpers live in `geom`; net/part-name classification lives in
 //! `circuit-graph::netclass`.
 
-pub mod cells;
 pub mod engine;
 pub mod geometry;
-pub mod idiom;
 pub mod ir;
 pub mod item;
 pub mod place;
-pub mod refine;
 pub mod result;
 pub mod route;
 pub mod text;
-pub mod topology;
 pub mod tree;

@@ -439,17 +439,6 @@ fn rewrite_payload_references(
     for tree in payload.layout.values_mut() {
         rewrite_tree_refs(tree, renamed);
     }
-    let Some(intent) = &mut payload.intent else {
-        return;
-    };
-    intent.place = std::mem::take(&mut intent.place)
-        .into_iter()
-        .map(|(refdes, cell)| (renamed.get(&refdes).cloned().unwrap_or(refdes), cell))
-        .collect();
-    intent.mirror = std::mem::take(&mut intent.mirror)
-        .into_iter()
-        .map(|refdes| renamed.get(&refdes).cloned().unwrap_or(refdes))
-        .collect();
 }
 
 fn rewrite_ref(refdes: &mut String, renamed: &BTreeMap<String, String>) {
@@ -617,7 +606,6 @@ fn sanitize_place_parts_input(input: &mut Value) -> Vec<String> {
                 .iter()
                 .filter(|(field, value)| match field.as_str() {
                     "rails" | "ports" | "place" => !value.is_object(),
-                    "mirror" => !value.is_array(),
                     _ => false,
                 })
                 .map(|(field, _)| field.clone())
