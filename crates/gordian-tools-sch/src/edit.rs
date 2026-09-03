@@ -986,8 +986,14 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 .map(|symbol| symbol.refdes().to_string())
         })
         .collect::<Vec<_>>();
-    let nets = refs::nets_touching(edit.before(), &removed_refs);
-    let allow = Allow::nothing().nets(nets).parts(removed_refs);
+    let mut nets = refs::nets_touching(edit.before(), &removed_refs);
+    let affected_pins = edit
+        .before()
+        .nets
+        .iter()
+        .filter(|net| nets.contains(&net.name))
+        .flat_map(|net| net.pins.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
 
     for uuid in &uuids {
         edit.doc.remove_symbol(uuid)?;
@@ -995,7 +1001,25 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     retract_stubs(&mut edit.doc, &orphaned);
     let floating = crate::wiring::floating_wires(&edit.doc);
     edit.doc.remove_drawing(&floating);
-    let loose = refs::newly_loose(edit.before(), &sch_doc::connect::extract(&edit.doc));
+    let after = sch_doc::connect::extract(&edit.doc);
+    nets.extend(
+        after
+            .nets
+            .iter()
+            .filter(|net| net.pins.iter().any(|pin| affected_pins.contains(pin)))
+            .map(|net| net.name.clone()),
+    );
+    nets.sort();
+    nets.dedup();
+    let affected_refs = affected_pins
+        .iter()
+        .map(|pin| pin.refdes.clone())
+        .collect::<Vec<_>>();
+    let allow = Allow::nothing()
+        .nets(nets)
+        .parts(removed_refs)
+        .parts(affected_refs);
+    let loose = refs::newly_loose(edit.before(), &after);
     let removed = removed_items(&original, &edit.doc);
     edit.commit(
         json!({

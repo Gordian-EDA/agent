@@ -159,3 +159,74 @@ fn copied_derived_net_names_resolve_in_payloads_and_connect() {
         "{missing}"
     );
 }
+
+#[test]
+fn remove_symbols_declares_every_net_at_the_selected_symbols() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let added = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [
+            {"lib_id": "Device:R", "ref": "R1"},
+            {"lib_id": "power:GND", "ref": "#PWR01"},
+            {"lib_id": "power:VCC", "ref": "#PWR02", "value": "3V3"}
+        ]}),
+    );
+    assert!(added.get("error").is_none(), "fixture failed: {added}");
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let pin = sch_doc::placed_pins(&doc)
+        .into_iter()
+        .find(|pin| pin.refdes == "R1" && pin.number == "1")
+        .unwrap()
+        .at;
+    let mut source = std::fs::read_to_string(ctx.sch_path()).unwrap();
+    for reference in ["#PWR01", "#PWR02"] {
+        let symbol = doc.symbol_by_ref(reference).unwrap();
+        let power_pin = sch_doc::placed_pins(&doc)
+            .into_iter()
+            .find(|candidate| candidate.refdes == reference)
+            .unwrap();
+        source = sch_floorplan::test_util::replace_symbol_at(
+            &source,
+            reference,
+            [
+                pin.x - (power_pin.at.x - symbol.at.x),
+                pin.y - (power_pin.at.y - symbol.at.y),
+            ],
+        );
+    }
+    std::fs::write(ctx.sch_path(), source).unwrap();
+
+    let mut positioned = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    for (reference, value) in [("#PWR01", "GND"), ("#PWR02", "3V3")] {
+        let uuid = positioned.symbol_by_ref(reference).unwrap().uuid.clone();
+        positioned.set_field(&uuid, "Value", value).unwrap();
+    }
+    let markers = positioned
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            sch_doc::Item::NoConnect(marker) if marker.at.near_eq(pin, geom::EPS) => {
+                Some(marker.uuid.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    positioned.remove_drawing(&markers);
+    positioned.write(ctx.sch_path()).unwrap();
+    let before = call(&ctx, "get_net", json!({"name": "3V3"})).to_string();
+    assert!(before.contains("R1.1"), "fixture did not overlap: {before}");
+    let removed = call(&ctx, "remove_symbols", json!({"refs": ["#PWR02"]}));
+    assert!(removed.get("error").is_none(), "{removed}");
+    assert_eq!(removed["changed"]["removed"]["power"], 1, "{removed}");
+    let netlist = ctx.env().netlist(ctx.sch_path()).expect("KiCad 10 netlist");
+    let rail = netlist
+        .nets
+        .iter()
+        .find(|net| net.nodes.contains(&("R1".to_string(), "1".to_string())))
+        .map(|net| net.name.as_str());
+    assert_eq!(rail, Some("GND"), "{netlist:?}");
+}
