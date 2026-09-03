@@ -305,3 +305,6 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   instead of dead-ending; per-state discovery allowances reset on commit. Single-run audio preamp:
   52 requests, 407 s, routed 23/23, DRC 0, 17 fab files, model stopped itself. Next: campaign round 7
   (one run per case, no cap) after the push.
+- Pushed 7abb6012 (no-turn-budget on origin). Campaign round 7 (camp10: one uncapped run per case)
+  running. In flight: text-box-model, sch-qc-suite (baseline on current main), layout-trees (+ engine
+  deletion). Next: merge those, run the schematic suite + campaign as round 8.
