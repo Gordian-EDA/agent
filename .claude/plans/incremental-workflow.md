@@ -187,3 +187,9 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   QUEUED (after lane/orthogonal-wires): add_power generic bar symbol for unknown power nets, get_net
   resolving power nets, remove_symbols partial (missing refs reported), delete_wires{pins} declaring
   the touched derived nets itself, decouple-ambiguous → place + gap instead of refuse.
+- Pushed: orthogonal-wires (all pin re-seats via drag redraw; `SchDoc::wire_faults` invariant),
+  sch-refusals (generic `power:VDC` bar for unknown rails, get_net resolves power nets/near-misses,
+  partial remove_symbols, delete_wires authorises its own cut, decouple-ambiguous → gap, label refusal
+  carries a fix, remove_region lists blocks, footprint-as-symbol explained). Running: pcb-refusals,
+  bench-draw (sent back: never rename a requested authored net — fix verifier attribution), assign-flex
+  (assign_footprints repairable + search_footprints query-only), rail-dup, campaign round 4.
