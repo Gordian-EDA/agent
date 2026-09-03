@@ -1301,18 +1301,27 @@ fn boundary_nets(doc: &SchDoc, before: &Netlist, chosen: &BTreeSet<String>) -> V
         .nets
         .iter()
         .filter_map(|net| {
+            // Only REAL parts hold a name in place. The rail terminals and flags a
+            // drawing is made of carry a `#` reference and are replaced wholesale by
+            // the redraw, so a label left on one of their pins would be left
+            // floating in space — KiCAD's `label_dangling`.
             let held: Vec<Point2> = net
                 .pins
                 .iter()
-                .filter(|pin| !chosen.contains(&pin.refdes))
+                .filter(|pin| !chosen.contains(&pin.refdes) && !pin.refdes.starts_with('#'))
                 .filter_map(|pin| at.get(&(pin.refdes.clone(), pin.pin.clone())).copied())
                 .collect();
             if held.is_empty() || !net.pins.iter().any(|pin| chosen.contains(&pin.refdes)) {
                 return None;
             }
+            let lead = net
+                .pins
+                .iter()
+                .find(|pin| !pin.refdes.starts_with('#'))
+                .unwrap_or(&net.pins[0]);
             Some(BoundaryNet {
                 mint: (net.source == sch_doc::NetSource::Auto)
-                    .then(|| minted_net_name(&net.pins[0].refdes, &net.pins[0].pin)),
+                    .then(|| minted_net_name(&lead.refdes, &lead.pin)),
                 name: net.name.clone(),
                 held,
             })

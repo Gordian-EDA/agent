@@ -144,3 +144,55 @@ fn arranging_a_whole_reference_sheet_keeps_its_netlist() {
     let after = cli_partition(&env, &save(&mut doc, dir.path(), "after"));
     assert_eq!(before, after, "re-laying out the sheet changed its netlist");
 }
+
+/// The same promise at the size the agent actually works at: a 47-part campaign
+/// block, placed and then wholly re-laid-out, has to come back as the same circuit.
+#[test]
+fn arranging_a_forty_part_block_keeps_its_netlist() {
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no KiCad environment detected");
+        return;
+    };
+    let payload: PlacePartsInput = serde_json::from_str(
+        &std::fs::read_to_string(
+            "tests/fixtures/validation/campaign-stm32-buck.place-parts.json",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(payload.parts.len() >= 40, "the block is the point");
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = live::blank_sheet().unwrap();
+    let placed = live::place_parts(
+        &env,
+        &mut doc,
+        &payload,
+        Box::new(spine_place::SpinePlace),
+        None,
+    )
+    .unwrap();
+    assert!(placed.committed, "{:?}", placed.mismatch);
+    let before = cli_partition(&env, &save(&mut doc, dir.path(), "block-before"));
+
+    let refs: Vec<String> = doc
+        .symbols()
+        .map(|symbol| symbol.refdes().to_string())
+        .filter(|refdes| !refdes.starts_with('#'))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let report = live::arrange(
+        &env,
+        &mut doc,
+        &Selection::Refs(refs),
+        None,
+        Box::new(spine_place::SpinePlace),
+        None,
+    )
+    .unwrap();
+
+    assert!(report.committed, "rolled back — {:?}", report.mismatch);
+    let after = cli_partition(&env, &save(&mut doc, dir.path(), "block-after"));
+    assert_eq!(before, after, "re-laying out the block changed its netlist");
+}
