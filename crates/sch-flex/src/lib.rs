@@ -42,9 +42,6 @@ const BLOCK_GAP: f64 = 8.0 * UNIT_MM;
 const FRAME_PAD: f64 = 5.0 * UNIT_MM;
 /// The width-to-height ratio a packed sheet aims for — a landscape page's usable area.
 const SHEET_ASPECT: f64 = 1.5;
-/// Usable width (mm) of the page the sheet starts on; a pack wider than this grows the
-/// paper, which reads worse than a taller sheet.
-const PAGE_WIDTH: f64 = 260.0;
 
 /// What the typesetter had to decide for itself.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -249,79 +246,72 @@ fn drawing_bbox(placed: &[measure::Placed], parts: &[Part]) -> Rect {
     Rect::bounding(&corners).unwrap_or_else(|| Rect::new(0.0, 0.0, 0.0, 0.0))
 }
 
-/// Shelf-pack the blocks, choosing the shelf width whose finished sheet is closest to a
-/// page's proportions — a sheet in one long row and a sheet in one long column are the two
-/// ways a multi-block drawing reads badly.
+/// Lay the blocks out in COLUMNS, reading down each column and then across — the way a
+/// person fills a sheet. The blocks keep their order; only the column boundaries move.
 ///
-/// The widths worth trying are exactly the ones a shelf boundary can fall on: the total
-/// width of each contiguous run of blocks. Anything between two of those packs identically.
+/// The number of columns is chosen on the proportions of the finished sheet: one long
+/// column and one long row are the two ways a multi-block drawing wastes a page.
 fn pack(sizes: &[(f64, f64)]) -> Vec<Point2> {
-    let shelve = |limit: f64| {
-        let (mut origins, mut x, mut y, mut shelf, mut used) =
-            (Vec::new(), MARGIN, MARGIN, 0.0f64, 0.0f64);
-        for (w, h) in sizes {
-            // The candidate limits are sums of these same widths, so a run that exactly
-            // fills one must not be pushed off it by floating-point dust.
-            if x > MARGIN && x + w > MARGIN + limit + geom::EPS {
-                x = MARGIN;
-                y += shelf + BLOCK_GAP;
-                shelf = 0.0;
-            }
-            origins.push(Point2::new(x, y));
-            x += w + BLOCK_GAP;
-            shelf = shelf.max(*h);
-            used = used.max(x - BLOCK_GAP - MARGIN);
-        }
-        (origins, used, y + shelf - MARGIN)
-    };
-    shelf_widths(sizes)
-        .into_iter()
-        .map(shelve)
+    (1..=sizes.len().max(1))
+        .map(|columns| lay_columns(sizes, columns))
         .min_by(|a, b| aspect_error(a.1, a.2).total_cmp(&aspect_error(b.1, b.2)))
         .map(|(origins, ..)| origins)
         .unwrap_or_default()
 }
 
-/// How far a packed sheet of `w` x `h` is from a page's proportions, with an overflowing
-/// width counted as the defect it is: a sheet wider than a page grows the paper.
-fn aspect_error(w: f64, h: f64) -> f64 {
-    (w / h.max(1.0) - SHEET_ASPECT).abs() + (w - PAGE_WIDTH).max(0.0)
+/// The blocks in `columns` contiguous groups, each group stacked downward, the groups laid
+/// left to right. Returns the origins and the finished sheet's extent.
+fn lay_columns(sizes: &[(f64, f64)], columns: usize) -> (Vec<Point2>, f64, f64) {
+    let total: f64 = sizes.iter().map(|s| s.1 + BLOCK_GAP).sum();
+    let target = total / columns as f64;
+    let (mut origins, mut x, mut y, mut wide, mut tall, mut used) =
+        (Vec::new(), MARGIN, MARGIN, 0.0f64, 0.0f64, 0.0f64);
+    let mut left = columns;
+    for (w, h) in sizes {
+        // Break to the next column once this one has its share — never on the last one,
+        // which takes whatever is left.
+        if left > 1 && used > 0.0 && used + h / 2.0 > target {
+            x += wide + BLOCK_GAP;
+            y = MARGIN;
+            wide = 0.0;
+            used = 0.0;
+            left -= 1;
+        }
+        origins.push(Point2::new(x, y));
+        y += h + BLOCK_GAP;
+        used += h + BLOCK_GAP;
+        wide = wide.max(*w);
+        tall = tall.max(y - BLOCK_GAP - MARGIN);
+    }
+    (origins, x + wide - MARGIN, tall)
 }
 
-/// Every shelf width that packs differently: the total width of each contiguous run.
-fn shelf_widths(sizes: &[(f64, f64)]) -> Vec<f64> {
-    let mut widths = Vec::new();
-    for i in 0..sizes.len() {
-        let mut run = 0.0;
-        for (w, _) in &sizes[i..] {
-            run += w + BLOCK_GAP;
-            widths.push(run - BLOCK_GAP);
-        }
-    }
-    widths.sort_by(f64::total_cmp);
-    widths.dedup_by(|a, b| (*a - *b).abs() < geom::EPS);
-    widths
+/// How far a packed sheet of `w` x `h` is from a page's proportions. The page itself grows
+/// to whatever the content needs, so what matters is the SHAPE: one long column and one
+/// long row are the two ways a multi-block drawing wastes its page.
+fn aspect_error(w: f64, h: f64) -> f64 {
+    (w / h.max(1.0) - SHEET_ASPECT).abs()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Three blocks that would make a tall column go two-to-a-shelf instead: the pack is
-    /// chosen on the proportions of the finished sheet, not on the first width that fits.
+    /// Blocks that would make one long column are laid in two, reading down and then
+    /// across: the pack is chosen on the proportions of the finished sheet.
     #[test]
-    fn blocks_are_shelved_into_a_page_shaped_sheet() {
-        let origins = pack(&[(160.0, 90.0), (105.0, 70.0), (80.0, 35.0)]);
+    fn blocks_are_laid_in_page_shaped_columns() {
+        let origins = pack(&[(90.0, 60.0), (90.0, 60.0), (90.0, 60.0), (90.0, 60.0)]);
         assert_eq!(origins[0], Point2::new(MARGIN, MARGIN));
-        assert!(origins[1].y > origins[0].y, "the wide block gets its own shelf");
-        assert_eq!(origins[2].y, origins[1].y, "the two narrow blocks share one");
-        assert!(origins[2].x > origins[1].x);
+        assert!(origins[1].y > origins[0].y, "the column reads downward first");
+        assert!(origins[2].x > origins[0].x, "then it breaks across");
+        assert_eq!(origins[2].y, MARGIN, "a new column starts at the top");
     }
 
-    /// A pack wider than the page grows the paper, so a run that overflows loses to a
-    /// taller sheet even when its proportions are better.
+    /// Two wide blocks stack rather than sit side by side: a page twice as wide as it is
+    /// tall reads worse than one that is roughly page-shaped.
     #[test]
-    fn a_shelf_never_overflows_the_page_to_look_squarer() {
+    fn wide_blocks_stack_rather_than_widen_the_sheet() {
         let origins = pack(&[(200.0, 40.0), (200.0, 40.0)]);
         assert!(origins[1].y > origins[0].y);
     }
