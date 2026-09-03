@@ -428,7 +428,8 @@ pub fn tool_defs() -> Vec<Tool> {
                  else applies only the delta and keeps placement and copper. Parts without a \
                  usable footprint remain staged and are named instead of blocking the sync. \
                  ERC errors are reported in schematic_erc but do not block. On an existing board, \
-                 intent applies the delta then places staged/new parts. Omit bounds for a managed auto outline \
+                 intent applies the delta then places staged/new parts. Geometry findings remain \
+                 written as honest partial work in guard_findings. Omit bounds for a managed auto outline \
                  that place_board grows/refits around placed parts while ignoring the staging row. \
                  clearance/min_trace_width are lowered to what those footprints permit \
                  (reported in design_rules)."

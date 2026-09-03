@@ -35,6 +35,8 @@ Create wires only with `connect` or `rewire`; never provide wire coordinates. To
 # PCB phased loop
 A board request continues after `check_schematic`; "schematic only" stops. ERC errors do not block `sync_board`: it reports `schematic_erc` while the PCB progresses in parallel. Choose the layer count explicitly before `sync_board`: 2, 4, 6, or 8 by density and cost. Sync preserves existing placement/copper and imports new schematic nets; if `get_board` or `route_board` reports a stale net table, run `sync_board` first. On an existing board, `sync_board({intent})` applies the schematic delta and then places staged/new parts with that intent. Omit `bounds` for a managed auto outline: placement grows/refits it around placed parts, ignoring staging. `rules.pours` accepts a net string, `{net,layer?}`, or arrays; defaults are B.Cu on 2 layers and an inner plane on 4+.
 
+Board mutators keep honest partial geometry: new DRC or outside-outline findings are returned in `guard_findings` without rolling back the edit. Only an edit that would silently short schematic nets is refused and restored.
+
 Follow these phases. After EVERY phase call `render_board` and `check_board`, inspect progress and fix violations in the work you touched before advancing.
 
 1. Place connectors and mechanical parts at intended edges with focused `place_board({refs,intent})`. Auto outlines grow; explicit outlines place what fits and report each remainder's extent and suggested bounds. Lock accepted parts; edge-intent mechanical parts self-lock.

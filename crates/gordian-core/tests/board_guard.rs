@@ -56,7 +56,7 @@ fn divider(ctx: &AgentRuntime) {
     );
 }
 
-/// One project on disk: subset placement, the guard's refusal,
+/// One project on disk: subset placement, the guard's partial report,
 /// and what `check_board` says about a board nothing has laid out yet.
 #[test]
 fn the_board_guard_and_its_subset_placement() {
@@ -100,7 +100,7 @@ fn the_board_guard_and_its_subset_placement() {
     let checked = run_tool("check_board", json!({}), &ctx).unwrap();
     assert_eq!(checked["staged"], json!([]), "{checked:#}");
 
-    // ── a refused mutator writes nothing ────────────────────────────────────
+    // ── geometry findings keep an honest partial edit ───────────────────────
     let routed = tool(&ctx, "route_board", json!({}));
     let before_text = std::fs::read_to_string(ctx.pcb_path()).unwrap();
     assert!(
@@ -110,28 +110,42 @@ fn the_board_guard_and_its_subset_placement() {
     let before = footprints(&ctx);
 
     // Shrinking the outline onto routed copper puts that copper outside the
-    // board — a violation this edit, and only this edit, is responsible for.
-    let refused = run_tool(
+    // board. It is visible, repairable geometry rather than a connectivity
+    // change, so the outline edit stays written and names what remains.
+    let partial = run_tool(
         "update_board_outline",
         json!({ "bounds": { "min_x": 0.0, "min_y": 0.0, "max_x": 6.0, "max_y": 6.0 } }),
         &ctx,
     )
     .unwrap();
-    assert_eq!(
-        refused["code"],
-        json!("board_guard_refused"),
-        "shrinking the outline over live copper must be refused: {refused:#}"
-    );
+    assert!(partial.get("error").is_none(), "{partial:#}");
+    assert_eq!(partial["partial"], json!(true), "{partial:#}");
     assert!(
-        !refused["violations"].as_array().unwrap().is_empty(),
-        "the refusal must name what it found: {refused:#}"
+        !partial["guard_findings"]["violations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+            || !partial["guard_findings"]["outside_outline"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+            || !partial["guard_findings"]["copper_outside_outline"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+        "the partial result must name what it found: {partial:#}"
     );
-    assert_eq!(refused["restored"], json!(true), "{refused:#}");
-    assert_eq!(
+    assert_ne!(
         std::fs::read_to_string(ctx.pcb_path()).unwrap(),
         before_text,
-        "a refused mutator must leave the board byte-identical"
+        "the honest partial edit must stay written"
     );
+    tool(
+        &ctx,
+        "update_board_outline",
+        json!({ "bounds": { "min_x": 0.0, "min_y": 0.0, "max_x": 40.0, "max_y": 40.0 } }),
+    );
+    let before_text = std::fs::read_to_string(ctx.pcb_path()).unwrap();
 
     // ── a subset placement moves only what it was asked to ──────────────────
     // With nothing staged, bare place_board is a no-op that says so.
