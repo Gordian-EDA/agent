@@ -64,6 +64,11 @@ fn strictly_between(v: f64, a: f64, b: f64) -> bool {
 impl<'a> Obstacles<'a> {
     /// Index everything the router must avoid.
     pub fn new(sheet: &'a Sheet) -> Obstacles<'a> {
+        Self::new_ignoring(sheet, &[])
+    }
+
+    /// Index the sheet while omitting the named symbols' bodies.
+    pub fn new_ignoring(sheet: &'a Sheet, ignored: &[String]) -> Obstacles<'a> {
         let mut horizontal: HashMap<i64, Vec<(f64, f64, &str)>> = HashMap::new();
         let mut vertical: HashMap<i64, Vec<(f64, f64, &str)>> = HashMap::new();
         let mut live_nodes: Vec<(Point2, &str)> = Vec::new();
@@ -113,6 +118,11 @@ impl<'a> Obstacles<'a> {
         let bodies = sheet
             .bodies
             .iter()
+            .filter(|body| {
+                !ignored
+                    .iter()
+                    .any(|id| id == &body.uuid || id == &body.refdes)
+            })
             .map(|b| b.rect.inflate(-0.05))
             .chain(sheet.texts.iter().map(|t| t.inflate(-0.05)))
             .collect();

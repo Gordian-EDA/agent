@@ -141,6 +141,36 @@ impl std::error::Error for DragError {}
 /// A pin of a symbol being dragged.
 type PinId = (String, String);
 
+/// One old pin identity and the pin that replaces it after a symbol edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinReSeat {
+    /// UUID of the symbol that owned the old pin.
+    pub old_owner: String,
+    /// Physical number of the old pin.
+    pub old_number: String,
+    /// UUID of the symbol that owns the replacement pin.
+    pub new_owner: String,
+    /// Physical number of the replacement pin.
+    pub new_number: String,
+}
+
+impl PinReSeat {
+    /// Describe a pin replacement by owner UUID and physical pin number.
+    pub fn new(
+        old_owner: impl Into<String>,
+        old_number: impl Into<String>,
+        new_owner: impl Into<String>,
+        new_number: impl Into<String>,
+    ) -> PinReSeat {
+        PinReSeat {
+            old_owner: old_owner.into(),
+            old_number: old_number.into(),
+            new_owner: new_owner.into(),
+            new_number: new_number.into(),
+        }
+    }
+}
+
 /// Where a retracted stub has to reconnect.
 #[derive(Debug, Clone)]
 enum Anchor {
@@ -171,11 +201,11 @@ struct Retraction {
 
 /// Peel every wire chain attached to these symbols' pins back to the first
 /// point that holds something else.
-fn retract(sheet: &Sheet, moving: &HashSet<String>) -> Retraction {
+fn retract(sheet: &Sheet, moving: &HashSet<PinId>) -> Retraction {
     let own: HashMap<NodeKey, PinId> = sheet
         .pins
         .iter()
-        .filter(|p| moving.contains(&p.owner))
+        .filter(|p| moving.contains(&(p.owner.clone(), p.number.clone())))
         .map(|p| (key(p.at), (p.owner.clone(), p.number.clone())))
         .collect();
     let mut removed: HashSet<String> = HashSet::new();
@@ -208,7 +238,11 @@ fn retract(sheet: &Sheet, moving: &HashSet<String>) -> Retraction {
         taps.first().copied()
     };
 
-    for pin in sheet.pins.iter().filter(|p| moving.contains(&p.owner)) {
+    for pin in sheet
+        .pins
+        .iter()
+        .filter(|p| moving.contains(&(p.owner.clone(), p.number.clone())))
+    {
         let start = key(pin.at);
         let Some(incident) = sheet.incident.get(&start) else {
             continue;
@@ -281,11 +315,11 @@ fn retract(sheet: &Sheet, moving: &HashSet<String>) -> Retraction {
 /// behind would drop the pin off its rail.
 ///
 /// Returned as `(symbol uuid, the pin it rides on)`.
-fn glued_symbols(sheet: &Sheet, moving: &HashSet<String>) -> Vec<(String, PinId)> {
+fn glued_symbols(sheet: &Sheet, moving: &HashSet<PinId>) -> Vec<(String, PinId)> {
     let own: HashMap<NodeKey, PinId> = sheet
         .pins
         .iter()
-        .filter(|p| moving.contains(&p.owner))
+        .filter(|p| moving.contains(&(p.owner.clone(), p.number.clone())))
         .map(|p| (key(p.at), (p.owner.clone(), p.number.clone())))
         .collect();
     let mut pin_count: HashMap<&str, usize> = HashMap::new();
@@ -295,7 +329,10 @@ fn glued_symbols(sheet: &Sheet, moving: &HashSet<String>) -> Vec<(String, PinId)
     let mut glued: Vec<(String, PinId)> = sheet
         .pins
         .iter()
-        .filter(|p| !moving.contains(&p.owner) && pin_count[p.owner.as_str()] == 1)
+        .filter(|p| {
+            !moving.contains(&(p.owner.clone(), p.number.clone()))
+                && pin_count[p.owner.as_str()] == 1
+        })
         .filter_map(|p| Some((p.owner.clone(), own.get(&key(p.at))?.clone())))
         .collect();
     glued.sort();
@@ -412,15 +449,95 @@ pub fn drag_many(
             .ok_or_else(|| DragError::Unknown(id.clone()))?;
         targets.push((uuid, *to));
     }
-    let moving: HashSet<String> = targets.iter().map(|(u, _)| u.clone()).collect();
+    let owners: HashSet<&str> = targets.iter().map(|(uuid, _)| uuid.as_str()).collect();
+    let seats = before
+        .pins
+        .iter()
+        .filter(|pin| owners.contains(pin.owner.as_str()))
+        .map(|pin| PinReSeat::new(&pin.owner, &pin.number, &pin.owner, &pin.number))
+        .collect::<Vec<_>>();
+    reseat_impl(doc, before, &seats, &targets, moves)
+}
+
+/// Reconnect pins whose identities or positions changed during a symbol edit.
+///
+/// The caller supplies the sheet from before the edit and the old-to-new pin
+/// mapping. Attached runs are retracted from the old pins and routed back to
+/// the nearest surviving point of their own nets. A route that cannot be drawn
+/// cleanly becomes a matched label pair and is counted in [`DragReport`].
+pub fn reseat_many(
+    doc: &mut SchDoc,
+    before: &Sheet,
+    seats: &[PinReSeat],
+) -> Result<(DragReport, Sheet), DragError> {
+    reseat_impl(doc, before, seats, &[], &[])
+}
+
+/// Draw one obstacle-aware orthogonal connection between two fixed points.
+///
+/// `ignored_symbols` names endpoint symbols by UUID or reference so their own
+/// bodies do not block the route leaving their pins. `None` means every clean
+/// straight, L, Z and lattice route was blocked; callers can then report and
+/// apply their appropriate label fallback.
+pub fn redraw_wire(
+    doc: &mut SchDoc,
+    from: Point2,
+    out: Point2,
+    to: Point2,
+    net: &str,
+    ignored_symbols: &[String],
+) -> Option<DragReport> {
+    let sheet = Sheet::of(doc);
+    let obstacles = Obstacles::new_ignoring(&sheet, ignored_symbols);
+    let path = route::route(&obstacles, from, out, to, net)
+        .or_else(|| route::maze(&obstacles, from, out, to, net))?;
+    let mut touched = HashSet::new();
+    let mut redrawn_segments = 0;
+    for pair in path.windows(2) {
+        if pair[0].near_eq(pair[1], geom::EPS) {
+            continue;
+        }
+        doc.add_wire(pair[0], pair[1]);
+        touched.insert(key(pair[0]));
+        touched.insert(key(pair[1]));
+        redrawn_segments += 1;
+    }
+    let after = Sheet::of(doc);
+    let (junctions_added, junctions_removed) = settle_junctions(doc, &after, &touched);
+    Some(DragReport {
+        redrawn_segments,
+        junctions_added,
+        junctions_removed,
+        ..DragReport::default()
+    })
+}
+
+fn reseat_impl(
+    doc: &mut SchDoc,
+    before: &Sheet,
+    seats: &[PinReSeat],
+    targets: &[(String, Placement)],
+    reported_moves: &[(String, Placement)],
+) -> Result<(DragReport, Sheet), DragError> {
+    let strict_partition = !targets.is_empty();
+    let mapping: HashMap<PinId, PinId> = seats
+        .iter()
+        .map(|seat| {
+            (
+                (seat.old_owner.clone(), seat.old_number.clone()),
+                (seat.new_owner.clone(), seat.new_number.clone()),
+            )
+        })
+        .collect();
+    let moving: HashSet<PinId> = mapping.keys().cloned().collect();
 
     let backup = doc.clone();
-    let was = partition(before);
+    let was = remap_partition(partition(before), &mapping);
 
     let old_pins: HashMap<PinId, Point2> = before
         .pins
         .iter()
-        .filter(|p| moving.contains(&p.owner))
+        .filter(|p| moving.contains(&(p.owner.clone(), p.number.clone())))
         .map(|p| ((p.owner.clone(), p.number.clone()), p.at))
         .collect();
     let Retraction {
@@ -434,17 +551,26 @@ pub fn drag_many(
     for (a, b) in &kept {
         doc.add_wire(*a, *b);
     }
-    for (uuid, to) in &targets {
+    for (uuid, to) in targets {
         doc.move_symbol(uuid, to.at.x, to.at.y)
             .and_then(|()| doc.set_symbol_orientation(uuid, to.rot, to.mirror))
             .map_err(|e| DragError::Doc(e.to_string()))?;
     }
 
-    let new_pins: HashMap<PinId, (Point2, Point2)> = sch_doc::placed_pins(doc)
+    let placed: HashMap<PinId, (Point2, Point2)> = sch_doc::placed_pins(doc)
         .into_iter()
-        .filter(|p| moving.contains(&p.owner))
         .map(|p| ((p.owner, p.number), (p.at, p.out)))
         .collect();
+    let new_pins: HashMap<PinId, (Point2, Point2)> = mapping
+        .iter()
+        .filter_map(|(old, new)| Some((old.clone(), *placed.get(new)?)))
+        .collect();
+    if new_pins.len() != mapping.len() {
+        *doc = backup;
+        return Err(DragError::Doc(
+            "a re-seated pin does not exist after the symbol edit".to_string(),
+        ));
+    }
 
     // Whatever was sitting on a pin — a label, a junction, a no-connect — rides
     // along, or the symbol would leave its own connection behind.
@@ -470,7 +596,7 @@ pub fn drag_many(
     }
 
     let (mut report, mut touched) = redraw(doc, &stubs, &new_pins);
-    report.moved = moves.iter().map(|(id, _)| id.clone()).collect();
+    report.moved = reported_moves.iter().map(|(id, _)| id.clone()).collect();
     let cut: Vec<&crate::sheet::WireSeg> = before
         .wires
         .iter()
@@ -509,12 +635,12 @@ pub fn drag_many(
         after = Sheet::of(doc);
     }
 
-    if partition(&after) != was {
+    if strict_partition && canonical_partition(partition(&after)) != was {
         let broken = broken_nets(before, &after);
         *doc = backup;
         return Err(DragError::Truthfulness(broken));
     }
-    let lost = orphaned_pins(before, &after, &moving);
+    let lost = orphaned_pins(before, &after, &moving, &mapping);
     if lost > 0 {
         *doc = backup;
         return Err(DragError::Disconnection(lost));
@@ -531,6 +657,43 @@ pub fn drag_many(
         .crossings
         .saturating_sub(crate::eval::measure(before).crossings);
     Ok((report, after))
+}
+
+fn remap_partition(
+    mut groups: Vec<Vec<String>>,
+    mapping: &HashMap<PinId, PinId>,
+) -> Vec<Vec<String>> {
+    let names: HashMap<String, String> = mapping
+        .iter()
+        .map(|((old_owner, old_number), (new_owner, new_number))| {
+            (
+                format!("{old_owner}.{old_number}"),
+                format!("{new_owner}.{new_number}"),
+            )
+        })
+        .collect();
+    for group in &mut groups {
+        for pin in group.iter_mut() {
+            if let Some(new) = names.get(pin) {
+                *pin = new.clone();
+            }
+        }
+        group.sort();
+        group.dedup();
+    }
+    groups.sort();
+    groups.dedup();
+    groups
+}
+
+fn canonical_partition(mut groups: Vec<Vec<String>>) -> Vec<Vec<String>> {
+    for group in &mut groups {
+        group.sort();
+        group.dedup();
+    }
+    groups.sort();
+    groups.dedup();
+    groups
 }
 
 /// Put a connection dot where the drag left one needed, and take away the ones
@@ -626,7 +789,12 @@ pub fn partition(sheet: &Sheet) -> Vec<Vec<String>> {
 /// This is the failure the pin partition cannot see: on a sheet wired with
 /// labels, dropping a pin's only wire leaves the netlist word-perfect and the
 /// drawing showing a part connected to thin air.
-fn orphaned_pins(before: &Sheet, after: &Sheet, moving: &HashSet<String>) -> usize {
+fn orphaned_pins(
+    before: &Sheet,
+    after: &Sheet,
+    moving: &HashSet<PinId>,
+    mapping: &HashMap<PinId, PinId>,
+) -> usize {
     let held = |sheet: &Sheet, at: Point2| {
         let k = key(at);
         sheet.incident.contains_key(&k)
@@ -636,15 +804,19 @@ fn orphaned_pins(before: &Sheet, after: &Sheet, moving: &HashSet<String>) -> usi
     let was_held: HashSet<(&str, &str)> = before
         .pins
         .iter()
-        .filter(|p| moving.contains(&p.owner) && held(before, p.at))
+        .filter(|p| moving.contains(&(p.owner.clone(), p.number.clone())) && held(before, p.at))
         .map(|p| (p.owner.as_str(), p.number.as_str()))
         .collect();
-    after
-        .pins
+    mapping
         .iter()
-        .filter(|p| moving.contains(&p.owner))
-        .filter(|p| was_held.contains(&(p.owner.as_str(), p.number.as_str())))
-        .filter(|p| !held(after, p.at))
+        .filter(|((owner, number), _)| was_held.contains(&(owner.as_str(), number.as_str())))
+        .filter(|(_, (owner, number))| {
+            after
+                .pins
+                .iter()
+                .find(|pin| pin.owner == *owner && pin.number == *number)
+                .is_none_or(|pin| !held(after, pin.at))
+        })
         .count()
 }
 
