@@ -270,7 +270,8 @@ fn remove_symbols_retracts_the_run_up_to_its_label() {
 
     assert!(result.get("error").is_none(), "{result}");
     assert!(
-        result["changed"]["retracted_drawing"].as_u64().unwrap_or(0) >= 3,
+        result["changed"]["removed"]["wires"].as_u64().unwrap_or(0) >= 2
+            && result["changed"]["removed"]["labels"] == 1,
         "the run and its label stayed behind: {result}"
     );
     let after = SchDoc::read(ctx.sch_path()).unwrap();
