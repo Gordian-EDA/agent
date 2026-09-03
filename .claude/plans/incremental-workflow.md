@@ -238,3 +238,9 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   floorplan_netlist, text collisions 0.27→0.50/part. Reviewer found `anneal-place anchors` lacks a
   `!frozen` filter → lane/anneal-frozen. Remaining ceiling: spine lays 60-part sheets as one long row
   (User 938×221 pages) — needs folding.
+- Round 5 (camp7): 4/4 ERC-0 schematics + boards, parity true; audio 0 unconnected / DRC 14; others
+  118–134 unconnected. Top refusal: `sync_board would short N net pairs` ×19 → lane/pcb-sync-shorts
+  (retract copper on re-netted pads + report; via_drill clamp; get_board net did-you-mean; classify
+  the remaining DRC on camp7 boards and fix the top class). lane/sch-refusals-3: swap_symbol diagonal
+  refusal path, rewire → arrange semantics (never refuse), turn_in_place with `to`, get_net/no_connect
+  did-you-mean, connect authored-merge evidence. anneal-frozen merged.
