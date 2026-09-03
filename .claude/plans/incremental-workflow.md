@@ -244,3 +244,8 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   the remaining DRC on camp7 boards and fix the top class). lane/sch-refusals-3: swap_symbol diagonal
   refusal path, rewire → arrange semantics (never refuse), turn_in_place with `to`, get_net/no_connect
   did-you-mean, connect authored-merge evidence. anneal-frozen merged.
+- sch-refusals-3 merged: swap_symbol re-seats every pin (label debit, never a diagonal), rewire =
+  arrange without moving (never refuses), both-endpoint connect authorises the joined nets,
+  turn_in_place combinable with a move, pin/net did-you-mean in connect/no_connect/add_power/get_net,
+  multi-unit refs resolve. anneal-frozen merged. Running: lane/pcb-sync-shorts; lane/sch-looks final
+  gates (A5 ladder, snapshot scores, netlist gate).
