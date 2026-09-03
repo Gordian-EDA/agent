@@ -218,7 +218,7 @@ fn grouped_violation_summaries<'a>(
 ) -> Vec<Value> {
     let mut grouped = std::collections::BTreeMap::<String, (usize, BTreeSet<String>)>::new();
     for finding in findings {
-        if !finding.blocks() || finding.violation.severity != "error" {
+        if finding.violation.severity != "error" {
             continue;
         }
         let (kind, refs, _) = violation_key(finding.violation);
@@ -751,7 +751,8 @@ mod tests {
             violation("shorting_items", "J1"),
             violation("courtyards_overlap", "R2"),
         ];
-        let findings = board_findings(&violations);
+        let mut findings = board_findings(&violations);
+        findings[0].staged = true;
 
         let top = grouped_violation_summaries(findings.iter(), 3);
 
