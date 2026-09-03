@@ -1,6 +1,6 @@
 //! Building the schematic document: placing symbols, labels, wires, junctions,
 //! and free graphics, plus the pin-endpoint geometry the connectivity helpers
-//! resolve against and the refinement-scorer accessors over the placed scene.
+//! resolve against and the truthfulness-count accessors over the placed scene.
 
 use std::io;
 
@@ -135,8 +135,8 @@ impl SchematicWriter {
     }
 
     /// Set the symbol UNIT of the most-recently-added instance (the dual of
-    /// [`Self::set_mirror_last`]). The floorplan engine calls this when it places
-    /// the units of a multi-unit part as separate instances sharing a refdes.
+    /// [`Self::set_mirror_last`]). `build_writer` calls this when it places the
+    /// units of a multi-unit part as separate instances sharing a refdes.
     pub fn set_unit_last(&mut self, unit: u8) {
         if let Some(i) = self.instances.last_mut() {
             i.unit = unit;
@@ -144,8 +144,8 @@ impl SchematicWriter {
     }
 
     /// Mirror the most recently added symbol left-to-right (`(mirror y)`). Used
-    /// by the floorplan engine to flip an IC so the pins facing its neighbours
-    /// (e.g. a translator's B-side toward the connector) point the right way.
+    /// to flip an IC so the pins facing its neighbours (e.g. a translator's
+    /// B-side toward the connector) point the right way.
     pub fn set_mirror_last(&mut self) {
         if let Some(i) = self.instances.last_mut() {
             i.mirror = true;
@@ -414,7 +414,6 @@ impl SchematicWriter {
     }
 
     /// Refuse junction dots that would weld two nets (see [`Self::add_junction_on_net`]).
-    /// Finalize-only, so the per-move placement scorer is never perturbed by the repair.
     pub fn set_weld_guard(&mut self, on: bool) {
         self.weld_guard = on;
     }
@@ -553,8 +552,7 @@ impl SchematicWriter {
             })?;
         let lib_id = any.lib_id.clone();
         // Pins are cached per lib_id when the symbol is first added, so this hot
-        // path (called once per net-pin during routing, and many times over while
-        // the refinement loop re-routes candidate placements) never re-reads the
+        // path (called once per net-pin during routing) never re-reads the
         // `.kicad_sym` from disk. Fall back to a load only if somehow uncached.
         let pins: Vec<PinGeom> = match self.sym_pins.get(&lib_id).cloned() {
             Some(p) => p,
@@ -871,11 +869,6 @@ impl SchematicWriter {
             .collect()
     }
 
-    /// Junction-dot count (a routing-quality signal for the refinement scorer).
-    pub fn junction_count(&self) -> usize {
-        self.junction_positions().len()
-    }
-
     /// Junction-dot positions (for the scorer's merge check: a junction sitting
     /// on wires of two different nets fuses them).
     pub fn junction_positions(&self) -> Vec<[f64; 2]> {
@@ -920,22 +913,8 @@ impl SchematicWriter {
         self.labels.iter().filter(|l| !l.global).count()
     }
 
-    /// Bounding boxes of the global/port labels (the edge pentagons), for the
-    /// refinement scorer to keep symbol bodies from colliding with a port label
-    /// (the label is placed during routing, so it is not an `Item`).
-    pub fn cluster_label_boxes(&self) -> Vec<Rect> {
-        self.labels
-            .iter()
-            .filter(|l| l.global)
-            .map(|l| {
-                let w = sch_model::text::text_width(&l.net) + 2.54;
-                Rect::new(l.at[0] - w, l.at[1] - 2.0, l.at[0] + w, l.at[1] + 2.0)
-            })
-            .collect()
-    }
-
-    /// Every drawn wire segment with its net. For the refinement scorer's
-    /// crossing / length / short metrics.
+    /// Every drawn wire segment with its net, for `place::score`'s truthfulness counts
+    /// (crossings, merges, foreign taps).
     pub fn wires_with_nets(&self) -> Vec<DrawnSegment> {
         self.wires
             .iter()
