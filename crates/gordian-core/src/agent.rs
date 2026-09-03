@@ -690,6 +690,7 @@ pub struct Agent<P: Provider = GenaiProvider> {
     /// ceiling belong to the turn, not to whichever subturn is running. `None`
     /// until a turn starts one.
     turn_budget: Option<TurnClock>,
+    turn_wall_clock: Duration,
     tool_seq: AtomicU64,
 }
 
@@ -713,6 +714,7 @@ impl<P: Provider> Agent<P> {
             turn_starts: Vec::new(),
             tool_phase,
             turn_budget: None,
+            turn_wall_clock: TURN_WALL_CLOCK,
             tool_seq: AtomicU64::new(0),
         }
     }
@@ -721,6 +723,12 @@ impl<P: Provider> Agent<P> {
     /// after a turn).
     pub fn ctx(&self) -> &AgentRuntime {
         &self.runtime
+    }
+
+    /// Override the turn clock in deterministic loop tests.
+    #[doc(hidden)]
+    pub fn set_turn_wall_clock_for_test(&mut self, duration: Duration) {
+        self.turn_wall_clock = duration;
     }
 
     fn emit_pending_usage(&self, events: Events<'_>) {
@@ -908,6 +916,7 @@ impl<P: Provider> Agent<P> {
             provider_requests: 0,
         });
         let started = clock.started;
+        let turn_wall_clock = self.turn_wall_clock;
         let mut provider_requests = clock.provider_requests;
         let mut wrap_up_sent = false;
         let mut provider_error_retries_left = MAX_PROVIDER_ERROR_RETRIES;
@@ -929,7 +938,7 @@ impl<P: Provider> Agent<P> {
                     &format!(
                         "Per-turn request budget reached after {provider_requests} model requests and {tool_calls_made} tool calls."
                     ),
-                    tool_calls_made,
+                    started.elapsed(),
                     last_tool_status.as_deref(),
                 );
                 emit(events, AgentEvent::AssistantText(final_text.clone()));
@@ -942,14 +951,14 @@ impl<P: Provider> Agent<P> {
                     },
                 });
             }
-            if started.elapsed() >= TURN_WALL_CLOCK {
+            if started.elapsed() >= turn_wall_clock {
                 progress.refresh_files(&self.runtime);
                 let final_text = progress.handoff(
                     &format!(
                         "Per-turn wall-clock budget reached after {}s and {tool_calls_made} tool calls.",
                         started.elapsed().as_secs()
                     ),
-                    tool_calls_made,
+                    started.elapsed(),
                     last_tool_status.as_deref(),
                 );
                 emit(events, AgentEvent::AssistantText(final_text.clone()));
@@ -968,7 +977,7 @@ impl<P: Provider> Agent<P> {
             // end the turn and produce a structured continuation handoff.
             let out_of_time = applied
                 && started.elapsed().as_secs_f64()
-                    >= TURN_WALL_CLOCK.as_secs_f64() * WRAP_UP_AT_ELAPSED;
+                    >= turn_wall_clock.as_secs_f64() * WRAP_UP_AT_ELAPSED;
             if !wrap_up_sent
                 && applied
                 && (remaining <= wrap_up_reserve(budgets.provider_requests) || out_of_time)
@@ -1044,7 +1053,7 @@ impl<P: Provider> Agent<P> {
                                 &format!(
                                     "Per-turn request budget reached after {provider_requests} model requests and {tool_calls_made} tool calls."
                                 ),
-                                tool_calls_made,
+                                started.elapsed(),
                                 last_tool_status.as_deref(),
                             );
                             if !text.trim().is_empty() {
@@ -1139,7 +1148,8 @@ impl<P: Provider> Agent<P> {
             for call in &tool_calls {
                 tool_calls_made += 1;
                 let seq = self.next_tool_seq();
-                let started = Instant::now();
+                let phase_elapsed = started.elapsed();
+                let tool_started = Instant::now();
                 let args_digest = value_digest(&call.fn_arguments);
                 let span = tracing::info_span!(
                     "tool",
@@ -1257,7 +1267,7 @@ impl<P: Provider> Agent<P> {
                     result
                 };
                 let parsed = parse_or_null(&content);
-                progress.observe(&call.fn_name, &parsed);
+                progress.observe(&call.fn_name, &parsed, phase_elapsed, dispatched);
                 if tool_result_is_timeout(&parsed) {
                     timed_out_tool_calls.push((
                         call.fn_name.clone(),
@@ -1307,7 +1317,7 @@ impl<P: Provider> Agent<P> {
                     tool_summary(&call.fn_name, &call.fn_arguments, &parse_or_null(&content));
                 let result = parse_or_null(&content);
                 tracing::debug!(parent: &span, content = %content, "tool result payload");
-                let elapsed_ms = millis(started.elapsed());
+                let elapsed_ms = millis(tool_started.elapsed());
                 tracing::info!(parent: &span, elapsed_ms, "tool finished");
                 emit_result_diagnostic(events, &call.fn_name, &result);
                 last_tool_status = Some(format!("{}: {summary}", call.fn_name));
@@ -1342,7 +1352,7 @@ impl<P: Provider> Agent<P> {
                     &format!(
                         "`{tool}` exceeded its operation deadline and may still be settling; no more mutations are safe in this turn."
                     ),
-                    tool_calls_made,
+                    started.elapsed(),
                     last_tool_status.as_deref(),
                 );
                 emit(events, AgentEvent::AssistantText(final_text.clone()));
@@ -1473,6 +1483,7 @@ struct TurnProgress {
     board_parts: Option<(usize, usize)>,
     erc: Option<(u64, u64)>,
     board_exists: bool,
+    board_started_at: Option<Duration>,
     routed: Option<(u64, u64)>,
     drc: Option<String>,
     blocker: Option<String>,
@@ -1480,7 +1491,10 @@ struct TurnProgress {
 
 impl TurnProgress {
     fn from_project(runtime: &AgentRuntime) -> Self {
-        let mut progress = Self::default();
+        let mut progress = Self {
+            board_started_at: runtime.pcb_path().exists().then_some(Duration::ZERO),
+            ..Self::default()
+        };
         progress.refresh_files(runtime);
         progress
     }
@@ -1500,7 +1514,10 @@ impl TurnProgress {
         }
     }
 
-    fn observe(&mut self, name: &str, value: &Value) {
+    fn observe(&mut self, name: &str, value: &Value, elapsed: Duration, dispatched: bool) {
+        if dispatched && is_pcb_stage_tool(name) && self.board_started_at.is_none() {
+            self.board_started_at = Some(elapsed);
+        }
         match name {
             "check_schematic" => {
                 self.erc = value
@@ -1546,12 +1563,7 @@ impl TurnProgress {
         }
     }
 
-    fn handoff(
-        &self,
-        boundary: &str,
-        _tool_calls_made: usize,
-        last_tool_status: Option<&str>,
-    ) -> String {
+    fn handoff(&self, boundary: &str, elapsed: Duration, last_tool_status: Option<&str>) -> String {
         let parts = self.board_parts.map_or_else(
             || {
                 self.schematic_parts
@@ -1574,9 +1586,13 @@ impl TurnProgress {
             .or(last_tool_status)
             .unwrap_or("none recorded; inspect the files before the next edit");
         let (phase, calls) = self.next_phase();
+        let schematic_budget = self.board_started_at.unwrap_or(elapsed).min(elapsed);
+        let board_budget = elapsed.saturating_sub(schematic_budget);
         format!(
             "## Partial state\n\
              - Turn boundary: {boundary}\n\
+             - Phase reached: {}\n\
+             - Budget used: schematic {}s, board {}s\n\
              - Parts placed: {parts}\n\
              - ERC: {erc}\n\
              - Board: {}\n\
@@ -1584,14 +1600,42 @@ impl TurnProgress {
              - DRC: {drc}\n\
              - Blocked: {blocker}\n\n\
              ## Next steps\n\
+             - {calls}\n\
              - Phase: {phase}\n\
-             - Tool calls: {calls}\n\
              - Continue from the project files in a new turn; the per-turn clock and request budget reset.",
-            if self.board_exists { "yes" } else { "no" }
+            self.phase_reached(),
+            schematic_budget.as_secs(),
+            board_budget.as_secs(),
+            if self.board_exists { "yes" } else { "no" },
         )
     }
 
+    fn phase_reached(&self) -> &'static str {
+        if !self.board_exists {
+            return if self.erc.is_some_and(|(errors, _)| errors == 0) {
+                "schematic ERC-error-free; board not started"
+            } else {
+                "schematic"
+            };
+        }
+        if self.drc.as_deref() == Some("clean") {
+            "board DRC-clean"
+        } else if self.routed.is_some() {
+            "board routing"
+        } else if self.board_parts.is_some() {
+            "board placement"
+        } else {
+            "board sync"
+        }
+    }
+
     fn next_phase(&self) -> (&'static str, &'static str) {
+        if !self.board_exists && self.erc.is_some_and(|(errors, _)| errors == 0) {
+            return (
+                "Board phase 1 — choose layers, create the outline, and place connectors/mechanical parts",
+                "`sync_board({rules:{layer_count:...},intent:...})`, `place_board({refs:[...],intent:...})`, `render_board({})`, `check_board({})`",
+            );
+        }
         if self.schematic_parts.is_none() {
             return (
                 "Schematic phase 1 — power entry",
@@ -1602,12 +1646,6 @@ impl TurnProgress {
             return (
                 "Current schematic block — inspect or repair before advancing",
                 "`read_schematic({})`, a targeted schematic mutator, `render_schematic({})`, `check_schematic({})`",
-            );
-        }
-        if !self.board_exists {
-            return (
-                "Board phase 1 — choose layers, create the outline, and place connectors/mechanical parts",
-                "`sync_board({rules:{layer_count:...},intent:...})`, `place_board({refs:[...],intent:...})`, `render_board({})`, `check_board({})`",
             );
         }
         if self
@@ -1628,7 +1666,7 @@ impl TurnProgress {
         if self.drc.as_deref() == Some("clean") {
             return (
                 "Board phase 8 — fabrication export",
-                "`render_board({})`, `check_board({})`, then `export_fab({})` only if the check remains clean",
+                "`get_board({})`, `render_board({})`, `check_board({})`, then `export_fab({})` only if the check remains clean",
             );
         }
         (
@@ -2903,6 +2941,7 @@ mod tests {
             board_parts: Some((18, 18)),
             erc: Some((0, 2)),
             board_exists: true,
+            board_started_at: Some(Duration::from_secs(145)),
             routed: Some((23, 41)),
             drc: Some("3 blocking finding(s), 2 unconnected item(s)".to_string()),
             blocker: Some("`route_board`: crystal net blocked by U1 courtyard".to_string()),
@@ -2913,15 +2952,25 @@ mod tests {
                 "routed_connection_count": 24,
                 "total_connection_count": 41
             }),
+            Duration::from_secs(200),
+            true,
         );
 
         let handoff = progress.handoff(
             "Per-turn wall-clock budget reached after 270s and 19 tool calls.",
-            19,
+            Duration::from_secs(270),
             None,
         );
 
         assert!(handoff.starts_with("## Partial state\n"), "{handoff}");
+        assert!(
+            handoff.contains("- Phase reached: board routing"),
+            "{handoff}"
+        );
+        assert!(
+            handoff.contains("- Budget used: schematic 145s, board 125s"),
+            "{handoff}"
+        );
         assert!(handoff.contains("- Parts placed: 18/18"), "{handoff}");
         assert!(
             handoff.contains("- ERC: 0 error(s), 2 warning(s)"),

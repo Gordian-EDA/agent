@@ -1,9 +1,34 @@
 //! Completion-contract coverage with a scripted provider and real schematic tools.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use async_trait::async_trait;
 use gordian_core::prompts::system_prompt;
 use gordian_core::testing::{ScriptedClient, final_text, tool_call};
-use gordian_core::{Agent, AgentRuntime, StopReason};
+use gordian_core::{Agent, AgentRuntime, ChatMessage, Provider, StopReason, StreamEnd, Tool};
 use serde_json::json;
+
+struct DelayableScriptedClient {
+    inner: ScriptedClient,
+    delay: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl Provider for DelayableScriptedClient {
+    async fn complete(
+        &self,
+        system: &str,
+        messages: &[ChatMessage],
+        tools: &[Tool],
+    ) -> anyhow::Result<StreamEnd> {
+        if self.delay.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        self.inner.complete(system, messages, tools).await
+    }
+}
 
 fn place_two_resistors() -> gordian_core::StreamEnd {
     tool_call(
@@ -158,5 +183,42 @@ async fn a_turn_cut_off_mid_edit_keeps_the_partial_schematic() {
     assert!(
         !after.contains("R2"),
         "the last legal partial edit should remain for the next turn"
+    );
+}
+
+#[tokio::test]
+async fn wall_clock_stop_after_erc_zero_starts_next_steps_with_sync_board() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let delay = Arc::new(AtomicBool::new(false));
+    let client = DelayableScriptedClient {
+        inner: ScriptedClient::new(vec![
+            place_two_resistors(),
+            tool_call("initial-check", "check_schematic", json!({})),
+            final_text("schematic complete"),
+            tool_call("continue-check", "check_schematic", json!({})),
+        ]),
+        delay: Arc::clone(&delay),
+    };
+    let mut agent = Agent::new(client, ctx, system_prompt());
+
+    agent
+        .run_turn("create a two-resistor divider", None)
+        .await
+        .unwrap();
+    assert!(!agent.ctx().pcb_path().exists());
+
+    agent.set_turn_wall_clock_for_test(Duration::from_millis(100));
+    delay.store(true, Ordering::Relaxed);
+    let outcome = agent.run_turn("continue", None).await.unwrap();
+
+    assert!(matches!(outcome.stop_reason, StopReason::TimeLimit { .. }));
+    assert!(outcome.final_text.contains("- ERC: 0 error(s)"));
+    let next_steps = outcome.final_text.split_once("## Next steps\n").unwrap().1;
+    assert!(
+        next_steps.starts_with("- `sync_board("),
+        "next steps did not start at the board: {next_steps}"
     );
 }
