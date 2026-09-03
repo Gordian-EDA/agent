@@ -256,3 +256,7 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   by clamps), STM32 copper_edge_clearance 12 + courtyards 3. BMS/ESP32 never reached route_board in
   3 turns (schematic repair ate turns 1–2) → round 6 with --max-turns 5; STM32 route_board 5/32 —
   placement congestion + nets to staged parts.
+- pcb-sync-shorts re-merged (1b20eb98; first attempt's script deleted the branch after a failed
+  index write — recovered). Gating + push + round 6 (camp8, --max-turns 5) in background.
+  lane/prompt-pace (codex): once ERC errors are 0 go to the board in the same turn; handoff names the
+  first board call; "continue" turns start from get_board. Lessons recorded in memory.
