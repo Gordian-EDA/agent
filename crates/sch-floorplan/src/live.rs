@@ -463,6 +463,7 @@ fn place_parts_inner(
     });
     let placed = posed(movable, &out.poses);
     let inc = incidence(&placed);
+    let was_global = global_label_nets(doc);
     let warnings = live_phase(
         phase,
         "realise",
@@ -488,6 +489,7 @@ fn place_parts_inner(
             Ok(warnings)
         },
     )?;
+    enforce_label_scopes(doc, &declared, &was_global);
 
     let mut mismatch = live_phase(phase, "verify", placed.len(), inc.len(), || {
         verify(doc, &design)
@@ -608,6 +610,9 @@ fn rearrange_inner(
     let mut owned = footprints(&movable);
     let ir = crate::floorplan::infer_ir(env, &design);
     let snapshot = doc.snapshot();
+    // Read before the erase: a net whose only labels belong to the selection would
+    // otherwise have no scope on record by the time the redraw needs one.
+    let was_global = global_label_nets(doc);
     let (placed, ir) = match engine {
         Some(engine) => {
             let out = live_phase(phase, "place", movable.len(), before.nets.len(), || {
@@ -659,6 +664,9 @@ fn rearrange_inner(
             Ok((redrawn, inc, warnings))
         },
     )?;
+    // A re-wire declares no ports of its own, so every net keeps the scope the
+    // sheet already gave it.
+    enforce_label_scopes(doc, &BTreeSet::new(), &was_global);
 
     let mismatch = live_phase(phase, "verify", placed.len(), inc.len(), || Mismatch {
         disturbed: disturbed(&before, &connect::extract(doc)),
@@ -958,6 +966,58 @@ fn driven_nets(doc: &SchDoc, netlist: &Netlist) -> Vec<String> {
         })
         .map(|net| net.name.clone())
         .collect()
+}
+
+/// The nets the sheet already names with a global label.
+fn global_label_nets(doc: &SchDoc) -> BTreeSet<String> {
+    doc.labels()
+        .filter(|label| label.kind == sch_doc::LabelKind::Global)
+        .map(|label| sch_doc::unescape(&label.text))
+        .collect()
+}
+
+/// Give every net one label scope on the sheet, returning how many labels changed.
+///
+/// A block reaches an existing net by NAME, and the router draws that reach as a
+/// port pennant while the same net's own pins keep plain stub labels — two scopes
+/// for one name, which KiCAD reports as `same_local_global_label` and which do not
+/// actually merge. The scope is decided per net, not per label: a net the payload
+/// declared in `intent.ports` is board I/O and is global everywhere on the sheet;
+/// every other net keeps whatever scope the sheet already used for it, so joining
+/// by name from a later block can never promote a sheet-local net to a pennant.
+fn enforce_label_scopes(
+    doc: &mut SchDoc,
+    declared: &BTreeSet<&str>,
+    was_global: &BTreeSet<String>,
+) -> usize {
+    let mut scopes: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+    for label in doc.labels() {
+        let seen = match label.kind {
+            sch_doc::LabelKind::Local => (true, false),
+            sch_doc::LabelKind::Global => (false, true),
+            sch_doc::LabelKind::Hier => continue,
+        };
+        let entry = scopes
+            .entry(sch_doc::unescape(&label.text))
+            .or_insert((false, false));
+        entry.0 |= seen.0;
+        entry.1 |= seen.1;
+    }
+    let mut changed = 0;
+    for (net, (local, global)) in scopes {
+        let want = match declared.contains(net.as_str()) || was_global.contains(&net) {
+            true => sch_doc::LabelKind::Global,
+            false => sch_doc::LabelKind::Local,
+        };
+        // Two scopes always have to be settled. One scope is only touched when the
+        // sheet has an opinion the drawing lost — a re-wire redraws a port's net
+        // with plain labels, and the port is not the re-wire's to demote.
+        let settle = local && (global || want == sch_doc::LabelKind::Global);
+        if settle {
+            changed += doc.set_label_scope(&net, want);
+        }
+    }
+    changed
 }
 
 /// Nets the new parts share with something already on the sheet.

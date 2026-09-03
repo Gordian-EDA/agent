@@ -110,9 +110,13 @@ fn unresolved_and_incompatible_footprints_place_with_repair_reports() {
             && issue["did_you_mean"].is_array()
     }));
     assert!(unresolved.iter().any(|issue| issue["ref"] == "C1"));
-    assert!(result["gaps"].as_array().unwrap().iter().any(|gap| {
-        gap["kind"] == "footprint_unresolved" && gap["refdes"] == "SW1"
-    }));
+    assert!(
+        result["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| { gap["kind"] == "footprint_unresolved" && gap["refdes"] == "SW1" })
+    );
 
     let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
     for reference in ["SW1", "C1"] {
@@ -150,9 +154,16 @@ fn malformed_layout_intent_is_dropped_but_parts_remain_strict() {
     assert!(result.get("error").is_none(), "placement failed: {result}");
     let warnings = result["warnings"].as_array().unwrap();
     assert_eq!(warnings.len(), 4, "{result}");
-    for path in ["parts[0].", "intent.ports.J1_PIN2", "intent.rails.3V3", "intent.relations[0]"] {
+    for path in [
+        "parts[0].",
+        "intent.ports.J1_PIN2",
+        "intent.rails.3V3",
+        "intent.relations[0]",
+    ] {
         assert!(
-            warnings.iter().any(|warning| warning.as_str().unwrap().contains(path)),
+            warnings
+                .iter()
+                .any(|warning| warning.as_str().unwrap().contains(path)),
             "missing warning for {path}: {result}"
         );
     }
@@ -210,8 +221,8 @@ fn place_parts_contract_advertises_repairable_inputs() {
         assert!(description.contains(phrase), "missing {phrase}");
     }
     assert_eq!(
-        definition.schema.unwrap()["properties"]["intent"]["properties"]["rails"]
-            ["additionalProperties"]["enum"],
+        definition.schema.unwrap()["properties"]["intent"]["properties"]["rails"]["additionalProperties"]
+            ["enum"],
         json!(["left", "right", "top", "bottom"])
     );
 }

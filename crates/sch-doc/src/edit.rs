@@ -458,6 +458,35 @@ impl SchDoc {
         removed
     }
 
+    /// Give every label naming `net` the same scope, returning how many changed.
+    ///
+    /// A net drawn with both a `label` and a `global_label` of the same name is
+    /// KiCAD's `same_local_global_label` warning: the two scopes do not merge, so
+    /// the drawing says one thing and the netlist another. A sheet may hold only
+    /// one scope per net, and this is where that is enforced.
+    ///
+    /// Hierarchical labels are left alone — they name a sheet pin, not a sheet
+    /// net. Each rewritten label is rebuilt from scratch rather than re-headed,
+    /// because the two scopes do not share a node shape: a `global_label` carries
+    /// a `shape` and an `Intersheetrefs` property a plain `label` must not keep.
+    pub fn set_label_scope(&mut self, net: &str, kind: LabelKind) -> usize {
+        let doomed: Vec<(String, Pose)> = self
+            .labels()
+            .filter(|label| {
+                label.kind != kind
+                    && label.kind != LabelKind::Hier
+                    && crate::text::unescape(&label.text) == net
+            })
+            .map(|label| (label.uuid.clone(), label.at))
+            .collect();
+        let uuids: Vec<String> = doomed.iter().map(|(uuid, _)| uuid.clone()).collect();
+        self.remove_drawing(&uuids);
+        for (_, at) in &doomed {
+            self.add_label(kind, net, *at);
+        }
+        doomed.len()
+    }
+
     /// Retarget a placed symbol at a different library part, keeping its
     /// position, orientation and properties.
     ///
@@ -605,7 +634,17 @@ impl SchDoc {
     }
 
     /// Mark a pin intentionally unconnected. Returns the marker's UUID.
+    ///
+    /// A point carries at most one marker: two markers at one coordinate say
+    /// nothing a single one does not, and KiCAD counts each of them separately
+    /// when it reports the pin. A repeat call returns the marker already there.
     pub fn add_no_connect(&mut self, at: Point2) -> String {
+        if let Some(existing) = self.items().iter().find_map(|item| match item {
+            Item::NoConnect(marker) if marker.at.near_eq(at, geom::EPS) => Some(&marker.uuid),
+            _ => None,
+        }) {
+            return existing.clone();
+        }
         let uuid = self.derive_uuid("no_connect", &format!("{},{}", at.x, at.y));
         let node = list(vec![
             sym("no_connect"),

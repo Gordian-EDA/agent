@@ -378,9 +378,11 @@ fn nonexistent_footprints_place_with_same_library_repairs() {
     assert!(result.get("error").is_none(), "placement failed: {result}");
     let repair = &result["footprints_unresolved"][0];
     assert!(
-        repair["did_you_mean"].as_array().unwrap().iter().any(|candidate| {
-            candidate == "Capacitor_SMD:C_1206_3216Metric"
-        }),
+        repair["did_you_mean"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| { candidate == "Capacitor_SMD:C_1206_3216Metric" }),
         "wrong repair: {result}"
     );
     assert!(listing(&ctx).contains("C1"), "placement dropped the part");
@@ -445,11 +447,15 @@ fn nonblocking_footprint_repairs_preserve_the_package_family() {
         let mismatch = &result["footprints_unresolved"][0];
         assert!(result.get("error").is_none(), "{result}");
         assert!(
-            mismatch["did_you_mean"].as_array().unwrap().iter().any(|suggestion| {
-                suggestion
-                    .as_str()
-                    .is_some_and(|suggestion| suggestion.starts_with(family))
-            }),
+            mismatch["did_you_mean"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|suggestion| {
+                    suggestion
+                        .as_str()
+                        .is_some_and(|suggestion| suggestion.starts_with(family))
+                }),
             "suggestion escaped {family}: {result}"
         );
     }
@@ -580,7 +586,12 @@ fn place_parts_keeps_connectivity_faults_fatal_when_a_footprint_is_repairable() 
     assert!(!result["unknown_pins"].as_array().unwrap().is_empty());
     assert!(result["footprint_mismatch"].as_array().unwrap().is_empty());
     let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
-    assert_eq!(doc.symbols().filter(|symbol| symbol.refdes() == "J1").count(), 1);
+    assert_eq!(
+        doc.symbols()
+            .filter(|symbol| symbol.refdes() == "J1")
+            .count(),
+        1
+    );
 }
 
 /// Renaming a part onto a reference another part already holds must be refused:
