@@ -372,15 +372,6 @@ impl SchDoc {
         Ok(())
     }
 
-    /// Drag whatever meets `from` to `to`: wire ends, junctions, labels and
-    /// no-connect markers. Returns how many items moved.
-    ///
-    /// This is what keeps a symbol's connections when the symbol moves —
-    /// leaving its wires where they were would quietly unwire the board.
-    pub fn move_attached(&mut self, from: Point2, to: Point2) -> usize {
-        self.move_attached_many(&[(from, to)])
-    }
-
     /// Relocate drawing attached at several old points in one pass.
     ///
     /// Every item is matched against its original position, so transposing two
