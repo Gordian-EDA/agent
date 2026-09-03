@@ -80,7 +80,7 @@ fn stm32_pin_keys_resolve_alternate_functions_and_rank_misses() {
     );
     let reason = unplaced["reason"].as_str().unwrap();
     assert!(!reason.contains("available pins"), "{reason}");
-    assert!(!diagnostic.contains("more"), "{diagnostic}");
+    assert!(!reason.contains("more"), "{reason}");
 }
 
 #[test]
