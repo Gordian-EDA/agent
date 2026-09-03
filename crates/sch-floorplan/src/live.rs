@@ -458,8 +458,21 @@ fn place_parts_inner(
     sch_check::nets::derive_attrs(&mut design);
 
     let mut ir = crate::floorplan::infer_ir(env, &design);
+    let available = design
+        .blocks
+        .values()
+        .flat_map(|block| block.components.keys().cloned())
+        .chain(
+            doc.symbols()
+                .filter(|symbol| !placement_ignores(symbol))
+                .map(|symbol| symbol.refdes().to_string()),
+        )
+        .collect();
+    let mut intent_warnings = Vec::new();
     if let Some(intent) = input.intent.clone() {
-        apply_intent(&mut ir, intent.into_layout_ir());
+        let (intent, warnings) = intent.into_layout_ir_for(&available);
+        intent_warnings = warnings;
+        apply_intent(&mut ir, intent);
     }
     // An unfinished single-pin net must not take the port convenience: a global label
     // reads as deliberate board I/O and silences KiCAD's own ERC, hiding the very gap
@@ -516,7 +529,8 @@ fn place_parts_inner(
                     beside: (!fresh).then(|| beside_scene(doc)).as_ref(),
                 },
             )?;
-            let mut warnings = writer.layout_warnings();
+            let mut warnings = intent_warnings;
+            warnings.extend(writer.layout_warnings());
             warnings.extend(net_conflict_warnings(env, &writer, &placed, &inc));
             crate::realize::graft(doc, writer)?;
             Ok(warnings)
@@ -815,8 +829,16 @@ fn rearrange_inner(
     // constrain the placement: obstacles are what is left once it is discounted.
     let mut owned = footprints(&movable);
     let mut ir = crate::floorplan::infer_ir(env, &design);
+    let available = design
+        .blocks
+        .values()
+        .flat_map(|block| block.components.keys().cloned())
+        .collect();
+    let mut intent_warnings = Vec::new();
     if let Some(intent) = intent {
-        apply_intent(&mut ir, intent.into_layout_ir());
+        let (intent, warnings) = intent.into_layout_ir_for(&available);
+        intent_warnings = warnings;
+        apply_intent(&mut ir, intent);
     }
     let snapshot = doc.snapshot();
     // Read before the erase: a net whose only labels belong to the selection would
@@ -889,7 +911,8 @@ fn rearrange_inner(
                     ..Default::default()
                 },
             )?;
-            let mut warnings = writer.layout_warnings();
+            let mut warnings = intent_warnings;
+            warnings.extend(writer.layout_warnings());
             warnings.extend(net_conflict_warnings(env, &writer, &placed, &inc));
             let labelled = writer.signal_label_count();
             crate::realize::graft_drawing(doc, writer)?;

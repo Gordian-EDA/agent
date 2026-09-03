@@ -164,3 +164,131 @@ fn connectivity_furniture_returns_the_nothing_placed_shape() {
     assert_eq!(result["unplaced"][0]["ref"], "#FLG5");
     assert_eq!(result["unplaced"][0]["part"], "power:PWR_FLAG");
 }
+
+#[test]
+fn arrange_reports_power_furniture_and_nearby_real_parts() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let placed = call(&ctx, "place_parts", divider());
+    assert_eq!(placed.get("error"), None, "{placed:#}");
+    let added = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [
+            {"lib_id": "power:PWR_FLAG", "ref": "#PWR01"},
+            {"lib_id": "power:PWR_FLAG", "ref": "#PWR02"}
+        ]}),
+    );
+    assert_eq!(added.get("error"), None, "{added:#}");
+    let mut doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    for (from, to) in [("#PWR01", "#FLG_Q9"), ("#PWR02", "#FLG_RAW2")] {
+        let uuid = doc.symbol_by_ref(from).unwrap().uuid.clone();
+        doc.set_field(&uuid, "Reference", to).unwrap();
+    }
+    doc.write(ctx.sch_path()).unwrap();
+
+    let furniture = call(
+        &ctx,
+        "arrange",
+        json!({
+            "refs": ["#FLG_Q9", "#FLG_RAW2"],
+            "intent": {"relations": [
+                {"kind": "below", "a": "#FLG_Q9", "b": "R1"},
+                {"kind": "below", "a": "#FLG_RAW2", "b": "R2"}
+            ]}
+        }),
+    );
+    assert_eq!(furniture.get("error"), None, "{furniture:#}");
+    assert_eq!(
+        furniture["changed"],
+        "no arrangeable parts selected",
+        "{furniture:#}"
+    );
+    assert_eq!(
+        furniture["not_arrangeable"],
+        json!(["#FLG_Q9", "#FLG_RAW2"]),
+        "{furniture:#}"
+    );
+    assert!(
+        furniture["arrangeable_nearby"]["#FLG_Q9"]
+            .as_array()
+            .is_some_and(|refs| refs.iter().any(|reference| reference == "R1")),
+        "{furniture:#}"
+    );
+
+    let mixed = call(
+        &ctx,
+        "arrange",
+        json!({
+            "refs": ["#FLG_Q9", "R1"],
+            "intent": {"relations": [
+                {"kind": "below", "a": "#FLG_Q9", "b": "R1"}
+            ]}
+        }),
+    );
+    assert_eq!(mixed.get("error"), None, "{mixed:#}");
+    assert_eq!(mixed["changed"]["moved"], json!(["R1"]), "{mixed:#}");
+    assert_eq!(mixed["not_arrangeable"], json!(["#FLG_Q9"]), "{mixed:#}");
+    assert!(
+        mixed["changed"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("intent.relations[0]")))),
+        "{mixed:#}"
+    );
+}
+
+#[test]
+fn connecting_coincident_power_and_flag_pins_is_idempotent() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let added = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [
+            {"lib_id": "power:GND", "ref": "#PWR01", "value": "GND"},
+            {"lib_id": "power:PWR_FLAG", "ref": "#PWR02", "value": "GND"}
+        ]}),
+    );
+    assert_eq!(added.get("error"), None, "{added:#}");
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let pins = sch_doc::placed_pins(&doc);
+    let target = pins.iter().find(|pin| pin.refdes == "#PWR01").unwrap().at;
+    let flag_pin = pins.iter().find(|pin| pin.refdes == "#PWR02").unwrap();
+    let flag = doc.symbol_by_ref("#PWR02").unwrap();
+    let source = std::fs::read_to_string(ctx.sch_path()).unwrap();
+    let source = sch_floorplan::test_util::replace_symbol_at(
+        &source,
+        "#PWR02",
+        [
+            target.x - (flag_pin.at.x - flag.at.x),
+            target.y - (flag_pin.at.y - flag.at.y),
+        ],
+    );
+    std::fs::write(ctx.sch_path(), source).unwrap();
+    let mut doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    for (from, to) in [("#PWR01", "#PWR_GND"), ("#PWR02", "#FLG_GND")] {
+        let uuid = doc.symbol_by_ref(from).unwrap().uuid.clone();
+        doc.set_field(&uuid, "Reference", to).unwrap();
+    }
+    doc.write(ctx.sch_path()).unwrap();
+
+    let connected = call(
+        &ctx,
+        "connect",
+        json!({"from": "#PWR_GND.1", "to": "#FLG_GND.1"}),
+    );
+
+    assert_eq!(connected.get("error"), None, "{connected:#}");
+    assert_eq!(connected["changed"], "already connected", "{connected:#}");
+    assert_eq!(
+        connected["net_delta"],
+        "connectivity unchanged",
+        "{connected:#}"
+    );
+}

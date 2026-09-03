@@ -167,20 +167,17 @@ pub fn minted_net_names(doc: &SchDoc, parts: &[&BenchPart]) -> BTreeMap<String, 
                 .or_insert((part.refdes.as_str(), pin.as_str()));
         }
     }
-    let requested: BTreeSet<&str> = first_pin.keys().copied().collect();
-
     let mut occupied: BTreeSet<String> = doc
         .labels()
         .map(|label| sch_doc::unescape(&label.text))
-        .chain(requested.iter().map(|net| (*net).to_string()))
+        .chain(first_pin.keys().map(|net| (*net).to_string()))
         .collect();
     let mut out = BTreeMap::new();
-    for net in requested.iter().copied().filter(|net| is_derived_name(net)) {
-        let (refdes, pin) = first_pin[net];
+    for (net, (refdes, pin)) in first_pin.iter().filter(|(net, _)| is_derived_name(net)) {
         let base = format!("N_{}_{}", identifier(refdes), identifier(pin));
         let authored = unique_name(&base, &occupied);
         occupied.insert(authored.clone());
-        out.insert(net.to_string(), authored);
+        out.insert((*net).to_string(), authored);
     }
     out
 }
