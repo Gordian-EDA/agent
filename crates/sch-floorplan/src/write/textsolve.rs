@@ -40,30 +40,32 @@ impl SchematicWriter {
     ///
     /// ## Idempotence
     ///
-    /// The pass only processes labels with `stub.is_some()` and clears `stub` to
-    /// `None` on any that retract; a *surviving* stub keeps its `Some(..)`, its
-    /// emitted wire is endpoint-deduped, and that wire is registered **on the
-    /// stub's own net**, so a re-run reads it as a deliberate same-net join (not
-    /// a foreign segment) and the survivor survives again. A second call is
-    /// therefore a no-op. This lets a caller run it early (e.g. to lint the
-    /// post-retraction geometry) and have `finish` run it again harmlessly.
+    /// The pass only processes labels with `stub.is_some()` and clears `stub` when
+    /// the label retracts. A covered stub keeps its attachment metadata while
+    /// junctions bind any interior pin/label anchors to the covering wire. Every
+    /// emitted wire is registered on the stub's own net, so a second call is a
+    /// no-op. This lets a caller run it early (e.g. to lint the post-retraction
+    /// geometry) and have `finish` run it again harmlessly.
     ///
     /// **Foreign geometry** at pass start = every *fixed* connection point (power
     /// symbol pins — origin, net = the Value; no-connect markers — a reserved
     /// sentinel net; direct labels; and every signal stub's own pin endpoint,
-    /// always safe) plus every existing wire **segment and endpoint**, under the
-    /// net that wire was drawn for. A stub touching a wire of the *same* net is a
-    /// deliberate join and survives; only a touch with a *different* net is foreign.
+    /// recorded as its own-net anchor) plus every existing wire **segment and
+    /// endpoint**, under the net that wire was drawn for. A stub touching a wire
+    /// of the *same* net is a deliberate join and survives; only a touch with a
+    /// *different* net is foreign.
     ///
     /// Signal stubs are then walked in deterministic `uuid_key` order. A stub is
-    /// **retracted** — its label snapped back onto its always-safe pin endpoint
-    /// (keeping its outward orientation, so the text reads away from the
-    /// body), no wire emitted — when its end coincides
-    /// with a foreign point, its end lies on a foreign segment, or its segment
+    /// **retracted** — its label snapped back onto its pin endpoint (keeping its
+    /// outward orientation, so the text reads away from the body), no wire
+    /// emitted — when either endpoint touches foreign geometry or its segment
     /// passes through a foreign point. A *surviving* stub registers its endpoint
     /// and segment as occupancy so a later differing-net stub cannot then collide
-    /// with it. The pin-endpoint fallback reproduces the proven pre-stub
-    /// connectivity, so retraction only ever removes an accidental merge.
+    /// with it. It replaces same-net route segments contained in its span, so the
+    /// later wire splitter cannot expose their overlap as reversed duplicates.
+    /// When the pin itself touches a foreign segment, retraction avoids adding
+    /// geometry and the post-graft net audit refuses the inherently invalid
+    /// placement.
     pub fn retract_colliding_stubs(&mut self) {
         // Sentinel "net" for no-connect anchors: a stub on a no-connect pin is
         // still a wrong attachment, so treat it as a foreign net.
@@ -125,36 +127,59 @@ impl SchematicWriter {
             let end = self.labels[i].at;
             let pin_at = self.labels[i].stub.unwrap().pin_at;
 
-            // Collision if: the end coincides with a foreign point; the end lies
-            // on a foreign segment; or the stub segment passes through a foreign
-            // point. (The pin endpoint is this net's own anchor, never foreign.)
-            // Note: because cluster-wire endpoints are registered as points, a
-            // foreign-net cluster wire endpoint landing exactly on this stub's
-            // pin endpoint will trip `seg_thru_point` and conservatively retract
-            // this stub. This is safe — it falls back to label-on-pin, never a
-            // silent merge. Cluster geometry (Task 11) is responsible for not
-            // terminating a wire on a foreign component's pin.
+            // Collision if either endpoint touches foreign geometry, or if the
+            // stub segment passes through a foreign point. A pin on a foreign
+            // segment must retract before covered-span junctions are emitted:
+            // the label-on-pin fallback remains scoped by name, while a rendered
+            // junction there would make the invalid placement harder to diagnose.
+            // The post-graft net audit remains responsible for refusing a symbol
+            // whose pin itself landed on that foreign segment.
             let end_on_point = points
                 .get(&bits(end))
                 .is_some_and(|nets| nets.iter().any(|n| *n != net));
             let end_on_seg = segments
                 .iter()
                 .any(|seg| seg.net != net && seg.segment.contains_point(end));
+            let pin_on_foreign_seg = segments
+                .iter()
+                .any(|seg| seg.net != net && seg.segment.contains_point(pin_at));
             let seg_thru_point = points.iter().any(|(&(xb, yb), nets)| {
                 let p = Point2::new(f64::from_bits(xb), f64::from_bits(yb));
                 nets.iter().any(|n| *n != net) && Segment::new(pin_at, end).contains_point(p)
             });
+            let covering = segments
+                .iter()
+                .find(|seg| {
+                    seg.net == net
+                        && seg.segment.contains_point(pin_at)
+                        && seg.segment.contains_point(end)
+                })
+                .map(|seg| seg.segment);
 
-            if end_on_point || end_on_seg || seg_thru_point {
+            if end_on_point || end_on_seg || seg_thru_point || pin_on_foreign_seg {
                 // Keep the outward dir: the text still reads away from the
                 // body (an East reset would run a west-side pin's text back
                 // across the pin line, over the pin name).
                 self.labels[i].at = pin_at;
                 self.labels[i].stub = None;
+            } else if let Some(covering) = covering {
+                for at in [pin_at, end] {
+                    let is_endpoint = at.near_eq(covering.a, EPS) || at.near_eq(covering.b, EPS);
+                    if !is_endpoint {
+                        self.add_junction_on_net(at, &net);
+                    }
+                }
+                add_point(end, &net, &mut points);
             } else {
                 // The stub wire is attributed to its own net so a re-run reads it
                 // as a deliberate same-net join and does not retract every
                 // survivor onto its pin.
+                let stub_span = Segment::new(pin_at, end);
+                self.wires.retain(|wire| {
+                    wire.net != net
+                        || !stub_span.contains_point(wire.a)
+                        || !stub_span.contains_point(wire.b)
+                });
                 self.add_wire_on_net(pin_at, end, &net);
                 add_point(end, &net, &mut points);
                 segments.push(sch_model::route::NetSegment::new(pin_at, end, net));
@@ -1119,7 +1144,7 @@ impl SchematicWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::write::{Dir, Instance};
+    use crate::write::{Dir, Instance, PinLabel, Stub};
     use geom::Point2;
     use kicad::KicadInstallation;
     use kicad_symbol::geometry::PinGeom;
@@ -1226,6 +1251,102 @@ mod tests {
         w.add_symbol(&env, "Device:R", "R2", "2k", [177.8, 63.5], 0.0)
             .unwrap();
         assert!(w.layout_warnings().is_empty());
+    }
+
+    #[test]
+    fn same_net_route_prefix_is_replaced_by_label_stub() {
+        let mut w = SchematicWriter::new();
+        let pin_at = Point2::new(10.16, 10.16);
+        let label_at = Point2::new(13.97, 10.16);
+        w.labels.push(PinLabel {
+            net: "SIG".into(),
+            at: label_at,
+            uuid_key: "U1:1:SIG:0".into(),
+            dir: Dir::East,
+            stub: Some(Stub { pin_at }),
+            global: true,
+        });
+        w.add_wire_on_net([11.43, 10.16], pin_at, "SIG");
+        w.add_wire_on_net([11.43, 8.89], [11.43, 10.16], "SIG");
+
+        w.prepare();
+
+        let once: Vec<_> = w
+            .wires
+            .iter()
+            .map(|wire| (wire.uuid_key.clone(), wire.net.clone()))
+            .collect();
+        w.prepare();
+
+        let mut segments = std::collections::BTreeSet::new();
+        for wire in &w.wires {
+            let a = crate::write::point_key(wire.a);
+            let b = crate::write::point_key(wire.b);
+            assert!(segments.insert(if a <= b { (a, b) } else { (b, a) }));
+        }
+        assert_eq!(w.wires.len(), 3);
+        assert!(w.labels[0].stub.is_some());
+        assert_eq!(w.labels[0].at, label_at);
+        assert_eq!(
+            w.wires
+                .iter()
+                .map(|wire| (wire.uuid_key.clone(), wire.net.clone()))
+                .collect::<Vec<_>>(),
+            once
+        );
+    }
+
+    #[test]
+    fn same_net_through_wire_attaches_to_stub_pin() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0)
+            .unwrap();
+        w.add_signal_label(&env, "R1", "1", "SIG").unwrap();
+        w.add_wire_on_net([127.0, 54.61], [127.0, 60.96], "SIG");
+
+        let doc = sch_doc::SchDoc::parse(&w.finish()).unwrap();
+        let netlist = sch_doc::connect::extract(&doc);
+
+        assert!(netlist.nets.iter().any(|net| {
+            net.name == "SIG"
+                && net
+                    .pins
+                    .iter()
+                    .any(|pin| pin.refdes == "R1" && pin.pin == "1")
+        }));
+    }
+
+    #[test]
+    fn covered_stub_pin_crossing_foreign_wire_retracts_without_geometry() {
+        let Some(env) = detect_env() else { return };
+        let mut existing = SchematicWriter::new();
+        existing.add_wire_on_net([127.0, 54.61], [127.0, 60.96], "SIG");
+        existing.add_cluster_label("SIG", [127.0, 54.61], Dir::South, false);
+        existing.add_wire_on_net([121.92, 59.69], [132.08, 59.69], "OTHER");
+        existing.add_cluster_label("OTHER", [121.92, 59.69], Dir::East, false);
+        let beside = existing.route_scene();
+
+        let mut added = SchematicWriter::new();
+        added.set_beside(beside);
+        added
+            .add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0)
+            .unwrap();
+        added.add_signal_label(&env, "R1", "1", "SIG").unwrap();
+        added.prepare();
+
+        assert!(added.labels.iter().any(|label| {
+            label.net == "SIG"
+                && label.at.near_eq(Point2::new(127.0, 59.69), EPS)
+                && label.stub.is_none()
+        }));
+        assert!(
+            added
+                .junctions
+                .iter()
+                .all(|junction| !junction.at.near_eq(Point2::new(127.0, 59.69), EPS))
+        );
+        assert!(added.wires.is_empty());
     }
 
     #[test]

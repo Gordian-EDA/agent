@@ -70,7 +70,9 @@ pub fn to_doc(writer: SchematicWriter) -> sch_doc::Result<SchDoc> {
 pub fn graft(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<Vec<String>> {
     let sheet = to_doc(writer)?;
     fit_page(doc, &sheet);
-    doc.adopt(&sheet)
+    let adopted = doc.adopt(&sheet)?;
+    debug_assert_unique_wire_segments(doc);
+    Ok(adopted)
 }
 
 /// Grow `doc`'s page to hold what `sheet` draws. The realiser sizes its own page to its
@@ -87,5 +89,44 @@ fn fit_page(doc: &mut SchDoc, sheet: &SchDoc) {
 pub fn graft_drawing(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<()> {
     let sheet = to_doc(writer)?;
     fit_page(doc, &sheet);
-    doc.adopt_drawing(&sheet)
+    doc.adopt_drawing(&sheet)?;
+    debug_assert_unique_wire_segments(doc);
+    Ok(())
+}
+
+/// Assert in debug builds that the adopted sheet has unique unordered wire segments.
+fn debug_assert_unique_wire_segments(doc: &SchDoc) {
+    #[cfg(debug_assertions)]
+    {
+        let mut seen = std::collections::BTreeSet::new();
+        for wire in doc.wires() {
+            for points in wire.points.windows(2) {
+                let a = crate::write::point_key(points[0]);
+                let b = crate::write::point_key(points[1]);
+                let pair = if a <= b { (a, b) } else { (b, a) };
+                debug_assert!(
+                    seen.insert(pair),
+                    "adopted wire segments must have unique unordered endpoint pairs; repeated {pair:?}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "adopted wire segments must have unique unordered endpoint pairs")]
+    fn graft_rejects_reversed_wire_duplicate() {
+        let mut first = SchematicWriter::new();
+        first.add_wire_on_net([10.16, 10.16], [11.43, 10.16], "SIG");
+        let mut doc = to_doc(first).unwrap();
+        let mut second = SchematicWriter::new();
+        second.add_wire_on_net([11.43, 10.16], [10.16, 10.16], "SIG");
+
+        let _ = graft(&mut doc, second);
+    }
 }

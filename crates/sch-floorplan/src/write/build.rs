@@ -319,7 +319,7 @@ impl SchematicWriter {
     ///
     /// If the two points are identical after snapping, the segment is silently
     /// dropped (a zero-length wire would clutter the schematic with no benefit).
-    /// The `uuid_key` is content-derived so repeated calls with the same
+    /// The `uuid_key` is content-derived so repeated calls with the same ordered
     /// endpoints produce one deterministic wire.
     pub fn add_wire_on_net(&mut self, a: impl Into<Point2>, b: impl Into<Point2>, net: &str) {
         self.push_wire(a.into(), b.into(), net.to_string());
@@ -341,6 +341,24 @@ impl SchematicWriter {
             uuid_key,
             net,
         });
+    }
+
+    /// Assert in debug builds that every wire has a unique unordered endpoint pair.
+    pub(super) fn debug_assert_unique_wire_segments(&self) {
+        #[cfg(debug_assertions)]
+        {
+            let mut seen = std::collections::BTreeSet::new();
+            for wire in &self.wires {
+                let a = point_key(wire.a);
+                let b = point_key(wire.b);
+                let pair = if a <= b { (a, b) } else { (b, a) };
+                debug_assert!(
+                    seen.insert(pair),
+                    "wire segments must have unique unordered endpoint pairs; repeated {pair:?} on `{}`",
+                    wire.net
+                );
+            }
+        }
     }
 
     /// Place a cluster net label at `at`, oriented `dir`.
