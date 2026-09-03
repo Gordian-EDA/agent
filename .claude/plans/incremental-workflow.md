@@ -281,3 +281,8 @@ re-place." Quality first; time later via parallel subagents; schematic too.
 - Text-collision measurement (scratchpad/textcol): lint measures a disjoint universe from the render
   (recall 0/103, 16 FPs); one validated as-drawn box model would take 0.353 → ~0.055 collisions/part
   → lane/text-box-model (Opus). Running: graft-additive (Opus), pcb-seed-shorts (Opus), text-box-model.
+- pcb-seed-shorts finished on Opus and merged locally (staging by property, envelopes side by side,
+  guard drops staged pads, route imports stale net tables, delete_copper selectors; review fixed a
+  rotated-envelope bug and outline refit unstaging parts). Prompt tightened back under 8000 chars.
+  Local main now holds: train 3 (pace, looks), sch-refusals-4, pcb-seed-shorts, prompt trim — push
+  waits on graft-additive; then round 7.
