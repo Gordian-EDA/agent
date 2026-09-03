@@ -923,6 +923,7 @@ dependencies = [
  "pcb-workflow",
  "sch-check",
  "sch-doc",
+ "sch-drag",
  "sch-floorplan",
  "sch-model",
  "serde",
