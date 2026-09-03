@@ -25,7 +25,6 @@ use geom::Rect;
 use gordian_runtime::AgentRuntime;
 use kicad_board::{BoardDoc, BoardFootprint};
 use kicad_footprint::FootprintCatalog;
-use pcb_model::Point2;
 use pcb_place::PlacementHints;
 
 use crate::board::guard::{Edit, Guard};
@@ -34,7 +33,8 @@ use crate::seed::{PourPadConnection, PourSpec};
 use crate::create::{
     BoardSeedSpec, MISSING_FOOTPRINT_ID, SeedPart, SeedRules, add_default_power_pours,
     apply_complexity_default_layer_count, emit_board_footprint, merge, parse_seed_bounds,
-    parse_seed_rules_over, plan_seed_board, rule_adjustments, staging_pose, write_seed_plan,
+    parse_seed_rules_over, plan_seed_board, rule_adjustments, seed_part_envelope,
+    write_seed_plan,
 };
 
 /// One schematic part as the exported netlist has it.
@@ -428,16 +428,8 @@ fn stage_incomplete(
     // A part the board already seeded is in the row where it belongs; only the
     // ones a laid-out board carries have to be moved there, and they go after
     // the slots the row already occupies rather than on top of them.
-    let already_staged = crate::staging::staged_references(&board);
-    let mut right = board
-        .imported
-        .parts
-        .iter()
-        .filter(|part| already_staged.contains(&part.reference))
-        .filter_map(crate::staging::part_extent)
-        .map(|extent| extent.max_x)
-        .max_by(f64::total_cmp)
-        .unwrap_or(board.imported.bounds.min_x);
+    let mut row = crate::staging::StagingRow::of(&board);
+    let already_staged = row.references.clone();
     let mut moves = Vec::new();
     let annotations: Vec<kicad_board::Annotation> = on_board
         .iter()
@@ -451,16 +443,11 @@ fn stage_incomplete(
                     .expect("on_board was resolved from this snapshot");
                 let local = crate::staging::part_local_extent(part)
                     .unwrap_or(Rect::new(-1.25, -1.25, 1.25, 1.25));
-                let at = Point2::new(
-                    right + crate::staging::STAGING_GAP_MM - local.min_x,
-                    board.imported.bounds.min_y - crate::staging::STAGING_GAP_MM - local.max_y,
-                );
                 moves.push(kicad_board::FootprintPlacement {
                     reference: (*reference).clone(),
-                    at,
+                    at: row.next_pose(local),
                     rotation_deg: Some(0.0),
                 });
-                right = at.x + local.max_x;
             }
             let annotation = kicad_board::Annotation::new((*reference).clone());
             if missing.contains(*reference) {
@@ -1302,24 +1289,13 @@ fn update_board(
         .iter()
         .map(|part| (part.reference.as_str(), part))
         .collect();
-    let staged = crate::staging::staged_references(&before);
-    let staging_right = before
-        .imported
-        .parts
-        .iter()
-        .filter(|part| staged.contains(&part.reference))
-        .filter_map(crate::staging::part_extent)
-        .map(|extent| extent.max_x)
-        .max_by(f64::total_cmp)
-        .unwrap_or(before.imported.bounds.min_x);
+    let mut staging = crate::staging::StagingRow::of(&before);
     if let Err(e) = apply(
         &mut doc,
         &delta,
         &by_reference,
         &existing,
-        staging_right,
-        before.imported.bounds.min_y,
-        &staged,
+        &mut staging,
         catalog,
         mismatched,
     ) {
@@ -1680,9 +1656,7 @@ fn apply(
     delta: &BoardDelta,
     schematic: &BTreeMap<&str, &SchematicPart>,
     existing: &BTreeMap<String, BoardFootprint>,
-    mut staging_right: f64,
-    outline_top: f64,
-    staged_references: &BTreeSet<String>,
+    staging: &mut crate::staging::StagingRow,
     catalog: &FootprintCatalog,
     mismatched: &BTreeMap<String, String>,
 ) -> std::result::Result<(), String> {
@@ -1738,11 +1712,9 @@ fn apply(
             pad_nets: part.pad_nets.clone(),
             locked: None,
         };
-        let staged = was.is_none() || staged_references.contains(reference);
+        let staged = was.is_none() || staging.references.contains(reference);
         let (at, rotation) = if staged {
-            let (at, next_right) = staging_pose(&seed, catalog, staging_right, outline_top)?;
-            staging_right = next_right;
-            (at, 0.0)
+            (staging.next_pose(seed_part_envelope(&seed, catalog)?), 0.0)
         } else {
             let fp = was.expect("a non-staged replacement has an existing pose");
             (fp.at, fp.rotation)
@@ -1858,6 +1830,7 @@ fn place_added(added: &[String], ctx: &AgentRuntime) -> std::result::Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pcb_model::Point2;
 
     fn schematic(
         reference: &str,

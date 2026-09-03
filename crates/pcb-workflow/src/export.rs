@@ -489,9 +489,9 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         })
         .count();
     // The board's own part list is what turns KiCAD's prose into pad handles and
-    // says which footprints are still in the seed row. Reading it reopens the
+    // says which footprints are still in the staging row. Reading it reopens the
     // session this function closed; DRC stands either way, so it is best-effort.
-    // A part left in the seed row is not a DRC finding — KiCAD has no rule for
+    // A part left in the staging row is not a DRC finding — KiCAD has no rule for
     // "never laid out" — but it is exactly what the next `place_board({refs})`
     // call must name, so the completion signal has to say it.
     let ratsnest = crate::ratsnest::build(&board, &board.problem, &[], None);

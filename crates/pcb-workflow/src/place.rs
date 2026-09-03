@@ -113,7 +113,7 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .collect();
 
     // A board is built incrementally, so its parts sit in three states at once:
-    // staged (in the seed row, with the reason they are there), placed, and
+    // staged (in the staging row, with the reason they are there), placed, and
     // locked. The lists are the fact; every flag is derived from them.
     let state = crate::staging::BoardState::of(&board);
     let routed = !board.copper.traces.is_empty() || !board.copper.vias.is_empty();
@@ -2644,7 +2644,7 @@ struct PlacementSubset {
 /// Which parts a `place_board` call may move: the caller's `refs`, or — with no
 /// `refs` — the parts nothing has laid out yet. `None` is the whole board.
 ///
-/// A board fresh from `sync_board` has every part in the seed row, so that is
+/// A board fresh from `sync_board` has every part in the staging row, so that is
 /// the whole board; a board that has just gained parts has only those, and
 /// placing them is a subset op that leaves the rest alone. Placing a fully
 /// placed board is a no-op, not a refusal — `replace: true` is what re-places
@@ -3239,26 +3239,25 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 fits
             });
         }
-        let (nudged_moves, nudges, exact_unplaced) =
-            match crate::interactive::nudge_placement_overlaps(
-                &board,
-                ctx,
-                moves,
-                problem.bounds,
-                problem.outline.as_ref(),
-            ) {
-                Ok(validated) => validated,
-                Err(error) => {
-                    return Ok(json!({
-                        "error": format!(
-                            "could not validate intent placement against saved footprints: {error}"
-                        )
-                    }));
-                }
-            };
-        moves = nudged_moves;
-        placement_nudges = nudges;
-        placement_unplaced.extend(exact_unplaced);
+        let validated = match crate::interactive::nudge_placement_overlaps(
+            &board,
+            ctx,
+            moves,
+            problem.bounds,
+            problem.outline.as_ref(),
+        ) {
+            Ok(validated) => validated,
+            Err(error) => {
+                return Ok(json!({
+                    "error": format!(
+                        "could not validate intent placement against saved footprints: {error}"
+                    )
+                }));
+            }
+        };
+        moves = validated.placements;
+        placement_nudges = validated.nudges;
+        placement_unplaced.extend(validated.unplaced);
         for movement in &moves {
             if let Some(placement) = result
                 .placements
@@ -3506,9 +3505,9 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
         }
         // What a local call did NOT do. A subset placement that leaves parts in
-        // the seed row is half a board, and the model has no other way to learn
+        // the staging row is half a board, and the model has no other way to learn
         // it short of another `check_board`. An ILLEGAL placement wrote nothing,
-        // so the parts it selected are still in the seed row too.
+        // so the parts it selected are still in the staging row too.
         let placed: std::collections::BTreeSet<&str> = if legal {
             applied_refs.iter().map(String::as_str).collect()
         } else {
@@ -3528,7 +3527,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         if !still_staged.is_empty() {
             out["still_staged"] = json!(still_staged);
             out["still_staged_note"] = json!(
-                "these parts are still in the seed row; place them too before routing the board."
+                "these parts are still in the staging row; place them too before routing the board."
             );
         }
     }
@@ -3612,9 +3611,9 @@ pub(crate) fn write_placement(
 
 /// Move footprints, and drop the staging annotation from every one of them.
 ///
-/// Staging membership is the seed row, so a part that has just been laid out is
-/// no longer staged; leaving the reason behind would be a stale claim about a
-/// part that has moved on.
+/// The staging annotation IS membership, so a part that has just been laid out
+/// is no longer staged; leaving the reason behind would be a stale claim about
+/// a part that has moved on.
 fn write_placement_file(
     path: &std::path::Path,
     moves: &[FootprintPlacement],

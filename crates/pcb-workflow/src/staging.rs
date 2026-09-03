@@ -1,9 +1,10 @@
-//! The staging row: parts that are on the board but not yet part of it.
+//! The staging row: parts that are on the board file but not yet part of it.
 //!
 //! A board is built incrementally, so a legal board has parts nobody has placed
-//! yet. They live in the seed row `sync_board` writes above the outline — the
-//! existing staging-reason annotation records row membership and explains why
-//! each part remains there. This module reads that state back as facts the
+//! yet. The hidden staging-reason annotation IS membership — it also says why
+//! each part is still waiting — and [`StagingRow`] hands out the poses that
+//! park them clear of each other above the outline. Position is convention;
+//! only the annotation decides. This module reads that state back as facts the
 //! tools report: who is staged, why, and who is placed or locked.
 //!
 //! Staged parts are excluded from the DRC verdict and from fabrication export:
@@ -98,6 +99,63 @@ pub(crate) fn rect_json(rect: geom::Rect) -> Value {
     })
 }
 
+/// The row of provisional footprints that hangs above the board outline.
+///
+/// A staged part has no place on the board yet, but it still has real copper,
+/// so the row hands out poses no two envelopes can overlap: each footprint is
+/// laid down to the right of the last one, its top edge one gap above the
+/// outline. Every seeded and re-seeded part goes through here, which is why a
+/// creation sync can never short a board against geometry it wrote itself.
+#[derive(Debug, Clone)]
+pub(crate) struct StagingRow {
+    /// The parts already in the row.
+    pub(crate) references: BTreeSet<String>,
+    /// Footprint envelopes end one gap above this line.
+    top: f64,
+    /// Right edge of the envelopes the row already holds.
+    right: f64,
+}
+
+impl StagingRow {
+    /// Read the row a saved board already carries.
+    pub(crate) fn of(board: &BoardSnapshot) -> Self {
+        let references = staged_references(board);
+        let right = board
+            .imported
+            .parts
+            .iter()
+            .filter(|part| references.contains(&part.reference))
+            .filter_map(part_extent)
+            .map(|extent| extent.max_x)
+            .max_by(f64::total_cmp)
+            .unwrap_or(board.imported.bounds.min_x);
+        Self {
+            references,
+            top: board.imported.bounds.min_y,
+            right,
+        }
+    }
+
+    /// An empty row above a board that is being written for the first time.
+    pub(crate) fn empty(origin: Point2) -> Self {
+        Self {
+            references: BTreeSet::new(),
+            top: origin.y,
+            right: origin.x,
+        }
+    }
+
+    /// Reserve the next slot for a footprint with this unrotated envelope.
+    pub(crate) fn next_pose(&mut self, local: geom::Rect) -> Point2 {
+        let at = Point2::new(
+            self.right + STAGING_GAP_MM - local.min_x,
+            self.top - STAGING_GAP_MM - local.max_y,
+        );
+        self.right = at.x + local.max_x;
+        at
+    }
+}
+
 /// Bounding box of a footprint's physical courtyard or pads at its saved pose.
 pub(crate) fn part_extent(part: &ImportedPart) -> Option<geom::Rect> {
     part_local_extent(part).map(|local| {
@@ -122,8 +180,13 @@ pub(crate) fn part_local_extent(part: &ImportedPart) -> Option<geom::Rect> {
         if back {
             local.x = -local.x;
         }
-        let half = Point2::new(pad.size.x / 2.0, pad.size.y / 2.0)
-            .rotated_half_extents(f64::from(part.rotation));
+        // `size` and `drill` are the pad's own footprint-local extents; the
+        // caller rotates the assembled envelope into world space.
+        let mut half = Point2::new(pad.size.x.abs() / 2.0, pad.size.y.abs() / 2.0);
+        if let Some(drill) = pad.drill {
+            half.x = half.x.max(drill.x.abs() / 2.0);
+            half.y = half.y.max(drill.y.abs() / 2.0);
+        }
         let pad = geom::Rect::from_center_half(local, (half.x, half.y));
         Some(match extent {
             None => pad,
@@ -321,6 +384,44 @@ mod tests {
         let path = dir.path().join("b.kicad_pcb");
         std::fs::write(&path, text).unwrap();
         kicad_board::read_snapshot(&path).unwrap()
+    }
+
+    #[test]
+    fn a_rotated_footprints_envelope_turns_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("board.kicad_pcb");
+        std::fs::write(
+            &path,
+            r#"(kicad_pcb
+ (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+ (net 0 "") (net 1 "SIG")
+ (gr_rect (start 0 0) (end 40 40) (layer "Edge.Cuts"))
+ (footprint "Test:Pad" (layer "F.Cu") (at 10 10 90)
+   (property "Reference" "R1")
+   (pad "1" smd rect (at 0 0 90) (size 4 1) (layers "F.Cu") (net 1 "SIG"))))"#,
+        )
+        .unwrap();
+        let board = kicad_board::read_snapshot(&path).unwrap();
+        let extent = part_extent(&board.imported.parts[0]).expect("a pad envelope");
+
+        assert!(
+            (extent.width() - 1.0).abs() < 1e-6 && (extent.height() - 4.0).abs() < 1e-6,
+            "a 4 x 1 pad on a 90-degree part is 1 wide and 4 tall: {extent:?}"
+        );
+    }
+
+    #[test]
+    fn the_staging_row_lays_envelopes_out_side_by_side_above_the_outline() {
+        let mut row = StagingRow::empty(Point2::new(0.0, 0.0));
+        let wide = geom::Rect::new(-6.0, -2.0, 6.0, 2.0);
+        let first = row.next_pose(wide);
+        let second = row.next_pose(wide);
+
+        assert!(first.y + wide.max_y <= -STAGING_GAP_MM, "clear of the outline");
+        assert!(
+            (second.x + wide.min_x) - (first.x + wide.max_x) >= STAGING_GAP_MM,
+            "the second envelope starts a gap past the first"
+        );
     }
 
     #[test]

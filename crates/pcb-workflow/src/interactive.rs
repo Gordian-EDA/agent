@@ -561,6 +561,16 @@ fn nudge_overlaps(board: &mut MoveBoard, plan: &mut MovePlan, clearance: f64) {
     }
 }
 
+/// Placer output after every pose was rechecked against exact footprint envelopes.
+pub(super) struct NudgedPlacements {
+    /// The poses to write, collision-free against the saved footprints.
+    pub placements: Vec<FootprintPlacement>,
+    /// The parts a collision moved, with where they came from.
+    pub nudges: Vec<Value>,
+    /// The parts no legal pose fit, with the reason.
+    pub unplaced: Vec<Value>,
+}
+
 /// Recheck placer output against exact saved-footprint envelopes and nudge collisions.
 pub(super) fn nudge_placement_overlaps(
     snapshot: &BoardSnapshot,
@@ -568,7 +578,7 @@ pub(super) fn nudge_placement_overlaps(
     placements: Vec<FootprintPlacement>,
     bounds: Rect,
     outline: Option<&Polygon>,
-) -> std::result::Result<(Vec<FootprintPlacement>, Vec<Value>, Vec<Value>), String> {
+) -> std::result::Result<NudgedPlacements, String> {
     let mut board = MoveBoard::from_snapshot(
         snapshot,
         &crate::place::courtyard_extents(snapshot, ctx),
@@ -633,7 +643,11 @@ pub(super) fn nudge_placement_overlaps(
         }
         accepted.push(plan.placements.remove(0));
     }
-    Ok((accepted, nudged, unplaced))
+    Ok(NudgedPlacements {
+        placements: accepted,
+        nudges: nudged,
+        unplaced,
+    })
 }
 
 const MOVE_SEARCH_GRID_MM: f64 = 0.25;

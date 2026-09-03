@@ -218,25 +218,24 @@ pub(super) fn plan_seed_board(
         },
         SeedBounds::Auto => Point2 { x: 0.0, y: 0.0 },
     };
-    let mut right = seed_origin.x;
+    let mut row = crate::staging::StagingRow::empty(seed_origin);
     for dp in &spec.parts {
         let source = footprint_source(&dp.reference, &dp.footprint, catalog)?;
-        let local = staging_envelope(&dp.footprint, &source);
-        let (staged_at, next_right) = next_staging_pose(local, right, seed_origin.y);
+        let (at, rotation) = match &dp.locked {
+            Some(locked) => (locked.at, locked.rotation),
+            None => (row.next_pose(staging_envelope(&dp.footprint, &source)), 0.0),
+        };
         parts.push(SeedFootprint {
             reference: dp.reference.clone(),
             value: dp.value.clone(),
             lib_id: dp.footprint.clone(),
             source,
             pad_nets: dp.pad_nets.clone(),
-            at: dp.locked.as_ref().map(|l| l.at).unwrap_or(staged_at),
-            rotation: dp.locked.as_ref().map(|l| l.rotation).unwrap_or(0.0),
+            at,
+            rotation,
             locked: dp.locked.is_some(),
             staged: dp.locked.is_none(),
         });
-        if dp.locked.is_none() {
-            right = next_right;
-        }
     }
     let (effective_rules, rule_notes) = effective_seed_rules(&spec.rules, &parts);
     let sizing = crate::sizing::size_board(
@@ -823,30 +822,19 @@ pub(super) fn emit_board_footprint(
     emit_seed_footprint(&seed, net_codes).map_err(|e| format!("part {}: {e}", part.reference))
 }
 
-/// Place one newly added footprint after the current staging-row right edge.
-pub(super) fn staging_pose(
+/// The unrotated envelope a staged footprint occupies in the staging row.
+pub(super) fn seed_part_envelope(
     part: &SeedPart,
     catalog: &FootprintCatalog,
-    right: f64,
-    outline_top: f64,
-) -> std::result::Result<(Point2, f64), String> {
+) -> std::result::Result<Rect, String> {
     let source = footprint_source(&part.reference, &part.footprint, catalog)?;
-    let local = staging_envelope(&part.footprint, &source);
-    Ok(next_staging_pose(local, right, outline_top))
+    Ok(staging_envelope(&part.footprint, &source))
 }
 
 fn staging_envelope(lib_id: &str, source: &str) -> Rect {
     kicad_footprint::Footprint::parse_str(lib_id, source)
         .map(|footprint| crate::place::placement_envelope(&footprint))
         .unwrap_or(Rect::new(-1.25, -1.25, 1.25, 1.25))
-}
-
-fn next_staging_pose(local: Rect, right: f64, outline_top: f64) -> (Point2, f64) {
-    let at = Point2::new(
-        right + crate::staging::STAGING_GAP_MM - local.min_x,
-        outline_top - crate::staging::STAGING_GAP_MM - local.max_y,
-    );
-    (at, at.x + local.max_x)
 }
 
 fn is_817_family(part: &SeedFootprint) -> bool {
@@ -2077,8 +2065,9 @@ mod tests {
     fn staging_uses_real_envelopes_outside_the_outline() {
         let first = Rect::new(-12.0, -3.0, 5.0, 4.0);
         let second = Rect::new(-2.0, -8.0, 18.0, 6.0);
-        let (first_at, first_right) = next_staging_pose(first, 0.0, 0.0);
-        let (second_at, _) = next_staging_pose(second, first_right, 0.0);
+        let mut row = crate::staging::StagingRow::empty(Point2::new(0.0, 0.0));
+        let first_at = row.next_pose(first);
+        let second_at = row.next_pose(second);
         let first_world = Rect::new(
             first.min_x + first_at.x,
             first.min_y + first_at.y,

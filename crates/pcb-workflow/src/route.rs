@@ -440,7 +440,7 @@ fn route_live_board(
         }
     };
     // A net with a terminal on a staged part leaves the router's problem: its
-    // pads are in the seed row, not where they will be, so any copper drawn to
+    // pads are in the staging row, not where they will be, so any copper drawn to
     // them is copper the next place_board would rip out again.
     let staged_nets = nets_reaching_staged(&board, &staged);
     let mut solve_view = solve_view;
