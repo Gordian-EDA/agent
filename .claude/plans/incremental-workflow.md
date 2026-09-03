@@ -155,3 +155,10 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   being removed (lane/no-baseline) with diff_schematic and introduced/pre-existing classification —
   the TUI from the repo root read a 186 GB target/. Harness: judges get clean KiCAD renders
   (lane/judge-clean-render).
+- Pushed: W3 (place_parts partial commit + bench + netlist-drawn arrange + reserve_refs enforced;
+  extractor already matches KiCAD on same-name scopes), no-baseline (no per-turn snapshot at all;
+  diff_schematic gone; check reports one list; repo cwd refused without --project), guard fix (a drag
+  may mint a name for a declared derived net). Open on main: `arrange_boundary` 40-part block and
+  `floorplan_netlist` challenge fixtures trip the writer's new duplicate-segment debug assert
+  (lane/arrange-dup); reversed-LED polarity fix needs turn-in-place (lane/turn-in-place); judges get
+  clean renders (lane/judge-clean-render).
