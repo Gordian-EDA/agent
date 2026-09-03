@@ -1,7 +1,7 @@
 //! Mutators. Every one of them invalidates only the items it rewrote, so the
 //! rest of the file is still written back from its original bytes.
 
-use geom::{Point2, Rect, stable_uuid};
+use geom::{EPS, Point2, Rect, stable_uuid};
 use kiutils_sexpr::Node;
 
 use crate::doc::SchDoc;
@@ -13,6 +13,21 @@ use crate::model::{
     set_instance_reference, set_pin_uuid, yes_no,
 };
 use crate::sexpr::{list, num, quoted, sym, tagged};
+
+/// The result of cutting wire geometry out of a rectangle.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WireClip {
+    /// Original wire items replaced or removed.
+    pub wires: usize,
+    /// Boundary endpoints created on the surviving outside wire fragments.
+    pub cut_points: Vec<Point2>,
+}
+
+struct WireFragments {
+    uuid: String,
+    outside: Vec<(Point2, Point2)>,
+    cuts: Vec<Point2>,
+}
 
 /// Landscape dimensions of the ISO page sizes KiCAD names, in millimetres.
 fn iso_page(name: &str) -> Option<[f64; 2]> {
@@ -429,7 +444,7 @@ impl SchDoc {
         moved
     }
 
-    /// Remove the wires, junctions, labels and no-connects carrying these
+    /// Remove the wires, junctions, labels, no-connects and text carrying these
     /// UUIDs, returning how many went. Symbols are not removable this way —
     /// they carry annotation state, so they go through [`Self::remove_symbol`].
     pub fn remove_drawing(&mut self, uuids: &[String]) -> usize {
@@ -440,6 +455,7 @@ impl SchDoc {
             Item::Junction(j) => !matches(&j.uuid),
             Item::Label(l) => !matches(&l.uuid),
             Item::NoConnect(n) => !matches(&n.uuid),
+            Item::Text(t) => !matches(&t.uuid),
             _ => true,
         });
         let removed = before - self.items().len();
@@ -447,6 +463,55 @@ impl SchDoc {
             self.mark_edited();
         }
         removed
+    }
+
+    /// Remove wire portions in `bounds`, keeping outside fragments terminated
+    /// exactly at the rectangle boundary.
+    pub fn clip_wires_outside(&mut self, bounds: Rect) -> WireClip {
+        let touched: Vec<WireFragments> = self
+            .wires()
+            .filter_map(|wire| {
+                let mut fragments = Vec::new();
+                let mut cuts = Vec::new();
+                let mut hit = false;
+                for pair in wire.points.windows(2) {
+                    let (outside, boundary) = segment_outside_rect(pair[0], pair[1], bounds);
+                    hit |= !boundary.is_empty() || outside.is_empty();
+                    fragments.extend(outside);
+                    cuts.extend(boundary);
+                }
+                hit.then(|| WireFragments {
+                    uuid: wire.uuid.clone(),
+                    outside: fragments,
+                    cuts,
+                })
+            })
+            .collect();
+        let uuids = touched
+            .iter()
+            .map(|wire| wire.uuid.clone())
+            .collect::<Vec<_>>();
+        self.remove_drawing(&uuids);
+        let mut cut_points = Vec::new();
+        for wire in &touched {
+            for &(from, to) in &wire.outside {
+                if !from.near_eq(to, EPS) {
+                    self.add_wire(from, to);
+                }
+            }
+            for &point in &wire.cuts {
+                if !cut_points
+                    .iter()
+                    .any(|seen: &Point2| seen.near_eq(point, EPS))
+                {
+                    cut_points.push(point);
+                }
+            }
+        }
+        WireClip {
+            wires: touched.len(),
+            cut_points,
+        }
     }
 
     /// Give every label naming `net` the same scope, returning how many changed.
@@ -921,4 +986,60 @@ impl SchDoc {
             ])],
         )
     }
+}
+
+/// The pieces of `a..b` outside `bounds`, plus newly exposed boundary points.
+fn segment_outside_rect(
+    a: Point2,
+    b: Point2,
+    bounds: Rect,
+) -> (Vec<(Point2, Point2)>, Vec<Point2>) {
+    let delta = Point2::new(b.x - a.x, b.y - a.y);
+    let mut enter = 0.0_f64;
+    let mut exit = 1.0_f64;
+    for (p, q) in [
+        (-delta.x, a.x - bounds.min_x),
+        (delta.x, bounds.max_x - a.x),
+        (-delta.y, a.y - bounds.min_y),
+        (delta.y, bounds.max_y - a.y),
+    ] {
+        if p.abs() <= EPS {
+            if q < -EPS {
+                return (vec![(a, b)], Vec::new());
+            }
+            continue;
+        }
+        let ratio = q / p;
+        if p < 0.0 {
+            enter = enter.max(ratio);
+        } else {
+            exit = exit.min(ratio);
+        }
+        if enter > exit {
+            return (vec![(a, b)], Vec::new());
+        }
+    }
+    let at = |t: f64| Point2::new(a.x + delta.x * t, a.y + delta.y * t);
+    let middle = at((enter + exit) / 2.0);
+    let crosses_interior = exit - enter > EPS
+        && middle.x > bounds.min_x + EPS
+        && middle.x < bounds.max_x - EPS
+        && middle.y > bounds.min_y + EPS
+        && middle.y < bounds.max_y - EPS;
+    if !crosses_interior {
+        return (vec![(a, b)], Vec::new());
+    }
+    let mut outside = Vec::new();
+    let mut cuts = Vec::new();
+    if enter > EPS {
+        let point = at(enter);
+        outside.push((a, point));
+        cuts.push(point);
+    }
+    if exit < 1.0 - EPS {
+        let point = at(exit);
+        outside.push((point, b));
+        cuts.push(point);
+    }
+    (outside, cuts)
 }

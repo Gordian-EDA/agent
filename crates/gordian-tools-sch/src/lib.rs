@@ -36,13 +36,14 @@ use serde_json::{Value, json};
 pub use sch_floorplan::live::PlacementBudget;
 
 /// The tools that write the schematic.
-pub const MUTATORS: [&str; 16] = [
+pub const MUTATORS: [&str; 18] = [
     "place_parts",
     "add_parts",
     "arrange",
     "rewire",
     "add_symbols",
     "remove_symbols",
+    "remove_region",
     "move_symbols",
     "set_fields",
     "assign_footprints",
@@ -53,6 +54,7 @@ pub const MUTATORS: [&str; 16] = [
     "no_connect",
     "add_power",
     "delete_wires",
+    "delete_labels",
 ];
 
 /// Whether `name` is one of this crate's tools.
@@ -105,7 +107,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "read_schematic",
-            "Read the live schematic as aligned plain text grouped into sorted parts and units, summarized power symbols, nets, loose pins, and warnings.",
+            "Read the live schematic as aligned plain text grouped into sorted parts and units, individually addressable power symbols and labels with UUIDs, nets, loose pins, and warnings.",
             json!({
                 "type": "object",
                 "properties": {
@@ -129,7 +131,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "get_net",
-            "The pins on a net and where it is named.",
+            "The pins on a net and every label UUID that names it.",
             json!({
                 "type": "object",
                 "properties": { "name": { "type": "string" } },
@@ -176,12 +178,34 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "remove_symbols",
-            "Delete parts, plus the wire stubs and labels that only served their pins; reports what \
-             it retracted.",
+            "Delete symbols by reference or UUID, including #PWR/#FLG symbols, plus no-connects, \
+             welded power flags, wire runs and labels that only served their pins. Reports counts \
+             by kind and surviving pins made loose.",
             json!({
                 "type": "object",
-                "properties": { "refs": { "type": "array", "items": { "type": "string" }, "minItems": 1 } },
+                "properties": { "refs": { "type": "array", "items": { "type": "string" }, "minItems": 1,
+                    "description": "Reference designators or symbol UUIDs." } },
                 "required": ["refs"],
+                "additionalProperties": false
+            }),
+        ),
+        (
+            "remove_region",
+            "Remove a complete design region in one call, selected by rectangle or `ap_block`. \
+             Deletes symbols, power symbols, labels, wires, junctions, no-connects and text. Wires \
+             crossing the boundary are cut there; each surviving outside endpoint is reported with \
+             its old net so a replacement block can reconnect it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "bbox": {
+                        "type": "array", "items": {"type": "number"},
+                        "minItems": 4, "maxItems": 4,
+                        "description": "Rectangle [x1,y1,x2,y2] in mm."
+                    },
+                    "block": {"type": "string", "description": "Functional `ap_block` value."}
+                },
+                "oneOf": [{"required": ["bbox"]}, {"required": ["block"]}],
                 "additionalProperties": false
             }),
         ),
@@ -388,6 +412,26 @@ pub fn tool_defs() -> Vec<Tool> {
                 "additionalProperties": false
             }),
         ),
+        (
+            "delete_labels",
+            "Remove local, global or hierarchical labels by text, UUID, rectangle or net. Reports \
+             net renames and pins made unconnected; refuses only if removing a label would silently \
+             merge two named nets.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "names": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    "uuids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    "bbox": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+                    "net": {"type": "string"}
+                },
+                "anyOf": [
+                    {"required": ["names"]}, {"required": ["uuids"]},
+                    {"required": ["bbox"]}, {"required": ["net"]}
+                ],
+                "additionalProperties": false
+            }),
+        ),
     ];
     defs.into_iter()
         .map(|(name, description, schema)| {
@@ -423,6 +467,7 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "check_schematic" => check::check_schematic(input, ctx),
         "add_symbols" => edit::add_symbols(input, ctx),
         "remove_symbols" => edit::remove_symbols(input, ctx),
+        "remove_region" => edit::remove_region(input, ctx),
         "move_symbols" => edit::move_symbols(input, ctx),
         "set_fields" => edit::set_fields(input, ctx),
         "assign_footprints" => edit::assign_footprints(input, ctx),
@@ -433,6 +478,7 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "no_connect" => wiring::no_connect(input, ctx),
         "add_power" => wiring::add_power(input, ctx),
         "delete_wires" => wiring::delete_wires(input, ctx),
+        "delete_labels" => wiring::delete_labels(input, ctx),
         _ => return None,
     })
 }

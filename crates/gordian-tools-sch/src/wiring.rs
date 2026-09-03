@@ -3,7 +3,7 @@
 //! nothing orthogonal fits — names the net at both ends instead, and says so.
 
 use anyhow::Result;
-use geom::{Dir, EPS, Point2, Segment};
+use geom::{Dir, EPS, Point2, Rect, Segment};
 use gordian_runtime::AgentRuntime;
 use sch_doc::{LabelKind, SchDoc, body_rects, connect};
 use sch_floorplan::wire::ElbowRouter;
@@ -430,6 +430,129 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .joining_nets([net.to_string()])
             .joining_nets(was)
             .part(&pin.refdes)
+            .creating(),
+    )
+}
+
+fn string_list(input: &Value, key: &str) -> Vec<String> {
+    input
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn input_bbox(input: &Value) -> std::result::Result<Option<Rect>, String> {
+    let Some(values) = input.get("bbox") else {
+        return Ok(None);
+    };
+    let Some(values) = values.as_array() else {
+        return Err("`bbox` must be [x1, y1, x2, y2] in mm".to_string());
+    };
+    let coordinates = values.iter().filter_map(Value::as_f64).collect::<Vec<_>>();
+    if coordinates.len() != 4 {
+        return Err("`bbox` must be [x1, y1, x2, y2] in mm".to_string());
+    }
+    Ok(Some(Rect::from_points(
+        Point2::new(coordinates[0], coordinates[1]),
+        Point2::new(coordinates[2], coordinates[3]),
+    )))
+}
+
+/// Remove labels selected by name, UUID, region or the net they name.
+pub fn delete_labels(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let names = string_list(&input, "names");
+    let uuids = string_list(&input, "uuids");
+    let bbox = match input_bbox(&input) {
+        Ok(bbox) => bbox,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
+    let wanted_net = input.get("net").and_then(Value::as_str);
+    if names.is_empty() && uuids.is_empty() && bbox.is_none() && wanted_net.is_none() {
+        return Ok(json!({
+            "error": "delete_labels needs one of `names`, `uuids`, `bbox` or `net`",
+        }));
+    }
+    let mut edit = Edit::open(ctx)?;
+    let scene = connect::scene(&edit.doc);
+    let on_net = |at: Point2, net: &str| {
+        scene
+            .points
+            .iter()
+            .any(|(point, name)| name == net && point.near_eq(at, EPS))
+    };
+    let doomed = edit
+        .doc
+        .labels()
+        .filter(|label| {
+            let text = sch_doc::unescape(&label.text);
+            names.contains(&text)
+                || uuids.contains(&label.uuid)
+                || bbox.is_some_and(|bounds| bounds.contains(label.at.point()))
+                || wanted_net.is_some_and(|net| text == net || on_net(label.at.point(), net))
+        })
+        .map(|label| (label.uuid.clone(), sch_doc::unescape(&label.text)))
+        .collect::<Vec<_>>();
+    if doomed.is_empty() {
+        return Ok(json!({
+            "changed": {"removed": 0, "labels": []},
+            "net_delta": "connectivity unchanged",
+        }));
+    }
+    edit.doc.remove_drawing(
+        &doomed
+            .iter()
+            .map(|(uuid, _)| uuid.clone())
+            .collect::<Vec<_>>(),
+    );
+    let after = connect::extract(&edit.doc);
+    let delta = sch_doc::Netlist::diff(edit.before(), &after);
+    if let Some((sources, target)) = delta.merged.first() {
+        let mut nets = sources.clone();
+        nets.push(target.clone());
+        nets.sort();
+        nets.dedup();
+        return Ok(json!({
+            "error": format!(
+                "refused: deleting those labels would silently merge nets {}; nothing was written",
+                nets.join(" and ")
+            ),
+        }));
+    }
+    let all_nets = edit
+        .before()
+        .nets
+        .iter()
+        .chain(&after.nets)
+        .map(|net| net.name.clone())
+        .collect::<Vec<_>>();
+    let all_refs = edit
+        .doc
+        .symbols()
+        .map(|symbol| symbol.refdes().to_string())
+        .collect::<Vec<_>>();
+    let now_unconnected = delta
+        .pins_now_unconnected
+        .iter()
+        .map(refs::label)
+        .collect::<Vec<_>>();
+    let changed = json!({
+        "removed": doomed.len(),
+        "labels": doomed.iter().map(|(_, name)| name).collect::<Vec<_>>(),
+        "nets_renamed": delta.renamed,
+        "now_unconnected": now_unconnected,
+    });
+    edit.commit(
+        changed,
+        Allow::nothing()
+            .joining_nets(all_nets)
+            .parts(all_refs)
             .creating(),
     )
 }

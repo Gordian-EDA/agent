@@ -1,11 +1,12 @@
 //! The symbol mutators: place, remove, move, retag and swap parts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use geom::{EPS, Point2, Rect};
+use geom::{EPS, Point2, Rect, Segment};
 use gordian_runtime::AgentRuntime;
 use sch_doc::{LabelKind, Pose, SchDoc, body_rect, placed_pins};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::place::{Occupancy, Side, snap, snap_point};
@@ -652,7 +653,162 @@ pub fn add_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(result)
 }
 
-/// Remove parts, together with the stubs and labels that only served them.
+#[derive(Debug, Default, Serialize)]
+struct RemovedItems {
+    symbols: usize,
+    wires: usize,
+    labels: usize,
+    no_connects: usize,
+    power: usize,
+    junctions: usize,
+    text: usize,
+}
+
+fn removed_items(before: &SchDoc, after: &SchDoc) -> RemovedItems {
+    let symbols = before
+        .symbols()
+        .filter(|symbol| !symbol.refdes().starts_with('#') && after.symbol(&symbol.uuid).is_none())
+        .count();
+    let power = before
+        .symbols()
+        .filter(|symbol| symbol.refdes().starts_with('#') && after.symbol(&symbol.uuid).is_none())
+        .count();
+    let missing = |uuid: &str| {
+        !after.items().iter().any(|item| match item {
+            sch_doc::Item::Wire(item) => item.uuid == uuid,
+            sch_doc::Item::Junction(item) => item.uuid == uuid,
+            sch_doc::Item::NoConnect(item) => item.uuid == uuid,
+            sch_doc::Item::Label(item) => item.uuid == uuid,
+            sch_doc::Item::Text(item) => item.uuid == uuid,
+            _ => false,
+        })
+    };
+    let mut removed = RemovedItems {
+        symbols,
+        power,
+        ..RemovedItems::default()
+    };
+    for item in before.items() {
+        match item {
+            sch_doc::Item::Wire(item) if missing(&item.uuid) => removed.wires += 1,
+            sch_doc::Item::Label(item) if missing(&item.uuid) => removed.labels += 1,
+            sch_doc::Item::NoConnect(item) if missing(&item.uuid) => removed.no_connects += 1,
+            sch_doc::Item::Junction(item) if missing(&item.uuid) => removed.junctions += 1,
+            sch_doc::Item::Text(item) if missing(&item.uuid) => removed.text += 1,
+            _ => {}
+        }
+    }
+    removed
+}
+
+fn symbol_targets(doc: &SchDoc, targets: &[String]) -> Result<Vec<String>, Vec<String>> {
+    let mut uuids = Vec::new();
+    let mut missing = Vec::new();
+    for target in targets {
+        if let Some(symbol) = doc.symbol(target) {
+            uuids.push(symbol.uuid.clone());
+            continue;
+        }
+        let matched = doc
+            .symbols()
+            .filter(|symbol| symbol.refdes() == target)
+            .map(|symbol| symbol.uuid.clone())
+            .collect::<Vec<_>>();
+        if matched.is_empty() {
+            missing.push(target.clone());
+        } else {
+            uuids.extend(matched);
+        }
+    }
+    uuids.sort();
+    uuids.dedup();
+    if missing.is_empty() {
+        Ok(uuids)
+    } else {
+        Err(missing)
+    }
+}
+
+fn welded_flags(doc: &SchDoc, pins: &[Point2], removed_owners: &[String]) -> Vec<String> {
+    let placed = placed_pins(doc);
+    let flags = doc
+        .symbols()
+        .filter(|symbol| symbol.refdes().starts_with("#FLG"))
+        .flat_map(|symbol| {
+            placed
+                .iter()
+                .filter(|pin| pin.owner == symbol.uuid)
+                .map(move |pin| (symbol.uuid.clone(), pin.at))
+        })
+        .collect::<Vec<_>>();
+    let wires = doc
+        .wires()
+        .filter_map(|wire| {
+            refs::ends(wire).map(|ends| (wire.uuid.clone(), Segment::new(ends.0, ends.1)))
+        })
+        .collect::<Vec<_>>();
+    let junctions = doc.items().iter().filter_map(|item| match item {
+        sch_doc::Item::Junction(junction) => Some(junction.at),
+        _ => None,
+    });
+    let junctions = junctions.collect::<Vec<_>>();
+    let component = |start: Point2| {
+        let mut points = vec![start];
+        let mut visited = BTreeSet::new();
+        for _ in 0..64 {
+            let mut grew = false;
+            for (uuid, wire) in &wires {
+                if visited.contains(uuid) {
+                    continue;
+                }
+                let joins = points.iter().any(|point| {
+                    wire.a.near_eq(*point, EPS)
+                        || wire.b.near_eq(*point, EPS)
+                        || (junctions.iter().any(|at| at.near_eq(*point, EPS))
+                            && wire.contains_point(*point))
+                });
+                if !joins {
+                    continue;
+                }
+                visited.insert(uuid.clone());
+                points.extend([wire.a, wire.b]);
+                points.extend(
+                    junctions
+                        .iter()
+                        .filter(|point| wire.contains_point(**point)),
+                );
+                grew = true;
+            }
+            if !grew {
+                break;
+            }
+        }
+        points
+    };
+    let mut removed = Vec::new();
+    for start in pins {
+        let points = component(*start);
+        let has_survivor = placed.iter().any(|pin| {
+            !removed_owners.contains(&pin.owner)
+                && !pin.refdes.starts_with("#")
+                && points.iter().any(|point| point.near_eq(pin.at, EPS))
+        });
+        if has_survivor {
+            continue;
+        }
+        removed.extend(
+            flags
+                .iter()
+                .filter(|(_, flag_pin)| points.iter().any(|point| point.near_eq(*flag_pin, EPS)))
+                .map(|(uuid, _)| uuid.clone()),
+        );
+    }
+    removed.sort();
+    removed.dedup();
+    removed
+}
+
+/// Remove parts, together with the drawing that only served them.
 pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let targets: Vec<String> = input
         .get("refs")
@@ -668,38 +824,258 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "remove_symbols needs `refs`" }));
     }
     let mut edit = Edit::open(ctx)?;
-    let missing: Vec<&String> = targets
-        .iter()
-        .filter(|r| edit.doc.symbol_by_ref(r).is_none())
-        .collect();
-    if !missing.is_empty() {
-        return Ok(json!({
-            "error": format!("not on the sheet: {}",
-                missing.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(", ")),
-        }));
-    }
-    let nets = refs::nets_touching(edit.before(), &targets);
-    let allow = Allow::nothing().nets(nets).parts(targets.clone());
+    let original = edit.doc.clone();
+    let mut uuids = match symbol_targets(&edit.doc, &targets) {
+        Ok(uuids) => uuids,
+        Err(missing) => {
+            return Ok(json!({
+                    "error": format!("not on the sheet: {}", missing.join(", ")),
+            }));
+        }
+    };
 
     let orphaned: Vec<Point2> = placed_pins(&edit.doc)
         .into_iter()
-        .filter(|p| targets.contains(&p.refdes))
+        .filter(|pin| uuids.contains(&pin.owner))
         .map(|p| p.at)
         .collect();
-    for refdes in &targets {
-        edit.doc.remove_symbol(refdes)?;
+    uuids.extend(welded_flags(&edit.doc, &orphaned, &uuids));
+    uuids.sort();
+    uuids.dedup();
+    let removed_refs = uuids
+        .iter()
+        .filter_map(|uuid| {
+            edit.doc
+                .symbol(uuid)
+                .map(|symbol| symbol.refdes().to_string())
+        })
+        .collect::<Vec<_>>();
+    let nets = refs::nets_touching(edit.before(), &removed_refs);
+    let allow = Allow::nothing().nets(nets).parts(removed_refs);
+
+    for uuid in &uuids {
+        edit.doc.remove_symbol(uuid)?;
     }
-    let mut retracted = retract_stubs(&mut edit.doc, &orphaned);
+    retract_stubs(&mut edit.doc, &orphaned);
     let floating = crate::wiring::floating_wires(&edit.doc);
-    retracted += edit.doc.remove_drawing(&floating);
+    edit.doc.remove_drawing(&floating);
     let loose = refs::newly_loose(edit.before(), &sch_doc::connect::extract(&edit.doc));
+    let removed = removed_items(&original, &edit.doc);
     edit.commit(
         json!({
-            "removed": targets,
-            "retracted_drawing": retracted,
+            "removed": {
+                "symbols": removed.symbols,
+                "wires": removed.wires,
+                "labels": removed.labels,
+                "no_connects": removed.no_connects,
+                "power": removed.power,
+            },
             "now_loose": loose,
         }),
         allow,
+    )
+}
+
+fn region_bounds(input: &Value, doc: &SchDoc) -> std::result::Result<(Rect, Vec<String>), String> {
+    let bbox = input.get("bbox");
+    let block = input.get("block").and_then(Value::as_str);
+    match (bbox, block) {
+        (Some(_), Some(_)) | (None, None) => {
+            Err("remove_region needs exactly one of `bbox` or `block`".to_string())
+        }
+        (Some(values), None) => {
+            let coordinates = values
+                .as_array()
+                .map(|values| values.iter().filter_map(Value::as_f64).collect::<Vec<_>>())
+                .unwrap_or_default();
+            if coordinates.len() != 4 {
+                return Err("`bbox` must be [x1, y1, x2, y2] in mm".to_string());
+            }
+            Ok((
+                Rect::from_points(
+                    Point2::new(coordinates[0], coordinates[1]),
+                    Point2::new(coordinates[2], coordinates[3]),
+                ),
+                Vec::new(),
+            ))
+        }
+        (None, Some(block)) => {
+            let uuids = doc
+                .symbols()
+                .filter(|symbol| {
+                    symbol
+                        .fields
+                        .get(sch_model::result::AP_BLOCK)
+                        .is_some_and(|field| field.value == block)
+                })
+                .map(|symbol| symbol.uuid.clone())
+                .collect::<Vec<_>>();
+            if uuids.is_empty() {
+                return Err(format!("no symbols belong to block `{block}`"));
+            }
+            let bounds = combined_extent(doc, &uuids).or_else(|| {
+                Rect::bounding(
+                    &uuids
+                        .iter()
+                        .filter_map(|uuid| doc.symbol(uuid).map(|symbol| symbol.at.point()))
+                        .collect::<Vec<_>>(),
+                )
+            });
+            bounds
+                .map(|bounds| (bounds, uuids))
+                .ok_or_else(|| format!("block `{block}` has no measurable region"))
+        }
+    }
+}
+
+fn region_drawing(doc: &SchDoc, bounds: Rect) -> Vec<String> {
+    doc.items()
+        .iter()
+        .filter_map(|item| match item {
+            sch_doc::Item::Junction(item) if bounds.contains(item.at) => Some(item.uuid.clone()),
+            sch_doc::Item::NoConnect(item) if bounds.contains(item.at) => Some(item.uuid.clone()),
+            sch_doc::Item::Label(item) if bounds.contains(item.at.point()) => {
+                Some(item.uuid.clone())
+            }
+            sch_doc::Item::Text(item) if bounds.contains(item.at.point()) => {
+                Some(item.uuid.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn merge_refusal(delta: &sch_doc::NetDelta) -> Option<String> {
+    let (sources, target) = delta.merged.first()?;
+    let mut nets = sources.clone();
+    nets.push(target.clone());
+    nets.sort();
+    nets.dedup();
+    Some(format!(
+        "refused: removing that region would silently merge nets {}; nothing was written",
+        nets.join(" and ")
+    ))
+}
+
+/// Remove a rectangular or named functional region, cutting crossing wires at
+/// its boundary and reporting the surviving ends.
+pub fn remove_region(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let mut edit = Edit::open(ctx)?;
+    let (bounds, block_uuids) = match region_bounds(&input, &edit.doc) {
+        Ok(selection) => selection,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
+    let original = edit.doc.clone();
+    let old_scene = sch_doc::connect::scene(&edit.doc);
+    let mut symbol_uuids = edit
+        .doc
+        .symbols()
+        .filter(|symbol| bounds.contains(symbol.at.point()) || block_uuids.contains(&symbol.uuid))
+        .map(|symbol| symbol.uuid.clone())
+        .collect::<Vec<_>>();
+    let removed_pins = placed_pins(&edit.doc)
+        .into_iter()
+        .filter(|pin| symbol_uuids.contains(&pin.owner))
+        .collect::<Vec<_>>();
+    let orphaned = removed_pins.iter().map(|pin| pin.at).collect::<Vec<_>>();
+    symbol_uuids.extend(welded_flags(&edit.doc, &orphaned, &symbol_uuids));
+    symbol_uuids.sort();
+    symbol_uuids.dedup();
+    let removed_refs = symbol_uuids
+        .iter()
+        .filter_map(|uuid| {
+            edit.doc
+                .symbol(uuid)
+                .map(|symbol| symbol.refdes().to_string())
+        })
+        .collect::<Vec<_>>();
+    let drawing = region_drawing(&edit.doc, bounds);
+    edit.doc.remove_drawing(&drawing);
+    for uuid in &symbol_uuids {
+        edit.doc.remove_symbol(uuid)?;
+    }
+    let clipped = edit.doc.clip_wires_outside(bounds);
+    retract_stubs(&mut edit.doc, &orphaned);
+
+    let after = sch_doc::connect::extract(&edit.doc);
+    let delta = sch_doc::Netlist::diff(edit.before(), &after);
+    if let Some(error) = merge_refusal(&delta) {
+        return Ok(json!({ "error": error }));
+    }
+    let surviving_cut = clipped
+        .cut_points
+        .iter()
+        .filter(|point| {
+            edit.doc.wires().any(|wire| {
+                refs::ends(wire)
+                    .is_some_and(|(a, b)| a.near_eq(**point, EPS) || b.near_eq(**point, EPS))
+            })
+        })
+        .flat_map(|point| {
+            old_scene
+                .segments
+                .iter()
+                .filter(move |(a, b, _)| Segment::new(*a, *b).contains_point(*point))
+                .map(move |(_, _, net)| (*point, net.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut now_loose = Vec::new();
+    for (point, net) in surviving_cut {
+        if !now_loose.iter().any(|entry: &Value| {
+            entry["net"] == net
+                && entry["at"][0]
+                    .as_f64()
+                    .is_some_and(|x| (x - point.x).abs() <= EPS)
+                && entry["at"][1]
+                    .as_f64()
+                    .is_some_and(|y| (y - point.y).abs() <= EPS)
+        }) {
+            now_loose.push(json!({"at": [point.x, point.y], "net": net}));
+        }
+    }
+    let mut nets_lost_members = edit
+        .before()
+        .nets
+        .iter()
+        .filter(|net| {
+            net.pins.iter().any(|member| {
+                removed_pins.iter().any(|pin| {
+                    pin.refdes == member.refdes
+                        && pin.unit == member.unit
+                        && pin.number == member.pin
+                })
+            })
+        })
+        .map(|net| net.name.clone())
+        .chain(delta.removed.iter().cloned())
+        .collect::<Vec<_>>();
+    nets_lost_members.sort();
+    nets_lost_members.dedup();
+    let counts = removed_items(&original, &edit.doc);
+    let all_nets = edit
+        .before()
+        .nets
+        .iter()
+        .chain(&after.nets)
+        .map(|net| net.name.clone())
+        .collect::<Vec<_>>();
+    let all_refs = original
+        .symbols()
+        .map(|symbol| symbol.refdes().to_string())
+        .chain(edit.doc.symbols().map(|symbol| symbol.refdes().to_string()))
+        .chain(removed_refs)
+        .collect::<BTreeSet<_>>();
+    edit.commit(
+        json!({
+            "bbox": [bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y],
+            "removed": counts,
+            "now_loose": now_loose,
+            "nets_lost_members": nets_lost_members,
+        }),
+        Allow::nothing()
+            .joining_nets(all_nets)
+            .parts(all_refs)
+            .creating(),
     )
 }
 
@@ -736,6 +1112,7 @@ pub(crate) fn retract_stubs(doc: &mut SchDoc, orphaned: &[Point2]) -> usize {
         })
         .collect();
     let mut removed = doc.remove_drawing(&markers);
+    removed += remove_unheld_components(doc, &orphaned);
     let mut frontier: Vec<Point2> = orphaned.clone();
     let mut peeled: Vec<Point2> = orphaned;
     for _ in 0..64 {
@@ -783,6 +1160,92 @@ pub(crate) fn retract_stubs(doc: &mut SchDoc, orphaned: &[Point2]) -> usize {
         frontier = next;
     }
     removed + doc.remove_drawing(&stranded_labels(doc, &peeled))
+}
+
+/// Drawing components reached by removed pins and held by no surviving pin.
+fn remove_unheld_components(doc: &mut SchDoc, orphaned: &[Point2]) -> usize {
+    let runs = doc
+        .wires()
+        .filter_map(|wire| refs::ends(wire).map(|(a, b)| (wire.uuid.clone(), Segment::new(a, b))))
+        .collect::<Vec<_>>();
+    let mut groups = geom::UnionFind::new(runs.len());
+    for (left, (_, one)) in runs.iter().enumerate() {
+        for (right, (_, other)) in runs.iter().enumerate().skip(left + 1) {
+            let junction_joins = doc.items().iter().any(|item| {
+                matches!(item, sch_doc::Item::Junction(junction)
+                    if one.contains_point(junction.at) && other.contains_point(junction.at))
+            });
+            if one.axis_aligned_connects(*other) || junction_joins {
+                groups.union(left, right);
+            }
+        }
+    }
+    let roots = (0..runs.len())
+        .map(|index| groups.find(index))
+        .collect::<Vec<_>>();
+    let pin_anchors = placed_pins(doc)
+        .into_iter()
+        .map(|pin| pin.at)
+        .collect::<Vec<_>>();
+    let sheet_anchors = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            sch_doc::Item::Sheet(sheet) => Some(sheet.pins.iter().map(|pin| pin.at.point())),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    let held = runs
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, run))| {
+            pin_anchors
+                .iter()
+                .any(|point| point.near_eq(run.a, EPS) || point.near_eq(run.b, EPS))
+                || sheet_anchors.iter().any(|point| run.contains_point(*point))
+        })
+        .map(|(index, _)| roots[index])
+        .collect::<BTreeSet<_>>();
+    let touched = runs
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, run))| orphaned.iter().any(|point| run.contains_point(*point)))
+        .map(|(index, _)| roots[index])
+        .filter(|root| !held.contains(root))
+        .collect::<BTreeSet<_>>();
+    if touched.is_empty() {
+        return 0;
+    }
+    let doomed_runs = runs
+        .iter()
+        .zip(&roots)
+        .filter(|(_, root)| touched.contains(root))
+        .map(|((uuid, _), _)| uuid.clone())
+        .collect::<Vec<_>>();
+    let on_doomed_run = |point: Point2| {
+        runs.iter()
+            .any(|(uuid, run)| doomed_runs.contains(uuid) && run.contains_point(point))
+    };
+    let drawing = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            sch_doc::Item::Label(label) if on_doomed_run(label.at.point()) => {
+                Some(label.uuid.clone())
+            }
+            sch_doc::Item::Junction(junction) if on_doomed_run(junction.at) => {
+                Some(junction.uuid.clone())
+            }
+            sch_doc::Item::NoConnect(marker) if on_doomed_run(marker.at) => {
+                Some(marker.uuid.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut doomed = doomed_runs;
+    doomed.extend(drawing);
+    doc.remove_drawing(&doomed)
 }
 
 /// Every point the sheet holds a connection at: symbol pins and the pins of a
