@@ -230,3 +230,11 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   stm32 sheet = KiCAD exactly; human sample 97/97 unambiguous). Merge train 2: pcb-refusals-3
   (pseudo-nets ignored, nudge rings 5/10/20 mm then outline, compass sides, refit skip on routed
   boards, pin did-you-mean by pad order) → corpus → push → campaign round 5 (camp7).
+- lane/sch-looks delivered (6 commits, not merged yet): sheet page-fit + standard paper via
+  `sch-doc/page.rs` (esp32 min x −57 → +76 mm), body-only placement rect for tall 2-pin parts
+  (area/part 29 → 18 cm²), rail emission bounded by `LABEL_LEN_MM` (longest wire 389 → 46 mm),
+  title block + block frames/notes through graft, corpus gate `human_look.rs`. Outstanding before
+  merge: critic evidence for 6 moved placement snapshots, harness critic/human-look run,
+  floorplan_netlist, text collisions 0.27→0.50/part. Reviewer found `anneal-place anchors` lacks a
+  `!frozen` filter → lane/anneal-frozen. Remaining ceiling: spine lays 60-part sheets as one long row
+  (User 938×221 pages) — needs folding.
