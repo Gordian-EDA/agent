@@ -1,6 +1,6 @@
 //! `region::arrange` — placing a few parts among neighbours that are already on the sheet.
 //!
-//! SKIPs without a KiCad installation (the adapter runs a real engine over real symbols).
+//! SKIPs without a KiCad installation (the typesetter measures real symbols).
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -179,8 +179,12 @@ fn passive_block(first: usize, last: usize, block: &str) -> sch_check::PlacePart
     serde_json::from_value(serde_json::json!({"block": block, "parts": parts})).unwrap()
 }
 
+/// Adding a named block to a 60-part sheet places only that block: the existing
+/// neighbourhood's relative arrangement (offsets, rotation, mirror) is exactly what
+/// it was, and the whole call stays fast — both signs the region path placed just
+/// the 30 new parts rather than re-arranging the sheet from scratch.
 #[test]
-fn thirty_part_named_block_uses_the_region_path_on_a_sixty_part_sheet() {
+fn adding_a_block_to_a_sixty_part_sheet_leaves_the_neighbourhood_arrangement_untouched() {
     let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCad environment detected");
         return;
@@ -222,5 +226,25 @@ fn thirty_part_named_block_uses_the_region_path_on_a_sixty_part_sheet() {
             )
         })
         .collect();
-    assert_eq!(after, before, "region placement moved an existing symbol");
+    // The new block widens the sheet, and `refit_page` re-margins the WHOLE page to
+    // the new content extent — sliding every existing symbol's ABSOLUTE coordinate
+    // by the same page-margin delta. That is not the region path disturbing anything:
+    // the RELATIVE arrangement (offsets between existing symbols, rotation, mirror)
+    // must still be exactly what it was, which is what proves the region path placed
+    // only the new block and left the 60-part neighbourhood otherwise untouched.
+    let (dx, dy) = {
+        let (refdes, (before_pose, _)) = before.iter().next().expect("60 existing parts");
+        let (after_pose, _) = &after[refdes];
+        (after_pose.x - before_pose.x, after_pose.y - before_pose.y)
+    };
+    for (key, (before_pose, before_mirror)) in &before {
+        let (after_pose, after_mirror) = &after[key];
+        assert!(
+            (after_pose.x - before_pose.x - dx).abs() < 1e-6
+                && (after_pose.y - before_pose.y - dy).abs() < 1e-6,
+            "{key:?} moved relative to the rest of the neighbourhood: {before_pose:?} -> {after_pose:?} (block offset {dx},{dy})"
+        );
+        assert_eq!(after_pose.rot, before_pose.rot, "{key:?} rotated");
+        assert_eq!(after_mirror, before_mirror, "{key:?} mirrored");
+    }
 }
