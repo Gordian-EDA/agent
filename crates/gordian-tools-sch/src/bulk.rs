@@ -869,8 +869,15 @@ fn guarded_place_parts(
 /// best-so-far — the layout is what it was, and the drawing reflects the netlist.
 pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let input: SelectionInput = typed(input, "arrange")?;
-    let selection = selection(&input)?;
+    let mut selection = selection(&input)?;
     let mut edit = Edit::open(ctx)?;
+    let selection_notes = resolve_arrangeable_refs(&edit.doc, &mut selection);
+    if matches!(&selection, Selection::Refs(refs) if refs.is_empty()) {
+        return Ok(selection_notes.finish(json!({
+            "changed": "no arrangeable parts selected",
+            "note": "power flags and power symbols are connectivity furniture, not arrangeable parts; select one of the nearby real-part references instead",
+        })));
+    }
     let (budget, engine) = budgeted(ctx, edit.doc.symbols().count(), input.engine);
     let timing = Timing::start("arrange", &budget, engine.name());
     let report = match sch_floorplan::live::arrange(
@@ -893,7 +900,86 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         "refused"
     });
-    finish_arrangement(edit, report, ctx)
+    Ok(selection_notes.finish(finish_arrangement(edit, report, ctx)?))
+}
+
+#[derive(Default)]
+struct ArrangeSelectionNotes {
+    not_arrangeable: Vec<String>,
+    missing: Vec<String>,
+    arrangeable_nearby: BTreeMap<String, Vec<String>>,
+}
+
+impl ArrangeSelectionNotes {
+    fn finish(self, mut value: Value) -> Value {
+        if !self.not_arrangeable.is_empty() {
+            value["not_arrangeable"] = json!(self.not_arrangeable);
+            value["arrangeable_nearby"] = json!(self.arrangeable_nearby);
+        }
+        if !self.missing.is_empty() {
+            value["missing"] = json!(self.missing);
+        }
+        value
+    }
+}
+
+fn resolve_arrangeable_refs(
+    doc: &sch_doc::SchDoc,
+    selection: &mut Selection,
+) -> ArrangeSelectionNotes {
+    let Selection::Refs(requested) = selection else {
+        return ArrangeSelectionNotes::default();
+    };
+    let arrangeable = doc
+        .symbols()
+        .filter(|symbol| {
+            !symbol.refdes().is_empty()
+                && !symbol.refdes().starts_with('#')
+                && !symbol.lib_id.starts_with("power:")
+        })
+        .collect::<Vec<_>>();
+    let mut notes = ArrangeSelectionNotes::default();
+    let mut selected = Vec::new();
+    for reference in std::mem::take(requested) {
+        let Some(symbol) = doc.symbol_by_ref(&reference) else {
+            notes.missing.push(reference);
+            continue;
+        };
+        if !symbol.refdes().starts_with('#') && !symbol.lib_id.starts_with("power:") {
+            selected.push(reference);
+            continue;
+        }
+        let mut nearby = arrangeable
+            .iter()
+            .map(|candidate| {
+                let dx = candidate.at.x - symbol.at.x;
+                let dy = candidate.at.y - symbol.at.y;
+                (dx * dx + dy * dy, candidate.refdes().to_string())
+            })
+            .collect::<Vec<_>>();
+        nearby.sort_by(|left, right| {
+            left.0
+                .total_cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+        });
+        notes.arrangeable_nearby.insert(
+            reference.clone(),
+            nearby
+                .into_iter()
+                .map(|(_, reference)| reference)
+                .take(6)
+                .collect(),
+        );
+        notes.not_arrangeable.push(reference);
+    }
+    selected.sort();
+    selected.dedup();
+    notes.not_arrangeable.sort();
+    notes.not_arrangeable.dedup();
+    notes.missing.sort();
+    notes.missing.dedup();
+    *requested = selected;
+    notes
 }
 
 /// The searchless half of `arrange`, run after its budget was spent.

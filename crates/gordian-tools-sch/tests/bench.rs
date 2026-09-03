@@ -164,3 +164,79 @@ fn connectivity_furniture_returns_the_nothing_placed_shape() {
     assert_eq!(result["unplaced"][0]["ref"], "#FLG5");
     assert_eq!(result["unplaced"][0]["part"], "power:PWR_FLAG");
 }
+
+#[test]
+fn arrange_reports_power_furniture_and_nearby_real_parts() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let placed = call(&ctx, "place_parts", divider());
+    assert_eq!(placed.get("error"), None, "{placed:#}");
+    let added = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [
+            {"lib_id": "power:PWR_FLAG", "ref": "#PWR01"},
+            {"lib_id": "power:PWR_FLAG", "ref": "#PWR02"}
+        ]}),
+    );
+    assert_eq!(added.get("error"), None, "{added:#}");
+    let mut doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    for (from, to) in [("#PWR01", "#FLG_Q9"), ("#PWR02", "#FLG_RAW2")] {
+        let uuid = doc.symbol_by_ref(from).unwrap().uuid.clone();
+        doc.set_field(&uuid, "Reference", to).unwrap();
+    }
+    doc.write(ctx.sch_path()).unwrap();
+
+    let furniture = call(
+        &ctx,
+        "arrange",
+        json!({
+            "refs": ["#FLG_Q9", "#FLG_RAW2"],
+            "intent": {"relations": [
+                {"kind": "below", "a": "#FLG_Q9", "b": "R1"},
+                {"kind": "below", "a": "#FLG_RAW2", "b": "R2"}
+            ]}
+        }),
+    );
+    assert_eq!(furniture.get("error"), None, "{furniture:#}");
+    assert_eq!(
+        furniture["changed"],
+        "no arrangeable parts selected",
+        "{furniture:#}"
+    );
+    assert_eq!(
+        furniture["not_arrangeable"],
+        json!(["#FLG_Q9", "#FLG_RAW2"]),
+        "{furniture:#}"
+    );
+    assert!(
+        furniture["arrangeable_nearby"]["#FLG_Q9"]
+            .as_array()
+            .is_some_and(|refs| refs.iter().any(|reference| reference == "R1")),
+        "{furniture:#}"
+    );
+
+    let mixed = call(
+        &ctx,
+        "arrange",
+        json!({
+            "refs": ["#FLG_Q9", "R1"],
+            "intent": {"relations": [
+                {"kind": "below", "a": "#FLG_Q9", "b": "R1"}
+            ]}
+        }),
+    );
+    assert_eq!(mixed.get("error"), None, "{mixed:#}");
+    assert_eq!(mixed["changed"]["moved"], json!(["R1"]), "{mixed:#}");
+    assert_eq!(mixed["not_arrangeable"], json!(["#FLG_Q9"]), "{mixed:#}");
+    assert!(
+        mixed["changed"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("intent.relations[0]")))),
+        "{mixed:#}"
+    );
+}
