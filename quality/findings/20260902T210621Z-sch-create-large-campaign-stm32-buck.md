@@ -88,12 +88,12 @@ Questions:
 ## [self-diagnosis]
 
 - `sch-create-large`: struggled: turn 1: The label tool reported SWCLK as named on U2.PA14, but ERC still flagged the SWCLK label as dangling.
-- `sch-create-large`: struggled: turn 1: The check_schematic tool retained baseline revision 1 and reported introduced findings across later revisions, making verification state confusing.
+- `sch-create-large`: struggled: turn 1: The check_schematic tool retained turn-relative state across later revisions, making verification state confusing.
 - `sch-create-large`: struggled: turn 1: The delete_wires tool removed nine wiring items when deleting SWCLK, unexpectedly leaving J2.4 and U2.25 disconnected.
 - `sch-create-large`: struggled: turn 1: The render_schematic tool reported visual findings without describing their locations or causes.
 - `sch-create-large`: struggled: turn 1: The duplicate +3V3/VOUT_3V3 net-name warning could not be repaired through the available tools.
 - `sch-create-large`: wished: turn 1: Provide a connectivity-aware label tool that places the label on an actual wire endpoint and confirms the resulting net.
-- `sch-create-large`: wished: turn 1: Allow check_schematic to establish or update the verification baseline explicitly after intentional edits.
+- `sch-create-large`: wished: turn 1: Make check_schematic verify the live file directly after intentional edits.
 - `sch-create-large`: wished: turn 1: Add a narrowly scoped wire or net repair operation that cannot delete unrelated connections.
 - `sch-create-large`: wished: turn 1: Return detailed visual-finding diagnostics, including coordinates, affected references, and suggested fixes.
 - `sch-create-large`: wished: turn 1: Automatically normalize equivalent power-net names or provide a rename/remove-net-label operation.

@@ -7,7 +7,7 @@
 
 use kicad::sexpr_escape;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use kicad::KicadInstallation;
@@ -31,8 +31,6 @@ pub struct AgentRuntime {
     project: ProjectContext,
     /// Shared services and caches used by tools.
     services: ToolServices,
-    /// Project files as they existed when the active turn started.
-    baseline: Mutex<Option<crate::baseline::TurnBaseline>>,
     /// The project's refdes reservations, read from and written to its own file.
     reservations: crate::refdes::Reservations,
     /// Keeps a test tempdir alive for the runtime's lifetime; `None` for real runtimes.
@@ -97,7 +95,6 @@ impl AgentRuntime {
         Ok(Self {
             env,
             services,
-            baseline: Mutex::new(None),
             reservations,
             project,
             config,
@@ -143,7 +140,6 @@ impl AgentRuntime {
             env,
             project,
             services,
-            baseline: Mutex::new(None),
             reservations,
             config: GordianConfig::default(),
             _tempdir: Some(tempdir),
@@ -170,7 +166,6 @@ impl AgentRuntime {
             env,
             project,
             services,
-            baseline: Mutex::new(None),
             reservations,
             config: GordianConfig::default(),
             _tempdir: Some(tempdir),
@@ -210,24 +205,6 @@ impl AgentRuntime {
     /// The project's refdes reservation store.
     pub fn reservations(&self) -> &crate::refdes::Reservations {
         &self.reservations
-    }
-
-    /// Captures the project files at the start of a new user turn.
-    pub fn begin_turn(&self) -> Result<()> {
-        let baseline = crate::baseline::TurnBaseline::capture(self.project_dir())?;
-        *self
-            .baseline
-            .lock()
-            .map_err(|_| anyhow::anyhow!("turn baseline lock poisoned"))? = Some(baseline);
-        Ok(())
-    }
-
-    /// Returns the active turn-start project snapshot, when a turn has begun.
-    pub fn turn_baseline(&self) -> Result<Option<crate::baseline::TurnBaseline>> {
-        self.baseline
-            .lock()
-            .map_err(|_| anyhow::anyhow!("turn baseline lock poisoned"))
-            .map(|baseline| baseline.clone())
     }
 
     /// The typed Gordian config this runtime was built with.

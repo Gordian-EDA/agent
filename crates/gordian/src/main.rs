@@ -136,14 +136,43 @@ fn parse_tui_args(args: &[String]) -> Result<PathBuf> {
             }
         }
     }
-    Ok(project_dir.unwrap_or_else(default_tui_project_dir))
+    match project_dir {
+        Some(project_dir) => Ok(project_dir),
+        None => default_tui_project_dir(),
+    }
 }
 
 /// The default project directory for `gordian tui` with no `--project`: the
 /// current working directory, so the schematic lands next to where the user
 /// launched the cockpit (never in a hidden tempdir).
-fn default_tui_project_dir() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+fn default_tui_project_dir() -> Result<PathBuf> {
+    let project_dir = std::env::current_dir().context("reading the current directory")?;
+    validate_implicit_project_dir(&project_dir)?;
+    Ok(project_dir)
+}
+
+fn validate_implicit_project_dir(project_dir: &Path) -> Result<()> {
+    let source_repository =
+        project_dir.join("Cargo.toml").is_file() || project_dir.join(".git").exists();
+    let has_kicad_design = std::fs::read_dir(project_dir)
+        .with_context(|| format!("reading project directory {}", project_dir.display()))?
+        .filter_map(std::result::Result::ok)
+        .any(|entry| {
+            matches!(
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str()),
+                Some("kicad_sch" | "kicad_pcb")
+            )
+        });
+    if source_repository && !has_kicad_design {
+        bail!(
+            "current directory {} looks like a source repository and contains no KiCad design; pass --project <dir>",
+            project_dir.display()
+        );
+    }
+    Ok(())
 }
 
 /// Run the `tui` subcommand: launch the cockpit on a single-threaded Tokio
@@ -802,6 +831,25 @@ mod tests {
             .is_err()
         );
         assert!(parse_tui_args(&["--unknown".into()]).is_err());
+    }
+
+    #[test]
+    fn implicit_tui_project_rejects_source_repository_without_kicad_design() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("Cargo.toml"), "[workspace]").unwrap();
+
+        let error = validate_implicit_project_dir(directory.path()).unwrap_err();
+
+        assert!(error.to_string().contains("--project"), "{error:#}");
+    }
+
+    #[test]
+    fn implicit_tui_project_accepts_repository_with_kicad_design() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join(".git")).unwrap();
+        std::fs::write(directory.path().join("design.kicad_sch"), "(kicad_sch)").unwrap();
+
+        validate_implicit_project_dir(directory.path()).unwrap();
     }
 
     #[test]

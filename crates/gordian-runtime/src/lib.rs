@@ -2,7 +2,6 @@
 //! [`GordianConfig`], the per-project [`AgentRuntime`] context, the tool result
 //! contract, and durable workspace state files.
 
-pub mod baseline;
 pub mod config;
 pub mod footprint_compat;
 pub mod logging;

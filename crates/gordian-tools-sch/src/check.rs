@@ -100,7 +100,6 @@ struct ToolFix {
 
 #[derive(Clone, Serialize)]
 struct Finding {
-    classification: &'static str,
     severity: String,
     source: &'static str,
     code: String,
@@ -306,19 +305,12 @@ struct FixPin {
 
 struct FixPlanner {
     pins: Vec<FixPin>,
-    baseline_nets: BTreeMap<String, String>,
     parts: BTreeMap<String, String>,
-    rotations: BTreeMap<String, f64>,
     default_footprints: BTreeMap<String, String>,
 }
 
 impl FixPlanner {
-    fn new(
-        doc: &SchDoc,
-        netlist: &Netlist,
-        baseline: Option<&Netlist>,
-        ctx: &AgentRuntime,
-    ) -> Self {
+    fn new(doc: &SchDoc, netlist: &Netlist, ctx: &AgentRuntime) -> Self {
         let pins = placed_pins(doc)
             .into_iter()
             .map(|pin| {
@@ -336,23 +328,10 @@ impl FixPlanner {
                 }
             })
             .collect();
-        let baseline_nets = baseline
-            .into_iter()
-            .flat_map(|netlist| &netlist.nets)
-            .flat_map(|net| {
-                net.pins
-                    .iter()
-                    .map(move |pin| (format!("{}.{}", pin.refdes, pin.pin), net.name.clone()))
-            })
-            .collect();
         let parts = doc
             .symbols()
             .map(|symbol| (symbol.refdes().to_string(), symbol.lib_id.clone()))
             .collect::<BTreeMap<_, _>>();
-        let rotations = doc
-            .symbols()
-            .map(|symbol| (symbol.refdes().to_string(), symbol.at.rot))
-            .collect();
         let default_footprints = parts
             .iter()
             .filter_map(|(reference, part)| {
@@ -365,9 +344,7 @@ impl FixPlanner {
             .collect();
         Self {
             pins,
-            baseline_nets,
             parts,
-            rotations,
             default_footprints,
         }
     }
@@ -385,7 +362,7 @@ impl FixPlanner {
             } else if code.contains("polarity")
                 || (message.contains("reversed") && message.contains("led"))
             {
-                self.polarity(finding)
+                None
             } else if is_assignable_footprint(&code, &message) {
                 self.footprint(finding, ctx)
             } else if is_connection_finding(&code, &message) {
@@ -398,12 +375,10 @@ impl FixPlanner {
             finding.why = why;
         } else if is_connection_finding(&code, &message) {
             finding.why =
-                "No baseline, same-net, or same-function endpoint proves the intended connection."
-                    .to_string();
+                "No same-net or same-function endpoint proves the intended connection.".to_string();
         } else if is_output_conflict(&code, &message) {
             finding.why =
-                "The turn baseline does not identify exactly one newly added driver to disconnect."
-                    .to_string();
+                "The finding does not identify which driver should be disconnected.".to_string();
         } else if is_assignable_footprint(&code, &message) {
             finding.why =
                 "No installed footprint matches both the symbol family and its pad numbers."
@@ -530,20 +505,13 @@ impl FixPlanner {
                 },
             ));
         }
-        let desired_net = self
-            .baseline_nets
-            .get(&from.id)
-            .or_else(|| finding.nets.first())
-            .or(from.net.as_ref());
+        let desired_net = finding.nets.first().or(from.net.as_ref());
         let to = desired_net
             .and_then(|net| {
                 self.pins
                     .iter()
                     .filter(|pin| pin.id != from.id)
-                    .filter(|pin| {
-                        pin.net.as_ref() == Some(net)
-                            || self.baseline_nets.get(&pin.id) == Some(net)
-                    })
+                    .filter(|pin| pin.net.as_ref() == Some(net))
                     .min_by(|left, right| left.id.cmp(&right.id))
             })
             .or_else(|| self.intent_matched_pin(from))?;
@@ -597,64 +565,8 @@ impl FixPlanner {
             .min_by(|left, right| left.id.cmp(&right.id))
     }
 
-    fn output_conflict(&self, finding: &Finding) -> Option<(ToolFix, String)> {
-        let net = finding.nets.first()?;
-        let mut drivers = self
-            .pins
-            .iter()
-            .filter(|pin| pin.net.as_deref() == Some(net))
-            .filter(|pin| is_output(&pin.etype) || is_power_output(&pin.etype))
-            .collect::<Vec<_>>();
-        drivers.sort_by(|left, right| left.id.cmp(&right.id));
-        let newcomers = drivers
-            .iter()
-            .copied()
-            .filter(|driver| self.baseline_nets.get(&driver.id).map(String::as_str) != Some(net))
-            .collect::<Vec<_>>();
-        let [disconnect] = newcomers.as_slice() else {
-            return None;
-        };
-        Some((
-            ToolFix {
-                tool: "delete_wires",
-                args: json!({"pins": [disconnect.id.clone()]}),
-            },
-            format!(
-                "Disconnecting {} leaves a single driver on {net}.",
-                disconnect.id
-            ),
-        ))
-    }
-
-    fn polarity(&self, finding: &Finding) -> Option<(ToolFix, String)> {
-        let reference = finding
-            .refs
-            .iter()
-            .map(|reference| reference.split('.').next().unwrap_or(reference))
-            .find(|reference| self.rotations.contains_key(*reference))?;
-        let mut pins = self
-            .pins
-            .iter()
-            .filter(|pin| pin.refdes == reference)
-            .filter_map(|pin| pin.id.rsplit_once('.').map(|(_, number)| number.to_owned()))
-            .collect::<Vec<_>>();
-        pins.sort();
-        pins.dedup();
-        if pins.len() != 2 {
-            return None;
-        }
-        Some((
-            ToolFix {
-                tool: "move_symbols",
-                args: json!({
-                    "moves": [{
-                        "ref": reference,
-                        "rot": (self.rotations[reference] + 180.0).rem_euclid(360.0)
-                    }]
-                }),
-            },
-            format!("Rotating {reference} 180 degrees swaps its two fixed net positions."),
-        ))
+    fn output_conflict(&self, _finding: &Finding) -> Option<(ToolFix, String)> {
+        None
     }
 
     fn footprint(&self, finding: &Finding, ctx: &AgentRuntime) -> Option<(ToolFix, String)> {
@@ -850,7 +762,6 @@ fn diagnostic_finding(
     );
     let message = strip_subject_prefix(message, &refs, &nets);
     Finding {
-        classification: "introduced",
         severity: severity.to_string(),
         source,
         code: diagnostic.code.to_string(),
@@ -888,7 +799,6 @@ fn erc_finding(locator: &FindingLocator<'_>, violation: &kicad::Violation) -> Fi
         .find_map(|item| item.pos)
         .map(|position| round_point(position.x, position.y));
     Finding {
-        classification: "introduced",
         severity: violation.severity.clone(),
         source: "kicad_erc",
         code: violation.kind.clone(),
@@ -918,14 +828,9 @@ fn add_rendered_findings(report: &mut Value, findings: &[Finding], detail: bool)
     } else {
         findings.len()
     };
-    let introduced = findings
-        .iter()
-        .filter(|finding| finding.classification == "introduced")
-        .count();
-    let pre_existing = findings.len() - introduced;
     let groups = fix_groups(findings);
     let mut lines = vec![format!(
-        "{} findings, {} fixes; {introduced} introduced, {pre_existing} pre-existing",
+        "{} findings, {} fixes",
         findings.len(),
         groups.len()
     )];
@@ -1151,7 +1056,6 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
                 std::iter::empty::<String>(),
             );
             findings.push(Finding {
-                classification: "introduced",
                 severity: "error".to_string(),
                 source: "footprint",
                 code: "footprint-pins".to_string(),
@@ -1173,7 +1077,6 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
             std::iter::empty::<String>(),
         );
         findings.push(Finding {
-            classification: "introduced",
             severity: "error".to_string(),
             source: "footprint",
             code: "footprint-pins".to_string(),
@@ -1190,7 +1093,6 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
         let message = finding_message(warning);
         let (refs, nets, at) = locator.locate(&message, [], []);
         findings.push(Finding {
-            classification: "introduced",
             severity: "warning".to_string(),
             source: "extractor",
             code: "extractor".to_string(),
@@ -1212,7 +1114,6 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
         );
         let (refs, nets, at) = locator.locate(&message, refs, nets);
         findings.push(Finding {
-            classification: "introduced",
             severity: "warning".to_string(),
             source: "completeness",
             code: gap.kind.clone(),
@@ -1266,108 +1167,32 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
     })
 }
 
-fn inspect_turn_baseline(ctx: &AgentRuntime) -> Result<(bool, Option<Inspection>)> {
-    let Some(baseline) = ctx.turn_baseline()? else {
-        return Ok((false, None));
-    };
-    if baseline.file(ctx.project_dir(), ctx.sch_path()).is_none() {
-        return Ok((true, None));
-    }
-    let directory = tempfile::tempdir().context("creating turn-start inspection directory")?;
-    for (relative, bytes) in &baseline.files {
-        let path = directory.path().join(relative);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, bytes)
-            .with_context(|| format!("preparing turn-start file {}", relative.display()))?;
-    }
-    let relative = ctx
-        .sch_path()
-        .strip_prefix(ctx.project_dir())
-        .context("schematic is outside project")?;
-    inspect_schematic(&directory.path().join(relative), ctx)
-        .map(|inspection| (true, Some(inspection)))
-}
-
-fn finding_key(finding: &Finding) -> (String, Vec<String>, Vec<String>) {
-    (
-        finding.code.clone(),
-        finding.refs.clone(),
-        finding.nets.clone(),
-    )
-}
-
-fn classify_findings(findings: &mut [Finding], baseline: &[Finding]) {
-    let mut available = BTreeMap::new();
-    for finding in baseline {
-        *available.entry(finding_key(finding)).or_insert(0usize) += 1;
-    }
-    for finding in findings {
-        let count = available.entry(finding_key(finding)).or_default();
-        if *count > 0 {
-            finding.classification = "pre_existing";
-            *count -= 1;
-        }
-    }
-}
-
-/// Lint and run ERC, classifying findings against this turn's first snapshot.
-///
-/// `ok` and `erc_clean` consider introduced errors only; inherited errors do
-/// not block completion of an otherwise clean focused edit.
+/// Lint and run ERC over the live schematic.
 pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let detail = input.get("detail").and_then(Value::as_bool) == Some(true);
     let mut inspection = inspect_schematic(ctx.sch_path(), ctx)?;
-    let (has_baseline, baseline_inspection) = inspect_turn_baseline(ctx)?;
-    if let Some(baseline) = &baseline_inspection {
-        classify_findings(&mut inspection.findings, &baseline.findings);
-    }
-    let planner = FixPlanner::new(
-        &inspection.doc,
-        &inspection.netlist,
-        baseline_inspection
-            .as_ref()
-            .map(|baseline| &baseline.netlist),
-        ctx,
-    );
+    let planner = FixPlanner::new(&inspection.doc, &inspection.netlist, ctx);
     for finding in &mut inspection.findings {
         planner.plan(finding, ctx);
     }
     inherit_duplicate_footprint_fixes(&mut inspection.findings);
-    inspection.findings.sort_by_key(|finding| {
-        (
-            finding.classification != "introduced",
-            finding.severity != "error",
-        )
-    });
-    let introduced = inspection
+    inspection
+        .findings
+        .sort_by_key(|finding| finding.severity != "error");
+    let errors = inspection
         .findings
         .iter()
-        .filter(|finding| finding.classification == "introduced")
+        .filter(|finding| finding.severity == "error")
         .count();
-    let pre_existing = inspection.findings.len() - introduced;
-    let introduced_errors = inspection
+    let erc_errors = inspection
         .findings
         .iter()
-        .filter(|finding| finding.classification == "introduced" && finding.severity == "error")
-        .count();
-    let introduced_erc_errors = inspection
-        .findings
-        .iter()
-        .filter(|finding| {
-            finding.classification == "introduced"
-                && finding.source == "kicad_erc"
-                && finding.severity == "error"
-        })
+        .filter(|finding| finding.source == "kicad_erc" && finding.severity == "error")
         .count();
     let mut report = json!({
-        "ok": introduced_errors == 0,
+        "ok": errors == 0,
         "bench": inspection.bench.len(),
         "bench_refs": inspection.bench,
-        "baseline": has_baseline.then_some("turn-start"),
-        "introduced": introduced,
-        "pre_existing": pre_existing,
         "detail": detail,
         "checks": {
             "errors": inspection.local_errors,
@@ -1392,13 +1217,9 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "warnings": warnings,
                 "findings": erc.violations.len(),
             });
-            report["erc_clean"] = json!(introduced_erc_errors == 0);
-            if introduced_errors == 0 {
-                report["message"] = if pre_existing > 0 {
-                    json!(format!(
-                        "no introduced errors; {pre_existing} pre-existing finding(s) remain"
-                    ))
-                } else if inspection.gaps.is_empty() {
+            report["erc_clean"] = json!(erc_errors == 0);
+            if errors == 0 {
+                report["message"] = if inspection.gaps.is_empty() {
                     json!(
                         "schematic is clean and complete by deterministic rules; placement is final"
                     )
@@ -1417,9 +1238,6 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "errors": inspection.findings.iter().filter(|finding| finding.severity == "error").count(),
         "warnings": inspection.findings.iter().filter(|finding| finding.severity == "warning").count(),
         "exclusions": inspection.findings.iter().filter(|finding| finding.severity == "exclusion").count(),
-        "introduced": introduced,
-        "pre_existing": pre_existing,
-        "introduced_errors": introduced_errors,
     });
     add_rendered_findings(&mut report, &inspection.findings, detail);
     Ok(report)
@@ -1443,16 +1261,13 @@ mod tests {
     fn planner(pins: Vec<FixPin>) -> FixPlanner {
         FixPlanner {
             pins,
-            baseline_nets: BTreeMap::new(),
             parts: BTreeMap::new(),
-            rotations: BTreeMap::new(),
             default_footprints: BTreeMap::new(),
         }
     }
 
     fn finding(code: &str, refs: &[&str], nets: &[&str], message: &str) -> Finding {
         Finding {
-            classification: "introduced",
             severity: "error".to_owned(),
             source: "test",
             code: code.to_owned(),
@@ -1464,92 +1279,6 @@ mod tests {
             why: "No safe one-call repair is known for this finding.".to_owned(),
             advisory: false,
         }
-    }
-
-    fn warning(code: &str, reference: &str, at: [f64; 2]) -> Finding {
-        Finding {
-            classification: "introduced",
-            severity: "warning".to_owned(),
-            source: "test",
-            code: code.to_owned(),
-            message: "warning".to_owned(),
-            refs: vec![reference.to_owned()],
-            nets: vec!["NET".to_owned()],
-            at: Some(at),
-            fix: Some(ToolFix {
-                tool: "connect",
-                args: json!({"from": reference, "to": "U1.1"}),
-            }),
-            why: "test repair".to_owned(),
-            advisory: true,
-        }
-    }
-
-    #[test]
-    fn edit_classifies_one_introduced_and_two_pre_existing_warnings() {
-        let baseline = vec![
-            warning("first", "R1", [1.0, 1.0]),
-            warning("second", "R2", [2.0, 2.0]),
-        ];
-        let mut current = vec![
-            warning("first", "R1", [10.0, 10.0]),
-            warning("second", "R2", [2.0, 2.0]),
-            warning("third", "R3", [3.0, 3.0]),
-        ];
-
-        classify_findings(&mut current, &baseline);
-
-        assert_eq!(
-            current
-                .iter()
-                .filter(|finding| finding.classification == "introduced")
-                .count(),
-            1
-        );
-        assert_eq!(
-            current
-                .iter()
-                .filter(|finding| finding.classification == "pre_existing")
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn restored_baseline_has_no_introduced_warnings() {
-        let baseline = vec![
-            warning("first", "R1", [1.0, 1.0]),
-            warning("second", "R2", [2.0, 2.0]),
-        ];
-        let mut restored = vec![
-            warning("first", "R1", [1.0, 1.0]),
-            warning("second", "R2", [2.0, 2.0]),
-        ];
-
-        classify_findings(&mut restored, &baseline);
-
-        assert!(
-            restored
-                .iter()
-                .all(|finding| finding.classification == "pre_existing")
-        );
-    }
-
-    #[test]
-    fn fresh_sheet_without_baseline_has_only_introduced_warnings() {
-        let mut findings = vec![
-            warning("first", "R1", [1.0, 1.0]),
-            warning("second", "R2", [2.0, 2.0]),
-            warning("third", "R3", [3.0, 3.0]),
-        ];
-
-        classify_findings(&mut findings, &[]);
-
-        assert!(
-            findings
-                .iter()
-                .all(|finding| finding.classification == "introduced")
-        );
     }
 
     #[test]
@@ -1586,14 +1315,10 @@ mod tests {
     }
 
     #[test]
-    fn single_pin_net_reconnects_to_the_baseline_endpoint_exactly() {
-        let mut planner = planner(vec![
+    fn single_pin_net_reconnects_to_the_live_endpoint_exactly() {
+        let planner = planner(vec![
             pin("R5.2", "~", "passive", None, 10.0),
-            pin("U1.3", "IN", "input", None, 80.0),
-        ]);
-        planner.baseline_nets = BTreeMap::from([
-            ("R5.2".to_owned(), "AUDIO_IN".to_owned()),
-            ("U1.3".to_owned(), "AUDIO_IN".to_owned()),
+            pin("U1.3", "IN", "input", Some("AUDIO_IN"), 80.0),
         ]);
         let finding = finding(
             "single-pin-net",
@@ -1669,31 +1394,6 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_outputs_disconnect_the_second_driver_exactly() {
-        let mut planner = planner(vec![
-            pin("U1.1", "OUT", "output", Some("BUS"), 10.0),
-            pin("U2.1", "OUT", "output", Some("BUS"), 20.0),
-        ]);
-        planner
-            .baseline_nets
-            .insert("U1.1".to_owned(), "BUS".to_owned());
-        let finding = finding(
-            "output-short",
-            &["U1", "U2"],
-            &["BUS"],
-            "multiple outputs tie to this net",
-        );
-
-        assert_eq!(
-            planner.output_conflict(&finding).unwrap().0,
-            ToolFix {
-                tool: "delete_wires",
-                args: json!({"pins": ["U2.1"]}),
-            }
-        );
-    }
-
-    #[test]
     fn conflicting_outputs_without_one_new_driver_have_no_destructive_guess() {
         let planner = planner(vec![
             pin("U1.1", "OUT", "output", Some("BUS"), 10.0),
@@ -1707,24 +1407,6 @@ mod tests {
         );
 
         assert!(planner.output_conflict(&finding).is_none());
-    }
-
-    #[test]
-    fn reversed_led_rotates_onto_the_fixed_net_positions_exactly() {
-        let mut planner = planner(vec![
-            pin("D1.1", "K", "passive", Some("LED_K"), 10.0),
-            pin("D1.2", "A", "passive", Some("GND"), 20.0),
-        ]);
-        planner.rotations.insert("D1".to_owned(), 90.0);
-        let finding = finding("led-polarity", &["D1"], &["GND", "+3V3"], "LED is reversed");
-
-        assert_eq!(
-            planner.polarity(&finding).unwrap().0,
-            ToolFix {
-                tool: "move_symbols",
-                args: json!({"moves": [{"ref": "D1", "rot": 270.0}]}),
-            }
-        );
     }
 
     #[test]

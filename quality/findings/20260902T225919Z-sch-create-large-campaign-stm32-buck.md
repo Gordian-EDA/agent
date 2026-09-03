@@ -62,7 +62,7 @@ Questions:
 - `campaign-stm32-buck`: judge: PCB was not created, placed, routed, rendered, or checked; complete the two-layer board and run DRC to zero errors and unrouted nets.
 - `campaign-stm32-buck`: judge: No fabrication outputs were exported; generate Gerbers, drill files, pick-and-place data, and BOM in the fab directory.
 - `campaign-stm32-buck`: judge: The delivered schematic contains only 13 parts and 9 nets, rather than the required complete MCU, USB, SWD, GPIO, clock, indicator, and support circuitry.
-- `campaign-stm32-buck`: judge: The final schematic check is not clean: it reports 12 introduced errors, including isolated LED_ACT, crystal, VCAP, USB, SWDIO, SWCLK, and SWO nets plus unresolved VSSA connectivity.
+- `campaign-stm32-buck`: judge: The final schematic check is not clean: it reports 12 errors, including isolated LED_ACT, crystal, VCAP, USB, SWDIO, SWCLK, and SWO nets plus unresolved VSSA connectivity.
 - `campaign-stm32-buck`: judge: Add the required MCU power implementation: all VDD/VSS connections, per-VDD 100 nF capacitors, 4.7 uF bulk, VDDA bead and capacitors, VBAT decoupling, and both 2.2 uF VCAP capacitors.
 - `campaign-stm32-buck`: judge: Complete and verify the USB-C protection/termination, SWD header, four GPIO headers, reset/BOOT circuitry, LEDs, I2C pull-ups, and 8 MHz crystal block with correct net connectivity and footprints.
 - `campaign-stm32-buck`: schematic critic: major/spacing/Entire visible buck-converter block, especially U1/L1 versus R1/R2/R3 and C4/C5: The power stage is spread across most of the sheet, leaving large empty gaps and forcing the VOUT and ground connections into very long rectangular runs.
@@ -96,7 +96,7 @@ Questions:
 - `sch-create-large`: wished: turn 1: Provide a rendered schematic preview or annotated image directly in the final result.
 - `campaign-stm32-buck`: struggled: turn 1: place_parts refused after shorting GND and HSE_OUT, despite reporting a valid payload and offering no targeted recovery mechanism.
 - `campaign-stm32-buck`: struggled: turn 1: Large-block placement exceeded the turn budget and could not automatically split the block into safe smaller functional groups.
-- `campaign-stm32-buck`: struggled: turn 1: ERC output reported 39 introduced findings during editing, while the final run summary reported zero errors and warnings without explaining the revision or rollback.
+- `campaign-stm32-buck`: struggled: turn 1: ERC output reported 39 findings during editing, while the final run summary reported zero errors and warnings without explaining the revision or rollback.
 - `campaign-stm32-buck`: struggled: turn 1: Connectivity diagnostics identified USB_DP/USB_DM naming mismatches and isolated labels but provided no safe automatic repair.
 - `campaign-stm32-buck`: struggled: turn 1: The workflow did not progress from schematic completion to PCB creation, routing, DRC, rendering, or fabrication export before the time limit.
 - `campaign-stm32-buck`: wished: turn 1: Add transactional placement with collision-aware retries and automatic pin/net-preserving fallback coordinates.

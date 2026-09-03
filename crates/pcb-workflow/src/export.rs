@@ -1,6 +1,6 @@
 //! Saved-board validation through KiCad 10 DRC.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::Result;
@@ -62,17 +62,17 @@ pub(super) fn violation_summaries<'a>(
 }
 
 #[derive(Clone, Copy)]
-struct ClassifiedViolation<'a> {
-    classification: &'static str,
+struct BoardFinding<'a> {
+    staged: bool,
     violation: &'a Violation,
 }
 
-impl ClassifiedViolation<'_> {
+impl BoardFinding<'_> {
     /// Whether this finding is the board's to answer for. A finding that only
     /// names parts still in the staging row is not: they are not part of the
     /// board yet, and DRC has no rule for "never laid out".
     fn blocks(&self) -> bool {
-        self.classification != "staged"
+        !self.staged
     }
 }
 
@@ -85,7 +85,7 @@ fn is_settled_by_placing(kind: &str) -> bool {
     )
 }
 
-/// Re-classify the findings a staged part is answerable for, so the DRC verdict
+/// Excuse the findings a staged part is answerable for, so the DRC verdict
 /// is about the board being built and not about the row waiting to join it.
 ///
 /// For a finding that placing the part settles — an unrouted pair, two
@@ -95,10 +95,8 @@ fn is_settled_by_placing(kind: &str) -> bool {
 /// every part it names is staged. `referenced_parts` is a prose heuristic, so
 /// erring toward keeping copper defects in the verdict is the safe direction.
 ///
-/// The list is re-sorted afterwards: what the caller must act on leads, then
-/// what the board arrived with, then the staging row it has not reached yet.
 fn excuse_staged<'a>(
-    findings: &mut Vec<ClassifiedViolation<'a>>,
+    findings: &mut Vec<BoardFinding<'a>>,
     staged: &std::collections::BTreeSet<String>,
 ) {
     if staged.is_empty() {
@@ -112,14 +110,10 @@ fn excuse_staged<'a>(
             !refs.is_empty() && refs.iter().all(|reference| staged.contains(reference))
         };
         if excused {
-            finding.classification = "staged";
+            finding.staged = true;
         }
     }
-    findings.sort_by_key(|finding| match finding.classification {
-        "introduced" => 0,
-        "pre_existing" => 1,
-        _ => 2,
-    });
+    findings.sort_by_key(|finding| finding.staged);
 }
 
 fn bracketed_names(text: &str) -> impl Iterator<Item = &str> {
@@ -167,38 +161,20 @@ fn violation_key(violation: &Violation) -> (String, Vec<String>, Vec<String>) {
     )
 }
 
-fn classify_violations<'a>(
-    current: &'a [Violation],
-    baseline: &[Violation],
-) -> Vec<ClassifiedViolation<'a>> {
-    let mut available = BTreeMap::new();
-    for violation in baseline {
-        *available.entry(violation_key(violation)).or_insert(0usize) += 1;
-    }
-    let mut classified = current
+fn board_findings(current: &[Violation]) -> Vec<BoardFinding<'_>> {
+    current
         .iter()
-        .map(|violation| {
-            let count = available.entry(violation_key(violation)).or_default();
-            let classification = if *count > 0 {
-                *count -= 1;
-                "pre_existing"
-            } else {
-                "introduced"
-            };
-            ClassifiedViolation {
-                classification,
-                violation,
-            }
+        .map(|violation| BoardFinding {
+            staged: false,
+            violation,
         })
-        .collect::<Vec<_>>();
-    classified.sort_by_key(|finding| finding.classification != "introduced");
-    classified
+        .collect()
 }
 
-fn classified_finding(finding: ClassifiedViolation<'_>) -> Value {
+fn finding_json(finding: BoardFinding<'_>) -> Value {
     let (_, refs, nets) = violation_key(finding.violation);
     json!({
-        "classification": finding.classification,
+        "staged": finding.staged,
         "code": finding.violation.kind,
         "type": finding.violation.kind,
         "severity": finding.violation.severity,
@@ -209,7 +185,7 @@ fn classified_finding(finding: ClassifiedViolation<'_>) -> Value {
     })
 }
 
-fn classified_line(finding: ClassifiedViolation<'_>) -> String {
+fn finding_line(finding: BoardFinding<'_>) -> String {
     let (_, refs, nets) = violation_key(finding.violation);
     let subjects = refs.into_iter().chain(nets).collect::<Vec<_>>().join(", ");
     let subjects = if subjects.is_empty() {
@@ -218,39 +194,31 @@ fn classified_line(finding: ClassifiedViolation<'_>) -> String {
         format!(" {subjects}")
     };
     format!(
-        "{} {}[{}]{}: {}",
-        finding.classification,
-        finding.violation.severity,
-        finding.violation.kind,
-        subjects,
-        finding.violation.description
+        "{}[{}]{}: {}",
+        finding.violation.severity, finding.violation.kind, subjects, finding.violation.description
     )
 }
 
-fn classified_summaries<'a>(
-    findings: impl IntoIterator<Item = &'a ClassifiedViolation<'a>>,
+fn finding_summaries<'a>(
+    findings: impl IntoIterator<Item = &'a BoardFinding<'a>>,
     limit: usize,
 ) -> Vec<Value> {
     findings
         .into_iter()
         .take(limit)
         .copied()
-        .map(classified_finding)
+        .map(finding_json)
         .collect()
 }
 
-fn classified_unconnected(
+fn unconnected_pairs(
     parts: &[kicad_board::ImportedPart],
-    findings: &[ClassifiedViolation<'_>],
+    findings: &[BoardFinding<'_>],
 ) -> Vec<Value> {
     findings
         .iter()
         .take(MAX_UNCONNECTED_PAIRS)
-        .filter_map(|finding| {
-            let mut pair = crate::diagnose::unconnected_pair(parts, finding.violation)?;
-            pair["classification"] = json!(finding.classification);
-            Some(pair)
-        })
+        .filter_map(|finding| crate::diagnose::unconnected_pair(parts, finding.violation))
         .collect()
 }
 
@@ -386,10 +354,7 @@ fn isolated_copper<'a>(
         .collect()
 }
 
-/// Run DRC and classify findings against this turn's first board snapshot.
-///
-/// `ok` and `drc_clean` consider introduced blocking findings only; inherited
-/// findings do not block completion of an otherwise clean focused edit.
+/// Run DRC and report every finding on the live board.
 #[tracing::instrument(skip_all, fields(project = %ctx.project_dir().display()))]
 pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
@@ -433,41 +398,8 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let silk_warnings = super::silk::silk_warning_count(&report);
     let gate = gate_drc(&report);
-    let baseline = ctx.turn_baseline()?;
-    let (baseline_report, baseline_error) = if let Some(baseline) = baseline.as_ref()
-        && baseline.file(ctx.project_dir(), &path).is_some()
-    {
-        let result = (|| -> Result<_> {
-            let directory = tempfile::tempdir()?;
-            for (relative, bytes) in &baseline.files {
-                let destination = directory.path().join(relative);
-                if let Some(parent) = destination.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(&destination, bytes)?;
-            }
-            let relative = path.strip_prefix(ctx.project_dir())?;
-            cli.drc(&directory.path().join(relative))
-                .map_err(Into::into)
-        })();
-        match result {
-            Ok(report) => (Some(report), None),
-            Err(error) => (None, Some(format!("running turn-start DRC: {error}"))),
-        }
-    } else {
-        (None, None)
-    };
-    let baseline_violations = baseline_report
-        .as_ref()
-        .map(|report| report.violations.as_slice())
-        .unwrap_or_default();
-    let baseline_unconnected = baseline_report
-        .as_ref()
-        .map(|report| report.unconnected_items.as_slice())
-        .unwrap_or_default();
-    let mut violations = classify_violations(&report.violations, baseline_violations);
-    let mut unconnected_findings =
-        classify_violations(&report.unconnected_items, baseline_unconnected);
+    let mut violations = board_findings(&report.violations);
+    let mut unconnected_findings = board_findings(&report.unconnected_items);
     let board = match crate::active_board(ctx) {
         Ok(board) => board,
         Err(error) => {
@@ -500,16 +432,6 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let containment = crate::board::guard::outline_containment(&board);
     let outline_blocking =
         containment.outside_outline.len() + usize::from(containment.copper_outside_outline > 0);
-    let introduced_copper = violations
-        .iter()
-        .filter(|finding| {
-            finding.classification == "introduced" && !is_non_copper(finding.violation)
-        })
-        .count();
-    let introduced_unconnected = meaningful_unconnected
-        .iter()
-        .filter(|finding| finding.classification == "introduced")
-        .count();
     // Staged parts are outside the verdict, so they are outside every count of
     // it too: the gate's raw totals are reduced by what was excused.
     let staged_copper = violations
@@ -522,22 +444,13 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .count();
     let copper_violations = gate.copper_violations - staged_copper;
     let unconnected_items = gate.meaningful_unconnected - staged_unconnected;
-    let pre_existing_copper = copper_violations - introduced_copper;
-    let pre_existing_unconnected = unconnected_items - introduced_unconnected;
-    let blocking_findings = introduced_copper + introduced_unconnected + outline_blocking;
-    let blocking_findings_absolute = copper_violations + unconnected_items + outline_blocking;
-    let introduced = violations
-        .iter()
-        .chain(&unconnected_findings)
-        .filter(|finding| finding.classification == "introduced")
-        .count();
+    let blocking_findings = copper_violations + unconnected_items + outline_blocking;
     let reported_findings =
         report.violations.len() + report.unconnected_items.len() + outline_blocking;
-    let pre_existing = reported_findings - introduced;
-    let introduced_silk_warnings = violations
+    let live_silk_warnings = violations
         .iter()
         .filter(|finding| {
-            finding.classification == "introduced"
+            !finding.staged
                 && finding.violation.severity == "warning"
                 && matches!(
                     finding.violation.kind.as_str(),
@@ -558,7 +471,7 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let unconnected = if meaningful_unconnected.is_empty() {
         Vec::new()
     } else {
-        classified_unconnected(&board.imported.parts, &meaningful_unconnected)
+        unconnected_pairs(&board.imported.parts, &meaningful_unconnected)
     };
     let islands = isolated_copper(
         &board.imported.parts,
@@ -570,11 +483,11 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .chain(&unconnected_findings)
         .copied()
-        .map(classified_finding)
+        .map(finding_json)
         .collect::<Vec<_>>();
     if !containment.outside_outline.is_empty() {
         findings.push(json!({
-            "classification": "absolute",
+            "staged": false,
             "code": "outside_outline",
             "type": "outside_outline",
             "severity": "error",
@@ -586,7 +499,7 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     if containment.copper_outside_outline > 0 {
         findings.push(json!({
-            "classification": "absolute",
+            "staged": false,
             "code": "copper_outside_outline",
             "type": "copper_outside_outline",
             "severity": "error",
@@ -599,16 +512,14 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "items": [],
         }));
     }
-    let mut diagnostics = vec![format!(
-        "{introduced} introduced, {pre_existing} pre-existing"
-    )];
+    let mut diagnostics = Vec::new();
     diagnostics.extend(
         violations
             .iter()
             .chain(&unconnected_findings)
             .take(10)
             .copied()
-            .map(classified_line),
+            .map(finding_line),
     );
     if !containment.outside_outline.is_empty() {
         diagnostics.push(format!(
@@ -629,16 +540,15 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let note = if blocking_findings == 0 {
         format!(
-            "{note_prefix}Routed {}/{}; {} part(s) staged. No introduced blocking DRC \
-             findings; {pre_existing} pre-existing finding(s) and {silk_warnings} absolute \
-             silkscreen warning(s) remain.",
+            "{note_prefix}Routed {}/{}; {} part(s) staged. No blocking DRC findings; \
+             {silk_warnings} silkscreen warning(s) remain.",
             ratsnest.routed,
             ratsnest.total,
             staged_refs_list.len(),
         )
     } else {
         format!(
-            "{note_prefix}Board checks reported {blocking_findings} blocking finding(s); inspect the introduced DRC findings and absolute outline containment first."
+            "{note_prefix}Board checks reported {blocking_findings} blocking finding(s); inspect the DRC findings and outline containment first."
         )
     };
     let next = if !staged_refs_list.is_empty() {
@@ -651,43 +561,34 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else if blocking_findings == 0 {
         "export_fab".to_owned()
     } else {
-        "Fix the introduced blocking violations/unconnected items, then call check_board again. Leave pre-existing findings alone and do not resync blindly.".to_owned()
+        "Fix the blocking violations/unconnected items, then call check_board again. Do not resync blindly.".to_owned()
     };
     let text = diagnostics.join("\n");
     // The DRC detail and the silkscreen pass each get their own object: the
     // board's verdict and its progress stay at the top level, where a caller
     // reads them, and no single `json!` grows past what the macro can expand.
     let drc = json!({
-        "baseline": baseline.as_ref().map(|_| "turn-start"),
-        "baseline_error": baseline_error,
-        "introduced": introduced,
-        "pre_existing": pre_existing,
-        "blocking_findings_absolute": blocking_findings_absolute,
         "reported_findings": reported_findings,
         "violations": report.violations.len(),
         "copper_violations": copper_violations,
-        "introduced_copper_violations": introduced_copper,
-        "pre_existing_copper_violations": pre_existing_copper,
         "unconnected_items": unconnected_items,
-        "introduced_unconnected_items": introduced_unconnected,
-        "pre_existing_unconnected_items": pre_existing_unconnected,
         "ignored_zone_self_unconnected": gate.ignored_zone_self_unconnected,
         "outside_outline": containment.outside_outline,
         "copper_outside_outline": containment.copper_outside_outline > 0,
-        "top_violations": classified_summaries(
+        "top_violations": finding_summaries(
             violations.iter().filter(|finding| !is_non_copper(finding.violation)),
             5,
         ),
-        "top_unconnected": classified_summaries(meaningful_unconnected.iter(), 5),
+        "top_unconnected": finding_summaries(meaningful_unconnected.iter(), 5),
     });
     let silk = json!({
         "warnings": silk_warnings,
-        "introduced_warnings": introduced_silk_warnings,
+        "live_warnings": live_silk_warnings,
         "warnings_fixed": initial_silk_warnings.saturating_sub(silk_warnings),
         "cleanup_attempts": silk_cleanup_attempts,
         "references_moved": silk_references_moved,
         "cleanup_error": silk_cleanup_error,
-        "top_violations": classified_summaries(
+        "top_violations": finding_summaries(
             violations.iter().filter(|finding| {
                 finding.violation.severity == "warning" && matches!(finding.violation.kind.as_str(),
                     "silk_over_copper" | "silk_overlap" | "silk_edge_clearance" | "silk_over_silk")
@@ -700,10 +601,6 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "drc_clean": blocking_findings == 0,
         "path": path.display().to_string(),
         "blocking_findings": blocking_findings,
-        // The headline counts stay at the top level: `drc` below carries the
-        // classification detail, but these are what a caller reads first.
-        "introduced": introduced,
-        "pre_existing": pre_existing,
         "reported_findings": reported_findings,
         "copper_violations": copper_violations,
         "unconnected_items": unconnected_items,
@@ -733,85 +630,6 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
 mod tests {
     use super::*;
     use pcb_model::{LayerRef, Point2};
-
-    fn violation(code: &str, reference: &str, net: &str) -> Violation {
-        Violation {
-            severity: "warning".to_owned(),
-            kind: code.to_owned(),
-            description: "finding".to_owned(),
-            items: vec![kicad::ViolationItem {
-                description: format!("Pad 1 [{net}] of {reference} on F.Cu"),
-                uuid: None,
-                pos: None,
-            }],
-        }
-    }
-
-    #[test]
-    fn board_edit_classifies_one_introduced_and_two_pre_existing_findings() {
-        let baseline = vec![
-            violation("clearance", "R1", "A"),
-            violation("clearance", "R2", "B"),
-        ];
-        let current = vec![
-            violation("clearance", "R1", "A"),
-            violation("clearance", "R2", "B"),
-            violation("clearance", "R3", "C"),
-        ];
-
-        let classified = classify_violations(&current, &baseline);
-
-        assert_eq!(
-            classified
-                .iter()
-                .filter(|finding| finding.classification == "introduced")
-                .count(),
-            1
-        );
-        assert_eq!(
-            classified
-                .iter()
-                .filter(|finding| finding.classification == "pre_existing")
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn restored_board_baseline_has_no_introduced_findings() {
-        let baseline = vec![
-            violation("clearance", "R1", "A"),
-            violation("clearance", "R2", "B"),
-        ];
-        let restored = vec![
-            violation("clearance", "R1", "A"),
-            violation("clearance", "R2", "B"),
-        ];
-
-        let classified = classify_violations(&restored, &baseline);
-
-        assert!(
-            classified
-                .iter()
-                .all(|finding| finding.classification == "pre_existing")
-        );
-    }
-
-    #[test]
-    fn fresh_board_without_baseline_has_only_introduced_findings() {
-        let current = vec![
-            violation("clearance", "R1", "A"),
-            violation("clearance", "R2", "B"),
-        ];
-
-        let classified = classify_violations(&current, &[]);
-
-        assert!(
-            classified
-                .iter()
-                .all(|finding| finding.classification == "introduced")
-        );
-    }
 
     #[test]
     fn isolated_copper_reports_only_same_net_items_and_pads() {

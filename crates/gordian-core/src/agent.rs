@@ -44,11 +44,7 @@ const MAX_FAILED_ROUTE_RETRIES: usize = 3;
 
 const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 
-const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. Fix introduced errors and leave pre-existing findings alone. If completeness.gaps is nonempty and this request calls for a complete powered/interface design, add exactly the listed support circuitry and check again. Those warnings are advisory for deliberately minimal designs and focused edits; do not add unrelated parts. Finish once introduced ERC errors are clean and every applicable gap is resolved.";
-
-const DIFF_SCHEMATIC_NUDGE: &str = "Run diff_schematic now against the default turn baseline. Verify only the requested symbols, fields, poses, wiring counts, and net partitions changed. Use the connectivity/unconnected report already returned for new or swapped parts; do not re-read the whole schematic. Then run check_schematic if the latest edit has not passed it.";
-
-const UNCHANGED_SCHEMATIC_NUDGE: &str = "the schematic is unchanged since the turn began (your edits did not land); the request is not satisfied — either complete it (e.g. `set_fields` when no compatible symbol exists) or state plainly that it cannot be done and why";
+const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. Fix the findings in what you touched; leave unrelated existing findings alone and mention them. If completeness.gaps is nonempty and this request calls for a complete powered/interface design, add exactly the listed support circuitry and check again. Those warnings are advisory for deliberately minimal designs and focused edits; do not add unrelated parts. Finish once errors in the requested work are clean and every applicable gap is resolved.";
 
 /// Base hard ceiling on provider invocations within one agent subturn. This is
 /// a last-resort guard against a model that keeps requesting tools forever: the
@@ -595,10 +591,7 @@ fn coalesced_discovery_call(call: &ToolCall, calls: &[ToolCall]) -> Option<ToolC
 }
 
 fn is_state_scoped_read(name: &str) -> bool {
-    matches!(
-        name,
-        "project_info" | "read_schematic" | "diff_schematic" | "render_schematic"
-    )
+    matches!(name, "project_info" | "read_schematic" | "render_schematic")
 }
 
 /// Best-effort emit: a closed receiver (UI gone) is ignored.
@@ -877,20 +870,26 @@ impl<P: Provider> Agent<P> {
     /// repeat, until the model returns a final text with no pending tool calls.
     #[tracing::instrument(skip_all, fields(history_messages = self.history.len()))]
     pub async fn run_turn(&mut self, user_msg: &str, events: Events<'_>) -> Result<TurnOutcome> {
-        self.begin_turn()?;
+        self.start_turn(events);
         let outcome = self.run_agent_subturn(user_msg, user_msg, events).await?;
         emit(events, AgentEvent::TurnDone);
         Ok(outcome)
     }
 
     /// Start a fresh whole-turn clock and request budget.
-    fn begin_turn(&mut self) -> Result<()> {
-        self.runtime.begin_turn()?;
+    fn start_turn(&mut self, events: Events<'_>) {
+        emit(
+            events,
+            AgentEvent::Diagnostic {
+                level: "info",
+                target: "agent".to_owned(),
+                message: "turn started".to_owned(),
+            },
+        );
         self.turn_budget = Some(TurnClock {
             started: std::time::Instant::now(),
             provider_requests: 0,
         });
-        Ok(())
     }
 
     async fn run_agent_subturn(
@@ -904,20 +903,12 @@ impl<P: Provider> Agent<P> {
         self.turn_starts.push(current_turn_start);
         self.history.push(ChatMessage::user(instruction));
 
-        let schematic_hash_at_turn_start =
-            gordian_tools_sch::schematic_content_hash(&self.runtime)?;
-        let diff_required = schematic_hash_at_turn_start.is_some();
-
         let budgets = TurnBudgets::for_intent(authoritative_intent);
         let pcb_work_requested = request_requires_pcb_work(authoritative_intent);
         let fabrication_required = request_requires_fabrication(authoritative_intent);
         let mut applied = false;
-        let mut schematic_mutator_issued = false;
         let mut schematic_mutated = false;
         let mut schematic_check_complete = false;
-        let mut schematic_diff_complete = !diff_required;
-        let mut diff_nudges_left = 2usize;
-        let mut unchanged_schematic_feedback_sent = false;
         let mut successful_place_parts = 0usize;
         let mut check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
@@ -1127,23 +1118,6 @@ impl<P: Provider> Agent<P> {
                         .push(ChatMessage::user(OUTPUT_TRUNCATION_NUDGE));
                     continue;
                 }
-                if schematic_mutator_issued
-                    && !unchanged_schematic_feedback_sent
-                    && gordian_tools_sch::schematic_content_hash(&self.runtime)?
-                        == schematic_hash_at_turn_start
-                {
-                    unchanged_schematic_feedback_sent = true;
-                    schematic_mutated = false;
-                    schematic_check_complete = false;
-                    self.history
-                        .push(ChatMessage::user(UNCHANGED_SCHEMATIC_NUDGE));
-                    continue;
-                }
-                if schematic_mutated && !schematic_diff_complete && diff_nudges_left > 0 {
-                    diff_nudges_left -= 1;
-                    self.history.push(ChatMessage::user(DIFF_SCHEMATIC_NUDGE));
-                    continue;
-                }
                 if schematic_mutated && !schematic_check_complete && check_nudges_left > 0 {
                     check_nudges_left -= 1;
                     self.history.push(ChatMessage::user(CHECK_SCHEMATIC_NUDGE));
@@ -1181,7 +1155,6 @@ impl<P: Provider> Agent<P> {
                     args_digest
                 );
                 tracing::debug!(parent: &span, args = %call.fn_arguments, "tool payload");
-                schematic_mutator_issued |= is_schematic_mutator(&call.fn_name);
                 let effect = tool_effect(&call.fn_name);
                 emit(
                     events,
@@ -1282,8 +1255,6 @@ impl<P: Provider> Agent<P> {
                 if dispatched && schematic_mutation_succeeded(&call.fn_name, &parsed) {
                     applied = true;
                     schematic_mutated = true;
-                    schematic_diff_complete = !diff_required;
-                    diff_nudges_left = 2;
                     if matches!(call.fn_name.as_str(), "place_parts" | "add_parts") {
                         successful_place_parts += 1;
                     }
@@ -1298,10 +1269,6 @@ impl<P: Provider> Agent<P> {
                         schematic_check_complete = complete;
                     }
                 }
-                if dispatched && call.fn_name == "diff_schematic" && parsed.get("error").is_none() {
-                    schematic_diff_complete = true;
-                }
-
                 if dispatched {
                     if tool_state_generation != prior_generation
                         && pcb_quality_invalidated_by(&call.fn_name)
@@ -1388,7 +1355,7 @@ impl<P: Provider> Agent<P> {
         events: Events<'_>,
         max_fix: usize,
     ) -> Result<TurnOutcome> {
-        self.begin_turn()?;
+        self.start_turn(events);
         let mut outcome = self.run_agent_subturn(user_msg, intent, events).await?;
         if !outcome.applied || outcome.stop_reason != StopReason::Completed {
             emit(events, AgentEvent::TurnDone);
@@ -1861,8 +1828,7 @@ fn check_board_is_clean(value: &Value) -> bool {
             .and_then(Value::as_u64)
             .is_some_and(|count| count == 0)
         && value
-            .get("introduced_silk_warnings")
-            .or_else(|| value.get("silk_warnings"))
+            .pointer("/silk/warnings")
             .and_then(Value::as_u64)
             .is_some_and(|count| count == 0)
 }
@@ -2285,10 +2251,7 @@ async fn check_schematic_review(ctx: &Arc<AgentRuntime>) -> ReviewOutcome {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|finding| {
-            finding.get("classification").and_then(Value::as_str) == Some("introduced")
-                && finding.get("severity").and_then(Value::as_str) == Some("error")
-        })
+        .filter(|finding| finding.get("severity").and_then(Value::as_str) == Some("error"))
         .map(|finding| finding.to_string())
         .collect::<Vec<_>>();
     defects.extend(
@@ -2506,7 +2469,6 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             format!("{lib} → {n} pads")
         }
         "read_schematic" => "read the schematic".to_string(),
-        "diff_schematic" => "compared the live schematic with its turn-start baseline".to_string(),
         "export_fab" => {
             let files = result
                 .get("file_count")
@@ -2516,23 +2478,16 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             format!("{files} file(s) in {dir}")
         }
         "check_schematic" => {
-            let introduced = result
-                .get("introduced")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let pre_existing = result
-                .get("pre_existing")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
+            let count = result
+                .get("findings")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
             let first = result
                 .get("findings")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .find(|finding| {
-                    finding.get("classification").and_then(Value::as_str) == Some("introduced")
-                        && finding.get("severity").and_then(Value::as_str) == Some("error")
-                })
+                .find(|finding| finding.get("severity").and_then(Value::as_str) == Some("error"))
                 .and_then(|finding| {
                     let code = finding.get("code")?.as_str()?;
                     let references = finding
@@ -2571,7 +2526,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                     )
                 })
                 .unwrap_or_default();
-            format!("{introduced} introduced, {pre_existing} pre-existing{first}")
+            format!("{count} finding(s){first}")
         }
         "place_parts" | "add_parts" => {
             let gaps = result
@@ -2594,30 +2549,18 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             .unwrap_or("project state")
             .to_string(),
         "render_schematic" => {
-            let introduced = [
-                "body_overlaps_introduced",
-                "text_collisions_introduced",
-                "wires_through_bodies_introduced",
-            ]
-            .iter()
-            .map(|name| {
-                result
-                    .pointer(&format!("/visual/{name}"))
-                    .and_then(Value::as_array)
-                    .map_or(0, Vec::len)
-            })
-            .sum::<usize>();
-            format!("rendered schematic; {introduced} introduced visual finding(s)")
+            let findings = ["body_overlaps", "text_collisions", "wires_through_bodies"]
+                .iter()
+                .map(|name| {
+                    result
+                        .pointer(&format!("/visual/{name}"))
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len)
+                })
+                .sum::<usize>();
+            format!("rendered schematic; {findings} visual finding(s)")
         }
         "check_board" => {
-            let introduced = result
-                .get("introduced")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let pre_existing = result
-                .get("pre_existing")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
             let blocking = result
                 .get("blocking_findings")
                 .and_then(Value::as_u64)
@@ -2632,18 +2575,13 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                             .unwrap_or(0)
                 });
             let silk = result
-                .get("introduced_silk_warnings")
-                .or_else(|| result.get("silk_warnings"))
+                .pointer("/silk/warnings")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             if check_board_is_clean(result) {
-                format!(
-                    "{introduced} introduced, {pre_existing} pre-existing; PCB quality gate passed"
-                )
+                "PCB quality gate passed".to_string()
             } else if result.get("ok").and_then(Value::as_bool) == Some(true) {
-                format!(
-                    "{introduced} introduced, {pre_existing} pre-existing; {silk} introduced silkscreen warning(s) block quality acceptance"
-                )
+                format!("{silk} silkscreen warning(s) block quality acceptance")
             } else {
                 // The reported order, not a ranking: check_board lists findings
                 // as KiCAD produced them.
@@ -2671,9 +2609,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                     })
                     .map(|first| format!(" — first is {first}"))
                     .unwrap_or_default();
-                format!(
-                    "{introduced} introduced, {pre_existing} pre-existing; {blocking} introduced blocking findings{first}; fix them, then check_board again"
-                )
+                format!("{blocking} blocking findings{first}; fix them, then check_board again")
             }
         }
         "assign_footprints" => {
@@ -3075,8 +3011,8 @@ mod tests {
         );
     }
 
-    /// `check_schematic` reports the turn-relative counts rather than looking
-    /// like a tool that declined to run.
+    /// `check_schematic` reports live findings rather than looking like a tool
+    /// that declined to run.
     #[test]
     fn a_failing_check_reports_its_counts_rather_than_a_refusal() {
         let result = json!({
@@ -3086,10 +3022,7 @@ mod tests {
             "erc": {"errors": 3, "warnings": 7},
             "checks": {"errors": 1, "warnings": 2},
             "completeness": {"warnings": 2},
-            "introduced": 1,
-            "pre_existing": 11,
             "findings": [{
-                "classification": "introduced",
                 "severity": "error",
                 "code": "power_pin_not_driven",
                 "message": "no driver on net VCC",
@@ -3103,7 +3036,7 @@ mod tests {
 
         assert_eq!(
             tool_summary("check_schematic", &json!({}), &result),
-            "1 introduced, 11 pre-existing — first blocking finding: power_pin_not_driven at \
+            "1 finding(s) — first blocking finding: power_pin_not_driven at \
              U1.8: no driver on net VCC → fix: add_power{\"net\":\"VCC\",\"pin\":\"U1.8\"}"
         );
     }
@@ -3111,10 +3044,7 @@ mod tests {
     #[test]
     fn a_long_check_summary_keeps_the_fix_visible() {
         let result = json!({
-            "introduced": 1,
-            "pre_existing": 0,
             "findings": [{
-                "classification": "introduced",
                 "severity": "error",
                 "code": "footprint-pins",
                 "message": "a very long footprint compatibility explanation that names every missing pad and every extra symbol pin before eventually describing the repair the model must make",
@@ -3137,8 +3067,6 @@ mod tests {
     fn a_failing_board_check_names_the_finding_it_reported_first() {
         let result = json!({
             "ok": false,
-            "introduced": 3,
-            "pre_existing": 9,
             "blocking_findings": 3,
             "reported_findings": 4,
             "silk_warnings": 1,
@@ -3153,8 +3081,53 @@ mod tests {
 
         assert_eq!(
             tool_summary("check_board", &json!({}), &result),
-            "3 introduced, 9 pre-existing; 3 introduced blocking findings — first is clearance: \
+            "3 blocking findings — first is clearance: \
              Pad 3 of U1 ↔ Pad 4 of U1; fix them, then check_board again"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn turn_starts_before_touching_unrelated_project_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(env) = kicad::KicadInstallation::detect() else {
+            eprintln!("SKIP: no KiCad detected");
+            return;
+        };
+        let project = tempfile::tempdir().unwrap();
+        let schematic = project.path().join("design.kicad_sch");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../kicad/tests/fixtures/rc_pair.kicad_sch");
+        std::fs::copy(fixture, &schematic).unwrap();
+        let junk = project.path().join("target/cache");
+        std::fs::create_dir_all(&junk).unwrap();
+        let canary = junk.join("must-not-be-read.bin");
+        std::fs::write(&canary, vec![0_u8; 4 * 1024 * 1024]).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o0)).unwrap();
+
+        let ctx = AgentRuntime::new(env, project.path().to_path_buf(), schematic).unwrap();
+        let mut agent = Agent::new(
+            ScriptedClient::new(vec![crate::testing::final_text("ready")]),
+            ctx,
+            system_prompt(),
+        );
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = agent
+            .run_turn("read the schematic", Some(&events_tx))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        let first = events_rx.try_recv().expect("turn-start event");
+        assert!(matches!(
+            first,
+            AgentEvent::Diagnostic {
+                level: "info",
+                ref target,
+                ref message,
+            } if target == "agent" && message == "turn started"
+        ));
     }
 }

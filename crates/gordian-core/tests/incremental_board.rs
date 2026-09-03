@@ -232,7 +232,7 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
     assert_eq!(checked["staged_count"], json!(24), "{checked:#}");
     assert_eq!(checked["routed"], json!(format!("1/{nets}")), "{checked:#}");
     for finding in checked["findings"].as_array().unwrap() {
-        if finding["classification"] == json!("introduced") {
+        if finding["staged"] == json!(false) {
             for reference in finding["refs"].as_array().unwrap() {
                 assert!(
                     !staged_now
@@ -406,9 +406,17 @@ fn the_board_tools_refuse_while_the_schematic_bench_is_not_empty() {
 
     for name in ["sync_board", "export_fab"] {
         let refused = run_tool(name, json!({}), &ctx).unwrap();
-        assert_eq!(refused["code"], json!("bench_not_empty"), "{name}: {refused:#}");
+        assert_eq!(
+            refused["code"],
+            json!("bench_not_empty"),
+            "{name}: {refused:#}"
+        );
         assert_eq!(refused["bench"], json!(2), "{name}: {refused:#}");
-        assert_eq!(refused["bench_refs"], json!(["R1", "R2"]), "{name}: {refused:#}");
+        assert_eq!(
+            refused["bench_refs"],
+            json!(["R1", "R2"]),
+            "{name}: {refused:#}"
+        );
     }
 
     tool(&ctx, "arrange", json!({"refs": ["R1", "R2"]}));

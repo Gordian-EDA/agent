@@ -127,7 +127,7 @@ fn connector_swap_reflows_fields_without_moving_the_part() {
     assert_success("add_power", &powered);
     let after_doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
     assert_eq!(after_doc.symbol_by_ref("P1").unwrap().at, before_at);
-    let introduced = sch_floorplan::visual::measure(&after_doc)
+    let new_collisions = sch_floorplan::visual::measure(&after_doc)
         .text_collisions
         .into_iter()
         .map(|collision| (collision.reference, collision.field, collision.with))
@@ -136,7 +136,7 @@ fn connector_swap_reflows_fields_without_moving_the_part() {
         .cloned()
         .collect::<Vec<_>>();
     assert!(
-        introduced.is_empty(),
-        "introduced collisions: {introduced:?}"
+        new_collisions.is_empty(),
+        "new collisions: {new_collisions:?}"
     );
 }

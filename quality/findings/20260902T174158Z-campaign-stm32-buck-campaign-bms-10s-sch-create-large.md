@@ -97,7 +97,7 @@ Questions:
 - `campaign-bms-10s`: struggled: The undo tool restored a revision that removed the schematic, while project_info still reported its path, creating an inconsistent project state.
 - `campaign-bms-10s`: struggled: The check_schematic tool provided no dependable file-existence or revision-status diagnostics to resolve that inconsistency.
 - `campaign-bms-10s`: struggled: Schematic connectivity tools lacked a bulk netlist or hierarchical wiring operation, making ten cell channels and filter banks error-prone to author manually.
-- `campaign-bms-10s`: struggled: ERC reported 190 introduced findings but omitted 151 details, preventing efficient diagnosis of the underlying connectivity failures.
+- `campaign-bms-10s`: struggled: ERC reported 190 findings but omitted 151 details, preventing efficient diagnosis of the underlying connectivity failures.
 - `campaign-bms-10s`: struggled: The toolset did not expose a clear authoritative pin-function map for the stock BQ76930DBT symbol, especially VC5B/VC5X and power/control pins.
 - `campaign-bms-10s`: struggled: Because schematic creation failed, PCB synchronization, board checking, rendering, and fabrication export were unavailable.
 - `campaign-bms-10s`: wished: Provide atomic project snapshots with reliable file existence, revision, and undo/redo status reporting.
