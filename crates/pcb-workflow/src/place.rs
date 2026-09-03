@@ -234,10 +234,14 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let (Some(requested), Some(resolved)) = (requested_net, net_filter)
         && requested != resolved
     {
+        output["resolved_from"] = json!(requested);
         output["requested_net"] = json!(requested);
         output["resolved_net"] = json!(resolved);
-        output["net_name_note"] =
-            json!("KiCad renamed this anonymous Net-(…) while preserving the same pad partition.");
+        output["net_name_note"] = if kicad_board::is_derived_net_name(requested) {
+            json!("KiCad renamed this anonymous Net-(…) while preserving the same pad partition.")
+        } else {
+            json!("Resolved the unique close spelling against this board's nets.")
+        };
     }
     if !schematic_changes.is_empty() {
         output["sync_required"] = json!(true);

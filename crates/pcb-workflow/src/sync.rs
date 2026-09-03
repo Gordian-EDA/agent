@@ -18,6 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
+use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use serde_json::{Value, json};
 
 use geom::Rect;
@@ -709,7 +710,7 @@ pub(crate) fn resolve_board_net(
         return Ok(Some(requested.to_owned()));
     }
     if !kicad_board::is_derived_net_name(requested) || !ctx.sch_path().exists() {
-        return Ok(None);
+        return Ok(unique_close_board_net(saved.values(), requested));
     }
     let netlist = ctx
         .env()
@@ -736,7 +737,50 @@ pub(crate) fn resolve_board_net(
         .find(|(name, members)| {
             kicad_board::is_derived_net_name(name) && members == requested_members
         })
-        .map(|(name, _)| name))
+        .map(|(name, _)| name)
+        .or_else(|| unique_close_board_net(saved.values(), requested)))
+}
+
+/// Resolve one unambiguous near spelling among the board's own design nets.
+fn unique_close_board_net<'a>(
+    nets: impl Iterator<Item = &'a String>,
+    requested: &str,
+) -> Option<String> {
+    let candidates = nets
+        .filter(|net| kicad_board::is_design_net_name(net))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let normalized = requested.trim_start_matches('/');
+    let canonical = candidates
+        .iter()
+        .filter(|net| net.trim_start_matches('/').eq_ignore_ascii_case(normalized))
+        .collect::<Vec<_>>();
+    if canonical.len() == 1 {
+        return Some(canonical[0].to_string());
+    }
+    if requested.chars().count() < 2 {
+        return None;
+    }
+
+    let matcher = SkimMatcherV2::default().ignore_case();
+    let mut ranked = candidates
+        .iter()
+        .filter(|net| net.chars().count().abs_diff(requested.chars().count()) <= 3)
+        .filter_map(|net| {
+            matcher
+                .fuzzy_match(net, requested)
+                .map(|score| (score, net))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(left_score, left), (right_score, right)| {
+        right_score.cmp(left_score).then_with(|| left.cmp(right))
+    });
+    match ranked.as_slice() {
+        [(score, net), ..] if ranked.get(1).is_none_or(|(next, _)| next < score) => {
+            Some((*net).clone())
+        }
+        _ => None,
+    }
 }
 
 /// References currently present in the live schematic netlist.
@@ -1812,6 +1856,17 @@ mod tests {
         let board = "(kicad_pcb\n\t(net 0 \"\")\n)\n";
         let doc = board_doc_for_sync(board.to_owned()).unwrap();
         assert_eq!(doc.text(), board);
+    }
+
+    #[test]
+    fn board_net_near_match_prefers_the_unique_canonical_spelling() {
+        let nets = ["/SW".to_owned(), "SWO".to_owned(), "GND".to_owned()];
+
+        assert_eq!(
+            unique_close_board_net(nets.iter(), "SW"),
+            Some("/SW".to_owned())
+        );
+        assert_eq!(unique_close_board_net(nets.iter(), "S"), None);
     }
 
     #[test]

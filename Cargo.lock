@@ -1800,6 +1800,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "circuit-graph",
+ "fuzzy-matcher",
  "geom",
  "gordian-runtime",
  "kicad",
