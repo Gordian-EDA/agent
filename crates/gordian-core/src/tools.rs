@@ -449,16 +449,36 @@ pub fn tool_defs() -> Vec<Tool> {
                                 "additionalProperties": { "type": "number" }
                             },
                             "pours": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "net": { "type": "string" },
-                                        "layer": { "type": "string" },
-                                        "connect": { "type": "string", "enum": ["thermal", "solid"] }
+                                "description": "One net or a list of nets/objects. Omitted layer defaults to B.Cu on 2-layer boards and an inner plane on 4+ layers; sync_board reports canonical objects.",
+                                "oneOf": [
+                                    { "type": "string" },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "net": { "type": "string" },
+                                            "layer": { "type": "string" },
+                                            "connect": { "type": "string", "enum": ["thermal", "solid"] }
+                                        },
+                                        "required": ["net"]
                                     },
-                                    "required": ["net", "layer"]
-                                }
+                                    {
+                                        "type": "array",
+                                        "items": {
+                                            "oneOf": [
+                                                { "type": "string" },
+                                                {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "net": { "type": "string" },
+                                                        "layer": { "type": "string" },
+                                                        "connect": { "type": "string", "enum": ["thermal", "solid"] }
+                                                    },
+                                                    "required": ["net"]
+                                                }
+                                            ]
+                                        }
+                                    }
+                                ]
                             }
                         }
                     }

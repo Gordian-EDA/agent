@@ -118,7 +118,11 @@ pub(crate) fn outline_containment_against(
         .map(|point| format!("{:016x}:{:016x}", point.x.to_bits(), point.y.to_bits()))
         .collect::<Vec<_>>()
         .join("/");
+    let staged: BTreeSet<String> = crate::staging::staged_references(board);
     for part in &board.imported.parts {
+        if staged.contains(&part.reference) {
+            continue;
+        }
         if let Some(local) = part.courtyard {
             let courtyard = crate::place::courtyard_at(
                 local,
@@ -207,7 +211,7 @@ pub(crate) fn outline_containment_against(
     result
 }
 
-fn rect_inside_outline(rect: geom::Rect, outline: &Polygon) -> bool {
+pub(crate) fn rect_inside_outline(rect: geom::Rect, outline: &Polygon) -> bool {
     let corners_inside = [
         Point2::new(rect.min_x, rect.min_y),
         Point2::new(rect.max_x, rect.min_y),

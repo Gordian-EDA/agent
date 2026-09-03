@@ -153,3 +153,62 @@ fn sync_board_creates_then_edits_a_board_without_disturbing_it() {
     assert_eq!(checked["drc_clean"], json!(true), "{checked:#}");
     assert_eq!(checked["unconnected_items"], json!(0), "{checked:#}");
 }
+
+#[test]
+fn incomplete_sync_and_auto_edge_placement_preserve_a_reported_partial_board() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+
+    let placed = tool(
+        &ctx,
+        "place_parts",
+        json!({"block": "partial", "parts": [
+            {"ref": "J1", "part": "Connector_Generic:Conn_01x02", "value": "INPUT",
+             "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+             "pins": {"1": "SIG", "2": "GND"}},
+            {"ref": "R1", "part": "Device:R", "value": "10k",
+             "footprint": "Missing:PackageA", "pins": {"1": "SIG", "2": "MID"}},
+            {"ref": "R2", "part": "Device:R", "value": "10k",
+             "footprint": "Missing:PackageB", "pins": {"1": "MID", "2": "GND"}}
+        ]}),
+    );
+    assert_eq!(placed["footprints_unresolved"].as_array().unwrap().len(), 2);
+
+    let synced = tool(
+        &ctx,
+        "sync_board",
+        json!({"bounds": "auto", "rules": {"layer_count": 2, "pours": "GND"}}),
+    );
+    assert_eq!(synced["missing_footprints"], json!(["R1", "R2"]));
+    assert_eq!(synced["staged_missing_footprint"], json!(["R1", "R2"]));
+    assert_eq!(
+        synced["design_rules"]["pours"],
+        json!([{"net": "GND", "layer": "bottom", "connect": "thermal"}])
+    );
+
+    let placed = tool(
+        &ctx,
+        "place_board",
+        json!({"refs": ["J1", "R1", "R2"], "intent": {"edge": {"J1": "left"}}}),
+    );
+    assert_eq!(placed["placed_refs"], json!(["J1"]), "{placed:#}");
+    assert_eq!(
+        placed["unplaced"].as_array().unwrap().len(),
+        2,
+        "{placed:#}"
+    );
+    assert!(placed["outline_refit"].is_object(), "{placed:#}");
+
+    let checked = run_tool("check_board", json!({}), &ctx).unwrap();
+    assert_eq!(checked["staged_count"], json!(2), "{checked:#}");
+    assert!(checked["outline"]["min"].is_array(), "{checked:#}");
+    assert!(checked["outline"]["max"].is_array(), "{checked:#}");
+    assert!(checked["outline"]["size_mm"].is_array(), "{checked:#}");
+    for staged in checked["staged"].as_array().unwrap() {
+        assert_eq!(staged["staged_reason"], json!("missing_footprint"));
+        assert!(staged["extent"]["min"].is_array(), "{staged:#}");
+        assert!(staged["extent"]["max"].is_array(), "{staged:#}");
+    }
+}

@@ -22,6 +22,8 @@ pub(crate) enum StagedReason {
     /// Its symbol pins and its footprint pads disagree, so it was staged rather
     /// than blocking the whole sync.
     FootprintMismatch,
+    /// The schematic has no footprint assignment for this reference yet.
+    MissingFootprint,
     /// Nothing has laid it out yet.
     Unplaced,
 }
@@ -31,6 +33,7 @@ impl StagedReason {
         match self {
             StagedReason::NewFromSync => "new_from_sync",
             StagedReason::FootprintMismatch => "footprint_mismatch",
+            StagedReason::MissingFootprint => "missing_footprint",
             StagedReason::Unplaced => "unplaced",
         }
     }
@@ -39,19 +42,36 @@ impl StagedReason {
         match value {
             "new_from_sync" => Some(StagedReason::NewFromSync),
             "footprint_mismatch" => Some(StagedReason::FootprintMismatch),
+            "missing_footprint" => Some(StagedReason::MissingFootprint),
             "unplaced" => Some(StagedReason::Unplaced),
             _ => None,
         }
     }
 }
 
+/// References whose staged reason prevents meaningful physical placement.
+pub(crate) fn unplaceable_references(board: &BoardSnapshot) -> BTreeSet<String> {
+    staged(board)
+        .into_iter()
+        .filter(|part| {
+            matches!(
+                part.reason,
+                StagedReason::FootprintMismatch | StagedReason::MissingFootprint
+            )
+        })
+        .map(|part| part.reference)
+        .collect()
+}
+
 /// One part waiting in the staging row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct StagedPart {
     pub(crate) reference: String,
     pub(crate) reason: StagedReason,
     /// What the reason needs spelled out — the pin/pad mismatch, say.
     pub(crate) detail: Option<String>,
+    /// Physical footprint bounds at its current board pose.
+    pub(crate) extent: Option<geom::Rect>,
 }
 
 impl StagedPart {
@@ -60,8 +80,68 @@ impl StagedPart {
             "ref": self.reference,
             "staged_reason": self.reason.as_str(),
             "detail": self.detail,
+            "extent": self.extent.map(rect_json),
         })
     }
+}
+
+/// Compact min/max/size representation shared by board-state reports.
+pub(crate) fn rect_json(rect: geom::Rect) -> Value {
+    json!({
+        "min": [rect.min_x, rect.min_y],
+        "max": [rect.max_x, rect.max_y],
+        "size_mm": [rect.width(), rect.height()],
+    })
+}
+
+/// Bounding box of a footprint's physical courtyard or pads at its saved pose.
+pub(crate) fn part_extent(part: &ImportedPart) -> Option<geom::Rect> {
+    if let Some(local) = part.courtyard {
+        return Some(crate::place::courtyard_at(
+            local,
+            part.at,
+            f64::from(part.rotation),
+            part.side == kicad_board::BoardSide::Back,
+        ));
+    }
+    part.pads.iter().fold(None, |extent, pad| {
+        let half = (pad.size.x / 2.0, pad.size.y / 2.0);
+        let pad = geom::Rect::from_center_half(pad.at, half);
+        Some(match extent {
+            None => pad,
+            Some(current) => geom::Rect::new(
+                current.min_x.min(pad.min_x),
+                current.min_y.min(pad.min_y),
+                current.max_x.max(pad.max_x),
+                current.max_y.max(pad.max_y),
+            ),
+        })
+    })
+}
+
+/// Outline bounds in the same shape used for footprint extents.
+pub(crate) fn outline_json(board: &BoardSnapshot) -> Value {
+    rect_json(board.problem.bounds)
+}
+
+/// References outside the outline paired with their physical extents.
+pub(crate) fn outside_json(
+    board: &BoardSnapshot,
+    references: impl IntoIterator<Item = String>,
+) -> Vec<Value> {
+    let references: BTreeSet<String> = references.into_iter().collect();
+    board
+        .imported
+        .parts
+        .iter()
+        .filter(|part| references.contains(&part.reference))
+        .map(|part| {
+            json!({
+                "ref": part.reference,
+                "extent": part_extent(part).map(rect_json),
+            })
+        })
+        .collect()
 }
 
 /// Every part still in the staging row, with the reason it is there.
@@ -85,6 +165,7 @@ pub(crate) fn staged(board: &BoardSnapshot) -> Vec<StagedPart> {
                 .and_then(StagedReason::parse)
                 .unwrap_or(StagedReason::Unplaced),
             detail: part.property(kicad_board::STAGED_DETAIL).map(str::to_owned),
+            extent: part_extent(part),
         })
         .collect()
 }
@@ -219,6 +300,7 @@ mod tests {
         assert_eq!(state.placed, ["U1"]);
         assert_eq!(state.staged[0].reason, StagedReason::Unplaced);
         assert_eq!(state.staged[0].detail, None);
+        assert!(state.staged[0].extent.is_none());
         assert_eq!(state.staged[1].reason, StagedReason::FootprintMismatch);
         assert_eq!(state.staged[1].detail.as_deref(), Some("pin 3 has no pad"));
     }
