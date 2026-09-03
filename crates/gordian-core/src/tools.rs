@@ -64,8 +64,8 @@ fn intent_schema() -> Value {
         "properties": {
             "edge": {
                 "type": "object",
-                "description": "Reference -> board side its courtyard should touch.",
-                "additionalProperties": { "type": "string", "enum": ["left", "right", "top", "bottom"] }
+                "description": "Reference -> board side its courtyard should touch; compass aliases are normalized in the response.",
+                "additionalProperties": { "type": "string", "enum": ["left", "right", "top", "bottom", "north", "south", "east", "west", "N", "S", "E", "W", "n", "s", "e", "w"] }
             },
             "keep_near": {
                 "type": "array",
@@ -219,7 +219,7 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "move_parts".into(),
-            description: "Move footprints by to/at, by, near, or edge, with rotation/rot and offsets. Accepts ref/reference, defaults an omitted near/edge gap, and nudges an occupied target to the nearest legal pose when one exists.".into(),
+            description: "Move footprints by to/at, by, near, or edge, with rotation/rot and offsets. Accepts ref/reference, defaults an omitted near/edge gap, and nudges an occupied target through 5, 10, and 20 mm searches before choosing the nearest legal pose anywhere inside the outline. Reports nudged_to and nudge_distance_mm; refuses only when the outline has no legal room.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -359,7 +359,7 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "update_board_outline".into(),
-            description: "Edit Edge.Cuts by bounds, polygon, or fitted geometry.".into(),
+            description: "Edit Edge.Cuts by bounds, polygon, or fitted geometry. A fit request on a routed board is a successful no-op reported as outline_refit: skipped (routed board).".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -384,7 +384,7 @@ pub fn tool_defs() -> Vec<Tool> {
                     },
                     "fit_to_geometry": {
                         "type": "boolean",
-                        "description": "Fit around parts/copper."
+                        "description": "Fit around parts before routing; reports a successful skipped no-op when copper already exists."
                     },
                     "margin": { "type": "number", "description": "Margin mm; default 2." }
                 }
@@ -656,7 +656,7 @@ pub fn tool_defs() -> Vec<Tool> {
 /// loop off-loads this onto the blocking pool.
 pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Some(result) = gordian_tools_sch::run(name, input.clone(), ctx) {
-        return result;
+        return result.map(pcb_workflow::enrich_positional_pin_refusal);
     }
     match name {
         "search_symbols" => search_symbols(input, ctx),

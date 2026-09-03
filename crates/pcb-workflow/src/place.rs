@@ -149,12 +149,30 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         },
         "parts": parts,
     });
-    let net_filter = input
+    let requested_net = input
         .get("net")
         .and_then(Value::as_str)
         .filter(|net| !net.is_empty());
-    if let Some(net) = net_filter
-        && !net_pins.contains_key(net)
+    if let Some(net) = requested_net
+        && !kicad_board::is_design_net_name(net)
+    {
+        return Ok(json!({
+            "error": format!(
+                "`{net}` is an unconnected-pad pseudo-net, not a design net"
+            ),
+            "code": "not_a_design_net",
+            "note": "KiCad names isolated pads unconnected-(REF-PadN); inspect the pad or its schematic no-connect marker instead.",
+        }));
+    }
+    let resolved_net = match requested_net {
+        Some(net) => match crate::sync::resolve_board_net(ctx, &board, net) {
+            Ok(resolved) => resolved,
+            Err(error) => return Ok(json!({ "error": error })),
+        },
+        None => None,
+    };
+    if let Some(net) = requested_net
+        && resolved_net.is_none()
     {
         if !schematic_changes.is_empty() {
             return Ok(json!({
@@ -169,6 +187,7 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         return Ok(json!({ "error": format!("no net named `{net}` on this board") }));
     }
+    let net_filter = resolved_net.as_deref();
     let include_copper = net_filter.is_some()
         || input
             .get("include_copper")
@@ -185,7 +204,7 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 )
             }));
         }
-        board_json["copper"] = copper_json(&board, &input);
+        board_json["copper"] = copper_json(&board, &input, net_filter);
     }
     if let Some(net) = net_filter {
         board_json["terminals"] = terminals_json(&board, net);
@@ -212,6 +231,14 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             ),
         },
     });
+    if let (Some(requested), Some(resolved)) = (requested_net, net_filter)
+        && requested != resolved
+    {
+        output["requested_net"] = json!(requested);
+        output["resolved_net"] = json!(resolved);
+        output["net_name_note"] =
+            json!("KiCad renamed this anonymous Net-(…) while preserving the same pad partition.");
+    }
     if !schematic_changes.is_empty() {
         output["sync_required"] = json!(true);
         output["schematic_changed"] = json!({ "nets": schematic_changes });
@@ -253,11 +280,7 @@ fn terminals_json(board: &BoardSnapshot, net: &str) -> Value {
     })
 }
 
-fn copper_json(board: &BoardSnapshot, input: &Value) -> Value {
-    let net_filter = input
-        .get("net")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty());
+fn copper_json(board: &BoardSnapshot, input: &Value, net_filter: Option<&str>) -> Value {
     let layer_filter = input
         .get("layer")
         .and_then(Value::as_str)
@@ -2912,6 +2935,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(intent) => intent,
         Err(error) => return Ok(json!({ "error": error })),
     };
+    let normalized_edges = intent.normalized_edges.clone();
     let known = board
         .imported
         .parts
@@ -2971,6 +2995,9 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         if !reference_status.is_empty() {
             result["reference_status"] = json!(reference_status);
         }
+        if !normalized_edges.is_empty() {
+            result["normalized_edges"] = json!(normalized_edges);
+        }
         return Ok(result);
     }
 
@@ -2994,7 +3021,8 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let board_text = std::fs::read_to_string(ctx.pcb_path())?;
     let managed_outline = super::outline::managed_outline_bounds(&board_text).ok();
     let auto_outline = managed_outline.is_some_and(|managed| !managed.explicit);
-    if auto_outline {
+    let routed_board = !board.copper.traces.is_empty() || !board.copper.vias.is_empty();
+    if auto_outline && !routed_board {
         let sizing = board_sizing(&problem, &board.imported.parts, &board.problem);
         problem.bounds.max_x = problem
             .bounds
@@ -3136,7 +3164,8 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut mechanical_locks: Vec<String> = Vec::new();
     let mut retracted = None;
     let mut outline_refit = None;
-    let mut outline_target = auto_outline.then_some(problem.bounds);
+    let outline_refit_skipped = auto_outline && routed_board;
+    let mut outline_target = (auto_outline && !routed_board).then_some(problem.bounds);
     let mut applied_refs = Vec::new();
     // A subset placement answers only for the parts it may move.
     let legal = match &refs {
@@ -3150,7 +3179,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             // is the explicit way to shrink a fixed one.
             if managed.explicit {
                 tracing::info!("outline bounds were explicit; placement leaves them as set");
-            } else {
+            } else if !routed_board {
                 let mut routing = board.problem.clone();
                 routing.fixed_copper = board.copper.clone();
                 if let Some(plan) =
@@ -3399,6 +3428,8 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     if let Some(plan) = &outline_refit {
         out["outline_refit"] = super::outline::outline_refit_json(plan);
+    } else if outline_refit_skipped {
+        out["outline_refit"] = json!("skipped (routed board)");
     }
     let retract = retracted.unwrap_or_default();
     out["retracted_tracks"] = json!(retract.count);
@@ -3472,6 +3503,9 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     if !reference_status.is_empty() {
         out["reference_status"] = json!(reference_status);
+    }
+    if !normalized_edges.is_empty() {
+        out["normalized_edges"] = json!(normalized_edges);
     }
     let out = match gate {
         Some(gate) => gate.commit(ctx, out),
@@ -4748,6 +4782,7 @@ mod tests {
         let out = copper_json(
             &board,
             &json!({ "include_copper": true, "net": "SIG", "layer": "F.Cu" }),
+            Some("SIG"),
         );
 
         assert_eq!(out["track_count"], json!(1));
@@ -4764,9 +4799,38 @@ mod tests {
         let tracks_only = copper_json(
             &board,
             &json!({ "include_copper": true, "kinds": ["track"] }),
+            None,
         );
         assert_eq!(tracks_only["track_count"], json!(2));
         assert_eq!(tracks_only["via_count"], json!(0));
+    }
+
+    #[test]
+    fn get_board_rejects_unconnected_pad_pseudo_nets_as_non_design_nets() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: KiCad is not installed");
+            return;
+        };
+        let board = include_str!("../tests/fixtures/two_res.kicad_pcb").replacen(
+            "(net 2 \"SIG\")",
+            "(net 2 \"unconnected-(R1-Pad1)\")",
+            1,
+        );
+        let board = board.replacen("(net 2 \"SIG\")", "(net 2 \"unconnected-(R1-Pad1)\")", 1);
+        std::fs::write(ctx.pcb_path(), board).unwrap();
+
+        let summary = get_board(json!({}), &ctx).unwrap();
+        assert!(
+            summary["summary"]["nets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|net| !net["name"].as_str().unwrap().starts_with("unconnected-")),
+            "{summary:#}"
+        );
+        let queried = get_board(json!({ "net": "unconnected-(R1-Pad1)" }), &ctx).unwrap();
+        assert_eq!(queried["code"], json!("not_a_design_net"), "{queried:#}");
+        assert!(queried.get("next_tool").is_none(), "{queried:#}");
     }
 
     #[test]

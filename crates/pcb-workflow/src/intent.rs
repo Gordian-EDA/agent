@@ -20,7 +20,7 @@
 //! rather than placement, so they belong to `sync_board`; each tool applies its
 //! own half and names the other rather than dropping it silently.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pcb_place::{Edge, GroupHint, PlacementHints};
 use serde_json::Value;
@@ -32,6 +32,8 @@ pub(crate) struct BoardIntent {
     pub(crate) hints: PlacementHints,
     /// Nets that should be poured as a copper zone.
     pub(crate) zones: Vec<String>,
+    /// Reference → canonical `left|right|top|bottom` for reported edge input.
+    pub(crate) normalized_edges: BTreeMap<String, String>,
 }
 
 impl BoardIntent {
@@ -76,6 +78,8 @@ impl BoardIntent {
             group.members.retain(|reference| known.contains(reference));
         }
         self.hints.groups.retain(|group| !group.members.is_empty());
+        self.normalized_edges
+            .retain(|reference, _| known.contains(reference));
     }
 }
 
@@ -97,7 +101,9 @@ pub(crate) fn parse(input: &Value) -> std::result::Result<BoardIntent, String> {
     }
 
     let mut hints = PlacementHints::default();
-    for (reference, side) in edge_entries(object.get("edge"))? {
+    let mut normalized_edges = BTreeMap::new();
+    for (reference, side, normalized) in edge_entries(object.get("edge"))? {
+        normalized_edges.insert(reference.clone(), normalized.to_owned());
         hints.groups.push(GroupHint {
             name: format!("edge:{reference}"),
             members: vec![reference],
@@ -123,10 +129,13 @@ pub(crate) fn parse(input: &Value) -> std::result::Result<BoardIntent, String> {
     Ok(BoardIntent {
         hints,
         zones: strings(object.get("zones"), "zones")?,
+        normalized_edges,
     })
 }
 
-fn edge_entries(value: Option<&Value>) -> std::result::Result<Vec<(String, Edge)>, String> {
+fn edge_entries(
+    value: Option<&Value>,
+) -> std::result::Result<Vec<(String, Edge, &'static str)>, String> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
@@ -139,19 +148,19 @@ fn edge_entries(value: Option<&Value>) -> std::result::Result<Vec<(String, Edge)
             let side = side
                 .as_str()
                 .ok_or_else(|| format!("intent.edge.{reference} must be a board side"))?;
-            let edge = match side {
-                "left" => Edge::W,
-                "right" => Edge::E,
-                "top" => Edge::N,
-                "bottom" => Edge::S,
+            let (edge, normalized) = match side {
+                "left" | "west" | "W" | "w" => (Edge::W, "left"),
+                "right" | "east" | "E" | "e" => (Edge::E, "right"),
+                "top" | "north" | "N" | "n" => (Edge::N, "top"),
+                "bottom" | "south" | "S" | "s" => (Edge::S, "bottom"),
                 other => {
                     return Err(format!(
-                        "intent.edge.{reference} is `{other}`; a board side is left, right, top \
-                         or bottom"
+                        "intent.edge.{reference} is `{other}`; a board side is left/west, \
+                         right/east, top/north or bottom/south"
                     ));
                 }
             };
-            Ok((reference.clone(), edge))
+            Ok((reference.clone(), edge, normalized))
         })
         .collect()
 }
@@ -244,8 +253,37 @@ mod tests {
 
     #[test]
     fn a_misspelled_side_is_refused_by_name() {
-        let error = parse(&json!({ "intent": { "edge": { "J1": "north" } } })).unwrap_err();
-        assert!(error.contains("left, right, top or bottom"), "{error}");
+        let error = parse(&json!({ "intent": { "edge": { "J1": "diagonal" } } })).unwrap_err();
+        assert!(error.contains("left/west"), "{error}");
+    }
+
+    #[test]
+    fn compass_edge_aliases_are_accepted_and_reported_canonically() {
+        let intent = parse(&json!({
+            "intent": {
+                "edge": {
+                    "J1": "south",
+                    "J2": "east",
+                    "J3": "N",
+                    "J4": "W"
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(intent.hints.groups[0].edge, Some(Edge::S));
+        assert_eq!(intent.hints.groups[1].edge, Some(Edge::E));
+        assert_eq!(intent.hints.groups[2].edge, Some(Edge::N));
+        assert_eq!(intent.hints.groups[3].edge, Some(Edge::W));
+        assert_eq!(
+            intent.normalized_edges,
+            BTreeMap::from([
+                ("J1".to_owned(), "bottom".to_owned()),
+                ("J2".to_owned(), "right".to_owned()),
+                ("J3".to_owned(), "top".to_owned()),
+                ("J4".to_owned(), "left".to_owned()),
+            ])
+        );
     }
 
     #[test]

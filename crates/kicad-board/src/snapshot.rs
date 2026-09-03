@@ -3,6 +3,19 @@
 use geom::{Point2, Rect};
 use pcb_model::{RouteSolution, RoutingView};
 
+/// Whether a KiCad net name denotes electrical design connectivity.
+///
+/// KiCad assigns `unconnected-(REF-PadN)` names to isolated pads. Those names
+/// are file-local bookkeeping, not schematic nets that may be routed or synced.
+pub fn is_design_net_name(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with("unconnected-")
+}
+
+/// Whether KiCad derived a net name from one of its member pads.
+pub fn is_derived_net_name(name: &str) -> bool {
+    name.starts_with("Net-(")
+}
+
 /// Domain view parsed from a saved KiCad board.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoardSnapshot {

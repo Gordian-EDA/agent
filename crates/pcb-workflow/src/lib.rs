@@ -47,6 +47,7 @@ mod diagnose;
 mod export;
 mod fab;
 mod footprints;
+mod guidance;
 mod intent;
 mod interactive;
 mod locks;
@@ -101,6 +102,7 @@ pub(crate) fn fmt_num(v: f64) -> String {
 pub use export::{check_board, refill_zones};
 pub use fab::export_fab;
 pub use footprints::{get_footprint_info, search_footprints};
+pub use guidance::enrich_positional_pin_refusal;
 pub use interactive::{delete_copper, move_parts, route_track, set_net_width};
 pub use locks::{lock_parts, unlock_parts};
 pub use outline::update_board_outline;

@@ -453,17 +453,10 @@ fn stale_nets_request_sync_and_existing_board_intent_runs_both_halves() {
         &ctx,
     )
     .expect("add an intentionally incomplete symbol");
+    tool(&ctx, "label", json!({ "pin": "R99.1", "net": "UNSYNCED" }));
 
     let stale_get = run_tool("get_board", json!({ "net": "UNSYNCED" }), &ctx).unwrap();
-    let imported_net = stale_get["schematic_changed"]["nets"]
-        .as_array()
-        .and_then(|nets| {
-            nets.iter()
-                .filter_map(Value::as_str)
-                .find(|net| net.contains("R99"))
-        })
-        .expect("a new R99 net")
-        .to_owned();
+    let imported_net = "UNSYNCED".to_owned();
     for stale in [
         stale_get,
         run_tool("route_board", json!({ "nets": ["UNSYNCED"] }), &ctx).unwrap(),
@@ -493,6 +486,7 @@ fn stale_nets_request_sync_and_existing_board_intent_runs_both_halves() {
     )
     .unwrap();
     assert!(synced.get("error").is_none(), "{synced:#}");
+    assert_eq!(synced["normalized_edges"]["J404"], json!("left"));
     assert!(synced["sync"].is_object(), "{synced:#}");
     assert!(synced["placement"].is_object(), "{synced:#}");
     assert!(

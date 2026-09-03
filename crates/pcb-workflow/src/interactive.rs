@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use geom::{Point2, Rect};
+use geom::{Point2, Polygon, Rect};
 use serde_json::{Value, json};
 
 use pcb_model::{
@@ -73,7 +73,7 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(crate::locks::locked_refusal("move_parts", &locked));
     }
     nudge_overlaps(&mut board, &mut plan, snapshot.problem.clearance);
-    if let Some(refusal) = overlap_error(&board, &plan, snapshot.problem.clearance) {
+    if let Some(refusal) = illegal_move_error(&board, &plan, snapshot.problem.clearance) {
         return Ok(refusal);
     }
     let retract = retracted_copper(&snapshot, &plan);
@@ -123,14 +123,13 @@ fn retracted_copper(snapshot: &BoardSnapshot, plan: &MovePlan) -> RetractedCoppe
     crate::copper::retract(&snapshot.copper, &pads, &BTreeSet::new())
 }
 
-/// Reject a move that would land a part on top of another one: the courtyards
-/// plus the board clearance must not overlap. Courtyards are what KiCAD's DRC
-/// checks, so a move this accepts cannot leave the board failing
-/// `courtyards_overlap`. The refusal carries both rectangles and the measured
-/// gap, so a wrong one can be seen for what it is.
-fn overlap_error(board: &MoveBoard, plan: &MovePlan, clearance: f64) -> Option<Value> {
+/// Report the board extents after the complete local-and-outline search fails.
+fn illegal_move_error(board: &MoveBoard, plan: &MovePlan, clearance: f64) -> Option<Value> {
     let rect = |r: &Rect| json!([r.min_x, r.min_y, r.max_x, r.max_y]);
     for position in &plan.positions {
+        if legal_move_candidate(board, position, clearance) {
+            continue;
+        }
         let Some(moved) = board.parts.get(&position.reference) else {
             return Some(json!({
                 "error": format!(
@@ -140,47 +139,61 @@ fn overlap_error(board: &MoveBoard, plan: &MovePlan, clearance: f64) -> Option<V
             }));
         };
         let moved_courtyard = moved.courtyard();
-        for (reference, other) in board.parts.iter() {
-            if reference == &position.reference {
-                continue;
-            }
-            let other_courtyard = other.courtyard();
-            let (ox, oy) = moved_courtyard
-                .inflate(clearance / 2.0)
-                .axis_penetration(&other_courtyard.inflate(clearance / 2.0));
-            if ox <= 0.0 || oy <= 0.0 {
-                continue;
-            }
-            let gap = -ox.min(oy);
-            return Some(json!({
-                "error": format!(
-                    "move_parts could not find a free legal spot for {} within 5 mm of \
-                     [{:.3}, {:.3}]; the requested pose would leave {gap:.3} mm to {} and \
-                     their courtyards need {clearance:.3} mm between them",
-                    position.reference, position.at.x, position.at.y, reference,
-                ),
-                "code": "courtyards_overlap",
-                // Show the work: a false refusal is only visible if the rects it
-                // was computed from are on the transcript.
-                "moved": { "reference": position.reference, "courtyard_mm": rect(&moved_courtyard) },
-                "blocked_by": { "reference": reference, "courtyard_mm": rect(&other_courtyard) },
-                "gap_mm": gap,
-                "required_clearance_mm": clearance,
-                "searched_mm": 5.0,
-                "search_extents_mm": [
-                    position.at.x - 5.0,
-                    position.at.y - 5.0,
-                    position.at.x + 5.0,
-                    position.at.y + 5.0,
-                ],
-            }));
-        }
+        let blocked_by = blocking_overlap(board, position, clearance).map(
+            |(reference, other_courtyard, gap)| {
+                json!({
+                    "reference": reference,
+                    "courtyard_mm": rect(&other_courtyard),
+                    "gap_mm": gap,
+                })
+            },
+        );
+        return Some(json!({
+            "error": format!(
+                "move_parts could not place {} anywhere inside the board outline; its \
+                 {:.3} x {:.3} mm courtyard plus {:.3} mm clearance has no free legal room",
+                position.reference,
+                moved_courtyard.width(),
+                moved_courtyard.height(),
+                clearance,
+            ),
+            "code": "outline_has_no_room",
+            "requested_at": [position.at.x, position.at.y],
+            "moved": {
+                "reference": position.reference,
+                "courtyard_mm": rect(&moved_courtyard),
+                "size_mm": [moved_courtyard.width(), moved_courtyard.height()],
+            },
+            "blocked_by": blocked_by,
+            "required_clearance_mm": clearance,
+            "searched_radii_mm": [5.0, 10.0, 20.0],
+            "outline_extents_mm": rect(&board.bounds),
+        }));
     }
     None
 }
 
+fn blocking_overlap<'a>(
+    board: &'a MoveBoard,
+    position: &ResolvedPosition,
+    clearance: f64,
+) -> Option<(&'a str, Rect, f64)> {
+    let moved = board.parts.get(&position.reference)?.courtyard();
+    board.parts.iter().find_map(|(reference, other)| {
+        if reference == &position.reference {
+            return None;
+        }
+        let other = other.courtyard();
+        let (ox, oy) = moved
+            .inflate(clearance / 2.0)
+            .axis_penetration(&other.inflate(clearance / 2.0));
+        (ox > 0.0 && oy > 0.0).then_some((reference.as_str(), other, -ox.min(oy)))
+    })
+}
+
 struct MoveBoard {
     bounds: Rect,
+    outline: Option<Polygon>,
     parts: BTreeMap<String, MovePart>,
 }
 
@@ -301,6 +314,7 @@ impl MoveBoard {
             .collect();
         Self {
             bounds: snapshot.imported.bounds,
+            outline: snapshot.problem.outline.clone(),
             parts,
         }
     }
@@ -319,6 +333,7 @@ impl MovePlan {
                     "rotation": p.rotation,
                     "read_as": p.read_as,
                     "nudged_to": p.nudged_from.map(|_| [p.at.x, p.at.y]),
+                    "nudge_distance_mm": p.nudged_from.map(|requested| requested.dist(p.at)),
                 })
             })
             .collect();
@@ -512,36 +527,23 @@ fn resolve_move_parts(
 }
 
 fn nudge_overlaps(board: &mut MoveBoard, plan: &mut MovePlan, clearance: f64) {
-    let mut offsets = Vec::new();
-    for ix in -20_i32..=20 {
-        for iy in -20_i32..=20 {
-            if ix == 0 && iy == 0 {
-                continue;
-            }
-            let dx = f64::from(ix) * 0.25;
-            let dy = f64::from(iy) * 0.25;
-            if dx.hypot(dy) <= 5.0 + geom::EPS {
-                offsets.push((dx, dy));
-            }
-        }
-    }
-    offsets.sort_by(|a, b| {
-        a.0.hypot(a.1)
-            .total_cmp(&b.0.hypot(b.1))
-            .then_with(|| a.0.total_cmp(&b.0))
-            .then_with(|| a.1.total_cmp(&b.1))
-    });
-
     for position in &mut plan.positions {
         if legal_move_candidate(board, position, clearance) {
             continue;
         }
         let requested = position.at;
-        let Some(candidate) = offsets.iter().find_map(|(dx, dy)| {
-            let mut candidate = position.clone();
-            candidate.at = Point2::new(requested.x + dx, requested.y + dy);
-            legal_move_candidate(board, &candidate, clearance).then_some(candidate.at)
-        }) else {
+        let mut inner = 0.0;
+        let mut candidate = None;
+        for outer in [5.0, 10.0, 20.0] {
+            candidate = nearest_legal_in_ring(board, position, clearance, inner, outer);
+            if candidate.is_some() {
+                break;
+            }
+            inner = outer;
+        }
+        let candidate =
+            candidate.or_else(|| nearest_legal_in_outline(board, position, clearance, requested));
+        let Some(candidate) = candidate else {
             continue;
         };
         position.at = candidate;
@@ -559,6 +561,123 @@ fn nudge_overlaps(board: &mut MoveBoard, plan: &mut MovePlan, clearance: f64) {
     }
 }
 
+const MOVE_SEARCH_GRID_MM: f64 = 0.25;
+
+fn nearest_legal_in_ring(
+    board: &MoveBoard,
+    position: &ResolvedPosition,
+    clearance: f64,
+    inner: f64,
+    outer: f64,
+) -> Option<Point2> {
+    let steps = (outer / MOVE_SEARCH_GRID_MM).ceil() as i32;
+    let mut candidates = Vec::new();
+    for ix in -steps..=steps {
+        for iy in -steps..=steps {
+            let dx = f64::from(ix) * MOVE_SEARCH_GRID_MM;
+            let dy = f64::from(iy) * MOVE_SEARCH_GRID_MM;
+            let distance = dx.hypot(dy);
+            if distance <= inner + geom::EPS || distance > outer + geom::EPS {
+                continue;
+            }
+            candidates.push((distance, dx, dy));
+        }
+    }
+    candidates.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then_with(|| a.1.total_cmp(&b.1))
+            .then_with(|| a.2.total_cmp(&b.2))
+    });
+    candidates.into_iter().find_map(|(_, dx, dy)| {
+        let mut candidate = position.clone();
+        candidate.at = Point2::new(position.at.x + dx, position.at.y + dy);
+        legal_move_candidate(board, &candidate, clearance).then_some(candidate.at)
+    })
+}
+
+fn nearest_legal_in_outline(
+    board: &MoveBoard,
+    position: &ResolvedPosition,
+    clearance: f64,
+    requested: Point2,
+) -> Option<Point2> {
+    let part = board.parts.get(&position.reference)?;
+    let courtyard = part.courtyard();
+    let relative = Rect::new(
+        courtyard.min_x - part.at.x,
+        courtyard.min_y - part.at.y,
+        courtyard.max_x - part.at.x,
+        courtyard.max_y - part.at.y,
+    );
+    let x_limits = (
+        board.bounds.min_x - relative.min_x,
+        board.bounds.max_x - relative.max_x,
+    );
+    let y_limits = (
+        board.bounds.min_y - relative.min_y,
+        board.bounds.max_y - relative.max_y,
+    );
+    if x_limits.0 > x_limits.1 || y_limits.0 > y_limits.1 {
+        return None;
+    }
+    let mut xs = axis_search_points(x_limits.0, x_limits.1, requested.x);
+    let mut ys = axis_search_points(y_limits.0, y_limits.1, requested.y);
+    for (reference, other) in &board.parts {
+        if reference == &position.reference {
+            continue;
+        }
+        let other = other.courtyard();
+        xs.extend([
+            other.min_x - clearance - relative.max_x,
+            other.max_x + clearance - relative.min_x,
+        ]);
+        ys.extend([
+            other.min_y - clearance - relative.max_y,
+            other.max_y + clearance - relative.min_y,
+        ]);
+    }
+    xs.retain(|x| *x >= x_limits.0 - geom::EPS && *x <= x_limits.1 + geom::EPS);
+    ys.retain(|y| *y >= y_limits.0 - geom::EPS && *y <= y_limits.1 + geom::EPS);
+    xs.sort_by(f64::total_cmp);
+    ys.sort_by(f64::total_cmp);
+    xs.dedup_by(|a, b| (*a - *b).abs() <= geom::EPS);
+    ys.dedup_by(|a, b| (*a - *b).abs() <= geom::EPS);
+
+    let mut best: Option<(f64, Point2)> = None;
+    for x in xs {
+        for &y in &ys {
+            let mut candidate = position.clone();
+            candidate.at = Point2::new(x, y);
+            if !legal_move_candidate(board, &candidate, clearance) {
+                continue;
+            }
+            let distance = requested.dist(candidate.at);
+            let replace = best.as_ref().is_none_or(|(best_distance, best_point)| {
+                distance < *best_distance - geom::EPS
+                    || ((distance - *best_distance).abs() <= geom::EPS
+                        && (x < best_point.x - geom::EPS
+                            || ((x - best_point.x).abs() <= geom::EPS
+                                && y < best_point.y - geom::EPS)))
+            });
+            if replace {
+                best = Some((distance, candidate.at));
+            }
+        }
+    }
+    best.map(|(_, point)| point)
+}
+
+fn axis_search_points(min: f64, max: f64, requested: f64) -> Vec<f64> {
+    let mut points = vec![min, max, requested.clamp(min, max)];
+    let steps = ((max - min) / MOVE_SEARCH_GRID_MM).ceil() as usize;
+    points.extend(
+        (0..=steps)
+            .map(|step| min + step as f64 * MOVE_SEARCH_GRID_MM)
+            .filter(|point| *point <= max + geom::EPS),
+    );
+    points
+}
+
 fn legal_move_candidate(board: &MoveBoard, position: &ResolvedPosition, clearance: f64) -> bool {
     let Some(original) = board.parts.get(&position.reference) else {
         return false;
@@ -567,7 +686,11 @@ fn legal_move_candidate(board: &MoveBoard, position: &ResolvedPosition, clearanc
     candidate.at = position.at;
     candidate.rotation = position.rotation;
     let courtyard = candidate.courtyard();
-    if !board.bounds.contains_rect_eps(&courtyard, geom::EPS) {
+    let inside_outline = board.outline.as_ref().map_or_else(
+        || board.bounds.contains_rect_eps(&courtyard, geom::EPS),
+        |outline| crate::board::guard::rect_inside_outline(courtyard, outline),
+    );
+    if !inside_outline {
         return false;
     }
     board.parts.iter().all(|(reference, other)| {
@@ -1755,6 +1878,7 @@ mod tests {
         };
         let mut board = MoveBoard {
             bounds: Rect::new(0.0, 0.0, 60.0, 60.0),
+            outline: None,
             parts: [
                 ("J1".to_owned(), part(Point2::new(2.27, 35.5), header)),
                 ("R2".to_owned(), part(Point2::new(25.25, 35.5), resistor)),
@@ -1768,7 +1892,7 @@ mod tests {
         )
         .expect("the move resolves");
         assert_eq!(
-            overlap_error(&board, &plan, 0.2),
+            illegal_move_error(&board, &plan, 0.2),
             None,
             "J1 {:?} and R2 {:?} do not touch",
             board.parts["J1"].courtyard(),
@@ -1782,9 +1906,10 @@ mod tests {
             &mut board,
         )
         .expect("the move resolves");
-        let refused = overlap_error(&board, &plan, 0.2).expect("an overlap");
-        assert_eq!(refused["code"], "courtyards_overlap");
-        assert!(refused["gap_mm"].as_f64().is_some_and(|gap| gap < 0.0));
+        let position = &plan.positions[0];
+        let (reference, _, gap) = blocking_overlap(&board, position, 0.2).expect("an overlap");
+        assert_eq!(reference, "R2");
+        assert!(gap < 0.0);
     }
 
     /// KiCAD's DRC checks courtyards, which are wider than the pads inside them.
@@ -1837,6 +1962,7 @@ mod tests {
     fn fixture_board() -> MoveBoard {
         MoveBoard {
             bounds: Rect::new(0.0, 0.0, 100.0, 50.0),
+            outline: None,
             parts: [
                 (
                     "U1".to_owned(),
@@ -1926,14 +2052,106 @@ mod tests {
             &mut board,
         )
         .unwrap();
-        assert!(overlap_error(&board, &plan, 0.2).is_some());
+        assert!(illegal_move_error(&board, &plan, 0.2).is_some());
 
         nudge_overlaps(&mut board, &mut plan, 0.2);
 
         let moved = pos(&plan, "C1");
         assert_ne!(moved.at, Point2::new(20.0, 20.0));
-        assert_eq!(moved.nudged_from, Some(Point2::new(20.0, 20.0)));
-        assert_eq!(overlap_error(&board, &plan, 0.2), None);
+        assert_eq!(illegal_move_error(&board, &plan, 0.2), None);
+        let output = plan.output(&RetractedCopper::default());
+        assert!(output["positions"][0]["nudged_to"].is_array());
+        assert!(
+            output["positions"][0]["nudge_distance_mm"]
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn an_occupied_target_searches_twenty_mm_then_the_whole_outline() {
+        let part = |at: Point2, local: Rect| MovePart {
+            at,
+            rotation: 0.0,
+            back: false,
+            local,
+        };
+        let mut board = MoveBoard {
+            bounds: Rect::new(0.0, 0.0, 100.0, 50.0),
+            outline: None,
+            parts: [
+                (
+                    "RV1".to_owned(),
+                    part(Point2::new(5.0, 5.0), Rect::new(-1.0, -1.0, 1.0, 1.0)),
+                ),
+                (
+                    "R3".to_owned(),
+                    part(Point2::new(50.0, 25.0), Rect::new(-25.0, -24.0, 25.0, 24.0)),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let mut plan = resolve_move_parts(
+            &json!({ "moves": [{ "ref": "RV1", "to": [50.0, 25.0] }] }),
+            &mut board,
+        )
+        .unwrap();
+
+        nudge_overlaps(&mut board, &mut plan, 0.2);
+
+        let moved = pos(&plan, "RV1");
+        let distance = moved.nudged_from.unwrap().dist(moved.at);
+        assert!(
+            distance > 20.0,
+            "whole-outline fallback moved {distance} mm"
+        );
+        assert!(illegal_move_error(&board, &plan, 0.2).is_none());
+        let output = plan.output(&RetractedCopper::default());
+        assert_eq!(output["positions"][0]["nudge_distance_mm"], json!(distance));
+    }
+
+    #[test]
+    fn a_full_outline_refusal_reports_the_available_and_required_extents() {
+        let part = |reference: &str, at: Point2, local: Rect| {
+            (
+                reference.to_owned(),
+                MovePart {
+                    at,
+                    rotation: 0.0,
+                    back: false,
+                    local,
+                },
+            )
+        };
+        let mut board = MoveBoard {
+            bounds: Rect::new(0.0, 0.0, 4.0, 4.0),
+            outline: None,
+            parts: [
+                part(
+                    "RV1",
+                    Point2::new(1.0, 1.0),
+                    Rect::new(-1.0, -1.0, 1.0, 1.0),
+                ),
+                part("R3", Point2::new(2.0, 2.0), Rect::new(-2.0, -2.0, 2.0, 2.0)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let mut plan = resolve_move_parts(
+            &json!({ "moves": [{ "ref": "RV1", "to": [2.0, 2.0] }] }),
+            &mut board,
+        )
+        .unwrap();
+
+        nudge_overlaps(&mut board, &mut plan, 0.2);
+
+        let refusal = illegal_move_error(&board, &plan, 0.2).unwrap();
+        assert_eq!(refusal["code"], json!("outline_has_no_room"));
+        assert_eq!(refusal["outline_extents_mm"], json!([0.0, 0.0, 4.0, 4.0]));
+        assert_eq!(refusal["moved"]["size_mm"], json!([2.0, 2.0]));
+        assert_eq!(refusal["searched_radii_mm"], json!([5.0, 10.0, 20.0]));
     }
 
     #[test]

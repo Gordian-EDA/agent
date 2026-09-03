@@ -82,7 +82,16 @@ fn refit_existing_board(ctx: &AgentRuntime) -> Result<Value> {
     };
     if !board.copper.traces.is_empty() || !board.copper.vias.is_empty() {
         return Ok(json!({
-            "error": "cannot re-fit a routed board: moving footprints would detach existing copper; re-fit before route_board, or deliberately re-place the whole board first"
+            "ok": true,
+            "changed": false,
+            "bounds": {
+                "min_x": board.imported.bounds.min_x,
+                "min_y": board.imported.bounds.min_y,
+                "max_x": board.imported.bounds.max_x,
+                "max_y": board.imported.bounds.max_y,
+            },
+            "outline_refit": "skipped (routed board)",
+            "note": "the board has copper, so its outline and footprint poses were left unchanged",
         }));
     }
     let placement = match super::place::place_problem_from_snapshot(&board, ctx) {
@@ -644,5 +653,29 @@ mod tests {
                 .unwrap_err()
                 .contains("user-drawn")
         );
+    }
+
+    #[test]
+    fn routed_board_refit_is_a_reported_no_op() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: KiCad is not installed");
+            return;
+        };
+        let board = include_str!("../tests/fixtures/two_res.kicad_pcb");
+        let close = board.rfind(')').unwrap();
+        let routed = format!(
+            "{}\t(segment (start 7.0875 10) (end 22 10.9125) (width 0.25) \
+             (layer \"F.Cu\") (net 2))\n{}",
+            &board[..close],
+            &board[close..],
+        );
+        std::fs::write(ctx.pcb_path(), &routed).unwrap();
+
+        let result = update_board_outline(json!({ "fit_to_geometry": true }), &ctx).unwrap();
+
+        assert_eq!(result["ok"], json!(true), "{result:#}");
+        assert_eq!(result["changed"], json!(false), "{result:#}");
+        assert_eq!(result["outline_refit"], json!("skipped (routed board)"));
+        assert_eq!(std::fs::read_to_string(ctx.pcb_path()).unwrap(), routed);
     }
 }

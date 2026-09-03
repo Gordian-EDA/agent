@@ -130,6 +130,8 @@ pub(crate) fn diff(schematic: &[SchematicPart], board: &[BoardFootprint]) -> Boa
         .map(|part| (part.reference.as_str(), part))
         .collect();
 
+    let schematic_members = schematic_net_members(&by_schematic);
+    let board_members = board_net_members(&by_board);
     let mut delta = BoardDelta {
         added: by_schematic
             .keys()
@@ -170,7 +172,12 @@ pub(crate) fn diff(schematic: &[SchematicPart], board: &[BoardFootprint]) -> Boa
             .collect::<BTreeSet<_>>()
         {
             let (want, have) = (part.pad_nets.get(pad), existing.pad_nets.get(pad));
-            if want != have {
+            if !net_assignments_match(
+                want.map(String::as_str),
+                have.map(String::as_str),
+                &schematic_members,
+                &board_members,
+            ) {
                 delta.pads_retargeted.push(PadRetarget {
                     reference: (*reference).to_owned(),
                     pad: pad.clone(),
@@ -181,43 +188,100 @@ pub(crate) fn diff(schematic: &[SchematicPart], board: &[BoardFootprint]) -> Boa
         }
     }
 
-    delta.nets_changed = changed_nets(&by_schematic, &by_board);
+    delta.nets_changed = changed_nets(&schematic_members, &board_members);
     delta
 }
 
-/// Nets whose set of `REF.PAD` members is not the same on both sides.
-fn changed_nets(
+fn schematic_net_members(
     schematic: &BTreeMap<&str, &SchematicPart>,
-    board: &BTreeMap<&str, &BoardFootprint>,
-) -> Vec<String> {
-    fn members<'a>(
-        pads: impl Iterator<Item = (&'a str, &'a BTreeMap<String, String>)>,
-    ) -> BTreeMap<String, BTreeSet<String>> {
-        let mut nets: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (reference, pad_nets) in pads {
-            for (pad, net) in pad_nets {
-                nets.entry(net.clone())
-                    .or_default()
-                    .insert(format!("{reference}.{pad}"));
-            }
-        }
-        nets
-    }
-    let want = members(
+) -> BTreeMap<String, BTreeSet<String>> {
+    net_members(
         schematic
             .iter()
             .map(|(reference, part)| (*reference, &part.pad_nets)),
-    );
-    let have = members(
+    )
+}
+
+fn board_net_members(
+    board: &BTreeMap<&str, &BoardFootprint>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    net_members(
         board
             .iter()
-            .map(|(reference, fp)| (*reference, &fp.pad_nets)),
-    );
+            .map(|(reference, footprint)| (*reference, &footprint.pad_nets)),
+    )
+}
+
+fn net_members<'a>(
+    pads: impl Iterator<Item = (&'a str, &'a BTreeMap<String, String>)>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut nets: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (reference, pad_nets) in pads {
+        for (pad, net) in pad_nets {
+            if !kicad_board::is_design_net_name(net) {
+                continue;
+            }
+            nets.entry(net.clone())
+                .or_default()
+                .insert(format!("{reference}.{pad}"));
+        }
+    }
+    nets
+}
+
+fn assignment_members(
+    assignments: &BTreeMap<(String, String), String>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut nets = BTreeMap::<String, BTreeSet<String>>::new();
+    for ((reference, pad), net) in assignments {
+        if kicad_board::is_design_net_name(net) {
+            nets.entry(net.clone())
+                .or_default()
+                .insert(format!("{reference}.{pad}"));
+        }
+    }
+    nets
+}
+
+fn net_assignments_match(
+    want: Option<&str>,
+    have: Option<&str>,
+    want_members: &BTreeMap<String, BTreeSet<String>>,
+    have_members: &BTreeMap<String, BTreeSet<String>>,
+) -> bool {
+    let want = want.filter(|name| kicad_board::is_design_net_name(name));
+    let have = have.filter(|name| kicad_board::is_design_net_name(name));
+    if want == have {
+        return true;
+    }
+    let (Some(want), Some(have)) = (want, have) else {
+        return false;
+    };
+    kicad_board::is_derived_net_name(want)
+        && kicad_board::is_derived_net_name(have)
+        && want_members.get(want) == have_members.get(have)
+}
+
+/// Nets whose `REF.PAD` partition is not the same on both sides.
+fn changed_nets(
+    want: &BTreeMap<String, BTreeSet<String>>,
+    have: &BTreeMap<String, BTreeSet<String>>,
+) -> Vec<String> {
     want.keys()
         .chain(have.keys())
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .filter(|net| want.get(*net) != have.get(*net))
+        .filter(|net| {
+            let own = if want.contains_key(*net) { want } else { have };
+            let other = if want.contains_key(*net) { have } else { want };
+            if own.get(*net) == other.get(*net) {
+                return false;
+            }
+            !kicad_board::is_derived_net_name(net)
+                || !other.iter().any(|(other_name, members)| {
+                    kicad_board::is_derived_net_name(other_name) && Some(members) == own.get(*net)
+                })
+        })
         .cloned()
         .collect()
 }
@@ -237,9 +301,10 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .collect::<BTreeSet<_>>()
         .len();
     let phase = crate::WorkflowPhase::start("sync", parts.len(), net_count);
-    if let Err(error) = crate::intent::parse(&input) {
-        return Ok(json!({ "error": error }));
-    }
+    let normalized_edges = match crate::intent::parse(&input) {
+        Ok(intent) => intent.normalized_edges,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
     let board_existed = ctx.pcb_path().exists();
     let mut result = if !board_existed {
         create_board(&parts, &design.mismatched, &input, ctx)
@@ -251,6 +316,9 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     report_staged(&design, &mut result);
     if let Some(object) = result.as_object_mut() {
         object.insert("schematic_erc".to_owned(), design.erc.clone());
+        if !normalized_edges.is_empty() {
+            object.insert("normalized_edges".to_owned(), json!(normalized_edges));
+        }
     }
     if board_existed
         && input.get("intent").is_some()
@@ -607,20 +675,68 @@ pub(crate) fn schematic_net_changes(
             })
         })
         .collect::<BTreeMap<_, _>>();
-    let keys = schematic
-        .keys()
-        .chain(saved.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut changed = BTreeSet::new();
-    for key in keys {
-        if schematic.get(&key) == saved.get(&key) {
-            continue;
-        }
-        changed.extend(schematic.get(&key).cloned());
-        changed.extend(saved.get(&key).cloned());
+    Ok(changed_nets(
+        &assignment_members(&schematic),
+        &assignment_members(&saved),
+    ))
+}
+
+/// Resolve a requested schematic net to the equivalent name on the saved board.
+///
+/// KiCad derives `Net-(…)` names from an arbitrary member of the partition, so
+/// two files may use different names for the same anonymous electrical net.
+pub(crate) fn resolve_board_net(
+    ctx: &AgentRuntime,
+    board: &kicad_board::BoardSnapshot,
+    requested: &str,
+) -> std::result::Result<Option<String>, String> {
+    if !kicad_board::is_design_net_name(requested) {
+        return Ok(None);
     }
-    Ok(changed.into_iter().collect())
+    let saved = board
+        .imported
+        .parts
+        .iter()
+        .flat_map(|part| {
+            part.pads.iter().filter_map(move |pad| {
+                pad.net
+                    .as_ref()
+                    .map(|net| ((part.reference.clone(), pad.number.clone()), net.clone()))
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    if saved.values().any(|net| net == requested) {
+        return Ok(Some(requested.to_owned()));
+    }
+    if !kicad_board::is_derived_net_name(requested) || !ctx.sch_path().exists() {
+        return Ok(None);
+    }
+    let netlist = ctx
+        .env()
+        .netlist(ctx.sch_path())
+        .map_err(|error| format!("could not resolve the schematic net on the board: {error}"))?;
+    let unplaceable = crate::staging::unplaceable_references(board);
+    let schematic = netlist
+        .nets
+        .iter()
+        .filter(|net| kicad_board::is_design_net_name(&net.name))
+        .flat_map(|net| {
+            net.nodes
+                .iter()
+                .filter(|(reference, _)| !unplaceable.contains(reference))
+                .map(move |(reference, pad)| ((reference.clone(), pad.clone()), net.name.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let schematic_members = assignment_members(&schematic);
+    let Some(requested_members) = schematic_members.get(requested) else {
+        return Ok(None);
+    };
+    Ok(assignment_members(&saved)
+        .into_iter()
+        .find(|(name, members)| {
+            kicad_board::is_derived_net_name(name) && members == requested_members
+        })
+        .map(|(name, _)| name))
 }
 
 /// References currently present in the live schematic netlist.
@@ -1531,6 +1647,37 @@ mod tests {
     }
 
     #[test]
+    fn unconnected_pad_pseudo_nets_do_not_make_a_board_stale() {
+        let schematic = vec![schematic("J2", "Jack", R0805, &[])];
+        let board = vec![board(
+            "J2",
+            "Jack",
+            R0805,
+            &[("SN", "unconnected-(J2-PadSN)")],
+        )];
+
+        let delta = diff(&schematic, &board);
+        assert!(delta.is_empty(), "{delta:#?}");
+        assert!(delta.nets_changed.is_empty());
+    }
+
+    #[test]
+    fn anonymous_net_renames_preserve_an_unchanged_pad_partition() {
+        let schematic = vec![
+            schematic("R1", "10k", R0805, &[("1", "Net-(R1-Pad1)")]),
+            schematic("R2", "10k", R0805, &[("1", "Net-(R1-Pad1)")]),
+        ];
+        let board = vec![
+            board("R1", "10k", R0805, &[("1", "Net-(R2-Pad1)")]),
+            board("R2", "10k", R0805, &[("1", "Net-(R2-Pad1)")]),
+        ];
+
+        let delta = diff(&schematic, &board);
+        assert!(delta.is_empty(), "{delta:#?}");
+        assert!(delta.nets_changed.is_empty());
+    }
+
+    #[test]
     fn a_new_part_is_added_and_names_its_nets() {
         let mut sch = divider_schematic();
         sch.push(schematic(
@@ -1714,5 +1861,27 @@ mod tests {
             !board.problem.connections.is_empty(),
             "the schematic nets were added to the initially empty table"
         );
+
+        let text = std::fs::read_to_string(ctx.pcb_path()).unwrap();
+        let mut doc = BoardDoc::parse(text).unwrap();
+        let codes = doc
+            .ensure_nets(["unconnected-(R1-Pad1)", "unconnected-(C1-Pad1)"])
+            .unwrap();
+        doc.set_pad_net(
+            "R1",
+            "1",
+            Some(("unconnected-(R1-Pad1)", codes["unconnected-(R1-Pad1)"])),
+        )
+        .unwrap();
+        doc.set_pad_net(
+            "C1",
+            "1",
+            Some(("unconnected-(C1-Pad1)", codes["unconnected-(C1-Pad1)"])),
+        )
+        .unwrap();
+        std::fs::write(ctx.pcb_path(), doc.into_text()).unwrap();
+
+        let board = kicad_board::read_snapshot(&ctx.pcb_path()).unwrap();
+        assert!(schematic_net_changes(&ctx, &board).unwrap().is_empty());
     }
 }
