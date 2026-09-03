@@ -1143,11 +1143,11 @@ def critic(kind, rendered, prompt, facts, llm, anchor=None, same_circuit=False):
 # --- render + run -----------------------------------------------------------
 
 
-def rasterize_clean_svg(svg, png, size=CLEAN_RENDER_SIZE):
-    """Rasterize one transparent KiCad SVG with a tight, consistent frame."""
+def frame_render(source, png, size=CLEAN_RENDER_SIZE):
+    """Trim, pad and scale one rasterized page into a judge PNG."""
     command(
         [
-            "magick", "-density", CLEAN_RENDER_DENSITY, str(svg),
+            "magick", "-density", CLEAN_RENDER_DENSITY, str(source),
             "-trim", "+repage", "-bordercolor", "white", "-border", "24",
             "-background", "white", "-alpha", "remove", "-alpha", "off",
             "-resize", size, str(png),
@@ -1155,7 +1155,37 @@ def rasterize_clean_svg(svg, png, size=CLEAN_RENDER_SIZE):
         timeout=180,
     )
     if not png.is_file():
-        raise RuntimeError(f"SVG conversion produced no PNG: {png}")
+        raise RuntimeError(f"page conversion produced no PNG: {png}")
+
+
+def rasterize_clean_svg(svg, png, size=CLEAN_RENDER_SIZE):
+    """Rasterize one transparent KiCad SVG with a tight, consistent frame."""
+    frame_render(svg, png, size)
+
+
+def rasterize_schematic_pdf(source, png, temporary, size=CLEAN_RENDER_SIZE):
+    """The rescue path for a sheet ImageMagick's own SVG renderer refuses.
+
+    Dense sheets hit its `vector graphics nested too deeply` limit; KiCad's PDF
+    of the same sheet, rasterized by poppler, is the same drawing.
+    """
+    pdf = temporary / "schematic.pdf"
+    command(
+        [
+            kicad_cli(), "sch", "export", "pdf", "--output", str(pdf),
+            "--exclude-drawing-sheet", "--no-background-color", str(source),
+        ],
+        timeout=180,
+    )
+    pages = temporary / "page"
+    command(
+        ["pdftoppm", "-r", CLEAN_RENDER_DENSITY, "-png", str(pdf), str(pages)],
+        timeout=180,
+    )
+    rendered = sorted(temporary.glob("page*.png"))
+    if not rendered:
+        raise RuntimeError(f"PDF rasterization produced no page: {source}")
+    frame_render(rendered[0], png, size)
 
 
 def kicad10_schematic_render_source(source, temporary):
@@ -1246,7 +1276,10 @@ def clean_render(kind, source, destination):
                 raise RuntimeError(f"KiCad schematic SVG export failed: {detail}")
             svg = svg_stem.with_suffix(".svg")
             shutil.copy2(rendered[0], svg)
-            rasterize_clean_svg(svg, destination)
+            try:
+                rasterize_clean_svg(svg, destination)
+            except RuntimeError:
+                rasterize_schematic_pdf(render_source, destination, temporary)
             return {"path": str(destination), "svg_paths": [str(svg)]}
 
         if kind != "pcb":
