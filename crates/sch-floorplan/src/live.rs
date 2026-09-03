@@ -379,6 +379,9 @@ fn place_parts_inner(
             .symbols()
             .map(|symbol| symbol.refdes().to_string())
             .collect(),
+        // The tool front end has already assigned every designator against the
+        // project's reservations; nothing is minted here.
+        reserved: BTreeSet::new(),
     };
     let (added, diags, mut audit) =
         live_phase(phase, "audit", input.parts.len(), before.nets.len(), || {

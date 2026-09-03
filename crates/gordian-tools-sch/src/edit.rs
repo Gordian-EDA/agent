@@ -14,10 +14,18 @@ use crate::session::{Allow, Edit, symbol_source};
 use crate::wiring::{spot_beside, spot_near};
 
 /// The next unused designator with this prefix, e.g. `R` → `R7`.
-pub(crate) fn next_refdes(doc: &SchDoc, prefix: &str) -> String {
-    let taken: Vec<u32> = doc
+/// The lowest free designator with `prefix`, stepping over both the sheet's own
+/// references and every one `reserve_refs` promised another caller.
+pub(crate) fn next_refdes(edit: &Edit, prefix: &str) -> String {
+    let taken: Vec<u32> = edit
+        .doc
         .symbols()
         .filter_map(|s| s.refdes().strip_prefix(prefix)?.parse().ok())
+        .chain(
+            edit.reserved()
+                .iter()
+                .filter_map(|refdes| refdes.strip_prefix(prefix)?.parse().ok()),
+        )
         .collect();
     let mut n = 1;
     while taken.contains(&n) {
@@ -477,7 +485,7 @@ fn place_one(
         ));
     }
     let park = Pose::new(5000.0, 5000.0, 0.0);
-    let provisional = next_refdes(&edit.doc, "ZZ");
+    let provisional = next_refdes(edit, "ZZ");
     let uuids = edit
         .doc
         .add_symbol(lib_id, &provisional, value, park, source)
@@ -489,7 +497,7 @@ fn place_one(
                 .doc
                 .reference_prefix(lib_id)
                 .unwrap_or_else(|| "U".to_string());
-            next_refdes(&edit.doc, &prefix)
+            next_refdes(edit, &prefix)
         }
     };
     let fail = |error: sch_doc::Error| error.to_string();

@@ -82,6 +82,17 @@ pub struct ExistingSheet {
     pub net_pins: BTreeMap<String, usize>,
     /// Reference designators already present on the sheet.
     pub refs: BTreeSet<RefDes>,
+    /// References `reserve_refs` promised another caller. They are free to be
+    /// named explicitly — that is what a reservation is for — but no designator
+    /// this payload mints for itself may land on one.
+    pub reserved: BTreeSet<RefDes>,
+}
+
+impl ExistingSheet {
+    /// Every reference a minted designator has to step over.
+    fn occupied(&self) -> BTreeSet<RefDes> {
+        self.refs.union(&self.reserved).cloned().collect()
+    }
 }
 
 /// An explicit reference designator that is already occupied.
@@ -227,7 +238,7 @@ pub fn into_design(
     existing: &ExistingSheet,
 ) -> (Design, Diagnostics, PayloadAudit) {
     let mut input = input.clone();
-    let duplicate_refs = resolve_references(&mut input, provider, &existing.refs);
+    let duplicate_refs = resolve_references(&mut input, provider, existing);
     let mut diags = Diagnostics::default();
     let mut design = Design {
         name: input.name.clone(),
@@ -281,10 +292,10 @@ pub fn into_design(
 fn resolve_references(
     input: &mut PlacePartsInput,
     provider: &SymbolTable,
-    existing: &BTreeSet<RefDes>,
+    existing: &ExistingSheet,
 ) -> Vec<DuplicateRef> {
     assign_references(input, provider, existing);
-    let mut occupied = existing.clone();
+    let mut occupied = existing.occupied();
     let mut counts = BTreeMap::<RefDes, usize>::new();
     for refdes in input.parts.iter().filter_map(|part| part.refdes.as_ref()) {
         *counts.entry(refdes.clone()).or_default() += 1;
@@ -292,7 +303,7 @@ fn resolve_references(
     }
     counts
         .into_iter()
-        .filter(|(refdes, count)| *count > 1 || existing.contains(refdes))
+        .filter(|(refdes, count)| *count > 1 || existing.refs.contains(refdes))
         .map(|(refdes, _)| DuplicateRef {
             next_free: next_free_ref(refdes_prefix(&refdes), &occupied),
             refdes,
@@ -304,9 +315,9 @@ fn resolve_references(
 pub fn assign_references(
     input: &mut PlacePartsInput,
     provider: &SymbolTable,
-    existing: &BTreeSet<RefDes>,
+    existing: &ExistingSheet,
 ) {
-    let mut occupied = existing.clone();
+    let mut occupied = existing.occupied();
     for refdes in input.parts.iter().filter_map(|part| part.refdes.as_ref()) {
         occupied.insert(refdes.clone());
     }

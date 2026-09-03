@@ -89,6 +89,17 @@ impl Reservations {
         Ok(reservation)
     }
 
+    /// Every reference any reservation holds — what a designator allocator must
+    /// step over so a part it mints does not take a name another caller was
+    /// promised.
+    pub fn reserved(&self) -> Result<BTreeSet<String>> {
+        Ok(self
+            .all()?
+            .into_iter()
+            .flat_map(|reservation| reservation.refs)
+            .collect())
+    }
+
     /// Every reservation the project has recorded.
     pub fn all(&self) -> Result<Vec<Reservation>> {
         let _guard = self
@@ -191,6 +202,10 @@ mod tests {
         assert_eq!(other_prefix.refs, ["C2"], "C numbering ignores R");
 
         assert_eq!(store.all().unwrap(), [first, second, other_prefix]);
+        assert_eq!(
+            store.reserved().unwrap(),
+            refs(&["C2", "R3", "R4", "R5", "R6", "R7"])
+        );
     }
 
     #[test]

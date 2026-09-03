@@ -587,7 +587,7 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         "#PWR"
     };
-    let refdes = crate::edit::next_refdes(&edit.doc, prefix);
+    let refdes = crate::edit::next_refdes(&edit, prefix);
     let mut placed = None;
     for lib_id in &candidates {
         if edit

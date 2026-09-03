@@ -118,8 +118,9 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .symbols()
             .map(|symbol| symbol.refdes().to_string())
             .collect(),
+        reserved: edit.reserved().clone(),
     };
-    sch_check::place_parts::assign_references(&mut payload, ctx.provider(), &existing.refs);
+    sch_check::place_parts::assign_references(&mut payload, ctx.provider(), &existing);
     let mut footprints_unresolved = clear_unknown_footprints(ctx, &mut payload)?;
     let (design, _, _) = sch_check::into_design(&payload, ctx.provider(), &existing);
     for mismatch in gordian_runtime::footprint_compat::design_pin_mismatches(ctx, &design)? {

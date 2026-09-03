@@ -343,3 +343,45 @@ fn reserved_references_are_recorded_in_the_project_not_in_this_process() {
     .unwrap();
     assert_eq!(second["refs"], json!(["R4", "R5"]), "{second:#}");
 }
+
+/// A reservation is a promise, so the allocators that mint designators for a
+/// caller who did not name one have to step over it.
+#[test]
+fn a_minted_designator_never_takes_a_reserved_reference() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let reserved = tool(&ctx, "reserve_refs", json!({ "prefix": "R", "count": 2 }));
+    assert_eq!(reserved["refs"], json!(["R1", "R2"]), "{reserved:#}");
+
+    // place_parts' own allocator: `ref` omitted, so it mints.
+    let placed = tool(
+        &ctx,
+        "place_parts",
+        json!({ "parts": [
+            { "part": "Device:R", "pins": { "1": "VIN", "2": "MID" } },
+            { "part": "Device:R", "pins": { "1": "MID", "2": "GND" } }
+        ] }),
+    );
+    assert!(
+        placed["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("PLACED  R3 R4")),
+        "{placed:#}"
+    );
+
+    // add_symbols' allocator mints from the same store.
+    let added = tool(
+        &ctx,
+        "add_symbols",
+        json!({ "parts": [{ "lib_id": "Device:R" }] }),
+    );
+    let refs: Vec<&str> = added["changed"]["placed"]
+        .as_array()
+        .unwrap_or_else(|| panic!("placed parts: {added:#}"))
+        .iter()
+        .filter_map(|part| part["ref"].as_str())
+        .collect();
+    assert_eq!(refs, ["R5"], "{added:#}");
+}
