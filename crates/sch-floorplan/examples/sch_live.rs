@@ -1,7 +1,7 @@
 //! `sch_live` — drive the live-edit API from a shell, one `.kicad_sch` at a time.
 //!
 //! ```text
-//! sch_live place-parts <sch> <input.json> [--engine cluster|anneal|spine]
+//! sch_live place-parts <sch> <input.json> [--engine flex|cluster|anneal|spine]
 //! sch_live arrange     <sch> R1,R2,…      [--engine …]
 //! sch_live rewire      <sch> R1,R2,…
 //! ```
@@ -87,10 +87,11 @@ fn engine(args: &[String]) -> Box<dyn PlacementEngine> {
         .position(|a| a == "--engine")
         .and_then(|i| args.get(i + 1))
         .map(String::as_str)
-        .unwrap_or("cluster");
+        .unwrap_or("flex");
     match name {
         "anneal" => Box::new(anneal_place::Anneal),
         "spine" => Box::new(spine_place::SpinePlace),
-        _ => Box::new(cluster_place::ClusterPlace),
+        "cluster" => Box::new(cluster_place::ClusterPlace),
+        _ => Box::new(sch_floorplan::flex::FlexPlace),
     }
 }

@@ -35,10 +35,16 @@ use sch_model::tree::{Align, Axis, Container, Tree, Trees, UNIT_MM};
 use measure::typeset_block;
 use part::Part;
 
-/// Space between two blocks on the sheet.
-const BLOCK_GAP: f64 = 10.0 * UNIT_MM;
+/// Space between two blocks on the sheet, over and above [`FRAME_PAD`].
+const BLOCK_GAP: f64 = 8.0 * UNIT_MM;
+/// Room each block keeps outside its parts for the dashed frame the realiser draws around
+/// it and the field text the solver seats along its edge.
+const FRAME_PAD: f64 = 5.0 * UNIT_MM;
 /// The width-to-height ratio a packed sheet aims for — a landscape page's usable area.
 const SHEET_ASPECT: f64 = 1.5;
+/// Usable width (mm) of the page the sheet starts on; a pack wider than this grows the
+/// paper, which reads worse than a taller sheet.
+const PAGE_WIDTH: f64 = 260.0;
 
 /// What the typesetter had to decide for itself.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -93,12 +99,16 @@ pub fn typeset(items: &mut [Item], trees: &Trees) -> Report {
             (global, bbox)
         })
         .collect();
-    for (origin, (placed, bbox)) in pack(&drawings).into_iter().zip(&drawings) {
+    let sizes: Vec<(f64, f64)> = drawings
+        .iter()
+        .map(|(_, b)| (b.width() + 2.0 * FRAME_PAD, b.height() + 2.0 * FRAME_PAD))
+        .collect();
+    for (origin, (placed, bbox)) in pack(&sizes).into_iter().zip(&drawings) {
         for p in placed {
             let item = &mut items[p.part];
             item.at = Point2::new(
-                origin.x + p.at.x - bbox.min_x,
-                origin.y + p.at.y - bbox.min_y,
+                origin.x + FRAME_PAD + p.at.x - bbox.min_x,
+                origin.y + FRAME_PAD + p.at.y - bbox.min_y,
             );
             item.angle = p.pose.angle;
             item.mirror = p.pose.mirror;
@@ -152,12 +162,16 @@ fn compose(
         .into_iter()
         .map(|block| {
             let mine = members.remove(&block).unwrap_or_default();
-            let refdes = || mine.iter().map(|i| items[*i].refdes.clone()).collect::<Vec<_>>();
+            let units = || {
+                mine.iter()
+                    .map(|i| (items[*i].refdes.clone(), items[*i].unit))
+                    .collect::<Vec<_>>()
+            };
             let tree = match trees.get(&block) {
                 Some(tree) => complete(tree, items, &mine),
                 None => {
                     report.untreed.push(block.clone());
-                    Tree::row_of(refdes())
+                    Tree::row_of(units())
                 }
             };
             (block, tree, mine)
@@ -168,14 +182,14 @@ fn compose(
 /// The authored tree plus a trailing row of whatever it forgot, so every part is drawn.
 fn complete(tree: &Tree, items: &[Item], members: &[usize]) -> Tree {
     let named = tree.keys();
-    let missing: Vec<String> = members
+    let missing: Vec<(String, u8)> = members
         .iter()
         .filter(|i| {
             !named
                 .iter()
                 .any(|(r, u)| *r == items[**i].refdes && *u == items[**i].unit)
         })
-        .map(|i| items[*i].refdes.clone())
+        .map(|i| (items[*i].refdes.clone(), items[*i].unit))
         .collect();
     if missing.is_empty() {
         return tree.clone();
@@ -206,18 +220,17 @@ fn drawing_bbox(placed: &[measure::Placed], parts: &[Part]) -> Rect {
 /// Shelf-pack the blocks, choosing the shelf width whose finished sheet is closest to a
 /// page's proportions — a sheet in one long row and a sheet in one long column are the two
 /// ways a multi-block drawing reads badly.
-fn pack(drawings: &[(Vec<measure::Placed>, Rect)]) -> Vec<Point2> {
-    let sizes: Vec<(f64, f64)> = drawings
-        .iter()
-        .map(|(_, b)| (b.width(), b.height()))
-        .collect();
-    let widest = sizes.iter().map(|s| s.0).fold(0.0, f64::max);
-    let total: f64 = sizes.iter().map(|s| s.0 + BLOCK_GAP).sum();
+///
+/// The widths worth trying are exactly the ones a shelf boundary can fall on: the total
+/// width of each contiguous run of blocks. Anything between two of those packs identically.
+fn pack(sizes: &[(f64, f64)]) -> Vec<Point2> {
     let shelve = |limit: f64| {
         let (mut origins, mut x, mut y, mut shelf, mut used) =
-            (Vec::new(), MARGIN, MARGIN, 0.0f64, MARGIN);
-        for (w, h) in &sizes {
-            if x > MARGIN && x + w > MARGIN + limit {
+            (Vec::new(), MARGIN, MARGIN, 0.0f64, 0.0f64);
+        for (w, h) in sizes {
+            // The candidate limits are sums of these same widths, so a run that exactly
+            // fills one must not be pushed off it by floating-point dust.
+            if x > MARGIN && x + w > MARGIN + limit + geom::EPS {
                 x = MARGIN;
                 y += shelf + BLOCK_GAP;
                 shelf = 0.0;
@@ -225,19 +238,59 @@ fn pack(drawings: &[(Vec<measure::Placed>, Rect)]) -> Vec<Point2> {
             origins.push(Point2::new(x, y));
             x += w + BLOCK_GAP;
             shelf = shelf.max(*h);
-            used = used.max(x - BLOCK_GAP);
+            used = used.max(x - BLOCK_GAP - MARGIN);
         }
-        (origins, used - MARGIN, y + shelf - MARGIN)
+        (origins, used, y + shelf - MARGIN)
     };
-    let mut best: Option<(f64, Vec<Point2>)> = None;
-    let mut limit = widest;
-    while limit <= total + 1.0 {
-        let (origins, w, h) = shelve(limit);
-        let score = (w / h.max(1.0) - SHEET_ASPECT).abs();
-        if best.as_ref().is_none_or(|(b, _)| score < *b) {
-            best = Some((score, origins));
+    shelf_widths(sizes)
+        .into_iter()
+        .map(shelve)
+        .min_by(|a, b| aspect_error(a.1, a.2).total_cmp(&aspect_error(b.1, b.2)))
+        .map(|(origins, ..)| origins)
+        .unwrap_or_default()
+}
+
+/// How far a packed sheet of `w` x `h` is from a page's proportions, with an overflowing
+/// width counted as the defect it is: a sheet wider than a page grows the paper.
+fn aspect_error(w: f64, h: f64) -> f64 {
+    (w / h.max(1.0) - SHEET_ASPECT).abs() + (w - PAGE_WIDTH).max(0.0)
+}
+
+/// Every shelf width that packs differently: the total width of each contiguous run.
+fn shelf_widths(sizes: &[(f64, f64)]) -> Vec<f64> {
+    let mut widths = Vec::new();
+    for i in 0..sizes.len() {
+        let mut run = 0.0;
+        for (w, _) in &sizes[i..] {
+            run += w + BLOCK_GAP;
+            widths.push(run - BLOCK_GAP);
         }
-        limit += widest.max(BLOCK_GAP);
     }
-    best.map(|(_, o)| o).unwrap_or_default()
+    widths.sort_by(f64::total_cmp);
+    widths.dedup_by(|a, b| (*a - *b).abs() < geom::EPS);
+    widths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Three blocks that would make a tall column go two-to-a-shelf instead: the pack is
+    /// chosen on the proportions of the finished sheet, not on the first width that fits.
+    #[test]
+    fn blocks_are_shelved_into_a_page_shaped_sheet() {
+        let origins = pack(&[(160.0, 90.0), (105.0, 70.0), (80.0, 35.0)]);
+        assert_eq!(origins[0], Point2::new(MARGIN, MARGIN));
+        assert!(origins[1].y > origins[0].y, "the wide block gets its own shelf");
+        assert_eq!(origins[2].y, origins[1].y, "the two narrow blocks share one");
+        assert!(origins[2].x > origins[1].x);
+    }
+
+    /// A pack wider than the page grows the paper, so a run that overflows loses to a
+    /// taller sheet even when its proportions are better.
+    #[test]
+    fn a_shelf_never_overflows_the_page_to_look_squarer() {
+        let origins = pack(&[(200.0, 40.0), (200.0, 40.0)]);
+        assert!(origins[1].y > origins[0].y);
+    }
 }

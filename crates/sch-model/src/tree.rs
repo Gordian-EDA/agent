@@ -86,18 +86,23 @@ pub enum Tree {
 }
 
 impl Tree {
-    /// A row of `parts` with default spacing — what a block without an authored tree gets.
-    pub fn row_of(parts: impl IntoIterator<Item = String>) -> Tree {
+    /// One part's leaf, at the unit it draws.
+    pub fn leaf(part: impl Into<String>, unit: u8) -> Tree {
+        Tree::Leaf(Leaf {
+            part: part.into(),
+            unit: (unit != 1).then_some(unit),
+            ..Leaf::default()
+        })
+    }
+
+    /// A row of `(part, unit)` with default spacing — what a block without an authored
+    /// tree gets.
+    pub fn row_of(parts: impl IntoIterator<Item = (String, u8)>) -> Tree {
         Tree::Container(Container {
             axis: Axis::Row,
             children: parts
                 .into_iter()
-                .map(|part| {
-                    Tree::Leaf(Leaf {
-                        part,
-                        ..Leaf::default()
-                    })
-                })
+                .map(|(part, unit)| Tree::leaf(part, unit))
                 .collect(),
             gap: None,
             align: Align::Center,

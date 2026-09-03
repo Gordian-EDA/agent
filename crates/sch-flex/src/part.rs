@@ -149,6 +149,15 @@ impl<'a> Part<'a> {
         r.max_x += right;
         r.min_y -= top;
         r.max_y += bottom;
+        if self.is_connector() {
+            // A connector's fields go beside it, on whichever side its pins leave free —
+            // and a jack's value ("OUTPUT 3.5mm") is far wider than the symbol. Half of it
+            // (what `field_pad` reserves) is not the room the solver takes.
+            let text = sch_model::text::text_width(&self.item.value)
+                .max(sch_model::text::text_width(&self.item.refdes));
+            r.min_x -= text;
+            r.max_x += text;
+        }
         for a in attachments {
             r.min_x = r.min_x.min(a.x);
             r.max_x = r.max_x.max(a.x);
