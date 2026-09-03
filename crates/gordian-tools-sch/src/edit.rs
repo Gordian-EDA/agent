@@ -298,18 +298,6 @@ fn assign_pin(
 }
 
 impl PinMappingPlan {
-    fn new_pin_number<'a>(
-        &self,
-        old_number: &str,
-        old_pins: &[sch_doc::PlacedPin],
-        new_pins: &'a [sch_doc::PlacedPin],
-    ) -> Option<&'a str> {
-        self.assignments
-            .iter()
-            .find(|assignment| old_pins[assignment.old].number == old_number)
-            .map(|assignment| new_pins[assignment.new].number.as_str())
-    }
-
     fn mapped_by_name(
         &self,
         old_pins: &[sch_doc::PlacedPin],
@@ -676,16 +664,23 @@ fn place_one(
         ));
     }
     let delta = Point2::new(at.x - park.x, at.y - park.y);
-    for uuid in &uuids {
-        let unit_at = edit
-            .doc
-            .symbol(uuid)
-            .map(|symbol| symbol.at)
-            .unwrap_or(park);
-        edit.doc
-            .move_symbol(uuid, snap(unit_at.x + delta.x), snap(unit_at.y + delta.y))
-            .map_err(fail)?;
-    }
+    let before_move = sch_drag::Sheet::of(&edit.doc);
+    let moves = uuids
+        .iter()
+        .filter_map(|uuid| {
+            let symbol = edit.doc.symbol(uuid)?;
+            Some((
+                uuid.clone(),
+                sch_drag::Placement::new(
+                    Point2::new(snap(symbol.at.x + delta.x), snap(symbol.at.y + delta.y)),
+                    symbol.at.rot,
+                    symbol.mirror,
+                ),
+            ))
+        })
+        .collect::<Vec<_>>();
+    sch_drag::drag_many(&mut edit.doc, &moves, &before_move)
+        .map_err(|error| format!("could not seat {refdes}: {error}"))?;
 
     let units: Vec<Value> = uuids
         .iter()
@@ -1975,6 +1970,7 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .into_iter()
         .filter(|p| p.refdes == refdes)
         .collect();
+    let before_sheet = sch_drag::Sheet::of(&edit.doc);
     // Where each connected pin sat, so whatever met it can follow it across.
     let before: Vec<(String, String, Point2)> = old_pins
         .iter()
@@ -2146,74 +2142,55 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     }
 
-    // The new part's pins sit where its own body puts them, which need not be
-    // where the old ones were. Drag each pin's wires across to it; only a pin
-    // that still cannot reach its net gets named in place.
-    let mut mapped = Vec::new();
-    for (number, net, was_at) in &before {
-        let pin_number = plan
-            .new_pin_number(number, &old_pins, &new_pins)
-            .expect("every old pin has an assignment");
-        let pin = new_pins
-            .iter()
-            .find(|pin| pin.number == pin_number)
-            .expect("assigned new pin exists");
-        let landed = pin.at;
-        mapped.push((pin.number.clone(), net.clone(), *was_at, landed));
-    }
-    // Dragging is keyed on coordinates, so a point where this part's pin met another
-    // part's pin carries wires from BOTH nets and moving it rewires the foreign one.
-    // The guard then refuses an edit the caller cannot restate — seven of the repair
-    // refusals in the campaign rerun were this. Such points are left alone; the pass
-    // below names the net at the pin instead, which is what that fallback is for.
-    let shared: std::collections::HashSet<String> = {
-        let all = placed_pins(&edit.doc);
-        let junctions: Vec<Point2> = edit
-            .doc
-            .items()
-            .iter()
-            .filter_map(|item| match item {
-                sch_doc::Item::Junction(junction) => Some(junction.at),
-                _ => None,
-            })
-            .collect();
-        old_pins
-            .iter()
-            .filter(|old| {
-                // Another part's pin, or a junction dot: either means more than this
-                // part's own net terminates here.
-                all.iter()
-                    .any(|other| other.refdes != *refdes && other.at.near_eq(old.at, geom::EPS))
-                    || junctions.iter().any(|at| at.near_eq(old.at, geom::EPS))
-            })
-            .map(|old| old.number.clone())
-            .collect()
-    };
-    let moves: Vec<(Point2, Point2)> = mapped
+    let seats = plan
+        .assignments
         .iter()
-        .filter(|(number, _, _, _)| !shared.contains(number))
-        .map(|(_, _, was_at, landed)| (*was_at, *landed))
-        .collect();
-    edit.doc.move_attached_many(&moves);
-
-    let mut restored = Vec::new();
-    for (number, net, _, landed) in mapped {
+        .map(|assignment| {
+            let old = &old_pins[assignment.old];
+            let new = &new_pins[assignment.new];
+            sch_drag::PinReSeat::new(&old.owner, &old.number, &new.owner, &new.number)
+        })
+        .collect::<Vec<_>>();
+    let mut redraw = match sch_drag::reseat_many(&mut edit.doc, &before_sheet, &seats) {
+        Ok((report, _)) => report,
+        Err(error) => {
+            return Ok(json!({
+                "error": format!(
+                    "refused: the replacement pins could not be re-seated cleanly: {error}; nothing was written"
+                ),
+                "suggestion": suggestion,
+            }));
+        }
+    };
+    let mut named = Vec::new();
+    for (old_number, net, _) in &before {
+        let Some(assignment) = plan
+            .assignments
+            .iter()
+            .find(|assignment| old_pins[assignment.old].number == *old_number)
+        else {
+            continue;
+        };
+        let pin = &new_pins[assignment.new];
         let after = sch_doc::connect::extract(&edit.doc);
-        if refs::net_of(&after, refdes, &number) == Some(net.as_str()) {
+        if refs::net_of(&after, refdes, &pin.number) == Some(net.as_str()) {
             continue;
         }
-        // The sheet's own scope for that net, not a plain label: a plain one on a
-        // net drawn with a pennant shadows it instead of restoring the pin to it.
-        let kind = crate::wiring::sheet_scope(&edit.doc, &net).unwrap_or(LabelKind::Local);
+        let kind = crate::wiring::sheet_scope(&edit.doc, net).unwrap_or(LabelKind::Local);
         edit.doc
-            .add_label(kind, &net, Pose::new(landed.x, landed.y, 0.0));
-        restored.push(format!("{refdes}.{number}={net}"));
+            .add_label(kind, net, Pose::new(pin.at.x, pin.at.y, 0.0));
+        named.push(format!("{refdes}.{}={net}", pin.number));
     }
-    if !restored.is_empty() {
+    redraw.labels_added += named.len();
+    if redraw.labels_added > 0 {
         edit.warn(format!(
-            "these pins could not reach their old net through wires, so it was named at \
-             them instead: {}",
-            restored.join(" ")
+            "pin re-seat debit: {} labels added where a clean orthogonal route could not preserve the connection and its name{}",
+            redraw.labels_added,
+            if named.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", named.join(" "))
+            }
         ));
     }
     // A wider replacement arrives with pins nothing drives. Left bare they are ERC
@@ -2248,6 +2225,8 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "lib_id": lib_id,
             "dropped_pins": dropped,
             "mapped_by_name": mapped_by_name,
+            "redrawn_segments": redraw.redrawn_segments,
+            "labels_added": redraw.labels_added,
         }),
         Allow::nothing().nets(was.clone()).part(refdes).creating(),
     )?;

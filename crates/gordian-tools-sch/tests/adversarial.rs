@@ -829,7 +829,10 @@ fn swap_symbol_drops_an_unwired_pin_and_marks_what_it_gains() {
 fn two_pin_connector_swap_repairs_its_footprint_and_preserves_erc_errors() {
     let input = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../quality/cases/sch-replace-connector/input");
-    let Some(ctx) = AgentRuntime::detect_for_test().filter(|_| input.is_dir()) else {
+    let Some(ctx) = AgentRuntime::detect_for_test()
+        .filter(|ctx| ctx.env().major_version() == Some(10))
+        .filter(|_| input.is_dir())
+    else {
         eprintln!("SKIP: KiCad 10 or the connector fixture is unavailable");
         return;
     };
@@ -840,6 +843,10 @@ fn two_pin_connector_swap_repairs_its_footprint_and_preserves_erc_errors() {
     )
     .unwrap();
     let baseline = ctx.env().erc(ctx.sch_path()).expect("baseline KiCad ERC");
+    let before_oracle = ctx
+        .env()
+        .netlist(ctx.sch_path())
+        .expect("baseline KiCad netlist");
     let before = sch_doc::connect::extract(&sch_doc::SchDoc::read(ctx.sch_path()).unwrap());
     let pin_net = |netlist: &sch_doc::Netlist, pin: &str| {
         netlist
@@ -878,6 +885,11 @@ fn two_pin_connector_swap_repairs_its_footprint_and_preserves_erc_errors() {
         "repair escaped the inherited footprint family: {result}"
     );
     let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    assert!(
+        doc.wire_faults().is_empty(),
+        "the connector swap wrote malformed wire segments: {:?}",
+        doc.wire_faults()
+    );
     let symbol = doc
         .symbols()
         .find(|symbol| symbol.refdes() == "P1")
@@ -886,6 +898,25 @@ fn two_pin_connector_swap_repairs_its_footprint_and_preserves_erc_errors() {
     assert_eq!(symbol.fields["Footprint"].value, repaired);
     let after = sch_doc::connect::extract(&doc);
     assert_eq!(old_nets, [pin_net(&after, "1"), pin_net(&after, "2")]);
+    let after_oracle = ctx
+        .env()
+        .netlist(ctx.sch_path())
+        .expect("KiCad netlist after swap");
+    let normalize = |mut nets: Vec<kicad::Net>| {
+        for net in &mut nets {
+            net.nodes
+                .retain(|node| node != &("P1".to_string(), "3".to_string()));
+            net.nodes.sort();
+        }
+        nets.retain(|net| !net.nodes.is_empty());
+        nets.sort_by(|left, right| left.nodes.cmp(&right.nodes));
+        nets.into_iter().map(|net| net.nodes).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        normalize(before_oracle.nets),
+        normalize(after_oracle.nets),
+        "KiCad netlist changed beyond P1's added pin"
+    );
     let erc = ctx.env().erc(ctx.sch_path()).expect("KiCad ERC after swap");
     assert_eq!(erc.error_count(), baseline.error_count(), "{erc:?}");
 }

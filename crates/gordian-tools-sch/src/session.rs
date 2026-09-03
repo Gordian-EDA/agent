@@ -233,6 +233,21 @@ impl Edit {
     /// Write the edit if its net delta stays within `allow`, else restore and
     /// report what it would have done.
     pub fn commit(mut self, changed: Value, allow: Allow) -> Result<Value> {
+        let wire_faults = self.doc.wire_faults();
+        if !wire_faults.is_empty() {
+            self.doc.restore(self.rollback)?;
+            return Ok(json!({
+                "error": format!(
+                    "refused: the edit would leave {} diagonal or zero-length wire segment(s); nothing was written",
+                    wire_faults.len()
+                ),
+                "wire_faults": wire_faults.iter().map(|fault| json!({
+                    "wire": fault.wire,
+                    "segment": fault.segment,
+                    "kind": format!("{:?}", fault.kind).to_lowercase(),
+                })).collect::<Vec<_>>(),
+            }));
+        }
         let after = connect::extract(&self.doc);
         let delta = Netlist::diff(&self.before, &after);
         let moved = pins_that_moved(&delta, &self.before, &after);
