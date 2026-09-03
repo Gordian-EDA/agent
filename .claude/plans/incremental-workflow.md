@@ -260,3 +260,7 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   index write — recovered). Gating + push + round 6 (camp8, --max-turns 5) in background.
   lane/prompt-pace (codex): once ERC errors are 0 go to the board in the same turn; handoff names the
   first board call; "continue" turns start from get_board. Lessons recorded in memory.
+- Round 6 (camp8, 5 turns): all boards reached but regressed — sync_board short refusal ×41 at
+  CREATION (guard vs seeded staging/intent geometry) + sync↔route deadlock; place_parts panic
+  "no entry found for key" (BMS power_protection block). → lane/pcb-seed-shorts, lane/sch-refusals-4.
+  Train 3 (prompt-pace + sch-looks) merging → round 7.
