@@ -17,7 +17,7 @@ use sch_floorplan::floorplan;
 const LONGEST_WIRE: f64 = 60.0;
 
 /// The fixtures whose PLACEMENT is still one long row, so no page holds them. Their width
-/// comes from `spine-place`'s row ordering, not from anything the writer or the page
+/// comes from the typesetter's row ordering, not from anything the writer or the page
 /// fitter decides — a sheet 938 mm wide is a placement that never folded. Listed rather
 /// than tolerated: the assertion is EQUALITY, so a new oversize sheet fails here and so
 /// does a fixed one, which is what makes the list shrink.
@@ -53,8 +53,7 @@ fn emit(env: &KicadInstallation, provider: &SymbolTable, name: &str) -> String {
         .clone()
         .map(sch_check::Intent::into_layout_ir)
         .unwrap_or_else(|| floorplan::baseline_ir(&design));
-    let engine: Box<dyn PlacementEngine> = ;
-    floorplan::emit_strategy(env, &design, engine, Some(ir))
+    floorplan::emit_strategy(env, &design, Some(ir))
         .unwrap_or_else(|e| panic!("{name}: {e}"))
         .sch
 }

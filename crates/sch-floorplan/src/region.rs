@@ -15,7 +15,7 @@
 //!   a fixed neighbour, or another movable part is walked out to the nearest clear grid
 //!   position. With no obstacles this is a no-op.
 
-use geom::{EPS, Point2, Rect};
+use geom::{Point2, Rect};
 
 use kicad::KicadInstallation;
 use sch_check::Design;

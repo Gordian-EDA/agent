@@ -3,19 +3,16 @@
 //! SKIPs without a KiCad installation (the adapter runs a real engine over real symbols).
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use geom::{Point2, Rect};
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan;
-use sch_floorplan::live::{self, PlacementBudget};
+use sch_floorplan::live;
 use sch_floorplan::region::{RegionProblem, arrange};
 use sch_model::geometry::body_rect;
 use sch_model::item::Item;
-use sch_model::place::PlaceOptions;
 
 const SHEET: &str = r#"{
   "parts": [
@@ -40,9 +37,7 @@ fn gathered(env: &KicadInstallation) -> (sch_check::Design, Vec<Item>) {
     let input: sch_check::PlacePartsInput = serde_json::from_str(SHEET).unwrap();
     let (design, diagnostics, _) = sch_check::into_design(&input, &provider, &Default::default());
     assert!(!diagnostics.has_errors(), "{:#?}", diagnostics);
-    let problem =
-        sch_floorplan::floorplan::place_problem(env, &design, None, PlaceOptions::default())
-            .unwrap();
+    let problem = sch_floorplan::floorplan::place_problem(env, &design, None).unwrap();
     (design, problem.items)
 }
 
@@ -86,7 +81,6 @@ fn arrange_places_new_parts_without_disturbing_the_neighbours() {
         fixed.clone(),
         obstacles.clone(),
         ir,
-        ,
     ));
 
     assert_eq!(out.poses.len(), 3);
@@ -160,30 +154,9 @@ fn arrange_with_no_neighbours_is_the_bulk_placement_path() {
         Vec::new(),
         Vec::new(),
         ir,
-        ,
     ));
     assert_eq!(out.poses.len(), n);
     assert_eq!(out.result.truthfulness_breaks, 0);
-}
-
-struct ObserveSpine(Arc<AtomicUsize>);
-
-impl PlacementEngine for ObserveSpine {
-    fn name(&self) -> &'static str {
-        "observed-spine"
-    }
-
-    fn place(
-        &self,
-        problem: &mut SchematicPlaceProblem,
-        eval: &dyn CandidateEvaluator,
-    ) -> PlacementOutput {
-        self.0.store(
-            problem.items.iter().filter(|item| item.frozen).count(),
-            Ordering::Release,
-        );
-        .place(problem, eval)
-    }
 }
 
 fn passive_block(first: usize, last: usize, block: &str) -> sch_check::PlacePartsInput {
@@ -218,13 +191,7 @@ fn thirty_part_named_block_uses_the_region_path_on_a_sixty_part_sheet() {
     let added = passive_block(31, 45, "filters-b");
 
     let mut doc = live::blank_sheet().unwrap();
-    let seeded = live::place_parts(
-        &env,
-        &mut doc,
-        &base,
-        Some(PlacementBudget::within(Duration::from_secs(45), 60)),
-    )
-    .unwrap();
+    let seeded = live::place_parts(&env, &mut doc, &base).unwrap();
     assert!(seeded.committed, "base refused: {:?}", seeded.mismatch);
     let before: BTreeMap<(String, u32), (sch_doc::Pose, sch_doc::Mirror)> = doc
         .symbols()
@@ -236,25 +203,13 @@ fn thirty_part_named_block_uses_the_region_path_on_a_sixty_part_sheet() {
         })
         .collect();
 
-    let frozen = Arc::new(AtomicUsize::new(0));
     let started = Instant::now();
-    let report = live::place_parts(
-        &env,
-        &mut doc,
-        &added,
-        Box::new(ObserveSpine(frozen.clone())),
-        Some(PlacementBudget::within(Duration::from_secs(20), 90)),
-    )
-    .unwrap();
+    let report = live::place_parts(&env, &mut doc, &added).unwrap();
     let elapsed = started.elapsed();
     eprintln!("60 existing + 30-part region: {elapsed:.3?}");
 
     assert!(report.committed, "block refused: {:?}", report.mismatch);
     assert_eq!(report.placed.len(), 30);
-    assert!(
-        frozen.load(Ordering::Acquire) >= 60,
-        "the engine did not receive the existing sheet as frozen neighbours"
-    );
     assert!(
         elapsed <= Duration::from_secs(20),
         "region took {elapsed:?}"

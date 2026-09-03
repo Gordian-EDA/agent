@@ -85,11 +85,7 @@ const CAMPAIGN_BMS_POWER_PROTECTION: &str = r#"{
     "ports": {
       "+3V3": "top", "CHG": "top", "DSG": "top", "GND": "bottom",
       "LOAD+": "right", "LOAD-": "right", "PACK+": "left", "PACK-": "left"
-    },
-    "relations": [
-      {"kind": "group", "members": ["J1", "F1", "J2", "Q1", "Q2", "RS1", "D1"], "name": "power_path", "side": "right"},
-      {"anchor": "J1", "kind": "group", "members": ["U2", "C1", "C2"], "name": "ldo", "side": "top"}
-    ]
+    }
   },
   "name": "10S Li-ion BMS",
   "parts": [
@@ -462,25 +458,6 @@ fn campaign_bms_unresolvable_decoupled_part_is_reported_without_panicking() {
             .iter()
             .any(|diagnostic| diagnostic.code == "decouple-unplaced"),
         "{diags:?}"
-    );
-
-    let available = design
-        .blocks
-        .values()
-        .flat_map(|block| block.components.keys().cloned())
-        .collect();
-    let (ir, warnings) = input.intent.unwrap().into_layout_ir_for(&available);
-    assert!(ir.relations.is_empty(), "{ir:?}");
-    assert_eq!(warnings.len(), 2, "{warnings:?}");
-    assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.contains("J1") && warning.contains("J2")),
-        "{warnings:?}"
-    );
-    assert!(
-        warnings.iter().any(|warning| warning.contains("U2")),
-        "{warnings:?}"
     );
 }
 

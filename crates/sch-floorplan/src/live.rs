@@ -31,11 +31,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+use std::sync::mpsc::sync_channel;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use geom::{Point2, Rect};
 use kicad::KicadInstallation;
@@ -56,29 +54,6 @@ use sch_model::result::SHEET_BLOCK;
 
 /// Clearance added around a selected part when deciding which wires belong to it.
 const TOUCH_MARGIN: f64 = 1.27;
-
-#[derive(Clone)]
-struct Phase(Arc<AtomicU8>);
-
-impl Phase {
-    const NAMES: [&'static str; 5] = ["lower", "audit", "place", "realise", "verify"];
-
-    fn new() -> Self {
-        Self(Arc::new(AtomicU8::new(0)))
-    }
-
-    fn enter(&self, name: &'static str) {
-        let index = Self::NAMES
-            .iter()
-            .position(|candidate| *candidate == name)
-            .expect("live phase has a published name");
-        self.0.store(index as u8, Ordering::Release);
-    }
-
-    fn current(&self) -> &'static str {
-        Self::NAMES[usize::from(self.0.load(Ordering::Acquire))]
-    }
-}
 
 /// Everything that can stop a live edit.
 #[derive(Debug, thiserror::Error)]
@@ -224,8 +199,8 @@ pub fn place_parts(
     input: &PlacePartsInput,
 ) -> Result<PlaceReport> {
     let input = input.clone();
-    bounded_edit(env, doc, move |env, doc, phase| {
-        place_parts_inner(&env, doc, &input, phase)
+    bounded_edit(env, doc, move |env, doc| {
+        place_parts_inner(&env, doc, &input)
     })
 }
 
@@ -233,10 +208,9 @@ fn place_parts_inner(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     input: &PlacePartsInput,
-    phase: &Phase,
 ) -> Result<PlaceReport> {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    let before = live_phase(phase, "lower", input.parts.len(), 0, || {
+    let before = live_phase("lower", input.parts.len(), 0, || {
         connect::extract(doc)
     });
     let existing = ExistingSheet {
@@ -254,7 +228,7 @@ fn place_parts_inner(
         reserved: BTreeSet::new(),
     };
     let (added, diags, mut audit) =
-        live_phase(phase, "audit", input.parts.len(), before.nets.len(), || {
+        live_phase("audit", input.parts.len(), before.nets.len(), || {
             sch_check::into_design(input, &provider, &existing)
         });
     tracing::info!(
@@ -331,7 +305,7 @@ fn place_parts_inner(
     }
     let held = seated_items(doc, &before);
 
-    let out = live_phase(phase, "place", movable.len(), design.nets.len(), || {
+    let out = live_phase("place", movable.len(), design.nets.len(), || {
         region_arrange(RegionProblem::new(
             env,
             &design,
@@ -344,9 +318,7 @@ fn place_parts_inner(
     let placed = posed(movable, &out.poses);
     let inc = incidence(&placed);
     let was_global = global_label_nets(doc);
-    let warnings = live_phase(
-        phase,
-        "realise",
+    let warnings = live_phase("realise",
         placed.len(),
         inc.len(),
         || -> Result<_> {
@@ -372,7 +344,7 @@ fn place_parts_inner(
     )?;
     enforce_label_scopes(doc, &declared, &was_global);
 
-    let mut mismatch = live_phase(phase, "verify", placed.len(), inc.len(), || {
+    let mut mismatch = live_phase("verify", placed.len(), inc.len(), || {
         verify(doc, &design)
     });
     mismatch.disturbed = disturbed(&before, &connect::extract(doc));
@@ -532,24 +504,22 @@ fn bench_parts(
     out
 }
 
+/// Run one stage of a live edit inside its own tracing span, timed.
 fn live_phase<T>(
-    current: &Phase,
     phase: &'static str,
     parts: usize,
     nets: usize,
     run: impl FnOnce() -> T,
 ) -> T {
-    current.enter(phase);
     let span = tracing::info_span!("sch_floorplan_phase", phase, parts, nets);
     let started = Instant::now();
     let result = span.in_scope(run);
     let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-    tracing::info!(parent: &span, elapsed_ms, "schematic engine phase finished");
+    tracing::info!(parent: &span, elapsed_ms, "schematic layout phase finished");
     result
 }
 
-/// Re-place `selection` among the parts around it, redrawing only its own wiring,
-/// under the same budget promise as [`place_parts`].
+/// Re-place `selection` among the parts around it, redrawing only its own wiring.
 pub fn arrange(
     env: &KicadInstallation,
     doc: &mut SchDoc,
@@ -558,21 +528,20 @@ pub fn arrange(
     layout: Option<sch_model::tree::Tree>,
 ) -> Result<ArrangeReport> {
     let selection = selection.clone();
-    bounded_edit(env, doc, move |env, doc, phase| {
-        rearrange_inner(&env, doc, &selection, intent, layout, true, phase)
+    bounded_edit(env, doc, move |env, doc| {
+        rearrange_inner(&env, doc, &selection, intent, layout, true)
     })
 }
 
-/// Redraw `selection`'s wiring where it stands, moving nothing, under the same hard
-/// wall-clock promise as [`place_parts`].
+/// Redraw `selection`'s wiring where it stands, moving nothing.
 pub fn rewire(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     selection: &Selection,
 ) -> Result<ArrangeReport> {
     let selection = selection.clone();
-    bounded_edit(env, doc, move |env, doc, phase| {
-        rearrange_inner(&env, doc, &selection, None, None, false, phase)
+    bounded_edit(env, doc, move |env, doc| {
+        rearrange_inner(&env, doc, &selection, None, None, false)
         },
     )
 }
@@ -585,10 +554,9 @@ fn rearrange_inner(
     intent: Option<sch_check::Intent>,
     layout: Option<sch_model::tree::Tree>,
     replace: bool,
-    phase: &Phase,
 ) -> Result<ArrangeReport> {
     let chosen = selection.resolve(doc);
-    let (before, design, boundary) = live_phase(phase, "lower", chosen.len(), 0, || {
+    let (before, design, boundary) = live_phase("lower", chosen.len(), 0, || {
         let before = connect::extract(doc);
         let mut design = Design::default();
         design
@@ -684,7 +652,7 @@ fn rearrange_inner(
         })
         .collect();
     let (placed, mut ir) = if replace {
-        let out = live_phase(phase, "place", movable.len(), before.nets.len(), || {
+        let out = live_phase("place", movable.len(), before.nets.len(), || {
             region_arrange(RegionProblem::new(
                 env,
                 &design,
@@ -699,9 +667,7 @@ fn rearrange_inner(
         (movable, ir)
     };
     ir.ports.extend(boundary_ports);
-    let (mut redrawn, inc, mut warnings, left_bench, mut labelled) = live_phase(
-        phase,
-        "realise",
+    let (mut redrawn, inc, mut warnings, left_bench, mut labelled) = live_phase("realise",
         placed.len(),
         before.nets.len(),
         || -> Result<_> {
@@ -743,7 +709,7 @@ fn rearrange_inner(
     // sheet already gave it.
     enforce_label_scopes(doc, &BTreeSet::new(), &was_global);
 
-    let mut mismatch = live_phase(phase, "verify", placed.len(), inc.len(), || Mismatch {
+    let mut mismatch = live_phase("verify", placed.len(), inc.len(), || Mismatch {
         disturbed: disturbed(&before, &connect::extract(doc)),
         ..Default::default()
     });
@@ -842,19 +808,16 @@ enum WorkerReply<T> {
 fn bounded_edit<T, F>(env: &KicadInstallation, doc: &mut SchDoc, run: F) -> Result<T>
 where
     T: Send + 'static,
-    F: FnOnce(KicadInstallation, &mut SchDoc, &Phase) -> Result<T> + Send + 'static,
+    F: FnOnce(KicadInstallation, &mut SchDoc) -> Result<T> + Send + 'static,
 {
-    let phase = Phase::new();
-    let worker_phase = phase.clone();
     let mut worker_doc = doc.clone();
     let worker_env = env.clone();
     let (send, receive) = sync_channel(1);
     thread::Builder::new()
         .name("schematic-typeset".to_owned())
         .spawn(move || {
-            let reply = match catch_unwind(AssertUnwindSafe(|| {
-                run(worker_env, &mut worker_doc, &worker_phase)
-            })) {
+            let reply = match catch_unwind(AssertUnwindSafe(|| run(worker_env, &mut worker_doc)))
+            {
                 Ok(result) => WorkerReply::Completed(result, worker_doc),
                 Err(panic) => WorkerReply::Panicked(panic),
             };

@@ -10,27 +10,21 @@
 //! - [`RoutedEvaluator`] — what a placement MEASURES once it is drawn: its truthfulness
 //!   breaks, its readability warnings and its crossings.
 
-use std::collections::BTreeMap;
 
-use geom::{EPS, Point2, Rect};
+use geom::{Point2, Rect};
 use kicad::KicadInstallation;
 use sch_check::model::Design;
 
 use crate::write::SchematicWriter;
-use circuit_graph::netclass::is_ground;
 use sch_model::ir::LayoutIr;
 use sch_model::item::{Incidence, Item};
 use sch_model::place::Crossings;
 
 use super::emit::{build_writer, compute_needs_flag};
 use super::score::{
-    count_body_crossings, count_close_wires, count_collinear_body_crossings, count_congestion,
-    count_corners, count_crossings, count_foreign_taps, count_ic_body_crossings, count_merges,
-    count_parallel_body_crossings, count_shorts, count_stray, signal_anchor_centroid,
-    supply_pin_target,
+    count_body_crossings, count_collinear_body_crossings, count_crossings, count_foreign_taps, count_ic_body_crossings, count_merges,
+    count_parallel_body_crossings, count_shorts,
 };
-use sch_model::geometry::body_overlap_count;
-use sch_model::geometry::item_rect;
 
 /// Which routed realization to build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

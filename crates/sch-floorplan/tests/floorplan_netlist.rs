@@ -221,14 +221,7 @@ fn validate_fixture(
             .intent
             .map(sch_check::Intent::into_layout_ir)
             .unwrap_or_else(|| floorplan::baseline_ir(&design));
-        // `SCH_ENGINE=spine` runs the same oracle over the spine engine; the
-        // default stays anneal so existing runs are untouched.
-        let engine: Box<dyn sch_model::engine::PlacementEngine> =
-            match std::env::var("SCH_ENGINE").as_deref() {
-                Ok("spine") => ,
-                _ => ,
-            };
-        let out = floorplan::emit_strategy(env, &design, engine, Some(ir))
+        let out = floorplan::emit_strategy(env, &design, Some(ir))
             .unwrap_or_else(|e| panic!("{name}: {e}"));
 
         // The realiser's own occupancy invariant, read off the finished sheet before the

@@ -31,9 +31,6 @@ use gordian_llm::Tool;
 use gordian_runtime::AgentRuntime;
 use serde_json::{Value, json};
 
-/// The wall-clock promise `place_parts` / `arrange` keep — the agent loop sizes its
-/// own timeout from it.
-
 /// The tools that write the schematic.
 pub const MUTATORS: [&str; 18] = [
     "place_parts",

@@ -18,7 +18,6 @@ use crate::write::SchematicWriter;
 use geom::Dir;
 use kicad_symbol::PinDir;
 use sch_model::engine::PinFlow;
-use sch_model::refine::SEARCH_SEED;
 use sch_model::result::EmitOutput;
 
 use super::*;

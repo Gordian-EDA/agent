@@ -34,11 +34,6 @@ use sch_check::place_parts::PlacePartsInput;
 use sch_doc::{SchDoc, connect};
 use sch_floorplan::live::{self, Selection};
 
-/// The engine the agent ships with, so the gates measure what actually runs.
-fn engine() -> impl PlacementEngine {
-    
-}
-
 /// The corpus the gate runs by default: the four tuned references plus the authored
 /// grid. Every one is small, because this runs on `cargo test` and the shipping engine
 /// routes the whole sheet per candidate.
@@ -140,8 +135,8 @@ fn save(doc: &mut SchDoc, dir: &Path, name: &str) -> PathBuf {
 /// The sheet the whole-sheet pipeline draws for `design` — the path `place_parts`
 /// replaces, and the baseline every parity claim is measured against.
 fn whole_sheet(env: &KicadInstallation, design: &Design, dir: &Path, name: &str) -> PathBuf {
-    let emitted = sch_floorplan::floorplan::emit_strategy(env, design, Box::new(engine()), None)
-        .expect("whole-sheet emit");
+    let emitted =
+        sch_floorplan::floorplan::emit_strategy(env, design, None).expect("whole-sheet emit");
     let path = dir.join(format!("{name}.old.kicad_sch"));
     std::fs::write(&path, emitted.sch).unwrap();
     path
@@ -231,7 +226,7 @@ fn bulk_create_matches_the_whole_sheet_pipeline() {
         let old_erc = env.erc(&old).expect("erc").error_count();
 
         let mut doc = live::blank_sheet().unwrap();
-        let report = live::place_parts(&env, &mut doc, &input, Box::new(engine()), None).unwrap();
+        let report = live::place_parts(&env, &mut doc, &input).unwrap();
         if !report.committed {
             if old_truthful {
                 failures.push(format!(
@@ -368,7 +363,7 @@ fn incremental_place_is_additive() {
     let mut doc = SchDoc::parse(&original).unwrap();
     let before = connect::extract(&doc);
 
-    let report = live::place_parts(&env, &mut doc, &ldo_block(), Box::new(engine()), None).unwrap();
+    let report = live::place_parts(&env, &mut doc, &ldo_block()).unwrap();
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
     assert_eq!(
         report.placed,
@@ -425,20 +420,14 @@ fn arrange_is_idempotent_on_connectivity() {
     };
     let dir = tempfile::tempdir().unwrap();
     let mut doc = SchDoc::read(&demo).unwrap();
-    let placed = live::place_parts(&env, &mut doc, &ldo_block(), Box::new(engine()), None).unwrap();
+    let placed = live::place_parts(&env, &mut doc, &ldo_block()).unwrap();
     assert!(placed.committed, "{:?}", placed.mismatch);
     let before = extracted_partition(&doc);
     let seeded = save(&mut doc, dir.path(), "seeded");
     let before_erc = erc_kinds(&env, &seeded);
 
     let selection = Selection::Refs(NEW_REFS.iter().map(|s| s.to_string()).collect());
-    let report = live::arrange(
-        &env,
-        &mut doc,
-        &selection,
-        None,
-        None,
-        Box::new(engine()), None).unwrap();
+    let report = live::arrange(&env, &mut doc, &selection, None, None).unwrap();
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
     // Over the PARTS: a re-wire is free to replace the rail terminals and flags it
     // draws, so the invariant is the parts' connectivity, not every uuid on the sheet.
@@ -469,19 +458,13 @@ fn arranging_one_end_of_a_net_keeps_the_other_end_on_it() {
     };
     let dir = tempfile::tempdir().unwrap();
     let mut doc = SchDoc::read(&demo).unwrap();
-    let placed = live::place_parts(&env, &mut doc, &ldo_block(), Box::new(engine()), None).unwrap();
+    let placed = live::place_parts(&env, &mut doc, &ldo_block()).unwrap();
     assert!(placed.committed, "{:?}", placed.mismatch);
     let before = extracted_partition(&doc);
 
     // R9 sits on LEDA with D9 and on V3P3 with U9/C10/C11; every one of them stays.
     let selection = Selection::Refs(vec!["R9".to_string()]);
-    let report = live::arrange(
-        &env,
-        &mut doc,
-        &selection,
-        None,
-        None,
-        Box::new(engine()), None).unwrap();
+    let report = live::arrange(&env, &mut doc, &selection, None, None).unwrap();
 
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
     assert_eq!(before, extracted_partition(&doc), "arranging changed a net");

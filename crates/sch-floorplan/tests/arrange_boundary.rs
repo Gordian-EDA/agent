@@ -51,26 +51,12 @@ fn arranging_one_symbol_keeps_its_neighbours_on_their_nets() {
         return;
     };
     let mut doc = live::blank_sheet().unwrap();
-    let placed = live::place_parts(
-        &env,
-        &mut doc,
-        &chain(),
-        None,
-    )
-    .unwrap();
+    let placed = live::place_parts(&env, &mut doc, &chain()).unwrap();
     assert!(placed.committed, "{:?}", placed.mismatch);
     let before = partition(&doc);
 
     let selection = Selection::Refs(vec!["R2".to_string()]);
-    let report = live::arrange(
-        &env,
-        &mut doc,
-        &selection,
-        None,
-        None,
-        None,
-    )
-    .unwrap();
+    let report = live::arrange(&env, &mut doc, &selection, None, None).unwrap();
 
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
     assert_eq!(before, partition(&doc), "arranging changed a net");
@@ -150,15 +136,7 @@ fn arranging_a_whole_reference_sheet_keeps_its_netlist() {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let report = live::arrange(
-        &env,
-        &mut doc,
-        &Selection::Refs(refs),
-        None,
-        None,
-        None,
-    )
-    .unwrap();
+    let report = live::arrange(&env, &mut doc, &Selection::Refs(refs), None, None).unwrap();
 
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
     let after = cli_partition(&env, &save(&mut doc, dir.path(), "after"));
@@ -184,13 +162,7 @@ fn arranging_a_forty_part_block_keeps_its_netlist() {
 
     let dir = tempfile::tempdir().unwrap();
     let mut doc = live::blank_sheet().unwrap();
-    let placed = live::place_parts(
-        &env,
-        &mut doc,
-        &payload,
-        None,
-    )
-    .unwrap();
+    let placed = live::place_parts(&env, &mut doc, &payload).unwrap();
     assert!(placed.committed, "{:?}", placed.mismatch);
     let before = cli_partition(&env, &save(&mut doc, dir.path(), "block-before"));
 
@@ -201,15 +173,7 @@ fn arranging_a_forty_part_block_keeps_its_netlist() {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let report = live::arrange(
-        &env,
-        &mut doc,
-        &Selection::Refs(refs),
-        None,
-        None,
-        None,
-    )
-    .unwrap();
+    let report = live::arrange(&env, &mut doc, &Selection::Refs(refs), None, None).unwrap();
 
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
     let after_path = save(&mut doc, dir.path(), "block-after");
