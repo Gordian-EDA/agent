@@ -1801,10 +1801,20 @@ fn emit_local_power(
         if split_flag.is_some_and(|(flag_idx, _)| k == flag_idx) {
             continue;
         }
-        if let Some(&near) = rail_taps.iter().find(|&&p| {
-            let d = (p[0] - ep[0]).abs() + (p[1] - ep[1]).abs();
-            d > EPS && d <= MERGE && ((p[0] - ep[0]).abs() < EPS || (p[1] - ep[1]).abs() < EPS)
-        }) {
+        if let Some(near) = rail_taps
+            .iter()
+            .map(|&p| {
+                let d = (p[0] - ep[0]).abs() + (p[1] - ep[1]).abs();
+                (p, d)
+            })
+            .filter(|(p, d)| {
+                *d > EPS
+                    && *d <= MERGE
+                    && ((p[0] - ep[0]).abs() < EPS || (p[1] - ep[1]).abs() < EPS)
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(p, _)| p)
+        {
             w.add_wire_on_net(*ep, near, net);
             w.add_junction_on_net(*ep, net);
             w.add_junction_on_net(near, net);
@@ -2149,6 +2159,49 @@ mod tests {
                 seg.segment.a,
                 seg.segment.b
             );
+        }
+    }
+
+    /// A split flag stub adds both endpoints as taps. The next collinear pin must merge
+    /// into the nearer one, or its wire covers the stub in reverse after splitting.
+    #[test]
+    fn local_power_merge_uses_the_nearest_split_flag_tap() {
+        let Some(env) = KicadInstallation::detect() else {
+            eprintln!("SKIP: no KiCAD environment detected");
+            return;
+        };
+        let eps = [
+            ([20.32, 40.64], Dir::North),
+            ([22.86, 40.64], Dir::North),
+            ([25.4, 40.64], Dir::North),
+        ];
+        let mut w = SchematicWriter::new();
+        let mut flags = BTreeMap::new();
+        emit_local_power(&env, &mut w, "3V3", &eps, Some(&mut flags), &[]).unwrap();
+
+        let pairs: BTreeSet<_> = w
+            .wires_with_nets()
+            .into_iter()
+            .map(|wire| {
+                let a = crate::write::point_key(wire.segment.a);
+                let b = crate::write::point_key(wire.segment.b);
+                if a <= b { (a, b) } else { (b, a) }
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            BTreeSet::from([
+                ((20320, 40640), (22860, 40640)),
+                ((22860, 40640), (25400, 40640)),
+            ])
+        );
+
+        w.prepare();
+        let mut pairs = BTreeSet::new();
+        for wire in w.wires_with_nets() {
+            let a = crate::write::point_key(wire.segment.a);
+            let b = crate::write::point_key(wire.segment.b);
+            assert!(pairs.insert(if a <= b { (a, b) } else { (b, a) }));
         }
     }
 
