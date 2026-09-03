@@ -301,6 +301,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     attach_connectivity(&mut value, ctx, report.placed, &format!("PLACED  {refs}"))?;
     let value = with_check(value, ctx).context("checking placed parts")?;
     let value = with_unresolved_footprints(value, &footprints_unresolved);
+    let value = with_unresolved_decoupling(value, &audit.decouple_unresolved);
     Ok(with_warnings(value, &warnings))
 }
 
@@ -359,6 +360,28 @@ fn with_unresolved_footprints(mut value: Value, unresolved: &[UnresolvedFootprin
     value
 }
 
+fn with_unresolved_decoupling(
+    mut value: Value,
+    unresolved: &[sch_check::place_parts::DecoupleUnresolved],
+) -> Value {
+    if unresolved.is_empty() {
+        return value;
+    }
+    value["decouple_unresolved"] = json!(unresolved);
+    let gaps = value["gaps"]
+        .as_array_mut()
+        .expect("place_parts gaps array");
+    gaps.extend(unresolved.iter().map(|issue| {
+        json!({
+            "kind": "decouple_unresolved",
+            "ref": issue.refdes,
+            "why": issue.why,
+            "how": issue.how,
+        })
+    }));
+    value
+}
+
 /// Render the one exhaustive refusal shape used by both audit phases.
 fn invalid_payload_response(audit: sch_check::PayloadAudit, warnings: &[String]) -> Value {
     with_warnings(
@@ -370,6 +393,7 @@ fn invalid_payload_response(audit: sch_check::PayloadAudit, warnings: &[String])
             "unknown_pins": audit.unknown_pins,
             "footprint_mismatch": audit.footprint_mismatch,
             "unplaced": audit.unplaced,
+            "decouple_unresolved": audit.decouple_unresolved,
             "dangling": audit.dangling,
             "did_you_mean": audit.did_you_mean,
             "unreliable_nets": audit.unreliable_nets,

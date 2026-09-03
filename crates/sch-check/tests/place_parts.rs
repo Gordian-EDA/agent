@@ -4,7 +4,7 @@ use sch_check::model::{Origin, PinTarget};
 use sch_check::place_parts::{
     DEFAULT_BLOCK, ExistingSheet, PlacePartsInput, into_design, place_parts_input_schema,
 };
-use sch_check::{PinType, SymbolTable};
+use sch_check::{PinType, Severity, SymbolTable};
 
 fn provider() -> SymbolTable {
     use PinType::*;
@@ -358,7 +358,7 @@ fn decouple_without_power_pins_names_the_fallback_candidates() {
              "decouple": {"100nF": 1}}]}"#,
     )
     .unwrap();
-    let (design, diags, _) = into_design(&input, &provider(), &Default::default());
+    let (design, diags, audit) = into_design(&input, &provider(), &Default::default());
     let diag = diags
         .0
         .iter()
@@ -368,6 +368,15 @@ fn decouple_without_power_pins_names_the_fallback_candidates() {
     assert!(diag.message.contains("VDD*/VCC*"), "{diag}");
     assert!(diag.message.contains("VSS*/GND*"), "{diag}");
     assert!(diag.message.contains("[] / [\"GND\"]"), "{diag}");
+    assert_eq!(diag.severity, Severity::Warning);
+    assert_eq!(audit.decouple_unresolved.len(), 1);
+    assert_eq!(audit.decouple_unresolved[0].refdes, "U5");
+    assert!(
+        audit.decouple_unresolved[0]
+            .why
+            .contains("needs supply and ground candidates")
+    );
+    assert!(audit.decouple_unresolved[0].how.contains("explicitly"));
     assert_eq!(design.blocks[DEFAULT_BLOCK].components.len(), 1);
 }
 

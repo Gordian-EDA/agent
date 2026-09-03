@@ -171,13 +171,14 @@ fn ambiguous(
     supplies: Vec<NetName>,
     grounds: Vec<NetName>,
 ) -> Diagnostic {
-    Diagnostic::error(
+    Diagnostic::warning(
         "decouple-ambiguous",
         format!(
             "{refdes}: decouple {source}; needs supply and ground candidates \
              (found {supplies:?} / {grounds:?}) — write the caps explicitly"
         ),
     )
+    .with_refs([refdes])
 }
 
 /// The caps `values` (value → count) asks for, keyed `__dec_<parent>_<n>`.

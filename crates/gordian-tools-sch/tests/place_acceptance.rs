@@ -135,6 +135,61 @@ fn unresolved_and_incompatible_footprints_place_with_repair_reports() {
 }
 
 #[test]
+fn ambiguous_decouple_sugar_places_the_part_and_reports_the_gap() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {
+                "ref": "U1",
+                "part": "Regulator_Linear:L7805",
+                "pins": {"1": "RAW9", "2": "GND", "3": "OUT"},
+                "decouple": {"100nF": 1}
+            },
+            {"ref": "R1", "part": "Device:R", "pins": {"1": "OUT", "2": "GND"}}
+        ]}),
+    );
+
+    assert!(result.get("error").is_none(), "{result}");
+    assert_ne!(result.get("ok"), Some(&json!(false)), "{result}");
+    let unresolved = result["decouple_unresolved"].as_array().unwrap();
+    assert_eq!(unresolved.len(), 1, "{result}");
+    assert_eq!(unresolved[0]["ref"], "U1", "{result}");
+    assert!(
+        unresolved[0]["why"]
+            .as_str()
+            .is_some_and(|why| { why.contains("needs supply and ground candidates") })
+    );
+    assert!(
+        unresolved[0]["how"]
+            .as_str()
+            .unwrap()
+            .contains("explicitly")
+    );
+    assert!(
+        result["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| { gap["kind"] == "decouple_unresolved" && gap["ref"] == "U1" })
+    );
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    assert!(doc.symbol_by_ref("U1").is_some(), "{result}");
+    assert_eq!(
+        doc.symbols()
+            .filter(|symbol| symbol.refdes().starts_with('C'))
+            .count(),
+        0,
+        "ambiguous sugar must not invent a capacitor: {result}"
+    );
+}
+
+#[test]
 fn malformed_layout_intent_is_dropped_but_parts_remain_strict() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: KiCad 10 not configured");

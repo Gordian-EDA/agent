@@ -134,6 +134,16 @@ pub struct Unplaced {
     pub did_you_mean: Vec<String>,
 }
 
+/// Decoupling sugar omitted because the part's supply and return rails were not
+/// uniquely identifiable. The authored part remains valid and is still placed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecoupleUnresolved {
+    #[serde(rename = "ref")]
+    pub refdes: RefDes,
+    pub why: String,
+    pub how: String,
+}
+
 /// Findings that make a bulk-create payload electrically incomplete.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PayloadAudit {
@@ -156,6 +166,9 @@ pub struct PayloadAudit {
     /// Parts left out of the design because nothing could resolve them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unplaced: Vec<Unplaced>,
+    /// Requested decouplers that need explicit supply and ground nets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decouple_unresolved: Vec<DecoupleUnresolved>,
 }
 
 /// One symbol/footprint assignment whose electrical pins do not agree.
@@ -310,13 +323,22 @@ pub fn into_design(
             )),
         }
     }
-    expand_decouple(&input, default_block, &mut design, provider, &mut diags);
+    let mut decouple_unresolved = Vec::new();
+    expand_decouple(
+        &input,
+        default_block,
+        &mut design,
+        provider,
+        &mut diags,
+        &mut decouple_unresolved,
+    );
     decouple::renumber(&mut design);
     pins::mark_unused_no_connect(&mut design, provider);
     nets::derive_attrs(&mut design);
     let mut audit = audit_payload(&input, &design, provider, existing, &diags);
     audit.duplicate_refs = duplicate_refs;
     audit.unplaced = unplaced;
+    audit.decouple_unresolved = decouple_unresolved;
     (design, diags, audit)
 }
 
@@ -651,6 +673,7 @@ fn expand_decouple(
     design: &mut Design,
     provider: &SymbolTable,
     diags: &mut Diagnostics,
+    unresolved: &mut Vec<DecoupleUnresolved>,
 ) {
     for spec in &input.parts {
         if spec.decouple.is_empty() {
@@ -669,7 +692,20 @@ fn expand_decouple(
                     block.components.insert(key, cap);
                 }
             }
-            Err(diag) => diags.push(diag),
+            Err(diag) => {
+                unresolved.push(DecoupleUnresolved {
+                    refdes: refdes.clone(),
+                    why: diag
+                        .message
+                        .strip_prefix(&format!("{refdes}: decouple "))
+                        .unwrap_or(&diag.message)
+                        .to_string(),
+                    how:
+                        "add the decoupling capacitors explicitly with their supply and ground nets"
+                            .to_string(),
+                });
+                diags.push(diag);
+            }
         }
     }
 }
