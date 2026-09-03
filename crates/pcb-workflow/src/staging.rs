@@ -198,6 +198,20 @@ pub(crate) fn staged_references(board: &BoardSnapshot) -> BTreeSet<String> {
         .collect()
 }
 
+/// Annotation edits that move references out of staging.
+pub(crate) fn clear_annotations(
+    references: impl IntoIterator<Item = String>,
+) -> Vec<kicad_board::Annotation> {
+    references
+        .into_iter()
+        .map(|reference| {
+            kicad_board::Annotation::new(reference)
+                .clear(kicad_board::STAGED_REASON)
+                .clear(kicad_board::STAGED_DETAIL)
+        })
+        .collect()
+}
+
 /// Why one part is locked. `locked_reason` is revocable metadata beside
 /// KiCad's own `locked` flag; a part locked in KiCad by hand has no reason
 /// property and reads as `user`.

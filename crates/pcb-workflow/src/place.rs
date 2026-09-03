@@ -3623,14 +3623,9 @@ fn write_placement_file(
         std::fs::read_to_string(path).map_err(|e| format!("could not read the board: {e}"))?;
     let patched = kicad_board::patch_placements(&text, moves)
         .map_err(|e| format!("could not patch placement: {e}"))?;
-    let unstaged: Vec<kicad_board::Annotation> = moves
-        .iter()
-        .map(|placement| {
-            kicad_board::Annotation::new(placement.reference.clone())
-                .clear(kicad_board::STAGED_REASON)
-                .clear(kicad_board::STAGED_DETAIL)
-        })
-        .collect();
+    let unstaged = crate::staging::clear_annotations(
+        moves.iter().map(|placement| placement.reference.clone()),
+    );
     let patched = kicad_board::patch_annotations(&patched, &unstaged)
         .map_err(|e| format!("could not clear the staging annotation: {e}"))?;
     crate::route::write_board_atomically(path, patched.as_bytes())
