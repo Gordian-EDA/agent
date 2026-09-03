@@ -200,6 +200,11 @@ fn incomplete_sync_and_auto_edge_placement_preserve_a_reported_partial_board() {
         "{placed:#}"
     );
     assert!(placed["outline_refit"].is_object(), "{placed:#}");
+    assert!(
+        placed["parts_courtyard_area_mm2"].as_f64().unwrap()
+            < synced["parts_courtyard_area_mm2"].as_f64().unwrap(),
+        "staged placeholder extents must not size the placed outline: {placed:#}"
+    );
 
     let checked = run_tool("check_board", json!({}), &ctx).unwrap();
     assert_eq!(checked["staged_count"], json!(2), "{checked:#}");

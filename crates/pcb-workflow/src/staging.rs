@@ -146,9 +146,10 @@ pub(crate) fn outside_json(
 
 /// Every part still in the staging row, with the reason it is there.
 ///
-/// Membership is positional (the seed row); the reason is the annotation
-/// `sync_board` left on the footprint, defaulting to `unplaced` for a part that
-/// was simply never laid out.
+/// Membership is the seed row or a still-live staging annotation. The
+/// annotation keeps a partial state recognizable when an auto outline grows
+/// past its original minimum coordinate; placement clears it when the part
+/// leaves staging.
 pub(crate) fn staged(board: &BoardSnapshot) -> Vec<StagedPart> {
     let row: BTreeSet<String> = kicad_board::seed_row_references(&board.imported)
         .into_iter()
@@ -157,7 +158,13 @@ pub(crate) fn staged(board: &BoardSnapshot) -> Vec<StagedPart> {
         .imported
         .parts
         .iter()
-        .filter(|part| row.contains(&part.reference))
+        .filter(|part| {
+            row.contains(&part.reference)
+                || part
+                    .property(kicad_board::STAGED_REASON)
+                    .and_then(StagedReason::parse)
+                    .is_some()
+        })
         .map(|part| StagedPart {
             reference: part.reference.clone(),
             reason: part
@@ -172,8 +179,9 @@ pub(crate) fn staged(board: &BoardSnapshot) -> Vec<StagedPart> {
 
 /// The references in the staging row.
 pub(crate) fn staged_references(board: &BoardSnapshot) -> BTreeSet<String> {
-    kicad_board::seed_row_references(&board.imported)
+    staged(board)
         .into_iter()
+        .map(|part| part.reference)
         .collect()
 }
 

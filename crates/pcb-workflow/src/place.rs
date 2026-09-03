@@ -2501,17 +2501,21 @@ fn sizing_report(
     result: &PlaceResult,
     legal: bool,
 ) -> Value {
+    let sizing = board_sizing(problem, &board.imported.parts, &board.problem);
     // On a failed placement, give the agent a CONCRETE board size so it can retry
     // deterministically instead of guessing — in the one vocabulary
     // `sync_board` also uses, grown past the outline that just failed so a
     // retry can never propose it again. `suggested_min_bounds_mm` carries the
     // same recommendation under the name the auto-resize path already reads.
-    let mut extra = json!({});
+    let mut extra = json!({
+        "parts_courtyard_area_mm2": sizing.courtyard_area_mm2,
+        "required_bounds": { "width": sizing.required_w, "height": sizing.required_h },
+        "recommended_bounds": { "width": sizing.recommended_w, "height": sizing.recommended_h },
+    });
     if !legal {
         let cw = (problem.bounds.max_x - problem.bounds.min_x).max(0.1);
         let ch = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
-        let sizing =
-            board_sizing(problem, &board.imported.parts, &board.problem).grown_past(cw, ch);
+        let sizing = sizing.grown_past(cw, ch);
         extra = json!({
             "overlap_pairs": placement_overlap_pairs(problem, result),
             "parts_courtyard_area_mm2": sizing.courtyard_area_mm2,
@@ -2554,16 +2558,19 @@ fn sizing_report(
             // envelope ratio always reads full even on an oversized board.
             let fresh = placement_size_estimate_with_growth(problem, 0.0, 0.0, false, false);
             let utilization = (fresh.total_area * 2.0) / (cw * ch);
-            extra = json!({
-                "utilized_bounds_mm": {
-                    "w": (envelope.width() * 10.0).round() / 10.0,
-                    "h": (envelope.height() * 10.0).round() / 10.0,
-                },
-                "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
-                "fit_bounds_mm": { "w": fresh.width.ceil(), "h": fresh.height.ceil() },
-                "canvas_utilization_percent": (utilization * 100.0).round().min(100.0),
-                "connectors_off_edge": connectors_off_edge(problem, &board.imported.parts, result),
-            });
+            crate::create::merge(
+                &mut extra,
+                json!({
+                    "utilized_bounds_mm": {
+                        "w": (envelope.width() * 10.0).round() / 10.0,
+                        "h": (envelope.height() * 10.0).round() / 10.0,
+                    },
+                    "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
+                    "fit_bounds_mm": { "w": fresh.width.ceil(), "h": fresh.height.ceil() },
+                    "canvas_utilization_percent": (utilization * 100.0).round().min(100.0),
+                    "connectors_off_edge": connectors_off_edge(problem, &board.imported.parts, result),
+                }),
+            );
         }
     }
     extra
@@ -3294,9 +3301,10 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 
     let extra = sizing_report(&problem, &board, &result, legal);
+    let placement_applied = legal && (refs.is_none() || !applied_refs.is_empty());
 
     let mut out = json!({
-        "placement_applied": legal,
+        "placement_applied": placement_applied,
         "legal": legal,
         "hpwl": result.report.hpwl,
         "overlaps_resolved": result.report.overlaps_resolved,
@@ -3335,6 +3343,10 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     if !placement_unplaced.is_empty() {
         out["unplaced"] = json!(placement_unplaced);
+        out["note"] = json!(
+            "placed every selected footprint that fit; the reported remainder stays staged. \
+             Repair missing footprints or apply suggested_bounds, then place those references again."
+        );
     }
     if let Some(refs) = &refs {
         out["placed_refs"] = json!(applied_refs);

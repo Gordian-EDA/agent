@@ -1788,6 +1788,37 @@ mod tests {
     }
 
     #[test]
+    fn missing_footprint_placeholder_is_padless_and_kicad_parseable() {
+        let root = tempfile::tempdir().unwrap();
+        let catalog = FootprintCatalog::from_root(root.path()).unwrap();
+        let part = SeedPart {
+            reference: "R1".to_owned(),
+            value: Some("10k".to_owned()),
+            footprint: MISSING_FOOTPRINT_ID.to_owned(),
+            pad_nets: BTreeMap::from([
+                ("1".to_owned(), "IN".to_owned()),
+                ("2".to_owned(), "OUT".to_owned()),
+            ]),
+            locked: None,
+        };
+
+        let emitted = emit_board_footprint(
+            &part,
+            Point2::new(2.0, 2.25),
+            0.0,
+            false,
+            &catalog,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert!(emitted.contains("Gordian:MissingFootprint"));
+        assert!(!emitted.contains("\n\t\t(pad "));
+        kicad_footprint::Footprint::parse_str(MISSING_FOOTPRINT_ID, MISSING_FOOTPRINT_SOURCE)
+            .unwrap();
+    }
+
+    #[test]
     fn parse_seed_rules_keeps_explicit_reserved_plane_overrides() {
         let rules = parse_seed_rules(Some(&json!({
             "layer_count": 4,

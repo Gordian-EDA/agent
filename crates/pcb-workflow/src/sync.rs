@@ -382,16 +382,25 @@ fn report_staged(design: &SchematicDesign, result: &mut Value) {
         .get("staged_missing_footprint")
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or_else(|| design.missing.iter().cloned().map(Value::String).collect());
     let mismatched = object
         .get("staged_footprint_mismatch")
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            design
+                .mismatched
+                .keys()
+                .cloned()
+                .map(Value::String)
+                .collect()
+        });
     if missing.is_empty() && mismatched.is_empty() {
         return;
     }
     object.insert("missing_footprints".to_owned(), json!(design.missing));
+    object.insert("staged_missing_footprint".to_owned(), json!(missing));
+    object.insert("staged_footprint_mismatch".to_owned(), json!(mismatched));
     if !mismatched.is_empty() {
         object.insert(
             "footprint_pin_mismatches".to_owned(),
@@ -794,7 +803,7 @@ fn update_board(
     ctx: &AgentRuntime,
 ) -> Value {
     if input.get("rules").is_some() || input.get("bounds").is_some() {
-        return reseed_board(parts, input, ctx);
+        return reseed_board(parts, mismatched, input, ctx);
     }
     let catalog = match ctx.footprint_catalog() {
         Ok(catalog) => catalog,
@@ -1013,7 +1022,12 @@ fn has_top_level_net(text: &str) -> bool {
 /// its netlist: they cannot be patched into an existing document one node at a
 /// So a rules change re-synthesizes the board and restores the placement — the
 /// layout survives, the copper does not, and the model re-routes.
-fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> Value {
+fn reseed_board(
+    parts: &[SchematicPart],
+    mismatched: &BTreeMap<String, String>,
+    input: &Value,
+    ctx: &AgentRuntime,
+) -> Value {
     let gate = match Guard::open(ctx, Edit::new("sync_board", &[ctx.pcb_path()])) {
         Ok(gate) => gate,
         Err(refusal) => return refusal,
@@ -1083,14 +1097,27 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
             );
         }
     }
+    let missing = parts
+        .iter()
+        .filter(|part| part.footprint == MISSING_FOOTPRINT_ID)
+        .map(|part| part.reference.clone())
+        .collect();
+    let (missing_staged, mismatched_staged) = match stage_incomplete(ctx, &missing, mismatched) {
+        Ok(staged) => staged,
+        Err(error) => {
+            return gate.rollback(
+                ctx,
+                json!({ "error": format!("could not restore incomplete staging: {error}") }),
+            );
+        }
+    };
     merge(
         &mut result,
         json!({
             "created": false,
             "reseeded": true,
-            // The rebuild restored every part where it sat, so nothing is
-            // waiting on placement — only the copper is.
-            "staged": Vec::<String>::new(),
+            "staged_missing_footprint": missing_staged,
+            "staged_footprint_mismatch": mismatched_staged,
             "delta": delta.to_json(),
             "retracted_tracks": original.matches("(segment").count(),
             "nets_to_reroute": delta_nets(parts),

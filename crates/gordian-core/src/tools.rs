@@ -413,9 +413,10 @@ pub fn tool_defs() -> Vec<Tool> {
         Def {
             name: "sync_board".into(),
             description: "Sync the PCB to the schematic: creates the board when absent, \
-                 else applies only the delta and keeps placement and copper. bounds/rules \
-                 apply on creation only; omit bounds to size the outline from the footprints \
-                 (the result reports required_bounds and recommended_bounds). \
+                 else applies only the delta and keeps placement and copper. Parts without a \
+                 usable footprint remain staged and are named instead of blocking the sync. \
+                 bounds/rules apply on creation only; omit bounds for a managed auto outline \
+                 that place_board grows/refits around placed parts while ignoring the staging row. \
                  clearance/min_trace_width are lowered to what those footprints permit \
                  (reported in design_rules)."
                 .into(),
@@ -488,7 +489,7 @@ pub fn tool_defs() -> Vec<Tool> {
         Def {
             name: "get_board".into(),
             description: "Inspect the board: its parts split into `staged` (with staged_reason), \
-                 `placed` and `locked`, its rules and its nets. `net` adds that net's pads, \
+                 `placed` and `locked`, its outline bounds, part extents, rules and nets. `net` adds that net's pads, \
                  copper, endpoint touches and its `ratsnest` entry — status, blocker, escapes."
                 .into(),
             input_schema: json!({
@@ -517,7 +518,8 @@ pub fn tool_defs() -> Vec<Tool> {
                  Copper on the parts it moves is retracted (see nets_to_reroute), and a local \
                  call reports what is still_staged. Locked parts are never moved and come \
                  back as skipped_locked; pass replace:true to re-place a finished board and \
-                 lose its layout."
+                 lose its layout. A managed auto outline grows/refits to the accepted placement; \
+                 fixed bounds accept fitting parts and report the rest with extents and suggested bounds."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -602,7 +604,8 @@ pub fn tool_defs() -> Vec<Tool> {
             name: "check_board".into(),
             description: "Progress and DRC for the board as it stands: `routed N/M`, `blocked` \
                  (the same ratsnest entries route_board returns), `staged` (the parts still in \
-                 the staging row, with the reason), and every live DRC finding. `ok` considers \
+                 the staging row, with reason and extent), outline bounds, grouped top_violations, \
+                 and every live DRC finding. `ok` considers \
                  every blocking finding. A staged part is never a violation."
                 .into(),
             input_schema: json!({ "type": "object", "properties": {} }),

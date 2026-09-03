@@ -22,7 +22,7 @@ Build these phases in order: power entry; regulator; MCU core including every su
 
 `dangling` pins are reported, not fatal: the parts are placed and the net has one end. Close each with a `connect`, or declare real board I/O in `intent.ports`. Write `"@R1.2"` as a net to join whatever net that pin is on; KiCAD's own `Net-(...)` names fork the net if reused. Resolve `completeness.gaps` for a complete powered/interface design with one follow-up `place_parts` of only the missing parts; gaps are advisory for deliberately minimal designs and focused edits.
 
-Unknown or pad-incompatible footprints are cleared, reported in `footprints_unresolved`, and repaired in one `assign_footprints` call before PCB work.
+Unknown or pad-incompatible footprints are cleared and reported in `footprints_unresolved`. They may be repaired in one `assign_footprints` call, but unresolved parts do not block PCB work: `sync_board` stages them with the reason and continues with every resolved part.
 
 For an existing schematic: `read_schematic()` once, perform only the requested mutators, use their returned `changed`, `connectivity`, and `unconnected` reports to verify the exact edit, then `check_schematic()`. `set_fields`, `set_flags`, `swap_symbol`, `add_symbols`, `remove_symbols`, `label`, `no_connect`, `add_power`, `delete_wires` edit; `arrange({refs|bbox|block, intent})` re-places and redraws the selection's wires from the netlist, leaving a matching label where it cannot draw one. Do not move unrelated parts.
 
@@ -30,20 +30,20 @@ To replace a sub-circuit, use `remove_region` (or `remove_symbols` for parts and
 
 Create wires only with `connect` or `rewire`; never provide wire coordinates. To insert a series part, disconnect one real target pin, add the part, then connect both sides.
 
-Every fitted non-power part needs a footprint before PCB work. `check_schematic` reports every live finding. Fix the findings in what you touched; leave unrelated existing ones alone and mention them. A final passing schematic render and check starts the board.
+`check_schematic` reports every live finding. Fix the findings in what you touched; leave unrelated existing ones alone and mention them. A final passing schematic render and check starts the board; missing footprints remain explicit staged work.
 
 # PCB phased loop
-A request for a board, PCB, layout, gerbers or a complete "design" continues here once `check_schematic` is clean; "schematic only" stops there. Choose the layer count explicitly before `sync_board`: use `rules.layer_count` with 2, 4, 6, or 8 based on density, escape needs, signal integrity, and cost. `sync_board({bounds?, rules?, intent?})` creates a board or applies only the schematic delta while keeping existing placement and copper. Omit `bounds` to size from footprints. Use `rules.pours` for the GND plane and net widths for power.
+A board request continues after clean `check_schematic`; "schematic only" stops. Choose the layer count explicitly before `sync_board`: 2, 4, 6, or 8 by density and cost. Sync preserves existing placement/copper. Omit `bounds` for a managed auto outline: placement grows/refits it around placed parts, ignoring staging. `rules.pours` accepts a net string, `{net,layer?}`, or arrays; defaults are B.Cu on 2 layers and an inner plane on 4+.
 
 Follow these phases. After EVERY phase call `render_board` and `check_board`, inspect progress and fix violations in the work you touched before advancing.
 
-1. Create or update the outline, then place connectors and mechanical parts at the intended edges with focused `place_board({refs, intent})` calls. Lock them with `lock_parts({refs, reason})` (edge-intent connectors and mounting holes self-lock as `mechanical`); locked parts never move.
-2. Place the big ICs by functional intent with `place_board({refs, intent})` and render/check. Partial boards are legal: `sync_board` leaves new parts `staged`; `get_board` lists `staged`/`placed`/`locked`, `check_board` reports `routed n/m`, `blocked` (each with its blocker and a way out) and `staged n` as progress. Say layout as intent, never coordinates: `intent.edge` ({"J1":"left"}), `intent.keep_near` ([["C3","U1"]]), `intent.group`.
-3. Place satellites tightly around their anchors: decouplers by supply pins, crystal parts by oscillator pins, feedback parts by the regulator, and pull-ups by their consumers.
-4. Establish the GND pour early with `sync_board` rules and `refill_zones`; fan out dense ground pads early using `route_track` with vias where needed.
-5. Route critical nets first with focused `route_board({nets})`: power, crystal, then differential pairs. Check the result. If blocked, inspect with `get_board({net})`, use `move_parts` or `delete_copper`/`set_net_width`, and re-route ONLY the blocked nets. Consider swapping header/GPIO pins in the schematic when equivalent pin assignments would remove a routing blockage; then re-check the schematic and `sync_board` before routing that changed net.
-6. Place remaining parts around what already exists. Route remaining nets in named batches with `route_board({nets})`, rendering and checking each batch.
-7. Run the DRC loop: `check_board`, inspect named blockers, make one concrete placement/copper/rule fix, re-route only affected nets, `refill_zones`, render, and check again. Fix findings in what you touched; leave unrelated existing ones alone and mention them.
+1. Place connectors and mechanical parts at intended edges with focused `place_board({refs,intent})`. Auto outlines grow; explicit outlines place what fits and report each remainder's extent and suggested bounds. Lock accepted parts; edge-intent mechanical parts self-lock.
+2. Place the big ICs by intent; render/check. Partial boards are legal: sync stages new/incomplete parts; get/check list staged, placed, locked, outline, `routed n/m`, and blockers. Use `intent.edge`, `intent.keep_near`, and `intent.group`, never coordinates.
+3. Place satellites tightly around their anchors: decouplers, crystal parts, feedback, then pull-ups.
+4. Establish the GND pour early; refill, then fan out dense ground pads with vias.
+5. Route critical nets first: power, crystal, differential pairs. If blocked, inspect the net, adjust placement/copper/width, and re-route ONLY the blocked nets. Consider swapping header/GPIO pins in the schematic, then re-check and sync.
+6. Place remaining parts. Route remaining nets in named batches; render/check each.
+7. Run the DRC loop: inspect `top_violations` ({type,count,example_refs}), fix one cause, re-route affected nets, refill, render, and check again.
 8. Call `export_fab()` only when `check_board` is clean. Otherwise preserve and report the useful partial board.
 
 
