@@ -631,7 +631,6 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "project_info" => project_info(ctx),
         "reserve_refs" => reserve_refs(input, ctx),
         "render_schematic" => render_schematic(ctx),
-        "search_footprints" => search_footprints(input, ctx),
         "get_footprint_info" => pcb_workflow::get_footprint_info(input, ctx),
         "sync_board" => match bench_refusal(ctx, "sync_board")? {
             Some(refusal) => Ok(refusal),
