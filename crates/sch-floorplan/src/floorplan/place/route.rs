@@ -459,7 +459,7 @@ pub(crate) fn route_signal(
                 }
             }
             for seg in p.windows(2) {
-                emit_routed_segment(w, scene, net, seg[0], seg[1]);
+                emit_routed_segment(w, scene, net, seg[0], seg[1], finalize);
             }
             paths.push(p);
             uf.union_to(i, j);
@@ -480,7 +480,7 @@ pub(crate) fn route_signal(
         && uf.find(0) != uf.find(pi)
         && safe_forced_single_port_stub(pts[0], pts[pi], net, scene)
     {
-        emit_routed_segment(w, scene, net, pts[0], pts[pi]);
+        emit_routed_segment(w, scene, net, pts[0], pts[pi], finalize);
         uf.union_to(0, pi);
     }
 
@@ -564,7 +564,7 @@ pub(crate) fn route_signal(
                         if (seg[0][0] - seg[1][0]).abs() > EPS
                             || (seg[0][1] - seg[1][1]).abs() > EPS
                         {
-                            emit_routed_segment(w, scene, net, seg[0], seg[1]);
+                            emit_routed_segment(w, scene, net, seg[0], seg[1], finalize);
                         }
                     }
                     uf.union_to(0, k);
@@ -668,35 +668,90 @@ pub(crate) fn route_signal(
     Ok(())
 }
 
-/// Emit one routed segment unless same-net geometry already covers its whole span.
-/// Covered endpoints in the existing segment's interior receive junctions so the
-/// geometric reuse is also an electrical attachment.
+/// Emit only the portions of one routed segment not already covered by same-net geometry.
+/// Partial-overlap trimming is finalize-only so correctness repair does not perturb the
+/// placement scorer; fully covered spans are always reused. Covered request endpoints in
+/// an existing segment's interior receive junctions so the reuse is electrically attached.
 fn emit_routed_segment(
     w: &mut SchematicWriter,
     scene: &mut sch_model::route::RouteScene,
     net: &str,
     a: ::geom::Point2,
     b: ::geom::Point2,
+    trim_partial: bool,
 ) {
-    let covering = scene.segments.iter().find(|existing| {
+    if let Some(covering) = scene.segments.iter().find(|existing| {
         existing.net == net
             && existing.segment.contains_point(a)
             && existing.segment.contains_point(b)
-    });
-    if let Some(covering) = covering {
-        let covering = covering.segment;
+    }) {
         for at in [a, b] {
-            let is_endpoint = at.near_eq(covering.a, EPS) || at.near_eq(covering.b, EPS);
+            let is_endpoint =
+                at.near_eq(covering.segment.a, EPS) || at.near_eq(covering.segment.b, EPS);
             if !is_endpoint {
                 w.add_junction_on_net(at, net);
             }
         }
         return;
     }
-    w.add_wire_on_net(a, b, net);
-    scene
+    if !trim_partial {
+        w.add_wire_on_net(a, b, net);
+        scene
+            .segments
+            .push(sch_model::route::NetSegment::new(a, b, net));
+        return;
+    }
+    let existing: Vec<_> = scene
         .segments
-        .push(sch_model::route::NetSegment::new(a, b, net));
+        .iter()
+        .filter(|segment| segment.net == net)
+        .map(|segment| segment.segment)
+        .collect();
+    for at in [a, b] {
+        if existing.iter().any(|segment| {
+            segment.contains_point(at) && !at.near_eq(segment.a, EPS) && !at.near_eq(segment.b, EPS)
+        }) {
+            w.add_junction_on_net(at, net);
+        }
+    }
+    let mut uncovered = vec![::geom::Segment::new(a, b)];
+    for covering in existing {
+        uncovered = uncovered
+            .into_iter()
+            .flat_map(|segment| subtract_collinear_overlap(segment, covering))
+            .collect();
+    }
+    for segment in uncovered {
+        w.add_wire_on_net(segment.a, segment.b, net);
+        scene
+            .segments
+            .push(sch_model::route::NetSegment::new(segment.a, segment.b, net));
+    }
+}
+
+fn subtract_collinear_overlap(
+    segment: ::geom::Segment,
+    covering: ::geom::Segment,
+) -> Vec<::geom::Segment> {
+    if !segment.axis_aligned_collinear_overlap(covering) {
+        return vec![segment];
+    }
+    let (dx, dy) = (segment.b.x - segment.a.x, segment.b.y - segment.a.y);
+    let length_squared = dx * dx + dy * dy;
+    let project = |point: ::geom::Point2| {
+        ((point.x - segment.a.x) * dx + (point.y - segment.a.y) * dy) / length_squared
+    };
+    let lo = project(covering.a).min(project(covering.b)).clamp(0.0, 1.0);
+    let hi = project(covering.a).max(project(covering.b)).clamp(0.0, 1.0);
+    let point = |t: f64| ::geom::Point2::new(segment.a.x + dx * t, segment.a.y + dy * t);
+    let mut remainder = Vec::with_capacity(2);
+    if lo * segment.length() > EPS {
+        remainder.push(::geom::Segment::new(segment.a, point(lo)));
+    }
+    if (1.0 - hi) * segment.length() > EPS {
+        remainder.push(::geom::Segment::new(point(hi), segment.b));
+    }
+    remainder
 }
 
 /// Where the label bridge seats `net`'s label on `refdes`.`num` — the stub length outward
@@ -1907,6 +1962,7 @@ mod tests {
             "+3V3",
             [105.41, 2.54].into(),
             [105.41, 24.13].into(),
+            false,
         );
         emit_routed_segment(
             &mut writer,
@@ -1914,6 +1970,7 @@ mod tests {
             "+3V3",
             [105.41, 24.13].into(),
             [105.41, 21.59].into(),
+            false,
         );
 
         assert_eq!(writer.wires_with_nets().len(), 1);
@@ -1922,6 +1979,43 @@ mod tests {
 
         writer.prepare();
         assert_eq!(writer.wires_with_nets().len(), 2);
+    }
+
+    #[test]
+    fn routed_segment_emits_only_the_remainder_after_partial_overlap() {
+        let mut writer = SchematicWriter::new();
+        let mut scene = sch_model::route::RouteScene::default();
+        emit_routed_segment(
+            &mut writer,
+            &mut scene,
+            "5V_FUSED",
+            [105.41, 21.59].into(),
+            [105.41, 24.13].into(),
+            true,
+        );
+        emit_routed_segment(
+            &mut writer,
+            &mut scene,
+            "5V_FUSED",
+            [105.41, 24.13].into(),
+            [105.41, 2.54].into(),
+            true,
+        );
+
+        assert_eq!(writer.wires_with_nets().len(), 2);
+        assert_eq!(scene.segments.len(), 2);
+        assert!(writer.wires_with_nets().iter().any(|wire| {
+            wire.segment.a.near_eq([105.41, 21.59].into(), EPS)
+                && wire.segment.b.near_eq([105.41, 2.54].into(), EPS)
+        }));
+
+        writer.prepare();
+        let mut pairs = BTreeSet::new();
+        for wire in writer.wires_with_nets() {
+            let a = crate::write::point_key(wire.segment.a);
+            let b = crate::write::point_key(wire.segment.b);
+            assert!(pairs.insert(if a <= b { (a, b) } else { (b, a) }));
+        }
     }
 
     #[test]
@@ -1940,6 +2034,7 @@ mod tests {
             "SIG",
             [12.7, 10.16].into(),
             [17.78, 10.16].into(),
+            false,
         );
 
         assert!(writer.wires_with_nets().is_empty());

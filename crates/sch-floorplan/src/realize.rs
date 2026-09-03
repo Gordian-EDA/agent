@@ -95,11 +95,11 @@ pub fn graft_drawing(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Resu
 }
 
 /// Assert in debug builds that the adopted sheet has unique unordered wire segments.
-fn debug_assert_unique_wire_segments(doc: &SchDoc) {
+fn debug_assert_unique_wire_segments(_doc: &SchDoc) {
     #[cfg(debug_assertions)]
     {
         let mut seen = std::collections::BTreeSet::new();
-        for wire in doc.wires() {
+        for wire in _doc.wires() {
             for points in wire.points.windows(2) {
                 let a = crate::write::point_key(points[0]);
                 let b = crate::write::point_key(points[1]);

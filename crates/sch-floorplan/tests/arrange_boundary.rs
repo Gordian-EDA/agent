@@ -106,6 +106,27 @@ fn save(doc: &mut SchDoc, dir: &std::path::Path, name: &str) -> std::path::PathB
     path
 }
 
+fn assert_unique_wire_segments(path: &std::path::Path) {
+    let doc = SchDoc::read(path).unwrap();
+    let key = |point: geom::Point2| {
+        (
+            (point.x * 10_000.0).round() as i64,
+            (point.y * 10_000.0).round() as i64,
+        )
+    };
+    let mut seen = BTreeSet::new();
+    for wire in doc.wires() {
+        for segment in wire.points.windows(2) {
+            let (a, b) = (key(segment[0]), key(segment[1]));
+            let pair = if a <= b { (a, b) } else { (b, a) };
+            assert!(
+                seen.insert(pair),
+                "written schematic repeats wire segment {pair:?}"
+            );
+        }
+    }
+}
+
 /// Re-laying out EVERY symbol on a sheet is the hardest form of the promise: the
 /// whole drawing is thrown away and drawn again from the netlist alone. What comes
 /// back has to be the same circuit, judged by `kicad-cli` rather than by us.
@@ -193,6 +214,8 @@ fn arranging_a_forty_part_block_keeps_its_netlist() {
     .unwrap();
 
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
-    let after = cli_partition(&env, &save(&mut doc, dir.path(), "block-after"));
+    let after_path = save(&mut doc, dir.path(), "block-after");
+    assert_unique_wire_segments(&after_path);
+    let after = cli_partition(&env, &after_path);
     assert_eq!(before, after, "re-laying out the block changed its netlist");
 }
