@@ -300,3 +300,8 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   before moving), pre-existing symbols never move; snapshot gate green. Integrated gate + push running.
   Open follow-up: `region.rs slide_block` early-returns on `clear` without `on_page` (may become moot
   under layout trees).
+- no-turn-budget merged (gate running): wall clock, request cap, handoff, harness continuation all
+  deleted; only an off-by-default `--max-requests` remains; `SettlingTools` parks timed-out mutations
+  instead of dead-ending; per-state discovery allowances reset on commit. Single-run audio preamp:
+  52 requests, 407 s, routed 23/23, DRC 0, 17 fab files, model stopped itself. Next: campaign round 7
+  (one run per case, no cap) after the push.
