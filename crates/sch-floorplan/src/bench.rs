@@ -14,10 +14,9 @@
 //! that did not mean what the payload said — those symbols are benched rather than
 //! the whole netlist discarded. [`crate::live::arrange`] is how they leave.
 //!
-//! Only an AUTHORED net name may be benched. KiCAD derives an unnamed net's name
-//! from its own pins (`Net-(R1-Pad1)`), so writing that name as a label forks the
-//! net the moment the partition shifts; [`bench`] refuses such a pin rather than
-//! draw a lie.
+//! Authored names are written exactly as requested. KiCAD-derived names such as
+//! `Net-(R1-Pad1)` are the sole exception: they change with their pin partition, so
+//! the bench mints a stable label and exposes that replacement in its report.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -88,9 +87,9 @@ pub fn unbench(doc: &mut SchDoc, refs: &BTreeSet<String>) -> Vec<String> {
 pub struct BenchReport {
     /// Symbols now on the bench, in refdes order.
     pub benched: Vec<Benched>,
-    /// Pins left unnamed because their net has no authored name — the one thing
-    /// the bench cannot express.
-    pub unnamed_pins: Vec<String>,
+    /// KiCAD-derived net name → stable authored label written in its place.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub minted_for_derived: BTreeMap<String, String>,
 }
 
 /// Put `parts` on `block`'s bench, wiring each pin by name.
@@ -103,8 +102,12 @@ pub fn bench(
     source: &SymbolSource,
     block: &str,
     parts: &[BenchPart],
+    minted_for_derived: &BTreeMap<String, String>,
 ) -> sch_doc::Result<BenchReport> {
-    let mut report = BenchReport::default();
+    let mut report = BenchReport {
+        minted_for_derived: minted_for_derived.clone(),
+        ..BenchReport::default()
+    };
     let global = global_nets(doc);
     let mut cursor = Cursor::new(doc);
     for part in parts {
@@ -121,7 +124,7 @@ pub fn bench(
             refdes: part.refdes.clone(),
             why: part.why.clone(),
         });
-        name_pins(doc, part, &global, &mut report);
+        name_pins(doc, part, &global, minted_for_derived);
     }
     report.benched.sort_by(|a, b| a.refdes.cmp(&b.refdes));
     Ok(report)
@@ -133,7 +136,7 @@ fn name_pins(
     doc: &mut SchDoc,
     part: &BenchPart,
     global: &BTreeSet<String>,
-    report: &mut BenchReport,
+    minted_for_derived: &BTreeMap<String, String>,
 ) {
     let placed: Vec<(String, Point2)> = sch_doc::placed_pins(doc)
         .into_iter()
@@ -145,16 +148,57 @@ fn name_pins(
             doc.add_no_connect(at);
             continue;
         };
-        if is_derived_name(net) {
-            report.unnamed_pins.push(format!("{}.{number}", part.refdes));
-            continue;
-        }
+        let net = minted_for_derived.get(net).unwrap_or(net);
         let kind = match global.contains(net) {
             true => LabelKind::Global,
             false => LabelKind::Local,
         };
         doc.add_label(kind, net, Pose::new(at.x, at.y, 0.0));
     }
+}
+
+/// Mint stable authored labels for the KiCAD-derived names in `parts`.
+pub fn minted_net_names(doc: &SchDoc, parts: &[&BenchPart]) -> BTreeMap<String, String> {
+    let mut first_pin = BTreeMap::new();
+    for part in parts {
+        for (pin, net) in &part.pins {
+            first_pin
+                .entry(net.as_str())
+                .or_insert((part.refdes.as_str(), pin.as_str()));
+        }
+    }
+    let requested: BTreeSet<&str> = first_pin.keys().copied().collect();
+
+    let mut occupied: BTreeSet<String> = doc
+        .labels()
+        .map(|label| sch_doc::unescape(&label.text))
+        .chain(requested.iter().map(|net| (*net).to_string()))
+        .collect();
+    let mut out = BTreeMap::new();
+    for net in requested.iter().copied().filter(|net| is_derived_name(net)) {
+        let (refdes, pin) = first_pin[net];
+        let base = format!("N_{}_{}", identifier(refdes), identifier(pin));
+        let authored = unique_name(&base, &occupied);
+        occupied.insert(authored.clone());
+        out.insert(net.to_string(), authored);
+    }
+    out
+}
+
+fn identifier(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
+}
+
+fn unique_name(base: &str, occupied: &BTreeSet<String>) -> String {
+    if !occupied.contains(base) {
+        return base.to_string();
+    }
+    (2..)
+        .map(|suffix| format!("{base}_{suffix}"))
+        .find(|candidate| !occupied.contains(candidate))
+        .expect("the authored net-name suffix space is unbounded")
 }
 
 /// A name KiCAD generates from a net's own pins, which is therefore not a name at

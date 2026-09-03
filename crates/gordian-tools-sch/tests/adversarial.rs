@@ -353,7 +353,7 @@ fn delete_wires_accepts_an_auto_name_left_by_stacked_pins() {
 }
 
 #[test]
-fn place_parts_refuses_a_reference_already_on_the_sheet() {
+fn place_parts_renames_a_reference_already_on_the_sheet_everywhere() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -371,18 +371,55 @@ fn place_parts_refuses_a_reference_already_on_the_sheet() {
     let result = call(
         &ctx,
         "place_parts",
-        json!({"parts": [{
-            "ref": "C2",
-            "part": "Device:C",
-            "pins": {"1": "VIN", "2": "GND"}
-        }]}),
+        json!({
+            "parts": [
+                {
+                    "ref": "C2",
+                    "part": "Device:C",
+                    "pins": {"1": "VIN", "2": "GND"}
+                },
+                {
+                    "ref": "R1",
+                    "part": "Device:R",
+                    "pins": {"1": "@C2.1", "2": "GND"}
+                }
+            ],
+            "intent": {"relations": [{"kind": "above", "a": "C2", "b": "R1"}]}
+        }),
     );
 
-    assert_eq!(result["code"], "invalid_payload");
-    assert_eq!(
-        result["duplicate_refs"],
-        json!([{"ref": "C2", "next_free": "C3"}])
+    assert!(result.get("error").is_none(), "{result:#}");
+    assert_eq!(result["renamed"], json!({"C2": "C3"}));
+    assert_eq!(result["changed"]["placed"], json!(["C3", "R1"]));
+    let net = call(&ctx, "get_net", json!({"name": "VIN"}));
+    let text = serde_json::to_string(&net).unwrap();
+    assert!(text.contains("C3") && text.contains("R1"), "{net:#}");
+}
+
+#[test]
+fn place_parts_refuses_one_reference_for_two_different_parts() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {"ref": "X1", "part": "Device:R", "pins": {"1": "A", "2": "B"}},
+            {"ref": "X1", "part": "Device:C", "pins": {"1": "A", "2": "B"}}
+        ]}),
     );
+
+    assert_eq!(result["code"], "invalid_payload", "{result:#}");
+    assert!(
+        result["input_errors"][0]
+            .as_str()
+            .is_some_and(|error| error.contains("two different parts"))
+    );
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    assert_eq!(doc.symbols().count(), 0);
 }
 
 #[test]
@@ -725,7 +762,7 @@ fn add_symbols_clears_an_unresolved_footprint_and_reports_a_gap() {
 }
 
 #[test]
-fn place_parts_reports_a_duplicate_ref_and_a_bad_pin_in_one_response() {
+fn place_parts_renames_before_reporting_a_bad_pin_as_unplaced() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCad detected");
         return;
@@ -747,24 +784,27 @@ fn place_parts_reports_a_duplicate_ref_and_a_bad_pin_in_one_response() {
         }]}),
     );
 
-    assert_eq!(result["code"], "invalid_payload", "{result:#}");
-    assert!(!result["duplicate_refs"].as_array().unwrap().is_empty());
-    // The pin fault costs that part, not the payload; the duplicate reference is
-    // what refuses, and both are named in the same response.
-    assert_eq!(result["unplaced"][0]["ref"], "J1", "{result:#}");
+    assert_eq!(result["code"], "nothing_placed", "{result:#}");
+    assert_eq!(result["renamed"], json!({"J1": "J2"}));
+    assert_eq!(result["unplaced"][0]["ref"], "J2", "{result:#}");
     assert!(
         result["unplaced"][0]["reason"]
             .as_str()
             .unwrap()
             .contains("bad-pin")
     );
-    assert!(result["footprint_mismatch"].as_array().unwrap().is_empty());
     let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
     assert_eq!(
         doc.symbols()
             .filter(|symbol| symbol.refdes() == "J1")
             .count(),
         1
+    );
+    assert_eq!(
+        doc.symbols()
+            .filter(|symbol| symbol.refdes() == "J2")
+            .count(),
+        0
     );
 }
 

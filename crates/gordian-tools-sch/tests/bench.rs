@@ -142,3 +142,25 @@ fn a_malformed_intent_is_dropped_not_refused() {
         "{placed:#}"
     );
 }
+
+#[test]
+fn connectivity_furniture_returns_the_nothing_placed_shape() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({
+            "block": "erc_repair",
+            "parts": [{"part": "power:PWR_FLAG", "pins": {"1": "+5V_USB"}, "ref": "#FLG5"}]
+        }),
+    );
+
+    assert_eq!(result["code"], "nothing_placed", "{result:#}");
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["unplaced"][0]["ref"], "#FLG5");
+    assert_eq!(result["unplaced"][0]["part"], "power:PWR_FLAG");
+}

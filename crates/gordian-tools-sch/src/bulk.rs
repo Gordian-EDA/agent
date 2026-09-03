@@ -3,10 +3,12 @@
 use anyhow::{Context, Result, anyhow};
 use gordian_runtime::AgentRuntime;
 use gordian_runtime::config::PlacementEngineKind;
+use sch_check::place_parts::PartSpec;
 use sch_floorplan::live::{ArrangeReport, PlaceReport, PlacementBudget, Selection};
 use sch_model::engine::PlacementEngine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
 
@@ -112,10 +114,9 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         Edit::create(ctx, sch_floorplan::live::blank_sheet()?)
     };
-    let minted = match resolve_pin_net_refs(&mut payload, &mut edit)? {
-        Ok(minted) => minted,
-        Err(error) => return Ok(with_warnings(error, &warnings)),
-    };
+    if let Some(error) = coalesce_payload_parts(&mut payload) {
+        return Ok(with_warnings(error, &warnings));
+    }
     let existing_netlist = sch_doc::connect::extract(&edit.doc);
     let existing = sch_check::ExistingSheet {
         net_pins: existing_netlist
@@ -129,6 +130,11 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .map(|symbol| symbol.refdes().to_string())
             .collect(),
         reserved: edit.reserved().clone(),
+    };
+    let renamed = rename_occupied_references(&mut payload, &existing);
+    let minted = match resolve_pin_net_refs(&mut payload, &mut edit)? {
+        Ok(minted) => minted,
+        Err(error) => return Ok(with_renamed(with_warnings(error, &warnings), &renamed)),
     };
     sch_check::place_parts::assign_references(&mut payload, ctx.provider(), &existing);
     let mut footprints_unresolved = clear_unknown_footprints(ctx, &mut payload)?;
@@ -154,18 +160,15 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
         .collect();
     if !audit.is_valid() || diags.has_errors() {
-        return Ok(invalid_payload_response(audit, &warnings));
+        return Ok(with_renamed(
+            invalid_payload_response(audit, &warnings),
+            &renamed,
+        ));
     }
     if audit.unplaced.len() == payload.parts.len() {
-        return Ok(with_warnings(
-            json!({
-                "ok": false,
-                "code": "nothing_placed",
-                "unplaced": audit.unplaced,
-                "note": "no part in this payload could be resolved, so the sheet is unchanged. \
-                         Each entry names what is wrong and the nearest real symbol or pin.",
-            }),
-            &warnings,
+        return Ok(with_renamed(
+            nothing_placed_response(json!(audit.unplaced), &warnings),
+            &renamed,
         ));
     }
     let derived: Vec<String> = payload
@@ -177,17 +180,23 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .filter_map(|net| crate::refs::derived_name_refusal(edit.before(), net))
         .collect();
     if !derived.is_empty() {
-        return Ok(json!({ "ok": false, "code": "derived_net_name", "nets": derived }));
+        return Ok(with_renamed(
+            json!({ "ok": false, "code": "derived_net_name", "nets": derived }),
+            &renamed,
+        ));
     }
     let requested = match payload.engine.as_deref().map(engine_named) {
         Some(Some(kind)) => Some(kind),
         Some(None) => {
-            return Ok(json!({
-                "error": format!(
-                    "unknown engine `{}`; use \"anneal\", \"spine\" or \"cluster\"",
-                    payload.engine.clone().unwrap_or_default()
-                ),
-            }));
+            return Ok(with_renamed(
+                json!({
+                    "error": format!(
+                        "unknown engine `{}`; use \"anneal\", \"spine\" or \"cluster\"",
+                        payload.engine.clone().unwrap_or_default()
+                    ),
+                }),
+                &renamed,
+            ));
         }
         None => None,
     };
@@ -250,10 +259,19 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
             Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
                 timing.done("overran");
-                return Ok(budget_refusal(&error));
+                return Ok(with_renamed(budget_refusal(&error), &renamed));
             }
             Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
-                return Ok(invalid_payload_response(*audit, &warnings));
+                return Ok(with_renamed(
+                    invalid_payload_response(*audit, &warnings),
+                    &renamed,
+                ));
+            }
+            Err(sch_floorplan::live::Error::Nothing) => {
+                return Ok(with_renamed(
+                    nothing_placed_response(non_placeable_parts(&payload), &warnings),
+                    &renamed,
+                ));
             }
             Err(error) => return Err(error.into()),
         }
@@ -261,11 +279,14 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let report = match report {
         Some(report) => report,
         None => {
-            return Ok(json!({
-                "error": "no placement engine completed",
-                "engines_tried": tried,
-                "engines_skipped": skipped,
-            }));
+            return Ok(with_renamed(
+                json!({
+                    "error": "no placement engine completed",
+                    "engines_tried": tried,
+                    "engines_skipped": skipped,
+                }),
+                &renamed,
+            ));
         }
     };
     if !report.committed {
@@ -280,7 +301,8 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             &tried,
             &skipped,
             &warnings,
-        );
+        )
+        .map(|value| with_renamed(value, &renamed));
     }
     let refs = report.placed.clone();
     let mut value = edit
@@ -302,7 +324,260 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let value = with_check(value, ctx).context("checking placed parts")?;
     let value = with_unresolved_footprints(value, &footprints_unresolved);
     let value = with_unresolved_decoupling(value, &audit.decouple_unresolved);
-    Ok(with_warnings(value, &warnings))
+    Ok(with_renamed(with_warnings(value, &warnings), &renamed))
+}
+
+fn nothing_placed_response(unplaced: Value, warnings: &[String]) -> Value {
+    with_warnings(
+        json!({
+            "ok": false,
+            "code": "nothing_placed",
+            "unplaced": unplaced,
+            "note": "no part in this payload can be placed, so the sheet is unchanged. \
+                     Each entry names the part and why it was left out.",
+        }),
+        warnings,
+    )
+}
+
+fn non_placeable_parts(payload: &sch_check::PlacePartsInput) -> Value {
+    Value::Array(
+        payload
+            .parts
+            .iter()
+            .map(|part| {
+                json!({
+                    "ref": part.refdes.clone().unwrap_or_else(|| part.part.clone()),
+                    "part": part.part,
+                    "reason": if part.part.starts_with("power:") || part.part.starts_with("label:") {
+                        "connectivity furniture is generated by wiring and cannot be placed as a part"
+                    } else {
+                        "no placeable symbol geometry was produced"
+                    },
+                })
+            })
+            .collect(),
+    )
+}
+
+fn with_renamed(mut value: Value, renamed: &BTreeMap<String, String>) -> Value {
+    if !renamed.is_empty() {
+        value["renamed"] = json!(renamed);
+    }
+    value
+}
+
+/// Collapse repeated declarations of one part, rejecting only declarations that
+/// make the reference ambiguous or assign one field two different values.
+fn coalesce_payload_parts(payload: &mut sch_check::PlacePartsInput) -> Option<Value> {
+    let mut parts: Vec<PartSpec> = Vec::new();
+    let mut by_ref = BTreeMap::new();
+    for part in std::mem::take(&mut payload.parts) {
+        let Some(refdes) = part.refdes.clone() else {
+            parts.push(part);
+            continue;
+        };
+        let Some(&index) = by_ref.get(&refdes) else {
+            by_ref.insert(refdes, parts.len());
+            parts.push(part);
+            continue;
+        };
+        let held_part = parts[index].part.clone();
+        if held_part != part.part {
+            let incoming_part = part.part.clone();
+            payload.parts = parts;
+            return Some(duplicate_part_refusal(
+                &refdes,
+                &held_part,
+                &incoming_part,
+                "names two different parts",
+            ));
+        }
+        let held = &mut parts[index];
+        if let Err(field) = merge_part(held, part) {
+            let lib_id = held.part.clone();
+            payload.parts = parts;
+            return Some(duplicate_part_refusal(
+                &refdes,
+                &lib_id,
+                &lib_id,
+                &format!("assigns conflicting `{field}` values"),
+            ));
+        }
+    }
+    payload.parts = parts;
+    None
+}
+
+fn merge_part(held: &mut PartSpec, incoming: PartSpec) -> std::result::Result<(), String> {
+    merge_option(&mut held.block, incoming.block, "block")?;
+    merge_option(&mut held.value, incoming.value, "value")?;
+    merge_option(&mut held.footprint, incoming.footprint, "footprint")?;
+    held.dnp |= incoming.dnp;
+    merge_map(&mut held.props, incoming.props, "props")?;
+    merge_map(&mut held.pins, incoming.pins, "pins")?;
+    merge_map(&mut held.decouple, incoming.decouple, "decouple")?;
+    Ok(())
+}
+
+fn merge_option<T: PartialEq>(
+    held: &mut Option<T>,
+    incoming: Option<T>,
+    field: &str,
+) -> std::result::Result<(), String> {
+    match (held.as_ref(), incoming) {
+        (Some(a), Some(b)) if *a != b => Err(field.to_string()),
+        (None, Some(value)) => {
+            *held = Some(value);
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn merge_map<V>(
+    held: &mut indexmap::IndexMap<String, V>,
+    incoming: indexmap::IndexMap<String, V>,
+    field: &str,
+) -> std::result::Result<(), String>
+where
+    V: PartialEq,
+{
+    for (key, value) in incoming {
+        match held.get(&key) {
+            Some(held_value) if *held_value != value => return Err(field.to_string()),
+            Some(_) => {}
+            None => {
+                held.insert(key, value);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn duplicate_part_refusal(refdes: &str, first: &str, second: &str, why: &str) -> Value {
+    json!({
+        "ok": false,
+        "code": "invalid_payload",
+        "input_errors": [format!(
+            "duplicate-ref: `{refdes}` {why} (`{first}` and `{second}`); give each physical part a distinct reference"
+        )],
+        "duplicate_refs": [],
+        "unknown_pins": [],
+        "footprint_mismatch": [],
+        "unplaced": [],
+        "dangling": [],
+        "did_you_mean": {},
+        "unreliable_nets": [],
+    })
+}
+
+/// Rename references already present on the sheet, then rewrite every reference
+/// carried by electrical or layout intent.
+fn rename_occupied_references(
+    payload: &mut sch_check::PlacePartsInput,
+    existing: &sch_check::ExistingSheet,
+) -> BTreeMap<String, String> {
+    let mut occupied: BTreeSet<String> = existing
+        .refs
+        .union(&existing.reserved)
+        .cloned()
+        .chain(payload.parts.iter().filter_map(|part| part.refdes.clone()))
+        .collect();
+    let mut renamed = BTreeMap::new();
+    for part in &mut payload.parts {
+        let Some(refdes) = part
+            .refdes
+            .as_ref()
+            .filter(|refdes| existing.refs.contains(*refdes))
+            .cloned()
+        else {
+            continue;
+        };
+        let prefix = refdes.trim_end_matches(|ch: char| ch.is_ascii_digit());
+        let next = (1..)
+            .map(|number| format!("{prefix}{number}"))
+            .find(|candidate| !occupied.contains(candidate))
+            .expect("the reference-number suffix space is unbounded");
+        occupied.insert(next.clone());
+        part.refdes = Some(next.clone());
+        renamed.insert(refdes, next);
+    }
+    rewrite_payload_references(payload, &renamed);
+    renamed
+}
+
+fn rewrite_payload_references(
+    payload: &mut sch_check::PlacePartsInput,
+    renamed: &BTreeMap<String, String>,
+) {
+    for part in &mut payload.parts {
+        for net in part.pins.values_mut() {
+            for (old, new) in renamed {
+                if let Some(pin) = net.strip_prefix(&format!("@{old}.")) {
+                    *net = format!("@{new}.{pin}");
+                    break;
+                }
+            }
+        }
+    }
+    for grid in payload.layout.values_mut() {
+        for refdes in grid.iter_mut().flatten().flatten() {
+            rewrite_ref(refdes, renamed);
+        }
+    }
+    let Some(intent) = &mut payload.intent else {
+        return;
+    };
+    intent.place = std::mem::take(&mut intent.place)
+        .into_iter()
+        .map(|(refdes, cell)| (renamed.get(&refdes).cloned().unwrap_or(refdes), cell))
+        .collect();
+    intent.mirror = std::mem::take(&mut intent.mirror)
+        .into_iter()
+        .map(|refdes| renamed.get(&refdes).cloned().unwrap_or(refdes))
+        .collect();
+    for relation in &mut intent.relations {
+        use sch_model::ir::{GroupSide, Relation};
+        match relation {
+            Relation::LeftOf { a, b }
+            | Relation::RightOf { a, b }
+            | Relation::Above { a, b }
+            | Relation::Below { a, b } => {
+                rewrite_ref(a, renamed);
+                rewrite_ref(b, renamed);
+            }
+            Relation::Group {
+                members,
+                side,
+                anchor,
+                ..
+            } => {
+                for member in members {
+                    rewrite_ref(member, renamed);
+                }
+                if let Some(anchor) = anchor {
+                    rewrite_ref(anchor, renamed);
+                }
+                match side {
+                    Some(GroupSide::Anchored(_, anchor))
+                    | Some(GroupSide::Named { anchor, .. }) => rewrite_ref(anchor, renamed),
+                    Some(GroupSide::Edge(_)) | None => {}
+                }
+            }
+            Relation::Align { members, .. } => {
+                for member in members {
+                    rewrite_ref(member, renamed);
+                }
+            }
+        }
+    }
+}
+
+fn rewrite_ref(refdes: &mut String, renamed: &BTreeMap<String, String>) {
+    if let Some(replacement) = renamed.get(refdes) {
+        *refdes = replacement.clone();
+    }
 }
 
 fn clear_unknown_footprints(
@@ -400,7 +675,8 @@ fn invalid_payload_response(audit: sch_check::PayloadAudit, warnings: &[String])
             "note": "this lists EVERY fault in the payload — fix them all before retrying. \
                      `place_parts` appends to the sheet, so resubmit only the parts named \
                      here, not the whole payload. `input_errors` are unresolvable lib_ids \
-                     and pin conflicts; `duplicate_refs` give the next free refdes; \
+                     and pin conflicts; occupied references are repaired in `renamed`, while \
+                     `duplicate_refs` identify one ref used for incompatible declarations; \
                      `unknown_pins` name a key the symbol does not have; `footprint_mismatch` \
                      includes the closest same-library pad-set repair. `unplaced` parts could \
                      not be resolved at all and were left out. `dangling` pins are NOT fatal \
@@ -723,6 +999,10 @@ fn resolve_pin_net_refs(
     let mut minted = Vec::new();
     let mut resolved = std::collections::BTreeMap::new();
     for spec in specs {
+        if let Some(net) = payload_pin_net(payload, &spec) {
+            resolved.insert(spec, net);
+            continue;
+        }
         match crate::refs::net_of_pin(&edit.doc, edit.before(), &spec) {
             Ok(found) => {
                 if let crate::refs::PinNet::Mint {
@@ -762,6 +1042,20 @@ fn resolve_pin_net_refs(
     Ok(Ok(minted))
 }
 
+/// Resolve an `@ref.pin` that points at another part in the same payload.
+fn payload_pin_net(payload: &sch_check::PlacePartsInput, spec: &str) -> Option<String> {
+    let (refdes, pin) = spec
+        .strip_prefix(crate::refs::NET_OF_PIN)?
+        .rsplit_once('.')?;
+    let net = payload
+        .parts
+        .iter()
+        .find(|part| part.refdes.as_deref() == Some(refdes))?
+        .pins
+        .get(pin)?;
+    (!net.starts_with(crate::refs::NET_OF_PIN)).then(|| net.clone())
+}
+
 /// The engine a payload named, if it named a real one.
 fn engine_named(name: &str) -> Option<PlacementEngineKind> {
     match name {
@@ -790,11 +1084,14 @@ pub(crate) fn add_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut input = input;
     let warnings = sanitize_place_parts_input(&mut input);
     let mut payload: sch_check::PlacePartsInput = typed(input, "add_parts")?;
-    let edit = if ctx.sch_path().is_file() {
+    let mut edit = if ctx.sch_path().is_file() {
         Edit::open(ctx).context("opening the existing schematic")?
     } else {
         Edit::create(ctx, sch_floorplan::live::blank_sheet()?)
     };
+    if let Some(error) = coalesce_payload_parts(&mut payload) {
+        return Ok(with_warnings(error, &warnings));
+    }
     let existing = sch_check::ExistingSheet {
         refs: edit
             .doc
@@ -804,6 +1101,11 @@ pub(crate) fn add_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         reserved: edit.reserved().clone(),
         ..Default::default()
     };
+    let renamed = rename_occupied_references(&mut payload, &existing);
+    match resolve_pin_net_refs(&mut payload, &mut edit)? {
+        Ok(_) => {}
+        Err(error) => return Ok(with_renamed(with_warnings(error, &warnings), &renamed)),
+    }
     sch_check::place_parts::assign_references(&mut payload, ctx.provider(), &existing);
     bench_payload(
         ctx,
@@ -814,6 +1116,7 @@ pub(crate) fn add_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         &[],
         &warnings,
     )
+    .map(|value| with_renamed(value, &renamed))
 }
 
 /// Write a payload's connectivity to the bench and commit it.
