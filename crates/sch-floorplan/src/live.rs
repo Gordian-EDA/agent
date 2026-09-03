@@ -1059,7 +1059,12 @@ fn coord(p: Point2) -> (i64, i64) {
 /// joins instead takes the whole run, and stopping at a foreign pin is what keeps it
 /// from swallowing the sheet through a shared ground.
 fn selection_drawing(doc: &SchDoc, owned: &[Rect], held: &[Item]) -> BTreeSet<String> {
-    let mut stop: BTreeSet<(i64, i64)> = held
+    // Only a HELD part's own pin stops the flood. Stopping at the rail symbols
+    // outside the selection as well was tried, to stop a re-wire taking a held pin
+    // off `GND`: it leaves the selection's own rails standing where they were and
+    // KiCAD reports `pin_not_connected` on the sheet that comes back. A rail is
+    // drawing, and the redraw owns all of it.
+    let stop: BTreeSet<(i64, i64)> = held
         .iter()
         .flat_map(|it| {
             it.geom.pins.iter().filter(|p| p.unit == it.unit).map(|p| {
@@ -1067,18 +1072,6 @@ fn selection_drawing(doc: &SchDoc, owned: &[Rect], held: &[Item]) -> BTreeSet<St
             })
         })
         .collect();
-    // A rail symbol standing on a HELD part's pin is that part's drawing, not the
-    // selection's: erasing it takes the held pin off its rail, which is a net the
-    // re-layout never meant to touch. One serving a moved part sits inside the
-    // selection's own area and is redrawn with it.
-    stop.extend(
-        sch_doc::placed_pins(doc)
-            .into_iter()
-            .filter(|pin| pin.power_symbol)
-            .map(|pin| pin.at)
-            .filter(|at| !owned.iter().any(|area| area.contains(*at)))
-            .map(coord),
-    );
 
     let items: Vec<(String, Vec<Point2>)> = doc
         .items()
