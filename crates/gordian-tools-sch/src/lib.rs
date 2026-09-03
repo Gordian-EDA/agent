@@ -22,6 +22,8 @@ mod check;
 mod edit;
 mod place;
 mod query;
+pub mod render;
+pub mod review;
 mod refs;
 mod session;
 mod wiring;
@@ -69,6 +71,7 @@ fn tool_names() -> Vec<&'static str> {
         "get_net",
         "check_schematic",
         "search_footprints",
+        "render_schematic",
     ];
     names.extend(MUTATORS);
     names
@@ -154,6 +157,25 @@ pub fn tool_defs() -> Vec<Tool> {
                     "detail": {
                         "type": "boolean",
                         "description": "Return every finding instead of the compact forty-finding view."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        (
+            "render_schematic",
+            "Render the schematic to a PNG with mm axes to check the visual result; use it whenever you want to see what an edit did. Not a substitute for `check_schematic`.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        (
+            "review_schematic",
+            "An independent visual critic scores the rendered sheet 0-10 against a human-drawn reference sheet rated 9 (as good as it = 9, clearly better = 10) and returns the defects that cost it, each with `at_mm` sheet coordinates, the `refs` involved and a concrete `fix`. Call it once `check_schematic` is clean; below 9, re-lay-out the blocks the defects name and review again.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "anchor": {
+                        "type": "string",
+                        "description": "Path to a different reference PNG to calibrate against."
                     }
                 },
                 "additionalProperties": false
@@ -493,6 +515,7 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "get_net" => query::get_net(input, ctx),
         "search_footprints" => query::search_footprints(input, ctx),
         "check_schematic" => check::check_schematic(input, ctx),
+        "render_schematic" => render::render_schematic(ctx),
         "add_symbols" => edit::add_symbols(input, ctx),
         "remove_symbols" => edit::remove_symbols(input, ctx),
         "remove_region" => edit::remove_region(input, ctx),

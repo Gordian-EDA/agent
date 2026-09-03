@@ -432,6 +432,7 @@ fn is_schematic_phase_tool(name: &str) -> bool {
                 | "get_symbol_info"
                 | "project_info"
                 | "render_schematic"
+                | "review_schematic"
                 | "search_footprints"
                 | "get_footprint_info"
                 | "assign_footprints"
@@ -523,7 +524,10 @@ fn discovery_call_key(call: &ToolCall) -> Option<(String, String)> {
 }
 
 fn is_state_scoped_read(name: &str) -> bool {
-    matches!(name, "project_info" | "read_schematic" | "render_schematic")
+    matches!(
+        name,
+        "project_info" | "read_schematic" | "render_schematic" | "review_schematic"
+    )
 }
 
 /// Best-effort emit: a closed receiver (UI gone) is ignored.
@@ -1252,13 +1256,42 @@ impl<P: Provider> Agent<P> {
     }
 
     async fn run_tool_call(&self, call: &ToolCall) -> (String, Vec<Binary>, Option<String>, bool) {
-        let outcome = run_kicad_tool(&self.runtime, &self.settling, call).await;
+        let outcome = if call.fn_name == "review_schematic" {
+            self.review_schematic(&call.fn_arguments).await
+        } else {
+            run_kicad_tool(&self.runtime, &self.settling, call).await
+        };
         (
             tool_result_text(&outcome.value),
             outcome.images,
             outcome.image_path,
             true,
         )
+    }
+}
+
+/// Serve `review_schematic`: render the sheet on the blocking pool, then grade it
+/// with a FRESH, history-free vision call. The synchronous tool registry cannot
+/// do this — the critic is the model itself.
+impl<P: Provider> Agent<P> {
+    async fn review_schematic(&self, input: &Value) -> ToolOutcome {
+        if !self.client.vision() {
+            return into_outcome(Ok(json!({
+                "error": "this model has no vision input; review_schematic needs to see the render",
+            })));
+        }
+        let ctx = Arc::clone(&self.runtime);
+        let input = input.clone();
+        let prepared =
+            tokio::task::spawn_blocking(move || gordian_tools_sch::review::prepare(&input, &ctx))
+                .await;
+        let subject = match prepared {
+            Err(e) => return into_outcome(Err(anyhow::anyhow!("review render task failed: {e}"))),
+            Ok(Err(e)) => return into_outcome(Err(e)),
+            Ok(Ok(Err(refusal))) => return into_outcome(Ok(refusal)),
+            Ok(Ok(Ok(subject))) => subject,
+        };
+        into_outcome(gordian_tools_sch::review::review(&self.client, &subject).await)
     }
 }
 
@@ -2267,6 +2300,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             .and_then(Value::as_str)
             .unwrap_or("project state")
             .to_string(),
+        "review_schematic" => gordian_tools_sch::review::summary(result),
         "render_schematic" => {
             let findings = ["body_overlaps", "text_collisions", "wires_through_bodies"]
                 .iter()

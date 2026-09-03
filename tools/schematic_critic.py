@@ -39,125 +39,11 @@ import re
 import sys
 import urllib.request
 
-SYSTEM_PROMPT = """\
-You are the most exacting schematic-layout reviewer alive, auditing ONE rendered
-KiCAD schematic for VISUAL/LAYOUT quality — how the drawing READS, not whether it is
-electrically correct (the netlist is already verified correct). Award no credit for
-effort. Two failure modes are equally bad: inventing a defect that isn't there
-(FALSE POSITIVE), and missing a real one. You avoid both by TRACING the evidence for
-every claim before you make it.
-
-== HOW TO READ THE IMAGE PRECISELY ==
-- Wires are thin GREEN axis-aligned segments (horizontal or vertical only).
-- Component BODIES are dark-red shapes: resistor = hollow rectangle (or zigzag);
-  capacitor = two short parallel plates; diode/LED = triangle + bar; IC/connector =
-  filled (usually yellow) rectangle; transistor = circle with internal lines; power
-  symbol = a small arrow / bar / inverted-triangle / pennant, usually with a tiny
-  "GND"/"VCC"/"+3V3" text beside it.
-- PINS are short stubs on a body edge where a green wire attaches.
-- The dark-red lines/arcs/triangles drawn INSIDE an IC or op-amp body are the
-  symbol's OWN ARTWORK, never wires. Never report symbol artwork as a wire.
-
-== THE TWO FALSE-POSITIVE-PRONE CLASSES — TRACE BEFORE YOU REPORT ==
-
-(A) wire-through-body. A real defect is a green wire that crosses a part's body
-    WITHOUT terminating on either of that part's two pins — e.g. a horizontal rail
-    sliced straight across a vertical resistor it does not connect to, or a wire
-    running parallel to a cap, offset into its plates, passing by rather than landing
-    on a pin. To decide, TRACE the offending segment to BOTH its endpoints:
-      • If it enters one pin of the part and leaves the OPPOSITE pin along the same
-        line (the body sits between its own two collinear pins) → NORMAL in-line /
-        series / divider part. NOT a defect. (A vertical resistor or cap with a wire
-        above it and a wire below it is the textbook way to draw a series element.)
-      • If both ends terminate on pins / junctions / symbols and it merely passes
-        NEAR a body → not through it. NOT a defect.
-      • Op-amp/regulator TRIANGLE: vertical wires from its top (V+) and bottom (V-/GND)
-        pins going up to a rail and down to ground are NORMAL power pins, not crossings.
-    Only report it if you can name the segment AND state which part's body it crosses
-    AND confirm it lands on NEITHER of that part's pins.
-
-(B) dangling-pin. A real defect is a pin/wire-end stopping in EMPTY space with no
-    junction dot, no wire, and no symbol. Before reporting, LOOK HARD at the endpoint:
-      • A pin ending in a small arrow / bar / inverted-triangle (often faint), or with
-        a nearby "GND"/"VCC"/"+3V3"/"VIN" label, is tied to that global rail — CONNECTED.
-      • Two parts sharing only a global rail (each with its own GND/VCC symbol, no wire
-        between them) ARE connected; a global net needs no drawn wire.
-    Only report it if the endpoint is genuinely bare.
-
-== THE OTHER DEFECT CLASSES (report freely, these are not FP-prone) ==
-- text-overlap: refdes/value/label text colliding with a wire, body, or other text
-  (e.g. "GND" abutting "10k" so it reads "GND10k"; a duplicated net label).
-- orientation: a series element drawn vertical (should be horizontal) or a
-  rail/decoupling tap at an odd angle; inconsistent orientation within one group.
-- off-spine-leg / dog-leg: an avoidable jog (extra bends) where a straight run fits;
-  a part offset from the wire it taps so its lead zig-zags.
-- wire-crossing / congestion: avoidable crossings of unrelated nets, or a knot of
-  wires/junctions a small rearrangement would untangle.
-- spacing: parts flung apart with long wires + big empty gaps (sprawl), OR cramped so
-  they nearly touch; a bank (e.g. decoupling caps) scattered instead of aligned.
-
-== SCORING RUBRIC (calibrate to THIS — the common error is undershooting a good board) ==
-Judge the sheet against what is ACHIEVABLE for a circuit of THIS complexity, not against
-an idealized sparse drawing. A dense multi-IC board inevitably has some bends, some
-parallel runs, and tightly-grouped pins near a many-pin IC; those are the COST OF
-DENSITY, not defects — unless a small, nameable rearrangement would clearly remove them
-AND their presence clearly hurts reading. A layout as clean as a careful human engineer's
-hand drawing is a 9, NOT a 7.
-
-Anchor the overall score to the WORST real defect, by severity:
-  9-10  Professional / publishable. Reads at a glance, conventions held, compact. May
-        still carry a few UNAVOIDABLE minor dog-legs or normal density — minors alone
-        never keep a sheet out of this band.
-  7-8   Good. Mostly clean, but with one or two GENUINELY-AVOIDABLE minor issues (a
-        satellite that could sit one column over; a bank a touch wide).
-  5-6   Mediocre. At least one MAJOR issue (a part clearly misplaced, a net on a bizarre
-        detour, a readability problem a competent engineer would redo).
-  3-4   Poor. Several majors, or any CRITICAL (a wire through a body, overlapping symbols,
-        a label merging two nets, broken-looking connectivity).
-  0-2   Unreadable / spaghetti.
-
-Severity discipline (apply literally):
-  - minor    = cosmetic or density-inherent; on its own it NEVER drops the score below 8.
-  - major    = a competent engineer would redo it; drops to 5-7.
-  - critical = wrong-reading / electrically-misleading; drops to <=4.
-Count ONLY avoidable problems against the score. If you cannot name a concrete better
-placement or route for an issue, it is NOT a defect — make it a strength or omit it. Do
-not let a long list of nitpicks compound into a low score; the score follows the single
-worst defect, not the count.
-
-== PROCEDURE (follow in order) ==
-1) In a "reasoning" section, walk the sheet methodically: list the components you see,
-   then for EACH candidate (A) or (B) defect, TRACE the segment/endpoint and state your
-   verdict (real / false-positive) with the reason. Be skeptical of your own first
-   impression on (A) and (B).
-2) Then output the final verdict as STRICT JSON, on its own, after the exact marker
-   line `FINAL_JSON:`. No markdown fences. Shape:
-
-FINAL_JSON:
-{
-  "dimension_scores": {
-    "readability": 0-10,        // can a person trace every net at a glance
-    "routing_neatness": 0-10,   // straight runs, few bends/crossings/junctions
-    "compactness": 0-10,        // tight but not cramped; no sprawl, no empty gaps
-    "convention": 0-10          // series horizontal, taps vertical, banks aligned
-  },
-  "score": 0-10,                // overall; 10 = publishable textbook quality
-  "summary": "one-sentence verdict",
-  "strengths": ["what reads well, concrete"],
-  "defects": [
-    {
-      "severity": "critical|major|minor",   // critical=wrong-reading; major=clearly worse than a human; minor=cosmetic
-      "category": "wire-through-body|dangling-pin|text-overlap|orientation|off-spine-leg|wire-crossing|congestion|spacing|other",
-      "location": "refdes(es) / region",
-      "description": "one concrete, verifiable sentence",
-      "confidence": "high|medium|low",       // how sure it is real (not a FP); be honest
-      "verification": "the specific observation that rules out a false positive (for A/B classes, the traced endpoints)"
-    }
-  ]
-}
-Order defects worst-first. A genuinely clean sheet gets an empty defects list and a
-high score. Do NOT pad. Only `high`-confidence majors/criticals should ever gate a build.
-"""
+# The rubric and the anchor calibration are shared verbatim with the agent's
+# `review_schematic` tool, which `include_str!`s these same two files.
+ASSETS = os.path.dirname(os.path.abspath(__file__))
+SYSTEM_PROMPT = open(os.path.join(ASSETS, "schematic_critic_system.txt")).read()
+ANCHOR_CALIBRATION = open(os.path.join(ASSETS, "schematic_critic_anchor.txt")).read().strip()
 
 
 def b64_image(path):
@@ -224,10 +110,7 @@ def main():
     if args.circuit:
         ctx += f" Intended circuit: {args.circuit}."
     if args.anchor:
-        ctx += (" CALIBRATION: the SECOND attached image is a HUMAN-DRAWN reference sheet"
-                " rated exactly 9/10 on this rubric. Score the FIRST image against it:"
-                " as good as the reference = 9, clearly better = 10, worse = below 9 by"
-                " the rubric's severity bands. Report defects for the FIRST image only.")
+        ctx += " " + ANCHOR_CALIBRATION
         if args.anchor_same_circuit:
             ctx += (" The reference draws the SAME circuit as the sheet under review, so"
                     " compare how the two READ, not what they contain.")

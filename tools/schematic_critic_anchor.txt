@@ -1,0 +1,1 @@
+CALIBRATION: the SECOND attached image is a HUMAN-DRAWN reference sheet rated exactly 9/10 on this rubric. Score the FIRST image against it: as good as the reference = 9, clearly better = 10, worse = below 9 by the rubric's severity bands. Report defects for the FIRST image only.

@@ -16,7 +16,7 @@ Work in small, legal blocks. Partial states are fine. After EVERY block, call `r
 
 Discover symbols once with `search_symbols({queries})`; top hits include pins, alternates, and a validated footprint. Search footprints BY SYMBOL with `search_footprints({symbol, query?})`; use only compatible hits. Never invent IDs or pins.
 
-Build these phases in order: power entry; regulator; MCU core including every supply-pin decoupler, crystal, reset, and boot straps; interfaces; connectors and indicators. Use `place_parts({parts, name?, intent?, block?, blocks?})` for only the current block, then use `connect`, `label`, `no_connect`, and `arrange({refs|block|region, intent})` for focused corrections. Include support, protection, decoupling, bias, termination, indicator resistors, and exposed-signal protection. State real symbol `Lib:Name`s, values, footprints and pin-to-net maps. Pin keys accept number, name or alternate case-insensitively (`PH0-OSC_IN` works); `"nc"` means no-connect. Rails and ports accept left, right, top or bottom. `intent.relations`: `left_of`/`right_of`/`above`/`below` ({kind,a,b}), `group` ({kind,name,members,side?,anchor?}), `align` ({kind,members,axis}). Always pass `name` (the sheet's title) and give each `block` a descriptive name; add `blocks: {<block>: {title?, note?}}` with a one-line `note` wherever a human would explain a decision the netlist cannot show — a switching frequency, a sizing choice, why a pull-up is on this side.
+Build these phases in order: power entry; regulator; MCU core including every supply-pin decoupler, crystal, reset, and boot straps; interfaces; connectors and indicators. Use `place_parts({parts, name?, intent?, block?, blocks?})` for only the current block, then use `connect`, `label`, `no_connect`, and `arrange({refs|block|region, intent})` for focused corrections. Include support, protection, decoupling, bias, termination, indicator resistors, and exposed-signal protection. State real symbol `Lib:Name`s, values, footprints and pin-to-net maps. Pin keys accept number, name or alternate case-insensitively (`PH0-OSC_IN` works); `"nc"` means no-connect. Rails and ports accept left, right, top or bottom. Always pass `name` (the sheet's title) and give each `block` a descriptive name; add `blocks: {<block>: {title?, note?}}` with a one-line `note` wherever a human would explain a decision the netlist cannot show — a switching frequency, a sizing choice, why a pull-up is on this side.
 
 `place_parts` never refuses a whole payload: unresolvable parts return as `unplaced` ({ref, reason, did_you_mean}) with their nets open, everything else is placed, and it appends, so resubmit only the parts it named. A block no engine can draw truthfully is committed to the BENCH (`benched`: wired by name, no layout); `add_parts({parts})` benches a payload directly; `arrange({refs|block})` lays them out and empties the bench. Checks report `bench: n`; `sync_board`/`export_fab` refuse while it is non-empty.
 
@@ -30,7 +30,9 @@ To replace a sub-circuit, use `remove_region` (or `remove_symbols` for parts and
 
 Create wires only with `connect` or `rewire`; never provide wire coordinates. To insert a series part, disconnect one real target pin, add the part, then connect both sides.
 
-`check_schematic` reports every finding. Fix ERC errors in what you touched; leave unrelated existing errors alone and mention them. Once `check_schematic` reports 0 ERC errors, proceed to the board in the SAME turn. Address ERC warnings and schematic appearance only after the board is routed and DRC-clean. Missing footprints remain explicit staged work.
+`check_schematic` reports every finding. Fix ERC errors in what you touched; leave unrelated existing errors alone and mention them. Once `check_schematic` reports 0 ERC errors, review the sheet, then proceed to the board in the SAME turn. Address ERC warnings only after the board is routed and DRC-clean. Missing footprints remain explicit staged work.
+
+On a clean sheet call `review_schematic()`: an independent critic scores the render against a human reference sheet (as good as it = 9) and names the defects that cost it, with coordinates and a fix each. Below 9, re-lay-out the blocks its defects name — `arrange({block, …})`, or place that block again differently — and review again; stop at 9 or when the score fails to improve twice in a row. State the final score.
 
 # PCB phased loop
 A board request continues after `check_schematic`; "schematic only" stops. ERC errors do not block `sync_board`: it reports `schematic_erc` while the PCB progresses. Geometry stays in `guard_findings`; only new shorts roll back. Choose the layer count explicitly before `sync_board`: 2, 4, 6, or 8 by density and cost. Sync preserves existing placement/copper and imports new schematic nets; `route_board` imports renamed nets itself, so a stale net table never needs a sync first. On an existing board, `sync_board({intent})` applies the schematic delta and then places staged/new parts with that intent. Omit `bounds` for a managed auto outline: placement grows/refits it around placed parts, ignoring staging. `rules.pours` takes a net string, `{net,layer?}`, or arrays; defaults are B.Cu on 2 layers and an inner plane on 4+.
@@ -47,7 +49,7 @@ Follow these phases. After EVERY phase call `render_board` and `check_board`, in
 8. Call `export_fab()` only when `check_board` is clean. Otherwise preserve and report the useful partial board.
 
 
-Never call the same failing tool twice without changing its arguments or making a concrete schematic, placement, copper, outline, or rule change first. Every mutator re-checks what it wrote; use `reserve_refs({prefix,count})` before minting references in parallel. Keep working until the request is delivered: there is no request or time budget to spend, and stopping early is only correct when the work is finished or a blocker genuinely needs the user — a question only they can answer, or an impossible request. Say which it is in your own words, with the exact tool result that blocked you."#;
+Never call the same failing tool twice without changing its arguments or making a concrete design change first. Every mutator re-checks what it wrote; use `reserve_refs({prefix,count})` before minting references in parallel. Keep working until the request is delivered: there is no request or time budget to spend, and stopping early is only correct when the work is finished or a blocker genuinely needs the user — a question only they can answer, or an impossible request. Say which it is in your own words, with the exact tool result that blocked you."#;
 
 #[cfg(test)]
 mod tests {
@@ -90,6 +92,22 @@ mod tests {
             "add_parts({parts})",
             "empties the bench",
             "bench: n",
+        ] {
+            assert!(prompt.contains(phrase), "prompt missing `{phrase}`");
+        }
+    }
+
+    /// The review loop: score the clean sheet against the human reference, revise
+    /// the blocks the defects name, and stop on 9 or on two flat rounds.
+    #[test]
+    fn prompt_teaches_the_visual_review_loop() {
+        let prompt = system_prompt();
+        for phrase in [
+            "On a clean sheet call `review_schematic()`",
+            "human reference sheet (as good as it = 9)",
+            "re-lay-out the blocks its defects name",
+            "stop at 9 or when the score fails to improve twice in a row",
+            "State the final score.",
         ] {
             assert!(prompt.contains(phrase), "prompt missing `{phrase}`");
         }
