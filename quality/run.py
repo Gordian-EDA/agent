@@ -1082,6 +1082,63 @@ def rasterize_clean_svg(svg, png, size=CLEAN_RENDER_SIZE):
         raise RuntimeError(f"SVG conversion produced no PNG: {png}")
 
 
+def kicad10_schematic_render_source(source, temporary):
+    """Give old minimal projects KiCad 10's standard schematic line defaults.
+
+    Gordian's small version-3 project files predate the netclass drawing fields.
+    KiCad 10 otherwise exports their real wire paths with ``stroke:none``. Work
+    from a linked temporary project so the design under test is never changed.
+    """
+    project = source.with_suffix(".kicad_pro")
+    if not project.is_file():
+        return source
+    try:
+        config = json.loads(project.read_text(encoding="utf-8"))
+        classes = config["net_settings"]["classes"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        return source
+    if not isinstance(classes, list) or all(
+        isinstance(netclass, dict) and "wire_width" in netclass
+        for netclass in classes
+    ):
+        return source
+
+    staged = temporary / "project"
+    staged.mkdir()
+    for item in source.parent.iterdir():
+        if item in (source, project):
+            continue
+        (staged / item.name).symlink_to(item.resolve(), target_is_directory=item.is_dir())
+    staged_source = staged / source.name
+    shutil.copy2(source, staged_source)
+    for netclass in classes:
+        if not isinstance(netclass, dict):
+            continue
+        netclass.setdefault("bus_width", 12)
+        netclass.setdefault("diff_pair_via_gap", 0.25)
+        netclass.setdefault("line_style", 0)
+        netclass.setdefault("pcb_color", "rgba(0, 0, 0, 0.000)")
+        netclass.setdefault("schematic_color", "rgba(0, 0, 0, 0.000)")
+        netclass.setdefault("wire_width", 6)
+    net_settings = config["net_settings"]
+    net_settings.setdefault("net_colors", None)
+    net_settings.setdefault("netclass_assignments", None)
+    net_settings.setdefault("netclass_patterns", [])
+    meta = net_settings.get("meta")
+    if not isinstance(meta, dict):
+        meta = {}
+        net_settings["meta"] = meta
+    try:
+        version = int(meta.get("version", 0))
+    except (TypeError, ValueError):
+        version = 0
+    meta["version"] = max(4, version)
+    (staged / project.name).write_text(
+        json.dumps(config, indent=2) + "\n", encoding="utf-8"
+    )
+    return staged_source
+
+
 def clean_render(kind, source, destination):
     """Export an unannotated KiCad 10 SVG and convert it to a judge PNG.
 
@@ -1098,10 +1155,11 @@ def clean_render(kind, source, destination):
         if kind == "schematic":
             export = temporary / "schematic"
             export.mkdir()
+            render_source = kicad10_schematic_render_source(source, temporary)
             result = command(
                 [
                     kicad_cli(), "sch", "export", "svg", "--output", str(export),
-                    "--exclude-drawing-sheet", "--no-background-color", str(source),
+                    "--exclude-drawing-sheet", "--no-background-color", str(render_source),
                 ],
                 timeout=180,
                 check=False,
