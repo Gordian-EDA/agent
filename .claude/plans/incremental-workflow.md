@@ -209,3 +209,7 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   lane/pcb-incremental-2 (plane-net partial routing, route_track guidance, move_parts nudge + lenient
   schema, sync intent on existing boards, sync never refuses on ERC, stale net table, delete_copper
   honesty), lane/discovery-coalesce, lane/sch-refusals-2.
+- Pushed: discovery-coalesce (only identical tool+args deferred), sch-refusals-2 (connect joins
+  derived nets and accepts net names as endpoints; `Net-(X-Y)` resolves through pins in
+  place_parts/connect/label; remove_symbols declares its nets; library-NC wired → nc + gap; ESP32 now
+  ERC 0 + board). Running: lane/pcb-incremental-2. Next: campaign round 5 after it merges.
