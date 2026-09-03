@@ -294,14 +294,7 @@ fn ldo_block() -> PlacePartsInput {
             {"ref": "R9", "part": "Device:R", "value": "330", "pins": {"1": "V3P3", "2": "LEDA"}},
             {"ref": "D9", "part": "Device:LED", "value": "red", "pins": {"1": "LEDA", "2": "AGND"}},
             {"ref": "C11", "part": "Device:C", "value": "100n", "pins": {"1": "V3P3", "2": "AGND"}}
-        ],
-        "intent": {
-            "relations": [
-                {"kind": "group", "name": "ldo",
-                 "members": ["U9", "C9", "C10", "R9", "D9", "C11"],
-                 "side": ["right", "R1"]}
-            ]
-        }
+        ]
     });
     serde_json::from_value(json).unwrap()
 }

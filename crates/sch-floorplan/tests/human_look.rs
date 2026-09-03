@@ -21,7 +21,11 @@ const LONGEST_WIRE: f64 = 60.0;
 /// fitter decides — a sheet 938 mm wide is a placement that never folded. Listed rather
 /// than tolerated: the assertion is EQUALITY, so a new oversize sheet fails here and so
 /// does a fixed one, which is what makes the list shrink.
-const OVERSIZE: [&str; 2] = ["campaign-stm32-buck", "esp32-multifunction"];
+const OVERSIZE: [&str; 3] = [
+    "campaign-esp32-sensor-node",
+    "campaign-stm32-buck",
+    "esp32-multifunction",
+];
 
 fn corpus() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/validation")

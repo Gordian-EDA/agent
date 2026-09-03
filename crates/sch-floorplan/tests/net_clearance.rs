@@ -3,12 +3,13 @@
 //! more than one piece (an OPEN). This is the geometry behind the `place_parts` refusals
 //! "the placed result does not match the requested connectivity (shorted A+B)" and
 //! "(scattered GND)" — checked here directly on the emitted sheet, so a regression is a
-//! failing unit test rather than a refused tool call a whole engine-run later.
+//! failing unit test rather than a refused tool call a whole typeset later.
 //!
-//! Runs over every `place-parts` fixture in the validation corpus under the SPINE engine —
-//! the one the agent places with, and the one `floorplan_netlist` (which asserts the same
-//! invariant for free on its own anneal emits) does not exercise. Between the two, both
-//! engines are covered once each. SKIPs without KiCAD.
+//! Runs over every `place-parts` fixture in the validation corpus twice: once straight
+//! through `emit_strategy` (`realised_corpus_sheets_are_truthful`, the same path
+//! `floorplan_netlist` exercises), and once through the LIVE path the agent actually
+//! places with (`live_place_parts_commits_every_corpus_fixture`, `place_parts` onto a
+//! blank sheet), which `floorplan_netlist` does not cover. SKIPs without KiCAD.
 
 use std::path::Path;
 
@@ -90,8 +91,8 @@ fn realised_corpus_sheets_are_truthful() {
 }
 
 /// The same corpus through the LIVE path the agent calls — `place_parts` onto a blank
-/// sheet under the spine engine — asserting the gate it is refused by. A refusal here is
-/// the `place_parts` failure a campaign pays a whole retry for, reproduced without one.
+/// sheet — asserting the gate it is refused by. A refusal here is the `place_parts`
+/// failure a campaign pays a whole retry for, reproduced without one.
 #[test]
 fn live_place_parts_commits_every_corpus_fixture() {
     if !corpus().is_dir() {

@@ -243,8 +243,8 @@ fn validate_fixture(
 
         // Readability invariant (tier-1 only): the reference fixtures emit with ZERO
         // layout warnings (no symbol/text overlap, no value-text smeared onto a
-        // neighbour, no wire through a body). This guards the IC-MPN placement, spine
-        // collinearity, and IC-body-crossing work — any of which regressing would
+        // neighbour, no wire through a body). This guards the IC-MPN placement, pin
+        // alignment, and IC-body-crossing work — any of which regressing would
         // re-introduce a warning here long before a human re-renders. The hard
         // challenge fixtures are exempt (a 100-pin part lays out rough on purpose).
         if strict_warnings {
