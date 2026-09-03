@@ -1,11 +1,7 @@
-//! Deterministic placement snapshots — the regression gate that replaces
-//! "byte-identical to the historical hand-tuned references" once the placement
-//! search produces re-baselined geometry (the emit-flow refactor). Renders the
-//! aesthetic targets through the PRODUCTION path (sidecar IR if hand-tuned, else
-//! connectivity-inferred IR inside [`SchematicPlaceProblem`]).
-//! Correctness of the hard challenge fixtures is covered by the geometry-invariant
-//! truthfulness oracle (`floorplan_netlist.rs`); this gate guards the *aesthetic*
-//! placement the oracle can't see.
+//! Deterministic placement snapshots — the regression gate that catches an
+//! aesthetic change the truthfulness oracle (`floorplan_netlist.rs`) can't see.
+//! Renders the aesthetic targets through the PRODUCTION path (sidecar IR if
+//! hand-tuned, else connectivity-inferred IR, typeset by `sch_flex::typeset`).
 
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
