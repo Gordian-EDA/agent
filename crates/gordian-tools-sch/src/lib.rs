@@ -158,7 +158,10 @@ pub fn tool_defs() -> Vec<Tool> {
             "Place one or many parts at collision-free grid positions and report each final spot \
              plus extractor-verified `connectivity` and `unconnected` pins. \
              `near`+`side` puts a series part by its upstream part and faces it; keep the reported \
-             spot. `rot` overrides; `ref` is optional. All-or-nothing; wire with `connect`.",
+             spot. `rot` overrides; `ref` is optional. A footprint is metadata: a unique \
+             same-library pad-compatible repair is applied and reported as `footprint_resolved`; \
+             otherwise the part is added without it and `footprints_unresolved` plus a completeness \
+             gap names the follow-up. All-or-nothing for connectivity; wire with `connect`.",
             json!({
                 "type": "object",
                 "properties": {
@@ -310,7 +313,10 @@ pub fn tool_defs() -> Vec<Tool> {
              counterpart, and the new symbol's unassigned pins with number, name, and type. For a \
              value/footprint change alone, or when no real match exists anywhere, use set_fields \
              instead — a same-named part in an unrelated library is not proven pin-compatible. \
-             Success reports extractor-verified `connectivity` and `unconnected` pins.",
+             A supplied or inherited footprint is metadata: a unique same-library pad-compatible \
+             repair is applied and reported as `footprint_resolved`; otherwise it is cleared and \
+             `footprints_unresolved` plus a completeness gap names the follow-up. Success reports \
+             extractor-verified `connectivity` and `unconnected` pins.",
             json!({
                 "type": "object",
                 "properties": {

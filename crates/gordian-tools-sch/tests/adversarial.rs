@@ -3,6 +3,8 @@
 //!
 //! Skips when no KiCAD is installed: the mutators embed library definitions.
 
+use std::path::Path;
+
 use gordian_runtime::AgentRuntime;
 use sch_doc::{LabelKind, Pose};
 use serde_json::{Value, json};
@@ -537,7 +539,7 @@ fn footprint_assignment_uses_embedded_pins_for_project_local_symbols() {
 }
 
 #[test]
-fn add_symbols_cannot_bypass_footprint_compatibility() {
+fn add_symbols_repairs_an_incompatible_footprint_without_dropping_the_part() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCad detected");
         return;
@@ -552,10 +554,50 @@ fn add_symbols_cannot_bypass_footprint_compatibility() {
         }]}),
     );
 
-    assert_eq!(result["code"], "invalid_payload");
-    assert_eq!(result["footprint_mismatch"][0]["ref"], "J1");
-    assert!(result["footprint_mismatch"][0]["suggestion"].is_string());
-    assert!(!listing(&ctx).contains("J1"), "refusal wrote the symbol");
+    assert!(result.get("error").is_none(), "addition failed: {result}");
+    assert_eq!(
+        result["footprint_resolved"]["from"],
+        "Connector_BarrelJack:BarrelJack_Horizontal"
+    );
+    let repaired = result["footprint_resolved"]["to"]
+        .as_str()
+        .expect("the repair must name its replacement");
+    assert!(repaired.starts_with("Connector_BarrelJack:"), "{result}");
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let symbol = doc
+        .symbols()
+        .find(|symbol| symbol.refdes() == "J1")
+        .expect("the part must be written");
+    assert_eq!(symbol.fields["Footprint"].value, repaired);
+}
+
+#[test]
+fn add_symbols_clears_an_unresolved_footprint_and_reports_a_gap() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let requested = "No_Such_Footprint_Library:No_Such_Footprint";
+    let result = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{
+            "lib_id": "Device:R",
+            "ref": "R1",
+            "footprint": requested
+        }]}),
+    );
+
+    assert!(result.get("error").is_none(), "addition failed: {result}");
+    assert_eq!(result["footprints_unresolved"][0]["ref"], "R1");
+    assert_eq!(result["footprints_unresolved"][0]["requested"], requested);
+    assert_eq!(result["gaps"][0]["kind"], "footprint_unresolved");
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let symbol = doc
+        .symbols()
+        .find(|symbol| symbol.refdes() == "R1")
+        .expect("the part must be written");
+    assert_eq!(symbol.fields["Footprint"].value, "");
 }
 
 #[test]
@@ -781,6 +823,127 @@ fn swap_symbol_drops_an_unwired_pin_and_marks_what_it_gains() {
         warnings.contains("marked no-connect"),
         "gained pins must be no-connected, not left for ERC: {warnings}"
     );
+}
+
+#[test]
+fn two_pin_connector_swap_repairs_its_footprint_and_preserves_erc_errors() {
+    let input = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../quality/cases/sch-replace-connector/input");
+    let Some(ctx) = AgentRuntime::detect_for_test().filter(|_| input.is_dir()) else {
+        eprintln!("SKIP: KiCad 10 or the connector fixture is unavailable");
+        return;
+    };
+    std::fs::copy(input.join("design.kicad_sch"), ctx.sch_path()).unwrap();
+    std::fs::copy(
+        input.join("design.kicad_pro"),
+        ctx.sch_path().with_extension("kicad_pro"),
+    )
+    .unwrap();
+    let baseline = ctx.env().erc(ctx.sch_path()).expect("baseline KiCad ERC");
+    let before = sch_doc::connect::extract(&sch_doc::SchDoc::read(ctx.sch_path()).unwrap());
+    let pin_net = |netlist: &sch_doc::Netlist, pin: &str| {
+        netlist
+            .nets
+            .iter()
+            .find(|net| {
+                net.pins
+                    .iter()
+                    .any(|candidate| candidate.refdes == "P1" && candidate.pin == pin)
+            })
+            .map(|net| net.name.clone())
+    };
+    let old_nets = [pin_net(&before, "1"), pin_net(&before, "2")];
+
+    let result = call(
+        &ctx,
+        "swap_symbol",
+        json!({
+            "ref": "P1",
+            "lib_id": "Connector:Conn_01x03_Pin",
+            "pin_map": {"1": "1", "2": "2"},
+            "value": "IN"
+        }),
+    );
+
+    assert!(result.get("error").is_none(), "swap failed: {result}");
+    let repaired = result["footprint_resolved"]["to"]
+        .as_str()
+        .expect("the inherited two-pad footprint must be repaired");
+    assert_eq!(
+        result["footprint_resolved"]["from"],
+        "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+    );
+    assert!(
+        repaired.starts_with("Connector_PinHeader_2.54mm:PinHeader_1x03_"),
+        "repair escaped the inherited footprint family: {result}"
+    );
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let symbol = doc
+        .symbols()
+        .find(|symbol| symbol.refdes() == "P1")
+        .expect("P1 must remain on the sheet");
+    assert_eq!(symbol.lib_id, "Connector:Conn_01x03_Pin");
+    assert_eq!(symbol.fields["Footprint"].value, repaired);
+    let after = sch_doc::connect::extract(&doc);
+    assert_eq!(old_nets, [pin_net(&after, "1"), pin_net(&after, "2")]);
+    let erc = ctx.env().erc(ctx.sch_path()).expect("KiCad ERC after swap");
+    assert_eq!(erc.error_count(), baseline.error_count(), "{erc:?}");
+}
+
+#[test]
+fn swap_symbol_clears_an_unresolved_explicit_footprint_and_reports_a_gap() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "Device:R", "ref": "R1"}]}),
+    );
+    assert!(placed.get("error").is_none(), "fixture failed: {placed}");
+    let requested = "No_Such_Footprint_Library:No_Such_Footprint";
+
+    let result = call(
+        &ctx,
+        "swap_symbol",
+        json!({
+            "ref": "R1",
+            "lib_id": "Device:R_US",
+            "footprint": requested
+        }),
+    );
+
+    assert!(result.get("error").is_none(), "swap failed: {result}");
+    assert_eq!(result["footprints_unresolved"][0]["ref"], "R1");
+    assert_eq!(result["footprints_unresolved"][0]["requested"], requested);
+    assert_eq!(result["gaps"][0]["kind"], "footprint_unresolved");
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let symbol = doc
+        .symbols()
+        .find(|symbol| symbol.refdes() == "R1")
+        .expect("R1 must remain on the sheet");
+    assert_eq!(symbol.lib_id, "Device:R_US");
+    assert_eq!(symbol.fields["Footprint"].value, "");
+}
+
+#[test]
+fn edit_tool_contracts_advertise_nonblocking_footprints() {
+    for name in ["add_symbols", "swap_symbol"] {
+        let definition = gordian_tools_sch::tool_defs()
+            .into_iter()
+            .find(|tool| tool.name.as_str() == name)
+            .unwrap();
+        let description = definition.description.unwrap();
+        for phrase in [
+            "footprint is metadata",
+            "footprint_resolved",
+            "footprints_unresolved",
+            "completeness gap",
+        ] {
+            assert!(description.contains(phrase), "{name} omits `{phrase}`");
+        }
+    }
 }
 
 /// A pin that carries a net still blocks the swap: dropping it would delete a
