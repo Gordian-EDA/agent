@@ -249,7 +249,12 @@ fn arranging_keeps_each_nets_scope() {
 
     let selection = live::Selection::Refs(vec!["U1".into(), "J3".into(), "R1".into(), "C1".into()]);
     let report =
-        live::arrange(&env, &mut doc, &selection, Box::new(engine()), None).expect("arrange");
+        live::arrange(
+        &env,
+        &mut doc,
+        &selection,
+        None,
+        Box::new(engine()), None).expect("arrange");
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
     doc.write(&path).unwrap();
 

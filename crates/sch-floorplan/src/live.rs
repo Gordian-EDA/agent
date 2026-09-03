@@ -40,7 +40,7 @@ use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::SymbolGeometry;
 use sch_check::model::{Block, Component, Design, PinTarget};
 use sch_check::{ExistingSheet, PayloadAudit, PlacePartsInput};
-use sch_doc::{Netlist, SchDoc, connect};
+use sch_doc::{Netlist, Pose, SchDoc, connect};
 use sch_model::ir::LayoutIr;
 use sch_model::item::{Incidence, Item};
 use sch_model::place::{Deadline, PlaceOptions, PlacementEngineKind};
@@ -273,6 +273,10 @@ pub struct PlaceReport {
     pub warnings: Vec<String>,
     /// Circuit idioms the engine recognized and co-placed.
     pub idioms: Vec<IdiomReport>,
+    /// Parts nothing could resolve. They are not on the sheet; every other part
+    /// is, and a net that only touched one of these is simply open.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unplaced: Vec<sch_check::place_parts::Unplaced>,
     /// Pins whose net carries no second pin — placed, but unfinished.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dangling: Vec<sch_check::place_parts::DanglingPin>,
@@ -289,6 +293,9 @@ pub struct PlaceReport {
 pub struct ArrangeReport {
     /// Reference designators the operation covered, in refdes order.
     pub moved: Vec<String>,
+    /// Symbols this call took off the bench, now laid out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_bench: Vec<String>,
     /// Wires, junctions, labels and markers removed and redrawn.
     pub redrawn: usize,
     pub warnings: Vec<String>,
@@ -301,10 +308,13 @@ pub struct ArrangeReport {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Selection {
-    /// By reference designator.
+    /// By reference designator. The only form that reaches the bench: a benched
+    /// symbol has no meaningful position and no block until it is arranged out.
     Refs(Vec<String>),
     /// Every symbol whose origin falls inside `[x1, y1, x2, y2]` millimetres.
     Bbox([f64; 4]),
+    /// Every symbol tagged with this functional block, bench included.
+    Block(String),
 }
 
 impl Selection {
@@ -314,10 +324,20 @@ impl Selection {
             Selection::Bbox([x1, y1, x2, y2]) => {
                 let box_ = Rect::new(x1.min(*x2), y1.min(*y2), x1.max(*x2), y1.max(*y2));
                 doc.symbols()
+                    .filter(|s| !crate::bench::is_benched(s))
                     .filter(|s| box_.contains(Point2::new(s.at.x, s.at.y)))
                     .map(|s| s.refdes().to_string())
                     .collect()
             }
+            Selection::Block(name) => doc
+                .symbols()
+                .filter(|s| {
+                    s.fields
+                        .get(sch_model::result::AP_BLOCK)
+                        .is_some_and(|field| field.value == *name)
+                })
+                .map(|s| s.refdes().to_string())
+                .collect(),
         }
     }
 }
@@ -507,11 +527,142 @@ fn place_parts_inner(
         nets: inc.keys().cloned().collect(),
         warnings,
         idioms: out.ir.idioms,
+        unplaced: audit.unplaced,
         dangling: audit.dangling,
         did_you_mean: audit.did_you_mean.into_iter().collect(),
         mismatch,
         committed,
     })
+}
+
+/// What [`add_parts`] did.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AddReport {
+    /// Symbols now on the bench, in refdes order.
+    pub benched: Vec<crate::bench::Benched>,
+    /// Nets the benched symbols connect to, in name order.
+    pub nets: Vec<String>,
+    /// Pins the bench could not name — their net has only KiCAD's derived name,
+    /// which is not a name a label may carry.
+    pub unnamed_pins: Vec<String>,
+    /// Parts nothing could resolve, so not even the bench can hold them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unplaced: Vec<sch_check::place_parts::Unplaced>,
+    /// Pins whose net carries no second pin — added, but unfinished.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dangling: Vec<sch_check::place_parts::DanglingPin>,
+    /// Dangling net → the existing net whose name it most resembles.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub did_you_mean: BTreeMap<String, String>,
+    /// Empty when the edit stands; otherwise the document was restored.
+    pub mismatch: Mismatch,
+    pub committed: bool,
+}
+
+/// Add `input`'s parts to the sheet's BENCH: on the sheet and on their nets, named
+/// at every pin, with no layout and no wire drawn.
+///
+/// This is the half of [`place_parts`] that cannot fail for want of a good drawing.
+/// `only` narrows it to those references — how a placement that could not be drawn
+/// truthfully keeps its connectivity anyway — and `why` is what the report says
+/// about each benched symbol.
+///
+/// Unlike a placement this is not searched, so it takes no budget: seating a symbol
+/// in the next free bench cell and hanging a label on each pin is linear work.
+pub fn add_parts(
+    env: &KicadInstallation,
+    doc: &mut SchDoc,
+    input: &PlacePartsInput,
+    only: Option<&BTreeSet<String>>,
+    why: &str,
+) -> Result<AddReport> {
+    let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
+    let before = connect::extract(doc);
+    let existing = ExistingSheet {
+        net_pins: before
+            .nets
+            .iter()
+            .map(|net| (net.name.clone(), net.pins.len()))
+            .collect(),
+        refs: doc
+            .symbols()
+            .map(|symbol| symbol.refdes().to_string())
+            .collect(),
+        reserved: BTreeSet::new(),
+    };
+    let (design, diags, mut audit) = sch_check::into_design(input, &provider, &existing);
+    if !audit.is_valid() || diags.has_errors() {
+        audit.input_errors = diags
+            .0
+            .iter()
+            .filter(|d| d.severity == sch_check::Severity::Error)
+            .map(|d| format!("{}: {}", d.code, d.message))
+            .collect();
+        return Err(Error::InvalidPayload(Box::new(audit)));
+    }
+    let snapshot = doc.snapshot();
+    let source = sch_doc::SymbolSource::new(env.symbol_dir().to_path_buf());
+    let mut report = AddReport::default();
+    let mut nets = BTreeSet::new();
+    for (block, parts) in bench_parts(&design, only, why) {
+        let benched = crate::bench::bench(doc, &source, &block, &parts)?;
+        report.benched.extend(benched.benched);
+        report.unnamed_pins.extend(benched.unnamed_pins);
+        nets.extend(parts.iter().flat_map(|part| part.pins.values().cloned()));
+    }
+    if report.benched.is_empty() {
+        doc.restore(snapshot)?;
+        return Err(Error::Nothing);
+    }
+    report.benched.sort_by(|a, b| a.refdes.cmp(&b.refdes));
+    report.nets = nets.into_iter().collect();
+    report.mismatch = Mismatch {
+        disturbed: disturbed(&before, &connect::extract(doc)),
+        ..verify(doc, &design)
+    };
+    report.committed = report.mismatch.is_empty();
+    if !report.committed {
+        doc.restore(snapshot)?;
+    }
+    report.unplaced = std::mem::take(&mut audit.unplaced);
+    report.dangling = std::mem::take(&mut audit.dangling);
+    report.did_you_mean = std::mem::take(&mut audit.did_you_mean).into_iter().collect();
+    Ok(report)
+}
+
+/// The lowered design as bench work, one batch per block.
+fn bench_parts(
+    design: &Design,
+    only: Option<&BTreeSet<String>>,
+    why: &str,
+) -> BTreeMap<String, Vec<crate::bench::BenchPart>> {
+    let mut out: BTreeMap<String, Vec<crate::bench::BenchPart>> = BTreeMap::new();
+    for (block, contents) in &design.blocks {
+        for (refdes, component) in &contents.components {
+            if only.is_some_and(|only| !only.contains(refdes)) {
+                continue;
+            }
+            out.entry(block.clone())
+                .or_default()
+                .push(crate::bench::BenchPart {
+                    refdes: refdes.clone(),
+                    lib_id: component.part.clone(),
+                    value: component.value.clone().unwrap_or_default(),
+                    footprint: component.footprint.clone(),
+                    pins: component
+                        .pins
+                        .iter()
+                        .chain(component.units.values().flatten())
+                        .filter_map(|(number, target)| match target {
+                            PinTarget::Net(net) => Some((number.clone(), net.clone())),
+                            _ => None,
+                        })
+                        .collect(),
+                    why: why.to_string(),
+                });
+        }
+    }
+    out
 }
 
 fn live_phase<T>(
@@ -536,6 +687,7 @@ pub fn arrange(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     selection: &Selection,
+    intent: Option<sch_check::Intent>,
     engine: Box<dyn PlacementEngine>,
     budget: Option<PlacementBudget>,
 ) -> Result<ArrangeReport> {
@@ -550,6 +702,7 @@ pub fn arrange(
                 &env,
                 doc,
                 &selection,
+                intent,
                 Some(engine.as_ref()),
                 phase,
                 deadlines,
@@ -573,32 +726,56 @@ pub fn rewire(
         budget,
         "rewire",
         move |env, doc, phase, deadlines| {
-            rearrange_inner(&env, doc, &selection, None, phase, deadlines)
+            rearrange_inner(&env, doc, &selection, None, None, phase, deadlines)
         },
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rearrange_inner(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     selection: &Selection,
+    intent: Option<sch_check::Intent>,
     engine: Option<&dyn PlacementEngine>,
     phase: &Phase,
     deadlines: Deadlines,
 ) -> Result<ArrangeReport> {
     let chosen = selection.resolve(doc);
-    let (before, design) = live_phase(phase, "lower", chosen.len(), 0, || {
+    let (before, design, boundary) = live_phase(phase, "lower", chosen.len(), 0, || {
         let before = connect::extract(doc);
         let mut design = Design::default();
         design
             .blocks
             .insert(SHEET_BLOCK.to_string(), lift_sheet(doc, &before));
+        // A net with a pin on both sides of the selection has to be reached by NAME:
+        // the redraw draws the selection's own terminals only, so a wire run to where
+        // a held pin's wire used to be reaches nothing.
+        let boundary = boundary_nets(doc, &before, &chosen);
+        for net in &boundary {
+            if let Some(minted) = &net.mint {
+                rename_net(&mut design, &net.name, minted);
+            }
+            design.nets.entry(net.drawn().to_string()).or_default().port = true;
+        }
         sch_check::nets::derive_attrs(&mut design);
-        (before, design)
+        (before, design, boundary)
     });
 
+    let renames: BTreeMap<&str, &str> = boundary
+        .iter()
+        .filter_map(|net| Some((net.name.as_str(), net.mint.as_deref()?)))
+        .collect();
     let (mut movable, held): (Vec<Item>, Vec<Item>) = seated_items(doc, &before)
         .into_iter()
+        .map(|mut item| {
+            for (_, _, net) in &mut item.pins {
+                if let Some(name) = net.as_ref().and_then(|net| renames.get(net.as_str())) {
+                    *net = Some((*name).to_string());
+                }
+            }
+            item
+        })
         .partition(|it| chosen.contains(&it.refdes));
     if movable.is_empty() {
         return Err(Error::EmptySelection);
@@ -611,12 +788,29 @@ fn rearrange_inner(
     // The selection's own drawing is about to be erased and redrawn, so it must not
     // constrain the placement: obstacles are what is left once it is discounted.
     let mut owned = footprints(&movable);
-    let ir = crate::floorplan::infer_ir(env, &design);
+    let mut ir = crate::floorplan::infer_ir(env, &design);
+    if let Some(intent) = intent {
+        apply_intent(&mut ir, intent.into_layout_ir());
+    }
     let snapshot = doc.snapshot();
     // Read before the erase: a net whose only labels belong to the selection would
     // otherwise have no scope on record by the time the redraw needs one.
     let was_global = global_label_nets(doc);
-    let (placed, ir) = match engine {
+    // The ports the boundary needs are the CALLER's contract, not a hint: an engine
+    // is free to rewrite the IR it searched with, and one that drops them leaves the
+    // redraw with a one-terminal net and nothing to name it.
+    let boundary_ports: BTreeMap<String, sch_model::ir::Side> = boundary
+        .iter()
+        .map(|net| {
+            let side = ir
+                .ports
+                .get(net.drawn())
+                .copied()
+                .unwrap_or(sch_model::ir::Side::Right);
+            (net.drawn().to_string(), side)
+        })
+        .collect();
+    let (placed, mut ir) = match engine {
         Some(engine) => {
             let out = live_phase(phase, "place", movable.len(), before.nets.len(), || {
                 region_arrange(
@@ -636,7 +830,8 @@ fn rearrange_inner(
         }
         None => (movable, ir),
     };
-    let (redrawn, inc, warnings) = live_phase(
+    ir.ports.extend(boundary_ports);
+    let (redrawn, inc, warnings, left_bench) = live_phase(
         phase,
         "realise",
         placed.len(),
@@ -645,9 +840,19 @@ fn rearrange_inner(
             for part in &placed {
                 seat(doc, part)?;
             }
+            // Arranging is how a symbol leaves the bench: it now has a position
+            // the layout chose, so it is an ordinary symbol again.
+            let left_bench = crate::bench::unbench(doc, &chosen);
             owned.extend(footprints(&placed));
             let erase = selection_drawing(doc, &owned, &held);
             let redrawn = doc.retain_drawing(|item| !erase.contains(&drawing_key(item)));
+            // The held half of a nameless boundary net needs the minted name too:
+            // one label each side is what makes the two halves one net again.
+            for net in &boundary {
+                if let Some(minted) = &net.mint {
+                    doc.add_label(sch_doc::LabelKind::Local, minted, Pose::new(net.held.x, net.held.y, 0.0));
+                }
+            }
             let inc = incidence(&placed);
             let writer = crate::realize::realize_block(
                 env,
@@ -664,7 +869,7 @@ fn rearrange_inner(
             let mut warnings = writer.layout_warnings();
             warnings.extend(net_conflict_warnings(env, &writer, &placed, &inc));
             crate::realize::graft_drawing(doc, writer)?;
-            Ok((redrawn, inc, warnings))
+            Ok((redrawn, inc, warnings, left_bench))
         },
     )?;
     // A re-wire declares no ports of its own, so every net keeps the scope the
@@ -680,6 +885,7 @@ fn rearrange_inner(
         doc.restore(snapshot)?;
     }
     Ok(ArrangeReport {
+        left_bench,
         moved: placed
             .iter()
             .map(|it| it.refdes.clone())
@@ -905,6 +1111,19 @@ fn posed(mut items: Vec<Item>, poses: &[crate::region::Pose]) -> Vec<Item> {
 /// placement pipeline draws its own. They stay behind as obstacles.
 fn lift_sheet(doc: &SchDoc, netlist: &Netlist) -> Block {
     let net_of = net_by_pin(netlist);
+    // The pins come from the symbol's DEFINITION, not from the instance's `(pin …)`
+    // children: an engine-written sheet carries none of those, and a lifted sheet
+    // with no pins is a design with no connectivity — which is how a re-arrange
+    // came to erase a wire and draw nothing back.
+    let mut numbers: HashMap<&str, Vec<String>> = HashMap::new();
+    for pin in sch_doc::placed_pins(doc) {
+        if let Some(symbol) = doc.symbol_by_ref(&pin.refdes) {
+            numbers
+                .entry(symbol.refdes())
+                .or_default()
+                .push(pin.number.clone());
+        }
+    }
     let mut block = Block::default();
     for symbol in doc.symbols().filter(|s| !placement_ignores(s)) {
         let refdes = symbol.refdes();
@@ -921,7 +1140,7 @@ fn lift_sheet(doc: &SchDoc, netlist: &Netlist) -> Block {
                     .filter(|f| !f.is_empty()),
                 ..Component::default()
             });
-        for number in symbol.pin_uuids.keys() {
+        for number in numbers.get(refdes).into_iter().flatten() {
             let target = match net_of.get(&(refdes, number.as_str())) {
                 Some(net) => PinTarget::Net((*net).to_string()),
                 None => PinTarget::NoConnect,
@@ -1021,6 +1240,86 @@ fn enforce_label_scopes(
         }
     }
     changed
+}
+
+/// A net that straddles the selection: a pin inside it and a pin outside it.
+///
+/// These are what a partial re-arrange cannot draw as wires. The selection's own
+/// drawing is erased and redrawn from the selection's terminals alone, so the pin
+/// left standing is only still on the net if the net carries a name both halves
+/// answer to.
+struct BoundaryNet {
+    /// The name the extractor gave the net before the edit.
+    name: String,
+    /// A stable name to give it, when the one it has is KiCAD's own derivation
+    /// from its pins — writing THAT down forks the net the moment a pin moves.
+    mint: Option<String>,
+    /// Where to name the held half: a pin of this net outside the selection.
+    held: Point2,
+}
+
+impl BoundaryNet {
+    /// The name the redraw should draw.
+    fn drawn(&self) -> &str {
+        self.mint.as_deref().unwrap_or(&self.name)
+    }
+}
+
+/// Every net straddling `chosen`, with the name each will be drawn under.
+fn boundary_nets(doc: &SchDoc, before: &Netlist, chosen: &BTreeSet<String>) -> Vec<BoundaryNet> {
+    let at: HashMap<(String, String), Point2> = sch_doc::placed_pins(doc)
+        .into_iter()
+        .map(|pin| ((pin.refdes, pin.number), pin.at))
+        .collect();
+    before
+        .nets
+        .iter()
+        .filter_map(|net| {
+            let held = net
+                .pins
+                .iter()
+                .find(|pin| !chosen.contains(&pin.refdes))
+                .and_then(|pin| at.get(&(pin.refdes.clone(), pin.pin.clone())).copied())?;
+            if !net.pins.iter().any(|pin| chosen.contains(&pin.refdes)) {
+                return None;
+            }
+            Some(BoundaryNet {
+                mint: (net.source == sch_doc::NetSource::Auto)
+                    .then(|| minted_net_name(&net.pins[0].refdes, &net.pins[0].pin)),
+                name: net.name.clone(),
+                held,
+            })
+        })
+        .collect()
+}
+
+/// The stable name given to a net that only had KiCAD's derived one.
+///
+/// Sanitised so it is a legal label: a name with a `(` or a `-` in it reads as
+/// KiCAD's own generated form and cannot be joined by a caller.
+fn minted_net_name(refdes: &str, number: &str) -> String {
+    let sanitize = |text: &str| -> String {
+        text.chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect()
+    };
+    format!("N_{}_{}", sanitize(refdes), sanitize(number))
+}
+
+/// Rewrite every reference to `from` in the lifted design to `to`.
+fn rename_net(design: &mut Design, from: &str, to: &str) {
+    for block in design.blocks.values_mut() {
+        for component in block.components.values_mut() {
+            for target in component.pins.values_mut() {
+                if matches!(target, PinTarget::Net(net) if net == from) {
+                    *target = PinTarget::Net(to.to_string());
+                }
+            }
+        }
+    }
+    if let Some(attrs) = design.nets.shift_remove(from) {
+        design.nets.insert(to.to_string(), attrs);
+    }
 }
 
 /// Nets the new parts share with something already on the sheet.

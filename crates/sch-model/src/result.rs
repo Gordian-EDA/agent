@@ -3,18 +3,14 @@
 //! These live in `sch-model` so the floorplan engine (`sch-floorplan`) and the
 //! live schematic tools can share them.
 
-/// Property key for the block a component belongs to.
+/// Property key naming the functional block a symbol belongs to. Blocks exist in
+/// a placement payload; this is what carries one onto the sheet, so a later call
+/// can say `arrange{block}` about parts it did not place itself.
 pub const AP_BLOCK: &str = "ap_block";
-/// Property key for a synthesized component's role (absent / `"authored"` for
-/// authored parts).
-pub const AP_ROLE: &str = "ap_role";
-/// Property key for a synthesized component's parent refdes.
-pub const AP_PARENT: &str = "ap_parent";
-/// Property key for a synthesized component's index within `(parent, role)`.
-pub const AP_INDEX: &str = "ap_index";
 
-/// The `ap_role` value written for authored components.
-pub const ROLE_AUTHORED: &str = "authored";
+/// Property key marking a symbol as benched — on the sheet and on its nets, but
+/// not laid out. `"1"` when set, cleared when the symbol is arranged.
+pub const AP_BENCH: &str = "ap_bench";
 
 /// A circuit idiom the engine RECOGNIZED purely from connectivity and co-placed as
 /// one cohesive cluster (a crystal+its load caps, a decoupling bank, an op-amp

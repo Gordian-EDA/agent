@@ -630,13 +630,19 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "render_schematic" => render_schematic(ctx),
         "search_footprints" => search_footprints(input, ctx),
         "get_footprint_info" => pcb_workflow::get_footprint_info(input, ctx),
-        "sync_board" => pcb_workflow::sync_board(input, ctx),
+        "sync_board" => match bench_refusal(ctx, "sync_board")? {
+            Some(refusal) => Ok(refusal),
+            None => pcb_workflow::sync_board(input, ctx),
+        },
         "get_board" => pcb_workflow::get_board(input, ctx),
         "place_board" => pcb_workflow::place_board(input, ctx),
         "route_board" => pcb_workflow::route_board(input, ctx),
         "check_board" => pcb_workflow::check_board(input, ctx),
         "refill_zones" => pcb_workflow::refill_zones(input, ctx),
-        "export_fab" => pcb_workflow::export_fab(input, ctx),
+        "export_fab" => match bench_refusal(ctx, "export_fab")? {
+            Some(refusal) => Ok(refusal),
+            None => pcb_workflow::export_fab(input, ctx),
+        },
         "move_parts" => pcb_workflow::move_parts(input, ctx),
         "lock_parts" => pcb_workflow::lock_parts(input, ctx),
         "unlock_parts" => pcb_workflow::unlock_parts(input, ctx),
@@ -993,6 +999,35 @@ fn designators_in_use(ctx: &AgentRuntime) -> std::collections::BTreeSet<String> 
     taken
 }
 
+/// The one refusal a partial state earns: a symbol on the bench is on its nets but
+/// has no layout, so a board built from it would silently omit real circuitry.
+///
+/// Everything else about an unfinished design is reported as progress; this is the
+/// line, and it names exactly which references have to be arranged first.
+fn bench_refusal(ctx: &AgentRuntime, tool: &str) -> Result<Option<Value>> {
+    if !ctx.sch_path().is_file() {
+        return Ok(None);
+    }
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).context("reading schematic for the bench")?;
+    let bench = sch_floorplan::bench::benched(&doc);
+    if bench.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(json!({
+        "ok": false,
+        "code": "bench_not_empty",
+        "bench": bench.len(),
+        "bench_refs": bench.clone(),
+        "error": format!(
+            "{tool} needs a finished schematic: {} symbol(s) are still on the bench — placed and \
+             wired by name, but not laid out ({}). Call arrange({{refs}}) or arrange({{block}}) \
+             on them first.",
+            bench.len(),
+            bench.join(", ")
+        ),
+    })))
+}
+
 /// Result key carrying a PNG path for the agent loop to attach as an image
 /// block (and strip from the JSON the model sees as text).
 fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
@@ -1018,8 +1053,10 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
     visual_json["baseline"] = json!(baseline.as_ref().map(|_| "turn-start"));
     let content_bounds = render_bounds(visual.sheet_extent);
     let overview_bounds = padded_bounds(content_bounds, 2.54);
+    let bench = sch_floorplan::bench::benched(&doc);
     let part_count = doc
         .symbols()
+        .filter(|symbol| !sch_floorplan::bench::is_benched(symbol))
         .filter(|symbol| !symbol.refdes().is_empty() && !symbol.refdes().starts_with('#'))
         .count();
     let plan = gordian_runtime::render::render_plan(
@@ -1046,6 +1083,8 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
     let mut obj = json!({
         "ok": true,
         "png_path": path.display().to_string(),
+        "bench": bench.len(),
+        "bench_refs": bench,
         "overview_px": plan.overview_px,
         "detail_paths": detail_paths,
         "visual": visual_json,

@@ -46,8 +46,9 @@ pub fn schematic_content_hash(ctx: &AgentRuntime) -> Result<Option<u64>> {
 }
 
 /// The tools that write the schematic.
-pub const MUTATORS: [&str; 15] = [
+pub const MUTATORS: [&str; 16] = [
     "place_parts",
+    "add_parts",
     "arrange",
     "rewire",
     "add_symbols",
@@ -104,8 +105,13 @@ pub fn tool_defs() -> Vec<Tool> {
             sch_check::place_parts_input_schema(),
         ),
         (
+            "add_parts",
+            "Add a block of parts to the BENCH: on the sheet and on their nets, named at every pin, with no layout and no wire drawn. Same payload as place_parts, minus the drawing. Use it when you want connectivity now and layout later, or to keep going after place_parts benched a block. `arrange({refs|block})` is what lays them out and takes them off the bench. `export_fab` and `sync_board` refuse while the bench is non-empty.",
+            sch_check::place_parts_input_schema(),
+        ),
+        (
             "arrange",
-            "Re-place selected symbols and redraw only their wiring while every unselected symbol stays frozen. Select by refs or bbox; the placement engine owns all coordinates.",
+            "Re-place selected symbols and redraw their wiring FROM THE NETLIST, while every unselected symbol stays frozen. This is also how a symbol leaves the bench. Select by `refs` (bench included), `bbox`, or `block`; `intent` steers the layout exactly as in place_parts. The placement engine owns all coordinates; a net it cannot draw as a wire is left as a matching label and reported.",
             bulk::selection_schema(true),
         ),
         (
@@ -428,6 +434,7 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
     }
     Some(match name {
         "place_parts" => bulk::place_parts(input, ctx),
+        "add_parts" => bulk::add_parts(input, ctx),
         "arrange" => bulk::arrange(input, ctx),
         "rewire" => bulk::rewire(input, ctx),
         "read_schematic" => query::read_schematic(input, ctx),

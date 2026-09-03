@@ -419,12 +419,9 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     s.push_str("\t\t\t(effects (font (size 1.27 1.27)) (hide yes))\n");
     s.push_str("\t\t)\n");
 
-    // Hidden reconciliation identity tags (`ap_*`), in insertion order. These
-    // make the file self-describing: on the next lift/reconcile a synthesized
-    // part is matched by `(ap_parent, ap_role, ap_index)` and every part by its
-    // block. They are hidden so they never clutter the schematic visually. Keys
-    // and values are internally generated (block/role names, refdes, indices),
-    // but escaping them is cheap insurance against odd block names.
+    // Hidden `ap_*` identity tags, in insertion order — the block a symbol belongs
+    // to and whether it is benched. Hidden so they never clutter the drawing;
+    // escaped because a block name is authored text.
     for (key, val) in &inst.extra_props {
         let k = escape_sexpr_string(key);
         let v = escape_sexpr_string(val);

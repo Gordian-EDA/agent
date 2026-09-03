@@ -96,14 +96,11 @@ pub(super) struct Instance {
     /// emit mirror today, but the endpoint transform handles it so connectivity
     /// stays correct once placement gains mirroring.
     pub(super) mirror: bool,
-    /// Extra hidden properties to write on this symbol, in insertion order. The
-    /// reconciliation identity tags (`ap_block`/`ap_role`/`ap_parent`/`ap_index`)
-    /// ride here so the emitted file is self-describing for the next
-    /// lift/reconcile (spec §4/§7).
+    /// Extra hidden properties to write on this symbol, in insertion order — the
+    /// `ap_*` identity tags that make the emitted file self-describing.
     pub(super) extra_props: Vec<(String, String)>,
-    /// An explicit instance uuid to reuse (e.g. a surviving symbol's prior uuid
-    /// during reconciliation, so diffs stay minimal). `None` falls back to the
-    /// content-derived `stable_uuid("symbol", refdes)`.
+    /// An explicit instance uuid to reuse, so re-emitting a surviving symbol keeps
+    /// its identity. `None` falls back to `stable_uuid("symbol", refdes)`.
     pub(super) uuid: Option<String>,
     /// Half the symbol body's approximate size `(w/2, h/2)`, used to push the
     /// Reference/Value field text clear of the body rather than a fixed offset.
