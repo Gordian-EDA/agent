@@ -40,13 +40,12 @@ impl SchematicWriter {
     ///
     /// ## Idempotence
     ///
-    /// The pass only processes labels with `stub.is_some()` and clears `stub` to
-    /// `None` on any that retract; a *surviving* stub keeps its `Some(..)`, its
-    /// emitted wire is endpoint-deduped, and that wire is registered **on the
-    /// stub's own net**, so a re-run reads it as a deliberate same-net join (not
-    /// a foreign segment) and the survivor survives again. A second call is
-    /// therefore a no-op. This lets a caller run it early (e.g. to lint the
-    /// post-retraction geometry) and have `finish` run it again harmlessly.
+    /// The pass only processes labels with `stub.is_some()`. It clears `stub` when
+    /// the label retracts or an existing same-net wire already covers the stub;
+    /// otherwise the emitted wire remains attached to the label. Every emitted
+    /// wire is registered on the stub's own net, so a second call is a no-op. This
+    /// lets a caller run it early (e.g. to lint the post-retraction geometry) and
+    /// have `finish` run it again harmlessly.
     ///
     /// **Foreign geometry** at pass start = every *fixed* connection point (power
     /// symbol pins — origin, net = the Value; no-connect markers — a reserved
@@ -62,8 +61,10 @@ impl SchematicWriter {
     /// with a foreign point, its end lies on a foreign segment, or its segment
     /// passes through a foreign point. A *surviving* stub registers its endpoint
     /// and segment as occupancy so a later differing-net stub cannot then collide
-    /// with it. The pin-endpoint fallback reproduces the proven pre-stub
-    /// connectivity, so retraction only ever removes an accidental merge.
+    /// with it. It replaces same-net route segments contained in its span, so the
+    /// later wire splitter cannot expose their overlap as reversed duplicates. The
+    /// pin-endpoint fallback reproduces the proven pre-stub connectivity, so
+    /// retraction only ever removes an accidental merge.
     pub fn retract_colliding_stubs(&mut self) {
         // Sentinel "net" for no-connect anchors: a stub on a no-connect pin is
         // still a wrong attachment, so treat it as a foreign net.
@@ -144,8 +145,16 @@ impl SchematicWriter {
                 let p = Point2::new(f64::from_bits(xb), f64::from_bits(yb));
                 nets.iter().any(|n| *n != net) && Segment::new(pin_at, end).contains_point(p)
             });
+            let already_wired = segments.iter().any(|seg| {
+                seg.net == net
+                    && seg.segment.contains_point(pin_at)
+                    && seg.segment.contains_point(end)
+            });
 
-            if end_on_point || end_on_seg || seg_thru_point {
+            if already_wired {
+                self.labels[i].stub = None;
+                add_point(end, &net, &mut points);
+            } else if end_on_point || end_on_seg || seg_thru_point {
                 // Keep the outward dir: the text still reads away from the
                 // body (an East reset would run a west-side pin's text back
                 // across the pin line, over the pin name).
@@ -155,6 +164,12 @@ impl SchematicWriter {
                 // The stub wire is attributed to its own net so a re-run reads it
                 // as a deliberate same-net join and does not retract every
                 // survivor onto its pin.
+                let stub_span = Segment::new(pin_at, end);
+                self.wires.retain(|wire| {
+                    wire.net != net
+                        || !stub_span.contains_point(wire.a)
+                        || !stub_span.contains_point(wire.b)
+                });
                 self.add_wire_on_net(pin_at, end, &net);
                 add_point(end, &net, &mut points);
                 segments.push(sch_model::route::NetSegment::new(pin_at, end, net));
@@ -1119,7 +1134,7 @@ impl SchematicWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::write::{Dir, Instance};
+    use crate::write::{Dir, Instance, PinLabel, Stub};
     use geom::Point2;
     use kicad::KicadInstallation;
     use kicad_symbol::geometry::PinGeom;
@@ -1226,6 +1241,35 @@ mod tests {
         w.add_symbol(&env, "Device:R", "R2", "2k", [177.8, 63.5], 0.0)
             .unwrap();
         assert!(w.layout_warnings().is_empty());
+    }
+
+    #[test]
+    fn same_net_route_prefix_is_replaced_by_label_stub() {
+        let mut w = SchematicWriter::new();
+        let pin_at = Point2::new(10.16, 10.16);
+        let label_at = Point2::new(13.97, 10.16);
+        w.labels.push(PinLabel {
+            net: "SIG".into(),
+            at: label_at,
+            uuid_key: "U1:1:SIG:0".into(),
+            dir: Dir::East,
+            stub: Some(Stub { pin_at }),
+            global: true,
+        });
+        w.add_wire_on_net([11.43, 10.16], pin_at, "SIG");
+        w.add_wire_on_net([11.43, 8.89], [11.43, 10.16], "SIG");
+
+        w.prepare();
+
+        let mut segments = std::collections::BTreeSet::new();
+        for wire in &w.wires {
+            let a = crate::write::point_key(wire.a);
+            let b = crate::write::point_key(wire.b);
+            assert!(segments.insert(if a <= b { (a, b) } else { (b, a) }));
+        }
+        assert_eq!(w.wires.len(), 3);
+        assert!(w.labels[0].stub.is_some());
+        assert_eq!(w.labels[0].at, label_at);
     }
 
     #[test]
