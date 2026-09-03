@@ -232,20 +232,25 @@ impl SchDoc {
 
     /// Bring the whole drawing inside the frame and size the page to it.
     ///
-    /// The content's minimum corner lands at [`PAGE_MARGIN`] and the page becomes
-    /// the smallest of A4/A3/A2 landscape that holds it — the sizes humans draw
-    /// on. Only content larger than A2 keeps a `User` page, because an invisible
-    /// drawing is worse than an unconventional page. When a title block is
-    /// present the page also reserves the band it prints in, so metadata never
-    /// overlaps the lowest parts.
+    /// Content that starts before [`PAGE_MARGIN`] — which is content the drawing frame
+    /// clips away, invisibly — is pushed back to it, and the page becomes the smallest of
+    /// A4/A3/A2 landscape that holds the result: the sizes humans draw on. Only content
+    /// larger than A2 keeps a `User` page, because an invisible drawing is worse than an
+    /// unconventional page. A sheet carrying a title block also reserves the band it
+    /// prints in, so metadata never overprints the lowest parts.
+    ///
+    /// The shift is one way and only as far as the margin. A drawing that already starts
+    /// inside the frame is not moved at all, so an untouched item still writes back from
+    /// its own bytes — the crate's round-trip guarantee — and a caller that read a
+    /// coordinate a moment ago still finds the part there.
     ///
     /// The shift is snapped to the 50 mil grid, so grid-aligned geometry stays
     /// grid-aligned (KiCAD's ERC rejects off-grid endpoints). `None` for an empty
     /// sheet, which keeps whatever page it declares.
     pub fn refit_page(&mut self) -> Option<PageFit> {
         let bbox = self.content_bbox()?;
-        let dx = GRID_50_MIL.snap(PAGE_MARGIN - bbox.min_x);
-        let dy = GRID_50_MIL.snap(PAGE_MARGIN - bbox.min_y);
+        let dx = GRID_50_MIL.snap((PAGE_MARGIN - bbox.min_x).max(0.0));
+        let dy = GRID_50_MIL.snap((PAGE_MARGIN - bbox.min_y).max(0.0));
         self.translate(dx, dy);
 
         let band = if self.has_title_block() {
@@ -254,8 +259,8 @@ impl SchDoc {
             0.0
         };
         let need = [
-            bbox.width() + 2.0 * PAGE_MARGIN,
-            bbox.height() + 2.0 * PAGE_MARGIN + band,
+            bbox.max_x + dx + PAGE_MARGIN,
+            bbox.max_y + dy + PAGE_MARGIN + band,
         ];
         let (page, standard) = match standard_page(need) {
             Some((name, size)) => {

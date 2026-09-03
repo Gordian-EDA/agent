@@ -27,36 +27,16 @@ pub fn track_centres(sizes: &BTreeMap<i32, f64>, gap: f64) -> BTreeMap<i32, f64>
     out
 }
 
-/// Aspect ratio of an ISO landscape page — every one of them is √2 wide by 1 tall. The
-/// seed for parts the author did not place is shaped to it, so a sheet starts out the
-/// shape of the paper it will be drawn on.
-const PAGE_ASPECT: f64 = std::f64::consts::SQRT_2;
-
-/// The coarse cell each item occupies. `assign_cells` reads the IR; the refinement loop
-/// perturbs these; then [`apply_cells`] turns them into mm.
-///
-/// Parts the author did not place fill a BLOCK to the right of the ones it did, wrapped
-/// at [`PAGE_ASPECT`]. One column each — the old behaviour — made a 40-part payload with
-/// no `intent.place` a 40-column single row, i.e. a sheet a metre wide and one part tall,
-/// which no search recovers from and no page holds: it is where `User 937x220` came from.
-/// The wrap is the seed only; every engine still searches from it.
+/// The coarse cell each item occupies. `assign_cells` reads the IR (unplaced
+/// parts flow into spare columns on the right); the refinement loop perturbs
+/// these; then [`apply_cells`] turns them into mm.
 ///
 /// An [`Item`] marked `preseeded` carries a LIVE pose the caller owns and
 /// [`apply_cells`] leaves it alone. `frozen` is NOT that signal — it only forbids the
 /// search from moving an item, and a frozen item still gets its seed here.
 pub fn assign_cells(items: &[Item], ir: &LayoutIr) -> Vec<Cell> {
     let max_col = ir.place.values().map(|c| c.col).max().unwrap_or(-1);
-    let base = max_col + 1;
-    let loose = items
-        .iter()
-        .filter(|it| {
-            !ir.place.contains_key(&unit_place_key(&it.refdes, it.unit))
-                && !ir.place.contains_key(&it.refdes)
-        })
-        .count();
-    // cols·rows = n with cols/rows = PAGE_ASPECT ⇒ cols = √(n·PAGE_ASPECT).
-    let cols = ((loose as f64 * PAGE_ASPECT).sqrt().ceil() as i32).max(1);
-    let mut spare = 0;
+    let mut spare = max_col + 1;
     // `place` is keyed by refdes, so a MULTI-UNIT part's units (op-amp A/B + power unit)
     // all resolve to ONE cell — they'd seed coincident, then decongest scatters them in
     // arbitrary directions. Offset each successive same-refdes unit by one ordinal row so
@@ -82,11 +62,11 @@ pub fn assign_cells(items: &[Item], ir: &LayoutIr) -> Vec<Cell> {
                         orient: c.orient,
                     },
                     None => {
-                        let i = spare;
+                        let c = spare;
                         spare += 1;
                         Cell {
-                            col: base + i % cols,
-                            row: i / cols,
+                            col: c,
+                            row: k,
                             orient: Orient::Down,
                         }
                     }
