@@ -84,7 +84,10 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let (a, b) = (from.at(), to.at());
     if a.near_eq(b, EPS) {
-        return Ok(json!({ "error": "both ends are the same point; they already touch" }));
+        return Ok(json!({
+            "changed": "already connected",
+            "net_delta": "connectivity unchanged",
+        }));
     }
     // Clearing comes first, before the router looks at the sheet and before the
     // ends' nets are read: a marker severs its point, so a wire drawn to a still

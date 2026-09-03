@@ -240,3 +240,55 @@ fn arrange_reports_power_furniture_and_nearby_real_parts() {
         "{mixed:#}"
     );
 }
+
+#[test]
+fn connecting_coincident_power_and_flag_pins_is_idempotent() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let added = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [
+            {"lib_id": "power:GND", "ref": "#PWR01", "value": "GND"},
+            {"lib_id": "power:PWR_FLAG", "ref": "#PWR02", "value": "GND"}
+        ]}),
+    );
+    assert_eq!(added.get("error"), None, "{added:#}");
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let pins = sch_doc::placed_pins(&doc);
+    let target = pins.iter().find(|pin| pin.refdes == "#PWR01").unwrap().at;
+    let flag_pin = pins.iter().find(|pin| pin.refdes == "#PWR02").unwrap();
+    let flag = doc.symbol_by_ref("#PWR02").unwrap();
+    let source = std::fs::read_to_string(ctx.sch_path()).unwrap();
+    let source = sch_floorplan::test_util::replace_symbol_at(
+        &source,
+        "#PWR02",
+        [
+            target.x - (flag_pin.at.x - flag.at.x),
+            target.y - (flag_pin.at.y - flag.at.y),
+        ],
+    );
+    std::fs::write(ctx.sch_path(), source).unwrap();
+    let mut doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    for (from, to) in [("#PWR01", "#PWR_GND"), ("#PWR02", "#FLG_GND")] {
+        let uuid = doc.symbol_by_ref(from).unwrap().uuid.clone();
+        doc.set_field(&uuid, "Reference", to).unwrap();
+    }
+    doc.write(ctx.sch_path()).unwrap();
+
+    let connected = call(
+        &ctx,
+        "connect",
+        json!({"from": "#PWR_GND.1", "to": "#FLG_GND.1"}),
+    );
+
+    assert_eq!(connected.get("error"), None, "{connected:#}");
+    assert_eq!(connected["changed"], "already connected", "{connected:#}");
+    assert_eq!(
+        connected["net_delta"],
+        "connectivity unchanged",
+        "{connected:#}"
+    );
+}
