@@ -3096,7 +3096,7 @@ mod tests {
         std::fs::create_dir_all(&junk).unwrap();
         let canary = junk.join("must-not-be-read.bin");
         std::fs::write(&canary, vec![0_u8; 4 * 1024 * 1024]).unwrap();
-        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o0)).unwrap();
 
         let ctx = AgentRuntime::new(env, project.path().to_path_buf(), schematic).unwrap();
         let mut agent = Agent::new(
