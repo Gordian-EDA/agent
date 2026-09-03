@@ -93,7 +93,7 @@ pub fn tool_defs() -> Vec<Tool> {
     let defs: Vec<(&str, &str, Value)> = vec![
         (
             "place_parts",
-            "The ONLY way to create a new design or add a multi-part block. Submit a COMPLETE electrically finished functional block in one call, including its support, protection, decoupling, bias, termination, indicator, and connector parts. If the call would leave 60 or more parts on the sheet, split the design into named functional blocks and set `block` on every payload; add one block per call. Those later calls use region placement and freeze every existing symbol. State connectivity only: real KiCAD parts and pin-to-net mappings, never coordinates or wires. Pin keys accept physical numbers, names, or alternate functions case-insensitively; `PH0-OSC_IN` selects PH0 by its alternate. Before placement, the complete payload is validated and writes nothing on electrical failure: explicit refs must be unused, and every new named signal pin must land on a net with at least one other pin across the payload and existing sheet; power rails, declared ports, and `nc` are terminal nets. Unknown or pad-incompatible footprints do not block placement: they are cleared and returned under `footprints_unresolved` for one `assign_footprints` repair call. Omit `ref` to auto-assign the lowest unused designator from the library symbol. The result reports extractor-verified `connectivity` and `unconnected` pins; trust it instead of re-reading. Its `gaps` are deterministic missing-support findings; add the listed parts in a coherent follow-up block. They are advisory for deliberately minimal designs and focused edits. Rails and ports accept left, right, top, or bottom. Use `intent.relations` for relative placement: kinds `left_of`/`right_of`/`above`/`below` {a, b}, `group` {name, members, side?: [left|right|top|bottom, anchor]}, `align` {members, axis}. If rejected, correct every reported diagnostic before retrying; unknown-pin errors return ranked suggestions.",
+            "The ONLY way to create a new design or add a multi-part block. Submit a COMPLETE electrically finished functional block in one call, including its support, protection, decoupling, bias, termination, indicator, and connector parts. If the call would leave 60 or more parts on the sheet, split the design into named functional blocks and set `block` on every payload; add one block per call. Those later calls use region placement and freeze every existing symbol. State connectivity only: real KiCAD parts and pin-to-net mappings, never coordinates or wires. Pin keys accept physical numbers, names, or alternate functions case-insensitively; `PH0-OSC_IN` selects PH0 by its alternate. Before placement, the complete payload is validated and writes nothing on electrical failure: explicit refs must be unused, and every new named signal pin must land on a net with at least one other pin across the payload and existing sheet; power rails, declared ports, and `nc` are terminal nets. A requested net on a library no-connect pin becomes `nc` and is returned under `nc_overridden` plus `gaps`; use a functional pin if that connection matters. Unknown or pad-incompatible footprints do not block placement: they are cleared and returned under `footprints_unresolved` for one `assign_footprints` repair call. Omit `ref` to auto-assign the lowest unused designator from the library symbol. The result reports extractor-verified `connectivity` and `unconnected` pins; trust it instead of re-reading. Its `gaps` are deterministic missing-support findings; add the listed parts in a coherent follow-up block. They are advisory for deliberately minimal designs and focused edits. Rails and ports accept left, right, top, or bottom. Use `intent.relations` for relative placement: kinds `left_of`/`right_of`/`above`/`below` {a, b}, `group` {name, members, side?: [left|right|top|bottom, anchor]}, `align` {members, axis}. If rejected, correct every reported diagnostic before retrying; unknown-pin errors return ranked suggestions.",
             sch_check::place_parts_input_schema(),
         ),
         (
@@ -339,8 +339,11 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "connect",
-            "Join two ends — a pin like \"R1.1\" / \"U1.VDD\", or a point [x,y] — or every pair in \
-             `pairs` at once. Give `from` and `net` with no `to` to put one pin on a named net. For series insertion, delete the old wire then join both sides in one \
+            "Join two ends — a pin like \"R1.1\" / \"U1.VDD\", a net name, or a point [x,y] — or every pair in \
+             `pairs` at once. One bare net-name endpoint puts the other pin on that net, creating \
+             the label when needed. Give `from` and `net` with no `to` for the same operation. \
+             Joining an unnamed KiCad-derived net to an authored net, or two derived nets, is the \
+             stated endpoint intent; joining two authored nets is refused with a `delete_wires` fix. For series insertion, delete the old wire then join both sides in one \
              `pairs` call. The route is solved around the existing \
              drawing and junctions are added for you; if nothing fits, both ends are named with \
              `net` instead and the result says so. Never draw wires by coordinate.",
@@ -370,7 +373,8 @@ pub fn tool_defs() -> Vec<Tool> {
         (
             "label",
             "Name the net at one pin. Two pins carrying the same local label are connected. \
-             `net` may be \"@R1.2\" to reuse whatever net that pin is on.",
+             `net` may be \"@R1.2\" or a copied KiCad-derived name such as \
+             \"Net-(R1-Pad2)\" to reuse whatever net that pin is on.",
             json!({
                 "type": "object",
                 "properties": {

@@ -1393,12 +1393,9 @@ fn a_swap_that_makes_a_mapped_pin_a_supply_pin_is_refused() {
     );
 }
 
-/// `read_schematic` prints the names KiCAD generates for unnamed nets, and they
-/// read like identities. Labelling another node with one forks the net instead
-/// of joining it — KiCAD renames the original to `…_1` — and no connectivity
-/// guard sees a break, because on paper both nets still exist.
+/// A generated net name copied from `read_schematic` resolves through its pin.
 #[test]
-fn labelling_a_node_with_a_generated_net_name_is_refused() {
+fn labelling_a_node_with_a_generated_net_name_joins_it() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -1423,14 +1420,14 @@ fn labelling_a_node_with_a_generated_net_name_is_refused() {
     let generated = &text[start..start + text[start..].find(')').unwrap() + 1];
 
     let result = call(&ctx, "label", json!({"pin": "R3.1", "net": generated}));
-    let error = result["error"].as_str().unwrap_or_default();
+    assert!(result.get("error").is_none(), "{result}");
+    assert_eq!(result["resolved_nets"][generated], "@R1.2", "{result}");
+    let joined = call(&ctx, "get_net", json!({"name": "N_R1_2"})).to_string();
     assert!(
-        error.contains("generates for an unnamed net"),
-        "labelling `{generated}` must be refused: {result}"
-    );
-    assert!(
-        !listing(&ctx).contains(&format!("{generated}_1")),
-        "the original net was forked anyway"
+        ["R1.2", "R2.1", "R3.1"]
+            .iter()
+            .all(|pin| joined.contains(pin)),
+        "not one net: {joined}"
     );
 }
 
