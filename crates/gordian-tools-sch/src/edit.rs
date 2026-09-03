@@ -822,46 +822,9 @@ fn stranded_labels(doc: &SchDoc, points: &[Point2]) -> Vec<String> {
 /// was asked for: 20 grid steps, about 25 mm.
 const NUDGE_RINGS: i32 = 20;
 
-/// Drag the symbols glued to a pin along with it.
-///
-/// A power symbol is placed straight onto the pin it feeds — that contact
-/// *is* the connection — so a move that left it behind would silently take the
-/// pin off its rail. Only symbols whose every pin sits on the moved one
-/// travel; anything with a pin elsewhere is wired, not glued.
-fn carry_glued_symbols(
-    doc: &mut SchDoc,
-    moved: &str,
-    from: Point2,
-    to: Point2,
-) -> anyhow::Result<()> {
-    if from.near_eq(to, EPS) {
-        return Ok(());
-    }
-    let pins = placed_pins(doc);
-    let glued: Vec<String> = doc
-        .symbols()
-        .filter(|s| s.uuid != moved)
-        .filter(|s| {
-            let own: Vec<&sch_doc::PlacedPin> = pins.iter().filter(|p| p.owner == s.uuid).collect();
-            !own.is_empty() && own.iter().all(|p| p.at.near_eq(from, EPS))
-        })
-        .map(|s| s.uuid.clone())
-        .collect();
-    for uuid in glued {
-        let at = match doc.symbol(&uuid) {
-            Some(symbol) => symbol.at,
-            None => continue,
-        };
-        doc.move_symbol(&uuid, at.x + to.x - from.x, at.y + to.y - from.y)?;
-    }
-    Ok(())
-}
-
 /// Apply a `rot`/`mirror` to a symbol, returning the rotation it now carries.
 ///
-/// Rotating in place is how a diode is reversed or a part turned to meet a
-/// wire; without it the only way to change an orientation is to delete the
-/// part and place it again, losing its connections.
+/// A drag may turn a part to meet its connections without replacing it.
 fn orient(doc: &mut SchDoc, uuid: &str, step: &Value) -> Result<Option<f64>> {
     let rot = step.get("rot").and_then(Value::as_f64);
     let mirror = step.get("mirror").and_then(Value::as_str);
@@ -902,6 +865,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "move_symbols needs `moves`" }));
     }
     let mut edit = Edit::open(ctx)?;
+    let mut planning = edit.doc.clone();
     let all: Vec<String> = moves
         .iter()
         .filter_map(|m| m.get("ref").and_then(Value::as_str).map(str::to_string))
@@ -910,14 +874,14 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "every move needs a `ref`" }));
     }
     let mut placed = Vec::new();
-    let mut allow = Allow::nothing();
+    let mut drag_moves = Vec::new();
     // A part still waiting its turn is not an obstacle to the one being placed;
     // one already placed in this batch is.
     let mut pending: Vec<String> = moves
         .iter()
         .filter_map(|step| {
             let refdes = step.get("ref")?.as_str()?;
-            let units = refs::units(&edit.doc, refdes);
+            let units = refs::units(&planning, refdes);
             let wanted = step.get("unit").and_then(Value::as_u64);
             match (units.as_slice(), wanted) {
                 ([(_, uuid)], _) => Some(uuid.clone()),
@@ -941,7 +905,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         // The units of one part sit in different places, so a move — unlike a
         // value or a swap — has to say which one it means.
-        let units = refs::units(&edit.doc, &refdes);
+        let units = refs::units(&planning, &refdes);
         let wanted = step.get("unit").and_then(Value::as_u64);
         let uuid = match (units.as_slice(), wanted) {
             ([], _) => {
@@ -966,40 +930,18 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 }));
             }
         };
-        if edit.doc.symbol(&uuid).is_none() {
+        if planning.symbol(&uuid).is_none() {
             return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
         }
-        let reverse_polarity = edit.doc.symbol(&uuid).is_some_and(|symbol| {
-            let pins = placed_pins(&edit.doc)
-                .into_iter()
-                .filter(|pin| pin.owner == uuid)
-                .count();
-            let desired = step.get("rot").and_then(Value::as_f64);
-            let turn = desired.map(|desired| (desired - symbol.at.rot).rem_euclid(360.0));
-            pins == 2
-                && is_polarized_symbol(&symbol.lib_id)
-                && turn.is_some_and(|turn| (turn - 180.0).abs() < EPS)
-                && step.get("mirror").is_none()
-                && ["to", "by", "near"]
-                    .iter()
-                    .all(|key| step.get(key).is_none())
-        });
-        // Where the pins are *now*, before any turn: their wires follow them
-        // through both the rotation and the move.
-        let was: Vec<Point2> = placed_pins(&edit.doc)
-            .into_iter()
-            .filter(|p| p.owner == uuid)
-            .map(|p| p.at)
-            .collect();
-        // Turning a part is how a diode is reversed, and it changes the shape
-        // that has to fit, so it happens before the destination is chosen.
-        let turned = orient(&mut edit.doc, &uuid, step)?;
-        let symbol = match edit.doc.symbol(&uuid) {
+        // A turn changes the shape that has to fit, so plan it before choosing
+        // the destination.
+        let turned = orient(&mut planning, &uuid, step)?;
+        let symbol = match planning.symbol(&uuid) {
             Some(symbol) => symbol,
             None => return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") })),
         };
         let origin = symbol.at.point();
-        let body = crate::place::extent(&edit.doc, symbol);
+        let body = crate::place::extent(&planning, symbol);
         let (w, h) = body.map_or((10.0, 10.0), |r| (r.width(), r.height()));
         let centre = body.map_or(origin, |r| r.center());
         let staying = ["to", "by", "near"]
@@ -1014,7 +956,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
             Destination::Centre(Point2::new(centre.x + n[0], centre.y + n[1]))
         } else {
-            match destination(&edit.doc, step, w, h, &pending) {
+            match destination(&planning, step, w, h, &pending) {
                 Ok((want, _)) => want,
                 Err(error) => return Ok(json!({ "error": error })),
             }
@@ -1023,9 +965,9 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         // Clearance is about the extent, which sits `centre - origin` away.
         let offset = Point2::new(centre.x - origin.x, centre.y - origin.y);
         let landing = Point2::new(at.x + offset.x, at.y + offset.y);
-        let occupancy = Occupancy::skipping(&edit.doc, &pending);
+        let occupancy = Occupancy::skipping(&planning, &pending);
         let mut nudge = None;
-        if !reverse_polarity && !occupancy.free(landing, w, h) {
+        if !occupancy.free(landing, w, h) {
             // The spot the caller picked is taken, but the intent — put this
             // part about here — still holds: slide to the nearest grid spot
             // that fits and say where it went.
@@ -1041,30 +983,14 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             at = snap_point(Point2::new(free.x - offset.x, free.y - offset.y));
             nudge = Some([at.x, at.y]);
         }
-        // Whatever met this part's pins comes with it, the way KiCAD drags a
-        // symbol: leaving the wires behind would silently unwire the board.
-        edit.doc.move_symbol(&uuid, at.x, at.y)?;
-        let now: Vec<Point2> = placed_pins(&edit.doc)
-            .into_iter()
-            .filter(|p| p.owner == uuid)
-            .map(|p| p.at)
-            .collect();
-        let straightened = if reverse_polarity {
-            let nets = refs::nets_touching(edit.before(), std::slice::from_ref(&refdes));
-            allow = std::mem::take(&mut allow)
-                .joining_nets(nets)
-                .part(refdes.clone())
-                .creating();
-            0
-        } else {
-            let mut landed = Vec::new();
-            for (from, to) in was.into_iter().zip(now) {
-                edit.doc.move_attached(from, to);
-                carry_glued_symbols(&mut edit.doc, &uuid, from, to)?;
-                landed.push(to);
-            }
-            crate::wiring::straighten(&mut edit.doc, &landed)
-        };
+        planning.move_symbol(&uuid, at.x, at.y)?;
+        let symbol = planning
+            .symbol(&uuid)
+            .expect("a planned move keeps its symbol");
+        drag_moves.push((
+            uuid.clone(),
+            sch_drag::Placement::new(symbol.at.point(), symbol.at.rot, symbol.mirror),
+        ));
         pending.retain(|pending_uuid| *pending_uuid != uuid);
         let mut report = json!({ "ref": refdes, "at": [at.x, at.y] });
         if let Some(to) = nudge {
@@ -1073,27 +999,36 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         if let Some(rot) = turned {
             report["rot"] = json!(rot);
         }
-        if straightened > 0 {
-            report["rerouted_wires"] = json!(straightened);
-        }
         placed.push(report);
     }
+    let before = sch_drag::Sheet::of(&edit.doc);
+    let drag = match sch_drag::drag_many(&mut edit.doc, &drag_moves, &before) {
+        Ok((report, _)) => report,
+        Err(error) => {
+            let symbols = all.join(", ");
+            let detail = match error {
+                sch_drag::DragError::Truthfulness(nets) => format!(
+                    "dragging {symbols} would change net{} {}; try a small 1.27 mm nudge away from other pins or wires",
+                    if nets.len() == 1 { "" } else { "s" },
+                    nets.join(", ")
+                ),
+                other => format!(
+                    "dragging {symbols} was refused ({other}); try a small 1.27 mm nudge away from other pins or wires"
+                ),
+            };
+            return Ok(json!({ "error": format!("refused: {detail}; nothing was moved") }));
+        }
+    };
     edit.commit(
         json!({
             "moved": placed,
+            "redrawn_segments": drag.redrawn_segments,
+            "labels_added": drag.labels_added,
+            "crossings_added": drag.crossings_added,
             "placement": "final and clean; any nudged_to coordinate is the collision-free final position, so do not move it again",
         }),
-        allow,
+        Allow::nothing(),
     )
-}
-
-fn is_polarized_symbol(lib_id: &str) -> bool {
-    let id = lib_id.to_ascii_uppercase();
-    id.contains("LED")
-        || id.contains("DIODE")
-        || id.ends_with(":D")
-        || id.contains(":D_")
-        || id.contains("OPTO")
 }
 
 /// Set or clear a part's properties.

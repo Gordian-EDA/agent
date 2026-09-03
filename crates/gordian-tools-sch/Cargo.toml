@@ -16,6 +16,7 @@ kicad-footprint = { path = "../kicad-footprint" }
 kicad = { path = "../kicad" }
 sch-check = { path = "../sch-check" }
 sch-doc = { path = "../sch-doc" }
+sch-drag = { path = "../sch-drag" }
 sch-floorplan = { path = "../sch-floorplan" }
 sch-model = { path = "../sch-model" }
 anneal-place = { path = "../anneal-place" }

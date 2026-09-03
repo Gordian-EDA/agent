@@ -54,6 +54,8 @@ pub struct DragReport {
     pub redrawn_segments: usize,
     /// Connections the router could not draw, left as a matched pair of labels.
     pub labels_added: usize,
+    /// New perpendicular wire crossings introduced by the drag.
+    pub crossings_added: usize,
     pub junctions_added: usize,
     pub junctions_removed: usize,
 }
@@ -399,6 +401,9 @@ pub fn drag_many(
         *doc = backup;
         return Err(DragError::Litter(litter));
     }
+    report.crossings_added = crate::eval::measure(&after)
+        .crossings
+        .saturating_sub(crate::eval::measure(before).crossings);
     Ok((report, after))
 }
 
@@ -526,11 +531,11 @@ fn broken_nets(before: &Sheet, after: &Sheet) -> Vec<String> {
         group
             .iter()
             .find_map(|pin| {
-                let (refdes, number) = pin.split_once('.')?;
+                let (owner, number) = pin.split_once('.')?;
                 let at = sheet
                     .pins
                     .iter()
-                    .find(|p| p.refdes == refdes && p.number == number)?
+                    .find(|p| p.owner == owner && p.number == number)?
                     .at;
                 sheet.net_at(at).map(str::to_string)
             })
