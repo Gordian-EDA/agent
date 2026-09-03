@@ -812,7 +812,7 @@ impl SchematicWriter {
                 Justify::Left.hjust(),
                 sch_model::text::VJust::Bottom,
                 0.0,
-                t.at.into(),
+                t.at,
             );
             acc(b.min_x, b.min_y, b.max_x, b.max_y);
         }
