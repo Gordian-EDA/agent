@@ -217,13 +217,25 @@ fn slide_block(movable: &mut [Item], blockers: &[Rect]) {
         let h = sheet.max_y.max(r.max_y) - sheet.min_y.min(r.min_y);
         w + h
     };
-    let landed = (1..=BLOCK_RINGS).find_map(|ring| {
-        ring_offsets(ring)
-            .into_iter()
-            .map(|(dx, dy)| (dx as f64 * BLOCK_WALK, dy as f64 * BLOCK_WALK))
-            .filter(|&(dx, dy)| clear(&shifted(dx, dy)))
-            .min_by(|a, b| cost(&shifted(a.0, a.1)).total_cmp(&cost(&shifted(b.0, b.1))))
-    });
+    // There is no sheet to the left of the origin: a block slid to a negative coordinate
+    // is drawn outside the frame, and the page fitter then has to shove the WHOLE sheet
+    // over to rescue it — moving parts the caller was promised would not move. So the
+    // landing must be on the page; only if nothing on the page is free does an off-page
+    // landing beat leaving the block on top of something.
+    let on_page = |r: &Rect| r.min_x >= sch_doc::PAGE_MARGIN && r.min_y >= sch_doc::PAGE_MARGIN;
+    let search = |page_only: bool| {
+        (1..=BLOCK_RINGS).find_map(|ring| {
+            ring_offsets(ring)
+                .into_iter()
+                .map(|(dx, dy)| (dx as f64 * BLOCK_WALK, dy as f64 * BLOCK_WALK))
+                .filter(|&(dx, dy)| {
+                    let r = shifted(dx, dy);
+                    clear(&r) && (!page_only || on_page(&r))
+                })
+                .min_by(|a, b| cost(&shifted(a.0, a.1)).total_cmp(&cost(&shifted(b.0, b.1))))
+        })
+    };
+    let landed = search(true).or_else(|| search(false));
     let Some((dx, dy)) = landed else { return };
     // ONE snapped delta for the whole block: snapping each part independently would move
     // them by different amounts and break the arrangement the engine just searched for.
