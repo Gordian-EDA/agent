@@ -107,6 +107,12 @@ def command(args, *, timeout=600, check=True, env=None, input_text=None):
 BUILT = {}
 
 
+def cargo_target_dir():
+    """Cargo target directory resolved the same way as subprocess builds."""
+    configured = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+    return configured if configured.is_absolute() else ROOT / configured
+
+
 def example(package, name):
     """Path to a release example, built once per run.
 
@@ -119,7 +125,7 @@ def example(package, name):
             ["cargo", "build", "--release", "-p", package, "--example", name],
             timeout=1800,
         )
-        BUILT[name] = str(ROOT / "target" / "release" / "examples" / name)
+        BUILT[name] = str(cargo_target_dir() / "release" / "examples" / name)
     return BUILT[name]
 
 
