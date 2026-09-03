@@ -15,6 +15,7 @@ sch-check = { path = "../sch-check" }
 sch-doc = { path = "../sch-doc" }
 geom = { path = "../geom" }
 gordian-runtime = { path = "../gordian-runtime" }
+fuzzy-matcher.workspace = true
 pcb-engine = { path = "../pcb-engine" }
 kicad-board = { path = "../kicad-board" }
 kicad = { path = "../kicad" }

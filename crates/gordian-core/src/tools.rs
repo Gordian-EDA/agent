@@ -432,7 +432,11 @@ pub fn tool_defs() -> Vec<Tool> {
                  written as honest partial work in guard_findings. Omit bounds for a managed auto outline \
                  that place_board grows/refits around placed parts while ignoring the staging row. \
                  clearance/min_trace_width are lowered to what those footprints permit \
-                 (reported in design_rules)."
+                 (reported in design_rules). Subminimum clearance, width, via diameter, drill, \
+                 and annular-ring requests are raised to standard-fab floors and reported in \
+                 rule_adjustments instead of refusing the sync. When a schematic edit re-nets \
+                 routed pads, sync retracts only the old copper components that would short the \
+                 new nets and returns copper_retracted plus their now_open ratsnest entries."
                 .into(),
             input_schema: json!({
                 "type": "object",

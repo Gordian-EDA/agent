@@ -155,6 +155,113 @@ fn sync_board_creates_then_edits_a_board_without_disturbing_it() {
 }
 
 #[test]
+fn sync_board_retracts_copper_from_two_retargeted_pads() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+
+    let parts = (1..=10)
+        .map(|index| {
+            json!({
+                "ref": format!("R{index}"),
+                "part": "Device:R",
+                "value": "10k",
+                "footprint": R0805,
+                "pins": {
+                    "1": format!("N{}", index - 1),
+                    "2": format!("N{index}"),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    tool(
+        &ctx,
+        "place_parts",
+        json!({ "block": "ten-part-route", "parts": parts }),
+    );
+    tool(&ctx, "label", json!({ "pin": "R4.2", "net": "N4" }));
+    tool(&ctx, "label", json!({ "pin": "R5.2", "net": "N5" }));
+    tool(
+        &ctx,
+        "sync_board",
+        json!({ "bounds": { "min_x": 0, "min_y": 0, "max_x": 60, "max_y": 60 } }),
+    );
+    tool(&ctx, "place_board", json!({}));
+    let routed = tool(&ctx, "route_board", json!({}));
+    assert_eq!(routed["routed"], json!("9/9"), "{routed:#}");
+    let before = kicad_board::read_snapshot(&ctx.pcb_path()).unwrap();
+
+    let rotation = sch_doc::SchDoc::read(ctx.sch_path())
+        .unwrap()
+        .symbol_by_ref("R5")
+        .unwrap()
+        .at
+        .rot;
+    tool(
+        &ctx,
+        "move_symbols",
+        json!({ "moves": [{ "ref": "R5", "turn_in_place": true, "rot": (rotation + 180.0).rem_euclid(360.0) }] }),
+    );
+    let synced = tool(&ctx, "sync_board", json!({}));
+
+    assert_eq!(
+        synced["delta"]["pads_retargeted"],
+        json!([
+            { "pad": "R5.1", "from": "/N4", "to": "/N5" },
+            { "pad": "R5.2", "from": "/N5", "to": "/N4" },
+        ]),
+        "{synced:#}"
+    );
+    assert_eq!(synced["copper_retracted"].as_array().unwrap().len(), 1);
+    let retracted = &synced["copper_retracted"][0];
+    assert_eq!(
+        (retracted["net_a"].as_str(), retracted["net_b"].as_str()),
+        (Some("/N4"), Some("/N5"))
+    );
+    assert!(
+        retracted["segments"]
+            .as_u64()
+            .is_some_and(|count| count >= 2)
+    );
+    assert!(
+        retracted["refs"]
+            .as_array()
+            .is_some_and(|refs| refs.contains(&json!("R5.1")) && refs.contains(&json!("R5.2"))),
+        "{synced:#}"
+    );
+    let open = synced["now_open"].as_array().unwrap();
+    assert!(
+        ["/N4", "/N5"].iter().all(|net| open
+            .iter()
+            .any(|entry| { entry["net"] == json!(net) && entry["status"] != json!("routed") })),
+        "{synced:#}"
+    );
+
+    let after = kicad_board::read_snapshot(&ctx.pcb_path()).unwrap();
+    assert!(
+        after
+            .copper
+            .traces
+            .iter()
+            .all(|trace| !matches!(trace.connection.as_str(), "/N4" | "/N5")),
+        "the old components touching the swapped pads must be gone"
+    );
+    assert!(
+        after.copper.traces.len() < before.copper.traces.len()
+            && after
+                .copper
+                .traces
+                .iter()
+                .any(|trace| !matches!(trace.connection.as_str(), "/N4" | "/N5")),
+        "unrelated routed copper must remain"
+    );
+    let checked = run_tool("check_board", json!({}), &ctx).unwrap();
+    assert_eq!(checked["drc"]["copper_violations"], json!(0), "{checked:#}");
+    assert_eq!(checked["unconnected_items"], json!(2), "{checked:#}");
+}
+
+#[test]
 fn incomplete_sync_and_auto_edge_placement_preserve_a_reported_partial_board() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");

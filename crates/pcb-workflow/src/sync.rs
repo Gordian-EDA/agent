@@ -18,6 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
+use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use serde_json::{Value, json};
 
 use geom::Rect;
@@ -33,7 +34,7 @@ use crate::seed::{PourPadConnection, PourSpec};
 use crate::create::{
     BoardSeedSpec, MISSING_FOOTPRINT_ID, SeedPart, SeedRules, add_default_power_pours,
     apply_complexity_default_layer_count, emit_board_footprint, merge, parse_seed_bounds,
-    parse_seed_rules_over, plan_seed_board, write_seed_plan,
+    parse_seed_rules_over, plan_seed_board, rule_adjustments, write_seed_plan,
 };
 
 /// One schematic part as the exported netlist has it.
@@ -86,12 +87,11 @@ impl BoardDelta {
 
     /// References whose pads move, vanish or change identity — the copper on
     /// them can no longer be trusted.
-    fn copper_invalidating(&self) -> BTreeSet<&str> {
+    fn structurally_copper_invalidating(&self) -> BTreeSet<&str> {
         self.removed
             .iter()
             .map(String::as_str)
             .chain(self.footprint_changed.iter().map(|c| c.reference.as_str()))
-            .chain(self.pads_retargeted.iter().map(|p| p.reference.as_str()))
             .collect()
     }
 
@@ -458,7 +458,7 @@ fn stage_incomplete(
         let moved = moves.iter().map(|placement| placement.reference.as_str());
         let pads = crate::copper::pad_extents(&board.problem, moved);
         let retract = crate::copper::retract(&board.copper, &pads, &BTreeSet::new());
-        if retract.count > 0 {
+        if retract.changed() {
             crate::copper::write_retained(
                 ctx,
                 board.problem.layer_count,
@@ -709,7 +709,7 @@ pub(crate) fn resolve_board_net(
         return Ok(Some(requested.to_owned()));
     }
     if !kicad_board::is_derived_net_name(requested) || !ctx.sch_path().exists() {
-        return Ok(None);
+        return Ok(unique_close_board_net(saved.values(), requested));
     }
     let netlist = ctx
         .env()
@@ -736,7 +736,50 @@ pub(crate) fn resolve_board_net(
         .find(|(name, members)| {
             kicad_board::is_derived_net_name(name) && members == requested_members
         })
-        .map(|(name, _)| name))
+        .map(|(name, _)| name)
+        .or_else(|| unique_close_board_net(saved.values(), requested)))
+}
+
+/// Resolve one unambiguous near spelling among the board's own design nets.
+fn unique_close_board_net<'a>(
+    nets: impl Iterator<Item = &'a String>,
+    requested: &str,
+) -> Option<String> {
+    let candidates = nets
+        .filter(|net| kicad_board::is_design_net_name(net))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let normalized = requested.trim_start_matches('/');
+    let canonical = candidates
+        .iter()
+        .filter(|net| net.trim_start_matches('/').eq_ignore_ascii_case(normalized))
+        .collect::<Vec<_>>();
+    if canonical.len() == 1 {
+        return Some(canonical[0].to_string());
+    }
+    if requested.chars().count() < 2 {
+        return None;
+    }
+
+    let matcher = SkimMatcherV2::default().ignore_case();
+    let mut ranked = candidates
+        .iter()
+        .filter(|net| net.chars().count().abs_diff(requested.chars().count()) <= 3)
+        .filter_map(|net| {
+            matcher
+                .fuzzy_match(net, requested)
+                .map(|score| (score, net))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(left_score, left), (right_score, right)| {
+        right_score.cmp(left_score).then_with(|| left.cmp(right))
+    });
+    match ranked.as_slice() {
+        [(score, net), ..] if ranked.get(1).is_none_or(|(next, _)| next < score) => {
+            Some((*net).clone())
+        }
+        _ => None,
+    }
 }
 
 /// References currently present in the live schematic netlist.
@@ -863,6 +906,7 @@ fn seed_board(
         Ok(rules) => rules,
         Err(e) => return json!({ "error": e }),
     };
+    let rule_adjustments = rule_adjustments(input.get("rules"), &rules);
     let seed = seed_parts(parts);
     if !rebuilding {
         apply_complexity_default_layer_count(&mut rules, input.get("rules"), seed.len());
@@ -944,6 +988,15 @@ fn seed_board(
                  then route_board, then check_board",
     });
     merge(&mut out, sizes);
+    if !rule_adjustments.is_empty() {
+        merge(
+            &mut out,
+            json!({
+                "rule_adjustments": rule_adjustments,
+                "rule_note": "Subminimum fabrication rules were raised to the nearest KiCad standard-fab values; the board was written with the applied values above.",
+            }),
+        );
+    }
     // The layout half of the intent is placement's to honour, not the seed's.
     // Hand it straight back so the next call carries it instead of losing it.
     if let Some(layout) = layout_intent(input) {
@@ -1069,6 +1122,21 @@ fn update_board(
         Err(refusal) => return refusal,
     };
 
+    // Compute the invalid old-net components against the pre-edit board. Pad
+    // net names in the document change below, but this geometry remains the
+    // authority for deciding exactly what copper must come out.
+    let (mut retract, mut copper_retracted) = crate::copper::retract_retargeted(
+        &before,
+        delta.pads_retargeted.iter().map(|retarget| {
+            (
+                retarget.reference.as_str(),
+                retarget.pad.as_str(),
+                retarget.from.as_deref(),
+                retarget.to.as_deref(),
+            )
+        }),
+    );
+
     let existing: BTreeMap<String, BoardFootprint> = doc
         .footprints()
         .into_iter()
@@ -1093,17 +1161,30 @@ fn update_board(
     ) {
         return gate.rollback(ctx, json!({ "error": e }));
     }
+    let removed_zones =
+        match doc.remove_zones_for_nets(retract.zone_nets.iter().map(String::as_str)) {
+            Ok(removed) => removed,
+            Err(e) => return gate.rollback(ctx, json!({ "error": e })),
+        };
+    for report in &mut copper_retracted {
+        report.zones = removed_zones.get(&report.net_a).copied().unwrap_or(0)
+            + removed_zones.get(&report.net_b).copied().unwrap_or(0);
+    }
 
     if let Err(e) = write_board(ctx, &doc.into_text()) {
         return gate.rollback(ctx, json!({ "error": e }));
     }
 
-    // Only copper the edit invalidated comes out: traces touching a pad that
-    // vanished, changed package, or changed net. Pad extents are per part, so a
-    // single retargeted pad retracts its part's traces — conservative, and the
-    // named nets are the ones the agent re-routes.
-    let pads = crate::copper::pad_extents(&before.problem, delta.copper_invalidating());
-    let retract = crate::copper::retract(&before.copper, &pads, &BTreeSet::new());
+    // A pad re-net removes only the old-net copper component that physically
+    // reaches that pad. A removed or package-swapped footprint still
+    // invalidates every net reaching any of its old pads.
+    let pads =
+        crate::copper::pad_extents(&before.problem, delta.structurally_copper_invalidating());
+    let structural = crate::copper::retract(&retract.retained, &pads, &BTreeSet::new());
+    retract.count += structural.count;
+    retract.via_count += structural.via_count;
+    retract.nets.extend(structural.nets);
+    retract.retained = structural.retained;
     if let Err(e) = crate::copper::write_retained(
         ctx,
         before.problem.layer_count,
@@ -1154,6 +1235,16 @@ fn update_board(
 
     let mut nets_to_reroute: BTreeSet<String> = retract.nets.clone();
     nets_to_reroute.extend(delta.nets_changed.iter().cloned());
+    let now_open = crate::active_board(ctx)
+        .ok()
+        .map(|board| {
+            crate::ratsnest::build(&board, &board.problem, &[], Some(&nets_to_reroute))
+                .entries
+                .into_iter()
+                .filter(|entry| entry.get("status").and_then(Value::as_str) != Some("routed"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     let result = json!({
         "ok": true,
@@ -1163,6 +1254,16 @@ fn update_board(
         "delta": delta.to_json(),
         "placed": placed,
         "retracted_tracks": retract.count,
+        "retracted_vias": retract.via_count,
+        "copper_retracted": copper_retracted.iter().map(|report| json!({
+            "net_a": report.net_a,
+            "net_b": report.net_b,
+            "segments": report.segments,
+            "vias": report.vias,
+            "zone_memberships": report.zones,
+            "refs": report.refs,
+        })).collect::<Vec<_>>(),
+        "now_open": now_open,
         "nets_to_reroute": nets_to_reroute,
         "next_tool": "route_board",
         "next": "call route_board({nets: nets_to_reroute}), then check_board",
@@ -1690,7 +1791,7 @@ mod tests {
         assert_eq!(delta.added, ["C1"]);
         assert!(delta.removed.is_empty());
         assert_eq!(delta.nets_changed, ["GND", "VIN"]);
-        assert_eq!(delta.copper_invalidating(), BTreeSet::new());
+        assert_eq!(delta.structurally_copper_invalidating(), BTreeSet::new());
     }
 
     #[test]
@@ -1699,7 +1800,10 @@ mod tests {
         assert_eq!(delta.removed, ["R2"]);
         assert!(delta.added.is_empty());
         assert_eq!(delta.nets_changed, ["GND", "SENSE"]);
-        assert_eq!(delta.copper_invalidating(), BTreeSet::from(["R2"]));
+        assert_eq!(
+            delta.structurally_copper_invalidating(),
+            BTreeSet::from(["R2"])
+        );
     }
 
     #[test]
@@ -1721,7 +1825,10 @@ mod tests {
         assert!(delta.pads_retargeted.is_empty());
         assert!(delta.value_changed.is_empty());
         assert!(delta.nets_changed.is_empty());
-        assert_eq!(delta.copper_invalidating(), BTreeSet::from(["R1"]));
+        assert_eq!(
+            delta.structurally_copper_invalidating(),
+            BTreeSet::from(["R1"])
+        );
     }
 
     #[test]
@@ -1748,7 +1855,7 @@ mod tests {
             ]
         );
         assert_eq!(delta.nets_changed, ["MID", "SENSE"]);
-        assert_eq!(delta.copper_invalidating(), BTreeSet::from(["R1", "R2"]));
+        assert_eq!(delta.structurally_copper_invalidating(), BTreeSet::new());
     }
 
     #[test]
@@ -1769,7 +1876,7 @@ mod tests {
         assert!(delta.pads_retargeted.is_empty());
         assert!(delta.nets_changed.is_empty());
         // Nothing about a value invalidates copper.
-        assert_eq!(delta.copper_invalidating(), BTreeSet::new());
+        assert_eq!(delta.structurally_copper_invalidating(), BTreeSet::new());
     }
 
     #[test]
@@ -1812,6 +1919,17 @@ mod tests {
         let board = "(kicad_pcb\n\t(net 0 \"\")\n)\n";
         let doc = board_doc_for_sync(board.to_owned()).unwrap();
         assert_eq!(doc.text(), board);
+    }
+
+    #[test]
+    fn board_net_near_match_prefers_the_unique_canonical_spelling() {
+        let nets = ["/SW".to_owned(), "SWO".to_owned(), "GND".to_owned()];
+
+        assert_eq!(
+            unique_close_board_net(nets.iter(), "SW"),
+            Some("/SW".to_owned())
+        );
+        assert_eq!(unique_close_board_net(nets.iter(), "S"), None);
     }
 
     #[test]

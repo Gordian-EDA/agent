@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use geom::Rect;
 use kicad_footprint::{FootprintCatalog, FootprintId};
@@ -1514,31 +1514,10 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
             "rules.layer_count must be 2, 4, 6, or 8, got {layer_count}"
         ));
     }
-    let via_diameter = num("via_diameter", d.via_diameter);
-    let via_drill = num("via_drill", d.via_drill);
-    // Vias must be fabricable to KiCAD's built-in standard-fab minimums (verified
-    // against kicad DRC): via ≥ 0.5 mm, drill ≥ 0.3 mm, annular ring ≥ 0.1 mm
-    // (i.e. via ≥ drill + 0.2). Below these the board would route but fail KiCAD
-    // DRC (via_diameter / drill_out_of_range / annular_width) — reject up front
-    // with the floor, rather than silently emit copper that lies about fab.
-    if via_diameter < KICAD_MIN_VIA_DIAMETER {
-        return Err(format!(
-            "rules.via_diameter {via_diameter} is below KiCAD's standard-fab minimum \
-             {KICAD_MIN_VIA_DIAMETER}mm — raise it (microvias need custom board rules / a finer fab class)"
-        ));
-    }
-    if via_drill < KICAD_MIN_VIA_DRILL {
-        return Err(format!(
-            "rules.via_drill {via_drill} is below KiCAD's standard-fab minimum {KICAD_MIN_VIA_DRILL}mm — raise it"
-        ));
-    }
-    if via_diameter - via_drill < 2.0 * KICAD_MIN_ANNULAR {
-        return Err(format!(
-            "rules via annular ring {:.3}mm (= (via_diameter {via_diameter} − via_drill {via_drill})/2) is below \
-             KiCAD's {KICAD_MIN_ANNULAR}mm minimum — widen the via or shrink the drill",
-            (via_diameter - via_drill) / 2.0
-        ));
-    }
+    let via_drill = num("via_drill", d.via_drill).max(KICAD_MIN_VIA_DRILL);
+    let via_diameter = num("via_diameter", d.via_diameter)
+        .max(KICAD_MIN_VIA_DIAMETER)
+        .max(via_drill + 2.0 * KICAD_MIN_ANNULAR);
     // Per-net trace widths: {"VCC": 0.8, "GND": 0.8} — fat power, thin signals.
     let mut net_widths = std::collections::BTreeMap::new();
     if let Some(nw) = obj.get("net_widths") {
@@ -1546,10 +1525,7 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
             .as_object()
             .ok_or_else(|| "rules.net_widths must be an object {net: width_mm}".to_string())?;
         for (net, value) in map {
-            let w = parse_net_width_value(net, value)?;
-            if w <= 0.0 {
-                return Err(format!("rules.net_widths[{net}] must be > 0, got {w}"));
-            }
+            let w = parse_net_width_value(net, value)?.max(crate::rules::FAB_MIN_TRACE_WIDTH_MM);
             if w > 1.5 {
                 return Err(format!(
                     "rules.net_widths[{net}] is {w} mm; use <= 1.5 mm for routed traces, or enlarge the board/add planes"
@@ -1633,14 +1609,83 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
         }
     }
     Ok(BoardSeedRules {
-        clearance: num("clearance", d.clearance),
-        min_trace_width: num("min_trace_width", d.min_trace_width),
+        clearance: num("clearance", d.clearance).max(crate::rules::FAB_MIN_CLEARANCE_MM),
+        min_trace_width: num("min_trace_width", d.min_trace_width)
+            .max(crate::rules::FAB_MIN_TRACE_WIDTH_MM),
         via_diameter,
         via_drill,
         layer_count,
         net_widths,
         pours,
     })
+}
+
+/// Requested fabrication rules that were raised to KiCad's standard floors.
+pub(super) fn rule_adjustments(v: Option<&Value>, applied: &SeedRules) -> Vec<Value> {
+    let Some(rules) = v.and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut adjustments = Vec::new();
+    let mut record = |rule: String, requested: f64, value: f64, reason: &str| {
+        if requested + f64::EPSILON < value {
+            adjustments.push(json!({
+                "rule": rule,
+                "requested": requested,
+                "applied": value,
+                "note": reason,
+            }));
+        }
+    };
+    if let Some(requested) = rules.get("clearance").and_then(Value::as_f64) {
+        record(
+            "clearance".to_owned(),
+            requested,
+            applied.clearance,
+            "raised to the standard-fab clearance minimum",
+        );
+    }
+    if let Some(requested) = rules.get("min_trace_width").and_then(Value::as_f64) {
+        record(
+            "min_trace_width".to_owned(),
+            requested,
+            applied.min_trace_width,
+            "raised to the standard-fab trace-width minimum",
+        );
+    }
+    if let Some(requested) = rules.get("via_drill").and_then(Value::as_f64) {
+        record(
+            "via_drill".to_owned(),
+            requested,
+            applied.via_drill,
+            "raised to KiCad's standard-fab drill minimum",
+        );
+    }
+    if let Some(requested) = rules.get("via_diameter").and_then(Value::as_f64) {
+        record(
+            "via_diameter".to_owned(),
+            requested,
+            applied.via_diameter,
+            "raised to satisfy KiCad's standard-fab diameter and annular-ring minimums",
+        );
+    }
+    if let Some(widths) = rules.get("net_widths").and_then(Value::as_object) {
+        for (net, value) in widths {
+            let requested = value
+                .as_f64()
+                .or_else(|| value.get("width").and_then(Value::as_f64));
+            if let Some(requested) = requested
+                && let Some(applied) = applied.net_widths.get(net)
+            {
+                record(
+                    format!("net_widths.{net}"),
+                    requested,
+                    *applied,
+                    "raised to KiCad's standard-fab trace-width minimum",
+                );
+            }
+        }
+    }
+    adjustments
 }
 
 fn parse_net_width_value(net: &str, value: &Value) -> std::result::Result<f64, String> {
@@ -1687,6 +1732,35 @@ mod tests {
         assert_eq!(rules.layer_count, 4);
         assert_eq!(rules.net_widths["GND"], 0.6);
         assert_eq!(rules.net_widths["V3V3"], 0.5);
+    }
+
+    #[test]
+    fn subminimum_fabrication_rules_are_clamped_and_reported() {
+        let input = json!({
+            "clearance": 0.05,
+            "min_trace_width": 0.05,
+            "via_diameter": 0.4,
+            "via_drill": 0.2,
+            "net_widths": { "SIG": 0.05 }
+        });
+        let rules = parse_seed_rules(Some(&input)).unwrap();
+
+        assert_eq!(rules.via_drill, 0.3);
+        assert_eq!(rules.via_diameter, 0.5);
+        assert_eq!(rules.clearance, 0.1);
+        assert_eq!(rules.min_trace_width, 0.1);
+        assert_eq!(rules.net_widths["SIG"], 0.1);
+        assert_eq!(rule_adjustments(Some(&input), &rules).len(), 5);
+    }
+
+    #[test]
+    fn annular_ring_floor_widens_the_via_instead_of_refusing() {
+        let input = json!({ "via_diameter": 0.5, "via_drill": 0.4 });
+        let rules = parse_seed_rules(Some(&input)).unwrap();
+
+        assert_eq!(rules.via_drill, 0.4);
+        assert!((rules.via_diameter - 0.6).abs() < f64::EPSILON);
+        assert_eq!(rule_adjustments(Some(&input), &rules).len(), 1);
     }
 
     #[test]
