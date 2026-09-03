@@ -32,17 +32,17 @@ pub struct EmitOutput {
     /// One human-readable warning per overlapping symbol/label pair (empty when
     /// the layout is clean). A side-channel only: it does not alter `sch`.
     pub layout_warnings: Vec<String>,
-    /// The shipped sheet's body / IC / wire-crossing triple (ground truth, the same
-    /// `fan_risers=true` measure the engines pick on). A vision critic systematically
-    /// over-reports these, so they are the objective signal behind its complaints.
+    /// The shipped sheet's body / IC / wire-crossing triple (ground truth). A vision
+    /// critic systematically over-reports these, so they are the objective signal
+    /// behind its complaints.
     pub crossings: crate::place::Crossings,
     /// One line per point where the realised sheet puts two nets — the shorts the
-    /// netlist would show. Empty is the invariant; a non-empty list is an engine
+    /// netlist would show. Empty is the invariant; a non-empty list is a typesetter
     /// defect, not a payload one.
     pub net_shorts: Vec<String>,
     /// One name per authored net whose pins did NOT all land on one net of the
     /// finished sheet — an OPEN. The dual of [`Self::net_shorts`]: a short welds two
     /// nets, an open leaves one in islands, and both are invisible on the render.
-    /// Empty is the invariant; a non-empty list is an engine defect.
+    /// Empty is the invariant; a non-empty list is a typesetter defect.
     pub net_opens: Vec<String>,
 }
