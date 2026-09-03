@@ -296,6 +296,9 @@ pub fn into_design(
     // A part nothing can resolve leaves before lowering, so the `decouple` caps it
     // would have grown never appear and the placement never has to draw it.
     let (dropped, unplaced) = unresolvable(&input, provider);
+    // The references those parts would have carried: a layout tree that names one is
+    // right about a part that is not there, which is a warning, not a refusal.
+    let dropped_refs: BTreeSet<RefDes> = unplaced.iter().map(|p| p.refdes.clone()).collect();
     for spec in input
         .parts
         .iter()
@@ -343,8 +346,8 @@ pub fn into_design(
     for (name, tree) in &input.layout {
         match design.blocks.get_mut(name) {
             Some(block) => {
-                for error in tree_faults(name, tree, block) {
-                    diags.push(error);
+                for fault in tree_faults(name, tree, block, &dropped_refs) {
+                    diags.push(fault);
                 }
                 block.layout = Some(tree.clone());
             }
@@ -828,13 +831,35 @@ fn expand_decouple(
 /// What is wrong with a region's layout tree: a leaf naming a part that is not in the
 /// region, or the same part placed twice. Both would silently lose a part off the drawing,
 /// so they refuse the payload rather than surprise the author.
-fn tree_faults(name: &str, tree: &Tree, block: &Block) -> Vec<Diagnostic> {
+///
+/// A leaf naming a part the payload could not resolve at all (`dropped`) is the author's
+/// tree being right about a part that is not there: it is a warning, and the typesetter
+/// simply has one fewer leaf to draw.
+fn tree_faults(
+    name: &str,
+    tree: &Tree,
+    block: &Block,
+    dropped: &BTreeSet<RefDes>,
+) -> Vec<Diagnostic> {
     let mut seen: BTreeSet<(String, u8)> = BTreeSet::new();
     let mut out = Vec::new();
     for (refdes, unit) in tree.keys() {
-        if !block.components.contains_key(&refdes) {
+        if dropped.contains(&refdes) {
+            out.push(Diagnostic::warning(
+                "layout-unplaced-part",
+                format!("`layout.{name}` places `{refdes}`, which could not be resolved — drawn without it"),
+            ));
+        } else if !block.components.contains_key(&refdes) {
             let near = closest_ref(&refdes, block.components.keys().map(String::as_str));
-            let hint = near.map_or(String::new(), |r| format!(" (did you mean `{r}`?)"));
+            let hint = near.map_or_else(
+                || {
+                    let mut members: Vec<&str> =
+                        block.components.keys().map(String::as_str).collect();
+                    members.truncate(12);
+                    format!(" — region `{name}` holds {}", members.join(", "))
+                },
+                |r| format!(" (did you mean `{r}`?)"),
+            );
             out.push(Diagnostic::error(
                 "layout-unknown-part",
                 format!("`layout.{name}` places `{refdes}`, which is not a part of that region{hint}"),
