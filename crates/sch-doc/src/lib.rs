@@ -68,7 +68,7 @@ mod text;
 pub use body::{body_rect, body_rects};
 pub use connect::{Net, NetDelta, NetSource, Netlist, PinRef, Scene};
 pub use doc::{SchDoc, SnapshotId};
-pub use edit::is_drawing;
+pub use edit::{WireClip, is_drawing};
 pub use error::{Error, Result};
 pub use libsyms::SymbolSource;
 pub use model::{

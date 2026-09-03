@@ -71,6 +71,31 @@ fn symbol_source() -> Option<SymbolSource> {
 }
 
 #[test]
+fn clipping_wires_keeps_only_the_outside_fragments() {
+    let (_, source) = fixture();
+    let mut doc = SchDoc::parse(&source).expect("parse");
+    let from = Point2::new(0.0, 250.0);
+    let to = Point2::new(30.0, 250.0);
+    doc.add_wire(from, to);
+
+    let clipped = doc.clip_wires_outside(geom::Rect::new(10.0, 240.0, 20.0, 260.0));
+
+    assert_eq!(clipped.wires, 1);
+    assert_eq!(
+        clipped.cut_points,
+        [Point2::new(10.0, 250.0), Point2::new(20.0, 250.0)]
+    );
+    assert!(
+        doc.wires()
+            .any(|wire| wire.points == [from, Point2::new(10.0, 250.0)])
+    );
+    assert!(
+        doc.wires()
+            .any(|wire| wire.points == [Point2::new(20.0, 250.0), to])
+    );
+}
+
+#[test]
 fn setting_a_field_touches_one_block_and_no_net() {
     let (source, text, delta) = edited(|doc| {
         doc.set_field("R7", "Value", "22k").expect("set_field");
