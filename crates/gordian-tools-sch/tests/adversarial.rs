@@ -638,7 +638,7 @@ fn add_symbols_clears_an_unresolved_footprint_and_reports_a_gap() {
 }
 
 #[test]
-fn place_parts_reports_a_duplicate_ref_and_a_bad_pin_in_one_response() {
+fn place_parts_renames_before_reporting_a_bad_pin_as_unplaced() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCad detected");
         return;
@@ -660,24 +660,27 @@ fn place_parts_reports_a_duplicate_ref_and_a_bad_pin_in_one_response() {
         }]}),
     );
 
-    assert_eq!(result["code"], "invalid_payload", "{result:#}");
-    assert!(!result["duplicate_refs"].as_array().unwrap().is_empty());
-    // The pin fault costs that part, not the payload; the duplicate reference is
-    // what refuses, and both are named in the same response.
-    assert_eq!(result["unplaced"][0]["ref"], "J1", "{result:#}");
+    assert_eq!(result["code"], "nothing_placed", "{result:#}");
+    assert_eq!(result["renamed"], json!({"J1": "J2"}));
+    assert_eq!(result["unplaced"][0]["ref"], "J2", "{result:#}");
     assert!(
         result["unplaced"][0]["reason"]
             .as_str()
             .unwrap()
             .contains("bad-pin")
     );
-    assert!(result["footprint_mismatch"].as_array().unwrap().is_empty());
     let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
     assert_eq!(
         doc.symbols()
             .filter(|symbol| symbol.refdes() == "J1")
             .count(),
         1
+    );
+    assert_eq!(
+        doc.symbols()
+            .filter(|symbol| symbol.refdes() == "J2")
+            .count(),
+        0
     );
 }
 
