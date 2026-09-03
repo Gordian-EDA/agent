@@ -1,0 +1,1 @@
+Design an NE555 astable LED blinker running at about 1 Hz with its timing resistors and capacitor, a current-limited LED, and a 5V LDO regulator fed from a 12V barrel-jack input with input and output capacitors and a power LED. Render the schematic.

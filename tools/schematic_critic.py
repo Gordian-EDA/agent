@@ -21,10 +21,14 @@ Model notes (gateway = OPENAI_BASE_URL, OpenAI-compatible):
   returns "no model was able to generate a response" — so Opus is the working choice.
   `--model X` still lets you point at any future model.
 
+Calibration: with `--anchor REF.png` the verdict is anchored to a human-drawn sheet
+rated exactly 9 — equal to it is a 9, clearly better a 10 — which is what makes scores
+comparable across circuits. `--samples 3` grades three times and reports the modal run.
+
 Usage:
-  python3 tools/schematic_critic.py OURS.png [--reference REF.png]
+  python3 tools/schematic_critic.py OURS.png [--anchor REF.png [--anchor-same-circuit]]
                                     [--circuit "one-line description"]
-                                    [--model anthropic/claude-opus-4-8]
+                                    [--model anthropic/claude-opus-4-8] [--samples 3]
                                     [--engine-clean] [--json-only] [--show-reasoning]
 """
 import argparse
@@ -193,7 +197,9 @@ def extract_json(text):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("image")
-    ap.add_argument("--reference", help="optional reference PNG of the same circuit")
+    ap.add_argument("--anchor", help="human-drawn reference PNG rated 9; calibrates the score")
+    ap.add_argument("--anchor-same-circuit", action="store_true",
+                    help="the anchor draws the same circuit as the sheet under review")
     ap.add_argument("--circuit", help="one-line description of the intended circuit")
     ap.add_argument("--model", default=os.environ.get("CRITIC_MODEL", "anthropic/claude-opus-4-8"))
     ap.add_argument("--json-only", action="store_true", help="print only the JSON verdict")
@@ -202,7 +208,7 @@ def main():
                     help="engine geometry analysis confirms 0 wires through any body AND a "
                          "complete netlist; suppress wire-through-body + dangling-pin (FPs)")
     ap.add_argument("--samples", type=int, default=1,
-                    help="grade N times and report the MEDIAN-score run — a noise-robust "
+                    help="grade N times and report the MODAL-score run — a noise-robust "
                          "verdict (the model has ~±1-2 run-to-run variance, so a single "
                          "sample is unreliable for gating or comparison)")
     args = ap.parse_args()
@@ -217,9 +223,14 @@ def main():
            " the FINAL_JSON verdict.")
     if args.circuit:
         ctx += f" Intended circuit: {args.circuit}."
-    if args.reference:
-        ctx += (" A REFERENCE render of the SAME circuit (hand-drawn, good) is attached"
-                " SECOND — compare, but only report defects in the FIRST (under review).")
+    if args.anchor:
+        ctx += (" CALIBRATION: the SECOND attached image is a HUMAN-DRAWN reference sheet"
+                " rated exactly 9/10 on this rubric. Score the FIRST image against it:"
+                " as good as the reference = 9, clearly better = 10, worse = below 9 by"
+                " the rubric's severity bands. Report defects for the FIRST image only.")
+        if args.anchor_same_circuit:
+            ctx += (" The reference draws the SAME circuit as the sheet under review, so"
+                    " compare how the two READ, not what they contain.")
     if args.engine_clean:
         ctx += (" AUTHORITATIVE ENGINE GROUND TRUTH (exact geometric + netlist analysis of the"
                 " real coordinates): (1) ZERO wires pass through any component body — the"
@@ -233,9 +244,9 @@ def main():
     user_content = [{"type": "text", "text": ctx},
                     {"type": "image_url",
                      "image_url": {"url": f"data:image/png;base64,{b64_image(args.image)}"}}]
-    if args.reference:
+    if args.anchor:
         user_content.append({"type": "image_url",
-                             "image_url": {"url": f"data:image/png;base64,{b64_image(args.reference)}"}})
+                             "image_url": {"url": f"data:image/png;base64,{b64_image(args.anchor)}"}})
 
     body = {
         "model": args.model,
@@ -281,13 +292,17 @@ def main():
     if not runs:
         print(last_text)
         sys.exit(2)
-    # Representative = the MEDIAN-score run (its score IS the median for odd n, and its
-    # defects/dimensions stay self-consistent — better than averaging incoherent verdicts).
+    # Representative = the MODAL-score run: the score the model settles on most often,
+    # with its own defects and dimensions intact (averaging incoherent verdicts does not
+    # produce a verdict). Ties go to the run nearest the middle of the samples.
     runs.sort(key=lambda x: x[0])
     score_list = [s for s, _, _ in runs]
-    result, text = runs[len(runs) // 2][1], runs[len(runs) // 2][2]
-    if n > 1:
-        print(f"# {len(runs)}/{n} samples; scores {score_list}; median run shown")
+    middle = score_list[len(score_list) // 2]
+    modal = max(set(score_list), key=lambda s: (score_list.count(s), -abs(s - middle)))
+    result, text = next((r, t) for s, r, t in runs if s == modal)
+    result["samples"] = score_list
+    if n > 1 and not args.json_only:
+        print(f"# {len(runs)}/{n} samples; scores {score_list}; modal run shown")
 
     # The engine-clean contract is enforced in code too, in case the model slips.
     if args.engine_clean:

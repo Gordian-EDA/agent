@@ -1,0 +1,294 @@
+Draw this circuit as a schematic from the netlist in netlist.json: every part with its lib id and value, every pin on exactly the net given. Do not add or remove parts. A pin whose net is "nc" stays unconnected. The sheet is titled "IBM M122 Keyboard Interface". Render the schematic when it is done.
+
+netlist.json:
+[
+ {
+  "ref": "AE1",
+  "lib_id": "Device:Antenna",
+  "value": "Antenna",
+  "pins": {
+   "1": "N$1"
+  }
+ },
+ {
+  "ref": "C1",
+  "lib_id": "Device:C_Small",
+  "value": "4u7F",
+  "pins": {
+   "1": "VBUS",
+   "2": "VSS_PA"
+  }
+ },
+ {
+  "ref": "C10",
+  "lib_id": "Device:C_Small",
+  "value": "12pF",
+  "pins": {
+   "1": "VSS_PA",
+   "2": "XL1"
+  }
+ },
+ {
+  "ref": "C11",
+  "lib_id": "Device:C_Small",
+  "value": "12pF",
+  "pins": {
+   "1": "VSS_PA",
+   "2": "XL2"
+  }
+ },
+ {
+  "ref": "C12",
+  "lib_id": "Device:C_Small",
+  "value": "12pF",
+  "pins": {
+   "1": "VSS_PA",
+   "2": "XH1"
+  }
+ },
+ {
+  "ref": "C13",
+  "lib_id": "Device:C_Small",
+  "value": "12pF",
+  "pins": {
+   "1": "VSS_PA",
+   "2": "XH2"
+  }
+ },
+ {
+  "ref": "C14",
+  "lib_id": "Device:C_Small",
+  "value": "1.2pF",
+  "pins": {
+   "1": "N$1",
+   "2": "VSS_PA"
+  }
+ },
+ {
+  "ref": "C15",
+  "lib_id": "Device:C_Small",
+  "value": "1uF",
+  "pins": {
+   "1": "DEC4_6",
+   "2": "VSS_PA"
+  }
+ },
+ {
+  "ref": "C16",
+  "lib_id": "Device:C_Small",
+  "value": "DNP",
+  "pins": {
+   "1": "DEC5",
+   "2": "VSS_PA"
+  }
+ },
+ {
+  "ref": "C2",
+  "lib_id": "Device:C_Small",
+  "value": "4u7F",
+  "pins": {
+   "1": "VBUS",
+   "2": "VSS_PA"
+  }
+ },
+ {
+  "ref": "C3",
+  "lib_id": "Device:C_Small",
+  "value": "4u7F",
+  "pins": {
+   "1": "DECUSB",
+   "2": "VSS_PA"
+  }
+ },
+ {
+  "ref": "C4",
+  "lib_id": "Device:C_Small",
+  "value": "100nF",
+  "pins": {
+   "1": "DEC1",
+   "2": "VSS_PA"
+  }
+ },
+ {
+  "ref": "C5",
+  "lib_id": "Device:C_Small",
+  "value": "DNP",
+  "pins": {
+   "1": "DEC2",
+   "2": "VSS_PA"
+  }
+ },
+ {
+  "ref": "C6",
+  "lib_id": "Device:C_Small",
+  "value": "0.8pF",
+  "pins": {
+   "1": "ANT",
+   "2": "VSS_PA"
+  }
+ },
+ {
+  "ref": "C7",
+  "lib_id": "Device:C_Small",
+  "value": "100pF",
+  "pins": {
+   "1": "DEC3",
+   "2": "VSS_PA"
+  }
+ },
+ {
+  "ref": "C8",
+  "lib_id": "Device:C_Small",
+  "value": "0.5pF",
+  "pins": {
+   "1": "N$1",
+   "2": "VSS_PA"
+  }
+ },
+ {
+  "ref": "C9",
+  "lib_id": "Device:C_Small",
+  "value": "47nF",
+  "pins": {
+   "1": "DEC4_6",
+   "2": "VSS_PA"
+  }
+ },
+ {
+  "ref": "L1",
+  "lib_id": "Device:L",
+  "value": "10uH",
+  "pins": {
+   "1": "N$3",
+   "2": "N$2"
+  }
+ },
+ {
+  "ref": "L2",
+  "lib_id": "Device:L",
+  "value": "4n7H",
+  "pins": {
+   "1": "N$4",
+   "2": "+3.3V"
+  }
+ },
+ {
+  "ref": "L3",
+  "lib_id": "Device:L",
+  "value": "15nH",
+  "pins": {
+   "1": "N$2",
+   "2": "DEC4_6"
+  }
+ },
+ {
+  "ref": "L4",
+  "lib_id": "Device:L",
+  "value": "4n7H",
+  "pins": {
+   "1": "ANT",
+   "2": "N$1"
+  }
+ },
+ {
+  "ref": "U1",
+  "lib_id": "MCU_Nordic:nRF52840",
+  "value": "nRF52840",
+  "pins": {
+   "A8": "nc",
+   "B1": "+3.3V",
+   "B3": "N$3",
+   "B5": "DEC4_6",
+   "B7": "VSS_PA",
+   "B9": "nc",
+   "C1": "DEC1",
+   "D2": "XL1",
+   "EP": "VSS_PA",
+   "F2": "XL2",
+   "G1": "COL19",
+   "H2": "nc",
+   "J1": "COL1",
+   "K2": "COL2",
+   "L1": "COL3",
+   "M2": "nc",
+   "N1": "COL4",
+   "P2": "ROW0",
+   "R1": "nc",
+   "T2": "nc",
+   "U1": "nc",
+   "W1": "+3.3V",
+   "Y2": "+3.3V",
+   "A10": "nc",
+   "A12": "VDIV",
+   "A14": "nc",
+   "A16": "nc",
+   "A18": "DEC2",
+   "A20": "nc",
+   "A22": "+3.3V",
+   "A23": "XH2",
+   "AB2": "N$4",
+   "AC5": "DECUSB",
+   "AC9": "COL8",
+   "AD2": "VBUS",
+   "AD4": "USB_D-",
+   "AD6": "USB_D+",
+   "AD8": "COL7",
+   "B11": "nc",
+   "B13": "COL0",
+   "B15": "nc",
+   "B17": "nc",
+   "B19": "nc",
+   "B24": "XH1",
+   "D23": "DEC3",
+   "E24": "DEC4_6",
+   "F23": "VSS_PA",
+   "H23": "ANT",
+   "J24": "COL6",
+   "L24": "COL5",
+   "N24": "DEC5",
+   "P23": "ROW1",
+   "R24": "ROW2",
+   "T23": "ROW3",
+   "U24": "ROW4",
+   "V23": "ROW5",
+   "W24": "ROW6",
+   "Y23": "ROW7",
+   "AA24": "SWDCLK",
+   "AC11": "COL10",
+   "AC13": "RESET",
+   "AC15": "COL12",
+   "AC17": "COL14",
+   "AC19": "COL16",
+   "AC21": "COL18",
+   "AC24": "SWDIO",
+   "AD10": "COL9",
+   "AD12": "COL11",
+   "AD14": "+3.3V",
+   "AD16": "COL13",
+   "AD18": "COL15",
+   "AD20": "COL17",
+   "AD22": "nc",
+   "AD23": "+3.3V"
+  }
+ },
+ {
+  "ref": "Y1",
+  "lib_id": "Device:Crystal",
+  "value": "32k768Hz",
+  "pins": {
+   "1": "XL1",
+   "2": "XL2"
+  }
+ },
+ {
+  "ref": "Y2",
+  "lib_id": "Device:Crystal_GND24",
+  "value": "32MHz",
+  "pins": {
+   "1": "XH1",
+   "2": "VSS_PA",
+   "3": "XH2",
+   "4": "VSS_PA"
+  }
+ }
+]

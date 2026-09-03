@@ -1,0 +1,1 @@
+Design a second-order Sallen-Key low-pass filter (1 kHz cutoff, LM358) followed by a non-inverting gain-of-10 stage, powered from a single 9V battery with a virtual-ground divider, with 3.5mm input and output jacks and supply decoupling. Render the schematic.

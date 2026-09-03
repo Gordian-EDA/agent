@@ -1,0 +1,1 @@
+Design a common-emitter BJT audio preamplifier around a 2N3904 with voltage-divider bias, emitter degeneration and a bypass capacitor, input and output coupling capacitors, powered from 9V, with input and output headers. Render the schematic.

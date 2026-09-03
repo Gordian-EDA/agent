@@ -1,0 +1,413 @@
+Draw this circuit as a schematic from the netlist in netlist.json: every part with its lib id and value, every pin on exactly the net given. Do not add or remove parts. A pin whose net is "nc" stays unconnected. The sheet is titled "0cdac5a02e3a". Render the schematic when it is done.
+
+netlist.json:
+[
+ {
+  "ref": "C17",
+  "lib_id": "Device:C",
+  "value": "100n",
+  "pins": {
+   "1": "+12V",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C18",
+  "lib_id": "Device:C",
+  "value": "1u",
+  "pins": {
+   "1": "N$1",
+   "2": "N$12"
+  }
+ },
+ {
+  "ref": "C19",
+  "lib_id": "Device:C",
+  "value": "100n",
+  "pins": {
+   "1": "+12V",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C20",
+  "lib_id": "Device:C",
+  "value": "1u",
+  "pins": {
+   "1": "N$2",
+   "2": "N$10"
+  }
+ },
+ {
+  "ref": "C21",
+  "lib_id": "Device:C",
+  "value": "100n",
+  "pins": {
+   "1": "+12V",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C22",
+  "lib_id": "Device:C",
+  "value": "1u",
+  "pins": {
+   "1": "N$3",
+   "2": "N$14"
+  }
+ },
+ {
+  "ref": "C23",
+  "lib_id": "Device:C",
+  "value": "100n",
+  "pins": {
+   "1": "+12V",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C24",
+  "lib_id": "Device:C",
+  "value": "1u",
+  "pins": {
+   "1": "N$4",
+   "2": "N$16"
+  }
+ },
+ {
+  "ref": "C25",
+  "lib_id": "Device:C",
+  "value": "100n",
+  "pins": {
+   "1": "+12V",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C26",
+  "lib_id": "Device:C",
+  "value": "100n",
+  "pins": {
+   "1": "+12V",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C27",
+  "lib_id": "Device:C",
+  "value": "1u",
+  "pins": {
+   "1": "N$5",
+   "2": "N$18"
+  }
+ },
+ {
+  "ref": "C28",
+  "lib_id": "Device:C",
+  "value": "1u",
+  "pins": {
+   "1": "N$6",
+   "2": "N$20"
+  }
+ },
+ {
+  "ref": "C29",
+  "lib_id": "Device:C",
+  "value": "100n",
+  "pins": {
+   "1": "+12V",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C30",
+  "lib_id": "Device:C",
+  "value": "100n",
+  "pins": {
+   "1": "+12V",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C31",
+  "lib_id": "Device:C",
+  "value": "1u",
+  "pins": {
+   "1": "N$7",
+   "2": "N$22"
+  }
+ },
+ {
+  "ref": "C32",
+  "lib_id": "Device:C",
+  "value": "1u",
+  "pins": {
+   "1": "N$8",
+   "2": "N$24"
+  }
+ },
+ {
+  "ref": "D13",
+  "lib_id": "Device:D",
+  "value": "D",
+  "pins": {
+   "1": "N$1",
+   "2": "+12V"
+  }
+ },
+ {
+  "ref": "D14",
+  "lib_id": "Device:D",
+  "value": "D",
+  "pins": {
+   "1": "N$2",
+   "2": "+12V"
+  }
+ },
+ {
+  "ref": "D15",
+  "lib_id": "Device:D",
+  "value": "D",
+  "pins": {
+   "1": "N$3",
+   "2": "+12V"
+  }
+ },
+ {
+  "ref": "D16",
+  "lib_id": "Device:D",
+  "value": "D",
+  "pins": {
+   "1": "N$4",
+   "2": "+12V"
+  }
+ },
+ {
+  "ref": "D17",
+  "lib_id": "Device:D",
+  "value": "D",
+  "pins": {
+   "1": "N$5",
+   "2": "+12V"
+  }
+ },
+ {
+  "ref": "D18",
+  "lib_id": "Device:D",
+  "value": "D",
+  "pins": {
+   "1": "N$6",
+   "2": "+12V"
+  }
+ },
+ {
+  "ref": "D19",
+  "lib_id": "Device:D",
+  "value": "D",
+  "pins": {
+   "1": "N$7",
+   "2": "+12V"
+  }
+ },
+ {
+  "ref": "D20",
+  "lib_id": "Device:D",
+  "value": "D",
+  "pins": {
+   "1": "N$8",
+   "2": "+12V"
+  }
+ },
+ {
+  "ref": "R10",
+  "lib_id": "Device:R",
+  "value": "10",
+  "pins": {
+   "1": "N$19",
+   "2": "coil_2-"
+  }
+ },
+ {
+  "ref": "R11",
+  "lib_id": "Device:R",
+  "value": "10",
+  "pins": {
+   "1": "N$21",
+   "2": "coil_1-"
+  }
+ },
+ {
+  "ref": "R12",
+  "lib_id": "Device:R",
+  "value": "10",
+  "pins": {
+   "1": "N$23",
+   "2": "coil_2-"
+  }
+ },
+ {
+  "ref": "R5",
+  "lib_id": "Device:R",
+  "value": "10",
+  "pins": {
+   "1": "N$11",
+   "2": "coil_1+"
+  }
+ },
+ {
+  "ref": "R6",
+  "lib_id": "Device:R",
+  "value": "10",
+  "pins": {
+   "1": "N$9",
+   "2": "coil_1+"
+  }
+ },
+ {
+  "ref": "R7",
+  "lib_id": "Device:R",
+  "value": "10",
+  "pins": {
+   "1": "N$13",
+   "2": "coil_2+"
+  }
+ },
+ {
+  "ref": "R8",
+  "lib_id": "Device:R",
+  "value": "10",
+  "pins": {
+   "1": "N$15",
+   "2": "coil_2+"
+  }
+ },
+ {
+  "ref": "R9",
+  "lib_id": "Device:R",
+  "value": "10",
+  "pins": {
+   "1": "N$17",
+   "2": "coil_1-"
+  }
+ },
+ {
+  "ref": "U10",
+  "lib_id": "Driver_FET:FAN7371",
+  "value": "FAN7371",
+  "pins": {
+   "1": "+12V",
+   "2": "delay_2",
+   "3": "nc",
+   "4": "GND",
+   "5": "nc",
+   "6": "N$14",
+   "7": "N$13",
+   "8": "N$3"
+  }
+ },
+ {
+  "ref": "U11",
+  "lib_id": "Driver_FET:FAN7371",
+  "value": "FAN7371",
+  "pins": {
+   "1": "+12V",
+   "2": "delay_2",
+   "3": "nc",
+   "4": "GND",
+   "5": "nc",
+   "6": "N$16",
+   "7": "N$15",
+   "8": "N$4"
+  }
+ },
+ {
+  "ref": "U12",
+  "lib_id": "Driver_FET:FAN7371",
+  "value": "FAN7371",
+  "pins": {
+   "1": "+12V",
+   "2": "#delay_1",
+   "3": "nc",
+   "4": "GND",
+   "5": "nc",
+   "6": "N$18",
+   "7": "N$17",
+   "8": "N$5"
+  }
+ },
+ {
+  "ref": "U13",
+  "lib_id": "Driver_FET:FAN7371",
+  "value": "FAN7371",
+  "pins": {
+   "1": "+12V",
+   "2": "#delay_2",
+   "3": "nc",
+   "4": "GND",
+   "5": "nc",
+   "6": "N$20",
+   "7": "N$19",
+   "8": "N$6"
+  }
+ },
+ {
+  "ref": "U14",
+  "lib_id": "Driver_FET:FAN7371",
+  "value": "FAN7371",
+  "pins": {
+   "1": "+12V",
+   "2": "#delay_1",
+   "3": "nc",
+   "4": "GND",
+   "5": "nc",
+   "6": "N$22",
+   "7": "N$21",
+   "8": "N$7"
+  }
+ },
+ {
+  "ref": "U15",
+  "lib_id": "Driver_FET:FAN7371",
+  "value": "FAN7371",
+  "pins": {
+   "1": "+12V",
+   "2": "#delay_2",
+   "3": "nc",
+   "4": "GND",
+   "5": "nc",
+   "6": "N$24",
+   "7": "N$23",
+   "8": "N$8"
+  }
+ },
+ {
+  "ref": "U8",
+  "lib_id": "Driver_FET:FAN7371",
+  "value": "FAN7371",
+  "pins": {
+   "1": "+12V",
+   "2": "delay_1",
+   "3": "nc",
+   "4": "GND",
+   "5": "nc",
+   "6": "N$10",
+   "7": "N$9",
+   "8": "N$2"
+  }
+ },
+ {
+  "ref": "U9",
+  "lib_id": "Driver_FET:FAN7371",
+  "value": "FAN7371",
+  "pins": {
+   "1": "+12V",
+   "2": "delay_1",
+   "3": "nc",
+   "4": "GND",
+   "5": "nc",
+   "6": "N$12",
+   "7": "N$11",
+   "8": "N$1"
+  }
+ }
+]

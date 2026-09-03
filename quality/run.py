@@ -18,6 +18,7 @@ at 3 whatever the judge thought.
 
 import argparse
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import hashlib
 import html
@@ -30,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import tempfile
 import time
 import tomllib
@@ -41,6 +43,12 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 CASES = Path(__file__).resolve().parent / "cases"
 REFERENCES = Path(__file__).resolve().parent / "references"
+# The human sheet every schematic critic score is calibrated against: equal to it
+# is a 9, better a 10. `dataset-*` cases anchor on their own human original instead.
+ANCHOR_SCHEMATIC = Path(__file__).resolve().parent / "anchor" / "schematic-9.png"
+# Case inputs that describe the answer; the agent never sees them.
+REFERENCE_INPUTS = {"reference.kicad_sch", "reference.png", "reference.svg"}
+CRITIC_SAMPLES = 3
 KICAD_DEMOS = Path(
     "/home/mimi/agent/.local/kicad-10.0.4/AppDir/usr/share/kicad/demos"
 )
@@ -111,6 +119,9 @@ def command(args, *, timeout=600, check=True, env=None, input_text=None):
 
 
 BUILT = {}
+BUILD_LOCK = threading.Lock()
+# Two cases may want the same cached demo render at the same time.
+REFERENCE_LOCK = threading.Lock()
 
 
 def cargo_target_dir():
@@ -126,13 +137,14 @@ def example(package, name):
     target-dir lock — so a concurrent `cargo test` elsewhere on the machine
     could stall a case for as long as that build ran, and land in the timings.
     """
-    if name not in BUILT:
-        command(
-            ["cargo", "build", "--release", "-p", package, "--example", name],
-            timeout=1800,
-        )
-        BUILT[name] = str(cargo_target_dir() / "release" / "examples" / name)
-    return BUILT[name]
+    with BUILD_LOCK:
+        if name not in BUILT:
+            command(
+                ["cargo", "build", "--release", "-p", package, "--example", name],
+                timeout=1800,
+            )
+            BUILT[name] = str(cargo_target_dir() / "release" / "examples" / name)
+        return BUILT[name]
 
 
 def tool(project, name, payload=None, *, allow_failed_verdict=False):
@@ -151,7 +163,7 @@ def prepare_project(case, project):
     source = case / "input"
     if source.is_dir():
         for item in source.iterdir():
-            if item.name in {"seed.place-parts.json", "seed-board"}:
+            if item.name in {"seed.place-parts.json", "seed-board"} | REFERENCE_INPUTS:
                 continue
             target = project / item.name
             if item.is_dir():
@@ -493,6 +505,47 @@ def schematic_facts(project, before_project, artifacts):
     return facts, detail
 
 
+def pin_partition(named_nets):
+    """Every pin grouped by the net it sits on, power symbols dropped.
+
+    Single-pin groups are kept: a sheet whose signals are mostly one pin and a
+    label would otherwise compare as almost nothing, and shorting two of those
+    pins together is exactly the mistake this has to catch.
+    """
+    groups = [sorted(p for p in group if not p.startswith("#")) for group in named_nets]
+    return sorted(group for group in groups if group)
+
+
+def reference_netlist_facts(case, facts, artifacts):
+    """Is the delivered netlist the human original's netlist, pin set for pin set?
+
+    Net *names* are the agent's to choose; what must survive is which pins sit
+    together. A reference that will not export leaves the verdict unmeasured, so
+    the case fails rather than passing on a netlist nobody read.
+    """
+    reference = case / "input" / "reference.kicad_sch"
+    if not reference.is_file():
+        return {}
+    _, named, error = kicad_partition(reference, artifacts / "reference-netlist.xml")
+    if error or named is None:
+        return {"reference_netlist_error": error or "reference netlist not exported"}
+    expected = pin_partition(named.values())
+    delivered = pin_partition((facts.get("kicad_nets") or {}).values())
+    missing = [group for group in expected if group not in delivered]
+    extra = [group for group in delivered if group not in expected]
+    expected_refs = {pin.split(".")[0] for group in expected for pin in group}
+    delivered_refs = {pin.split(".")[0] for group in delivered for pin in group}
+    return {
+        "reference_netlist_error": None,
+        "netlist_matches_reference": bool(expected) and not missing and not extra,
+        "reference_net_count": len(expected),
+        "reference_nets_missing": missing,
+        "reference_nets_extra": extra,
+        "reference_parts_missing": sorted(expected_refs - delivered_refs),
+        "reference_parts_extra": sorted(delivered_refs - expected_refs),
+    }
+
+
 def first_schematic(project):
     """The project's schematic, chosen deterministically so the ERC and the
     netlist export can never end up measuring different sheets."""
@@ -577,7 +630,7 @@ def transcript_facts(artifacts):
     }
 
 
-def deterministic_facts(project, before_project, artifacts, agent_result):
+def deterministic_facts(case, project, before_project, artifacts, agent_result):
     schematic = first_schematic(project)
     board = next(iter(sorted(project.glob("*.kicad_pcb"))), None)
     board_quality = board_quality_facts(project) if board is not None else {}
@@ -603,6 +656,8 @@ def deterministic_facts(project, before_project, artifacts, agent_result):
         **transcript_facts(artifacts),
         **sch,
     }
+    if sch.get("schematic_created"):
+        facts.update(reference_netlist_facts(case, facts, artifacts))
     return facts, detail
 
 
@@ -788,8 +843,9 @@ def render_reference_candidate(kind, source, count):
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", source.stem).strip("-")
     REFERENCES.mkdir(parents=True, exist_ok=True)
     png = REFERENCES / f"{kind}-{count}-{stem}-{digest}-clean-v2.png"
-    if not png.is_file():
-        clean_render(kind, source, png)
+    with REFERENCE_LOCK:
+        if not png.is_file():
+            clean_render(kind, source, png)
     return {"path": str(png), "source": str(source), "part_count": count}
 
 
@@ -848,8 +904,9 @@ ERC, DRC, or connectivity claims from pixels."""
         payload["choices"][0]["message"].get("content") or ""
     )
     score = verdict.get("score")
-    worst = verdict.get("worst_three")
-    changes = verdict.get("what_a_human_would_change")
+    # A judge with nothing to add answers `null`, which is an empty list.
+    worst = verdict.get("worst_three") or []
+    changes = verdict.get("what_a_human_would_change") or []
     if not isinstance(score, int) or isinstance(score, bool) or not 1 <= score <= 10:
         raise ValueError(f"invalid human-look score: {score!r}")
     if not isinstance(worst, list) or not all(isinstance(item, str) for item in worst):
@@ -989,7 +1046,14 @@ capability."""
     }
 
 
-def critic(kind, rendered, prompt, facts, llm):
+def schematic_anchor(case):
+    """The human sheet this case's critic score is calibrated against: the case's
+    own original where there is one, else the suite-wide reference-9 sheet."""
+    own = case / "input" / "reference.png"
+    return (own, True) if own.is_file() else (ANCHOR_SCHEMATIC, False)
+
+
+def critic(kind, rendered, prompt, facts, llm, anchor=None, same_circuit=False):
     """Run one dedicated visual critic with the judge's gateway credentials."""
     path = rendered.get("path")
     if not path:
@@ -1012,6 +1076,10 @@ def critic(kind, rendered, prompt, facts, llm):
         model,
         "--json-only",
     ]
+    if kind == "schematic" and anchor is not None:
+        args.extend(["--anchor", str(anchor), "--samples", str(CRITIC_SAMPLES)])
+        if same_circuit:
+            args.append("--anchor-same-circuit")
     if kind == "pcb":
         args.extend(
             [
@@ -1054,6 +1122,7 @@ def critic(kind, rendered, prompt, facts, llm):
         ) from error
     score = verdict.get("score")
     issues = verdict.get("defects", [])
+    samples = verdict.get("samples")
     if (
         isinstance(score, bool)
         or not isinstance(score, (int, float))
@@ -1063,17 +1132,23 @@ def critic(kind, rendered, prompt, facts, llm):
         or not all(isinstance(issue, dict) for issue in issues)
     ):
         raise ValueError(f"invalid {kind} critic verdict: {verdict!r}")
-    return {"score": score, "issues": issues}
+    result = {"score": score, "issues": issues}
+    if samples:
+        result["samples"] = samples
+    if kind == "schematic" and anchor is not None:
+        result["anchor"] = str(anchor)
+        result["anchor_same_circuit"] = same_circuit
+    return result
 
 
 # --- render + run -----------------------------------------------------------
 
 
-def rasterize_clean_svg(svg, png, size=CLEAN_RENDER_SIZE):
-    """Rasterize one transparent KiCad SVG with a tight, consistent frame."""
+def frame_render(source, png, size=CLEAN_RENDER_SIZE):
+    """Trim, pad and scale one rasterized page into a judge PNG."""
     command(
         [
-            "magick", "-density", CLEAN_RENDER_DENSITY, str(svg),
+            "magick", "-density", CLEAN_RENDER_DENSITY, str(source),
             "-trim", "+repage", "-bordercolor", "white", "-border", "24",
             "-background", "white", "-alpha", "remove", "-alpha", "off",
             "-resize", size, str(png),
@@ -1081,7 +1156,37 @@ def rasterize_clean_svg(svg, png, size=CLEAN_RENDER_SIZE):
         timeout=180,
     )
     if not png.is_file():
-        raise RuntimeError(f"SVG conversion produced no PNG: {png}")
+        raise RuntimeError(f"page conversion produced no PNG: {png}")
+
+
+def rasterize_clean_svg(svg, png, size=CLEAN_RENDER_SIZE):
+    """Rasterize one transparent KiCad SVG with a tight, consistent frame."""
+    frame_render(svg, png, size)
+
+
+def rasterize_schematic_pdf(source, png, temporary, size=CLEAN_RENDER_SIZE):
+    """The rescue path for a sheet ImageMagick's own SVG renderer refuses.
+
+    Dense sheets hit its `vector graphics nested too deeply` limit; KiCad's PDF
+    of the same sheet, rasterized by poppler, is the same drawing.
+    """
+    pdf = temporary / "schematic.pdf"
+    command(
+        [
+            kicad_cli(), "sch", "export", "pdf", "--output", str(pdf),
+            "--exclude-drawing-sheet", "--no-background-color", str(source),
+        ],
+        timeout=180,
+    )
+    pages = temporary / "page"
+    command(
+        ["pdftoppm", "-r", CLEAN_RENDER_DENSITY, "-png", str(pdf), str(pages)],
+        timeout=180,
+    )
+    rendered = sorted(temporary.glob("page*.png"))
+    if not rendered:
+        raise RuntimeError(f"PDF rasterization produced no page: {source}")
+    frame_render(rendered[0], png, size)
 
 
 def kicad10_schematic_render_source(source, temporary):
@@ -1172,7 +1277,10 @@ def clean_render(kind, source, destination):
                 raise RuntimeError(f"KiCad schematic SVG export failed: {detail}")
             svg = svg_stem.with_suffix(".svg")
             shutil.copy2(rendered[0], svg)
-            rasterize_clean_svg(svg, destination)
+            try:
+                rasterize_clean_svg(svg, destination)
+            except RuntimeError:
+                rasterize_schematic_pdf(render_source, destination, temporary)
             return {"path": str(destination), "svg_paths": [str(svg)]}
 
         if kind != "pcb":
@@ -1571,7 +1679,7 @@ def run_case(case, output_root):
         encoding="utf-8",
     )
 
-    facts, detail = deterministic_facts(project, before_project, artifacts, result)
+    facts, detail = deterministic_facts(case, project, before_project, artifacts, result)
     renders["after"] = phases[-1]["renders"]
     facts.update(schematic_visual_facts(renders) if first_schematic(project) else {})
     facts.update(turn_facts)
@@ -1593,11 +1701,14 @@ def run_case(case, output_root):
     except Exception as error:
         llm = None
 
+    anchor, same_circuit = schematic_anchor(case)
     for kind in ("schematic", "pcb"):
         key = f"critic_{kind}"
         rendered = renders.get("after", {}).get(kind, {})
+        arguments = (kind, rendered, prompt, facts, llm)
+        keywords = {"anchor": anchor, "same_circuit": same_circuit} if kind == "schematic" else {}
         if not rendered.get("path"):
-            report[key] = critic(kind, rendered, prompt, facts, llm)
+            report[key] = critic(*arguments, **keywords)
         elif llm is None:
             report[key] = {
                 "score": None,
@@ -1606,7 +1717,7 @@ def run_case(case, output_root):
             }
         else:
             try:
-                report[key] = critic(kind, rendered, prompt, facts, llm)
+                report[key] = critic(*arguments, **keywords)
             except Exception as error:
                 report[key] = {"score": None, "issues": [], "error": str(error)}
 
@@ -1640,7 +1751,10 @@ def run_case(case, output_root):
                     "error": str(error),
                 }
     facts["human_look"] = human_look
+    facts["critic_anchor"] = str(anchor)
     facts["schematic_critic_score"] = report["critic_schematic"].get("score")
+    if same_circuit:
+        facts["critic_vs_reference"] = facts["schematic_critic_score"]
     facts["pcb_critic_score"] = report["critic_pcb"].get("score")
     facts["human_look_schematic_score"] = human_look["schematic"].get("score")
     facts["human_look_pcb_score"] = human_look["pcb"].get("score")
@@ -1942,9 +2056,35 @@ def row(report):
     ]
 
 
-def scoreboard(reports):
-    rows = [COLUMNS] + [row(report) for report in reports]
-    widths = [max(len(r[i]) for r in rows) for i in range(len(COLUMNS))]
+SCHEMATIC_COLUMNS = [
+    "case", "parts", "netlist", "erc e/w", "critic", "human look", "agent s",
+]
+
+
+def schematic_row(report):
+    """The benchmark view: did the circuit come out right, and does it read well."""
+    if "error" in report:
+        return [report["case"]] + ["-"] * (len(SCHEMATIC_COLUMNS) - 2) + [report["error"][:60]]
+    match = report.get("netlist_matches_reference")
+    critic = report.get("critic_schematic", {})
+    score = critic.get("score")
+    samples = critic.get("samples")
+    return [
+        report["case"],
+        str(report.get("part_count", "-")),
+        "-" if match is None else ("yes" if match else "NO"),
+        f"{report.get('erc_errors', '?')}/{report.get('erc_warnings', '?')}",
+        "-" if score is None else (
+            f"{score:g}" + (f" {samples}" if samples and len(set(samples)) > 1 else "")
+        ),
+        human_look_score(report).split("/")[0],
+        f"{report.get('agent_seconds', 0):.0f}s",
+    ]
+
+
+def scoreboard(reports, columns=COLUMNS, row_of=row):
+    rows = [columns] + [row_of(report) for report in reports]
+    widths = [max(len(r[i]) for r in rows) for i in range(len(columns))]
     lines = ["| " + " | ".join(c.ljust(w) for c, w in zip(rows[0], widths)) + " |"]
     lines.append("| " + " | ".join("-" * w for w in widths) + " |")
     for r in rows[1:]:
@@ -1952,16 +2092,33 @@ def scoreboard(reports):
     return "\n".join(lines)
 
 
+def suite_view(suite):
+    """Columns and row builder for a suite's scoreboard."""
+    if suite == "schematic":
+        return SCHEMATIC_COLUMNS, schematic_row
+    return COLUMNS, row
+
+
+SUITES = {
+    "campaign": lambda name: name.startswith("campaign-"),
+    # The schematic benchmark: human sheets redrawn from their netlist, and
+    # generic circuit prompts.
+    "schematic": lambda name: name.startswith(("dataset-", "prompt-")),
+    "live-edit": lambda name: name.startswith("sch-"),
+    "pcb": lambda name: not name.startswith(("campaign-", "dataset-", "prompt-", "sch-")),
+    "all": lambda name: True,
+}
+
+
+def futures_report(futures, name):
+    """The finished report for one case, in the order the suite lists it."""
+    return next(future.result() for future, queued in futures.items() if queued == name)
+
+
 def select(available, args):
     if args.cases:
         return args.cases
-    if args.suite == "campaign":
-        return sorted(n for n in available if n.startswith("campaign-"))
-    if args.suite == "schematic":
-        return sorted(n for n in available if n.startswith("sch-"))
-    if args.suite == "pcb":
-        return sorted(n for n in available if not n.startswith("sch-"))
-    return sorted(available)
+    return sorted(name for name in available if SUITES[args.suite](name))
 
 
 def main():
@@ -1970,9 +2127,13 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("quality/runs"))
     parser.add_argument(
         "--suite",
-        choices=["campaign", "schematic", "pcb", "all"],
+        choices=sorted(SUITES),
         default="all",
-        help="campaign runs campaign-*, schematic runs sch-*, pcb runs the rest",
+        help="schematic runs dataset-*/prompt-*, campaign campaign-*, "
+             "live-edit sch-*, pcb the rest",
+    )
+    parser.add_argument(
+        "--jobs", type=int, default=1, help="cases to run at a time (default: 1)"
     )
     parser.add_argument("--scoreboard", type=Path, help="write the scoreboard here too")
     parser.add_argument(
@@ -1983,6 +2144,9 @@ def main():
     )
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
+    if args.jobs < 1:
+        parser.error("--jobs must be at least 1")
+
     available = {path.name: path for path in CASES.iterdir() if path.is_dir()}
     if args.list:
         print("\n".join(select(available, args)))
@@ -1998,19 +2162,34 @@ def main():
             file=sys.stderr,
         )
 
-    reports = []
-    for name in selected:
+    columns, row_of = suite_view(args.suite)
+
+    def one(name):
         try:
-            report = run_case(available[name], output)
+            return run_case(available[name], output)
         except Exception as error:
-            report = recover_failed_report(output, name, error)
             print(f"{name}: {error}", file=sys.stderr)
-        reports.append(report)
-        print(" | ".join(row(report)), flush=True)
+            return recover_failed_report(output, name, error)
+
+    def announce(report):
+        print(" | ".join(row_of(report)), flush=True)
         for failure in report.get("checks", {}).get("fail", []):
             print(f"    failed check: {failure}", flush=True)
 
-    table = scoreboard(reports)
+    if args.jobs == 1:
+        reports = []
+        for name in selected:
+            report = one(name)
+            reports.append(report)
+            announce(report)
+    else:
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            futures = {pool.submit(one, name): name for name in selected}
+            for future in as_completed(futures):
+                announce(future.result())
+            reports = [futures_report(futures, name) for name in selected]
+
+    table = scoreboard(reports, columns, row_of)
     print("\n" + table)
     if args.scoreboard:
         args.scoreboard.write_text(table + "\n", encoding="utf-8")

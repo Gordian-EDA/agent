@@ -1,0 +1,342 @@
+Draw this circuit as a schematic from the netlist in netlist.json: every part with its lib id and value, every pin on exactly the net given. Do not add or remove parts. A pin whose net is "nc" stays unconnected. The sheet is titled "22e02ab9e857". Render the schematic when it is done.
+
+netlist.json:
+[
+ {
+  "ref": "C112",
+  "lib_id": "Device:C",
+  "value": "0.1\u00b5F",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C113",
+  "lib_id": "Device:C",
+  "value": "0.1\u00b5F",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C114",
+  "lib_id": "Device:C",
+  "value": "0.1\u00b5F",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C115",
+  "lib_id": "Device:C",
+  "value": "10nF",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C117",
+  "lib_id": "Device:C",
+  "value": "4.7\u00b5F",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C118",
+  "lib_id": "Device:C",
+  "value": "1\u00b5F",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C128",
+  "lib_id": "Device:C",
+  "value": "0.1\u00b5F",
+  "pins": {
+   "1": "N$1",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C129",
+  "lib_id": "Device:C",
+  "value": "0.1\u00b5F",
+  "pins": {
+   "1": "N$1",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C130",
+  "lib_id": "Device:C_Polarized_US",
+  "value": "470\u00b5F",
+  "pins": {
+   "1": "N$1",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "D15",
+  "lib_id": "Diode:1N4007",
+  "value": "1N4007",
+  "pins": {
+   "1": "N$1",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "J10",
+  "lib_id": "Connector_Generic:Conn_01x04",
+  "value": "SWD",
+  "pins": {
+   "1": "+3V3",
+   "2": "SWDIO",
+   "3": "SWCLK",
+   "4": "GND"
+  }
+ },
+ {
+  "ref": "J11",
+  "lib_id": "Connector_Generic:Conn_01x04",
+  "value": "UART",
+  "pins": {
+   "1": "+3V3",
+   "2": "TX",
+   "3": "RX",
+   "4": "GND"
+  }
+ },
+ {
+  "ref": "J12",
+  "lib_id": "Connector_Generic:Conn_01x04",
+  "value": "I2C1",
+  "pins": {
+   "1": "+3V3",
+   "2": "SCL1",
+   "3": "SDA1",
+   "4": "GND"
+  }
+ },
+ {
+  "ref": "J16",
+  "lib_id": "Connector_Generic:Conn_01x02",
+  "value": "~",
+  "pins": {
+   "1": "+5V",
+   "2": "N$2"
+  }
+ },
+ {
+  "ref": "J18",
+  "lib_id": "Connector_Generic:Conn_01x04",
+  "value": "~",
+  "pins": {
+   "1": "GND",
+   "2": "N$1",
+   "3": "nc",
+   "4": "N$3"
+  }
+ },
+ {
+  "ref": "J19",
+  "lib_id": "Connector_Generic:Conn_01x04",
+  "value": "~",
+  "pins": {
+   "1": "GND",
+   "2": "N$1",
+   "3": "nc",
+   "4": "N$3"
+  }
+ },
+ {
+  "ref": "Q16",
+  "lib_id": "Transistor_FET:AO3401A",
+  "value": "AO3401A",
+  "pins": {
+   "1": "N$4",
+   "2": "+12V",
+   "3": "N$1"
+  }
+ },
+ {
+  "ref": "Q17",
+  "lib_id": "Transistor_FET:BSS214NW",
+  "value": "2N7002W",
+  "pins": {
+   "1": "N$5",
+   "2": "GND",
+   "3": "N$4"
+  }
+ },
+ {
+  "ref": "R19",
+  "lib_id": "Device:R",
+  "value": "4.7k",
+  "pins": {
+   "1": "+3V3",
+   "2": "SCL2"
+  }
+ },
+ {
+  "ref": "R20",
+  "lib_id": "Device:R",
+  "value": "4.7k",
+  "pins": {
+   "1": "+3V3",
+   "2": "SDA2"
+  }
+ },
+ {
+  "ref": "R33",
+  "lib_id": "Device:R",
+  "value": "10k",
+  "pins": {
+   "1": "+3V3",
+   "2": "SCL1"
+  }
+ },
+ {
+  "ref": "R34",
+  "lib_id": "Device:R",
+  "value": "10k",
+  "pins": {
+   "1": "+3V3",
+   "2": "SDA1"
+  }
+ },
+ {
+  "ref": "R74",
+  "lib_id": "Device:R_Small",
+  "value": "47k",
+  "pins": {
+   "1": "~{CASE_LED}",
+   "2": "N$2"
+  }
+ },
+ {
+  "ref": "R75",
+  "lib_id": "Device:R_Small",
+  "value": "100",
+  "pins": {
+   "1": "FAN_ON",
+   "2": "N$5"
+  }
+ },
+ {
+  "ref": "R76",
+  "lib_id": "Device:R_Small",
+  "value": "330",
+  "pins": {
+   "1": "FAN_PWM",
+   "2": "N$3"
+  }
+ },
+ {
+  "ref": "R77",
+  "lib_id": "Device:R",
+  "value": "10k",
+  "pins": {
+   "1": "+12V",
+   "2": "N$4"
+  }
+ },
+ {
+  "ref": "R84",
+  "lib_id": "Device:R_Small",
+  "value": "1k",
+  "pins": {
+   "1": "GND",
+   "2": "N$6"
+  }
+ },
+ {
+  "ref": "R85",
+  "lib_id": "Device:R_Small",
+  "value": "10k",
+  "pins": {
+   "1": "~{RST}",
+   "2": "+3V3"
+  }
+ },
+ {
+  "ref": "R86",
+  "lib_id": "Device:R",
+  "value": "100k",
+  "pins": {
+   "1": "N$7",
+   "2": "+3V3"
+  }
+ },
+ {
+  "ref": "TH1",
+  "lib_id": "Device:Thermistor_NTC",
+  "value": "NCP15WF104F03RC",
+  "pins": {
+   "1": "N$7",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "U12",
+  "lib_id": "MCU_ST_STM32F0:STM32F030C8Tx",
+  "value": "STM32F030C8Tx",
+  "pins": {
+   "1": "+3V3",
+   "2": "PC13",
+   "3": "PC14",
+   "4": "PC15",
+   "5": "PF0",
+   "6": "PF1",
+   "7": "~{RST}",
+   "8": "GND",
+   "9": "+3V3",
+   "10": "PA0",
+   "11": "PA1",
+   "12": "PA2",
+   "13": "PA3",
+   "14": "PA4",
+   "15": "PA5",
+   "16": "nc",
+   "17": "nc",
+   "18": "nc",
+   "19": "N$7",
+   "20": "PB2",
+   "21": "SCL2",
+   "22": "SDA2",
+   "23": "GND",
+   "24": "+3V3",
+   "25": "PB12",
+   "26": "PB13",
+   "27": "PB14",
+   "28": "nc",
+   "29": "nc",
+   "30": "TX",
+   "31": "RX",
+   "32": "nc",
+   "33": "FAN_ON",
+   "34": "SWDIO",
+   "35": "nc",
+   "36": "~{CASE_LED}",
+   "37": "SWCLK",
+   "38": "PA15",
+   "39": "FAN_PWM",
+   "40": "PB4",
+   "41": "PB5",
+   "42": "PB6",
+   "43": "nc",
+   "44": "N$6",
+   "45": "SCL1",
+   "46": "SDA1",
+   "47": "GND",
+   "48": "+3V3"
+  }
+ }
+]

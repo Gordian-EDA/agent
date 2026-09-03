@@ -1,0 +1,1 @@
+Design an STM32F103C8T6 'Blue Pill' development board: 8 MHz HSE crystal and 32.768 kHz LSE crystal with load capacitors, BOOT0/BOOT1 jumpers, reset button, micro-USB connector with the 1.5k D+ pull-up, an AMS1117-3.3 regulator with bulk and decoupling capacitors, power and user LEDs, an SWD header, and all GPIO broken out on two headers. Render the schematic.
