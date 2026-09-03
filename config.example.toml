@@ -29,7 +29,6 @@ reviewFixRounds = 1
 [review]
 retryJson = false
 ensemble = false
-layout = true
 
 [tools]
 defaultSearchLimit = 8

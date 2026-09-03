@@ -605,7 +605,7 @@ fn sanitize_place_parts_input(input: &mut Value) -> Vec<String> {
                 .expect("just checked")
                 .iter()
                 .filter(|(field, value)| match field.as_str() {
-                    "rails" | "ports" | "place" => !value.is_object(),
+                    "rails" | "ports" => !value.is_object(),
                     _ => false,
                 })
                 .map(|(field, _)| field.clone())

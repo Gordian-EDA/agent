@@ -209,8 +209,6 @@ pub struct ReviewConfig {
     /// Use the broader diverse-lens netlist review ensemble instead of the
     /// single quick lens.
     pub ensemble: bool,
-    /// Run visual layout review when the calling workflow supports image input.
-    pub layout: bool,
 }
 
 impl Default for ReviewConfig {
@@ -218,7 +216,6 @@ impl Default for ReviewConfig {
         Self {
             retry_json: false,
             ensemble: false,
-            layout: true,
         }
     }
 }
