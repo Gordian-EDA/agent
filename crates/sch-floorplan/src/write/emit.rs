@@ -533,15 +533,15 @@ mod tests {
     }
 
     #[test]
-    fn small_sheet_takes_a_standard_page() {
+    fn small_sheet_takes_the_smallest_standard_page() {
         let mut w = SchematicWriter::new();
         w.set_title("my_board");
         w.add_junction_on_net([25.4, 25.4], "N1");
 
         let text = w.finish();
         assert!(
-            text.contains("(paper \"A4\")"),
-            "a sheet this small belongs on A4, got {:?}",
+            text.contains("(paper \"A5\")"),
+            "a sheet this small belongs on A5, got {:?}",
             text.lines().find(|l| l.contains("(paper")),
         );
         assert!(
