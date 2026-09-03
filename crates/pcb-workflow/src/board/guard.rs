@@ -2,15 +2,16 @@
 //!
 //! The invariant is one-directional: the board's copper may connect *less* than
 //! the schematic asks — an unrouted net is honest work still to do — but never
-//! *more*. A short is a defect no result payload can excuse, and neither is a
-//! clearance fault the edit itself introduced.
+//! *more*. A short is a connectivity change no result payload can excuse.
+//! Geometry findings are visible partial work: the edit stays written and the
+//! result names every finding it introduced.
 //!
 //! So a mutator never writes unguarded. It opens a [`Guard`] (which saves any
 //! live session, snapshots the `.kicad_pcb`, and records the defects the board
 //! *already* had), makes its edit, and hands the result to [`Guard::commit`].
 //! The guard re-reads the board, diffs its defects against the baseline, and
-//! either accepts the result or restores the snapshot and refuses with the
-//! violations it found.
+//! either accepts the result with any geometry findings or restores the
+//! snapshot when connectivity changed.
 //!
 //! Faults are compared as `(rule, the nets involved)`, not as exact payloads:
 //! copper moves, so coordinates move with it, but the *fault* does not. A board
@@ -378,7 +379,8 @@ impl Guard {
         merge_into(error, json!({ "restored": restored }))
     }
 
-    /// Check the edited board, accepting it when honest or restoring it on refusal.
+    /// Check the edited board, keeping geometry defects as partial work and
+    /// restoring only a connectivity-changing edit.
     pub(crate) fn commit(self, ctx: &AgentRuntime, result: Value) -> Value {
         let Some(before) = self.before.as_ref() else {
             self.phase.facts(None, None, Some(0));
@@ -408,13 +410,36 @@ impl Guard {
             outside_outline,
             copper_outside_outline,
         } = introduced(before, &after, &explained);
-        if shorts.is_empty()
-            && introduced.is_empty()
-            && outside_outline.is_empty()
-            && copper_outside_outline.is_empty()
-        {
+        let geometry_finding_count =
+            introduced.len() + outside_outline.len() + copper_outside_outline.len();
+        if shorts.is_empty() && geometry_finding_count == 0 {
             self.phase.facts(None, None, Some(0));
             return result;
+        }
+        if shorts.is_empty() {
+            self.phase.facts(None, None, Some(geometry_finding_count));
+            tracing::info!(
+                tool = self.tool,
+                findings = geometry_finding_count,
+                "board guard kept an honest partial edit"
+            );
+            return merge_into(
+                result,
+                json!({
+                    "partial": true,
+                    "guard_findings": {
+                        "violations": introduced
+                            .iter()
+                            .map(|fault| fault.json.clone())
+                            .collect::<Vec<_>>(),
+                        "outside_outline": outside_outline,
+                        "copper_outside_outline": copper_outside_outline,
+                        "unrouted": after.unrouted.iter().collect::<Vec<_>>(),
+                    },
+                    "guard_note": "the edit was kept because it did not change connectivity; fix \
+                                   the reported geometry findings in a later board step",
+                }),
+            );
         }
         let shorts: Vec<Value> = shorts
             .iter()
@@ -423,51 +448,73 @@ impl Guard {
 
         let restored = self.restore(ctx);
         let tool = self.tool;
-        let headline = if !outside_outline.is_empty() || !copper_outside_outline.is_empty() {
-            format!("{tool} refused: the edit moved board geometry outside the outline")
-        } else if shorts.is_empty() {
-            format!(
-                "{tool} refused: the edit introduced {} design-rule violation(s) the board did \
-                 not have",
-                introduced.len()
-            )
-        } else {
-            format!(
-                "{tool} refused: the edit would short {} net pair(s) the schematic keeps apart",
-                shorts.len()
-            )
-        };
-        self.phase.facts(
-            None,
-            None,
-            Some(
-                shorts.len()
-                    + introduced.len()
-                    + outside_outline.len()
-                    + usize::from(!copper_outside_outline.is_empty()),
-            ),
+        let headline = format!(
+            "{tool} refused: the edit would short {} net pair(s) the schematic keeps apart",
+            shorts.len()
         );
+        self.phase.facts(None, None, Some(shorts.len()));
         tracing::info!(tool, reason = %headline, "board guard refusal");
         json!({
             "ok": false,
             "error": headline,
-            "code": "board_guard_refused",
+            "code": "connectivity_change_refused",
             "shorts": shorts,
-            "violations": introduced.iter().map(|fault| fault.json.clone()).collect::<Vec<_>>(),
-            "outside_outline": outside_outline,
-            "copper_outside_outline": !copper_outside_outline.is_empty(),
-            // Honest, not blocking: what the board still has left to route. A
-            // net here is a to-do, and it is reported so the caller can tell it
-            // apart from the defects above.
-            "unrouted": after.unrouted.iter().collect::<Vec<_>>(),
             "restored": restored,
             "note": if restored {
-                "the board is back to its pre-edit state; nothing was written. Fix what the \
-                 violations name — delete the offending copper, move the part, or widen the \
-                 board — then try again."
+                "the board is back to its pre-edit state; nothing was written because the edit \
+                 would have silently changed connectivity"
             } else {
                 "the board could NOT be put back — stop editing and recover the project files."
             },
+        })
+    }
+
+    /// Accept a copper-only deletion after proving it did not create a short.
+    ///
+    /// Removing track or via geometry can expose pre-existing geometry findings
+    /// to the lint's attribution, but it cannot create a clearance collision.
+    /// Open nets are the intended effect and belong in the tool result rather
+    /// than in the refusal path.
+    pub(crate) fn commit_copper_deletion(self, ctx: &AgentRuntime, result: Value) -> Value {
+        let Some(before) = self.before.as_ref() else {
+            self.phase.facts(None, None, Some(0));
+            return result;
+        };
+        let board = match crate::active_board(ctx) {
+            Ok(board) => board,
+            Err(error) => {
+                let tool = self.tool;
+                self.phase.facts(None, None, Some(1));
+                let restored = self.restore(ctx);
+                return json!({
+                    "ok": false,
+                    "error": format!("{tool}: the edited board could not be read back: {error}"),
+                    "code": "board_unreadable_after_edit",
+                    "restored": restored,
+                });
+            }
+        };
+        let (after, _) = Defects::of(&board);
+        let shorts = after
+            .shorts
+            .difference(&before.shorts)
+            .map(|(a, b)| json!({ "a": a, "b": b }))
+            .collect::<Vec<_>>();
+        if shorts.is_empty() {
+            self.phase.facts(None, None, Some(0));
+            return result;
+        }
+        self.phase.facts(None, None, Some(shorts.len()));
+        let restored = self.restore(ctx);
+        json!({
+            "ok": false,
+            "error": format!(
+                "{} refused: the edit would short net pairs the schematic keeps apart",
+                self.tool
+            ),
+            "code": "connectivity_change_refused",
+            "shorts": shorts,
+            "restored": restored,
         })
     }
 

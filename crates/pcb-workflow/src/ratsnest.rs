@@ -169,9 +169,14 @@ pub(crate) fn build(
         let obstruction = (status == Status::Open && on_staged.is_empty())
             .then(|| obstruction_between(problem, &board.imported.parts, net, from, to))
             .flatten();
-        let status = match (status, &obstruction) {
-            (Status::Open, Some(_)) => Status::Blocked,
-            (status, _) => status,
+        let plane_partial = reasons.get(net).is_some_and(|records| {
+            records
+                .iter()
+                .any(|reason| reason.contains("copper pour reaches only part"))
+        });
+        let status = match (status, &obstruction, plane_partial) {
+            (Status::Open, Some(_), _) | (Status::Open, None, true) => Status::Blocked,
+            (status, _, _) => status,
         };
         let mut entry = json!({
             "net": net,
@@ -182,6 +187,19 @@ pub(crate) fn build(
         if let Some(object) = entry.as_object_mut() {
             if let Some(obstruction) = &obstruction {
                 object.insert("blocker".to_owned(), obstruction.to_blocker_json());
+            } else if plane_partial {
+                object.insert(
+                    "blocker".to_owned(),
+                    json!({
+                        "kind": "zone",
+                        "owner_ref": Value::Null,
+                        "net": net,
+                        "layer": to.layer,
+                        "at": [to.at.x, to.at.y],
+                        "gap_mm": 0.0,
+                        "need_mm": problem.clearance,
+                    }),
+                );
             }
             if status != Status::Routed {
                 object.insert(

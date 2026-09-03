@@ -362,8 +362,8 @@ pub(crate) struct Terminal {
     pub(crate) pad: String,
     /// The footprint owning the pad, when there is one.
     pub(crate) reference: Option<String>,
-    at: Point2,
-    layer: String,
+    pub(crate) at: Point2,
+    pub(crate) layer: String,
 }
 
 impl Terminal {

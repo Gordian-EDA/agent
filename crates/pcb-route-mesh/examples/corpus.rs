@@ -1,4 +1,4 @@
-//! Routing-only scoreboard over the seven `--required` corpus boards.
+//! Routing-only scoreboard over the required corpus plus large-board stress cases.
 //!
 //! `fixtures/corpus/*.json` are the prepared [`RoutingView`]s the workflow hands
 //! the router for those boards, captured once. The placer is budget-driven and
@@ -18,13 +18,14 @@ use pcb_route_grid::router::{GridRouter, GridSinglePassRouter};
 use pcb_route_mesh::deps::MeshDeps;
 use pcb_route_mesh::pipeline::MeshRouter;
 
-const BOARDS: [&str; 8] = [
+const BOARDS: [&str; 9] = [
     "rc-divider",
     "transistor-led-driver",
     "keepout-route",
     "rc-lowpass-chain",
     "power-buck",
     "led-array",
+    "led-array-60",
     "bga25-route",
     "mcu-board",
 ];

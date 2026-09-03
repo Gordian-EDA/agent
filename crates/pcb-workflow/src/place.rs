@@ -106,6 +106,7 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
 
     let net_pins = snapshot_net_pin_counts(&board);
+    let schematic_changes = crate::sync::schematic_net_changes(ctx, &board).unwrap_or_default();
     let nets: Vec<Value> = net_pins
         .iter()
         .map(|(name, &pins)| json!({ "name": name, "pins": pins }))
@@ -155,6 +156,17 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Some(net) = net_filter
         && !net_pins.contains_key(net)
     {
+        if !schematic_changes.is_empty() {
+            return Ok(json!({
+                "error": format!(
+                    "run sync_board first (schematic changed: nets {})",
+                    schematic_changes.join(", ")
+                ),
+                "code": "board_net_table_stale",
+                "schematic_changed": { "nets": schematic_changes },
+                "next_tool": "sync_board",
+            }));
+        }
         return Ok(json!({ "error": format!("no net named `{net}` on this board") }));
     }
     let include_copper = net_filter.is_some()
@@ -182,7 +194,7 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             json!(crate::ratsnest::build(&board, &board.problem, &[], Some(&scope)).entries);
     }
 
-    Ok(json!({
+    let mut output = json!({
         "board": board_json,
         "summary": {
             "part_count": board.imported.parts.len(),
@@ -199,7 +211,17 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 containment.outside_outline.into_iter(),
             ),
         },
-    }))
+    });
+    if !schematic_changes.is_empty() {
+        output["sync_required"] = json!(true);
+        output["schematic_changed"] = json!({ "nets": schematic_changes });
+        output["next_tool"] = json!("sync_board");
+        output["note"] = json!(format!(
+            "run sync_board first (schematic changed: nets {})",
+            schematic_changes.join(", ")
+        ));
+    }
+    Ok(output)
 }
 
 const MAX_FILTERED_TERMINALS: usize = 128;
@@ -2743,16 +2765,13 @@ fn subset_selection(
         }
         return Ok((Some(refs), Some(bbox)));
     }
-    Ok((subset_refs(input, board)?, None))
+    Ok((subset_refs(input)?, None))
 }
 
 /// The `refs` a call names, checked against the board. Naming a part that is
 /// not there is a mistake worth catching: the placer would otherwise silently
 /// lay out nothing and report a legal placement.
-fn subset_refs(
-    input: &Value,
-    board: &BoardSnapshot,
-) -> std::result::Result<Option<Vec<String>>, String> {
+fn subset_refs(input: &Value) -> std::result::Result<Option<Vec<String>>, String> {
     let Some(value) = input.get("refs") else {
         return Ok(None);
     };
@@ -2766,35 +2785,50 @@ fn subset_refs(
                 .ok_or_else(|| "each entry of refs must be a reference string".to_owned())
         })
         .collect::<std::result::Result<_, _>>()?;
-    if refs.is_empty() {
-        return Err("refs was empty — omit it to place the whole board".to_owned());
-    }
-    check_references(refs.iter().map(String::as_str), board, "refs")?;
     Ok(Some(refs))
 }
 
-/// Every named reference must be on this board.
-fn check_references<'a>(
-    named: impl Iterator<Item = &'a str>,
+/// Classify every requested reference without blocking valid placement work.
+fn placement_reference_status(
+    named: &std::collections::BTreeSet<String>,
+    known: &std::collections::BTreeSet<String>,
     board: &BoardSnapshot,
-    what: &str,
-) -> std::result::Result<(), String> {
-    let known: std::collections::BTreeSet<&str> = board
-        .imported
-        .parts
+    ctx: &AgentRuntime,
+) -> Vec<Value> {
+    let staged = crate::staging::staged_references(board);
+    let schematic = crate::sync::schematic_references(ctx).unwrap_or_default();
+    named
         .iter()
-        .map(|part| part.reference.as_str())
-        .collect();
-    let unknown: Vec<&str> = named.filter(|name| !known.contains(name)).collect();
-    if unknown.is_empty() {
-        return Ok(());
-    }
-    Err(format!(
-        "{what} names {} which {} not on this board; the board has {}",
-        unknown.join(", "),
-        if unknown.len() == 1 { "is" } else { "are" },
-        known.into_iter().collect::<Vec<_>>().join(", "),
-    ))
+        .map(|reference| {
+            if known.contains(reference) {
+                return json!({
+                    "reference": reference,
+                    "status": if staged.contains(reference) { "staged" } else { "on_board" },
+                });
+            }
+            if let Some(alias) = known
+                .iter()
+                .find(|candidate| candidate.eq_ignore_ascii_case(reference))
+            {
+                return json!({
+                    "reference": reference,
+                    "status": "on_board_under_another_ref",
+                    "board_reference": alias,
+                });
+            }
+            if schematic.contains(reference) {
+                return json!({
+                    "reference": reference,
+                    "status": "absent_from_board",
+                    "next": "run sync_board to stage this schematic part",
+                });
+            }
+            json!({
+                "reference": reference,
+                "status": "absent_from_schematic",
+            })
+        })
+        .collect()
 }
 
 /// Lock the parts a caller pinned to a board edge whose position is physical:
@@ -2874,12 +2908,32 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Err(live_err) => return Ok(json!({ "error": live_err })),
     };
     let phase = crate::WorkflowPhase::start("place", board.imported.parts.len(), 0);
-    let (refs, bbox) = match subset_selection(&input, &board) {
-        Ok(selection) => selection,
+    let mut intent = match crate::intent::parse(&input) {
+        Ok(intent) => intent,
         Err(error) => return Ok(json!({ "error": error })),
     };
-    let intent = match crate::intent::parse(&input) {
-        Ok(intent) => intent,
+    let known = board
+        .imported
+        .parts
+        .iter()
+        .map(|part| part.reference.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut named = input
+        .get("refs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    named.extend(intent.references().into_iter().map(str::to_owned));
+    let reference_status = placement_reference_status(&named, &known, &board, ctx);
+    if let Some(refs) = input.get_mut("refs").and_then(Value::as_array_mut) {
+        refs.retain(|reference| reference.as_str().is_some_and(|name| known.contains(name)));
+    }
+    intent.retain_references(&known);
+    let (refs, bbox) = match subset_selection(&input, &board) {
+        Ok(selection) => selection,
         Err(error) => return Ok(json!({ "error": error })),
     };
     let edge_intent: std::collections::BTreeSet<String> = intent
@@ -2887,9 +2941,6 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .into_iter()
         .map(str::to_owned)
         .collect();
-    if let Err(error) = check_references(intent.references().into_iter(), &board, "intent") {
-        return Ok(json!({ "error": error }));
-    }
     let replace = input
         .get("replace")
         .and_then(Value::as_bool)
@@ -2916,6 +2967,9 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "Every selected part without a usable footprint remains staged. Assign or repair \
                  those footprints, run sync_board, then place_board again."
             );
+        }
+        if !reference_status.is_empty() {
+            result["reference_status"] = json!(reference_status);
         }
         return Ok(result);
     }
@@ -3415,6 +3469,9 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "intent.zones are board rules, not placement: pass them to \
              sync_board({rules:{pours:[…]}})."
         );
+    }
+    if !reference_status.is_empty() {
+        out["reference_status"] = json!(reference_status);
     }
     let out = match gate {
         Some(gate) => gate.commit(ctx, out),

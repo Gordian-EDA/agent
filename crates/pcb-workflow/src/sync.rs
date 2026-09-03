@@ -240,21 +240,41 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Err(error) = crate::intent::parse(&input) {
         return Ok(json!({ "error": error }));
     }
-    let mut result = if !ctx.pcb_path().exists() {
+    let board_existed = ctx.pcb_path().exists();
+    let mut result = if !board_existed {
         create_board(&parts, &design.mismatched, &input, ctx)
-    } else if input.get("intent").is_some() {
-        json!({
-            "error": "sync_board takes `intent` only when it creates the board. On an existing \
-                      board pass the layout half to place_board({intent}) and any zones as \
-                      rules {\"pours\": [{\"net\": …, \"layer\": …}]}.",
-            "code": "intent_after_creation",
-        })
     } else {
         update_board(&parts, &design.mismatched, &input, ctx)
     };
     // The parts whose symbol and footprint disagree did not block this sync;
     // they were built into the board and staged, and the report says so.
     report_staged(&design, &mut result);
+    if let Some(object) = result.as_object_mut() {
+        object.insert("schematic_erc".to_owned(), design.erc.clone());
+    }
+    if board_existed
+        && input.get("intent").is_some()
+        && result.get("error").is_none()
+        && result.get("ok").and_then(Value::as_bool) != Some(false)
+    {
+        let sync_half = result.clone();
+        let placement = place_after_sync(&input, &sync_half, ctx);
+        if let Some(object) = result.as_object_mut() {
+            object.insert("sync".to_owned(), sync_half);
+            object.insert("placement".to_owned(), placement.clone());
+            object.insert(
+                "intent_applied".to_owned(),
+                json!(
+                    placement.get("error").is_none()
+                        && placement.get("ok").and_then(Value::as_bool) != Some(false)
+                ),
+            );
+            object.insert(
+                "note".to_owned(),
+                json!("applied the schematic delta, then passed the requested intent to place_board for staged/new parts"),
+            );
+        }
+    }
     phase.facts(
         result
             .get("retracted_tracks")
@@ -270,6 +290,31 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .map(Vec::len),
     );
     Ok(result)
+}
+
+fn place_after_sync(input: &Value, sync: &Value, ctx: &AgentRuntime) -> Value {
+    let mut refs = sync
+        .pointer("/delta/added")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if let Ok(board) = crate::active_board(ctx) {
+        refs.extend(
+            crate::staging::staged_references(&board)
+                .difference(&crate::staging::unplaceable_references(&board))
+                .cloned(),
+        );
+    }
+    let mut placement = json!({ "intent": input["intent"].clone() });
+    if !refs.is_empty() {
+        placement["refs"] = json!(refs);
+    }
+    crate::place::place_board(placement, ctx).unwrap_or_else(
+        |error| json!({ "error": format!("place_board after sync failed: {error}") }),
+    )
 }
 
 /// Move every mismatched part the board has already laid out back into the
@@ -429,12 +474,11 @@ pub(crate) struct SchematicDesign {
     pub(crate) mismatched: BTreeMap<String, String>,
     /// The full mismatch records, for the report.
     pub(crate) mismatches: Vec<Value>,
+    /// Live ERC totals and findings; errors do not block PCB progress.
+    pub(crate) erc: Value,
 }
 
-/// The schematic's parts and nets, or the refusal that says why the board
-/// cannot be synced yet. ERC errors and unassigned footprints block, because
-/// there is no netlist to sync without them. A symbol/footprint pin mismatch
-/// does not: that part is staged and the rest of the board is built.
+/// The schematic's parts and nets, including live ERC findings for the report.
 fn schematic_parts(ctx: &AgentRuntime) -> std::result::Result<SchematicDesign, Value> {
     if !ctx.sch_path().exists() {
         return Err(json!({
@@ -457,26 +501,15 @@ fn schematic_parts(ctx: &AgentRuntime) -> std::result::Result<SchematicDesign, V
     let erc = ctx.env().erc(ctx.sch_path()).map_err(
         |e| json!({ "error": format!("could not run ERC before syncing the board: {e}") }),
     )?;
-    if erc.error_count() > 0 {
-        let violations: Vec<Value> = erc
-            .violations
-            .iter()
-            .filter(|v| v.severity == "error")
-            .map(|v| json!({ "type": v.kind, "description": v.description }))
-            .collect();
-        return Err(json!({
-            "ok": false,
-            "error": format!(
-                "schematic ERC has {} error(s); fix the live schematic before sync_board",
-                erc.error_count()
-            ),
-            "erc": {
-                "errors": erc.error_count(),
-                "warnings": erc.warning_count(),
-                "violations": violations,
-            },
-        }));
-    }
+    let erc_report = json!({
+        "errors": erc.error_count(),
+        "warnings": erc.warning_count(),
+        "violations": erc.violations.iter().map(|violation| json!({
+            "severity": violation.severity,
+            "type": violation.kind,
+            "description": violation.description,
+        })).collect::<Vec<_>>(),
+    });
 
     let mut pad_nets_by_ref: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for net in &netlist.nets {
@@ -535,7 +568,78 @@ fn schematic_parts(ctx: &AgentRuntime) -> std::result::Result<SchematicDesign, V
             .iter()
             .map(|mismatch| serde_json::to_value(mismatch).unwrap_or(Value::Null))
             .collect(),
+        erc: erc_report,
     })
+}
+
+/// Nets whose schematic pad assignments differ from the saved board.
+pub(crate) fn schematic_net_changes(
+    ctx: &AgentRuntime,
+    board: &kicad_board::BoardSnapshot,
+) -> std::result::Result<Vec<String>, String> {
+    if !ctx.sch_path().exists() {
+        return Ok(Vec::new());
+    }
+    let netlist = ctx.env().netlist(ctx.sch_path()).map_err(|error| {
+        format!("could not compare the schematic and board net tables: {error}")
+    })?;
+    let unplaceable = crate::staging::unplaceable_references(board);
+    let schematic = netlist
+        .nets
+        .iter()
+        .filter(|net| !net.name.is_empty())
+        .flat_map(|net| {
+            net.nodes
+                .iter()
+                .filter(|(reference, _)| !unplaceable.contains(reference))
+                .map(move |(reference, pad)| ((reference.clone(), pad.clone()), net.name.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let saved = board
+        .imported
+        .parts
+        .iter()
+        .flat_map(|part| {
+            part.pads.iter().filter_map(move |pad| {
+                pad.net
+                    .as_ref()
+                    .map(|net| ((part.reference.clone(), pad.number.clone()), net.clone()))
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    let keys = schematic
+        .keys()
+        .chain(saved.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut changed = BTreeSet::new();
+    for key in keys {
+        if schematic.get(&key) == saved.get(&key) {
+            continue;
+        }
+        changed.extend(schematic.get(&key).cloned());
+        changed.extend(saved.get(&key).cloned());
+    }
+    Ok(changed.into_iter().collect())
+}
+
+/// References currently present in the live schematic netlist.
+pub(crate) fn schematic_references(
+    ctx: &AgentRuntime,
+) -> std::result::Result<BTreeSet<String>, String> {
+    if !ctx.sch_path().exists() {
+        return Ok(BTreeSet::new());
+    }
+    ctx.env()
+        .netlist(ctx.sch_path())
+        .map(|netlist| {
+            netlist
+                .components
+                .into_iter()
+                .map(|component| component.reference)
+                .collect()
+        })
+        .map_err(|error| format!("could not read schematic references: {error}"))
 }
 
 /// The mismatch in one line, so a staged part carries the reason it is staged.

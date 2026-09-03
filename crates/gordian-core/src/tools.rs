@@ -219,7 +219,7 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "move_parts".into(),
-            description: "Move footprints by to, by, near, or edge, with rotation/offsets.".into(),
+            description: "Move footprints by to/at, by, near, or edge, with rotation/rot and offsets. Accepts ref/reference, defaults an omitted near/edge gap, and nudges an occupied target to the nearest legal pose when one exists.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -230,7 +230,14 @@ pub fn tool_defs() -> Vec<Tool> {
                             "type": "object",
                             "properties": {
                                 "reference": { "type": "string" },
+                                "ref": { "type": "string" },
                                 "to": {
+                                    "type": "array",
+                                    "items": { "type": "number" },
+                                    "minItems": 2,
+                                    "maxItems": 2
+                                },
+                                "at": {
                                     "type": "array",
                                     "items": { "type": "number" },
                                     "minItems": 2,
@@ -247,10 +254,11 @@ pub fn tool_defs() -> Vec<Tool> {
                                 "edge": { "type": "string", "enum": ["left", "right", "top", "bottom"] },
                                 "gap": { "type": "number" },
                                 "rotation": { "type": "number" },
+                                "rot": { "type": "number" },
                                 "horizontal_offset": { "type": "number" },
                                 "vertical_offset": { "type": "number" }
                             },
-                            "required": ["reference"]
+                            "anyOf": [{ "required": ["reference"] }, { "required": ["ref"] }]
                         }
                     }
                 },
@@ -259,7 +267,7 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "route_track".into(),
-            description: "Route one connection around obstacles, with layers and optional vias."
+            description: "Route one connection around obstacles, with layers and optional vias. Widths below the board minimum are raised with a note; same-layer vias are dropped; a blocked search returns blocker geometry, a waypoint and a layer alternative without writing copper."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -298,7 +306,7 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "delete_copper".into(),
-            description: "Delete track/via copper by click, or remove a net globally or inside a bbox."
+            description: "Delete track/via copper by click, or remove a net globally or inside a bbox. Returns now_open nets; removing copper never refuses for a newly attributed clearance finding."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -419,7 +427,9 @@ pub fn tool_defs() -> Vec<Tool> {
             description: "Sync the PCB to the schematic: creates the board when absent, \
                  else applies only the delta and keeps placement and copper. Parts without a \
                  usable footprint remain staged and are named instead of blocking the sync. \
-                 bounds/rules apply on creation only; omit bounds for a managed auto outline \
+                 ERC errors are reported in schematic_erc but do not block. On an existing board, \
+                 intent applies the delta then places staged/new parts. Geometry findings remain \
+                 written as honest partial work in guard_findings. Omit bounds for a managed auto outline \
                  that place_board grows/refits around placed parts while ignoring the staging row. \
                  clearance/min_trace_width are lowered to what those footprints permit \
                  (reported in design_rules)."
@@ -523,7 +533,7 @@ pub fn tool_defs() -> Vec<Tool> {
                  call reports what is still_staged. Locked parts are never moved and come \
                  back as skipped_locked; pass replace:true to re-place a finished board and \
                  lose its layout. A managed auto outline grows/refits to the accepted placement; \
-                 fixed bounds accept fitting parts and report the rest with extents and suggested bounds."
+                 fixed bounds accept fitting parts and report the rest with extents and suggested bounds. Unknown refs are classified as staged, absent from the schematic, absent pending sync, or present under another spelling while valid refs proceed."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -582,7 +592,7 @@ pub fn tool_defs() -> Vec<Tool> {
                  open/routed/blocked, the blocker, and the escapes. LOCAL by default: pass \
                  `nets` to re-route only those nets after a move_parts, or `bbox` to rip and \
                  re-route only the nets that reach into a board window. Every other net's \
-                 copper is kept exactly as it is and treated as fixed obstacle."
+                 copper is kept exactly as it is and treated as fixed obstacle. Plane nets keep clean connected fanout and report unreached pads; stale schematic nets request sync_board first."
                 .into(),
             input_schema: json!({
                 "type": "object",
