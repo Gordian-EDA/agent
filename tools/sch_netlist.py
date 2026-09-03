@@ -37,7 +37,11 @@ ANONYMOUS = re.compile(r"^(?:Net-\(|unconnected-\()")
 
 PROMPT = """Draw this circuit as a schematic from the netlist in netlist.json: every part \
 with its lib id and value, every pin on exactly the net given. Do not add or remove parts. \
-The sheet is titled "{title}". Render the schematic when it is done."""
+A pin whose net is "nc" stays unconnected. The sheet is titled "{title}". Render the \
+schematic when it is done.
+
+netlist.json:
+{netlist}"""
 
 RUBRIC = """The delivered sheet must carry the given netlist exactly — the same parts on the
 same nets as the human original — pass KiCAD's ERC, and read as well as the human
@@ -189,7 +193,10 @@ def write_case(case, sheet, identifier, description):
     harness.clean_render("schematic", inputs / "reference.kicad_sch", inputs / "reference.png")
     for stray in inputs.glob("reference.svg"):
         stray.unlink()
-    (case / "prompt.txt").write_text(PROMPT.format(title=netlist["title"]) + "\n", encoding="utf-8")
+    (case / "prompt.txt").write_text(
+        PROMPT.format(title=netlist["title"], netlist=json.dumps(netlist["parts"], indent=1)) + "\n",
+        encoding="utf-8",
+    )
     (case / "rubric.txt").write_text(RUBRIC, encoding="utf-8")
     (case / "source.json").write_text(
         json.dumps(

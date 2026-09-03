@@ -1,1 +1,419 @@
-Draw this circuit as a schematic from the netlist in netlist.json: every part with its lib id and value, every pin on exactly the net given. Do not add or remove parts. The sheet is titled "0ea574f3f803". Render the schematic when it is done.
+Draw this circuit as a schematic from the netlist in netlist.json: every part with its lib id and value, every pin on exactly the net given. Do not add or remove parts. A pin whose net is "nc" stays unconnected. The sheet is titled "0ea574f3f803". Render the schematic when it is done.
+
+netlist.json:
+[
+ {
+  "ref": "C1",
+  "lib_id": "Device:C",
+  "value": "1uF",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C10",
+  "lib_id": "Device:C",
+  "value": "1uF",
+  "pins": {
+   "1": "+1V1",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C11",
+  "lib_id": "Device:C",
+  "value": ".1uF",
+  "pins": {
+   "1": "+1V1",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C12",
+  "lib_id": "Device:C",
+  "value": ".1uF",
+  "pins": {
+   "1": "+1V1",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C13",
+  "lib_id": "Device:C",
+  "value": "10uF",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C14",
+  "lib_id": "Device:C",
+  "value": "10uF",
+  "pins": {
+   "1": "VBUS",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C15",
+  "lib_id": "Device:C",
+  "value": "33pF",
+  "pins": {
+   "1": "GND",
+   "2": "XIN"
+  }
+ },
+ {
+  "ref": "C16",
+  "lib_id": "Device:C",
+  "value": "33pF",
+  "pins": {
+   "1": "GND",
+   "2": "N$1"
+  }
+ },
+ {
+  "ref": "C17",
+  "lib_id": "Device:C",
+  "value": ".1uF",
+  "pins": {
+   "1": "GND",
+   "2": "+3V3"
+  }
+ },
+ {
+  "ref": "C2",
+  "lib_id": "Device:C",
+  "value": ".1uF",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C3",
+  "lib_id": "Device:C",
+  "value": ".1uF",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C4",
+  "lib_id": "Device:C",
+  "value": ".1uF",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C5",
+  "lib_id": "Device:C",
+  "value": ".1uF",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C6",
+  "lib_id": "Device:C",
+  "value": ".1uF",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C7",
+  "lib_id": "Device:C",
+  "value": ".1uF",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C8",
+  "lib_id": "Device:C",
+  "value": ".1uF",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C9",
+  "lib_id": "Device:C",
+  "value": ".1uF",
+  "pins": {
+   "1": "+3V3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "J1",
+  "lib_id": "Connector:USB_C_Receptacle_USB2.0_14P",
+  "value": "USB_C_Receptacle_USB2.0_14P",
+  "pins": {
+   "A1": "GND",
+   "A4": "VBUS",
+   "A5": "N$2",
+   "A6": "USB_DP",
+   "A7": "USB_DN",
+   "A9": "VBUS",
+   "B1": "GND",
+   "B4": "VBUS",
+   "B5": "N$3",
+   "B6": "USB_DP",
+   "B7": "USB_DN",
+   "B9": "VBUS",
+   "S1": "GND",
+   "A12": "GND",
+   "B12": "GND"
+  }
+ },
+ {
+  "ref": "J2",
+  "lib_id": "Connector_Generic:Conn_01x20",
+  "value": "Conn_01x20",
+  "pins": {
+   "1": "GPIO0",
+   "2": "GPIO1",
+   "3": "GND",
+   "4": "GPIO2",
+   "5": "GPIO3",
+   "6": "GPIO4",
+   "7": "GND",
+   "8": "GPIO5",
+   "9": "GPIO6",
+   "10": "GPIO7",
+   "11": "GPIO8",
+   "12": "GPIO9",
+   "13": "GND",
+   "14": "GPIO10",
+   "15": "GPIO11",
+   "16": "GPIO12",
+   "17": "GPIO13",
+   "18": "GND",
+   "19": "GPIO14",
+   "20": "GPIO15"
+  }
+ },
+ {
+  "ref": "J3",
+  "lib_id": "Connector_Generic:Conn_01x20",
+  "value": "Conn_01x20",
+  "pins": {
+   "1": "VBUS",
+   "2": "GPIO29_ADC3",
+   "3": "GND",
+   "4": "GPIO28_ADC2",
+   "5": "+3V3",
+   "6": "GPIO27_ADC1",
+   "7": "GPIO26_ADC0",
+   "8": "GND",
+   "9": "GPIO24",
+   "10": "GPIO23",
+   "11": "GPIO22",
+   "12": "GPIO21",
+   "13": "GND",
+   "14": "RUN",
+   "15": "GPIO20",
+   "16": "GPIO19",
+   "17": "GPIO18",
+   "18": "GND",
+   "19": "GPIO17",
+   "20": "GPIO16"
+  }
+ },
+ {
+  "ref": "J4",
+  "lib_id": "Connector_Generic:Conn_01x03",
+  "value": "Conn_01x03",
+  "pins": {
+   "1": "SWCLK",
+   "2": "GND",
+   "3": "SWD"
+  }
+ },
+ {
+  "ref": "R1",
+  "lib_id": "Device:R",
+  "value": "5.1k",
+  "pins": {
+   "1": "N$2",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "R2",
+  "lib_id": "Device:R",
+  "value": "5.1k",
+  "pins": {
+   "1": "N$3",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "R3",
+  "lib_id": "Device:R",
+  "value": "27",
+  "pins": {
+   "1": "N$5",
+   "2": "USB_DN"
+  }
+ },
+ {
+  "ref": "R4",
+  "lib_id": "Device:R",
+  "value": "27",
+  "pins": {
+   "1": "N$6",
+   "2": "USB_DP"
+  }
+ },
+ {
+  "ref": "R5",
+  "lib_id": "Device:R",
+  "value": "1k",
+  "pins": {
+   "1": "XOUT",
+   "2": "N$1"
+  }
+ },
+ {
+  "ref": "R6",
+  "lib_id": "Device:R",
+  "value": "10k",
+  "pins": {
+   "1": "+3V3",
+   "2": "QSPI_SS"
+  }
+ },
+ {
+  "ref": "R7",
+  "lib_id": "Device:R",
+  "value": "1k",
+  "pins": {
+   "1": "N$4",
+   "2": "QSPI_SS"
+  }
+ },
+ {
+  "ref": "SW1",
+  "lib_id": "Switch:SW_Push",
+  "value": "SW_Push",
+  "pins": {
+   "1": "GND",
+   "2": "N$4"
+  }
+ },
+ {
+  "ref": "U1",
+  "lib_id": "MCU_RaspberryPi:RP2040",
+  "value": "RP2040",
+  "pins": {
+   "1": "+3V3",
+   "2": "GPIO0",
+   "3": "GPIO1",
+   "4": "GPIO2",
+   "5": "GPIO3",
+   "6": "GPIO4",
+   "7": "GPIO5",
+   "8": "GPIO6",
+   "9": "GPIO7",
+   "10": "+3V3",
+   "11": "GPIO8",
+   "12": "GPIO9",
+   "13": "GPIO10",
+   "14": "GPIO11",
+   "15": "GPIO12",
+   "16": "GPIO13",
+   "17": "GPIO14",
+   "18": "GPIO15",
+   "19": "GND",
+   "20": "XIN",
+   "21": "XOUT",
+   "22": "+3V3",
+   "23": "+1V1",
+   "24": "SWCLK",
+   "25": "SWD",
+   "26": "RUN",
+   "27": "GPIO16",
+   "28": "GPIO17",
+   "29": "GPIO18",
+   "30": "GPIO19",
+   "31": "GPIO20",
+   "32": "GPIO21",
+   "33": "+3V3",
+   "34": "GPIO22",
+   "35": "GPIO23",
+   "36": "GPIO24",
+   "37": "nc",
+   "38": "GPIO26_ADC0",
+   "39": "GPIO27_ADC1",
+   "40": "GPIO28_ADC2",
+   "41": "GPIO29_ADC3",
+   "42": "+3V3",
+   "43": "+3V3",
+   "44": "+3V3",
+   "45": "+1V1",
+   "46": "N$5",
+   "47": "N$6",
+   "48": "+3V3",
+   "49": "+3V3",
+   "50": "+1V1",
+   "51": "QSPI_SD3",
+   "52": "QSPI_SCLK",
+   "53": "QSPI_SD0",
+   "54": "QSPI_SD2",
+   "55": "QSPI_SD1",
+   "56": "QSPI_SS",
+   "57": "GND"
+  }
+ },
+ {
+  "ref": "U2",
+  "lib_id": "Regulator_Linear:AP2112K-3.3",
+  "value": "AP2112K-3.3",
+  "pins": {
+   "1": "VBUS",
+   "2": "GND",
+   "3": "VBUS",
+   "4": "nc",
+   "5": "+3V3"
+  }
+ },
+ {
+  "ref": "U3",
+  "lib_id": "Memory_Flash:W25Q128JVS",
+  "value": "W25Q16JVZPIQ TR",
+  "pins": {
+   "1": "QSPI_SS",
+   "2": "QSPI_SD1",
+   "3": "QSPI_SD2",
+   "4": "GND",
+   "5": "QSPI_SD0",
+   "6": "QSPI_SCLK",
+   "7": "QSPI_SD3",
+   "8": "+3V3",
+   "9": "GND"
+  }
+ },
+ {
+  "ref": "Y1",
+  "lib_id": "Device:Crystal_GND24",
+  "value": "12 MHz",
+  "pins": {
+   "1": "N$1",
+   "2": "GND",
+   "3": "XIN",
+   "4": "GND"
+  }
+ }
+]

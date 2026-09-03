@@ -120,6 +120,8 @@ def command(args, *, timeout=600, check=True, env=None, input_text=None):
 
 BUILT = {}
 BUILD_LOCK = threading.Lock()
+# Two cases may want the same cached demo render at the same time.
+REFERENCE_LOCK = threading.Lock()
 
 
 def cargo_target_dir():
@@ -829,8 +831,9 @@ def render_reference_candidate(kind, source, count):
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", source.stem).strip("-")
     REFERENCES.mkdir(parents=True, exist_ok=True)
     png = REFERENCES / f"{kind}-{count}-{stem}-{digest}-clean-v2.png"
-    if not png.is_file():
-        clean_render(kind, source, png)
+    with REFERENCE_LOCK:
+        if not png.is_file():
+            clean_render(kind, source, png)
     return {"path": str(png), "source": str(source), "part_count": count}
 
 

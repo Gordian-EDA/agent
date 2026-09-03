@@ -155,8 +155,8 @@ Fourteen schematic-only cases, scored on the drawing the agent delivers.
 
 * `dataset-*` (8): a human-drawn sheet from `~/kicad-scraper/dataset` — single
   sheet, stock-library symbols only, 20-60 parts, two per size band — reduced to
-  its netlist by `tools/sch_netlist.py`. The agent gets `netlist.json` (every part
-  with its lib id and value, every pin's net) and the sheet title, nothing else.
+  its netlist by `tools/sch_netlist.py`. The prompt carries that netlist — every part
+  with its lib id and value, every pin's net — and the sheet title, nothing else.
   `netlist_matches_reference` compares KiCAD's netlist of the delivered sheet with
   KiCAD's netlist of the human original, pin set for pin set; the human sheet and
   its render stay out of the agent's project.
