@@ -148,3 +148,10 @@ re-place." Quality first; time later via parallel subagents; schematic too.
 - Launched: W3 lane/sch-bench (Opus: place_parts partial commit + bench + netlist-drawn arrange +
   reserve_refs enforcement + extractor label-scope parity), lane/drag-move (codex: sch_drag::drag
   inside move_symbols).
+- Pushed together: bluepill-erc, drag-move (`move_symbols` on `sch_drag::drag_many`; straighten/glue
+  helpers deleted), dup-segment (second emitter was `retract_colliding_stubs` drawing a fallback stub
+  over a same-net route prefix; debug asserts: no duplicate unordered segment in writer or after graft),
+  user hotfix "Snapshot only the design files at turn start". USER: the turn-start snapshot itself is
+  being removed (lane/no-baseline) with diff_schematic and introduced/pre-existing classification —
+  the TUI from the repo root read a 186 GB target/. Harness: judges get clean KiCAD renders
+  (lane/judge-clean-render).
