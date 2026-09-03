@@ -307,8 +307,7 @@ pub enum AgentEvent {
     /// `cache_read_tokens`, letting consumers bill cached prefixes correctly.
     Usage {
         /// Actual provider invocations represented by this event. This includes
-        /// main-loop, review, compaction, recovery, and failed invocations and
-        /// is deliberately separate from the main-loop request safety budget.
+        /// main-loop, review, compaction, recovery, and failed invocations.
         provider_requests: u64,
         input_tokens: u64,
         output_tokens: u64,
@@ -801,7 +800,7 @@ impl<P: Provider> Agent<P> {
         Ok(outcome)
     }
 
-    /// Start a fresh whole-turn clock and request budget.
+    /// Start a fresh turn: its request count spans every subturn.
     fn start_turn(&mut self, events: Events<'_>) {
         emit(
             events,
@@ -1892,7 +1891,7 @@ fn tool_timeout(name: &str) -> Duration {
 /// Tools that hold themselves to a wall-clock budget and write nothing once it has
 /// passed (`sch_floorplan::live::PlacementBudget`): the search is cooperatively
 /// cancelled and the document restored, so timing one out cannot leave a half-applied
-/// edit and the turn need not be abandoned.
+/// edit and later mutations stay safe.
 fn enforces_own_deadline(name: &str) -> bool {
     matches!(name, "place_parts" | "arrange")
 }
