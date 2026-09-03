@@ -36,10 +36,10 @@ use measure::typeset_block;
 use part::Part;
 
 /// Space between two blocks on the sheet, over and above [`FRAME_PAD`].
-const BLOCK_GAP: f64 = 8.0 * UNIT_MM;
+const BLOCK_GAP: f64 = 6.0 * UNIT_MM;
 /// Room each block keeps outside its parts for the dashed frame the realiser draws around
 /// it and the field text the solver seats along its edge.
-const FRAME_PAD: f64 = 5.0 * UNIT_MM;
+const FRAME_PAD: f64 = 4.0 * UNIT_MM;
 /// The width-to-height ratio a packed sheet aims for — a landscape page's usable area.
 const SHEET_ASPECT: f64 = 1.5;
 /// Usable width (mm) of the page the sheet starts on; a pack wider than this grows the
