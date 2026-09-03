@@ -314,3 +314,7 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   agent invents parts despite "do not add") — defects: sprawl (14/14), text over circuitry (5),
   no signal-flow grouping (6). These are the targets for lane/layout-trees. Follow-up: when the
   prompt says not to add parts, completeness gaps must be silent.
+- SPRINT (user): schematic to 10/10 first; PCB paused. Order: land layout-trees + text-box-model →
+  suite table → lane/composition-pass (anchored `review_schematic`, tree revision loop) → port
+  sch-agent text/route conventions → dataset discipline (gaps silent under "do not add parts") →
+  iterate on the suite's top defect until green.
