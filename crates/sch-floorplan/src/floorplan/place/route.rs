@@ -156,7 +156,7 @@ pub(crate) fn wire(
     // dense ones: the wire-dense small references (555/uart/grid) are exactly where
     // literal long crossing wires read worst. Mirrors the spread-rail →
     // local-power-symbol distribution above.
-    let label_policy = Some(LabelPolicy::default());
+    let label_policy = LabelPolicy::default();
     for (net, eps) in &net_eps {
         if ir.rails.contains_key(net) {
             continue;
@@ -230,14 +230,10 @@ pub(crate) fn route_signal(
     net: &str,
     eps: &[([f64; 2], Dir)],
     port_exit: Option<(Side, [f64; 2])>,
-    label_policy: Option<LabelPolicy>,
+    label_policy: LabelPolicy,
     scene: &mut sch_model::route::RouteScene,
 ) -> io::Result<()> {
     let port = port_exit.map(|(side, _)| side);
-    // `label_policy` is Some only on the shipped sheet (see `wire`), which is the same
-    // signal the riser fan and the weld guard use: finalize-only repairs, so the
-    // per-move scorer realises every candidate through an unchanged code path.
-    let finalize = label_policy.is_some();
 
     // Terminals: real pins (with outward dir) + the virtual port exit `plan_port_exits`
     // already settled and reserved.
@@ -364,9 +360,8 @@ pub(crate) fn route_signal(
     let term_label_seatable: Vec<bool> = term_pin
         .iter()
         .map(|tp| {
-            tp.as_ref().is_none_or(|(it, num)| {
-                label_stub(w, env, scene, &items[*it].refdes, num, net, finalize).1
-            })
+            tp.as_ref()
+                .is_none_or(|(it, num)| label_stub(w, env, scene, &items[*it].refdes, num, net).1)
         })
         .collect();
 
@@ -386,47 +381,42 @@ pub(crate) fn route_signal(
         };
         // A hop longer than the label policy's length is left unrouted so the union-find
         // leaves its endpoints split — the label-bridge below then names each side,
-        // turning a long literal wire into a net-label pair (the human idiom). The policy
-        // is Some only at finalize (see `wire`), so every per-move route is unaffected.
+        // turning a long literal wire into a net-label pair (the human idiom).
         let direct = (a[0] - b[0]).abs() + (a[1] - b[1]).abs();
-        if let Some(pol) = label_policy
-            && direct > pol.len_mm
-        {
+        if direct > label_policy.len_mm {
             continue;
         }
         if let Some(p) = router.route_edge(a, da, b, net, scene) {
-            if let Some(pol) = label_policy {
-                // The DIRECT gap may be short while the only obstacle-free ROUTE is a sheet-wide
-                // DETOUR (two ICs whose shared bus pins face opposite ways, so the wire wraps the
-                // perimeter). A drawn wraparound reads far worse than naming each end, so discard a
-                // path whose routed length exceeds the policy length and leave the endpoints split.
-                let routed: f64 = p
-                    .windows(2)
-                    .map(|s| (s[0][0] - s[1][0]).abs() + (s[0][1] - s[1][1]).abs())
-                    .sum();
-                if routed > pol.len_mm {
-                    continue;
-                }
-                // CROSSING-DRIVEN promotion: a cross-block hop whose literal route would CROSS a
-                // foreign wire reads as spaghetti (humans keep ~0 crossings). Name it instead —
-                // leave the endpoints split for the label-bridge. Gated on the DIRECT pin-to-pin
-                // gap (not the routed length): a LOCAL node (terminals a few mm apart) keeps its
-                // wires even when the only obstacle-free route detours far around a body, so a
-                // tight cluster isn't fragmented into label spam. Only promote when BOTH endpoints
-                // could carry a body-CLEAR label (predictor matches the lint's geometry), so a pin
-                // whose label would land over a chip body or pin-name text — including after the
-                // finalize stub-retraction — keeps its wire instead of becoming a lint-flagged
-                // label. Conservative on purpose: the TIER-1 references must stay 0-warning.
-                if direct > pol.cross_len_mm
-                    && term_label_clear[i]
-                    && term_label_clear[j]
-                    && sch_model::route::path_crossings(&p, net, scene) > 0
-                {
-                    continue;
-                }
+            // The DIRECT gap may be short while the only obstacle-free ROUTE is a sheet-wide
+            // DETOUR (two ICs whose shared bus pins face opposite ways, so the wire wraps the
+            // perimeter). A drawn wraparound reads far worse than naming each end, so discard a
+            // path whose routed length exceeds the policy length and leave the endpoints split.
+            let routed: f64 = p
+                .windows(2)
+                .map(|s| (s[0][0] - s[1][0]).abs() + (s[0][1] - s[1][1]).abs())
+                .sum();
+            if routed > label_policy.len_mm {
+                continue;
+            }
+            // CROSSING-DRIVEN promotion: a cross-block hop whose literal route would CROSS a
+            // foreign wire reads as spaghetti (humans keep ~0 crossings). Name it instead —
+            // leave the endpoints split for the label-bridge. Gated on the DIRECT pin-to-pin
+            // gap (not the routed length): a LOCAL node (terminals a few mm apart) keeps its
+            // wires even when the only obstacle-free route detours far around a body, so a
+            // tight cluster isn't fragmented into label spam. Only promote when BOTH endpoints
+            // could carry a body-CLEAR label (predictor matches the lint's geometry), so a pin
+            // whose label would land over a chip body or pin-name text — including after the
+            // stub-retraction — keeps its wire instead of becoming a lint-flagged label.
+            // Conservative on purpose: the TIER-1 references must stay 0-warning.
+            if direct > label_policy.cross_len_mm
+                && term_label_clear[i]
+                && term_label_clear[j]
+                && sch_model::route::path_crossings(&p, net, scene) > 0
+            {
+                continue;
             }
             for seg in p.windows(2) {
-                emit_routed_segment(w, scene, net, seg[0], seg[1], finalize);
+                emit_routed_segment(w, scene, net, seg[0], seg[1]);
             }
             paths.push(p);
             uf.union_to(i, j);
@@ -447,7 +437,7 @@ pub(crate) fn route_signal(
         && uf.find(0) != uf.find(pi)
         && safe_forced_single_port_stub(pts[0], pts[pi], net, scene)
     {
-        emit_routed_segment(w, scene, net, pts[0], pts[pi], finalize);
+        emit_routed_segment(w, scene, net, pts[0], pts[pi]);
         uf.union_to(0, pi);
     }
 
@@ -497,12 +487,11 @@ pub(crate) fn route_signal(
             }
             // Don't force an OVERHEAD detour across a long-haul gap: that recreates the very sheet-wide
             // wraparound the MST already declined (the i2c_sensors U4 SCL pin, ~110 mm from the rest of
-            // the bus). When the label policy is active, leave such a pin SPLIT so the label-bridge
-            // below names it instead — exactly as the too-long MST hop already does, and as the sibling
-            // SDA pin already gets. The local op-amp feedback case (pins a few mm apart) is well under
-            // the length, so it still forces its clean loop.
-            if let Some(pol) = label_policy
-                && (pts[0][0] - pts[k][0]).abs() + (pts[0][1] - pts[k][1]).abs() > pol.len_mm
+            // the bus). Leave such a pin SPLIT so the label-bridge below names it instead — exactly as
+            // the too-long MST hop already does, and as the sibling SDA pin already gets. The local
+            // op-amp feedback case (pins a few mm apart) is well under the length, so it still forces
+            // its clean loop.
+            if (pts[0][0] - pts[k][0]).abs() + (pts[0][1] - pts[k][1]).abs() > label_policy.len_mm
             {
                 continue;
             }
@@ -531,7 +520,7 @@ pub(crate) fn route_signal(
                         if (seg[0][0] - seg[1][0]).abs() > EPS
                             || (seg[0][1] - seg[1][1]).abs() > EPS
                         {
-                            emit_routed_segment(w, scene, net, seg[0], seg[1], finalize);
+                            emit_routed_segment(w, scene, net, seg[0], seg[1]);
                         }
                     }
                     uf.union_to(0, k);
@@ -594,7 +583,7 @@ pub(crate) fn route_signal(
                 continue; // named by the port label below
             }
             if let Some((i, num)) = pin {
-                let (stub, _) = label_stub(w, env, scene, &items[*i].refdes, num, net, finalize);
+                let (stub, _) = label_stub(w, env, scene, &items[*i].refdes, num, net);
                 if Some(*root) == global_fallback_root {
                     w.add_global_signal_label_stub(env, &items[*i].refdes, num, net, stub)?;
                 } else {
@@ -636,16 +625,14 @@ pub(crate) fn route_signal(
 }
 
 /// Emit only the portions of one routed segment not already covered by same-net geometry.
-/// Partial-overlap trimming is finalize-only so correctness repair does not perturb the
-/// placement scorer; fully covered spans are always reused. Covered request endpoints in
-/// an existing segment's interior receive junctions so the reuse is electrically attached.
+/// Fully covered spans are always reused; covered request endpoints in an existing
+/// segment's interior receive junctions so the reuse is electrically attached.
 fn emit_routed_segment(
     w: &mut SchematicWriter,
     scene: &mut sch_model::route::RouteScene,
     net: &str,
     a: ::geom::Point2,
     b: ::geom::Point2,
-    trim_partial: bool,
 ) {
     if let Some(covering) = scene.segments.iter().find(|existing| {
         existing.net == net
@@ -659,13 +646,6 @@ fn emit_routed_segment(
                 w.add_junction_on_net(at, net);
             }
         }
-        return;
-    }
-    if !trim_partial {
-        w.add_wire_on_net(a, b, net);
-        scene
-            .segments
-            .push(sch_model::route::NetSegment::new(a, b, net));
         return;
     }
     let existing: Vec<_> = scene
@@ -733,15 +713,11 @@ fn subtract_collinear_overlap(
 /// label tucks onto the pin endpoint itself, which is where the writer's stub retraction
 /// would put it anyway and which the lint exempts against the pin's own body.
 ///
-/// On a `finalize` build a rung whose anchor would MERGE the net with another
-/// (`anchor_merges`) is not a rung at all: readability may be given up, truthfulness may
-/// not. When every rung merges — which needs a foreign wire or pin over this pin's own
-/// tip, so only on a block drawn beside existing content — the default landing comes
-/// back reported as not clear, and the bridge picks another pin.
-///
-/// FINALIZE-ONLY, like the riser fan and the weld guard: the per-move scorer realises
-/// every candidate through this same path, so filtering there would make a truthfulness
-/// repair part of the cost landscape and move placements that never had a short.
+/// A rung whose anchor would MERGE the net with another (`anchor_merges`) is not a rung
+/// at all: readability may be given up, truthfulness may not. When every rung merges —
+/// which needs a foreign wire or pin over this pin's own tip, so only on a block drawn
+/// beside existing content — the default landing comes back reported as not clear, and
+/// the bridge picks another pin.
 fn label_stub(
     w: &SchematicWriter,
     env: &KicadInstallation,
@@ -749,7 +725,6 @@ fn label_stub(
     refdes: &str,
     num: &str,
     net: &str,
-    finalize: bool,
 ) -> (f64, bool) {
     const LADDER: [f64; 5] = [3.81, 6.35, 8.89, 11.43, 13.97];
     let Some((ep, dir)) = w
@@ -766,7 +741,7 @@ fn label_stub(
     let truthful: Vec<f64> = LADDER
         .into_iter()
         .chain([0.0])
-        .filter(|&s| !finalize || !anchor_merges(scene, landing(s), net))
+        .filter(|&s| !anchor_merges(scene, landing(s), net))
         .collect();
     match truthful
         .iter()
@@ -1231,8 +1206,7 @@ pub(crate) fn dir_toward(a: impl Into<::geom::Point2>, b: impl Into<::geom::Poin
 
 /// A signal-net MST hop whose (direct OR routed) length exceeds this (mm) is delegated
 /// to a name-matched net-label pair instead of a drawn wire — the professional idiom for
-/// long-haul / cross-block connectivity. Applied FINALIZE-ONLY (see [`LabelPolicy`]) so
-/// the per-move scorer / placement is never perturbed.
+/// long-haul / cross-block connectivity (see [`LabelPolicy`]).
 ///
 /// 50mm, anchored directly to the human corpus (`tools/layout_metrics.py`): humans keep
 /// ~0% of wires above 50mm (`wire_frac_gt50` median 0). A literal wire longer than this is
@@ -1698,8 +1672,7 @@ fn trunk_hits_body(rail_y: f64, span: (f64, f64), bodies: &[Rect]) -> bool {
 /// same-rail cap column, or a mis-oriented cap whose own body sits between its pin and the
 /// rail), a FOREIGN pin the run would weld onto, and a lane another net's riser already
 /// occupies. One predicate, one search: jogging off one hazard can no longer land on
-/// another. `bodies`/`foreign_pins` are empty on the per-move scorer (finalize-only), so
-/// the placement is never churned by this.
+/// another.
 fn plan_rail_attaches(
     net: &str,
     eps: &[([f64; 2], Dir)],
@@ -1940,7 +1913,7 @@ mod tests {
             "+3V3",
             [105.41, 2.54].into(),
             [105.41, 24.13].into(),
-            false,
+            
         );
         emit_routed_segment(
             &mut writer,
@@ -1948,7 +1921,7 @@ mod tests {
             "+3V3",
             [105.41, 24.13].into(),
             [105.41, 21.59].into(),
-            false,
+            
         );
 
         assert_eq!(writer.wires_with_nets().len(), 1);
@@ -1969,7 +1942,7 @@ mod tests {
             "5V_FUSED",
             [105.41, 21.59].into(),
             [105.41, 24.13].into(),
-            true,
+            
         );
         emit_routed_segment(
             &mut writer,
@@ -1977,7 +1950,7 @@ mod tests {
             "5V_FUSED",
             [105.41, 24.13].into(),
             [105.41, 2.54].into(),
-            true,
+            
         );
 
         assert_eq!(writer.wires_with_nets().len(), 2);
@@ -2012,7 +1985,7 @@ mod tests {
             "SIG",
             [12.7, 10.16].into(),
             [17.78, 10.16].into(),
-            false,
+            
         );
 
         assert!(writer.wires_with_nets().is_empty());

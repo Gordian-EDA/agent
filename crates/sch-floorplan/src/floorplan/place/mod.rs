@@ -3,16 +3,12 @@
 //! verbatim):
 //!
 //! - [`audit`] — the net-occupancy check: no point shared by two nets.
-//! - [`emit`] — gather + grid seed + engine orchestration + `SchematicWriter` assembly.
-//! - [`score`] — the routed `count_*` crossing/merge/short terms + the geometry primitives
-//!   the [`measure`] library reads off a built sheet.
-//! - [`measure`] — the routed-sheet realiser and the [`sch_model::engine::CandidateEvaluator`]
-//!   it implements: the oracle an engine crate asks what a candidate would cost. The
-//!   OBJECTIVE (the weights) and the SEARCH live in the engine crates, not here.
+//! - [`emit`] — gather + grid seed + `sch_flex::typeset` + `SchematicWriter` assembly.
+//! - [`score`] — the routed `count_*` crossing/merge/short truthfulness terms `measure`
+//!   reads off a built sheet.
+//! - `measure` — the routed-sheet realiser ([`RoutedSheetRealizer`]) and
+//!   [`RoutedEvaluator`], what a placement measures once it is drawn.
 //! - [`route`] — the orthogonal elbow router + power-rail riser planning.
-//!
-//! Realizing a sheet is heavy + non-algorithmic (how to draw and measure), so it lives
-//! here as a shared library; the cost weights and the search are engine-owned method.
 
 mod audit;
 mod emit;

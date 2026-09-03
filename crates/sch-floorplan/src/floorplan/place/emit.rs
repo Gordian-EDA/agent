@@ -1,7 +1,6 @@
-//! `place::emit` — IR → millimetre orchestration: `gather` the parts, seed the
-//! coarse grid into mm (`assign_cells`/`apply_cells`), drive the placement engine
-//! (`emit_strategy`/`prepare_writer`), and assemble the routed `SchematicWriter`
-//! (`build_writer`).
+//! `place::emit` — IR → millimetre orchestration: `gather` the parts, hand them to
+//! `sch_flex::typeset` (`emit_strategy`/`prepare_writer`), and assemble the routed
+//! `SchematicWriter` (`build_writer`).
 
 #![allow(clippy::items_after_test_module)]
 
@@ -20,9 +19,6 @@ use sch_model::result::EmitOutput;
 
 use super::*;
 use sch_model::item::{Incidence, Item};
-
-// The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `geom::union_find`, shared with the desugar pin reconciler.
 use sch_model::ir::LayoutIr;
 
 // ---------------------------------------------------------------------------
@@ -276,7 +272,7 @@ pub(crate) fn prepare_writer(
     let warnings = w.layout_warnings();
     let crossings = evaluator.crossings(&problem.items);
     // The truthfulness invariant of the finished geometry, read back off the writer:
-    // no point may carry two nets. Cheap next to the search, and it names the pair.
+    // no point may carry two nets.
     let net_shorts: Vec<String> = super::net_conflicts(env, &w, &problem.items, &problem.inc)
         .iter()
         .map(ToString::to_string)
