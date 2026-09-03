@@ -28,6 +28,7 @@ enum CopperKind {
 #[derive(Debug, Clone)]
 struct CopperDeleteRequest {
     at: Point2,
+    near_point: bool,
     radius: f64,
     kinds: BTreeSet<CopperKind>,
     net: Option<String>,
@@ -919,7 +920,7 @@ fn delete_copper_file(
             ));
         }
     }
-    if selection.bbox.is_none() {
+    if request.near_point {
         matches.retain(|(_, hit)| hit.distance <= request.radius + geom::EPS);
     }
     matches.sort_by(|a, b| {
@@ -1560,6 +1561,7 @@ fn parse_delete_copper_request(
             at: at
                 .or_else(|| bbox.map(|bbox| bbox.center()))
                 .unwrap_or_else(|| Point2::new(0.0, 0.0)),
+            near_point: at.is_some(),
             radius,
             kinds,
             net,
@@ -2417,6 +2419,7 @@ mod tests {
         let whole = parse_delete_copper_request(&json!({ "net": "GND" }), 2).unwrap();
         assert_eq!(whole.request.net.as_deref(), Some("GND"));
         assert!(whole.request.all);
+        assert!(!whole.request.near_point);
         assert!(whole.bbox.is_none());
 
         let bounded = parse_delete_copper_request(
