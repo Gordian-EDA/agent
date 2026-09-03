@@ -21,8 +21,8 @@ fn block_trees(design: &Design) -> sch_model::tree::Trees {
 }
 
 /// A deterministic baseline IR for designs without an LLM-produced one: rails
-/// from the design's power nets (ground-like → bottom, else top), no explicit
-/// anchor cells, no ports. Good enough to render; not tuned for aesthetics.
+/// from the design's power nets (ground-like → bottom, else top), no ports.
+/// Good enough to render; not tuned for aesthetics.
 pub fn baseline_ir(design: &Design) -> LayoutIr {
     let mut rails = BTreeMap::new();
     for (net, attrs) in &design.nets {
@@ -71,11 +71,9 @@ fn local_rail_nets(design: &Design) -> BTreeSet<String> {
         .collect()
 }
 
-/// Connectivity-driven frame inference: derive a full Layout IR — rails, anchor
-/// columns, satellite cells/orientation by the spec's inference rules, and edge
-/// ports — straight from the netlist + symbol pin geometry, so the engine owns the
-/// whole layout and needs no LLM `place`. The coarse cells it emits are polished
-/// by the same refine/align/decongest passes the LLM-frame path uses.
+/// Connectivity-driven frame inference: derive a full Layout IR — rails and edge
+/// ports — straight from the netlist and each net's declared attributes, so a
+/// design with no author-supplied `intent` still gets one.
 pub fn infer_ir(env: &KicadInstallation, design: &Design) -> LayoutIr {
     let Ok(items) = gather(env, design) else {
         return baseline_ir(design);
