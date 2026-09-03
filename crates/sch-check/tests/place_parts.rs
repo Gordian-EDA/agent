@@ -273,7 +273,7 @@ fn a_single_pin_gnd_typo_suggests_the_existing_ground_net() {
 }
 
 #[test]
-fn a_library_no_connect_pin_is_invalid_before_placement() {
+fn a_library_no_connect_pin_becomes_an_explicit_gap() {
     let mut symbols = provider();
     symbols.mock_add(
         "MCU:WithNC",
@@ -287,15 +287,20 @@ fn a_library_no_connect_pin_is_invalid_before_placement() {
              "pins": {"NC": "GND", "IO": "+3V3"}}]}"#,
     )
     .unwrap();
-    let (_, _, audit) = into_design(&input, &symbols, &live_power_nets());
+    let (design, _, audit) = into_design(&input, &symbols, &live_power_nets());
 
-    assert!(!audit.is_valid());
-    assert!(
-        audit
-            .unknown_pins
-            .iter()
-            .any(|finding| finding.contains("library-no-connect-wired")),
-        "{audit:?}"
+    assert!(audit.is_valid(), "{audit:?}");
+    assert_eq!(
+        audit.nc_overridden,
+        vec![sch_check::NcOverride {
+            refdes: "U3".into(),
+            pin: "1".into(),
+            requested_net: "GND".into(),
+        }]
+    );
+    assert_eq!(
+        design.blocks[DEFAULT_BLOCK].components["U3"].pins["1"],
+        sch_check::PinTarget::NoConnect
     );
 }
 

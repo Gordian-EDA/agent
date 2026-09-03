@@ -230,3 +230,70 @@ fn remove_symbols_declares_every_net_at_the_selected_symbols() {
         .map(|net| net.name.as_str());
     assert_eq!(rail, Some("GND"), "{netlist:?}");
 }
+
+#[test]
+fn place_parts_turns_a_library_nc_connection_into_a_reported_gap() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {
+                "ref": "U1",
+                "part": "Regulator_Linear:AP2112K-3.3",
+                "pins": {"1": "VIN", "2": "GND", "3": "3V3", "4": "EN_REG", "5": "VIN"}
+            },
+            {"ref": "C1", "part": "Device:C", "pins": {"1": "VIN", "2": "GND"}},
+            {"ref": "C2", "part": "Device:C", "pins": {"1": "3V3", "2": "GND"}}
+        ]}),
+    );
+    assert!(placed.get("error").is_none(), "{placed}");
+    assert_ne!(placed.get("ok"), Some(&json!(false)), "{placed}");
+    assert_eq!(
+        placed["nc_overridden"],
+        json!([{"ref": "U1", "pin": "4", "requested_net": "EN_REG"}]),
+        "{placed}"
+    );
+    assert!(
+        placed["gaps"]
+            .as_array()
+            .is_some_and(|gaps| gaps.iter().any(|gap| {
+                gap["kind"] == "library_no_connect_overridden"
+                    && gap["ref"] == "U1"
+                    && gap["pin"] == "4"
+                    && gap["requested_net"] == "EN_REG"
+            })),
+        "{placed}"
+    );
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let nc_pin = sch_doc::placed_pins(&doc)
+        .into_iter()
+        .find(|pin| pin.refdes == "U1" && pin.number == "4")
+        .unwrap();
+    assert!(
+        doc.items().iter().any(|item| {
+            matches!(item, sch_doc::Item::NoConnect(marker) if marker.at.near_eq(nc_pin.at, geom::EPS))
+        }),
+        "U1.4 was not marked no-connect: {placed}"
+    );
+    let netlist = ctx.env().netlist(ctx.sch_path()).expect("KiCad 10 netlist");
+    assert!(
+        netlist.nets.iter().all(|net| net.name != "EN_REG"),
+        "the refused requested net survived: {netlist:?}"
+    );
+    let nc_net = netlist
+        .nets
+        .iter()
+        .find(|net| {
+            net.nodes
+                .contains(&("U1".to_string(), "4".to_string()))
+        })
+        .map(|net| net.name.as_str());
+    assert!(
+        nc_net.is_some_and(|name| name.starts_with("unconnected-(")),
+        "{netlist:?}"
+    );
+}

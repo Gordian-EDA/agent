@@ -270,7 +270,8 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             &skipped,
             &warnings,
         )?;
-        return Ok(with_resolved_nets(value, &resolved_nets.reported));
+        let value = with_resolved_nets(value, &resolved_nets.reported);
+        return Ok(with_nc_overrides(value, &audit.nc_overridden));
     }
     let refs = report.placed.clone();
     let mut value = edit
@@ -296,6 +297,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let value = with_unresolved_footprints(value, &footprints_unresolved);
     let value = with_unresolved_decoupling(value, &audit.decouple_unresolved);
     let value = with_resolved_nets(value, &resolved_nets.reported);
+    let value = with_nc_overrides(value, &audit.nc_overridden);
     Ok(with_warnings(value, &warnings))
 }
 
@@ -376,6 +378,26 @@ fn with_unresolved_decoupling(
     value
 }
 
+fn with_nc_overrides(mut value: Value, overridden: &[sch_check::NcOverride]) -> Value {
+    if overridden.is_empty() {
+        return value;
+    }
+    value["nc_overridden"] = json!(overridden);
+    let gaps = value["gaps"]
+        .as_array_mut()
+        .expect("place_parts gaps array");
+    gaps.extend(overridden.iter().map(|issue| {
+        json!({
+            "kind": "library_no_connect_overridden",
+            "ref": issue.refdes,
+            "pin": issue.pin,
+            "requested_net": issue.requested_net,
+            "suggestion": "use a functional pin or a compatible symbol if this connection is required",
+        })
+    }));
+    value
+}
+
 /// Render the one exhaustive refusal shape used by both audit phases.
 fn invalid_payload_response(audit: sch_check::PayloadAudit, warnings: &[String]) -> Value {
     with_warnings(
@@ -388,6 +410,7 @@ fn invalid_payload_response(audit: sch_check::PayloadAudit, warnings: &[String])
             "footprint_mismatch": audit.footprint_mismatch,
             "unplaced": audit.unplaced,
             "decouple_unresolved": audit.decouple_unresolved,
+            "nc_overridden": audit.nc_overridden,
             "dangling": audit.dangling,
             "did_you_mean": audit.did_you_mean,
             "unreliable_nets": audit.unreliable_nets,

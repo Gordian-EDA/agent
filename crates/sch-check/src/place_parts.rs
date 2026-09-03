@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::model::*;
-use crate::{Diagnostic, Diagnostics, SymbolTable, authored, decouple, nets, pins};
+use crate::{Diagnostic, Diagnostics, PinType, SymbolTable, authored, decouple, nets, pins};
 
 /// Bulk-create payload: the parts to add, plus optional layout intent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -145,6 +145,15 @@ pub struct DecoupleUnresolved {
     pub how: String,
 }
 
+/// A requested connection dropped because the library declares that pin NC.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NcOverride {
+    #[serde(rename = "ref")]
+    pub refdes: RefDes,
+    pub pin: String,
+    pub requested_net: NetName,
+}
+
 /// Findings that make a bulk-create payload electrically incomplete.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PayloadAudit {
@@ -170,6 +179,9 @@ pub struct PayloadAudit {
     /// Requested decouplers that need explicit supply and ground nets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decouple_unresolved: Vec<DecoupleUnresolved>,
+    /// Requested nets replaced by explicit no-connects on library NC pins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nc_overridden: Vec<NcOverride>,
 }
 
 /// One symbol/footprint assignment whose electrical pins do not agree.
@@ -272,6 +284,7 @@ pub fn into_design(
 ) -> (Design, Diagnostics, PayloadAudit) {
     let mut input = input.clone();
     let duplicate_refs = resolve_references(&mut input, provider, existing);
+    let nc_overridden = override_library_no_connects(&mut input, provider);
     let mut diags = Diagnostics::default();
     let mut design = Design {
         name: input.name.clone(),
@@ -340,7 +353,47 @@ pub fn into_design(
     audit.duplicate_refs = duplicate_refs;
     audit.unplaced = unplaced;
     audit.decouple_unresolved = decouple_unresolved;
+    audit.nc_overridden = nc_overridden;
     (design, diags, audit)
+}
+
+fn override_library_no_connects(
+    input: &mut PlacePartsInput,
+    provider: &SymbolTable,
+) -> Vec<NcOverride> {
+    let mut overridden = Vec::new();
+    for part in &mut input.parts {
+        let (Some(refdes), Some(meta)) = (part.refdes.as_ref(), provider.symbol(&part.part)) else {
+            continue;
+        };
+        for (key, requested_net) in &mut part.pins {
+            if is_no_connect_name(requested_net) {
+                continue;
+            }
+            let resolved = pins::resolve(&meta, key);
+            let no_connects = resolved
+                .iter()
+                .filter(|pin| pin.etype == PinType::NoConnect)
+                .collect::<Vec<_>>();
+            if no_connects.is_empty() {
+                continue;
+            }
+            overridden.extend(no_connects.into_iter().map(|pin| NcOverride {
+                refdes: refdes.clone(),
+                pin: pin.number.clone(),
+                requested_net: requested_net.clone(),
+            }));
+            *requested_net = "nc".to_string();
+        }
+    }
+    overridden.sort_by(|left, right| {
+        left.refdes
+            .cmp(&right.refdes)
+            .then_with(|| left.pin.cmp(&right.pin))
+            .then_with(|| left.requested_net.cmp(&right.requested_net))
+    });
+    overridden.dedup();
+    overridden
 }
 
 fn resolve_references(
