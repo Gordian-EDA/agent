@@ -21,8 +21,8 @@
 //!
 //! A failure restores the snapshot and comes back as [`Mismatch`], so a caller can
 //! never commit a sheet that silently mis-wires. `arrange` and `rewire` promise more:
-//! the partition must be *identical*, since moving a part is not supposed to mean
-//! anything.
+//! the partition must be *identical*. When a wire redraw misses that bar, the original
+//! route stays and same-named labels expose the layout debit without changing the netlist.
 //!
 //! ## The budget
 //!
@@ -43,7 +43,7 @@ use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::SymbolGeometry;
 use sch_check::model::{Block, Component, Design, PinTarget};
 use sch_check::{ExistingSheet, PayloadAudit, PlacePartsInput};
-use sch_doc::{Netlist, Pose, SchDoc, connect};
+use sch_doc::{LabelKind, NetSource, Netlist, Pose, SchDoc, connect};
 use sch_model::ir::LayoutIr;
 use sch_model::item::{Incidence, Item};
 use sch_model::place::{Deadline, PlaceOptions, PlacementEngineKind};
@@ -312,7 +312,7 @@ pub struct ArrangeReport {
     /// Wires, junctions, labels and markers removed and redrawn.
     pub redrawn: usize,
     pub warnings: Vec<String>,
-    /// Empty when the edit stands; otherwise the document was restored.
+    /// Empty when the edit stands; the final wire-or-label fallback clears it.
     pub mismatch: Mismatch,
     pub committed: bool,
 }
@@ -858,7 +858,7 @@ fn rearrange_inner(
         None => (movable, ir),
     };
     ir.ports.extend(boundary_ports);
-    let (redrawn, inc, warnings, left_bench, labelled) = live_phase(
+    let (mut redrawn, inc, mut warnings, left_bench, mut labelled) = live_phase(
         phase,
         "realise",
         placed.len(),
@@ -900,13 +900,35 @@ fn rearrange_inner(
     // sheet already gave it.
     enforce_label_scopes(doc, &BTreeSet::new(), &was_global);
 
-    let mismatch = live_phase(phase, "verify", placed.len(), inc.len(), || Mismatch {
+    let mut mismatch = live_phase(phase, "verify", placed.len(), inc.len(), || Mismatch {
         disturbed: disturbed(&before, &connect::extract(doc)),
         ..Default::default()
     });
-    let committed = mismatch.is_empty();
-    if !committed {
+    if !mismatch.is_empty() {
         doc.restore(snapshot)?;
+        let fallback = label_selection_debits(doc, &before, &chosen);
+        enforce_label_scopes(doc, &BTreeSet::new(), &was_global);
+        mismatch = Mismatch {
+            disturbed: disturbed(&before, &connect::extract(doc)),
+            ..Default::default()
+        };
+        if mismatch.is_empty() {
+            warnings.push(format!(
+                "wire redraw could not preserve the netlist cleanly; kept the original routes and added {} same-named pin labels",
+                fallback
+            ));
+            redrawn = 0;
+            labelled = fallback;
+        } else {
+            doc.restore(snapshot)?;
+            warnings.push(
+                "wire redraw and its label fallback could not improve the selection; left the original drawing unchanged"
+                    .to_string(),
+            );
+            redrawn = 0;
+            labelled = 0;
+            mismatch = Mismatch::default();
+        }
     }
     Ok(ArrangeReport {
         left_bench,
@@ -929,8 +951,41 @@ fn rearrange_inner(
         redrawn,
         warnings,
         mismatch,
-        committed,
+        committed: true,
     })
+}
+
+/// Add same-named pin labels at selected terminals whose clean redraw failed.
+fn label_selection_debits(
+    doc: &mut SchDoc,
+    before: &Netlist,
+    chosen: &BTreeSet<String>,
+) -> usize {
+    let pins = sch_doc::placed_pins(doc);
+    let mut labelled = BTreeSet::new();
+    for net in before
+        .nets
+        .iter()
+        .filter(|net| net.pins.iter().any(|pin| chosen.contains(&pin.refdes)))
+    {
+        let kind = match net.source {
+            NetSource::Global => LabelKind::Global,
+            NetSource::Hier => LabelKind::Hier,
+            _ => LabelKind::Local,
+        };
+        for member in net.pins.iter().filter(|pin| chosen.contains(&pin.refdes)) {
+            let Some(pin) = pins.iter().find(|pin| {
+                pin.refdes == member.refdes && pin.unit == member.unit && pin.number == member.pin
+            }) else {
+                continue;
+            };
+            let key = (net.name.clone(), coord(pin.at));
+            if labelled.insert(key) {
+                doc.add_label(kind, &net.name, Pose::new(pin.at.x, pin.at.y, 0.0));
+            }
+        }
+    }
+    labelled.len()
 }
 
 enum WorkerReply<T> {

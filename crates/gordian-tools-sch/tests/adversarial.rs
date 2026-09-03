@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 const EMPTY_SHEET: &str = "(kicad_sch\n\
 \t(version 20250114)\n\
 \t(generator \"eeschema\")\n\
-\t(generator_version \"9.0\")\n\
+\t(generator_version \"10.0\")\n\
 \t(uuid \"4a1c0f2e-0000-4000-8000-0000000000aa\")\n\
 \t(paper \"A4\")\n\
 \t(lib_symbols)\n\
@@ -24,7 +24,8 @@ const EMPTY_SHEET: &str = "(kicad_sch\n\
 )\n";
 
 fn sheet() -> Option<AgentRuntime> {
-    let ctx = AgentRuntime::detect_for_test()?;
+    let ctx =
+        AgentRuntime::detect_for_test().filter(|ctx| ctx.env().major_version() == Some(10))?;
     std::fs::write(ctx.sch_path(), EMPTY_SHEET).unwrap();
     Some(ctx)
 }
@@ -50,6 +51,71 @@ fn labelled_resistor(ctx: &AgentRuntime) {
         json!({"parts": [{"lib_id": "Device:R", "ref": "R1", "value": "DNP"}]}),
     );
     assert!(added.get("error").is_none(), "fixture failed: {added}");
+}
+
+#[test]
+fn bms_swap_payload_reseats_every_surviving_pin_without_bad_wires() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let mut doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    doc.add_symbol(
+        "Battery_Management:BQ76930DBT",
+        "U1",
+        "BQ76930DBT",
+        Pose::new(100.0, 100.0, 0.0),
+        &sch_doc::SymbolSource::new(ctx.env().symbol_dir().to_path_buf()),
+    )
+    .unwrap();
+    for pin in sch_doc::placed_pins(&doc)
+        .into_iter()
+        .filter(|pin| pin.refdes == "U1")
+    {
+        let number = pin.number.parse::<u32>().unwrap();
+        if matches!(number, 11 | 12 | 21..=30) {
+            doc.add_no_connect(pin.at);
+            continue;
+        }
+        let end = geom::Point2::new(pin.at.x + pin.out.x * 5.08, pin.at.y + pin.out.y * 5.08);
+        doc.add_wire(pin.at, end);
+        doc.add_label(
+            LabelKind::Local,
+            &format!("SIG_{}", pin.number),
+            Pose::new(end.x, end.y, 0.0),
+        );
+    }
+    doc.write(ctx.sch_path()).unwrap();
+
+    let result = call(
+        &ctx,
+        "swap_symbol",
+        json!({"lib_id":"Battery_Management:BQ76920PW","ref":"U1","value":"BQ76920"}),
+    );
+    assert!(result.get("error").is_none(), "{result:#}");
+    let after = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    assert!(after.wire_faults().is_empty(), "{:?}", after.wire_faults());
+    let netlist = ctx.env().netlist(ctx.sch_path()).unwrap();
+    for number in [
+        "1", "3", "4", "5", "6", "7", "8", "9", "10", "13", "14", "15", "16", "17", "18", "19",
+        "20",
+    ] {
+        let actual = netlist
+            .nets
+            .iter()
+            .find(|net| {
+                net.nodes
+                    .iter()
+                    .any(|(reference, pin)| reference == "U1" && pin == number)
+            })
+            .map(|net| net.name.trim_start_matches('/'));
+        let expected = format!("SIG_{number}");
+        assert_eq!(
+            actual,
+            Some(expected.as_str()),
+            "U1.{number} was not re-seated: {result}"
+        );
+    }
 }
 
 #[test]
@@ -96,14 +162,127 @@ fn get_net_resolves_power_only_nets_and_a_unique_close_name() {
     labelled_resistor(&ctx);
     let named = call(&ctx, "label", json!({"pin": "R1.1", "net": "OUT_AC"}));
     assert!(named.get("error").is_none(), "fixture failed: {named}");
-    let resolved = call(&ctx, "get_net", json!({"name": "OUT_ISO"}));
-    assert_eq!(resolved["resolved_from"], "OUT_ISO", "{resolved}");
+    let resolved = call(&ctx, "get_net", json!({"name": "OUTA"}));
+    assert_eq!(resolved["resolved_from"], "OUTA", "{resolved}");
     assert_eq!(resolved["name"], "OUT_AC", "{resolved}");
     assert!(
         resolved["report"]
             .as_str()
             .is_some_and(|text| text.starts_with("NET OUT_AC")),
         "{resolved}"
+    );
+}
+
+#[test]
+fn pin_mutators_rank_unknown_pin_names_with_the_shared_resolver() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let added = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [
+            {"lib_id": "Connector:USB_B", "ref": "J1"},
+            {"lib_id": "Device:R", "ref": "R1"}
+        ]}),
+    );
+    assert!(added.get("error").is_none(), "fixture failed: {added}");
+
+    for (tool, input) in [
+        ("no_connect", json!({"pin": "J1.VBU"})),
+        ("add_power", json!({"pin": "J1.VBU", "net": "VBUS"})),
+        ("connect", json!({"from": "J1.VBU", "to": "R1.1"})),
+    ] {
+        let result = call(&ctx, tool, input);
+        let suggestions = result["did_you_mean"]["J1.VBU"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{tool} omitted pin suggestions: {result}"));
+        assert!(
+            suggestions.iter().any(|suggestion| suggestion == "J1.VBUS"),
+            "{tool}: {result}"
+        );
+    }
+}
+
+#[test]
+fn get_symbol_resolves_a_kicad_multi_unit_reference_suffix() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let added = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "Amplifier_Operational:LM358", "ref": "U1"}]}),
+    );
+    assert!(added.get("error").is_none(), "fixture failed: {added}");
+
+    let result = call(&ctx, "get_symbol", json!({"ref": "U1A"}));
+    let report = result.as_str().unwrap_or_else(|| panic!("{result}"));
+    assert!(report.contains("requested as U1A → unit 1"), "{report}");
+    assert!(report.contains("pin  name"), "{report}");
+}
+
+#[test]
+fn rewire_keeps_positions_and_the_kicad_net_partition() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let added = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [
+            {"lib_id": "Device:R", "ref": "R1"},
+            {"lib_id": "Device:R", "ref": "R2", "near": "R1", "side": "right"},
+            {"lib_id": "Device:R", "ref": "R3", "near": "R2", "side": "right"}
+        ]}),
+    );
+    assert!(added.get("error").is_none(), "fixture failed: {added}");
+    for input in [
+        json!({"from": "R1.1", "to": "R2.1", "net": "INPUT_RF"}),
+        json!({"from": "R2.2", "to": "R3.1", "net": "OUTPUT_RF"}),
+    ] {
+        let connected = call(&ctx, "connect", input);
+        assert!(
+            connected.get("error").is_none(),
+            "fixture failed: {connected}"
+        );
+    }
+    let marked = call(&ctx, "no_connect", json!({"pins": ["R1.2", "R3.2"]}));
+    assert!(marked.get("error").is_none(), "fixture failed: {marked}");
+    let before_doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let positions = before_doc
+        .symbols()
+        .map(|symbol| (symbol.refdes().to_string(), symbol.at))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let before = ctx.env().netlist(ctx.sch_path()).unwrap();
+
+    let result = call(&ctx, "rewire", json!({"refs": ["R1", "R2", "R3"]}));
+    assert!(result.get("error").is_none(), "{result:#}");
+    let after_doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let after_positions = after_doc
+        .symbols()
+        .map(|symbol| (symbol.refdes().to_string(), symbol.at))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(after_positions, positions);
+    let partition = |netlist: kicad::Netlist| {
+        netlist
+            .nets
+            .into_iter()
+            .map(|mut net| {
+                net.nodes
+                    .retain(|(reference, _)| !reference.starts_with('#'));
+                net.nodes.sort();
+                net.nodes
+            })
+            .filter(|nodes| !nodes.is_empty())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(
+        partition(ctx.env().netlist(ctx.sch_path()).unwrap()),
+        partition(before)
     );
 }
 

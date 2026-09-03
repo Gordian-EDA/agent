@@ -108,7 +108,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "rewire",
-            "Redraw selected symbols' wiring in place without moving any symbol. Select by refs or bbox; wires are solver-generated, never coordinate-authored.",
+            "Run arrange's netlist-driven redraw over selected symbols without moving them. Select by refs or bbox. A clean route is solver-generated; when that redraw cannot preserve the netlist, the original route stays and same-named labels record the debit. Connectivity never causes a refusal.",
             bulk::selection_schema(false),
         ),
         (
@@ -225,7 +225,9 @@ pub fn tool_defs() -> Vec<Tool> {
              Attached wire runs retract and return as clean obstacle-aware orthogonal routes; welded \
              power flags follow. A pose-only rotation or mirror whose pins permute their existing \
              positions is a turn in place: the body turns, the wires stay fixed, and the pin nets \
-             swap; set `turn_in_place:true` to require that geometry or get an offset error. A taken \
+             swap; set `turn_in_place:true` to require that geometry or get an offset error. When \
+             combined with `to`, `by`, or `near`, the part is dragged first and then turned at its \
+             new position, and both operations are reported. A taken \
              spot slides to final `nudged_to`. Refused with a nudge \
              suggestion if no nearby spot fits, a pin loses its drawing, or an undeclared net would change. \
              After adding and connecting parts, use one batch drag to compact or align them when a \
@@ -342,8 +344,9 @@ pub fn tool_defs() -> Vec<Tool> {
             "Join two ends — a pin like \"R1.1\" / \"U1.VDD\", a net name, or a point [x,y] — or every pair in \
              `pairs` at once. One bare net-name endpoint puts the other pin on that net, creating \
              the label when needed. Give `from` and `net` with no `to` for the same operation. \
-             Joining an unnamed KiCad-derived net to an authored net, or two derived nets, is the \
-             stated endpoint intent; joining two authored nets is refused with a `delete_wires` fix. For series insertion, delete the old wire then join both sides in one \
+             Every net carried by the two named endpoints is stated intent, including two authored \
+             nets; a one-pin `net` label still refuses replacing a different authored name and \
+             returns a `delete_wires` fix. For series insertion, delete the old wire then join both sides in one \
              `pairs` call. The route is solved around the existing \
              drawing and junctions are added for you; if nothing fits, both ends are named with \
              `net` instead and the result says so. Never draw wires by coordinate.",

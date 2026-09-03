@@ -847,7 +847,7 @@ fn guarded_place_parts(
 /// engine ignored it and the whole call was abandoned. Coming back empty is the
 /// one outcome worth avoiding: a re-wire in place redraws the same selection's
 /// wiring from the same netlist with no search at all, which is the honest
-/// best-so-far — the layout is what it was, and the drawing is current.
+/// best-so-far — the layout is what it was, and the drawing reflects the netlist.
 pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let input: SelectionInput = typed(input, "arrange")?;
     let selection = selection(&input)?;
@@ -959,16 +959,12 @@ fn budget_refusal(error: &sch_floorplan::live::Error) -> Value {
 
 fn finish_arrangement(edit: Edit, report: ArrangeReport, ctx: &AgentRuntime) -> Result<Value> {
     if !report.committed {
-        // A re-layout draws the selection's wires FROM THE NETLIST, so this is not
-        // supposed to be reachable — it is the last guard, and what it protects is
-        // the netlist, which is intact either way.
         return Ok(json!({
             "ok": false,
             "code": "layout_unchanged",
             "error": format!(
-                "the re-layout would have changed connectivity ({:?}); the sheet and its \
-                 netlist are untouched. Arrange a smaller selection — one symbol at a time \
-                 with `refs` always works.",
+                "internal error: the netlist-driven layout exhausted its wire and label \
+                 fallbacks ({:?}); the sheet and its netlist are untouched",
                 report.mismatch
             ),
             "report": report,
