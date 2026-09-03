@@ -559,7 +559,7 @@ fn add_symbols_cannot_bypass_footprint_compatibility() {
 }
 
 #[test]
-fn place_parts_keeps_connectivity_faults_fatal_when_a_footprint_is_repairable() {
+fn place_parts_reports_a_duplicate_ref_and_a_bad_pin_in_one_response() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCad detected");
         return;
@@ -581,9 +581,12 @@ fn place_parts_keeps_connectivity_faults_fatal_when_a_footprint_is_repairable() 
         }]}),
     );
 
-    assert_eq!(result["code"], "invalid_payload");
+    assert_eq!(result["code"], "invalid_payload", "{result:#}");
     assert!(!result["duplicate_refs"].as_array().unwrap().is_empty());
-    assert!(!result["unknown_pins"].as_array().unwrap().is_empty());
+    // The pin fault costs that part, not the payload; the duplicate reference is
+    // what refuses, and both are named in the same response.
+    assert_eq!(result["unplaced"][0]["ref"], "J1", "{result:#}");
+    assert!(result["unplaced"][0]["reason"].as_str().unwrap().contains("bad-pin"));
     assert!(result["footprint_mismatch"].as_array().unwrap().is_empty());
     let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
     assert_eq!(

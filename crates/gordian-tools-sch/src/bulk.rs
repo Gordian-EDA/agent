@@ -155,6 +155,18 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !audit.is_valid() || diags.has_errors() {
         return Ok(invalid_payload_response(audit, &warnings));
     }
+    if audit.unplaced.len() == payload.parts.len() {
+        return Ok(with_warnings(
+            json!({
+                "ok": false,
+                "code": "nothing_placed",
+                "unplaced": audit.unplaced,
+                "note": "no part in this payload could be resolved, so the sheet is unchanged. \
+                         Each entry names what is wrong and the nearest real symbol or pin.",
+            }),
+            &warnings,
+        ));
+    }
     let derived: Vec<String> = payload
         .parts
         .iter()
@@ -356,6 +368,7 @@ fn invalid_payload_response(audit: sch_check::PayloadAudit, warnings: &[String])
             "duplicate_refs": audit.duplicate_refs,
             "unknown_pins": audit.unknown_pins,
             "footprint_mismatch": audit.footprint_mismatch,
+            "unplaced": audit.unplaced,
             "dangling": audit.dangling,
             "did_you_mean": audit.did_you_mean,
             "unreliable_nets": audit.unreliable_nets,
@@ -364,8 +377,9 @@ fn invalid_payload_response(audit: sch_check::PayloadAudit, warnings: &[String])
                      here, not the whole payload. `input_errors` are unresolvable lib_ids \
                      and pin conflicts; `duplicate_refs` give the next free refdes; \
                      `unknown_pins` name a key the symbol does not have; `footprint_mismatch` \
-                     includes the closest same-library pad-set repair. `dangling` pins \
-                     are NOT fatal on their own — they are listed so you can finish them.",
+                     includes the closest same-library pad-set repair. `unplaced` parts could \
+                     not be resolved at all and were left out. `dangling` pins are NOT fatal \
+                     on their own — they are listed so you can finish them.",
         }),
         warnings,
     )
