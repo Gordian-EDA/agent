@@ -163,7 +163,8 @@ pub(crate) fn nets_touching(netlist: &Netlist, refs: &[String]) -> Vec<String> {
 pub(crate) fn net_exists(doc: &SchDoc, netlist: &Netlist, name: &str) -> bool {
     netlist.nets.iter().any(|net| net.name == name)
         || doc.symbols().any(|symbol| {
-            symbol.refdes().starts_with("#PWR")
+            symbol.lib_id.starts_with("power:")
+                && symbol.lib_id != "power:PWR_FLAG"
                 && match symbol.value() {
                     "" => symbol.lib_id.strip_prefix("power:") == Some(name),
                     value => value == name,

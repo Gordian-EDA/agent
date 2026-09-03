@@ -89,7 +89,13 @@ fn connect_accepts_a_net_name_as_either_endpoint() {
         eprintln!("SKIP: KiCad 10 not configured");
         return;
     };
-    add_resistors(&ctx, &["R1", "R2", "R3"]);
+    add_resistors(&ctx, &["R1", "R2", "R3", "R4"]);
+    let power = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "power:GND", "ref": "PWR3"}]}),
+    );
+    assert!(power.get("error").is_none(), "fixture failed: {power}");
     let named = call(&ctx, "label", json!({"pin": "R1.1", "net": "VREF"}));
     assert!(named.get("error").is_none(), "fixture failed: {named}");
 
@@ -104,6 +110,9 @@ fn connect_accepts_a_net_name_as_either_endpoint() {
     assert!(vref.contains("R1.1") && vref.contains("R2.1"), "{vref}");
     let sense = call(&ctx, "get_net", json!({"name": "NEW_SENSE"})).to_string();
     assert!(sense.contains("R3.1"), "{sense}");
+    let power_only = call(&ctx, "connect", json!({"from": "R4.1", "to": "GND"}));
+    assert!(power_only.get("error").is_none(), "{power_only}");
+    assert_eq!(power_only["net_endpoint"]["existed"], true, "{power_only}");
 }
 
 #[test]

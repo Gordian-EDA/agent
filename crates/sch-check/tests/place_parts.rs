@@ -305,6 +305,31 @@ fn a_library_no_connect_pin_becomes_an_explicit_gap() {
 }
 
 #[test]
+fn a_shared_pin_name_only_overrides_its_library_nc_pin() {
+    let mut symbols = provider();
+    symbols.mock_add(
+        "MCU:MixedName",
+        vec![
+            ("1", "MIX", PinType::NoConnect, 1),
+            ("2", "MIX", PinType::Other, 1),
+        ],
+    );
+    let input: PlacePartsInput = serde_json::from_str(
+        r#"{"parts": [{"ref": "U3", "part": "MCU:MixedName",
+             "pins": {"MIX": "SIGNAL"}}]}"#,
+    )
+    .unwrap();
+    let (design, _, audit) = into_design(&input, &symbols, &Default::default());
+
+    assert!(audit.is_valid(), "{audit:?}");
+    let pins = &design.blocks[DEFAULT_BLOCK].components["U3"].pins;
+    assert_eq!(pins["1"], sch_check::PinTarget::NoConnect);
+    assert_eq!(pins["2"], sch_check::PinTarget::Net("SIGNAL".into()));
+    assert_eq!(audit.nc_overridden.len(), 1);
+    assert_eq!(audit.nc_overridden[0].pin, "1");
+}
+
+#[test]
 fn decouple_uses_power_pin_types_for_a_3v3_sensor() {
     let input: PlacePartsInput = serde_json::from_str(
         r#"{"parts": [{"ref": "U3", "part": "Sensor:RailNamed",

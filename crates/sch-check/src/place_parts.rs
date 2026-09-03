@@ -366,16 +366,19 @@ fn override_library_no_connects(
         let (Some(refdes), Some(meta)) = (part.refdes.as_ref(), provider.symbol(&part.part)) else {
             continue;
         };
-        for (key, requested_net) in &mut part.pins {
-            if is_no_connect_name(requested_net) {
+        let requested = std::mem::take(&mut part.pins);
+        for (key, requested_net) in requested {
+            if is_no_connect_name(&requested_net) {
+                part.pins.insert(key, requested_net);
                 continue;
             }
-            let resolved = pins::resolve(&meta, key);
+            let resolved = pins::resolve(&meta, &key);
             let no_connects = resolved
                 .iter()
                 .filter(|pin| pin.etype == PinType::NoConnect)
                 .collect::<Vec<_>>();
             if no_connects.is_empty() {
+                part.pins.insert(key, requested_net);
                 continue;
             }
             overridden.extend(no_connects.into_iter().map(|pin| NcOverride {
@@ -383,7 +386,17 @@ fn override_library_no_connects(
                 pin: pin.number.clone(),
                 requested_net: requested_net.clone(),
             }));
-            *requested_net = "nc".to_string();
+            if resolved.iter().all(|pin| pin.etype == PinType::NoConnect) {
+                part.pins.insert(key, "nc".to_string());
+                continue;
+            }
+            for pin in resolved {
+                let net = match pin.etype {
+                    PinType::NoConnect => "nc".to_string(),
+                    _ => requested_net.clone(),
+                };
+                part.pins.insert(pin.number.clone(), net);
+            }
         }
     }
     overridden.sort_by(|left, right| {
