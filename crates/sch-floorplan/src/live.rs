@@ -552,9 +552,10 @@ pub struct AddReport {
     pub benched: Vec<crate::bench::Benched>,
     /// Nets the benched symbols connect to, in name order.
     pub nets: Vec<String>,
-    /// Pins the bench could not name — their net has only KiCAD's derived name,
-    /// which is not a name a label may carry.
-    pub unnamed_pins: Vec<String>,
+    /// Requested net name → stable authored name used when the requested name
+    /// could not identify a distinct net on this sheet.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub authored_nets: BTreeMap<String, String>,
     /// Parts nothing could resolve, so not even the bench can hold them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unplaced: Vec<sch_check::place_parts::Unplaced>,
@@ -614,12 +615,19 @@ pub fn add_parts(
     let source = sch_doc::SymbolSource::new(env.symbol_dir().to_path_buf());
     let mut report = AddReport::default();
     let mut nets = BTreeSet::new();
-    for (block, parts) in bench_parts(&design, only, why) {
-        let benched = crate::bench::bench(doc, &source, &block, &parts)?;
+    let parts_by_block = bench_parts(&design, only, why);
+    let all_parts: Vec<&crate::bench::BenchPart> = parts_by_block.values().flatten().collect();
+    let authored_nets = crate::bench::authored_net_names(doc, &all_parts);
+    for (block, parts) in parts_by_block {
+        let benched = crate::bench::bench(doc, &source, &block, &parts, &authored_nets)?;
         report.benched.extend(benched.benched);
-        report.unnamed_pins.extend(benched.unnamed_pins);
-        nets.extend(parts.iter().flat_map(|part| part.pins.values().cloned()));
+        nets.extend(parts.iter().flat_map(|part| {
+            part.pins
+                .values()
+                .map(|net| authored_nets.get(net).unwrap_or(net).clone())
+        }));
     }
+    report.authored_nets = authored_nets;
     if report.benched.is_empty() {
         doc.restore(snapshot)?;
         return Err(Error::Nothing);
