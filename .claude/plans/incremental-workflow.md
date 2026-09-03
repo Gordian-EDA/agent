@@ -249,3 +249,10 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   turn_in_place combinable with a move, pin/net did-you-mean in connect/no_connect/add_power/get_net,
   multi-unit refs resolve. anneal-frozen merged. Running: lane/pcb-sync-shorts; lane/sch-looks final
   gates (A5 ladder, snapshot scores, netlist gate).
+- ★ First end-to-end campaign completion under the incremental workflow: audio-preamp (pcb4 rerun)
+  → ERC 0, board, 0 unconnected, DRC 0/2, 17 fab files, in 2 turns (PCB critic 6). lane/pcb-sync-shorts
+  (merging): sync retracts only invalidated copper + reports; rule floors clamp; get_board net
+  did-you-mean. Round-5 DRC classes: staged-placeholder lib warnings, ESP32 drill_out_of_range (fixed
+  by clamps), STM32 copper_edge_clearance 12 + courtyards 3. BMS/ESP32 never reached route_board in
+  3 turns (schematic repair ate turns 1–2) → round 6 with --max-turns 5; STM32 route_board 5/32 —
+  placement congestion + nets to staged parts.
