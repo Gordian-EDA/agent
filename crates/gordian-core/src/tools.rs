@@ -64,8 +64,8 @@ fn intent_schema() -> Value {
         "properties": {
             "edge": {
                 "type": "object",
-                "description": "Reference -> board side its courtyard should touch.",
-                "additionalProperties": { "type": "string", "enum": ["left", "right", "top", "bottom"] }
+                "description": "Reference -> board side its courtyard should touch; compass aliases are normalized in the response.",
+                "additionalProperties": { "type": "string", "enum": ["left", "right", "top", "bottom", "north", "south", "east", "west", "N", "S", "E", "W", "n", "s", "e", "w"] }
             },
             "keep_near": {
                 "type": "array",

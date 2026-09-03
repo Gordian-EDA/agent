@@ -2935,6 +2935,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(intent) => intent,
         Err(error) => return Ok(json!({ "error": error })),
     };
+    let normalized_edges = intent.normalized_edges.clone();
     let known = board
         .imported
         .parts
@@ -2993,6 +2994,9 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         if !reference_status.is_empty() {
             result["reference_status"] = json!(reference_status);
+        }
+        if !normalized_edges.is_empty() {
+            result["normalized_edges"] = json!(normalized_edges);
         }
         return Ok(result);
     }
@@ -3495,6 +3499,9 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     if !reference_status.is_empty() {
         out["reference_status"] = json!(reference_status);
+    }
+    if !normalized_edges.is_empty() {
+        out["normalized_edges"] = json!(normalized_edges);
     }
     let out = match gate {
         Some(gate) => gate.commit(ctx, out),
