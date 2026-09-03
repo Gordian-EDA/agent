@@ -486,6 +486,7 @@ fn stale_nets_request_sync_and_existing_board_intent_runs_both_halves() {
     )
     .unwrap();
     assert!(synced.get("error").is_none(), "{synced:#}");
+    assert_eq!(synced["normalized_edges"]["J404"], json!("left"));
     assert!(synced["sync"].is_object(), "{synced:#}");
     assert!(synced["placement"].is_object(), "{synced:#}");
     assert!(

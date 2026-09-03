@@ -301,9 +301,10 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .collect::<BTreeSet<_>>()
         .len();
     let phase = crate::WorkflowPhase::start("sync", parts.len(), net_count);
-    if let Err(error) = crate::intent::parse(&input) {
-        return Ok(json!({ "error": error }));
-    }
+    let normalized_edges = match crate::intent::parse(&input) {
+        Ok(intent) => intent.normalized_edges,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
     let board_existed = ctx.pcb_path().exists();
     let mut result = if !board_existed {
         create_board(&parts, &design.mismatched, &input, ctx)
@@ -315,6 +316,9 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     report_staged(&design, &mut result);
     if let Some(object) = result.as_object_mut() {
         object.insert("schematic_erc".to_owned(), design.erc.clone());
+        if !normalized_edges.is_empty() {
+            object.insert("normalized_edges".to_owned(), json!(normalized_edges));
+        }
     }
     if board_existed
         && input.get("intent").is_some()
