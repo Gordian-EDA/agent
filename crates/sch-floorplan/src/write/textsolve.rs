@@ -731,51 +731,19 @@ impl SchematicWriter {
 
     /// Shift the whole drawing so its true minimum corner — including the rail
     /// power symbols, edge port labels, and solved field text that extend beyond
-    /// the symbol bodies — lands at the page margin. The floorplan's `normalize`
+    /// the symbol bodies — lands at the page margin. The corner is
+    /// [`Self::content_bbox`]'s, so the page the sheet is framed on and the page
+    /// it is sized for are measured the same way. The floorplan's `normalize`
     /// only shifts symbol bodies, and it runs *before* wiring adds those edge
     /// elements, so a left/top port label can otherwise sit at a negative
     /// coordinate and be clipped off the content-fit page. Run last, after text is
     /// solved, so field positions move with their symbols.
     fn reframe(&mut self) {
-        use sch_model::text::text_width;
         const M: f64 = 12.7;
-        let (mut minx, mut miny) = (f64::MAX, f64::MAX);
-        let mut lo = |x: f64, y: f64| {
-            minx = minx.min(x);
-            miny = miny.min(y);
-        };
-        for i in &self.instances {
-            let h = i.half_extents.rotated_half_extents(i.angle);
-            lo(i.at[0] - h[0], i.at[1] - h[1]);
-            for (p, text) in [(i.ref_pos, &i.refdes), (i.val_pos, &i.value)] {
-                let Some(p) = p else { continue };
-                lo(p.at[0] - text_width(text), p.at[1] - 1.6);
-            }
-        }
-        for w in &self.wires {
-            lo(w.a[0], w.a[1]);
-            lo(w.b[0], w.b[1]);
-        }
-        for l in &self.labels {
-            // A right-justified edge label (a left/top port) extends back toward
-            // smaller x by its text width; cover both directions conservatively.
-            lo(l.at[0] - text_width(&l.net), l.at[1] - 1.6);
-        }
-        for j in &self.junctions {
-            lo(j.at[0], j.at[1]);
-        }
-        for nc in &self.no_connects {
-            lo(nc.at[0], nc.at[1]);
-        }
-        for t in &self.texts {
-            lo(t.at[0], t.at[1] - t.size);
-        }
-        for r in &self.rects {
-            lo(r.start[0].min(r.end[0]), r.start[1].min(r.end[1]));
-        }
-        if minx == f64::MAX {
+        let Some(content) = self.content_bbox() else {
             return;
-        }
+        };
+        let (minx, miny) = (content.min_x, content.min_y);
         // Snap the shift to the grid: all wire/pin geometry is grid-aligned, so a
         // grid-multiple shift keeps it grid-aligned (KiCAD ERCs off-grid endpoints).
         // `minx`/`miny` include off-grid text extents, so an unsnapped shift would
@@ -797,7 +765,6 @@ impl SchematicWriter {
     /// a placement on its true post-text-solve extent, edge label-columns included). `None`
     /// for an empty sheet.
     pub fn content_bbox(&self) -> Option<geom::Rect> {
-        use sch_model::text::text_width;
         let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
         let mut acc = |lx: f64, ly: f64, hx: f64, hy: f64| {
             x0 = x0.min(lx);
@@ -805,6 +772,7 @@ impl SchematicWriter {
             x1 = x1.max(hx);
             y1 = y1.max(hy);
         };
+
         for i in &self.instances {
             let h = i.half_extents.rotated_half_extents(i.angle);
             acc(
@@ -813,12 +781,12 @@ impl SchematicWriter {
                 i.at[0] + h[0],
                 i.at[1] + h[1],
             );
-            // Fields are boxed by the width they actually render at, both ways: a long
-            // MPN value overhangs a fixed allowance and then falls off the page.
+            // Fields are boxed exactly as they render: a long MPN value overhangs
+            // a fixed allowance and then falls off the page.
             for (p, text) in [(i.ref_pos, &i.refdes), (i.val_pos, &i.value)] {
                 let Some(p) = p else { continue };
-                let tw = text_width(text);
-                acc(p.at[0] - tw, p.at[1] - 1.6, p.at[0] + tw, p.at[1] + 1.6);
+                let b = super::field_box(p.at, p.justify, text);
+                acc(b.min_x, b.min_y, b.max_x, b.max_y);
             }
         }
         for w in &self.wires {
@@ -830,8 +798,8 @@ impl SchematicWriter {
             );
         }
         for l in &self.labels {
-            let tw = text_width(&l.net);
-            acc(l.at[0] - tw, l.at[1] - 1.6, l.at[0] + tw, l.at[1] + 1.6);
+            let b = label_rect(l, l.at);
+            acc(b.min_x, b.min_y, b.max_x, b.max_y);
         }
         for j in &self.junctions {
             acc(j.at[0], j.at[1], j.at[0], j.at[1]);
@@ -840,8 +808,16 @@ impl SchematicWriter {
             acc(nc.at[0], nc.at[1], nc.at[0], nc.at[1]);
         }
         for t in &self.texts {
-            let tw = text_width(&t.text) * t.size / 1.27;
-            acc(t.at[0], t.at[1] - t.size, t.at[0] + tw, t.at[1] + t.size);
+            // `emit::render_text` writes notes `(justify left bottom)`.
+            let b = sch_model::text::note_box(
+                &t.text,
+                t.size,
+                Justify::Left.hjust(),
+                sch_model::text::VJust::Bottom,
+                0.0,
+                t.at.into(),
+            );
+            acc(b.min_x, b.min_y, b.max_x, b.max_y);
         }
         for r in &self.rects {
             acc(

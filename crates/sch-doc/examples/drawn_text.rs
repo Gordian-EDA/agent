@@ -34,8 +34,12 @@ fn main() {
                 }
             }
         }
+        let extent = texts
+            .iter()
+            .map(|t| t.bbox)
+            .reduce(|a, b| geom::Rect::new(a.min_x.min(b.min_x), a.min_y.min(b.min_y), a.max_x.max(b.max_x), a.max_y.max(b.max_y)));
         println!(
-            "{path}\tparts={sheet_parts}\ttexts={}\tpairs={}\tper_part={:.3}",
+            "{path}\textent={extent:?}\tparts={sheet_parts}\ttexts={}\tpairs={}\tper_part={:.3}",
             texts.len(),
             hits.len(),
             hits.len() as f64 / sheet_parts.max(1) as f64

@@ -22,7 +22,16 @@ const LONGEST_WIRE: f64 = 60.0;
 /// fitter decides — a sheet 938 mm wide is a placement that never folded. Listed rather
 /// than tolerated: the assertion is EQUALITY, so a new oversize sheet fails here and so
 /// does a fixed one, which is what makes the list shrink.
-const OVERSIZE: [&str; 2] = ["campaign-stm32-buck", "esp32-multifunction"];
+///
+/// `campaign-esp32-sensor-node` is the same unfolded row, 517 mm of it. It sat just
+/// inside A2 only while text was measured at a flat 1.1 mm per character, which runs
+/// 11-13 % short of what KiCAD strokes; reserving the width the render actually uses
+/// pushed the row to 624 mm. The row is the defect, not the measurement.
+const OVERSIZE: [&str; 3] = [
+    "campaign-esp32-sensor-node",
+    "campaign-stm32-buck",
+    "esp32-multifunction",
+];
 
 fn corpus() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/validation")
