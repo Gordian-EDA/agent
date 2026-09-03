@@ -1295,6 +1295,8 @@ REFUSAL = re.compile(r"\brefus(?:e|ed|al|ing)\b", re.IGNORECASE)
 TURN_STARTED = re.compile(r"^turn (?P<turn>\d+): (?P<prompt>.*)$")
 TURN_DONE = re.compile(r"^turn (?P<turn>\d+) done:")
 ASSISTANT_TEXT = re.compile(r"^assistant:\s*(.+)$", re.M)
+
+
 def parse_agent_stderr(stderr):
     """Turn the headless agent's compact event transcript into durable facts."""
     text = ANSI.sub("", stderr)
@@ -1448,7 +1450,7 @@ def write_gallery(artifacts, phases):
                     relative = Path(item["path"]).relative_to(artifacts)
                     pair.append(
                         f'<figure><img src="{html.escape(str(relative))}" '
-                        f'alt="Turn {phase["turn"]} {kind} {html.escape(label)}">'
+                        f'alt="{html.escape(phase["label"])} {kind} {html.escape(label)}">'
                         f'<figcaption>{html.escape(label)}</figcaption></figure>'
                     )
                 else:
@@ -1478,10 +1480,10 @@ figcaption{text-align:center;padding-top:6px}@media(max-width:800px){.pair{grid-
     (artifacts / "gallery.html").write_text(document, encoding="utf-8")
 
 
-
-
-
 def run_agent(project, prompt, timeout, env):
+    """Run one agent case to completion. `timeout` is None unless the operator
+    set `QUALITY_TIMEOUT`: the loop has no budget of its own and the harness
+    imposes none either."""
     args = agent_command(project, prompt)
     try:
         return command(args, timeout=timeout, check=False, env=env)
@@ -1527,7 +1529,7 @@ def run_case(case, output_root):
     result = run_agent(
         project,
         prompt,
-        int(os.environ.get("QUALITY_TIMEOUT", "7200")),
+        int(os.environ["QUALITY_TIMEOUT"]) if os.environ.get("QUALITY_TIMEOUT") else None,
         {**os.environ, "GORDIAN_THREAD_ID": f"quality-{case.name}-{int(started)}"},
     )
     agent_seconds = round(time.time() - agent_started, 1)
@@ -1540,7 +1542,6 @@ def run_case(case, output_root):
         "health": phase_health(project, artifacts, 1),
         "renders": render_project(project, artifacts, "phase-1"),
     }]
-    write_gallery(artifacts, phases)
     turn_facts = {
         "agent_exit": result.returncode,
         "request_count": parsed["request_count"],
@@ -1553,7 +1554,6 @@ def run_case(case, output_root):
         "final_assistant": parsed["final_assistant"],
         "transcript": parsed["transcript"],
     }
-    # The measured half is written before the judges are asked, so a gateway
     # failure costs the verdicts and not the whole run.
     result_path.write_text(
         json.dumps(

@@ -338,6 +338,28 @@ fn validate_optional_path(
 mod tests {
     use super::*;
 
+    /// The request cap is opt-in and must be a usable number when present.
+    #[test]
+    fn agent_max_requests_is_absent_by_default_and_validated_when_set() {
+        let mut config = GordianConfig::default();
+        assert_eq!(config.agent.max_requests, None);
+        config.validate().unwrap();
+
+        config.agent.max_requests = Some(0);
+        assert_eq!(
+            config.validate().unwrap_err().path,
+            "agent.maxRequests",
+            "a zero cap is rejected"
+        );
+
+        config.agent.max_requests = Some(200);
+        config.validate().unwrap();
+
+        let parsed: GordianConfig =
+            toml::from_str("[agent]\nmaxRequests = 120\n").expect("camelCase key");
+        assert_eq!(parsed.agent.max_requests, Some(120));
+    }
+
     #[test]
     fn default_config_is_valid() {
         let cfg = GordianConfig::default();

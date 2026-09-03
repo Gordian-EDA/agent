@@ -28,8 +28,11 @@ const DEFAULT_PROJECT_DIR: &str = "gordian-project";
 
 const USAGE: &str = "usage:
   gordian                              print version
-  gordian agent [--project <dir>] [--no-review] [--input <file|->] [\"<prompt>\"]
+  gordian agent [--project <dir>] [--no-review] [--input <file|->]
+                [--max-requests <n>] [\"<prompt>\"]
                                        run one or more agent turns
+                                       (a turn ends when the model stops calling
+                                       tools; --max-requests caps it, default none)
   gordian tui [--project <dir>]        launch the copilot cockpit
 
 options:
@@ -65,7 +68,7 @@ fn main() -> ExitCode {
         Some("agent") if is_help_request(&args[1..]) => {
             logging::init_stderr_only();
             tracing::info!(
-                "usage: gordian agent [--project <dir>] [--no-review] [--input <file|->] [\"<prompt>\"]\n\nRun one or more headless agent turns."
+                "usage: gordian agent [--project <dir>] [--no-review] [--input <file|->] [--max-requests <n>] [\"<prompt>\"]\n\nRun one or more headless agent turns. A turn ends when the model stops calling tools; --max-requests sets an optional ceiling (default: none)."
             );
             ExitCode::SUCCESS
         }
@@ -817,6 +820,36 @@ mod tests {
         assert_eq!(inv.project_dir, PathBuf::from("/tmp/demo"));
         assert_eq!(inv.prompt.as_deref(), Some("make a board"));
         assert!(inv.review, "review defaults on");
+    }
+
+    /// The cap is off unless the user asks for one, and a nonsense value is
+    /// rejected rather than silently ignored.
+    #[test]
+    fn parses_the_optional_user_request_cap() {
+        let inv = parse_agent_args(&["make a board".into()]).unwrap();
+        assert_eq!(inv.max_requests, None, "no cap by default");
+
+        let inv = parse_agent_args(&["--max-requests".into(), "40".into(), "make a board".into()])
+            .unwrap();
+        assert_eq!(inv.max_requests, Some(40));
+
+        for bad in [
+            vec!["--max-requests".into(), "0".into(), "p".into()],
+            vec!["--max-requests".into(), "lots".into(), "p".into()],
+            vec!["--max-requests".into()],
+            vec![
+                "--max-requests".into(),
+                "3".into(),
+                "--max-requests".into(),
+                "4".into(),
+                "p".into(),
+            ],
+        ] {
+            assert!(
+                parse_agent_args(&bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
     }
 
     #[test]

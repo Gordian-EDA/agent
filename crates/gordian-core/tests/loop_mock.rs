@@ -69,7 +69,8 @@ async fn reviewed_turn_uses_check_schematic_without_a_reviewer_model_call() {
 }
 
 /// The loop has no turn budget: it ends when the model stops asking for tools,
-/// however long that takes.
+/// however long that takes. `reserve_refs` is neither a discovery call nor a
+/// state-scoped read, so all 200 really dispatch.
 #[tokio::test]
 async fn a_long_tool_sequence_runs_to_completion() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
@@ -77,14 +78,20 @@ async fn a_long_tool_sequence_runs_to_completion() {
         return;
     };
     let mut script: Vec<_> = (0..200)
-        .map(|index| tool_call(&format!("read-{index}"), "project_info", json!({})))
+        .map(|index| {
+            tool_call(
+                &format!("reserve-{index}"),
+                "reserve_refs",
+                json!({"prefix": "R", "count": 1}),
+            )
+        })
         .collect();
     script.push(final_text("inspected"));
     let (client, seen) = ScriptedClient::recording(script);
     let mut agent = Agent::new(client, ctx, system_prompt());
 
     let outcome = agent
-        .run_turn("inspect the project repeatedly", None)
+        .run_turn("reserve references repeatedly", None)
         .await
         .unwrap();
 
@@ -95,29 +102,48 @@ async fn a_long_tool_sequence_runs_to_completion() {
 }
 
 /// The optional user-set cap belongs to the whole turn, not to whichever subturn
-/// is running: a turn is the model's own work plus every review round.
+/// is running: a turn is the model's own work plus every review round. The first
+/// subturn finishes on its own, so the requests the cap stops belong to the
+/// review-driven fix subturn that follows it.
 #[tokio::test]
 async fn the_user_set_cap_spans_a_whole_reviewed_turn() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
-    let mut script = vec![place_two_resistors()];
-    script.extend(
-        (0..80).map(|index| tool_call(&format!("read-{index}"), "project_info", json!({}))),
-    );
+    let mut script = vec![
+        // A committed change with a dangling net, so the post-turn check finds a
+        // defect and a fix subturn starts.
+        tool_call(
+            "place",
+            "place_parts",
+            json!({
+                "parts": [
+                    {"ref": "R1", "part": "Device:R", "value": "10k", "pins": {"1": "SIG", "2": "GND"}}
+                ]
+            }),
+        ),
+        final_text("placed"),
+    ];
+    script.extend((0..40).map(|index| {
+        tool_call(
+            &format!("reserve-{index}"),
+            "reserve_refs",
+            json!({"prefix": "R", "count": 1}),
+        )
+    }));
     let (client, seen) = ScriptedClient::recording(script);
     let mut agent = Agent::new(client, ctx, system_prompt());
-    agent.set_max_requests(Some(12));
+    agent.set_max_requests(Some(8));
 
     let outcome = agent
-        .run_turn_reviewed("create a divider", "create a divider", None, 2)
+        .run_turn_reviewed("place a resistor", "place a resistor", None, 2)
         .await
         .unwrap();
 
     assert_eq!(
         outcome.stop_reason,
-        StopReason::MaxRequestsReached { requests: 12 }
+        StopReason::MaxRequestsReached { requests: 8 }
     );
     assert!(
         outcome.final_text.contains("user-set cap"),
@@ -125,7 +151,14 @@ async fn the_user_set_cap_spans_a_whole_reviewed_turn() {
         outcome.final_text
     );
     let spent = seen.lock().unwrap().len();
-    assert!(spent <= 12, "a reviewed turn spent {spent} against a cap of 12");
+    assert!(
+        spent <= 8,
+        "a reviewed turn spent {spent} against a cap of 8"
+    );
+    assert!(
+        spent > 2,
+        "the cap stopped the first subturn, not the review"
+    );
 }
 
 /// A turn stopped at the user cap keeps the last legal partial write on disk.

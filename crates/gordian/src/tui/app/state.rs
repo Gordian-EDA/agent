@@ -195,7 +195,7 @@ impl App {
     /// Tear a turn down and post its end indicator. The sole teardown point:
     /// clears `running`/`turn_started` and pushes one labelled,
     /// tinted system line saying *why* the turn stopped — a clean finish, the
-    /// iteration-cap cutoff, a user interruption, or an error — with the elapsed
+    /// user's request cap, a user interruption, or an error — with the elapsed
     /// time and tool-call count. `Compacted` posts no line (the shrink note from
     /// the `Compacted` event already covers it). Idempotent: a second call (the
     /// `TurnDone`/`TurnEnded` pair can't both reach here, but a stray repeat) is

@@ -237,25 +237,27 @@ impl<P: Provider> Provider for MeteredProvider<P> {
     }
 }
 
-/// Base cap on each kind of catalog exploration before the model must reuse
-/// its best prior hits. One assistant completion may contain several same-kind
-/// discovery calls and still costs that tool only one round. An explicit
-/// component floor in the request raises it via [`discovery_rounds_for_intent`].
-const MAX_DISCOVERY_ROUNDS_PER_SUBTURN: usize = 1;
+/// Base cap on each kind of catalog exploration before the model must reuse its
+/// best prior hits, counted against one project state: committing a change
+/// clears it, so a long build searches per block rather than once per task. One
+/// assistant completion may contain several same-kind discovery calls and still
+/// costs that tool only one round. An explicit component floor in the request
+/// raises it via [`discovery_rounds_for_intent`].
+const MAX_DISCOVERY_ROUNDS_PER_STATE: usize = 1;
 
 /// A model can put dozens of near-duplicate catalog queries into one
 /// completion. Bound the actually dispatched fan-out so one speculative batch
 /// cannot flood history with hundreds of low-value hits.
 const MAX_DISCOVERY_CALLS_PER_COMPLETION: usize = 4;
 
-/// Catalog discovery a request may spend before it must reuse its best prior
-/// hits. A request with an explicit numeric component floor (45+ parts,
-/// multi-domain) legitimately needs more catalog exploration than the base
+/// Catalog discovery a request may spend per project state before it must reuse
+/// its best prior hits. A request with an explicit numeric component floor (45+
+/// parts, multi-domain) legitimately needs more catalog exploration than the base
 /// constant sized for small boards; without a stated floor, or below 24 parts,
-/// this is [`MAX_DISCOVERY_ROUNDS_PER_SUBTURN`].
+/// this is [`MAX_DISCOVERY_ROUNDS_PER_STATE`].
 fn discovery_rounds_for_intent(intent: &str) -> usize {
     let floor = explicit_minimum_physical_components(intent).unwrap_or(0);
-    MAX_DISCOVERY_ROUNDS_PER_SUBTURN + floor / 24
+    MAX_DISCOVERY_ROUNDS_PER_STATE + floor / 24
 }
 
 /// One chance for a model that has not touched the requested PCB workflow to
@@ -623,6 +625,8 @@ pub struct Agent<P: Provider = GenaiProvider> {
     /// An optional, user-set ceiling on model requests per turn. `None` (the
     /// default) means the turn runs until the model stops calling tools.
     max_requests: Option<usize>,
+    /// Timed-out tool tasks a later mutation must wait for.
+    settling: SettlingTools,
     tool_seq: AtomicU64,
 }
 
@@ -640,6 +644,7 @@ impl<P: Provider> Agent<P> {
             tool_phase,
             turn_requests: 0,
             max_requests: None,
+            settling: SettlingTools::default(),
             tool_seq: AtomicU64::new(0),
         }
     }
@@ -840,7 +845,6 @@ impl<P: Provider> Agent<P> {
         let mut tool_state_generation = 0u64;
         let mut discovery_rounds_used: HashMap<String, usize> = HashMap::new();
         let mut state_read_uses: HashMap<String, u64> = HashMap::new();
-        let mut timed_out_tool_calls: Vec<(String, Value, u64)> = Vec::new();
         let mut pcb_recovery = PcbRecoveryState::default();
         let mut pcb_quality = PcbQualityState::default();
         loop {
@@ -866,9 +870,7 @@ impl<P: Provider> Agent<P> {
             }
             let state_reads_used = state_read_uses
                 .iter()
-                .filter(|(name, generation)| {
-                    name.as_str() == "read_schematic" || **generation == tool_state_generation
-                })
+                .filter(|(_, generation)| **generation == tool_state_generation)
                 .map(|(name, _)| name.clone())
                 .collect::<HashSet<_>>();
             let mut defs = tool_defs_for_phase(
@@ -911,6 +913,22 @@ impl<P: Provider> Agent<P> {
                     StreamCompletion::End { text, end } => (text, end),
                     StreamCompletion::MissingEnd { text } => {
                         stream_transport_available = false;
+                        if let Some(cap) = self.max_requests
+                            && provider_requests >= cap
+                        {
+                            let mut final_text = max_requests_message(cap, tool_calls_made);
+                            if !text.trim().is_empty() {
+                                final_text.push_str("\n\nLast partial model response: ");
+                                final_text.push_str(text.trim());
+                            }
+                            emit(events, AgentEvent::AssistantText(final_text.clone()));
+                            return Ok(TurnOutcome {
+                                applied,
+                                final_text,
+                                tool_calls_made,
+                                stop_reason: StopReason::MaxRequestsReached { requests: cap },
+                            });
+                        }
                         provider_requests += 1;
                         self.turn_requests = provider_requests;
                         let end = self
@@ -1026,11 +1044,7 @@ impl<P: Provider> Agent<P> {
                 let repeated_read = is_state_scoped_read(&call.fn_name)
                     && state_read_uses
                         .get(&call.fn_name)
-                        .is_some_and(|generation| {
-                            call.fn_name == "read_schematic" || *generation == tool_state_generation
-                        });
-                let mutation_blocked = timed_out_mutation_name(&timed_out_tool_calls).is_some()
-                    && effect == ToolEffect::Mutating;
+                        .is_some_and(|generation| *generation == tool_state_generation);
 
                 let (mut content, images, image_path, dispatched) = if discovery_duplicate {
                     (
@@ -1076,17 +1090,6 @@ impl<P: Provider> Agent<P> {
                         None,
                         false,
                     )
-                } else if mutation_blocked {
-                    (
-                        json!({
-                            "error": "a prior mutation timed out and may still be running",
-                            "note": "another mutation could race it; inspect the project with a read tool, and if it stays blocked report that in your reply"
-                        })
-                        .to_string(),
-                        Vec::new(),
-                        None,
-                        false,
-                    )
                 } else {
                     if budgeted_discovery {
                         if discovery_tools_started.insert(call.fn_name.clone()) {
@@ -1105,19 +1108,21 @@ impl<P: Provider> Agent<P> {
                     result
                 };
                 let parsed = parse_or_null(&content);
-                if tool_result_is_timeout(&parsed) {
-                    timed_out_tool_calls.push((
-                        call.fn_name.clone(),
-                        call.fn_arguments.clone(),
-                        tool_state_generation,
-                    ));
-                }
                 if dispatched && is_state_scoped_read(&call.fn_name) {
                     state_read_uses.insert(call.fn_name.clone(), tool_state_generation);
                 }
                 let prior_generation = tool_state_generation;
                 tool_state_generation =
                     next_tool_state_generation(tool_state_generation, dispatched, effect, &parsed);
+                if tool_state_generation != prior_generation {
+                    // The per-state allowances are about repeating work on an
+                    // unchanged project. A committed change is new ground: the
+                    // next block may legitimately need the catalog again, and a
+                    // premature finish after it deserves the same nudge.
+                    discovery_rounds_used.clear();
+                    check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
+                    pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
+                }
                 if dispatched && schematic_mutation_succeeded(&call.fn_name, &parsed) {
                     applied = true;
                     schematic_mutated = true;
@@ -1210,7 +1215,7 @@ impl<P: Provider> Agent<P> {
         }
         for round in 0..=max_fix {
             emit(events, AgentEvent::ReviewStarted { round });
-            let review = check_schematic_review(&self.runtime).await;
+            let review = check_schematic_review(&self.runtime, &self.settling).await;
             emit(
                 events,
                 AgentEvent::Reviewed {
@@ -1247,7 +1252,7 @@ impl<P: Provider> Agent<P> {
     }
 
     async fn run_tool_call(&self, call: &ToolCall) -> (String, Vec<Binary>, Option<String>, bool) {
-        let outcome = run_kicad_tool(&self.runtime, call).await;
+        let outcome = run_kicad_tool(&self.runtime, &self.settling, call).await;
         (
             tool_result_text(&outcome.value),
             outcome.images,
@@ -1299,7 +1304,10 @@ fn emit_result_diagnostic(events: Events<'_>, name: &str, result: &Value) {
 /// names the cap as the cause so nobody reads it as a statement about the design.
 fn max_requests_message(cap: usize, tool_calls_made: usize) -> String {
     format!(
-        "Stopped at the user-set cap of {cap} model requests (`--max-requests` / `agent.maxRequests`)          after {tool_calls_made} tool calls. This is the configured limit, not a judgement about the          work: raise or remove the cap and run again to let the turn finish."
+        "Stopped at the user-set cap of {cap} model requests \
+         (`--max-requests` / `agent.maxRequests`) after {tool_calls_made} tool calls. \
+         This is the configured limit, not a judgement about the work: raise or remove \
+         the cap and run again to let the turn finish."
     )
 }
 
@@ -1519,18 +1527,6 @@ fn request_requires_fabrication(user_msg: &str) -> bool {
         || request.contains("export fab")
         || request.contains("gerber")
         || request.contains("board house")
-}
-
-/// The timed-out call whose edit may still be in flight, and which therefore makes
-/// concurrent mutation unsafe. A mutation that enforces its own deadline is not one
-/// of those.
-fn timed_out_mutation_name(timed_out: &[(String, Value, u64)]) -> Option<&str> {
-    timed_out
-        .iter()
-        .find(|(name, _, _)| {
-            tool_effect(name) == ToolEffect::Mutating && !enforces_own_deadline(name)
-        })
-        .map(|(name, _, _)| name.as_str())
 }
 
 fn tool_result_is_timeout(value: &Value) -> bool {
@@ -1824,21 +1820,75 @@ fn fix_prompt(defects: &[String]) -> String {
 }
 
 /// Run one KiCAD tool on the blocking pool.
-async fn run_kicad_tool(ctx: &Arc<AgentRuntime>, call: &ToolCall) -> ToolOutcome {
-    into_outcome(run_blocking(ctx, &call.fn_name, call.fn_arguments.clone()).await)
+async fn run_kicad_tool(
+    ctx: &Arc<AgentRuntime>,
+    settling: &SettlingTools,
+    call: &ToolCall,
+) -> ToolOutcome {
+    into_outcome(run_blocking(ctx, settling, &call.fn_name, call.fn_arguments.clone()).await)
 }
 
-async fn run_blocking(ctx: &Arc<AgentRuntime>, name: &str, input: Value) -> Result<Value> {
+/// Tool tasks that outlived their deadline. `spawn_blocking` cannot be
+/// cancelled, so a timed-out mutation may still be writing; parking its handle
+/// here lets the next mutation wait for it instead of racing it.
+#[derive(Default)]
+struct SettlingTools(Mutex<Vec<(String, tokio::task::JoinHandle<Result<Value>>)>>);
+
+impl SettlingTools {
+    fn park(&self, name: &str, handle: tokio::task::JoinHandle<Result<Value>>) {
+        self.0
+            .lock()
+            .expect("settling tools poisoned")
+            .push((name.to_string(), handle));
+    }
+
+    /// Wait up to `grace` for every parked task, returning the names of those
+    /// that are still running.
+    async fn settle(&self, grace: Duration) -> Vec<String> {
+        let parked = std::mem::take(&mut *self.0.lock().expect("settling tools poisoned"));
+        let mut unsettled = Vec::new();
+        for (name, mut handle) in parked {
+            match tokio::time::timeout(grace, &mut handle).await {
+                Ok(_) => tracing::info!(tool = %name, "timed-out tool settled"),
+                Err(_) => {
+                    unsettled.push(name.clone());
+                    self.park(&name, handle);
+                }
+            }
+        }
+        unsettled
+    }
+}
+
+async fn run_blocking(
+    ctx: &Arc<AgentRuntime>,
+    settling: &SettlingTools,
+    name: &str,
+    input: Value,
+) -> Result<Value> {
+    let timeout = tool_timeout(name);
+    if tool_effect(name) == ToolEffect::Mutating {
+        let unsettled = settling.settle(timeout).await;
+        if !unsettled.is_empty() {
+            anyhow::bail!(
+                "`{}` is still running past its deadline and may be writing the project; \
+                 no other mutation is safe until it returns",
+                unsettled.join("`, `")
+            );
+        }
+    }
     let ctx = Arc::clone(ctx);
-    let name = name.to_string();
-    let timeout = tool_timeout(&name);
-    let handle = tokio::task::spawn_blocking({
-        let name = name.clone();
+    let owned_name = name.to_string();
+    let mut handle = tokio::task::spawn_blocking({
+        let name = owned_name.clone();
         move || run_tool(&name, input, &ctx)
     });
-    match tokio::time::timeout(timeout, handle).await {
+    match tokio::time::timeout(timeout, &mut handle).await {
         Ok(joined) => joined.map_err(|e| anyhow::anyhow!("tool execution task failed: {e}"))?,
-        Err(_) => anyhow::bail!(tool_timeout_message(&name, timeout)),
+        Err(_) => {
+            settling.park(&owned_name, handle);
+            anyhow::bail!(tool_timeout_message(&owned_name, timeout))
+        }
     }
 }
 
@@ -1896,8 +1946,11 @@ fn enforces_own_deadline(name: &str) -> bool {
     matches!(name, "place_parts" | "arrange")
 }
 
-async fn check_schematic_review(ctx: &Arc<AgentRuntime>) -> ReviewOutcome {
-    let value = match run_blocking(ctx, "check_schematic", json!({})).await {
+async fn check_schematic_review(
+    ctx: &Arc<AgentRuntime>,
+    settling: &SettlingTools,
+) -> ReviewOutcome {
+    let value = match run_blocking(ctx, settling, "check_schematic", json!({})).await {
         Ok(value) => value,
         Err(error) => {
             return ReviewOutcome {
@@ -2544,7 +2597,9 @@ mod tests {
             StopReason::MaxRequestsReached { requests: 2 }
         );
         assert!(
-            outcome.final_text.contains("user-set cap of 2 model requests"),
+            outcome
+                .final_text
+                .contains("user-set cap of 2 model requests"),
             "{}",
             outcome.final_text
         );
@@ -2556,7 +2611,7 @@ mod tests {
         let defs = tool_defs_for_phase(
             ToolPhase::Schematic,
             &HashMap::new(),
-            MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
+            MAX_DISCOVERY_ROUNDS_PER_STATE,
             &HashSet::new(),
         );
 
