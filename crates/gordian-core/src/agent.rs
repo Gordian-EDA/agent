@@ -286,12 +286,12 @@ impl<P: Provider> Provider for MeteredProvider<P> {
 }
 
 /// Base cap on each kind of catalog exploration before the model must reuse
-/// its best prior hits. One assistant completion may batch several same-kind
+/// its best prior hits. One assistant completion may contain several same-kind
 /// discovery calls and still costs that tool only one round. An explicit
 /// component floor in the request raises it via [`TurnBudgets`].
 const MAX_DISCOVERY_ROUNDS_PER_SUBTURN: usize = 1;
 
-/// A model can batch dozens of near-duplicate catalog queries into one
+/// A model can put dozens of near-duplicate catalog queries into one
 /// completion. Bound the actually dispatched fan-out so one speculative batch
 /// cannot flood history with hundreds of low-value hits.
 const MAX_DISCOVERY_CALLS_PER_COMPLETION: usize = 4;
@@ -555,38 +555,29 @@ fn is_batchable_discovery_tool(name: &str) -> bool {
     matches!(name, "search_symbols" | "search_footprints")
 }
 
-fn coalesced_discovery_call(call: &ToolCall, calls: &[ToolCall]) -> Option<ToolCall> {
-    if !is_batchable_discovery_tool(&call.fn_name) {
-        return None;
-    }
-    let mut queries = Vec::new();
-    for candidate in calls
-        .iter()
-        .filter(|candidate| candidate.fn_name == call.fn_name)
-    {
-        if let Some(batch) = candidate
-            .fn_arguments
-            .get("queries")
-            .and_then(Value::as_array)
-        {
-            queries.extend(batch.iter().filter(|query| query.is_object()).cloned());
-        } else if let Some(query) = candidate.fn_arguments.get("query").and_then(Value::as_str) {
-            let mut item = serde_json::Map::from_iter([("query".to_owned(), json!(query))]);
-            if let Some(limit) = candidate.fn_arguments.get("limit").and_then(Value::as_u64) {
-                item.insert("limit".to_owned(), json!(limit));
-            }
-            queries.push(Value::Object(item));
+fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.iter().map(canonical_json).collect()),
+        Value::Object(object) => {
+            let mut entries = object.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), canonical_json(value)))
+                    .collect(),
+            )
         }
-        if queries.len() >= MAX_DISCOVERY_CALLS_PER_COMPLETION {
-            break;
-        }
+        scalar => scalar.clone(),
     }
-    queries.truncate(MAX_DISCOVERY_CALLS_PER_COMPLETION);
-    (queries.len() > 1).then(|| ToolCall {
-        call_id: call.call_id.clone(),
-        fn_name: call.fn_name.clone(),
-        fn_arguments: json!({"queries": queries}),
-        thought_signatures: call.thought_signatures.clone(),
+}
+
+fn discovery_call_key(call: &ToolCall) -> Option<(String, String)> {
+    is_discovery_tool(&call.fn_name).then(|| {
+        (
+            call.fn_name.clone(),
+            canonical_json(&call.fn_arguments).to_string(),
+        )
     })
 }
 
@@ -1143,6 +1134,8 @@ impl<P: Provider> Agent<P> {
             let mut responses = Vec::with_capacity(tool_calls.len());
             let mut result_images = Vec::new();
             let mut discovery_seen = HashSet::new();
+            let mut discovery_tools_started = HashSet::new();
+            let mut discovery_calls_dispatched = HashMap::<String, usize>::new();
             for call in &tool_calls {
                 tool_calls_made += 1;
                 let seq = self.next_tool_seq();
@@ -1165,14 +1158,23 @@ impl<P: Provider> Agent<P> {
                     },
                 );
                 let budgeted_discovery = is_batchable_discovery_tool(&call.fn_name);
-                let discovery_duplicate =
-                    budgeted_discovery && !discovery_seen.insert(call.fn_name.clone());
+                let discovery_key = discovery_call_key(call);
+                let discovery_duplicate = discovery_key
+                    .as_ref()
+                    .is_some_and(|key| discovery_seen.contains(key));
                 let discovery_exhausted = budgeted_discovery
+                    && !discovery_tools_started.contains(&call.fn_name)
                     && discovery_rounds_used
                         .get(&call.fn_name)
                         .copied()
                         .unwrap_or(0)
                         >= budgets.discovery_rounds_per_subturn;
+                let discovery_batch_exhausted = budgeted_discovery
+                    && discovery_calls_dispatched
+                        .get(&call.fn_name)
+                        .copied()
+                        .unwrap_or(0)
+                        >= MAX_DISCOVERY_CALLS_PER_COMPLETION;
                 let repeated_read = is_state_scoped_read(&call.fn_name)
                     && state_read_uses
                         .get(&call.fn_name)
@@ -1204,6 +1206,17 @@ impl<P: Provider> Agent<P> {
                         None,
                         false,
                     )
+                } else if discovery_batch_exhausted {
+                    (
+                        json!({
+                            "error": "discovery call batch budget exhausted",
+                            "note": "reuse the catalog results already returned by this completion"
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                        false,
+                    )
                 } else if repeated_read {
                     (
                         json!({
@@ -1228,14 +1241,20 @@ impl<P: Provider> Agent<P> {
                     )
                 } else {
                     if budgeted_discovery {
-                        *discovery_rounds_used
+                        if discovery_tools_started.insert(call.fn_name.clone()) {
+                            *discovery_rounds_used
+                                .entry(call.fn_name.clone())
+                                .or_default() += 1;
+                        }
+                        *discovery_calls_dispatched
                             .entry(call.fn_name.clone())
                             .or_default() += 1;
                     }
-                    let effective = coalesced_discovery_call(call, &tool_calls);
-                    self.run_tool_call(effective.as_ref().unwrap_or(call))
-                        .instrument(span.clone())
-                        .await
+                    let result = self.run_tool_call(call).instrument(span.clone()).await;
+                    if let Some(key) = discovery_key {
+                        discovery_seen.insert(key);
+                    }
+                    result
                 };
                 let parsed = parse_or_null(&content);
                 progress.observe(&call.fn_name, &parsed);
@@ -2930,6 +2949,70 @@ mod tests {
         assert!(
             defs.iter()
                 .any(|tool| tool.name.as_str() == "check_schematic")
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_discovery_calls_run_while_an_exact_duplicate_is_deferred() {
+        let footprints = tempfile::tempdir().unwrap();
+        let ctx = AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf())
+            .expect("test runtime");
+        let first_arguments = json!({"query": "0603", "limit": 3});
+        let mut duplicate_arguments = serde_json::Map::new();
+        duplicate_arguments.insert("limit".to_owned(), json!(3));
+        duplicate_arguments.insert("query".to_owned(), json!("0603"));
+        let batch = StreamEnd {
+            captured_content: Some(MessageContent::from_tool_calls(vec![
+                ToolCall {
+                    call_id: "first".to_owned(),
+                    fn_name: "search_footprints".to_owned(),
+                    fn_arguments: first_arguments,
+                    thought_signatures: None,
+                },
+                ToolCall {
+                    call_id: "distinct".to_owned(),
+                    fn_name: "search_footprints".to_owned(),
+                    fn_arguments: json!({"query": "SOT-23", "limit": 3}),
+                    thought_signatures: None,
+                },
+                ToolCall {
+                    call_id: "duplicate".to_owned(),
+                    fn_name: "search_footprints".to_owned(),
+                    fn_arguments: Value::Object(duplicate_arguments),
+                    thought_signatures: None,
+                },
+            ])),
+            ..Default::default()
+        };
+        let (client, seen) = ScriptedClient::recording(vec![
+            batch,
+            crate::testing::final_text("used both searches"),
+        ]);
+        let mut agent = Agent::new(client, ctx, system_prompt());
+
+        let outcome = agent.run_turn("find two footprints", None).await.unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.tool_calls_made, 3);
+        let requests = seen.lock().unwrap();
+        let responses = requests[1]
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|part| match part {
+                ContentPart::ToolResponse(response) => Some((
+                    response.call_id.as_str(),
+                    serde_json::from_str::<Value>(&response.content).unwrap(),
+                )),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(responses["first"]["query"], "0603");
+        assert!(responses["first"]["error"].is_null());
+        assert_eq!(responses["distinct"]["query"], "SOT-23");
+        assert!(responses["distinct"]["error"].is_null());
+        assert_eq!(
+            responses["duplicate"]["error"],
+            "duplicate discovery call deferred"
         );
     }
 
