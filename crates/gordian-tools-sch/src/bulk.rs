@@ -406,6 +406,35 @@ fn sanitize_place_parts_input(input: &mut Value) -> Vec<String> {
             }
         }
     }
+    // A layout hint of the wrong SHAPE — `"rails": "+3V3"` where a map belongs — is
+    // still only a hint. Dropping it costs a rail band; refusing the payload costs
+    // the whole block.
+    if let Some(intent) = input.get_mut("intent") {
+        if intent.as_object().is_some() {
+            let malformed: Vec<String> = intent
+                .as_object()
+                .expect("just checked")
+                .iter()
+                .filter(|(field, value)| match field.as_str() {
+                    "rails" | "ports" | "place" => !value.is_object(),
+                    "relations" => !value.is_array(),
+                    "mirror" => !value.is_array(),
+                    _ => false,
+                })
+                .map(|(field, _)| field.clone())
+                .collect();
+            for field in malformed {
+                intent.as_object_mut().expect("just checked").remove(&field);
+                warnings.push(format!("dropped malformed intent.{field}: wrong shape"));
+            }
+        } else {
+            warnings.push("dropped malformed intent: expected an object".to_string());
+            input
+                .as_object_mut()
+                .expect("place_parts input is an object")
+                .remove("intent");
+        }
+    }
     let Some(intent) = input.get_mut("intent").and_then(Value::as_object_mut) else {
         return warnings;
     };

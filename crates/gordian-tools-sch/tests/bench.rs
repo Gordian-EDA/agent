@@ -117,3 +117,28 @@ fn an_unresolvable_part_is_reported_and_the_rest_is_placed() {
         "{placed:#}"
     );
 }
+
+/// A layout hint of the wrong SHAPE is still only a hint. Dropping it costs a rail
+/// band; refusing the payload costs the whole block — which is what a campaign run
+/// did when the model wrote `"rails": "+3V3"`.
+#[test]
+fn a_malformed_intent_is_dropped_not_refused() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let mut payload = divider();
+    payload["intent"] = json!({ "rails": "+3V3" });
+
+    let placed = call(&ctx, "place_parts", payload);
+
+    assert_eq!(placed.get("error"), None, "{placed:#}");
+    let warnings = serde_json::to_string(&placed["warnings"]).unwrap();
+    assert!(warnings.contains("intent.rails"), "{placed:#}");
+    assert!(
+        placed["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("PLACED  C1 R1 R2")),
+        "{placed:#}"
+    );
+}
