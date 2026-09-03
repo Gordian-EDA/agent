@@ -202,3 +202,10 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   derived `Net-(X-Y)` accepted as a pin address everywhere, `connect: every connection failed` must
   name each failure, remove_symbols declares the nets it touches, library-NC pin wired → place with nc
   + gap.
+- Merge train pushed (7840c92f): bench attribution fix + payload ref recovery, assign_footprints
+  repairable + query-only search_footprints, pcb-refusals (missing footprints staged, outline growth
+  + extents, staging excluded from sizing, lenient pours, DRC grouped by type), rail-dup
+  (`emit_local_power` split PWR_FLAG stub; floorplan_netlist green 2/2 in 3447 s). Running:
+  lane/pcb-incremental-2 (plane-net partial routing, route_track guidance, move_parts nudge + lenient
+  schema, sync intent on existing boards, sync never refuses on ERC, stale net table, delete_copper
+  honesty), lane/discovery-coalesce, lane/sch-refusals-2.
