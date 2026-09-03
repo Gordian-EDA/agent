@@ -62,6 +62,7 @@ mod error;
 mod libsyms;
 mod model;
 mod page;
+mod drawn;
 mod pins;
 mod sexpr;
 mod text;
@@ -77,6 +78,7 @@ pub use model::{
     Retained, Sheet, SheetPin, SymbolInst, Text, Wire, WireFault, WireFaultKind,
 };
 pub use page::{PAGE_MARGIN, PageFit, STANDARD_PAGES, TITLE_BLOCK_BAND, standard_page};
+pub use drawn::drawn_texts;
 pub use pins::{PlacedPin, placed_pins};
 pub use text::{escape, unescape};
 

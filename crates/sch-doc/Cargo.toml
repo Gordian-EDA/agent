@@ -8,6 +8,7 @@ description = "Lossless, editable .kicad_sch document over a retained S-expressi
 
 [dependencies]
 geom = { path = "../geom" }
+sch-model = { path = "../sch-model" }
 kicad-symbol = { path = "../kicad-symbol" }
 kiutils_sexpr.workspace = true
 indexmap.workspace = true

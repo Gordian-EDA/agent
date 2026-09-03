@@ -315,7 +315,8 @@ mod tests {
                     angle: 0.0,
                     length: 2.54,
                     unit: 1,
-                })
+                    text: Default::default(),
+})
                 .collect(),
             raw_definition: String::new(),
         }

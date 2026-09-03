@@ -294,14 +294,41 @@ pub(super) fn field_anchors(inst: &Instance) -> (TextPos, TextPos) {
     )
 }
 
-/// Bbox of a rendered field text line: bottom-anchored, 1.6 mm tall, width
-/// per [`sch_model::text::text_width`], extending per its justification.
-pub(super) fn field_box(at: impl Into<Point2>, j: Justify, width: f64) -> Rect {
-    let at = at.into();
-    match j {
-        Justify::Left => Rect::new(at.x, at.y - 1.6, at.x + width, at.y),
-        Justify::Right => Rect::new(at.x - width, at.y - 1.6, at.x, at.y),
-        Justify::Center => Rect::new(at.x - width / 2.0, at.y - 1.6, at.x + width / 2.0, at.y),
+impl Justify {
+    /// The as-drawn model's horizontal justification.
+    pub(super) fn hjust(self) -> sch_model::text::HJust {
+        match self {
+            Justify::Left => sch_model::text::HJust::Left,
+            Justify::Right => sch_model::text::HJust::Right,
+            Justify::Center => sch_model::text::HJust::Center,
+        }
+    }
+}
+
+/// Box of a rendered field text line, per the as-drawn model.
+///
+/// The writer emits fields with a horizontal justify token and no vertical one,
+/// so KiCAD centres them on the anchor; `render_instance` compensates the
+/// symbol's rotation so field text always draws horizontally.
+pub(super) fn field_box(at: impl Into<Point2>, j: Justify, text: &str) -> Rect {
+    sch_model::text::drawn_box(
+        text,
+        sch_model::text::FONT_SIZE,
+        j.hjust(),
+        sch_model::text::VJust::Center,
+        0.0,
+        at.into(),
+    )
+}
+
+/// Box of a label as the sheet DRAWS it, anchored at `at` (which may be the
+/// label's own position or a candidate landing): a port renders as KiCAD's
+/// global-label pentagon, a signal label as plain text floating off its wire.
+pub(super) fn label_rect(label: &PinLabel, at: Point2) -> Rect {
+    if label.global {
+        sch_model::text::global_label_box(at, label.dir, &label.net)
+    } else {
+        sch_model::text::label_box(at, label.dir, &label.net)
     }
 }
 

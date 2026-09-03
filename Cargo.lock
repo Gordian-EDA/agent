@@ -2410,6 +2410,7 @@ dependencies = [
  "kicad",
  "kicad-symbol",
  "kiutils_sexpr",
+ "sch-model",
  "tempfile",
  "thiserror",
 ]

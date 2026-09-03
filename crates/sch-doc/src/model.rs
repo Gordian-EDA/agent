@@ -104,6 +104,12 @@ pub struct Field {
 }
 
 impl Field {
+    /// The `(property …)` node this field was decoded from — the only place
+    /// its effects (font size, justification) survive.
+    pub(crate) fn node(&self) -> &Node {
+        &self.node
+    }
+
     fn decode(node: &Node) -> Option<(String, Field)> {
         let name = sexpr::text(items(node).get(1)?)?.to_string();
         // A property with no value slot is malformed, but dropping it would

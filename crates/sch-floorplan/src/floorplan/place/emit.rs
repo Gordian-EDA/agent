@@ -187,6 +187,7 @@ mod resolve_pin_tests {
             angle: 0.0,
             length: 2.54,
             unit,
+            text: Default::default(),
         }
     }
 

@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use geom::{EPS, GRID_50_MIL, Point2, Rect, Segment};
 
-use super::{Justify, SchematicWriter, TextPos, Wire, field_anchors, field_box};
+use super::{Justify, SchematicWriter, TextPos, Wire, field_anchors, field_box, label_rect};
 
 /// What [`SchematicWriter::solve_text_positions`] mutates once the greedy solver
 /// has picked a candidate for the parallel [`sch_model::text::Movable`].
@@ -265,7 +265,7 @@ impl SchematicWriter {
     /// for their own refdes), pin name/number text, wires, no-connect markers,
     /// and fixed (stub-less) labels.
     fn build_obstacles(&self) -> Vec<sch_model::text::Obstacle> {
-        use sch_model::text::{ObKind, Obstacle, label_box, pin_text_boxes, text_width, wire_box};
+        use sch_model::text::{ObKind, Obstacle, pin_text_boxes, wire_box};
         let mut obstacles: Vec<Obstacle> = Vec::new();
         for inst in &self.instances {
             let h = inst.half_extents.rotated_half_extents(inst.angle);
@@ -316,7 +316,7 @@ impl SchematicWriter {
         for l in &self.labels {
             if l.stub.is_none() {
                 obstacles.push(Obstacle {
-                    bbox: label_box(l.at, l.dir, text_width(&l.net)),
+                    bbox: label_rect(l, l.at),
                     kind: ObKind::Hard,
                 });
             }
@@ -329,7 +329,7 @@ impl SchematicWriter {
     /// onto the always-safe pin endpoint keeping the outward direction (the stub
     /// wire is dropped when retraction wins).
     fn stub_label_movables(&self) -> (Vec<sch_model::text::Movable>, Vec<Apply>) {
-        use sch_model::text::{Movable, label_box, text_width};
+        use sch_model::text::Movable;
         let mut movables: Vec<Movable> = Vec::new();
         let mut applies: Vec<Apply> = Vec::new();
         let mut stub_idx: Vec<usize> = (0..self.labels.len())
@@ -338,13 +338,12 @@ impl SchematicWriter {
         stub_idx.sort_by(|&a, &b| self.labels[a].uuid_key.cmp(&self.labels[b].uuid_key));
         for &i in &stub_idx {
             let l = &self.labels[i];
-            let wdt = text_width(&l.net);
             let owner = l.uuid_key.split(':').next().unwrap_or("").to_string();
             movables.push(Movable {
                 owner: Some(owner),
                 candidates: vec![
-                    label_box(l.at, l.dir, wdt),
-                    label_box(l.stub.unwrap().pin_at, l.dir, wdt),
+                    label_rect(l, l.at),
+                    label_rect(l, l.stub.unwrap().pin_at),
                 ],
             });
             applies.push(Apply::StubLabel(i));
@@ -923,8 +922,8 @@ impl SchematicWriter {
         net: &str,
         own_refdes: &str,
     ) -> bool {
-        use sch_model::text::{label_box, pin_text_boxes, text_width};
-        let b = label_box(at, dir, text_width(net));
+        use sch_model::text::{label_box, pin_text_boxes};
+        let b = label_box(at, dir, net);
         for inst in &self.instances {
             if inst.refdes.starts_with('#') || inst.refdes == own_refdes {
                 continue;
@@ -954,7 +953,7 @@ impl SchematicWriter {
             if label.net == net {
                 continue;
             }
-            let lb = label_box(label.at, label.dir, text_width(&label.net));
+            let lb = label_rect(label, label.at);
             if lb.overlaps(&b) {
                 return false;
             }
@@ -977,7 +976,7 @@ impl SchematicWriter {
         &self,
         ignore_pairs: &std::collections::BTreeSet<(String, String)>,
     ) -> Vec<String> {
-        use sch_model::text::{label_box, pin_text_boxes, text_width};
+        use sch_model::text::pin_text_boxes;
 
         /// What an item is, for exemption decisions.
         #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1009,7 +1008,7 @@ impl SchematicWriter {
                     let (_, vp) = field_anchors(inst);
                     items.push((
                         format!("value \"{}\" of {}", inst.value, inst.refdes),
-                        field_box(vp.at, vp.justify, text_width(&inst.value)),
+                        field_box(vp.at, vp.justify, &inst.value),
                         inst.refdes.clone(),
                         Kind::Text,
                     ));
@@ -1044,19 +1043,19 @@ impl SchematicWriter {
             let (rp, vp) = field_anchors(inst);
             items.push((
                 format!("field \"{}\"", inst.refdes),
-                field_box(rp.at, rp.justify, text_width(&inst.refdes)),
+                field_box(rp.at, rp.justify, &inst.refdes),
                 inst.refdes.clone(),
                 Kind::Text,
             ));
             items.push((
                 format!("value \"{}\" of {}", inst.value, inst.refdes),
-                field_box(vp.at, vp.justify, text_width(&inst.value)),
+                field_box(vp.at, vp.justify, &inst.value),
                 inst.refdes.clone(),
                 Kind::Text,
             ));
         }
         for label in &self.labels {
-            let b = label_box(label.at, label.dir, text_width(&label.net));
+            let b = label_rect(label, label.at);
             let owner = label.uuid_key.split(':').next().unwrap_or("").to_string();
             items.push((
                 format!("label \"{}\" at {:?}", label.net, label.at),
@@ -1196,7 +1195,8 @@ mod tests {
                     angle: 0.0,
                     length: 2.54,
                     unit: 1,
-                },
+                    text: Default::default(),
+},
                 PinGeom {
                     number: "2".into(),
                     name: "RIGHT".into(),
@@ -1204,7 +1204,8 @@ mod tests {
                     angle: 180.0,
                     length: 2.54,
                     unit: 1,
-                },
+                    text: Default::default(),
+},
                 PinGeom {
                     number: "3".into(),
                     name: "TOP".into(),
@@ -1212,7 +1213,8 @@ mod tests {
                     angle: 270.0,
                     length: 2.54,
                     unit: 1,
-                },
+                    text: Default::default(),
+},
             ],
         );
 

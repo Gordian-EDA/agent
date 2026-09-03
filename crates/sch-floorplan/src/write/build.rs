@@ -479,11 +479,7 @@ impl SchematicWriter {
             let (r, v) = super::field_anchors(inst);
             for (pos, text) in [(r, &inst.refdes), (v, &inst.value)] {
                 if !text.is_empty() {
-                    grow(super::field_box(
-                        pos.at,
-                        pos.justify,
-                        sch_model::text::text_width(text),
-                    ));
+                    grow(super::field_box(pos.at, pos.justify, text));
                 }
             }
         }
@@ -1244,6 +1240,7 @@ mod tests {
             angle: 0.0,
             length: 1.27,
             unit: 1,
+            text: Default::default(),
         }
     }
 
