@@ -56,6 +56,18 @@ fn partition(netlist: &Netlist) -> BTreeSet<Vec<String>> {
         .collect()
 }
 
+fn net_of<'a>(netlist: &'a Netlist, reference: &str, pin: &str) -> Option<&'a str> {
+    netlist
+        .nets
+        .iter()
+        .find(|net| {
+            net.nodes
+                .iter()
+                .any(|(found_ref, found_pin)| found_ref == reference && found_pin == pin)
+        })
+        .map(|net| net.name.trim_start_matches('/'))
+}
+
 fn assert_pins_drawn(doc: &SchDoc, reference: &str) {
     for pin in placed_pins(doc)
         .into_iter()
@@ -246,4 +258,83 @@ fn moving_a_decoupling_cap_beside_its_ic_pin_leaves_two_straight_segments() {
     assert!(attached.iter().all(|ends| {
         (ends[0].x - ends[1].x).abs() < EPS || (ends[0].y - ends[1].y).abs() < EPS
     }));
+}
+
+#[test]
+fn turn_in_place_swaps_only_its_fixed_pin_nets_while_drag_preserves_them() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let mut doc = SchDoc::read(ctx.sch_path()).unwrap();
+    doc.add_symbol(
+        "Device:LED",
+        "D1",
+        "LED",
+        Pose::new(100.0, 100.0, 0.0),
+        &source(&ctx),
+    )
+    .unwrap();
+    add_named_stubs(&mut doc, "D1");
+    doc.write(ctx.sch_path()).unwrap();
+    let before = ctx.env().netlist(ctx.sch_path()).unwrap();
+    assert_eq!(net_of(&before, "D1", "1"), Some("SIG_1"));
+    assert_eq!(net_of(&before, "D1", "2"), Some("SIG_2"));
+
+    let turned = call(&ctx, json!({"moves": [{"ref": "D1", "rot": 180}]}));
+    assert!(turned.get("error").is_none(), "{turned:#}");
+    assert_eq!(turned["changed"]["moved"][0]["turned_in_place"], true);
+    assert_eq!(
+        turned["changed"]["moved"][0]["pins_swapped"],
+        json!([["1", "SIG_1"], ["2", "SIG_2"]])
+    );
+    assert_eq!(turned["changed"]["labels_added"], 0);
+    assert!(turned["changed"]["moved"][0].get("nudged_to").is_none());
+    let after_turn = ctx.env().netlist(ctx.sch_path()).unwrap();
+    assert_eq!(net_of(&after_turn, "D1", "1"), Some("SIG_2"));
+    assert_eq!(net_of(&after_turn, "D1", "2"), Some("SIG_1"));
+
+    let dragged = call(
+        &ctx,
+        json!({"moves": [{"ref": "D1", "by": [20.32, 0.0], "rot": 0}]}),
+    );
+    assert!(dragged.get("error").is_none(), "{dragged:#}");
+    assert!(
+        dragged["changed"]["moved"][0]
+            .get("turned_in_place")
+            .is_none()
+    );
+    let after_drag = ctx.env().netlist(ctx.sch_path()).unwrap();
+    assert_eq!(net_of(&after_drag, "D1", "1"), Some("SIG_2"));
+    assert_eq!(net_of(&after_drag, "D1", "2"), Some("SIG_1"));
+}
+
+#[test]
+fn explicit_turn_in_place_names_the_pin_offset_when_geometry_cannot_land() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let mut doc = SchDoc::read(ctx.sch_path()).unwrap();
+    doc.add_symbol(
+        "Connector_Generic:Conn_01x04",
+        "J1",
+        "Conn_01x04",
+        Pose::new(100.0, 100.0, 0.0),
+        &source(&ctx),
+    )
+    .unwrap();
+    doc.write(ctx.sch_path()).unwrap();
+
+    let refused = call(
+        &ctx,
+        json!({"moves": [{"ref": "J1", "turn_in_place": true, "rot": 90}]}),
+    );
+    let error = refused["error"].as_str().expect("turn must be refused");
+    assert!(
+        error.contains("pin ") && error.contains("offset ["),
+        "{error}"
+    );
+    let unchanged = SchDoc::read(ctx.sch_path()).unwrap();
+    assert_eq!(unchanged.symbol_by_ref("J1").unwrap().at.rot, 0.0);
 }
