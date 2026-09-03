@@ -153,6 +153,12 @@ pub(crate) fn outline_containment_against(
         .obstacles
         .iter()
         .filter(|obstacle| obstacle.kind.starts_with("pad:") || obstacle.kind == "zone")
+        .filter(|obstacle| {
+            obstacle
+                .kind
+                .strip_prefix("pad:")
+                .is_none_or(|reference| !staged.contains(reference))
+        })
         .enumerate()
     {
         let bounds = geom::Rect::from_center_half(
@@ -576,6 +582,17 @@ mod tests {
         let outside = outline_containment(&containment_snapshot(9.5, 9.8));
         assert_eq!(outside.outside_outline, BTreeSet::from(["R1".to_owned()]));
         assert!(outside.copper_outside_outline >= 2, "{outside:?}");
+    }
+
+    #[test]
+    fn outline_containment_ignores_staged_courtyards_and_pads() {
+        let mut board = containment_snapshot(9.5, 8.0);
+        board.imported.parts[0].properties.insert(
+            kicad_board::STAGED_REASON.to_owned(),
+            "new_from_sync".to_owned(),
+        );
+
+        assert!(outline_containment(&board).is_clear());
     }
 
     #[test]

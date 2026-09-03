@@ -750,14 +750,19 @@ fn placed_extent(
     let copper = pcb_place::rotated_copper_bbox(part, placement.rotation);
     let envelope = pcb_place::part_placement_bounds_envelope(part, half, copper);
     let mut extent = pcb_place::placement_envelope_at(placement.at, envelope);
-    if let Some(courtyard) = imported
+    if let Some(saved) = imported
         .iter()
         .find(|part| part.reference == placement.reference)
-        .and_then(|part| part.courtyard)
+        && let Some(courtyard) = saved.courtyard
     {
         extent = union_rect(
             extent,
-            courtyard_at(courtyard, placement.at, placement.rotation, false),
+            courtyard_at(
+                courtyard,
+                placement.at,
+                placement.rotation,
+                saved.side == kicad_board::BoardSide::Back,
+            ),
         );
     }
     Some(extent)
