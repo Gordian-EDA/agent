@@ -213,3 +213,8 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   derived nets and accepts net names as endpoints; `Net-(X-Y)` resolves through pins in
   place_parts/connect/label; remove_symbols declares its nets; library-NC wired → nc + gap; ESP32 now
   ERC 0 + board). Running: lane/pcb-incremental-2. Next: campaign round 5 after it merges.
+- Looks diagnosis (scratchpad/looks/report.md, measured on 500 human sheets): the gap is density
+  (area/part 16–32 vs 7.3 cm²), content off the page (4/4), stringy nets (longest wire 189–389 vs
+  41 mm), no title block/frames/notes — not label count. lane/sch-looks (Opus) fixes the four
+  owners: page fit + standard paper, body-only placement geometry, post-placement wire-vs-label,
+  title block + block frames/notes through graft.
