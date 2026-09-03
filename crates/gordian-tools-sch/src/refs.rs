@@ -2,6 +2,7 @@
 //! bare point, and the net a pin currently sits on.
 
 use geom::Point2;
+use kicad_symbol::SymbolTable;
 use sch_doc::{Netlist, PinRef, PlacedPin, SchDoc, placed_pins};
 use serde_json::Value;
 
@@ -86,6 +87,28 @@ pub(crate) fn pin(doc: &SchDoc, spec: &str) -> Result<PlacedPin, String> {
                 .join(", ")
         )),
     }
+}
+
+/// Ranked complete pin addresses for an unresolved caller-facing pin key.
+pub(crate) fn pin_suggestions(
+    doc: &SchDoc,
+    spec: &str,
+    symbol_dir: std::path::PathBuf,
+) -> Vec<String> {
+    let Some((refdes, key)) = spec.rsplit_once('.') else {
+        return Vec::new();
+    };
+    let Some(symbol) = doc.symbol_by_ref(refdes) else {
+        return Vec::new();
+    };
+    let table = SymbolTable::from_symbol_dir(symbol_dir);
+    let Some(meta) = table.symbol(&symbol.lib_id) else {
+        return Vec::new();
+    };
+    sch_check::pins::ranked_suggestions(&meta, key, 8)
+        .into_iter()
+        .map(|pin| format!("{refdes}.{pin}"))
+        .collect()
 }
 
 /// A short `1=A 2=K` listing of a symbol's pins for an error message.

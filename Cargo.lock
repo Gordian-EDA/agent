@@ -915,6 +915,7 @@ dependencies = [
  "anyhow",
  "circuit-graph",
  "cluster-place",
+ "fuzzy-matcher",
  "geom",
  "gordian-llm",
  "gordian-runtime",
@@ -932,7 +933,6 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "spine-place",
- "strsim",
  "tempfile",
  "tracing",
 ]

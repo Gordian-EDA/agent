@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use anyhow::Result;
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use geom::Rect;
 use gordian_runtime::AgentRuntime;
 use sch_doc::{
@@ -535,12 +537,26 @@ pub fn get_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "get_symbol needs `ref`" }));
     };
     let (doc, netlist) = Edit::read(ctx)?;
-    let Some(symbol) = doc.symbol_by_ref(refdes) else {
+    let qualified = resolve_unit_reference(&doc, refdes);
+    let lookup = qualified
+        .as_ref()
+        .map_or(refdes, |(reference, _)| reference.as_str());
+    let Some(symbol) = qualified
+        .as_ref()
+        .and_then(|(_, unit)| {
+            refs::units(&doc, lookup)
+                .into_iter()
+                .find(|(candidate, _)| candidate == unit)
+                .and_then(|(_, uuid)| doc.symbol(&uuid))
+        })
+        .or_else(|| doc.symbol_by_ref(lookup))
+    else {
         return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
     };
     let placed = placed_pins(&doc);
-    let units: Vec<(u32, &SymbolInst)> = refs::units(&doc, refdes)
+    let units: Vec<(u32, &SymbolInst)> = refs::units(&doc, lookup)
         .iter()
+        .filter(|(unit, _)| qualified.as_ref().is_none_or(|(_, wanted)| unit == wanted))
         .filter_map(|(unit, uuid)| Some((*unit, doc.symbol(uuid)?)))
         .collect();
     let all_pins: Vec<&PlacedPin> = units
@@ -583,7 +599,9 @@ pub fn get_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .fields
         .get("Footprint")
         .map_or("", |field| &field.value);
-    let unit_note = if units.len() > 1 {
+    let unit_note = if let Some((_, unit)) = qualified {
+        format!("  requested as {refdes} → unit {unit}")
+    } else if units.len() > 1 {
         format!("  {} units", units.len())
     } else {
         String::new()
@@ -625,6 +643,25 @@ pub fn get_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         write_symbol_pin_table(&mut out, &pins, &netlist, widths);
     }
     Ok(Value::String(out))
+}
+
+fn resolve_unit_reference(doc: &SchDoc, requested: &str) -> Option<(String, u32)> {
+    if doc.symbol_by_ref(requested).is_some() {
+        return None;
+    }
+    let suffix = requested.chars().last()?;
+    if !suffix.is_ascii_uppercase() {
+        return None;
+    }
+    let base = requested.strip_suffix(suffix)?;
+    if !base.ends_with(|character: char| character.is_ascii_digit()) {
+        return None;
+    }
+    let unit = u32::from(suffix as u8 - b'A') + 1;
+    refs::units(doc, base)
+        .iter()
+        .any(|(candidate, _)| *candidate == unit)
+        .then(|| (base.to_string(), unit))
 }
 
 fn net_source(source: NetSource) -> &'static str {
@@ -704,15 +741,7 @@ pub fn get_net(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .collect::<Vec<_>>();
         known.sort();
         known.dedup();
-        let close = known
-            .iter()
-            .filter_map(|candidate| {
-                let score = strsim::jaro_winkler(candidate, name);
-                (score > 0.8).then_some((score, candidate))
-            })
-            .collect::<Vec<_>>();
-        if close.len() == 1 {
-            let resolved = close[0].1;
+        if let Some(resolved) = unique_close_net(name, &known) {
             let mut result = get_net(json!({"name": resolved}), ctx)?;
             return match result.as_object_mut() {
                 Some(object) => {
@@ -782,4 +811,23 @@ pub fn get_net(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     }
     Ok(Value::String(out))
+}
+
+fn unique_close_net<'a>(query: &str, candidates: &'a [String]) -> Option<&'a str> {
+    let matcher = SkimMatcherV2::default().ignore_case();
+    let mut matches = candidates
+        .iter()
+        .filter(|candidate| candidate.as_str() != query)
+        .filter_map(|candidate| {
+            let score = matcher
+                .fuzzy_match(candidate, query)
+                .into_iter()
+                .chain(matcher.fuzzy_match(query, candidate))
+                .max()?;
+            Some((score, candidate.as_str()))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(right.1)));
+    let (best_score, best) = matches.first().copied()?;
+    (matches.get(1).is_none_or(|(score, _)| *score < best_score)).then_some(best)
 }

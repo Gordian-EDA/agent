@@ -22,7 +22,6 @@ pub(crate) struct Allow {
     nets: BTreeSet<String>,
     joined_nets: BTreeSet<String>,
     endpoint_nets: BTreeSet<String>,
-    derived_endpoint_nets: BTreeSet<String>,
     unnamed_nets: BTreeSet<String>,
     refs: BTreeSet<String>,
     /// The call may bring nets into existence it could not name in advance —
@@ -49,19 +48,15 @@ impl Allow {
         self
     }
 
-    /// Permit the electrically named ends of a connection to join when that
-    /// consumes no more than one authored net name.
+    /// Permit the electrically named ends of a connection to join.
     pub fn joining_endpoints<I: Into<String>>(
         mut self,
-        names: impl IntoIterator<Item = (I, bool)>,
+        names: impl IntoIterator<Item = I>,
     ) -> Allow {
-        for (name, derived) in names {
+        for name in names {
             let name = name.into();
             self.nets.insert(name.clone());
-            self.endpoint_nets.insert(name.clone());
-            if derived {
-                self.derived_endpoint_nets.insert(name);
-            }
+            self.endpoint_nets.insert(name);
         }
         self
     }
@@ -122,12 +117,9 @@ impl Allow {
         // generated name the survivor ends up with is a consequence.
         let unauthored = |name: &String| unnamed(name) && !is_auto(name);
         for (sources, target) in &delta.merged {
-            let endpoint_join = sources.iter().all(|name| self.endpoint_nets.contains(name))
-                && sources
-                    .iter()
-                    .filter(|name| !self.derived_endpoint_nets.contains(*name))
-                    .count()
-                    <= 1;
+            let endpoint_join = sources
+                .iter()
+                .all(|name| self.endpoint_nets.contains(name) || self.joined_nets.contains(name));
             if endpoint_join {
                 continue;
             }
@@ -541,28 +533,25 @@ mod tests {
         };
         assert!(
             Allow::nothing()
-                .joining_endpoints([
-                    ("3V3".to_string(), false),
-                    ("Net-(J1-D+)".to_string(), true),
-                ])
+                .joining_endpoints(["3V3".to_string(), "Net-(J1-D+)".to_string()])
                 .violation(&delta, &[])
                 .is_none()
         );
     }
 
-    /// Endpoint intent never licenses the loss of a second authored name.
+    /// Naming both endpoints licenses joining both authored names.
     #[test]
-    fn endpoint_join_refuses_two_authored_nets() {
+    fn endpoint_join_accepts_two_authored_nets() {
         let delta = NetDelta {
             merged: vec![(vec!["SDA".into(), "SCL".into()], "SDA".into())],
             ..NetDelta::default()
         };
-        let offenders = Allow::nothing()
-            .joining_endpoints([("SDA".to_string(), false), ("SCL".to_string(), false)])
-            .violation(&delta, &[])
-            .expect("two authored nets must stay distinct");
-        assert!(offenders.contains("SDA"), "{offenders}");
-        assert!(offenders.contains("SCL"), "{offenders}");
+        assert!(
+            Allow::nothing()
+                .joining_endpoints(["SDA".to_string(), "SCL".to_string()])
+                .violation(&delta, &[])
+                .is_none()
+        );
     }
 
     /// KiCAD names an unnamed net after its strongest pin, so joining a pin to

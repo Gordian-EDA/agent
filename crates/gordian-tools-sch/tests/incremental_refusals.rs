@@ -18,7 +18,8 @@ const EMPTY_SHEET: &str = "(kicad_sch\n\
 )\n";
 
 fn sheet() -> Option<AgentRuntime> {
-    let ctx = AgentRuntime::detect_for_test()?;
+    let ctx =
+        AgentRuntime::detect_for_test().filter(|ctx| ctx.env().major_version() == Some(10))?;
     std::fs::write(ctx.sch_path(), EMPTY_SHEET).unwrap();
     Some(ctx)
 }
@@ -39,7 +40,7 @@ fn add_resistors(ctx: &AgentRuntime, refs: &[&str]) {
 }
 
 #[test]
-fn connect_joins_derived_endpoints_but_not_two_authored_nets() {
+fn connect_joins_every_net_carried_by_its_named_endpoints() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: KiCad 10 not configured");
         return;
@@ -66,21 +67,25 @@ fn connect_joins_derived_endpoints_but_not_two_authored_nets() {
         assert!(net.contains(pin), "{pin} absent from joined net: {net}");
     }
 
-    for (pin, net) in [("R4.1", "SDA"), ("R5.1", "SCL")] {
+    for (pin, net) in [("R4.1", "CHG"), ("R5.1", "DSG")] {
         let result = call(&ctx, "label", json!({"pin": pin, "net": net}));
         assert!(result.get("error").is_none(), "fixture failed: {result}");
     }
-    let refused = call(&ctx, "connect", json!({"from": "R4.1", "to": "R5.1"}));
-    let error = refused["error"].as_str().unwrap_or_default();
-    assert!(error.contains("SDA") && error.contains("SCL"), "{refused}");
-    assert_eq!(
-        refused["fix"],
-        json!({"tool": "delete_wires", "args": {"pins": ["R5.1"]}})
+    let joined = call(&ctx, "connect", json!({"from": "R4.1", "to": "R5.1"}));
+    assert!(joined.get("error").is_none(), "{joined}");
+    assert_eq!(joined["joined"]["from_net"], "CHG", "{joined}");
+    assert_eq!(joined["joined"]["to_net"], "DSG", "{joined}");
+    let survivor = joined["joined"]["survivor"].as_str().unwrap();
+    let merged = call(&ctx, "get_net", json!({"name": survivor})).to_string();
+    assert!(
+        merged.contains("R4.1") && merged.contains("R5.1"),
+        "{merged}"
     );
-    let sda = call(&ctx, "get_net", json!({"name": "SDA"})).to_string();
-    let scl = call(&ctx, "get_net", json!({"name": "SCL"})).to_string();
-    assert!(sda.contains("R4.1") && !sda.contains("R5.1"), "{sda}");
-    assert!(scl.contains("R5.1") && !scl.contains("R4.1"), "{scl}");
+    let oracle = ctx.env().netlist(ctx.sch_path()).unwrap();
+    assert!(oracle.nets.iter().any(|net| {
+        net.nodes.contains(&("R4".into(), "1".into()))
+            && net.nodes.contains(&("R5".into(), "1".into()))
+    }));
 }
 
 #[test]

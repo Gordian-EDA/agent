@@ -5,7 +5,7 @@
 use anyhow::Result;
 use geom::{EPS, Point2, Rect, Segment};
 use gordian_runtime::AgentRuntime;
-use sch_doc::{LabelKind, NetSource, SchDoc, connect};
+use sch_doc::{LabelKind, SchDoc, connect};
 use serde_json::{Value, json};
 
 use crate::place::{Occupancy, snap_point};
@@ -69,11 +69,11 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let from = match refs::target(&edit.doc, from) {
         Ok(target) => target,
-        Err(error) => return Ok(reference_error(&edit.doc, &input, error)),
+        Err(error) => return Ok(reference_error(&edit.doc, &input, error, ctx)),
     };
     let to = match refs::target(&edit.doc, to) {
         Ok(target) => target,
-        Err(error) => return Ok(reference_error(&edit.doc, &input, error)),
+        Err(error) => return Ok(reference_error(&edit.doc, &input, error, ctx)),
     };
     let requested_net = match input.get("net").and_then(Value::as_str) {
         Some(net) => match resolve_tool_net(&mut edit, net) {
@@ -96,32 +96,6 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Target::Point(_) => None,
     };
     let (from_net, to_net) = (existing(&from), existing(&to));
-    let net_source = |name: &str| {
-        live.nets
-            .iter()
-            .find(|net| net.name == name)
-            .map(|net| net.source)
-    };
-    if let (Some(from_name), Some(to_name)) = (&from_net, &to_net)
-        && from_name != to_name
-        && net_source(from_name) != Some(NetSource::Auto)
-        && net_source(to_name) != Some(NetSource::Auto)
-    {
-        let to_pin = to.describe();
-        return Ok(json!({
-            "error": format!(
-                "refused: connecting {} on authored net `{from_name}` to {} on authored net \
-                 `{to_name}` would merge two authored nets; nothing was written",
-                from.describe(), to.describe(),
-            ),
-            "from_net": from_name,
-            "to_net": to_name,
-            "fix": {
-                "tool": "delete_wires",
-                "args": {"pins": [to_pin]},
-            },
-        }));
-    }
     let net = requested_net
         .as_ref()
         .map(|resolved| resolved.name.clone())
@@ -141,7 +115,7 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             [from_net.as_ref(), to_net.as_ref()]
                 .into_iter()
                 .flatten()
-                .map(|name| (name.clone(), net_source(name) == Some(NetSource::Auto))),
+                .cloned(),
         )
         .parts(from.owner().map(str::to_string))
         .parts(to.owner().map(str::to_string))
@@ -428,7 +402,7 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let net = &resolved_net.name;
     let pin = match refs::pin(&edit.doc, spec) {
         Ok(pin) => pin,
-        Err(error) => return Ok(reference_error(&edit.doc, &input, error)),
+        Err(error) => return Ok(reference_error(&edit.doc, &input, error, ctx)),
     };
     // Naming a pin connects it, so its marker goes — and it goes BEFORE the pin's
     // net is read, because a marker severs its point and a still-marked pin reads
@@ -598,8 +572,27 @@ pub fn delete_labels(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     )
 }
 
-fn reference_error(doc: &SchDoc, input: &Value, error: String) -> Value {
+fn reference_error(doc: &SchDoc, input: &Value, error: String, ctx: &AgentRuntime) -> Value {
     let mut response = json!({ "error": error });
+    let suggestions = ["from", "to", "pin"]
+        .into_iter()
+        .filter_map(|key| input.get(key).and_then(Value::as_str))
+        .chain(
+            input
+                .get("pins")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        )
+        .filter_map(|spec| {
+            let ranked = refs::pin_suggestions(doc, spec, ctx.env().symbol_dir().to_path_buf());
+            (!ranked.is_empty()).then(|| (spec.to_string(), json!(ranked)))
+        })
+        .collect::<serde_json::Map<String, Value>>();
+    if !suggestions.is_empty() {
+        response["did_you_mean"] = Value::Object(suggestions);
+    }
     let Some(net) = input.get("net").and_then(Value::as_str) else {
         return response;
     };
@@ -640,7 +633,14 @@ pub fn no_connect(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     for spec in &specs {
         let pin = match refs::pin(&edit.doc, spec) {
             Ok(pin) => pin,
-            Err(error) => return Ok(json!({ "error": error })),
+            Err(error) => {
+                return Ok(reference_error(
+                    &edit.doc,
+                    &json!({"pin": spec}),
+                    error,
+                    ctx,
+                ));
+            }
         };
         if let Some(net) = edit.before().nets.iter().find(|net| {
             net.pins
@@ -732,7 +732,7 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut edit = Edit::open(ctx)?;
     let pin = match refs::pin(&edit.doc, spec) {
         Ok(pin) => pin,
-        Err(error) => return Ok(json!({ "error": error })),
+        Err(error) => return Ok(reference_error(&edit.doc, &input, error, ctx)),
     };
     // Seating a rail on a pin connects it, so the pin's marker goes with the same
     // rule `connect` and `label` follow — and goes before its net is read.
