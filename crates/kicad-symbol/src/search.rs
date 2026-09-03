@@ -35,8 +35,10 @@ pub struct Hit {
 /// One indexed symbol: pre-normalized for ranking.
 struct Entry {
     lib_id: String,
-    /// Lowercased name with non-alphanumeric runs collapsed to single spaces.
+    /// Lowercased `Lib:Name` with non-alphanumeric runs collapsed to single spaces.
     normalized: String,
+    /// The same treatment of the `Name` half alone.
+    normalized_name: String,
 }
 
 /// Name index over every symbol in every installed library.
@@ -65,11 +67,7 @@ impl SymbolNames {
                     continue;
                 };
                 for name in top_level_symbol_names(&text) {
-                    let lib_id = format!("{}:{name}", lib.name);
-                    entries.push(Entry {
-                        normalized: normalize(&lib_id),
-                        lib_id,
-                    });
+                    entries.push(Entry::new(&format!("{}:{name}", lib.name)));
                 }
             }
         }
@@ -91,6 +89,53 @@ impl SymbolNames {
         self.entries.is_empty()
     }
 
+    /// The `n` closest lib_ids to a *qualified* one, best first.
+    ///
+    /// A wrong lib_id is nearly always the right symbol NAME under the wrong
+    /// library — `Device:Conn_01x02` for `Connector_Generic:Conn_01x02`,
+    /// `Regulator_Switching:TPS62160` for its `TPS62160DGK` variant — so the name
+    /// half is what ranks, across every library, and the library half only breaks
+    /// ties. Ranking the whole `Lib:Name` instead scores those `None`: the wrong
+    /// library's letters are not a subsequence of the right one's.
+    ///
+    /// An unqualified query has no name half to isolate and falls back to [`best`].
+    ///
+    /// [`best`]: Self::best
+    pub fn best_lib_id(&self, lib_id: &str, n: usize) -> Vec<&str> {
+        let Some((library, name)) = lib_id.split_once(':') else {
+            return self.best(lib_id, n);
+        };
+        let (needle, library) = (normalize(name), normalize(library));
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let matcher = SkimMatcherV2::default();
+        let tokens: Vec<&str> = needle.split_whitespace().collect();
+        let mut hits: Vec<(i64, i64, usize)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let name = score(&matcher, &entry.normalized_name, &needle, &tokens)?;
+                let lib = matcher
+                    .fuzzy_match(&entry.normalized, &library)
+                    .unwrap_or_default();
+                Some((name, lib, index))
+            })
+            .collect();
+        hits.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| self.entries[left.2].lib_id.cmp(&self.entries[right.2].lib_id))
+        });
+        hits.into_iter()
+            .take(n)
+            .map(|(_, _, index)| self.entries[index].lib_id.as_str())
+            .collect()
+    }
+
     /// The `n` best-matching lib_ids for `query`, best first.
     pub fn best(&self, query: &str, n: usize) -> Vec<&str> {
         let needle = normalize(query);
@@ -101,6 +146,17 @@ impl SymbolNames {
             .into_iter()
             .map(|i| self.entries[i].lib_id.as_str())
             .collect()
+    }
+}
+
+impl Entry {
+    fn new(lib_id: &str) -> Entry {
+        let name = lib_id.rsplit(':').next().unwrap_or(lib_id);
+        Entry {
+            normalized: normalize(lib_id),
+            normalized_name: normalize(name),
+            lib_id: lib_id.to_string(),
+        }
     }
 }
 
@@ -375,12 +431,8 @@ fn symbol_block_name(rest: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
-    /// Build an `Entry` the way `build` does: normalized over the full lib_id.
     fn entry(lib_id: &str) -> Entry {
-        Entry {
-            normalized: normalize(lib_id),
-            lib_id: lib_id.to_string(),
-        }
+        Entry::new(lib_id)
     }
 
     #[test]
@@ -483,6 +535,40 @@ mod tests {
         );
         assert_eq!(normalize("usb-c receptacle usb2"), "usb c receptacle usb2");
         assert_eq!(normalize("--R_Small--"), "r small");
+    }
+
+    fn names(lib_ids: &[&str]) -> SymbolNames {
+        SymbolNames {
+            entries: lib_ids.iter().copied().map(Entry::new).collect(),
+        }
+    }
+
+    /// The right symbol under the wrong library is what an unknown lib_id nearly
+    /// always is, and ranking the whole `Lib:Name` cannot see it.
+    #[test]
+    fn a_qualified_suggestion_ranks_on_the_symbol_name() {
+        let index = names(&[
+            "Connector_Generic:Conn_01x02",
+            "Device:C",
+            "Regulator_Switching:TPS62160DGK",
+            "Regulator_Switching:TPS62160DSG",
+        ]);
+
+        assert_eq!(
+            index.best_lib_id("Device:Conn_01x02", 1),
+            ["Connector_Generic:Conn_01x02"]
+        );
+        assert_eq!(
+            index.best_lib_id("Regulator_Switching:TPS62160", 2),
+            ["Regulator_Switching:TPS62160DGK", "Regulator_Switching:TPS62160DSG"]
+        );
+    }
+
+    /// The library half still breaks ties between equally named symbols.
+    #[test]
+    fn the_library_half_breaks_ties() {
+        let index = names(&["Device:R", "Device_Old:R"]);
+        assert_eq!(index.best_lib_id("Device:R", 1), ["Device:R"]);
     }
 
     #[test]

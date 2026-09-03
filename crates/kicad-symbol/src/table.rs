@@ -123,12 +123,13 @@ impl SymbolTable {
 
     /// Closest known `lib_id`s for an unknown one (for diagnostics).
     ///
-    /// Ranked across the WHOLE install, on the whole `Lib:Name`, by the project's
-    /// fuzzy matcher — the same ranking `search_symbols` serves. Both ways of getting
-    /// a lib_id wrong then answer from one place: a misspelt symbol
-    /// (`Regulator:AMS1117-3.3`) and a guessed library (`Fuse:Fuse`) are the same
-    /// query, and keeping the library half in the needle is what lets the first find
-    /// `Regulator_Linear:AMS1117-3.3` and the second `Device:Fuse`.
+    /// Ranked across the WHOLE install by the project's fuzzy matcher, on the
+    /// symbol NAME with the library only breaking ties — see
+    /// [`SymbolNames::best_lib_id`]. Every way of getting a lib_id wrong is then one
+    /// query: a guessed library (`Fuse:Fuse` → `Device:Fuse`, `Device:Conn_01x02` →
+    /// `Connector_Generic:Conn_01x02`), a truncated library
+    /// (`Regulator:AMS1117-3.3`), and a part number missing its package suffix
+    /// (`Regulator_Switching:TPS62160` → its `DGK`/`DSG` variants).
     pub fn suggest(&self, lib_id: &str) -> Vec<String> {
         if !self.inline.is_empty() {
             return suggest_inline(&self.inline, lib_id);
@@ -138,7 +139,7 @@ impl SymbolTable {
         };
         self.names
             .get_or_init(|| SymbolNames::scan(dir).unwrap_or_else(|_| SymbolNames::empty()))
-            .best(lib_id, SUGGEST_LIMIT)
+            .best_lib_id(lib_id, SUGGEST_LIMIT)
             .into_iter()
             .map(str::to_string)
             .collect()
