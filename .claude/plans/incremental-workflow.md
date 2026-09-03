@@ -193,3 +193,12 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   carries a fix, remove_region lists blocks, footprint-as-symbol explained). Running: pcb-refusals,
   bench-draw (sent back: never rename a requested authored net — fix verifier attribution), assign-flex
   (assign_footprints repairable + search_footprints query-only), rail-dup, campaign round 4.
+- Round 4 (camp6): continuation works; 3/4 cases reach a DRC-0 board; unrouted 5/20/20 remain; no fab
+  yet. QUEUED PCB-2 (after lane/pcb-refusals merges): route_board partial for plane nets (keep what
+  routed, report the rest), move_parts nudge-to-free like move_symbols + lenient move schema,
+  sync_board with intent on an existing board = delta + place_board(intent), sync_board never refuses
+  on ERC errors/missing footprints (stage + report), place_board reporting absent vs staged refs,
+  route_board on a net absent from the board → sync hint. QUEUED SCH-2 (after bench/assign merge):
+  derived `Net-(X-Y)` accepted as a pin address everywhere, `connect: every connection failed` must
+  name each failure, remove_symbols declares the nets it touches, library-NC pin wired → place with nc
+  + gap.
