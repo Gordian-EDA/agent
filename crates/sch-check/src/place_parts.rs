@@ -82,6 +82,17 @@ pub struct ExistingSheet {
     pub net_pins: BTreeMap<String, usize>,
     /// Reference designators already present on the sheet.
     pub refs: BTreeSet<RefDes>,
+    /// References `reserve_refs` promised another caller. They are free to be
+    /// named explicitly — that is what a reservation is for — but no designator
+    /// this payload mints for itself may land on one.
+    pub reserved: BTreeSet<RefDes>,
+}
+
+impl ExistingSheet {
+    /// Every reference a minted designator has to step over.
+    fn occupied(&self) -> BTreeSet<RefDes> {
+        self.refs.union(&self.reserved).cloned().collect()
+    }
 }
 
 /// An explicit reference designator that is already occupied.
@@ -107,6 +118,22 @@ pub struct DanglingPin {
     pub on_sheet: bool,
 }
 
+/// A part that cannot be drawn: its `lib_id` names no symbol, or one of its pin
+/// keys names no pin of that symbol.
+///
+/// It is left OUT of the design rather than refusing the payload it arrived in —
+/// the other forty parts of a block are still a circuit, and a net that only
+/// touched this part simply stays open and is reported as dangling.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Unplaced {
+    #[serde(rename = "ref")]
+    pub refdes: RefDes,
+    pub part: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub did_you_mean: Vec<String>,
+}
+
 /// Findings that make a bulk-create payload electrically incomplete.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PayloadAudit {
@@ -126,6 +153,9 @@ pub struct PayloadAudit {
     /// Symbol/footprint assignments rejected before any placement work begins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub footprint_mismatch: Vec<FootprintMismatch>,
+    /// Parts left out of the design because nothing could resolve them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unplaced: Vec<Unplaced>,
 }
 
 /// One symbol/footprint assignment whose electrical pins do not agree.
@@ -227,14 +257,23 @@ pub fn into_design(
     existing: &ExistingSheet,
 ) -> (Design, Diagnostics, PayloadAudit) {
     let mut input = input.clone();
-    let duplicate_refs = resolve_references(&mut input, provider, &existing.refs);
+    let duplicate_refs = resolve_references(&mut input, provider, existing);
     let mut diags = Diagnostics::default();
     let mut design = Design {
         name: input.name.clone(),
         ..Design::default()
     };
     let default_block = input.block.as_deref().unwrap_or(DEFAULT_BLOCK);
-    for spec in &input.parts {
+    // A part nothing can resolve leaves before lowering, so the `decouple` caps it
+    // would have grown never appear and the placement never has to draw it.
+    let (dropped, unplaced) = unresolvable(&input, provider);
+    for spec in input
+        .parts
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !dropped.contains(index))
+        .map(|(_, spec)| spec)
+    {
         let Some(refdes) = spec.refdes.as_ref() else {
             diags.push(Diagnostic::error(
                 "missing-reference-prefix",
@@ -263,9 +302,11 @@ pub fn into_design(
     for (name, grid) in &input.layout {
         match design.blocks.get_mut(name) {
             Some(block) => block.layout = grid.clone(),
-            None => diags.push(Diagnostic::error(
+            // A layout hint for a region nobody joined is a hint about nothing,
+            // not a broken circuit — it is dropped and said so.
+            None => diags.push(Diagnostic::warning(
                 "unknown-block",
-                format!("`layout` names region `{name}`, which no part joins"),
+                format!("`layout` names region `{name}`, which no part joins — ignored"),
             )),
         }
     }
@@ -275,16 +316,17 @@ pub fn into_design(
     nets::derive_attrs(&mut design);
     let mut audit = audit_payload(&input, &design, provider, existing, &diags);
     audit.duplicate_refs = duplicate_refs;
+    audit.unplaced = unplaced;
     (design, diags, audit)
 }
 
 fn resolve_references(
     input: &mut PlacePartsInput,
     provider: &SymbolTable,
-    existing: &BTreeSet<RefDes>,
+    existing: &ExistingSheet,
 ) -> Vec<DuplicateRef> {
     assign_references(input, provider, existing);
-    let mut occupied = existing.clone();
+    let mut occupied = existing.occupied();
     let mut counts = BTreeMap::<RefDes, usize>::new();
     for refdes in input.parts.iter().filter_map(|part| part.refdes.as_ref()) {
         *counts.entry(refdes.clone()).or_default() += 1;
@@ -292,7 +334,7 @@ fn resolve_references(
     }
     counts
         .into_iter()
-        .filter(|(refdes, count)| *count > 1 || existing.contains(refdes))
+        .filter(|(refdes, count)| *count > 1 || existing.refs.contains(refdes))
         .map(|(refdes, _)| DuplicateRef {
             next_free: next_free_ref(refdes_prefix(&refdes), &occupied),
             refdes,
@@ -304,9 +346,9 @@ fn resolve_references(
 pub fn assign_references(
     input: &mut PlacePartsInput,
     provider: &SymbolTable,
-    existing: &BTreeSet<RefDes>,
+    existing: &ExistingSheet,
 ) {
-    let mut occupied = existing.clone();
+    let mut occupied = existing.occupied();
     for refdes in input.parts.iter().filter_map(|part| part.refdes.as_ref()) {
         occupied.insert(refdes.clone());
     }
@@ -453,6 +495,78 @@ fn audit_payload(
     audit.unknown_pins.sort();
     audit.unknown_pins.dedup();
     audit
+}
+
+/// The parts of `input` that cannot be drawn, with the repair for each.
+///
+/// A missing reference prefix belongs here too: the lowering has no designator to
+/// file the part under, so it was already being dropped — silently, as a
+/// whole-payload error rather than as one part's.
+fn unresolvable(
+    input: &PlacePartsInput,
+    provider: &SymbolTable,
+) -> (BTreeSet<usize>, Vec<Unplaced>) {
+    let mut dropped = BTreeSet::new();
+    let mut out = Vec::new();
+    for (index, spec) in input.parts.iter().enumerate() {
+        let Some(refdes) = spec.refdes.clone() else {
+            let near = provider.suggest(&spec.part);
+            dropped.insert(index);
+            out.push(Unplaced {
+                refdes: format!("unassigned {}", spec.part),
+                part: spec.part.clone(),
+                reason: format!(
+                    "`{}` has no library Reference field from which to assign a designator; \
+                     give this part an explicit `ref`",
+                    spec.part
+                ),
+                did_you_mean: near,
+            });
+            continue;
+        };
+        let Some(meta) = provider.symbol(&spec.part) else {
+            // A footprint written where a symbol belongs gets its own explicit
+            // message and no shortlist: the repair is a different FIELD, not a
+            // nearer name.
+            let diagnostic = authored::unknown_part(&refdes, &spec.part, provider);
+            let did_you_mean = match diagnostic.suggestion.is_some() {
+                true => provider.suggest(&spec.part),
+                false => Vec::new(),
+            };
+            dropped.insert(index);
+            out.push(Unplaced {
+                refdes,
+                part: spec.part.clone(),
+                reason: diagnostic.message,
+                did_you_mean,
+            });
+            continue;
+        };
+        let unknown: Vec<&String> = spec
+            .pins
+            .keys()
+            .filter(|key| pins::resolve(&meta, key).is_empty())
+            .collect();
+        if let Some(key) = unknown.first() {
+            dropped.insert(index);
+            out.push(Unplaced {
+                reason: format!(
+                    "pin key{} {} not found on {refdes} ({})",
+                    if unknown.len() > 1 { "s" } else { "" },
+                    unknown
+                        .iter()
+                        .map(|key| format!("`{key}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    spec.part
+                ),
+                did_you_mean: pins::ranked_suggestions(&meta, key, 8),
+                refdes,
+                part: spec.part.clone(),
+            });
+        }
+    }
+    (dropped, out)
 }
 
 /// The best subsequence match for a net name, when any candidate is related.

@@ -26,6 +26,7 @@
 //! The shared layout vocabulary lives in `sch-model`; pure geometry and grid snapping live
 //! in `geom`; live `.kicad_sch` editing lives in `sch-doc`.
 
+pub mod bench;
 pub mod floorplan;
 pub mod label;
 pub mod live;

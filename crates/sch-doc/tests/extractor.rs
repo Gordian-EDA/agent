@@ -316,3 +316,45 @@ fn no_sheet_is_ever_over_connected() {
         failures.join("\n")
     );
 }
+
+/// A local label and a global label of one name are ONE net, and a hierarchical
+/// label joins them too — the scope is about where the name reaches beyond this
+/// sheet, not about whether it reaches across it.
+///
+/// This was reported as an extractor blind spot: that the two scopes are separate
+/// nets and the guard therefore cannot see a clash. `kicad-cli` says otherwise, so
+/// the merge in `connect::names` is correct and this pins it — what the clash
+/// actually costs is the `same_local_global_label` ERC warning, which is a rule
+/// about the drawing and is why `enforce_label_scopes` exists.
+#[test]
+fn one_name_in_two_scopes_is_one_net_here_and_in_kicad() {
+    let Some(kicad) = kicad::KicadInstallation::detect() else {
+        eprintln!("SKIP: no KiCAD installation");
+        return;
+    };
+    let source = corpus::repo_roots()
+        .into_iter()
+        .map(|root| root.join("crates/kicad/tests/fixtures/rc_pair.kicad_sch"))
+        .find(|path| path.is_file())
+        .expect("the rc_pair fixture");
+    let text = std::fs::read_to_string(&source).expect("read fixture");
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    for (scope, head) in [
+        ("global", "global_label \"FOO\"\n\t\t(shape input)"),
+        ("hierarchical", "hierarchical_label \"FOO\"\n\t\t(shape input)"),
+    ] {
+        let clashed = text
+            .replace("(label \"VIN\"", "(label \"FOO\"")
+            .replace("(label \"VOUT\"", &format!("({head}"));
+        let path = dir.path().join(format!("{scope}.kicad_sch"));
+        std::fs::write(&path, &clashed).expect("write fixture");
+
+        let doc = SchDoc::read(&path).expect("parse");
+        assert_eq!(
+            ours(&connect::extract(&doc)),
+            theirs(&kicad.netlist(&path).expect("kicad-cli netlist")),
+            "{scope} label of the same name",
+        );
+    }
+}

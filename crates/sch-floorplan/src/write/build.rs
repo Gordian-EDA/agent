@@ -74,14 +74,13 @@ impl SchematicWriter {
             .insert(geom.lib_id.clone(), geom.raw_definition.clone());
     }
 
-    /// Place one symbol instance with reconciliation metadata.
+    /// Place one symbol instance with its identity tags.
     ///
     /// The fuller form of [`Self::add_symbol`]: in addition to the placement, it
     /// attaches `extra_props` (the hidden `ap_*` identity tags that make the
-    /// emitted file self-describing for the next lift/reconcile, spec §4/§7) and
-    /// an optional explicit instance `uuid` to reuse a surviving symbol's prior
-    /// id (so re-emitting after a user edit produces a minimal diff). `uuid =
-    /// None` falls back to the content-derived `stable_uuid("symbol", refdes)`.
+    /// emitted file self-describing) and an optional explicit instance `uuid` to
+    /// reuse a surviving symbol's id, so re-emitting produces a minimal diff.
+    /// `uuid = None` falls back to `stable_uuid("symbol", refdes)`.
     ///
     /// `at` is grid-snapped exactly as in [`Self::add_symbol`]; passing a
     /// position read back from a prior `.kicad_sch` therefore preserves it (the

@@ -433,7 +433,12 @@ fn arrange_is_idempotent_on_connectivity() {
     let before_erc = erc_kinds(&env, &seeded);
 
     let selection = Selection::Refs(NEW_REFS.iter().map(|s| s.to_string()).collect());
-    let report = live::arrange(&env, &mut doc, &selection, Box::new(engine()), None).unwrap();
+    let report = live::arrange(
+        &env,
+        &mut doc,
+        &selection,
+        None,
+        Box::new(engine()), None).unwrap();
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
     // Over the PARTS: a re-wire is free to replace the rail terminals and flags it
     // draws, so the invariant is the parts' connectivity, not every uuid on the sheet.
@@ -447,4 +452,38 @@ fn arrange_is_idempotent_on_connectivity() {
     let after_erc = erc_kinds(&env, &saved);
     let new: Vec<&String> = after_erc.difference(&before_erc).collect();
     assert!(new.is_empty(), "arranging introduced ERC errors: {new:?}");
+}
+
+/// Arranging PART of a block is the ordinary case — "move this resistor and redraw
+/// it" — and every net it shares with a symbol left standing is a net the redraw has
+/// to reach back to. Selecting a whole block hides this: its nets are internal.
+#[test]
+fn arranging_one_end_of_a_net_keeps_the_other_end_on_it() {
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no KiCad environment detected");
+        return;
+    };
+    let Some(demo) = demo_sheet() else {
+        eprintln!("SKIP: KiCAD demo sheets not installed");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = SchDoc::read(&demo).unwrap();
+    let placed = live::place_parts(&env, &mut doc, &ldo_block(), Box::new(engine()), None).unwrap();
+    assert!(placed.committed, "{:?}", placed.mismatch);
+    let before = extracted_partition(&doc);
+
+    // R9 sits on LEDA with D9 and on V3P3 with U9/C10/C11; every one of them stays.
+    let selection = Selection::Refs(vec!["R9".to_string()]);
+    let report = live::arrange(
+        &env,
+        &mut doc,
+        &selection,
+        None,
+        Box::new(engine()), None).unwrap();
+
+    assert!(report.committed, "rolled back — {:?}", report.mismatch);
+    assert_eq!(before, extracted_partition(&doc), "arranging changed a net");
+    let saved = save(&mut doc, dir.path(), "one-end");
+    assert_eq!(extracted_partition(&doc), cli_partition(&env, &saved));
 }

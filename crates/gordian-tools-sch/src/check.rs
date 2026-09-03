@@ -19,13 +19,20 @@ const COMPACT_FINDING_LIMIT: usize = 40;
 ///
 /// One sheet is one block: the extractor's scope is a file, and the checkers
 /// only use blocks to group, never to separate connectivity.
+/// The live sheet as the kernel [`Design`] every checker reads.
+///
+/// Benched symbols are left out: they are on their nets but not laid out, and
+/// every finding about one — an unassigned footprint, an undriven rail — is a
+/// statement about work that has not been done yet rather than about the drawing.
+/// `check_schematic` reports the bench as a count instead, and `export_fab`
+/// refuses while it is non-empty, so nothing benched can reach a board house.
 pub(crate) fn design(doc: &SchDoc, netlist: &Netlist) -> Design {
     let pins = placed_pins(doc);
     let mut components: IndexMap<String, Component> = IndexMap::new();
     // The units of a multi-unit part are separate symbols sharing one
     // reference; they are one component, and folding them together is what
     // stops the lints seeing each unit's pins as a design of its own.
-    for symbol in doc.symbols() {
+    for symbol in doc.symbols().filter(|s| !sch_floorplan::bench::is_benched(s)) {
         let field = |name: &str| {
             symbol
                 .fields
@@ -1001,6 +1008,8 @@ fn inherit_duplicate_footprint_fixes(findings: &mut [Finding]) {
 struct Inspection {
     doc: SchDoc,
     netlist: Netlist,
+    /// Symbols placed and wired but not laid out — progress, not a defect.
+    bench: Vec<String>,
     gaps: Vec<sch_check::completeness::Gap>,
     findings: Vec<Finding>,
     local_errors: usize,
@@ -1053,6 +1062,7 @@ fn live_footprint_mismatches(
 fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
     let doc = SchDoc::read(path).with_context(|| format!("reading {}", path.display()))?;
     let netlist = sch_doc::connect::extract(&doc);
+    let bench = sch_floorplan::bench::benched(&doc);
     let design = design(&doc, &netlist);
     let locator = FindingLocator::new(&doc, &netlist);
     let gaps = sch_check::completeness::audit(&design, ctx.provider());
@@ -1232,9 +1242,20 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
                 .map(|violation| erc_finding(&locator, violation)),
         );
     }
+    // A finding that is only ABOUT benched symbols is a statement about layout
+    // work not yet done. The bench count is what reports that.
+    let on_bench: BTreeSet<&str> = bench.iter().map(String::as_str).collect();
+    findings.retain(|finding| {
+        finding.refs.is_empty()
+            || !finding
+                .refs
+                .iter()
+                .all(|reference| on_bench.contains(reference.split('.').next().unwrap_or(reference)))
+    });
     Ok(Inspection {
         doc,
         netlist,
+        bench,
         gaps,
         findings,
         local_errors,
@@ -1340,6 +1361,8 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .count();
     let mut report = json!({
         "ok": introduced_errors == 0,
+        "bench": inspection.bench.len(),
+        "bench_refs": inspection.bench,
         "baseline": has_baseline.then_some("turn-start"),
         "introduced": introduced,
         "pre_existing": pre_existing,

@@ -374,6 +374,16 @@ pub fn read_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         )
         .expect("writing to a string cannot fail");
     }
+    let bench = sch_floorplan::bench::benched(&doc);
+    if !bench.is_empty() {
+        write!(
+            out,
+            "\nBENCH  ({} placed and wired by name, not laid out — arrange them to finish)\n{}\n",
+            bench.len(),
+            bench.join(" ")
+        )
+        .expect("writing to a string cannot fail");
+    }
     if !netlist.warnings.is_empty() {
         write!(out, "\nWARNINGS\n{}\n", netlist.warnings.join("\n"))
             .expect("writing to a string cannot fail");

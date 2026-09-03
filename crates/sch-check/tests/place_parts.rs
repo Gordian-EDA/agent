@@ -161,15 +161,29 @@ fn only_attributed_nets_get_an_entry() {
     assert!(!design.nets.contains_key("SIG"));
 }
 
+/// A pin key the symbol does not have leaves that ONE part out, with the repair —
+/// the rest of the payload is still a circuit and is still placed.
 #[test]
-fn an_unknown_pin_is_reported_with_a_suggestion() {
+fn an_unknown_pin_leaves_its_part_out_with_a_suggestion() {
     let input: PlacePartsInput = serde_json::from_str(
-        r#"{"parts": [{"ref": "U2", "part": "MCU:STM32F103C8T", "pins": {"PA99": "SIG"}}]}"#,
+        r#"{"parts": [{"ref": "U2", "part": "MCU:STM32F103C8T", "pins": {"PA99": "SIG"}},
+             {"ref": "R1", "part": "Device:R", "pins": {"1": "SIG", "2": "GND"}}]}"#,
     )
     .unwrap();
-    let (_, diags, _) = into_design(&input, &provider(), &Default::default());
-    let d = diags.0.iter().find(|d| d.code == "unknown-pin").unwrap();
-    assert_eq!(d.suggestion.as_deref(), Some("PA9"));
+    let (design, diags, audit) = into_design(&input, &provider(), &Default::default());
+
+    assert!(audit.is_valid(), "{audit:?}");
+    assert!(!diags.has_errors(), "{diags:?}");
+    assert_eq!(audit.unplaced.len(), 1, "{:?}", audit.unplaced);
+    assert_eq!(audit.unplaced[0].refdes, "U2");
+    assert!(audit.unplaced[0].reason.contains("PA99"), "{audit:?}");
+    assert_eq!(audit.unplaced[0].did_you_mean.first().map(String::as_str), Some("PA9"));
+    let placed: Vec<&String> = design
+        .blocks
+        .values()
+        .flat_map(|block| block.components.keys())
+        .collect();
+    assert_eq!(placed, ["R1"], "every other part is still placed");
 }
 
 fn live_power_nets() -> ExistingSheet {
@@ -513,17 +527,15 @@ fn one_refusal_names_every_fault_in_the_payload() {
              {"ref": "R7", "part": "Device:R", "pins": {"1": "SIG_A", "2": "GND"}}]}"#,
     )
     .unwrap();
-    let (_, diags, audit) = into_design(&input, &provider(), &live_power_nets());
+    let (_, _, audit) = into_design(&input, &provider(), &live_power_nets());
 
     assert!(!audit.is_valid(), "a duplicate refdes is still fatal");
     assert_eq!(audit.duplicate_refs.len(), 1);
     assert_eq!(audit.duplicate_refs[0].refdes, "R1");
     assert_eq!(audit.dangling.len(), 1, "{:?}", audit.dangling);
     assert_eq!(audit.dangling[0].net, "SIG_A");
-    assert!(
-        diags.0.iter().any(|d| d.code == "unknown-part"),
-        "the unknown lib_id is found in the same pass, not a later one"
-    );
+    assert_eq!(audit.unplaced.len(), 1, "{:?}", audit.unplaced);
+    assert_eq!(audit.unplaced[0].refdes, "U9");
 }
 
 #[test]
@@ -534,13 +546,12 @@ fn a_footprint_written_as_a_lib_id_says_so() {
              "pins": {"1": "GND", "2": "+3V3"}}]}"#,
     )
     .unwrap();
-    let (_, diags, _) = into_design(&input, &provider(), &live_power_nets());
+    let (_, _, audit) = into_design(&input, &provider(), &live_power_nets());
 
-    let message = diags
-        .0
-        .iter()
-        .find(|d| d.code == "unknown-part")
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    assert!(message.contains("FOOTPRINT"), "{message}");
+    let unplaced = audit.unplaced.first().expect("J1 left out");
+    assert!(unplaced.reason.contains("FOOTPRINT"), "{unplaced:?}");
+    assert!(
+        unplaced.did_you_mean.is_empty(),
+        "a footprint name has no nearer SYMBOL: {unplaced:?}"
+    );
 }

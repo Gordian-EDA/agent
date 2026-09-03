@@ -81,8 +81,12 @@ fn body_overlap_pairs(bodies: &BTreeMap<(String, u32), Rect>) -> Vec<[String; 2]
     pairs.into_iter().collect()
 }
 
+/// The bodies the DRAWING is made of. Benched symbols are left out: they have no
+/// layout to measure, and letting them into the extent would blow up every render
+/// bound and every readability count with parts nobody has placed yet.
 fn symbol_bodies(doc: &SchDoc) -> BTreeMap<(String, u32), Rect> {
     doc.symbols()
+        .filter(|symbol| !crate::bench::is_benched(symbol))
         .filter(|symbol| !symbol.refdes().is_empty() && !symbol.refdes().starts_with('#'))
         .filter_map(|symbol| {
             Some((

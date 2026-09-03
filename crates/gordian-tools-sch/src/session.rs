@@ -164,6 +164,9 @@ pub(crate) struct Edit {
     path: PathBuf,
     before: Netlist,
     rollback: SnapshotId,
+    /// References another caller was promised by `reserve_refs`. No designator
+    /// this edit mints may take one.
+    reserved: BTreeSet<String>,
     pub doc: SchDoc,
     pub warnings: Vec<String>,
 }
@@ -183,6 +186,7 @@ impl Edit {
             warnings: before.warnings.clone(),
             before,
             rollback,
+            reserved: ctx.reservations().reserved()?,
             doc,
         })
     }
@@ -196,8 +200,14 @@ impl Edit {
             warnings: before.warnings.clone(),
             before,
             rollback,
+            reserved: ctx.reservations().reserved().unwrap_or_default(),
             doc,
         }
+    }
+
+    /// References `reserve_refs` has promised to somebody.
+    pub fn reserved(&self) -> &BTreeSet<String> {
+        &self.reserved
     }
 
     /// Read the schematic without intending to change it.

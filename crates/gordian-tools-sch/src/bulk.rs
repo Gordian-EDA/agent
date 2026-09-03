@@ -44,6 +44,8 @@ fn typed<T: serde::de::DeserializeOwned>(input: Value, tool: &str) -> Result<T> 
 struct SelectionInput {
     refs: Option<Vec<String>>,
     bbox: Option<[f64; 4]>,
+    block: Option<String>,
+    intent: Option<sch_check::Intent>,
     engine: Option<PlacementEngineKind>,
 }
 
@@ -60,17 +62,23 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
         "refs": {
             "type": "array",
             "items": { "type": "string" },
-            "minItems": 1
+            "minItems": 1,
+            "description": "Reference designators, bench symbols included."
         },
         "bbox": {
             "type": "array",
             "items": { "type": "number" },
             "minItems": 4,
             "maxItems": 4,
-            "description": "Select symbols whose origins lie inside [x1,y1,x2,y2] mm."
+            "description": "Select symbols whose origins lie inside [x1,y1,x2,y2] mm. Never the bench."
+        },
+        "block": {
+            "type": "string",
+            "description": "Select every symbol tagged with this functional block, bench included."
         }
     });
     if engine {
+        properties["intent"] = sch_check::place_parts_input_schema()["properties"]["intent"].clone();
         properties["engine"] = json!({
             "type": "string",
             "enum": ["anneal", "spine", "cluster"],
@@ -82,7 +90,8 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
         "properties": properties,
         "oneOf": [
             { "required": ["refs"] },
-            { "required": ["bbox"] }
+            { "required": ["bbox"] },
+            { "required": ["block"] }
         ],
         "additionalProperties": false
     })
@@ -118,8 +127,9 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .symbols()
             .map(|symbol| symbol.refdes().to_string())
             .collect(),
+        reserved: edit.reserved().clone(),
     };
-    sch_check::place_parts::assign_references(&mut payload, ctx.provider(), &existing.refs);
+    sch_check::place_parts::assign_references(&mut payload, ctx.provider(), &existing);
     let mut footprints_unresolved = clear_unknown_footprints(ctx, &mut payload)?;
     let (design, _, _) = sch_check::into_design(&payload, ctx.provider(), &existing);
     for mismatch in gordian_runtime::footprint_compat::design_pin_mismatches(ctx, &design)? {
@@ -144,6 +154,18 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .collect();
     if !audit.is_valid() || diags.has_errors() {
         return Ok(invalid_payload_response(audit, &warnings));
+    }
+    if audit.unplaced.len() == payload.parts.len() {
+        return Ok(with_warnings(
+            json!({
+                "ok": false,
+                "code": "nothing_placed",
+                "unplaced": audit.unplaced,
+                "note": "no part in this payload could be resolved, so the sheet is unchanged. \
+                         Each entry names what is wrong and the nearest real symbol or pin.",
+            }),
+            &warnings,
+        ));
     }
     let derived: Vec<String> = payload
         .parts
@@ -246,13 +268,18 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     };
     if !report.committed {
-        return Ok(refused_place(
-            report,
+        // Every engine drew a sheet that did not mean what the payload said. The
+        // connectivity is not the engines' to throw away: the parts go to the
+        // bench, named at every pin, and `arrange` lays them out from there.
+        return bench_payload(
+            ctx,
+            edit,
             &payload,
+            &mismatch_clause(&report.mismatch),
             &tried,
             &skipped,
-            sheet_parts,
-        ));
+            &warnings,
+        );
     }
     let refs = report.placed.clone();
     let mut value = edit
@@ -341,6 +368,7 @@ fn invalid_payload_response(audit: sch_check::PayloadAudit, warnings: &[String])
             "duplicate_refs": audit.duplicate_refs,
             "unknown_pins": audit.unknown_pins,
             "footprint_mismatch": audit.footprint_mismatch,
+            "unplaced": audit.unplaced,
             "dangling": audit.dangling,
             "did_you_mean": audit.did_you_mean,
             "unreliable_nets": audit.unreliable_nets,
@@ -349,8 +377,9 @@ fn invalid_payload_response(audit: sch_check::PayloadAudit, warnings: &[String])
                      here, not the whole payload. `input_errors` are unresolvable lib_ids \
                      and pin conflicts; `duplicate_refs` give the next free refdes; \
                      `unknown_pins` name a key the symbol does not have; `footprint_mismatch` \
-                     includes the closest same-library pad-set repair. `dangling` pins \
-                     are NOT fatal on their own — they are listed so you can finish them.",
+                     includes the closest same-library pad-set repair. `unplaced` parts could \
+                     not be resolved at all and were left out. `dangling` pins are NOT fatal \
+                     on their own — they are listed so you can finish them.",
         }),
         warnings,
     )
@@ -375,6 +404,35 @@ fn sanitize_place_parts_input(input: &mut Value) -> Vec<String> {
             {
                 warnings.push(format!("dropped empty field at parts[{index}]."));
             }
+        }
+    }
+    // A layout hint of the wrong SHAPE — `"rails": "+3V3"` where a map belongs — is
+    // still only a hint. Dropping it costs a rail band; refusing the payload costs
+    // the whole block.
+    if let Some(intent) = input.get_mut("intent") {
+        if intent.as_object().is_some() {
+            let malformed: Vec<String> = intent
+                .as_object()
+                .expect("just checked")
+                .iter()
+                .filter(|(field, value)| match field.as_str() {
+                    "rails" | "ports" | "place" => !value.is_object(),
+                    "relations" => !value.is_array(),
+                    "mirror" => !value.is_array(),
+                    _ => false,
+                })
+                .map(|(field, _)| field.clone())
+                .collect();
+            for field in malformed {
+                intent.as_object_mut().expect("just checked").remove(&field);
+                warnings.push(format!("dropped malformed intent.{field}: wrong shape"));
+            }
+        } else {
+            warnings.push("dropped malformed intent: expected an object".to_string());
+            input
+                .as_object_mut()
+                .expect("place_parts input is an object")
+                .remove("intent");
         }
     }
     let Some(intent) = input.get_mut("intent").and_then(Value::as_object_mut) else {
@@ -467,6 +525,14 @@ fn guarded_place_parts(
     }
 }
 
+/// Re-lay out a selection, or — when the search runs out of clock — do the half of
+/// the work that has no search in it.
+///
+/// The engines stop themselves at the search deadline, so an overrun means an
+/// engine ignored it and the whole call was abandoned. Coming back empty is the
+/// one outcome worth avoiding: a re-wire in place redraws the same selection's
+/// wiring from the same netlist with no search at all, which is the honest
+/// best-so-far — the layout is what it was, and the drawing is current.
 pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let input: SelectionInput = typed(input, "arrange")?;
     let selection = selection(&input)?;
@@ -477,13 +543,14 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         ctx.env(),
         &mut edit.doc,
         &selection,
+        input.intent.clone(),
         engine,
         Some(budget),
     ) {
         Ok(report) => report,
         Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
             timing.done("overran");
-            return Ok(budget_refusal(&error));
+            return arrange_in_place(ctx, &selection, budget_refusal(&error));
         }
         Err(error) => return Err(error.into()),
     };
@@ -495,10 +562,31 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     finish_arrangement(edit, report, ctx)
 }
 
+/// The searchless half of `arrange`, run after its budget was spent.
+fn arrange_in_place(ctx: &AgentRuntime, selection: &Selection, overrun: Value) -> Result<Value> {
+    let mut edit = Edit::open(ctx)?;
+    let budget = PlacementBudget::new(edit.doc.symbols().count());
+    let report =
+        match sch_floorplan::live::rewire(ctx.env(), &mut edit.doc, selection, Some(budget)) {
+            Ok(report) => report,
+            Err(_) => return Ok(overrun),
+        };
+    if !report.committed {
+        return Ok(overrun);
+    }
+    let mut value = finish_arrangement(edit, report, ctx)?;
+    value["placement"] = overrun["placement"].clone();
+    value["note"] = json!(
+        "the placement search overran its budget; the selection's wiring was redrawn where it \
+         stands instead. Arrange a smaller selection to move it."
+    );
+    Ok(value)
+}
+
 pub(crate) fn rewire(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let input: SelectionInput = typed(input, "rewire")?;
-    if input.engine.is_some() {
-        return Err(anyhow!("rewire does not accept an engine"));
+    if input.engine.is_some() || input.intent.is_some() {
+        return Err(anyhow!("rewire moves nothing, so it takes no engine or intent"));
     }
     let selection = selection(&input)?;
     let mut edit = Edit::open(ctx)?;
@@ -554,12 +642,30 @@ fn budget_refusal(error: &sch_floorplan::live::Error) -> Value {
 
 fn finish_arrangement(edit: Edit, report: ArrangeReport, ctx: &AgentRuntime) -> Result<Value> {
     if !report.committed {
+        // A re-layout draws the selection's wires FROM THE NETLIST, so this is not
+        // supposed to be reachable — it is the last guard, and what it protects is
+        // the netlist, which is intact either way.
         return Ok(json!({
-            "error": "refused: the solver's result changed connectivity; nothing was written",
+            "ok": false,
+            "code": "layout_unchanged",
+            "error": format!(
+                "the re-layout would have changed connectivity ({:?}); the sheet and its \
+                 netlist are untouched. Arrange a smaller selection — one symbol at a time \
+                 with `refs` always works.",
+                report.mismatch
+            ),
             "report": report,
         }));
     }
-    let value = edit.commit(json!(report), Allow::nothing())?;
+    // The re-layout owns the selection's own drawing: its rail symbols and flags
+    // are replaced, and a net it now draws as a wire loses the authored name its
+    // erased label carried. The partition is what may not move, and the live gate
+    // has already checked that.
+    let allow = Allow::nothing()
+        .parts(report.moved.clone())
+        .unname_nets(report.nets.clone())
+        .creating();
+    let value = edit.commit(json!(report), allow)?;
     if value.get("error").is_some() {
         return Ok(value);
     }
@@ -652,68 +758,121 @@ fn engines_to_try(requested: Option<PlacementEngineKind>) -> Vec<PlacementEngine
     ]
 }
 
-fn refused_place(
-    report: PlaceReport,
+/// The tool behind `add_parts`: a payload with no layout at all.
+pub(crate) fn add_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let mut input = input;
+    let warnings = sanitize_place_parts_input(&mut input);
+    let mut payload: sch_check::PlacePartsInput = typed(input, "add_parts")?;
+    let edit = if ctx.sch_path().is_file() {
+        Edit::open(ctx).context("opening the existing schematic")?
+    } else {
+        Edit::create(ctx, sch_floorplan::live::blank_sheet()?)
+    };
+    let existing = sch_check::ExistingSheet {
+        refs: edit
+            .doc
+            .symbols()
+            .map(|symbol| symbol.refdes().to_string())
+            .collect(),
+        reserved: edit.reserved().clone(),
+        ..Default::default()
+    };
+    sch_check::place_parts::assign_references(&mut payload, ctx.provider(), &existing);
+    bench_payload(
+        ctx,
+        edit,
+        &payload,
+        "added without layout — call arrange to lay it out",
+        &[],
+        &[],
+        &warnings,
+    )
+}
+
+/// Write a payload's connectivity to the bench and commit it.
+///
+/// The bench is what makes a placement failure survivable: the parts and their
+/// nets are written, only the LAYOUT is missing, and `arrange` is the one call
+/// that finishes them. Nothing here can short anything — no wire is drawn.
+fn bench_payload(
+    ctx: &AgentRuntime,
+    mut edit: Edit,
     payload: &sch_check::PlacePartsInput,
+    why: &str,
     tried: &[&str],
     skipped: &[&str],
-    sheet_parts: usize,
-) -> Value {
-    let m = &report.mismatch;
+    warnings: &[String],
+) -> Result<Value> {
+    let report =
+        match sch_floorplan::live::add_parts(ctx.env(), &mut edit.doc, payload, None, why) {
+            Ok(report) => report,
+            Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
+                return Ok(invalid_payload_response(*audit, warnings));
+            }
+            Err(error) => return Err(error.into()),
+        };
+    if !report.committed {
+        return Ok(with_warnings(
+            json!({
+                "ok": false,
+                "code": "bench_mismatch",
+                "error": "the bench draw did not preserve connectivity; nothing was written",
+                "report": report,
+            }),
+            warnings,
+        ));
+    }
+    let refs: Vec<String> = report
+        .benched
+        .iter()
+        .map(|benched| benched.refdes.clone())
+        .collect();
+    let mut value = edit
+        .commit(
+            json!(report),
+            Allow::nothing().parts(refs.clone()).creating(),
+        )
+        .context("committing benched parts")?;
+    if value.get("error").is_some() {
+        return Ok(value);
+    }
+    if !tried.is_empty() {
+        value["engines_tried"] = json!(tried);
+        value["engines_skipped"] = json!(skipped);
+    }
+    let joined = refs.join(" ");
+    attach_connectivity(&mut value, ctx, refs, &format!("BENCHED  {joined}"))?;
+    let value = with_check(value, ctx).context("checking benched parts")?;
+    Ok(with_warnings(value, warnings))
+}
+
+/// One clause naming what the engines got wrong, for the bench report.
+fn mismatch_clause(mismatch: &sch_floorplan::live::Mismatch) -> String {
     let mut why = Vec::new();
-    if !m.shorted.is_empty() {
-        let pairs: Vec<String> = m.shorted.iter().map(|(a, b)| format!("{a}+{b}")).collect();
+    if !mismatch.shorted.is_empty() {
+        let pairs: Vec<String> = mismatch
+            .shorted
+            .iter()
+            .map(|(a, b)| format!("{a}+{b}"))
+            .collect();
         why.push(format!("shorted {}", pairs.join(", ")));
     }
-    if !m.scattered.is_empty() {
-        why.push(format!("scattered {}", m.scattered.join(", ")));
+    if !mismatch.scattered.is_empty() {
+        why.push(format!("scattered {}", mismatch.scattered.join(", ")));
     }
-    if !m.disturbed.is_empty() {
-        why.push(format!("disturbed existing {}", m.disturbed.join(", ")));
+    if !mismatch.disturbed.is_empty() {
+        why.push(format!("disturbed existing {}", mismatch.disturbed.join(", ")));
     }
-    let mut blocks: std::collections::BTreeMap<&str, usize> = Default::default();
-    for part in &payload.parts {
-        let block = part
-            .block
-            .as_deref()
-            .or(payload.block.as_deref())
-            .unwrap_or(sch_check::place_parts::DEFAULT_BLOCK);
-        *blocks.entry(block).or_default() += 1;
-    }
-    let split: Vec<String> = blocks
-        .iter()
-        .map(|(name, count)| format!("{name} ({count} parts)"))
-        .collect();
-    let block_guidance = if sheet_parts >= 60 {
-        " This sheet is large: place one named functional block per call with the `block` field; \
-         each call takes the region path and freezes symbols already on the sheet."
-    } else {
-        ""
-    };
-    json!({
-        "error": format!(
-            "refused: the placed result does not match the requested connectivity ({}); nothing \
-             was written. This is a placement-engine failure, not a payload error — {} already \
-             tried it. Send one payload per block instead ({}); a smaller block is what has \
-             recovered this every time.{}",
-            why.join("; "),
-            tried.join(", then "),
-            split.join(", "),
-            block_guidance,
-        ),
-        "engines_tried": tried,
-        "engines_skipped": skipped,
-        "split_into": split,
-        "report": report,
-    })
+    format!("no placement engine could draw it truthfully ({})", why.join("; "))
 }
 
 fn selection(input: &SelectionInput) -> Result<Selection> {
-    match (&input.refs, input.bbox) {
-        (Some(refs), None) if !refs.is_empty() => Ok(Selection::Refs(refs.clone())),
-        (None, Some(bbox)) => Ok(Selection::Bbox(bbox)),
+    match (&input.refs, input.bbox, &input.block) {
+        (Some(refs), None, None) if !refs.is_empty() => Ok(Selection::Refs(refs.clone())),
+        (None, Some(bbox), None) => Ok(Selection::Bbox(bbox)),
+        (None, None, Some(block)) if !block.is_empty() => Ok(Selection::Block(block.clone())),
         _ => Err(anyhow!(
-            "provide exactly one non-empty `refs` or `bbox` selection"
+            "provide exactly one non-empty `refs`, `bbox` or `block` selection"
         )),
     }
 }

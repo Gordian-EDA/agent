@@ -1284,7 +1284,7 @@ impl<P: Provider> Agent<P> {
                     schematic_mutated = true;
                     schematic_diff_complete = !diff_required;
                     diff_nudges_left = 2;
-                    if call.fn_name == "place_parts" {
+                    if matches!(call.fn_name.as_str(), "place_parts" | "add_parts") {
                         successful_place_parts += 1;
                     }
                     schematic_check_complete = successful_place_parts > 1
@@ -2573,12 +2573,20 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 .unwrap_or_default();
             format!("{introduced} introduced, {pre_existing} pre-existing{first}")
         }
-        "place_parts" => {
+        "place_parts" | "add_parts" => {
             let gaps = result
                 .get("gaps")
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
-            format!("placed block; {gaps} completeness gaps remain")
+            let bench = result
+                .pointer("/check_schematic/bench")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            let bench = match bench {
+                0 => String::new(),
+                n => format!("; {n} on the bench"),
+            };
+            format!("placed block; {gaps} completeness gaps remain{bench}")
         }
         "project_info" => result
             .get("sch_path")
