@@ -59,18 +59,18 @@ fn top_symbol_hit_has_a_validated_compatible_footprint() {
 }
 
 #[test]
-fn footprint_tool_schema_requires_a_symbol() {
+fn footprint_tool_schema_accepts_a_query_without_a_symbol() {
     let definition = gordian_core::tools::tool_defs()
         .into_iter()
         .find(|tool| tool.name.to_string() == "search_footprints")
         .expect("search_footprints definition");
     let schema: Value = definition.schema.expect("search_footprints schema");
-    assert_eq!(schema["oneOf"][0]["required"], json!(["symbol"]));
+    assert_eq!(schema["anyOf"][1]["required"], json!(["query"]));
     assert!(
         definition
             .description
             .as_deref()
-            .is_some_and(|description| description.contains("Pass the symbol"))
+            .is_some_and(|description| description.contains("without it"))
     );
 }
 
@@ -128,9 +128,11 @@ fn symbol_info_recognizes_a_pin_header_footprint_name() {
     )
     .unwrap();
 
-    assert!(result["error"].as_str().is_some_and(|error| {
-        error.contains("is a FOOTPRINT name, not a symbol")
-    }));
+    assert!(
+        result["error"]
+            .as_str()
+            .is_some_and(|error| { error.contains("is a FOOTPRINT name, not a symbol") })
+    );
     assert_eq!(
         result["suggestions"],
         json!(["Connector_Generic:Conn_01x06"]),

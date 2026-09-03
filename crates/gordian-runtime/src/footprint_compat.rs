@@ -82,6 +82,13 @@ pub struct CompatibleFootprintHit {
     score: i64,
 }
 
+/// One footprint-name search result without a symbol compatibility verdict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FootprintNameHit {
+    pub lib_id: String,
+    pub pads: Vec<String>,
+}
+
 struct Assignment<'a> {
     reference: &'a str,
     symbol: &'a str,
@@ -108,7 +115,8 @@ pub fn footprint_compatibility(
     )
 }
 
-fn footprint_compatibility_ignoring(
+/// Decide a pair while allowing explicitly unused symbol pins to lack pads.
+pub fn footprint_compatibility_ignoring(
     ctx: &AgentRuntime,
     symbol_id: &str,
     footprint_id: &str,
@@ -294,6 +302,65 @@ pub fn search_compatible_footprints(
     Ok(hits)
 }
 
+/// Rank footprint IDs by fuzzy name match, preferring an explicitly named library.
+pub fn search_footprints_by_name(
+    ctx: &AgentRuntime,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<FootprintNameHit>> {
+    let catalog = ctx.footprint_catalog()?;
+    let matcher = SkimMatcherV2::default().ignore_case();
+    let explicit_library = query
+        .split_once(':')
+        .map(|(library, name)| (library, name))
+        .filter(|(library, _)| {
+            catalog
+                .libraries()
+                .any(|candidate| candidate.id().as_str() == *library)
+        });
+    let needle = explicit_library.map_or(query, |(_, name)| name);
+    let mut hits = catalog
+        .entries()
+        .filter_map(|entry| {
+            let score = matcher.fuzzy_match(entry.id().name(), needle)?;
+            let preferred_library = explicit_library
+                .is_some_and(|(library, _)| entry.id().library().as_str() == library);
+            Some((preferred_library, score, entry.id().clone()))
+        })
+        .collect::<Vec<_>>();
+    hits.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.cmp(&left.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    hits.truncate(limit);
+    Ok(hits
+        .into_iter()
+        .map(|(_, _, id)| {
+            let pads = catalog
+                .footprint(&id)
+                .map(|footprint| {
+                    footprint
+                        .pads
+                        .iter()
+                        .filter(|pad| pad.technology != PadTechnology::NpThruHole)
+                        .map(|pad| pad.number.clone())
+                        .filter(|number| !number.is_empty())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default();
+            FootprintNameHit {
+                lib_id: id.to_string(),
+                pads,
+            }
+        })
+        .collect())
+}
+
 /// Best installed compatible footprint for a symbol near `preferred`.
 pub fn best_compatible_footprint(
     ctx: &AgentRuntime,
@@ -425,9 +492,22 @@ fn best_same_library_footprint(
             }
             (1..=preferred_tokens.len()).rev().find_map(|token_count| {
                 let query = preferred_tokens[..token_count].join("_");
-                matcher
-                    .fuzzy_match(entry.id().name(), &query)
-                    .map(|score| (token_count, score, id.clone()))
+                matcher.fuzzy_match(entry.id().name(), &query).map(|score| {
+                    let shared_tokens = entry
+                        .id()
+                        .name()
+                        .split('_')
+                        .filter(|candidate| {
+                            candidate.len() > 1
+                                && preferred_tokens.iter().any(|preferred| {
+                                    preferred.len() > 1
+                                        && (preferred.contains(candidate)
+                                            || candidate.contains(preferred))
+                                })
+                        })
+                        .count();
+                    (shared_tokens, token_count, score, id.clone())
+                })
             })
         })
         .collect::<Vec<_>>();
@@ -436,12 +516,13 @@ fn best_same_library_footprint(
             .0
             .cmp(&left.0)
             .then_with(|| right.1.cmp(&left.1))
-            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| left.3.cmp(&right.3))
     });
     text_candidates.truncate(32);
 
     let mut candidates = Vec::new();
-    for (_, score, id) in text_candidates {
+    for (shared_tokens, _, score, id) in text_candidates {
         let Ok(verdict) = footprint_compatibility_ignoring(ctx, symbol_id, &id, ignored_pins)
         else {
             continue;
@@ -449,15 +530,16 @@ fn best_same_library_footprint(
         let mismatch = verdict.missing_pads.len()
             + verdict.extra_pins.len()
             + usize::from(verdict.polarity_mismatch.is_some());
-        candidates.push((mismatch, score, id));
+        candidates.push((mismatch, shared_tokens, score, id));
     }
     candidates.sort_by(|left, right| {
         left.0
             .cmp(&right.0)
             .then_with(|| right.1.cmp(&left.1))
-            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| left.3.cmp(&right.3))
     });
-    Ok(candidates.into_iter().next().map(|(_, _, id)| id))
+    Ok(candidates.into_iter().next().map(|(_, _, _, id)| id))
 }
 
 /// Diagnose a footprint ID that cannot be loaded and rank compatible repairs
@@ -941,6 +1023,24 @@ mod tests {
             hits.iter()
                 .all(|hit| hit.lib_id.starts_with("Connector_BarrelJack:"))
         );
+    }
+
+    #[test]
+    fn powerpak_duplicate_pads_are_electrical_pad_numbers_not_pin_count() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCad detected");
+            return;
+        };
+        let verdict = footprint_compatibility(
+            &ctx,
+            "Transistor_FET:Si7336ADP",
+            "Package_SO:PowerPAK_SO-8_Single",
+        )
+        .unwrap();
+
+        assert!(verdict.compatible, "{verdict:?}");
+        assert_eq!(verdict.pads, ["1", "2", "3", "4", "5"]);
+        assert!(verdict.extra_pins.is_empty());
     }
 
     #[test]

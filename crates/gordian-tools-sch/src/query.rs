@@ -15,6 +15,64 @@ use serde_json::{Value, json};
 use crate::refs;
 use crate::session::Edit;
 
+const MAX_FOOTPRINT_QUERIES: usize = 4;
+
+/// Search installed footprints by name, optionally ranking electrical compatibility.
+pub fn search_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    if let Some(queries) = input.get("queries") {
+        let Some(queries) = queries.as_array() else {
+            return Ok(json!({ "error": "`queries` must be an array" }));
+        };
+        if queries.is_empty() || queries.len() > MAX_FOOTPRINT_QUERIES {
+            return Ok(json!({
+                "error": format!("`queries` must contain 1 to {MAX_FOOTPRINT_QUERIES} searches")
+            }));
+        }
+        let results = queries
+            .iter()
+            .map(|item| search_footprints_one(item, ctx))
+            .collect::<Result<Vec<_>>>()?;
+        return Ok(json!({ "results": results }));
+    }
+    search_footprints_one(&input, ctx)
+}
+
+fn search_footprints_one(input: &Value, ctx: &AgentRuntime) -> Result<Value> {
+    let symbol = input.get("symbol").and_then(Value::as_str);
+    let query = input.get("query").and_then(Value::as_str);
+    if symbol.is_none() && query.is_none() {
+        return Ok(json!({ "error": "search_footprints needs `query` or `symbol`" }));
+    }
+    let limit = input
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|limit| limit as usize)
+        .unwrap_or(ctx.config().tools.default_search_limit);
+    let hits = if let Some(symbol) = symbol {
+        serde_json::to_value(
+            gordian_runtime::footprint_compat::search_compatible_footprints(
+                ctx, symbol, query, limit,
+            )?,
+        )?
+    } else {
+        serde_json::to_value(
+            gordian_runtime::footprint_compat::search_footprints_by_name(
+                ctx,
+                query.expect("a query is required without a symbol"),
+                limit,
+            )?,
+        )?
+    };
+    let mut result = json!({ "hits": hits });
+    if let Some(symbol) = symbol {
+        result["symbol"] = json!(symbol);
+    }
+    if let Some(query) = query {
+        result["query"] = json!(query);
+    }
+    Ok(result)
+}
+
 /// Which edge of its symbol a pin leaves from.
 fn side_of(pin: &PlacedPin) -> &'static str {
     if pin.out.x.abs() >= pin.out.y.abs() {
