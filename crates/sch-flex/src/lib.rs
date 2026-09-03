@@ -46,25 +46,33 @@ const SHEET_ASPECT: f64 = 1.5;
 /// paper, which reads worse than a taller sheet.
 const PAGE_WIDTH: f64 = 260.0;
 
-/// What the typesetter had to decide for itself.
+/// What the typesetter had to decide for itself, because its author did not.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Report {
     /// Blocks whose author composed no tree; each was drawn as one bare row.
     pub untreed: Vec<String>,
+    /// Block → the parts its tree left out, drawn as a bare row underneath it.
+    pub uncomposed: BTreeMap<String, Vec<String>>,
 }
 
 impl Report {
-    /// The warnings a caller shows the author.
+    /// What the author needs to hear: a bare row is not a composition, and the
+    /// typesetter drawing one is not the same as the author having chosen it.
     pub fn warnings(&self) -> Vec<String> {
-        self.untreed
-            .iter()
-            .map(|block| {
-                format!(
-                    "block `{block}` has no `layout` tree, so it was drawn as one row: \
-                     compose it as rows/cols of parts to get a readable block"
-                )
-            })
-            .collect()
+        let untreed = self.untreed.iter().map(|block| {
+            format!(
+                "`layout` has no tree for block `{block}`, so it was drawn as one bare row: \
+                 compose it as rows and cols to get a readable block"
+            )
+        });
+        let uncomposed = self.uncomposed.iter().map(|(block, parts)| {
+            format!(
+                "`layout.{block}` leaves out {}, drawn as a bare row under the rest: \
+                 give every part of a block a place in its tree",
+                parts.join(", ")
+            )
+        });
+        untreed.chain(uncomposed).collect()
     }
 }
 
@@ -187,7 +195,7 @@ fn compose(
                     .collect::<Vec<_>>()
             };
             let tree = match trees.get(&block) {
-                Some(tree) => complete(tree, items, &mine),
+                Some(tree) => complete(tree, items, &mine, &block, report),
                 None => {
                     report.untreed.push(block.clone());
                     Tree::row_of(units())
@@ -198,8 +206,15 @@ fn compose(
         .collect()
 }
 
-/// The authored tree plus a trailing row of whatever it forgot, so every part is drawn.
-fn complete(tree: &Tree, items: &[Item], members: &[usize]) -> Tree {
+/// The authored tree plus a trailing row of whatever it forgot, so every part is drawn —
+/// and a note to its author saying which parts they left to the typesetter.
+fn complete(
+    tree: &Tree,
+    items: &[Item],
+    members: &[usize],
+    block: &str,
+    report: &mut Report,
+) -> Tree {
     let named = tree.keys();
     let missing: Vec<(String, u8)> = members
         .iter()
@@ -213,6 +228,10 @@ fn complete(tree: &Tree, items: &[Item], members: &[usize]) -> Tree {
     if missing.is_empty() {
         return tree.clone();
     }
+    report.uncomposed.insert(
+        block.to_owned(),
+        missing.iter().map(|(refdes, _)| refdes.clone()).collect(),
+    );
     Tree::Container(Container {
         axis: Axis::Col,
         children: vec![tree.clone(), Tree::row_of(missing)],

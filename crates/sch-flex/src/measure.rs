@@ -178,15 +178,14 @@ fn container_node(c: &Container, parts: &[Part], index: &dyn Fn(&str, u8) -> Opt
         .iter()
         .map(|child| measure(child, parts, index, c.axis))
         .collect();
-    if let Some(wrapped) = wrap(c, &children) {
+    if let Some(wrapped) = wrap(c, &children, parts) {
         return container_node(&wrapped, parts, index);
     }
     face_neighbours(&mut children, &c.children, parts, c.axis);
     if c.axis == Axis::Row {
         align_columns_to_ic_pins(&mut children, parts);
     }
-    let big = children.iter().any(|k| ic_leaf(k, parts));
-    let gap = c.gap.unwrap_or(DEFAULT_GAP).max(if big { IC_GAP } else { 0.0 }) * UNIT_MM;
+    let gap = spacing(c, &children, parts);
     let span: f64 = children.iter().map(|k| main(k, c.axis)).sum::<f64>()
         + gap * children.len().saturating_sub(1) as f64;
     let (before, after) = (
@@ -222,10 +221,17 @@ fn container_node(c: &Container, parts: &[Part], index: &dyn Fn(&str, u8) -> Opt
     }
 }
 
+/// The spacing a container is laid out with, which is what a band has to be measured
+/// against: one holding an IC is opened up to [`IC_GAP`].
+fn spacing(c: &Container, children: &[Node], parts: &[Part]) -> f64 {
+    let big = children.iter().any(|k| ic_leaf(k, parts));
+    c.gap.unwrap_or(DEFAULT_GAP).max(if big { IC_GAP } else { 0.0 }) * UNIT_MM
+}
+
 /// A container longer than a page is not something a reader can follow: break it into
 /// bands of the same children, in order, stacked across its own axis. A row wraps into
 /// stacked rows, a column into side-by-side columns. `None` when it already fits.
-fn wrap(c: &Container, children: &[Node]) -> Option<Container> {
+fn wrap(c: &Container, children: &[Node], parts: &[Part]) -> Option<Container> {
     if c.children.len() < 2 {
         return None;
     }
@@ -233,7 +239,7 @@ fn wrap(c: &Container, children: &[Node]) -> Option<Container> {
         Axis::Row => WRAP_WIDTH,
         Axis::Col => WRAP_HEIGHT,
     }) * UNIT_MM;
-    let gap = c.gap.unwrap_or(DEFAULT_GAP) * UNIT_MM;
+    let gap = spacing(c, children, parts);
     let span: f64 = children.iter().map(|k| main(k, c.axis)).sum::<f64>()
         + gap * (children.len() - 1) as f64;
     if span <= limit {
@@ -252,7 +258,9 @@ fn wrap(c: &Container, children: &[Node]) -> Option<Container> {
             band.push(child.clone());
         }
     }
-    if bands.len() < 2 {
+    // A container that overflows on BOTH axes would otherwise wrap forever, flipping axis
+    // each time. One child per band is that state: splitting further cannot shorten it.
+    if bands.len() < 2 || bands.len() == c.children.len() {
         return None;
     }
     Some(Container {
@@ -325,7 +333,7 @@ fn face_neighbours(children: &mut [Node], authored: &[Tree], parts: &[Part], axi
         let Kind::Leaf { part, pose, .. } = children[i].kind else {
             continue;
         };
-        if matches!(&authored[i], Tree::Leaf(l) if l.rot.is_some()) {
+        if matches!(&authored[i], Tree::Leaf(l) if l.rot.is_some() || l.mirror) {
             continue;
         }
         let (before, after) = neighbour_nets(children, parts, i);
@@ -542,20 +550,40 @@ fn pin_lines(
 
 /// Slide a column's children onto `lines`, keeping their order and never overlapping.
 /// Returns whether any child found a line to sit on.
+/// Where in a node's own box the pin carrying `net` sits — what has to land on the IC's
+/// pin line. Falls back to the node's alignment line when it has no such pin of its own.
+fn seat_of(node: &Node, parts: &[Part], net: &str) -> f64 {
+    let Kind::Leaf { part, pose, anchor } = &node.kind else {
+        return node.ay;
+    };
+    let part = &parts[*part];
+    part.pins
+        .iter()
+        .find(|pin| part.net(pin) == Some(net))
+        .map(|pin| anchor.y + part.pin_offset(pin, *pose).y)
+        .unwrap_or(node.ay)
+}
+
 fn seat_column(col: &mut Node, parts: &[Part], lines: &[(String, f64)]) -> bool {
     let Kind::Stack { children, gap, .. } = &col.kind else {
         return false;
     };
     let gap = *gap;
-    let targets: Vec<Option<f64>> = children
+    // What has to land on the IC's pin line is the child's OWN pin carrying that net, not
+    // its origin: a standing 2-pin part's origin is midway between its pins, so seating
+    // the origin puts the connection half a body off the line.
+    // Per child: the IC pin line to sit on, and where in the child's own box the pin that
+    // reaches it is. Seating the child's ORIGIN instead would put a standing passive's
+    // connection half a body off the line.
+    let targets: Vec<Option<(f64, f64)>> = children
         .iter()
         .map(|child| {
             let nets = child.signal_nets(parts);
-            lines
+            let (net, line) = lines
                 .iter()
                 .filter(|(net, _)| nets.contains(net))
-                .map(|(_, y)| *y)
-                .min_by(f64::total_cmp)
+                .min_by(|a, b| a.1.total_cmp(&b.1))?;
+            Some((*line, seat_of(child, parts, net)))
         })
         .collect();
     if targets.iter().all(Option::is_none) {
@@ -564,10 +592,10 @@ fn seat_column(col: &mut Node, parts: &[Part], lines: &[(String, f64)]) -> bool 
     let (mut cursor, mut anchor_line, mut offsets) = (0.0f64, None, Vec::new());
     for (child, target) in children.iter().zip(&targets) {
         let mut y = cursor;
-        if let Some(t) = target {
+        if let Some((line, seat)) = target {
             match anchor_line {
-                None => anchor_line = Some(y + child.ay - t),
-                Some(l) => y = cursor.max(l + t - child.ay),
+                None => anchor_line = Some(y + seat - line),
+                Some(l) => y = cursor.max(l + line - seat),
             }
         }
         offsets.push(y);
@@ -625,8 +653,9 @@ fn place(node: &Node, x: f64, y: f64, out: &mut Vec<Placed>) {
     }
 }
 
-/// Schematic parts sit on the 100-mil lattice: half the pitch of the sheet grid, and the
-/// spacing every KiCAD symbol's pins are drawn on.
+/// The lattice a pin connects on: the 50-mil grid every KiCAD symbol's pins are drawn on,
+/// and the one `pin_endpoint` snaps a wire's terminal to. Rounding an alignment line any
+/// coarser than this collapses two pin lines a single grid step apart onto one.
 fn snap(v: f64) -> f64 {
-    (v / (2.0 * UNIT_MM)).round() * 2.0 * UNIT_MM
+    geom::GRID_50_MIL.snap(v)
 }

@@ -70,6 +70,8 @@ pub struct Pose {
 /// New poses for the movable set, in input order, plus what the finished sheet measures.
 pub struct RegionOutput {
     pub poses: Vec<Pose>,
+    /// What the typesetter had to decide because the author's trees did not.
+    pub warnings: Vec<String>,
     /// The IR the sheet ships with — its recognized idioms and rail decisions.
     pub ir: LayoutIr,
     pub result: PlaceResult,
@@ -284,7 +286,7 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
         it.preseeded = true;
     }
 
-    sch_flex::typeset(&mut all, &ir.trees);
+    let typeset = sch_flex::typeset(&mut all, &ir.trees);
     for (it, live) in all.iter_mut().skip(movable).zip(&fixed) {
         it.at = live.at;
         it.angle = live.angle;
@@ -313,6 +315,7 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
     };
     RegionOutput {
         ir,
+        warnings: typeset.warnings(),
         poses: all[..movable]
             .iter()
             .map(|it| Pose {

@@ -302,6 +302,7 @@ fn place_parts_inner(
     let placed = posed(movable, &out.poses);
     let inc = incidence(&placed);
     let was_global = global_label_nets(doc);
+    let typeset_warnings = out.warnings.clone();
     let warnings = live_phase("realise",
         placed.len(),
         inc.len(),
@@ -319,7 +320,8 @@ fn place_parts_inner(
                     beside: (!fresh).then(|| beside_scene(doc)).as_ref(),
                 },
             )?;
-            let mut warnings = writer.layout_warnings();
+            let mut warnings = typeset_warnings;
+            warnings.extend(writer.layout_warnings());
             warnings.extend(net_conflict_warnings(env, &writer, &placed, &inc));
             crate::realize::graft(doc, writer)?;
             Ok(warnings)
@@ -625,7 +627,7 @@ fn rearrange_inner(
             (net.drawn().to_string(), side)
         })
         .collect();
-    let (placed, mut ir) = if replace {
+    let (placed, mut ir, typeset_warnings) = if replace {
         let out = live_phase("place", movable.len(), before.nets.len(), || {
             region_arrange(RegionProblem::new(
                 env,
@@ -636,9 +638,9 @@ fn rearrange_inner(
                 ir,
             ))
         });
-        (posed(movable, &out.poses), out.ir)
+        (posed(movable, &out.poses), out.ir, out.warnings)
     } else {
-        (movable, ir)
+        (movable, ir, Vec::new())
     };
     ir.ports.extend(boundary_ports);
     let (mut redrawn, inc, mut warnings, left_bench, mut labelled) = live_phase("realise",
@@ -671,7 +673,8 @@ fn rearrange_inner(
                     ..Default::default()
                 },
             )?;
-            let mut warnings = writer.layout_warnings();
+            let mut warnings = typeset_warnings;
+            warnings.extend(writer.layout_warnings());
             warnings.extend(net_conflict_warnings(env, &writer, &placed, &inc));
             let labelled = writer.signal_label_count();
             crate::realize::graft_drawing(doc, writer)?;
