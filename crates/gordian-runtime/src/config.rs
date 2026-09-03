@@ -201,7 +201,7 @@ impl AgentConfig {
 }
 
 /// Independent review behavior.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReviewConfig {
     /// Retry a malformed review JSON response once.
@@ -209,15 +209,6 @@ pub struct ReviewConfig {
     /// Use the broader diverse-lens netlist review ensemble instead of the
     /// single quick lens.
     pub ensemble: bool,
-}
-
-impl Default for ReviewConfig {
-    fn default() -> Self {
-        Self {
-            retry_json: false,
-            ensemble: false,
-        }
-    }
 }
 
 /// Tool-level defaults shared across schematic and PCB tools.

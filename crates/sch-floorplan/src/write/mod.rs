@@ -255,9 +255,8 @@ pub struct SchematicWriter {
     /// which place content at fixed absolute coordinates.
     pub(super) frame: bool,
     /// When set, a junction dot is refused where a FOREIGN net's wire already runs — a
-    /// dot welds everything through it, so on a shipped sheet the realiser must never be
-    /// the thing that merges two nets. A finalize-only repair, like the riser fan: the
-    /// per-move scorer leaves it off so its cost landscape stays the geometry alone.
+    /// dot welds everything through it, so the realiser must never be the thing that
+    /// merges two nets.
     pub(super) weld_guard: bool,
     /// Points occupied by a pin the design put on a NET. A no-connect marker there is
     /// refused: symbols stack their duplicate power pins on one endpoint (an ESP32's
