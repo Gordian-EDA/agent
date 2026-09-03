@@ -44,8 +44,14 @@ pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .map(|result| {
                 format!(
                     "{} -> {}: {}",
-                    result.get("from").and_then(Value::as_str).unwrap_or("<missing>"),
-                    result.get("to").and_then(Value::as_str).unwrap_or("<missing>"),
+                    result
+                        .get("from")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<missing>"),
+                    result
+                        .get("to")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<missing>"),
                     result
                         .get("error")
                         .and_then(Value::as_str)
@@ -810,7 +816,11 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     };
     let redraw = stand_off(&mut edit.doc, &refdes, &pin, net);
-    seat_rail_name(&mut edit.doc, &refdes);
+    if !seat_rail_name(&mut edit.doc, &refdes) {
+        edit.warn(format!(
+            "rail name debit: nothing around {refdes} is clear, so `{net}` prints over its neighbours"
+        ));
+    }
     if redraw.labels_added > 0 {
         edit.warn(format!(
             "pin re-seat debit: {} labels added because no clean orthogonal power stub fit",
@@ -856,37 +866,58 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// the first spot around its graphic that is clear of everything the sheet
 /// already draws. `add_symbol` seats every field at a fixed offset, which on a
 /// crowded pin puts the rail name straight through a neighbouring label.
-fn seat_rail_name(doc: &mut SchDoc, refdes: &str) {
+///
+/// Returns `false` when nothing around the graphic is clear and the name stays
+/// where it was put, so the caller can report the debit rather than draw a
+/// smear silently.
+fn seat_rail_name(doc: &mut SchDoc, refdes: &str) -> bool {
     let Some(symbol) = doc.symbol_by_ref(refdes) else {
-        return;
+        return true;
     };
     let (uuid, origin) = (symbol.uuid.clone(), symbol.at);
     let Some(value) = symbol.fields.get("Value").filter(|f| !f.hidden) else {
-        return;
+        return true;
     };
     let (text, size) = (value.value.clone(), value.font_size[1]);
-    let occupied: Vec<geom::Rect> = sch_doc::drawn_texts(doc)
+    // Everything the name must clear: the other text on the sheet, the bodies
+    // it is not part of, and the wires — the same three the readability lint
+    // measures a field against.
+    let mut occupied: Vec<geom::Rect> = sch_doc::drawn_texts(doc)
         .into_iter()
         .filter(|drawn| drawn.owner.as_deref() != Some(refdes))
         .map(|drawn| drawn.bbox)
         .collect();
+    occupied.extend(
+        doc.symbols()
+            .filter(|other| other.refdes() != refdes)
+            .filter_map(|other| sch_doc::body_rect(doc, other)),
+    );
+    occupied.extend(
+        doc.wires()
+            .flat_map(|wire| wire.points.windows(2))
+            .map(|seg| sch_model::text::wire_box(seg[0], seg[1])),
+    );
+    // A rail drawn at 90/270 prints its name vertically; KiCAD composes a
+    // property's angle with its symbol's and draws the result mod 180.
+    let angle = origin.rot.rem_euclid(180.0);
     // Below the graphic (where a GND-family rail points), then above, then to
     // either side — the order `write::textsolve` seats a rail name in.
     for offset in [[0.0, 2.54], [0.0, -2.54], [3.81, 0.0], [-3.81, 0.0]] {
         let at = sch_doc::Pose::new(origin.x + offset[0], origin.y + offset[1], 0.0);
-        let box_ = sch_model::text::drawn_box(
+        let seat = sch_model::text::drawn_box(
             &text,
             size,
             sch_model::text::HJust::Center,
             sch_model::text::VJust::Center,
-            0.0,
+            angle,
             at.point(),
         );
-        if occupied.iter().all(|other| !box_.overlaps(other)) {
+        if occupied.iter().all(|other| !seat.overlaps(other)) {
             let _ = doc.set_field_pose(&uuid, "Value", at);
-            return;
+            return true;
         }
     }
+    false
 }
 
 fn stand_off(

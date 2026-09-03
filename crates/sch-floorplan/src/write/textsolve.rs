@@ -341,10 +341,7 @@ impl SchematicWriter {
             let owner = l.uuid_key.split(':').next().unwrap_or("").to_string();
             movables.push(Movable {
                 owner: Some(owner),
-                candidates: vec![
-                    label_rect(l, l.at),
-                    label_rect(l, l.stub.unwrap().pin_at),
-                ],
+                candidates: vec![label_rect(l, l.at), label_rect(l, l.stub.unwrap().pin_at)],
             });
             applies.push(Apply::StubLabel(i));
         }
@@ -1172,7 +1169,7 @@ mod tests {
                     length: 2.54,
                     unit: 1,
                     text: Default::default(),
-},
+                },
                 PinGeom {
                     number: "2".into(),
                     name: "RIGHT".into(),
@@ -1181,7 +1178,7 @@ mod tests {
                     length: 2.54,
                     unit: 1,
                     text: Default::default(),
-},
+                },
                 PinGeom {
                     number: "3".into(),
                     name: "TOP".into(),
@@ -1190,7 +1187,7 @@ mod tests {
                     length: 2.54,
                     unit: 1,
                     text: Default::default(),
-},
+                },
             ],
         );
 

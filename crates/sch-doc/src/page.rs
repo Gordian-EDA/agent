@@ -185,10 +185,12 @@ impl Wiring {
 
     /// Whether any connection point of one drawing lies on a point or a wire of the other.
     fn touches(&self, other: &Wiring) -> bool {
-        let on_wire = |p: &Point2, w: &Wiring| w.segments.iter().any(|[a, b]| on_segment(*p, *a, *b));
-        self.points.iter().any(|p| {
-            other.points.iter().any(|q| p.near_eq(*q, TOUCH_EPS)) || on_wire(p, other)
-        }) || other.points.iter().any(|p| on_wire(p, self))
+        let on_wire =
+            |p: &Point2, w: &Wiring| w.segments.iter().any(|[a, b]| on_segment(*p, *a, *b));
+        self.points
+            .iter()
+            .any(|p| other.points.iter().any(|q| p.near_eq(*q, TOUCH_EPS)) || on_wire(p, other))
+            || other.points.iter().any(|p| on_wire(p, self))
     }
 }
 
@@ -473,7 +475,11 @@ mod tests {
         let mut doc = off_page_sheet();
         let fit = doc.refit_page(&BTreeSet::new()).expect("content to fit");
         assert!(fit.standard, "this content belongs on a standard page");
-        assert_eq!(fit.page, [210.0, 148.0], "a 35 mm sketch takes the smallest standard page");
+        assert_eq!(
+            fit.page,
+            [210.0, 148.0],
+            "a 35 mm sketch takes the smallest standard page"
+        );
         let bbox = doc.content_bbox().expect("content");
         assert!(
             bbox.min_x >= PAGE_MARGIN - 1.27 && bbox.min_y >= PAGE_MARGIN - 1.27,
@@ -550,9 +556,17 @@ mod tests {
             .refit_page(&BTreeSet::from(["seated".to_string()]))
             .expect("content to fit");
 
-        assert_eq!(fit.shift, [0.0, 0.0], "the new wire was slid off the seated one");
+        assert_eq!(
+            fit.shift,
+            [0.0, 0.0],
+            "the new wire was slid off the seated one"
+        );
         let new = doc.wires().find(|w| w.uuid == "new").expect("the new wire");
-        assert_eq!(new.points[0], Point2::new(5.08, 40.64), "its junction moved");
+        assert_eq!(
+            new.points[0],
+            Point2::new(5.08, 40.64),
+            "its junction moved"
+        );
     }
 
     #[test]

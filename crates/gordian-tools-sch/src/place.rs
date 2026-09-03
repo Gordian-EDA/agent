@@ -65,18 +65,27 @@ impl Side {
     }
 }
 
-/// KiCAD's default field text: 1.27 mm tall, roughly as wide per character.
-///
-/// A visible footprint field is a 60-character string 60 mm long. Reserving
-/// all of it would push every new part a whole sheet away from its anchor, so
-/// only the first inch of a run of text counts as territory; a neighbour
+/// The TERRITORY a field claims for placement, which is not the box it draws
+/// into: a visible footprint field is a 60-character string 60 mm long, and
+/// reserving all of it would push every new part a whole sheet away from its
+/// anchor. Only the first inch of a run of text counts; a neighbour
 /// overlapping the tail of one is a far smaller sin than the detour.
 fn text_rect(text: &str, at: Pose) -> Option<Rect> {
-    let len = text.chars().count();
-    if len == 0 {
+    if text.is_empty() {
         return None;
     }
-    let half = Point2::new((0.55 * len as f64).min(6.35), 0.8).rotated_half_extents(at.rot);
+    let drawn = sch_model::text::drawn_box(
+        text,
+        sch_model::text::FONT_SIZE,
+        sch_model::text::HJust::Center,
+        sch_model::text::VJust::Center,
+        at.rot,
+        at.point(),
+    );
+    let half = Point2::new(
+        (drawn.width() / 2.0).min(6.35),
+        (drawn.height() / 2.0).min(6.35),
+    );
     Some(Rect::from_center_half(at.point(), (half.x, half.y)))
 }
 

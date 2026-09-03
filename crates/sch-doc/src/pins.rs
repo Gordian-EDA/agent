@@ -32,9 +32,8 @@ pub(crate) struct LibPin {
 
 /// The `pin_names` / `pin_numbers` settings of a `lib_symbols` definition.
 pub(crate) fn definition_pin_text(def: &Node) -> PinTextStyle {
-    let hidden = |node: &Node| {
-        sexpr::flag_present(node, "hide") || child_text(node, "hide") == Some("yes")
-    };
+    let hidden =
+        |node: &Node| sexpr::flag_present(node, "hide") || child_text(node, "hide") == Some("yes");
     let names = child(def, "pin_names");
     PinTextStyle {
         name_offset: names
@@ -369,4 +368,3 @@ mod tests {
         assert!(got.near_eq(Point2::new(-3.81, 0.0), 1e-9), "{got:?}");
     }
 }
-

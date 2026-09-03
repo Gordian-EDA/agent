@@ -167,7 +167,7 @@ fn text_collisions(
                 continue;
             }
             let same_owner = a.owner.is_some() && a.owner == b.owner;
-            if same_owner && is_pin_text(a.kind) && is_pin_text(b.kind) {
+            if same_owner && a.kind.is_pin_text() && b.kind.is_pin_text() {
                 continue;
             }
             found.insert(TextCollision {
@@ -176,7 +176,7 @@ fn text_collisions(
                 with: describe(b),
             });
         }
-        if is_pin_text(a.kind) {
+        if a.kind.is_pin_text() {
             continue;
         }
         for ((other, _), body) in bodies {
@@ -202,10 +202,6 @@ fn text_collisions(
         }
     }
     found.into_iter().collect()
-}
-
-fn is_pin_text(kind: TextKind) -> bool {
-    matches!(kind, TextKind::PinName | TextKind::PinNumber)
 }
 
 /// How a drawn text names itself in a warning.

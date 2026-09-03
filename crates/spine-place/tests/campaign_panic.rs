@@ -19,7 +19,7 @@ fn item(refdes: &str, part: &str, nets: &[&str], geometry_pins: usize) -> Item {
             length: 1.27,
             unit: 1,
             text: Default::default(),
-})
+        })
         .collect();
     Item {
         refdes: refdes.into(),

@@ -38,9 +38,9 @@ pub fn classify_nets(inc: &Incidence, ir: &LayoutIr) -> BTreeMap<String, NetClas
         .collect()
 }
 
-/// Reserved width of a net-name label: the realizer's stub lead plus its
-/// per-character glyph advance. One definition — nine call sites once drifted
-/// against the renderer in lockstep.
+/// Reserved width of a net-name label: the realiser's stub lead plus the width
+/// the renderer actually strokes the name at. One definition — nine call sites
+/// that must reserve what the drawing uses, no more and no less.
 pub(crate) fn label_text_width(net: &str) -> f64 {
-    2.54 + 1.4 * net.chars().count() as f64
+    2.54 + sch_model::text::text_width(net)
 }

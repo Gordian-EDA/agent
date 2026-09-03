@@ -192,7 +192,7 @@ mod tests {
             length: 2.54,
             unit: 1,
             text: Default::default(),
-};
+        };
         Item {
             refdes: refdes.into(),
             block: String::new(),

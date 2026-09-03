@@ -1793,7 +1793,7 @@ fn place_banks(
         let module_anchor = st.form.modules[*mi].anchor;
         let anchor_half = half_size(&items[module_anchor], 0.0);
         // Per-cap orientation (supply pin up) computed once, in chain order.
-        let mut rail_chars = 0usize;
+        let mut rail_width = 0.0_f64;
         let caps: Vec<(usize, f64)> = chains
             .iter()
             .map(|&ci| {
@@ -1804,13 +1804,17 @@ fn place_banks(
                 } else {
                     c.nets.last().unwrap().clone()
                 };
-                rail_chars = rail_chars.max(supply_net.chars().count());
+                // The pitch has to hold whichever of the two texts printed in
+                // this column is wider: the rail's name and the cap's own value.
+                rail_width = rail_width
+                    .max(sch_model::text::text_width(&supply_net))
+                    .max(sch_model::text::text_width(&items[p].value));
                 (p, orient_for(&items[p], &supply_net, Orient::Down))
             })
             .collect();
-        // A long rail name (+3V3A) outgrows the human 9-column pitch: widen so
-        // the glyph's value text clears the neighbour cap's field.
-        let cap_pitch = CAP_PITCH.max(2.54 + 1.4 * rail_chars as f64 + 2.54);
+        // A long rail name (+3V3A) or a long cap value outgrows the human
+        // 9-column pitch: widen so each column's text clears its neighbour's.
+        let cap_pitch = CAP_PITCH.max(2.54 + rail_width + 2.54);
         let h = half_size(&items[caps[0].0], caps[0].1);
         // A tall anchor (MCU) hosts a narrow bank down its right flank; a wide
         // one (regulator) a row along its top-right. The grid is rigid either
@@ -1822,7 +1826,13 @@ fn place_banks(
         };
         // Row gap carries the rail glyph plus its VALUE text (a long +3V3A
         // name collides with the next row's refdes at a bare lead).
-        let row_h = h.y * 2.0 + LEAD + if rail_chars >= 4 { 2.54 } else { 0.0 };
+        let row_h = h.y * 2.0
+            + LEAD
+            + if rail_width >= 4.0 * sch_model::text::FONT_SIZE {
+                2.54
+            } else {
+                0.0
+            };
         let y0 = -anchor_half.y + h.y;
         let x0 = anchor_half.x + LEAD + h.x;
         let build = |at: Point2| -> Vec<SatPlace> {

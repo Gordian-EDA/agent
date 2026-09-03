@@ -81,7 +81,11 @@ fn model_boxes_contain_the_drawn_ink() {
                     .filter(|t| t.text == pair.texts[side])
                     .map(|t| shortfall(t.bbox, pair.boxes[side]))
                     .fold(f64::MAX, f64::min);
-                assert!(best < f64::MAX, "{sheet}: no model box for {:?}", pair.texts[side]);
+                assert!(
+                    best < f64::MAX,
+                    "{sheet}: no model box for {:?}",
+                    pair.texts[side]
+                );
                 checked += 1;
                 if best > worst.0 {
                     let m = model
@@ -103,10 +107,16 @@ fn model_boxes_contain_the_drawn_ink() {
             }
         }
     }
-    assert!(checked > 150, "the fixtures must exercise the model broadly");
+    assert!(
+        checked > 150,
+        "the fixtures must exercise the model broadly"
+    );
     // Sub-0.1 mm is a stroke half-width: the box is the advance box, so it
     // rides right on the ink of a glyph with no side bearing.
-    eprintln!("worst containment shortfall {:.3} mm at {}", worst.0, worst.1);
+    eprintln!(
+        "worst containment shortfall {:.3} mm at {}",
+        worst.0, worst.1
+    );
     assert!(
         worst.0 < 0.1,
         "ink escapes its model box by {:.3} mm at {}",

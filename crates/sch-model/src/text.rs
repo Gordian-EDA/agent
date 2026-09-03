@@ -249,17 +249,6 @@ impl LabelShape {
             LabelShape::Passive => 0.891,
         }
     }
-
-    /// Decode a KiCAD `(shape …)` token, defaulting to `input`.
-    pub fn parse(token: &str) -> Self {
-        match token {
-            "output" => LabelShape::Output,
-            "bidirectional" => LabelShape::Bidirectional,
-            "tri_state" => LabelShape::TriState,
-            "passive" => LabelShape::Passive,
-            _ => LabelShape::Input,
-        }
-    }
 }
 
 /// What a drawn text is, for exemption decisions in a lint.
@@ -275,6 +264,15 @@ pub enum TextKind {
     FreeText,
     PinName,
     PinNumber,
+}
+
+impl TextKind {
+    /// Whether KiCAD draws this text as part of a symbol's pin, which is the
+    /// library's layout rather than the sheet's: two of a symbol's own pin
+    /// texts touching is not something a placement can fix.
+    pub fn is_pin_text(self) -> bool {
+        matches!(self, TextKind::PinName | TextKind::PinNumber)
+    }
 }
 
 /// One piece of text the sheet renders, with the box it renders into.
@@ -294,12 +292,8 @@ pub struct DrawnText {
 /// screen rotation is by `-angle`.
 fn place(anchor: Point2, angle: f64, (u0, v0, u1, v1): (f64, f64, f64, f64)) -> Rect {
     let (sin, cos) = (-angle).to_radians().sin_cos();
-    let corner = |u: f64, v: f64| {
-        Point2::new(
-            anchor.x + u * cos - v * sin,
-            anchor.y + u * sin + v * cos,
-        )
-    };
+    let corner =
+        |u: f64, v: f64| Point2::new(anchor.x + u * cos - v * sin, anchor.y + u * sin + v * cos);
     let pts = [
         corner(u0, v0),
         corner(u0, v1),
@@ -504,9 +498,7 @@ pub fn placed_pin_texts(pin: &DrawnPin) -> Vec<(TextKind, Rect)> {
         return out;
     }
     let horizontal = pin.out.x.abs() > pin.out.y.abs();
-    let step = |d: f64| {
-        Point2::new(pin.tip.x - d * pin.out.x, pin.tip.y - d * pin.out.y)
-    };
+    let step = |d: f64| Point2::new(pin.tip.x - d * pin.out.x, pin.tip.y - d * pin.out.y);
     let mid = step(0.5 * pin.length);
     // A band of text centred on the pin line, `side` picking which flank.
     let banded = |centre: Point2, text: &str, size: f64, side: f64| {
@@ -514,9 +506,19 @@ pub fn placed_pin_texts(pin: &DrawnPin) -> Vec<(TextKind, Rect)> {
         let off = side * PIN_TEXT_GAP * size;
         let (up, down) = pin_band(text, size);
         if horizontal {
-            Rect::new(centre.x - half, centre.y + off + up, centre.x + half, centre.y + off + down)
+            Rect::new(
+                centre.x - half,
+                centre.y + off + up,
+                centre.x + half,
+                centre.y + off + down,
+            )
         } else {
-            Rect::new(centre.x + off + up, centre.y - half, centre.x + off + down, centre.y + half)
+            Rect::new(
+                centre.x + off + up,
+                centre.y - half,
+                centre.x + off + down,
+                centre.y + half,
+            )
         }
     };
     let names_inside = pin.style.name_offset > 0.0;
@@ -667,7 +669,11 @@ mod tests {
     #[test]
     fn glyph_table_is_sorted_and_covers_the_printable_ascii() {
         assert!(GLYPH_ADVANCE.windows(2).all(|w| w[0].0 < w[1].0));
-        for c in ('a'..='z').chain('A'..='Z').chain('0'..='9').chain("_-+./#()".chars()) {
+        for c in ('a'..='z')
+            .chain('A'..='Z')
+            .chain('0'..='9')
+            .chain("_-+./#()".chars())
+        {
             assert!(
                 GLYPH_ADVANCE.iter().any(|(g, _)| *g == c),
                 "no measured advance for {c:?}"
@@ -700,8 +706,18 @@ mod tests {
     fn a_multi_line_note_stacks_downward() {
         let at = Point2::new(0.0, 0.0);
         let one = note_box("SHORT", FONT_SIZE, HJust::Left, VJust::Bottom, 0.0, at);
-        let two = note_box("SHORT\nA MUCH LONGER LINE", FONT_SIZE, HJust::Left, VJust::Bottom, 0.0, at);
-        assert!((two.max_y - one.max_y).abs() < 1e-9, "the last line stays on the anchor");
+        let two = note_box(
+            "SHORT\nA MUCH LONGER LINE",
+            FONT_SIZE,
+            HJust::Left,
+            VJust::Bottom,
+            0.0,
+            at,
+        );
+        assert!(
+            (two.max_y - one.max_y).abs() < 1e-9,
+            "the last line stays on the anchor"
+        );
         assert!(two.min_y < one.min_y - 1.9, "the first line piles above it");
         assert!(two.width() > one.width(), "the widest line sets the width");
     }
@@ -728,11 +744,28 @@ mod tests {
     /// A 90° text reads bottom-to-top: the advance lies along -y.
     #[test]
     fn rotation_turns_the_advance_onto_the_other_axis() {
-        let flat = drawn_box("ABC", FONT_SIZE, HJust::Left, VJust::Center, 0.0, Point2::new(0.0, 0.0));
-        let turned = drawn_box("ABC", FONT_SIZE, HJust::Left, VJust::Center, 90.0, Point2::new(0.0, 0.0));
+        let flat = drawn_box(
+            "ABC",
+            FONT_SIZE,
+            HJust::Left,
+            VJust::Center,
+            0.0,
+            Point2::new(0.0, 0.0),
+        );
+        let turned = drawn_box(
+            "ABC",
+            FONT_SIZE,
+            HJust::Left,
+            VJust::Center,
+            90.0,
+            Point2::new(0.0, 0.0),
+        );
         assert!((turned.height() - flat.width()).abs() < 1e-9);
         assert!((turned.width() - flat.height()).abs() < 1e-9);
-        assert!(turned.max_y <= 1e-9 && turned.min_y < 0.0, "reads upward: {turned:?}");
+        assert!(
+            turned.max_y <= 1e-9 && turned.min_y < 0.0,
+            "reads upward: {turned:?}"
+        );
     }
 
     /// A local label floats off its anchor, away from the wire it names — the
@@ -743,9 +776,18 @@ mod tests {
         let at = Point2::new(0.0, 0.0);
         let field = drawn_box("NET", FONT_SIZE, HJust::Left, VJust::Bottom, 0.0, at);
         let label = local_label_box("NET", FONT_SIZE, HJust::Left, VJust::Bottom, 0.0, at);
-        assert!(label.max_y < field.max_y, "a label rides higher than a field");
-        assert!(label.max_y < 0.0, "its ink never reaches the wire at the anchor");
-        assert!((label.height() - field.height()).abs() < 1e-9, "same line, same height");
+        assert!(
+            label.max_y < field.max_y,
+            "a label rides higher than a field"
+        );
+        assert!(
+            label.max_y < 0.0,
+            "its ink never reaches the wire at the anchor"
+        );
+        assert!(
+            (label.height() - field.height()).abs() < 1e-9,
+            "same line, same height"
+        );
     }
 
     /// The writer emits every port as a `bidirectional` global label, whose
@@ -763,7 +805,12 @@ mod tests {
         );
         close(
             outline,
-            Rect::new(0.0, -FONT_SIZE, text_width(text) + 2.640 * FONT_SIZE, FONT_SIZE),
+            Rect::new(
+                0.0,
+                -FONT_SIZE,
+                text_width(text) + 2.640 * FONT_SIZE,
+                FONT_SIZE,
+            ),
         );
         // The glyphs sit inside it, starting past the pentagon's lead-in.
         let inner = port_label_text_box(text, FONT_SIZE, HJust::Left, 0.0, Point2::new(0.0, 0.0));
@@ -800,7 +847,10 @@ mod tests {
         // Body end at x = 2.54, plus the 0.508 name offset, running on east.
         assert!((name.min_x - 3.048).abs() < 1e-9, "{name:?}");
         assert!((name.width() - text_width("RST")).abs() < 1e-9);
-        assert!(name.min_y < 0.0 && name.max_y > 0.0, "centred on the pin axis");
+        assert!(
+            name.min_y < 0.0 && name.max_y > 0.0,
+            "centred on the pin axis"
+        );
     }
 
     /// With `pin_names` offset 0 the name goes OUTSIDE — it takes the line's
@@ -874,7 +924,10 @@ mod tests {
         let boxes = placed_pin_texts(&pin);
         assert_eq!(boxes.len(), 1);
         assert!(boxes[0].1.max_x < 0.0, "number left of a vertical pin line");
-        assert!(boxes[0].1.height() > boxes[0].1.width(), "text reads vertically");
+        assert!(
+            boxes[0].1.height() > boxes[0].1.width(),
+            "text reads vertically"
+        );
     }
 
     /// The writer's four label orientations read away from the body, so a
@@ -882,12 +935,24 @@ mod tests {
     #[test]
     fn a_label_reads_along_its_stub() {
         let north = label_box(Point2::new(0.0, 0.0), Dir::North, "NET");
-        assert!(north.max_y <= 1e-9 && north.min_y < 0.0, "reads north: {north:?}");
+        assert!(
+            north.max_y <= 1e-9 && north.min_y < 0.0,
+            "reads north: {north:?}"
+        );
         let south = label_box(Point2::new(0.0, 0.0), Dir::South, "NET");
-        assert!(south.min_y >= -1e-9 && south.max_y > 0.0, "reads south: {south:?}");
+        assert!(
+            south.min_y >= -1e-9 && south.max_y > 0.0,
+            "reads south: {south:?}"
+        );
         let east = label_box(Point2::new(0.0, 0.0), Dir::East, "NET");
-        assert!(east.min_x >= -1e-9 && east.max_x > 0.0, "reads east: {east:?}");
+        assert!(
+            east.min_x >= -1e-9 && east.max_x > 0.0,
+            "reads east: {east:?}"
+        );
         let west = label_box(Point2::new(0.0, 0.0), Dir::West, "NET");
-        assert!(west.max_x <= 1e-9 && west.min_x < 0.0, "reads west: {west:?}");
+        assert!(
+            west.max_x <= 1e-9 && west.min_x < 0.0,
+            "reads west: {west:?}"
+        );
     }
 }

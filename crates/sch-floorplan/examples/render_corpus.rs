@@ -16,7 +16,11 @@ fn corpus() -> PathBuf {
 }
 
 fn main() {
-    let out = PathBuf::from(std::env::args().nth(1).expect("usage: render_corpus <out-dir>"));
+    let out = PathBuf::from(
+        std::env::args()
+            .nth(1)
+            .expect("usage: render_corpus <out-dir>"),
+    );
     std::fs::create_dir_all(&out).unwrap();
     let Some(env) = KicadInstallation::detect() else {
         eprintln!("no KiCAD environment");
@@ -35,7 +39,8 @@ fn main() {
         .collect();
     names.sort();
     for name in names {
-        let src = std::fs::read_to_string(corpus().join(format!("{name}.place-parts.json"))).unwrap();
+        let src =
+            std::fs::read_to_string(corpus().join(format!("{name}.place-parts.json"))).unwrap();
         let input: sch_check::PlacePartsInput = serde_json::from_str(&src).unwrap();
         let (design, diags, _) = sch_check::into_design(&input, &provider, &Default::default());
         if diags.has_errors() {

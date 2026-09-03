@@ -330,7 +330,11 @@ fn collect_pins(body: &Symbol, style_from: &Symbol) -> Vec<PinGeom> {
         ..PinTextStyle::default()
     };
     let sym = body;
-    let mut out: Vec<PinGeom> = sym.pins.iter().filter_map(|p| pin_geom(p, 1, style(p))).collect();
+    let mut out: Vec<PinGeom> = sym
+        .pins
+        .iter()
+        .filter_map(|p| pin_geom(p, 1, style(p)))
+        .collect();
     for unit in &sym.units {
         let unit_no = unit
             .name
@@ -339,7 +343,11 @@ fn collect_pins(body: &Symbol, style_from: &Symbol) -> Vec<PinGeom> {
             // Unit 0 holds graphics / pins common to all units; PinGeom units
             // are 1-based, so fold it into unit 1.
             .map_or(1, |u| u.max(1));
-        out.extend(unit.pins.iter().filter_map(|p| pin_geom(p, unit_no, style(p))));
+        out.extend(
+            unit.pins
+                .iter()
+                .filter_map(|p| pin_geom(p, unit_no, style(p))),
+        );
     }
     out
 }

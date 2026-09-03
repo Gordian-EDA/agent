@@ -57,12 +57,12 @@
 pub mod body;
 pub mod connect;
 mod doc;
+mod drawn;
 mod edit;
 mod error;
 mod libsyms;
 mod model;
 mod page;
-mod drawn;
 mod pins;
 mod sexpr;
 mod text;
@@ -70,6 +70,7 @@ mod text;
 pub use body::{body_rect, body_rects};
 pub use connect::{Net, NetDelta, NetSource, Netlist, PinRef, Scene};
 pub use doc::{SchDoc, SnapshotId};
+pub use drawn::drawn_texts;
 pub use edit::{WireClip, is_drawing};
 pub use error::{Error, Result};
 pub use libsyms::SymbolSource;
@@ -78,7 +79,6 @@ pub use model::{
     Retained, Sheet, SheetPin, SymbolInst, Text, Wire, WireFault, WireFaultKind,
 };
 pub use page::{PAGE_MARGIN, PageFit, STANDARD_PAGES, TITLE_BLOCK_BAND, standard_page};
-pub use drawn::drawn_texts;
 pub use pins::{PlacedPin, placed_pins};
 pub use text::{escape, unescape};
 

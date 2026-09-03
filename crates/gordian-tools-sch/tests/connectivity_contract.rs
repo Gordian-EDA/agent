@@ -114,6 +114,7 @@ fn connector_swap_reflows_fields_without_moving_the_part() {
     };
     let before_doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
     let before_at = before_doc.symbol_by_ref("P1").unwrap().at;
+    let before_nets = sch_doc::connect::extract(&before_doc);
     let before = collisions(&ctx);
     let swapped = tool(
         &ctx,
@@ -130,6 +131,16 @@ fn connector_swap_reflows_fields_without_moving_the_part() {
     assert!(
         after_swap.is_empty(),
         "the swap must not smear text: {after_swap:?}"
+    );
+    // Every re-seated label is re-anchored and re-oriented, which is exactly
+    // where a silent short is manufactured: a label binds to the point it sits
+    // on. The swap preserves the pins it maps, so the nets must survive it.
+    let swapped_doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let delta =
+        sch_doc::connect::Netlist::diff(&before_nets, &sch_doc::connect::extract(&swapped_doc));
+    assert!(
+        delta.is_empty(),
+        "the swap must preserve every net: {delta:?}"
     );
 
     let powered = tool(&ctx, "add_power", json!({"net": "GND", "pin": "P1.3"}));

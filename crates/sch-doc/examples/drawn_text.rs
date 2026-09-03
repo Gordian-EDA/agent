@@ -28,10 +28,13 @@ fn main() {
             for b in &texts[i + 1..] {
                 let same_pin = a.owner.is_some()
                     && a.owner == b.owner
-                    && is_pin_text(a.kind)
-                    && is_pin_text(b.kind);
+                    && a.kind.is_pin_text()
+                    && b.kind.is_pin_text();
                 if !same_pin && a.bbox.overlaps(&b.bbox) {
-                    hits.push(format!("  {:?} {:?} x {:?} {:?}", a.kind, a.text, b.kind, b.text));
+                    hits.push(format!(
+                        "  {:?} {:?} x {:?} {:?}",
+                        a.kind, a.text, b.kind, b.text
+                    ));
                 }
             }
         }
@@ -62,12 +65,8 @@ fn main() {
         pairs += hits.len();
         parts += sheet_parts;
     }
-    println!("TOTAL\tparts={parts}\tpairs={pairs}\tper_part={:.3}", pairs as f64 / parts.max(1) as f64);
-}
-
-fn is_pin_text(kind: sch_model::text::TextKind) -> bool {
-    matches!(
-        kind,
-        sch_model::text::TextKind::PinName | sch_model::text::TextKind::PinNumber
-    )
+    println!(
+        "TOTAL\tparts={parts}\tpairs={pairs}\tper_part={:.3}",
+        pairs as f64 / parts.max(1) as f64
+    );
 }

@@ -1,11 +1,18 @@
 //! Every text the sheet DRAWS, boxed by the one as-drawn model.
 //!
 //! [`drawn_texts`] is the item set: visible symbol fields (including a power
-//! symbol's `#`-prefixed Reference and its rail-name Value), local labels,
-//! global and hierarchical labels, free notes, and the name/number KiCAD
-//! prints beside every pin. Boxing them all through
+//! symbol's rail-name Value), local labels, global and hierarchical labels,
+//! free notes, a hierarchical sheet's name/file and ports, and the name and
+//! number KiCAD prints beside every pin. Boxing them all through
 //! [`sch_model::text`] is what lets a readability lint report exactly what a
 //! render shows.
+//!
+//! A global or hierarchical label is boxed by its GLYPHS, not by the pentagon
+//! drawn around them. The pentagon is real ink and
+//! [`sch_model::text::port_label_outline`] measures it — the writer reserves
+//! it — but it is calibrated from the outline geometry rather than from the
+//! `stroked-text` groups the ink fixtures capture, so counting it here would
+//! report overlaps the ink measurement cannot confirm.
 
 use kiutils_sexpr::Node;
 use sch_model::text::{DrawnText, FONT_SIZE, HJust, TextKind, VJust};
@@ -51,7 +58,10 @@ fn field_angle(symbol_rot: f64, field_rot: f64) -> f64 {
 fn symbol_texts(doc: &SchDoc, symbol: &SymbolInst, out: &mut Vec<DrawnText>) {
     let owner = symbol.refdes().to_string();
     for field in symbol.fields.values() {
-        let Some(at) = field.at.filter(|_| !field.hidden && !field.value.is_empty()) else {
+        let Some(at) = field
+            .at
+            .filter(|_| !field.hidden && !field.value.is_empty())
+        else {
             continue;
         };
         let (size, hjust, vjust, _) = effects(field.node());
