@@ -592,7 +592,8 @@ pub struct TurnOutcome {
     pub final_text: String,
     /// How many tool calls the loop handled.
     pub tool_calls_made: usize,
-    /// Whether the loop finished cleanly or stopped at a bounded safety guard.
+    /// Whether the model finished on its own, hit the user's request cap, or
+    /// left the quality gate unsatisfied.
     pub stop_reason: StopReason,
 }
 
