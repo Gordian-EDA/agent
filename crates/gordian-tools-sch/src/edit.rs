@@ -50,6 +50,16 @@ fn footprint_repair(
     symbol: &str,
     requested: &str,
 ) -> Result<FootprintRepair> {
+    footprint_repair_ignoring(ctx, reference, symbol, requested, &BTreeSet::new())
+}
+
+fn footprint_repair_ignoring(
+    ctx: &AgentRuntime,
+    reference: &str,
+    symbol: &str,
+    requested: &str,
+    ignored_pins: &BTreeSet<String>,
+) -> Result<FootprintRepair> {
     if let Some(did_you_mean) =
         gordian_runtime::footprint_compat::unresolved_footprint_suggestions(ctx, symbol, requested)?
     {
@@ -64,8 +74,13 @@ fn footprint_repair(
                 })
             })
             .filter(|candidate| {
-                gordian_runtime::footprint_compat::footprint_compatibility(ctx, symbol, candidate)
-                    .is_ok_and(|verdict| verdict.compatible)
+                gordian_runtime::footprint_compat::footprint_compatibility_ignoring(
+                    ctx,
+                    symbol,
+                    candidate,
+                    ignored_pins,
+                )
+                .is_ok_and(|verdict| verdict.compatible)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -83,8 +98,12 @@ fn footprint_repair(
         });
     }
 
-    let Some(mismatch) = gordian_runtime::footprint_compat::assignment_pin_mismatch(
-        ctx, reference, symbol, requested,
+    let Some(mismatch) = gordian_runtime::footprint_compat::assignment_pin_mismatch_ignoring(
+        ctx,
+        reference,
+        symbol,
+        requested,
+        ignored_pins,
     )?
     else {
         return Ok(FootprintRepair::Keep);
@@ -1864,28 +1883,9 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }));
         }
     }
-    let mut input_errors = Vec::new();
-    for (reference, footprint) in &requested {
-        let units = refs::units(&edit.doc, reference);
-        let symbol = units
-            .first()
-            .and_then(|(_, uuid)| edit.doc.symbol(uuid))
-            .map(|symbol| symbol.lib_id.clone())
-            .expect("validated schematic reference has a symbol");
-        if let Some(error) = gordian_runtime::footprint_compat::footprint_input_error(
-            ctx, reference, &symbol, footprint,
-        )? {
-            input_errors.push(error);
-        }
-    }
-    if !input_errors.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "code": "invalid_payload",
-            "input_errors": input_errors,
-        }));
-    }
-    let mut footprint_mismatch = Vec::new();
+    let mut assigned = Vec::new();
+    let mut resolved = Vec::new();
+    let mut unresolved = Vec::new();
     for (reference, footprint) in &requested {
         let units = refs::units(&edit.doc, reference);
         let symbol = units
@@ -1905,14 +1905,8 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .symbol(&symbol)
             .or_else(|| ctx.index().ok()?.symbol(&symbol))
             .is_some();
-        let mismatch = if installed {
-            gordian_runtime::footprint_compat::assignment_pin_mismatch_ignoring(
-                ctx,
-                reference,
-                &symbol,
-                footprint,
-                &ignored_pins,
-            )?
+        let repair = if installed {
+            footprint_repair_ignoring(ctx, reference, &symbol, footprint, &ignored_pins)?
         } else {
             let pin_numbers = placed_pins(&edit.doc)
                 .into_iter()
@@ -1926,50 +1920,53 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     ),
                 }));
             }
-            let verdict = gordian_runtime::footprint_compat::footprint_compatibility_for_pins(
+            match gordian_runtime::footprint_compat::footprint_compatibility_for_pins(
                 ctx,
                 &symbol,
                 pin_numbers.iter().map(String::as_str),
                 footprint,
-            )?;
-            (!verdict.compatible).then_some(
-                gordian_runtime::footprint_compat::FootprintPinMismatch {
-                    reference: reference.clone(),
-                    symbol: symbol.clone(),
-                    footprint: footprint.clone(),
-                    polarity_mismatch: verdict.polarity_mismatch,
-                    missing_pads: verdict.missing_pads,
-                    extra_pins: verdict.extra_pins,
-                    suggestion: None,
-                    suggestion_compatible: false,
-                    symbol_suggestion: None,
+            ) {
+                Ok(verdict) if verdict.compatible => FootprintRepair::Keep,
+                Ok(_) | Err(_) => FootprintRepair::Clear {
+                    requested: footprint.clone(),
+                    did_you_mean: Vec::new(),
                 },
-            )
+            }
         };
-        if let Some(mismatch) = mismatch {
-            footprint_mismatch.push(mismatch.payload());
-        }
-    }
-    if !footprint_mismatch.is_empty() {
-        return Ok(json!({
-            "error": "symbol/footprint mismatch; nothing was written",
-            "code": "invalid_payload",
-            "footprint_mismatch": footprint_mismatch,
-        }));
-    }
-    for (reference, footprint) in &requested {
+        let selected = match repair {
+            FootprintRepair::Keep => footprint.clone(),
+            FootprintRepair::Resolve { from, to } => {
+                resolved.push(ResolvedFootprint {
+                    refdes: reference.clone(),
+                    from,
+                    to: to.clone(),
+                });
+                to
+            }
+            FootprintRepair::Clear {
+                requested,
+                did_you_mean,
+            } => {
+                unresolved.push(UnresolvedFootprint {
+                    refdes: reference.clone(),
+                    requested,
+                    did_you_mean,
+                });
+                String::new()
+            }
+        };
         for (_, uuid) in refs::units(&edit.doc, reference) {
-            edit.doc.set_field(&uuid, "Footprint", footprint)?;
+            edit.doc.set_field(&uuid, "Footprint", &selected)?;
+        }
+        if !selected.is_empty() {
+            assigned.push(json!({ "reference": reference, "footprint": selected }));
         }
     }
-    edit.commit(
-        json!({
-            "assigned": requested.iter().map(|(reference, footprint)| {
-                json!({ "reference": reference, "footprint": footprint })
-            }).collect::<Vec<_>>()
-        }),
-        Allow::nothing(),
-    )
+    let mut result = edit.commit(json!({ "assigned": assigned }), Allow::nothing())?;
+    if result.get("error").is_none() {
+        attach_footprint_repairs(&mut result, &resolved, &unresolved);
+    }
+    Ok(result)
 }
 
 /// Set a part's build attributes.

@@ -476,19 +476,13 @@ fn wrong_footprint_is_cleared_and_its_suggestion_closes_the_loop() {
         "assign_footprints",
         json!({"assignments": [{"reference": "C1", "footprint": wrong}]}),
     );
-    assert_eq!(reassignment["code"], "invalid_payload");
-    let repaired = reassignment["footprint_mismatch"][0]["suggestion"]
-        .as_str()
-        .expect("assignment refusal must include a compatible footprint");
-    let assigned = call(
-        &ctx,
-        "assign_footprints",
-        json!({"assignments": [{"reference": "C1", "footprint": repaired}]}),
-    );
     assert!(
-        assigned.get("error").is_none(),
-        "assignment failed: {assigned}"
+        reassignment.get("error").is_none(),
+        "assignment failed: {reassignment}"
     );
+    let repaired = reassignment["footprint_resolved"]["to"]
+        .as_str()
+        .expect("assignment must apply its compatible footprint repair");
 
     let source = std::fs::read_to_string(ctx.sch_path()).unwrap();
     let broken = source.replacen(repaired, wrong, 1);
@@ -551,17 +545,18 @@ fn nonexistent_footprints_place_with_same_library_repairs() {
     assert!(listing(&ctx).contains("C1"), "placement dropped the part");
 
     labelled_resistor(&ctx);
-    let refused = call(
+    let reassigned = call(
         &ctx,
         "assign_footprints",
         json!({"assignments": [{"reference": "R1", "footprint": invented}]}),
     );
-    assert_eq!(refused["code"], "invalid_payload", "{refused}");
+    assert!(reassigned.get("error").is_none(), "{reassigned}");
+    assert_eq!(reassigned["footprint_resolved"]["from"], invented);
     assert!(
-        refused["input_errors"][0]
+        reassigned["footprint_resolved"]["to"]
             .as_str()
-            .is_some_and(|message| message.contains("Capacitor_SMD:C_1206_3216Metric")),
-        "assign_footprints gave an unrelated suggestion: {refused}"
+            .is_some_and(|footprint| footprint.starts_with("Capacitor_SMD:")),
+        "repair escaped the requested library: {reassigned}"
     );
     let bypass = call(
         &ctx,
@@ -574,6 +569,132 @@ fn nonexistent_footprints_place_with_same_library_repairs() {
             .is_some_and(|error| error.contains("assign_footprints")),
         "set_fields must route footprints through assign_footprints: {bypass}"
     );
+}
+
+#[test]
+fn footprint_assignment_repairs_one_part_without_blocking_the_batch() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let added = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [
+            {"lib_id": "Device:R", "ref": "R1"},
+            {"lib_id": "Device:R", "ref": "R2"},
+            {"lib_id": "Device:C", "ref": "C1"}
+        ]}),
+    );
+    assert!(added.get("error").is_none(), "fixture failed: {added}");
+
+    let result = call(
+        &ctx,
+        "assign_footprints",
+        json!({"assignments": [
+            {
+                "reference": "R1",
+                "footprint": "Resistor_SMD:R_Array_Concave_2x0603"
+            },
+            {
+                "reference": "C1",
+                "footprint": "Capacitor_SMD:C_0603_1608Metric"
+            },
+            {
+                "reference": "R2",
+                "footprint": "No_Such_Library:No_Such_Footprint"
+            }
+        ]}),
+    );
+
+    assert!(result.get("error").is_none(), "{result}");
+    assert_eq!(
+        result["footprint_resolved"]["to"], "Resistor_SMD:R_0603_1608Metric",
+        "{result}"
+    );
+    assert_eq!(result["changed"]["assigned"].as_array().unwrap().len(), 2);
+    assert_eq!(result["footprints_unresolved"][0]["ref"], "R2");
+    assert_eq!(result["gaps"][0]["kind"], "footprint_unresolved");
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    assert_eq!(
+        doc.symbols()
+            .find(|symbol| symbol.refdes() == "R1")
+            .unwrap()
+            .fields["Footprint"]
+            .value,
+        "Resistor_SMD:R_0603_1608Metric"
+    );
+    assert_eq!(
+        doc.symbols()
+            .find(|symbol| symbol.refdes() == "R2")
+            .unwrap()
+            .fields["Footprint"]
+            .value,
+        ""
+    );
+}
+
+#[test]
+fn powerpak_mismatch_is_repairable_metadata_not_a_batch_refusal() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let added = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [
+            {"lib_id": "Transistor_FET:Q_NMOS_GSD", "ref": "Q1"},
+            {"lib_id": "Device:R", "ref": "R1"}
+        ]}),
+    );
+    assert!(added.get("error").is_none(), "fixture failed: {added}");
+
+    let result = call(
+        &ctx,
+        "assign_footprints",
+        json!({"assignments": [
+            {"reference": "Q1", "footprint": "Package_SO:PowerPAK_SO-8_Single"},
+            {"reference": "R1", "footprint": "Resistor_SMD:R_0603_1608Metric"}
+        ]}),
+    );
+
+    assert!(result.get("error").is_none(), "{result}");
+    assert!(result.get("footprint_mismatch").is_none(), "{result}");
+    assert!(
+        result["changed"]["assigned"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|assignment| assignment["reference"] == "R1"),
+        "compatible batch member was not applied: {result}"
+    );
+    assert_eq!(result["footprints_unresolved"][0]["ref"], "Q1");
+}
+
+#[test]
+fn footprint_search_accepts_a_query_without_a_symbol() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+
+    let result = call(
+        &ctx,
+        "search_footprints",
+        json!({"query": "Resistor_SMD:0603", "limit": 8}),
+    );
+
+    assert!(result.get("error").is_none(), "{result}");
+    let hits = result["hits"].as_array().unwrap();
+    assert!(!hits.is_empty(), "{result}");
+    assert!(
+        hits.iter().all(|hit| hit["lib_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("Resistor_SMD:"))),
+        "explicit-library matches must rank first: {result}"
+    );
+    assert!(hits.iter().all(|hit| hit.get("compatible").is_none()));
 }
 
 #[test]

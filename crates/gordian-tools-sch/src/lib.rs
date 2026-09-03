@@ -63,7 +63,13 @@ pub fn handles(name: &str) -> bool {
 }
 
 fn tool_names() -> Vec<&'static str> {
-    let mut names = vec!["read_schematic", "get_symbol", "get_net", "check_schematic"];
+    let mut names = vec![
+        "read_schematic",
+        "get_symbol",
+        "get_net",
+        "check_schematic",
+        "search_footprints",
+    ];
     names.extend(MUTATORS);
     names
 }
@@ -458,7 +464,9 @@ pub fn tool_defs() -> Vec<Tool> {
 pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>> {
     // `place_parts` and `add_parts` are the two ways a schematic comes into
     // existence; everything else needs one to already be there.
-    if !ctx.sch_path().is_file() && !matches!(name, "place_parts" | "add_parts") {
+    if !ctx.sch_path().is_file()
+        && !matches!(name, "place_parts" | "add_parts" | "search_footprints")
+    {
         return handles(name).then(|| {
             Ok(json!({
                 "error": format!(
@@ -476,6 +484,7 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "read_schematic" => query::read_schematic(input, ctx),
         "get_symbol" => query::get_symbol(input, ctx),
         "get_net" => query::get_net(input, ctx),
+        "search_footprints" => query::search_footprints(input, ctx),
         "check_schematic" => check::check_schematic(input, ctx),
         "add_symbols" => edit::add_symbols(input, ctx),
         "remove_symbols" => edit::remove_symbols(input, ctx),

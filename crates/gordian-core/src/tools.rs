@@ -176,7 +176,7 @@ pub fn tool_defs() -> Vec<Tool> {
         // ── PCB tools (slice 5) ─────────────────────────────────────────
         Def {
             name: "search_footprints".into(),
-            description: "Find footprint `Lib:Name` IDs ranked for an electrical symbol. Pass the symbol so results are usable; compatible pad-number matches rank before query text. Batch up to 4 searches."
+            description: "Find footprint `Lib:Name` IDs by fuzzy name query, optionally ranked for an electrical symbol. With `symbol`, compatible pad-number matches rank before query text; without it, names from an explicit `Lib:` prefix rank first. Batch up to 4 searches."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -193,12 +193,16 @@ pub fn tool_defs() -> Vec<Tool> {
                                 "query": { "type": "string", "minLength": 1 },
                                 "limit": { "type": "integer", "minimum": 1, "maximum": 25 }
                             },
-                            "required": ["symbol"],
+                            "anyOf": [{ "required": ["symbol"] }, { "required": ["query"] }],
                             "additionalProperties": false
                         }
                     }
                 },
-                "oneOf": [{ "required": ["symbol"] }, { "required": ["queries"] }],
+                "anyOf": [
+                    { "required": ["symbol"] },
+                    { "required": ["query"] },
+                    { "required": ["queries"] }
+                ],
                 "additionalProperties": false
             }),
         },
@@ -627,7 +631,6 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "project_info" => project_info(ctx),
         "reserve_refs" => reserve_refs(input, ctx),
         "render_schematic" => render_schematic(ctx),
-        "search_footprints" => search_footprints(input, ctx),
         "get_footprint_info" => pcb_workflow::get_footprint_info(input, ctx),
         "sync_board" => match bench_refusal(ctx, "sync_board")? {
             Some(refusal) => Ok(refusal),
@@ -781,41 +784,6 @@ fn validated_symbol_footprint(
         symbol_id,
         meta.footprint.as_deref(),
     )
-}
-
-const MAX_FOOTPRINT_QUERIES: usize = 4;
-
-fn search_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    if let Some(queries) = input.get("queries") {
-        let queries = queries
-            .as_array()
-            .ok_or_else(|| anyhow!("`queries` must be an array"))?;
-        if queries.is_empty() || queries.len() > MAX_FOOTPRINT_QUERIES {
-            bail!("`queries` must contain 1 to {MAX_FOOTPRINT_QUERIES} searches");
-        }
-        let results = queries
-            .iter()
-            .map(|item| search_footprints_one(item, ctx))
-            .collect::<Result<Vec<_>>>()?;
-        return Ok(json!({ "results": results }));
-    }
-    search_footprints_one(&input, ctx)
-}
-
-fn search_footprints_one(input: &Value, ctx: &AgentRuntime) -> Result<Value> {
-    let symbol = require_str(input, "symbol")?;
-    let query = input.get("query").and_then(Value::as_str);
-    let hits = gordian_runtime::footprint_compat::search_compatible_footprints(
-        ctx,
-        &symbol,
-        query,
-        search_limit(input, ctx),
-    )?;
-    Ok(json!({
-        "symbol": symbol,
-        "query": query,
-        "hits": hits,
-    }))
 }
 
 fn builtin_symbol_alias(query: &str) -> Option<(&'static str, usize)> {
