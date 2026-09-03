@@ -264,3 +264,7 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   CREATION (guard vs seeded staging/intent geometry) + sync↔route deadlock; place_parts panic
   "no entry found for key" (BMS power_protection block). → lane/pcb-seed-shorts, lane/sch-refusals-4.
   Train 3 (prompt-pace + sch-looks) merging → round 7.
+- Train 3: prompt-pace + sch-looks merged locally (7064352b, 309f7c6f) but the combined tree fails
+  `live_e2e::incremental_place_is_additive` (a graft moved an existing symbol via the whole-sheet
+  page-fit) → lane/graft-additive on the merged tree; push held. sch-refusals-4 finished its 5 items
+  (codex API 404 at the end → continuation running); pcb-seed-shorts running.
