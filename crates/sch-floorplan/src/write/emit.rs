@@ -549,30 +549,37 @@ mod tests {
     }
 
     #[test]
-    fn titled_user_page_reserves_bottom_title_block() {
+    fn small_sheet_takes_a_standard_page() {
         let mut w = SchematicWriter::new();
         w.set_title("my_board");
         w.add_junction_on_net([25.4, 25.4], "N1");
 
         let text = w.finish();
+        assert!(
+            text.contains("(paper \"A4\")"),
+            "a sheet this small belongs on A4, got {:?}",
+            text.lines().find(|l| l.contains("(paper")),
+        );
+        assert!(text.contains("(title_block"), "the title must reach the sheet");
+    }
+
+    #[test]
+    fn oversize_content_falls_back_to_a_fitted_user_page() {
+        let mut w = SchematicWriter::new();
+        w.add_junction_on_net([25.4, 25.4], "N1");
+        w.add_junction_on_net([900.0, 500.0], "N1");
+
+        let text = w.finish();
         let paper = text
             .lines()
             .find(|line| line.contains("(paper \"User\""))
-            .expect("titled content should emit a custom User page");
+            .expect("content past A2 keeps a fitted User page");
         let nums: Vec<f64> = paper
             .split_whitespace()
             .filter_map(|token| token.trim_end_matches(')').parse::<f64>().ok())
             .collect();
-
-        assert_eq!(
-            nums.len(),
-            2,
-            "paper dimensions should parse from {paper:?}"
-        );
-        assert!(
-            nums[1] >= 70.0,
-            "title block reserve must extend page height, got line {paper:?}"
-        );
+        assert_eq!(nums.len(), 2, "paper dimensions should parse from {paper:?}");
+        assert!(nums[0] > 900.0 && nums[1] > 500.0, "the page must hold the content, got {paper:?}");
     }
 
     #[test]

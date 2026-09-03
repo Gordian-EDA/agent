@@ -800,10 +800,13 @@ impl SchDoc {
                 // The block the realiser drew carries the design's title. A sheet
                 // has one title block, so it is adopted only onto a sheet with none —
                 // the first block to land names the sheet, later ones leave it alone.
-                Item::Other(raw)
+                Item::Other(mut raw)
                     if crate::sexpr::head(&raw.node) == Some("title_block")
                         && !self.has_title_block() =>
                 {
+                    // The span it carries indexes the SOURCE's bytes, which this document
+                    // does not have; adopt the node itself.
+                    raw.touch();
                     self.insert_item(Item::Other(raw));
                 }
                 Item::Symbol(_) | Item::Sheet(_) | Item::LibSymbols(_) | Item::Other(_) => {}

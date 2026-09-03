@@ -540,7 +540,7 @@ pub(crate) fn compute_needs_flag(
 pub(crate) fn gather(env: &KicadInstallation, design: &Design) -> io::Result<Vec<Item>> {
     let mut items = Vec::new();
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    for block in design.blocks.values() {
+    for (block_name, block) in &design.blocks {
         for (refdes, comp) in &block.components {
             if comp.dnp {
                 continue;
@@ -593,6 +593,7 @@ pub(crate) fn gather(env: &KicadInstallation, design: &Design) -> io::Result<Vec
                     .collect();
                 items.push(Item {
                     refdes: refdes.clone(),
+                    block: block_name.clone(),
                     part: comp.part.clone(),
                     // Show the MPN/value on the FIRST placed unit only — N copies
                     // of "MCP6002" across the units would just be clutter.

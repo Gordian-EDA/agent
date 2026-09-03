@@ -58,7 +58,35 @@ pub fn realize_block(
     add_orphan_label_columns(&mut writer, design, inc);
     writer.set_frame(draw.frame);
     writer.prepare();
+    draw_block_frames(&mut writer, design, items);
+    // Re-run the (idempotent) finalize so the reframe sees the frames it must keep on
+    // the page; the text solve and wire splitting are unchanged by decoration.
+    writer.prepare();
     Ok(writer)
+}
+
+/// Draw one dashed frame per design region that has parts on this sheet, captioned with
+/// the region's title and carrying its note.
+///
+/// The default region on its own is not a region — it is everything the author did not
+/// divide up, i.e. the whole sheet, which the drawing frame and title block already
+/// delimit. Boxing that says nothing, so it is left alone.
+fn draw_block_frames(writer: &mut SchematicWriter, design: &Design, items: &[Item]) {
+    if design.blocks.len() == 1 && design.blocks.contains_key(sch_check::DEFAULT_BLOCK) {
+        return;
+    }
+    for (name, block) in &design.blocks {
+        let members: Vec<String> = items
+            .iter()
+            .filter(|it| &it.block == name)
+            .map(|it| it.refdes.clone())
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let title = block.title.as_deref().unwrap_or(name);
+        writer.add_block_frame(title, block.note.as_deref(), &members);
+    }
 }
 
 /// Render a finished writer as a standalone document.
@@ -74,10 +102,37 @@ pub fn to_doc(writer: SchematicWriter) -> sch_doc::Result<SchDoc> {
 /// the merged drawing back to the page margin and re-picks the smallest standard page.
 pub fn graft(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<Vec<String>> {
     let sheet = to_doc(writer)?;
+    replace_frames(doc, &sheet);
     let adopted = doc.adopt(&sheet)?;
     doc.refit_page();
     debug_assert_unique_wire_segments(doc);
     Ok(adopted)
+}
+
+/// Drop the block frames `sheet` is about to redraw: any rectangle overlapping one of its
+/// frames, and any annotation text standing inside one. A block extended by a later call
+/// gets a new frame around the parts it now has, and the stale one must not survive
+/// beside it. Frames are decoration the realiser owns, so nothing else is at risk.
+fn replace_frames(doc: &mut SchDoc, sheet: &SchDoc) {
+    let frames: Vec<geom::Rect> = sheet
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            sch_doc::Item::Rectangle(r) => Some(geom::Rect::from_points(r.start, r.end)),
+            _ => None,
+        })
+        .collect();
+    if frames.is_empty() {
+        return;
+    }
+    let hits = |p: geom::Point2| frames.iter().any(|f| f.contains(p));
+    doc.retain_drawing(|item| match item {
+        sch_doc::Item::Rectangle(r) => {
+            !frames.iter().any(|f| f.overlaps(&geom::Rect::from_points(r.start, r.end)))
+        }
+        sch_doc::Item::Text(t) => !hits(t.at.point()),
+        _ => true,
+    });
 }
 
 /// Graft only a writer's wiring — wires, junctions, labels, markers, text — for a

@@ -33,6 +33,10 @@ pub type LayoutGrid = Vec<Vec<Option<String>>>;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Block {
+    /// Caption drawn on the block's frame. Defaults to the block's own name.
+    pub title: Option<String>,
+    /// One line under the frame explaining a decision a reader would otherwise
+    /// have to reverse-engineer — what a human writes on a schematic.
     pub note: Option<String>,
     pub components: IndexMap<RefDes, Component>,
     /// This module's internal placement grid (per-block `layout:`). See

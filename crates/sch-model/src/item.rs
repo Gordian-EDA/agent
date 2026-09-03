@@ -35,6 +35,12 @@ pub fn pin_side(at: Point2) -> PinSide {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Item {
     pub refdes: String,
+    /// The design region this part joined. Placement never reads it; the realiser
+    /// draws one dashed frame per region, which is how a human sheet says where
+    /// one functional block ends and the next begins. Empty when the caller has no
+    /// regions (a live sheet lifted back off the document).
+    #[serde(default)]
+    pub block: String,
     pub part: String,
     pub value: String,
     /// Footprint lib_id from the kernel `Component`, carried to emit so the

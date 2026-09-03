@@ -78,6 +78,7 @@ pub(crate) fn design(doc: &SchDoc, netlist: &Netlist) -> Design {
     blocks.insert(
         "main".to_string(),
         Block {
+            title: None,
             note: None,
             components,
             layout: Vec::new(),

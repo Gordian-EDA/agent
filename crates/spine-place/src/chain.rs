@@ -324,6 +324,7 @@ mod tests {
     fn item(refdes: &str, part: &str, nets: &[Option<&str>]) -> Item {
         Item {
             refdes: refdes.to_string(),
+            block: String::new(),
             part: part.to_string(),
             value: String::new(),
             footprint: None,

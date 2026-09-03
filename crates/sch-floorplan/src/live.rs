@@ -1460,6 +1460,7 @@ fn seated_items(doc: &SchDoc, netlist: &Netlist) -> Vec<Item> {
                 .collect();
             Some(Item {
                 refdes: symbol.refdes().to_string(),
+                block: String::new(),
                 part: symbol.lib_id.clone(),
                 value: symbol.value().to_string(),
                 footprint: None,
