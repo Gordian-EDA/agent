@@ -40,12 +40,12 @@ impl SchematicWriter {
     ///
     /// ## Idempotence
     ///
-    /// The pass only processes labels with `stub.is_some()`. It clears `stub` when
-    /// the label retracts or an existing same-net wire already covers the stub;
-    /// otherwise the emitted wire remains attached to the label. Every emitted
-    /// wire is registered on the stub's own net, so a second call is a no-op. This
-    /// lets a caller run it early (e.g. to lint the post-retraction geometry) and
-    /// have `finish` run it again harmlessly.
+    /// The pass only processes labels with `stub.is_some()` and clears `stub` when
+    /// the label retracts. A covered stub keeps its attachment metadata while
+    /// junctions bind any interior pin/label anchors to the covering wire. Every
+    /// emitted wire is registered on the stub's own net, so a second call is a
+    /// no-op. This lets a caller run it early (e.g. to lint the post-retraction
+    /// geometry) and have `finish` run it again harmlessly.
     ///
     /// **Foreign geometry** at pass start = every *fixed* connection point (power
     /// symbol pins — origin, net = the Value; no-connect markers — a reserved
@@ -145,14 +145,22 @@ impl SchematicWriter {
                 let p = Point2::new(f64::from_bits(xb), f64::from_bits(yb));
                 nets.iter().any(|n| *n != net) && Segment::new(pin_at, end).contains_point(p)
             });
-            let already_wired = segments.iter().any(|seg| {
-                seg.net == net
-                    && seg.segment.contains_point(pin_at)
-                    && seg.segment.contains_point(end)
-            });
+            let covering = segments
+                .iter()
+                .find(|seg| {
+                    seg.net == net
+                        && seg.segment.contains_point(pin_at)
+                        && seg.segment.contains_point(end)
+                })
+                .map(|seg| seg.segment);
 
-            if already_wired {
-                self.labels[i].stub = None;
+            if let Some(covering) = covering {
+                for at in [pin_at, end] {
+                    let is_endpoint = at.near_eq(covering.a, EPS) || at.near_eq(covering.b, EPS);
+                    if !is_endpoint {
+                        self.add_junction_on_net(at, &net);
+                    }
+                }
                 add_point(end, &net, &mut points);
             } else if end_on_point || end_on_seg || seg_thru_point {
                 // Keep the outward dir: the text still reads away from the
@@ -1261,6 +1269,13 @@ mod tests {
 
         w.prepare();
 
+        let once: Vec<_> = w
+            .wires
+            .iter()
+            .map(|wire| (wire.uuid_key.clone(), wire.net.clone()))
+            .collect();
+        w.prepare();
+
         let mut segments = std::collections::BTreeSet::new();
         for wire in &w.wires {
             let a = crate::write::point_key(wire.a);
@@ -1270,6 +1285,34 @@ mod tests {
         assert_eq!(w.wires.len(), 3);
         assert!(w.labels[0].stub.is_some());
         assert_eq!(w.labels[0].at, label_at);
+        assert_eq!(
+            w.wires
+                .iter()
+                .map(|wire| (wire.uuid_key.clone(), wire.net.clone()))
+                .collect::<Vec<_>>(),
+            once
+        );
+    }
+
+    #[test]
+    fn same_net_through_wire_attaches_to_stub_pin() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0)
+            .unwrap();
+        w.add_signal_label(&env, "R1", "1", "SIG").unwrap();
+        w.add_wire_on_net([127.0, 54.61], [127.0, 60.96], "SIG");
+
+        let doc = sch_doc::SchDoc::parse(&w.finish()).unwrap();
+        let netlist = sch_doc::connect::extract(&doc);
+
+        assert!(netlist.nets.iter().any(|net| {
+            net.name == "SIG"
+                && net
+                    .pins
+                    .iter()
+                    .any(|pin| pin.refdes == "R1" && pin.pin == "1")
+        }));
     }
 
     #[test]

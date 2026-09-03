@@ -319,7 +319,7 @@ impl SchematicWriter {
     ///
     /// If the two points are identical after snapping, the segment is silently
     /// dropped (a zero-length wire would clutter the schematic with no benefit).
-    /// The `uuid_key` is content-derived so repeated calls with the same
+    /// The `uuid_key` is content-derived so repeated calls with the same ordered
     /// endpoints produce one deterministic wire.
     pub fn add_wire_on_net(&mut self, a: impl Into<Point2>, b: impl Into<Point2>, net: &str) {
         self.push_wire(a.into(), b.into(), net.to_string());

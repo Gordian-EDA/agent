@@ -669,6 +669,8 @@ pub(crate) fn route_signal(
 }
 
 /// Emit one routed segment unless same-net geometry already covers its whole span.
+/// Covered endpoints in the existing segment's interior receive junctions so the
+/// geometric reuse is also an electrical attachment.
 fn emit_routed_segment(
     w: &mut SchematicWriter,
     scene: &mut sch_model::route::RouteScene,
@@ -676,12 +678,19 @@ fn emit_routed_segment(
     a: ::geom::Point2,
     b: ::geom::Point2,
 ) {
-    let covered = scene.segments.iter().any(|existing| {
+    let covering = scene.segments.iter().find(|existing| {
         existing.net == net
             && existing.segment.contains_point(a)
             && existing.segment.contains_point(b)
     });
-    if covered {
+    if let Some(covering) = covering {
+        let covering = covering.segment;
+        for at in [a, b] {
+            let is_endpoint = at.near_eq(covering.a, EPS) || at.near_eq(covering.b, EPS);
+            if !is_endpoint {
+                w.add_junction_on_net(at, net);
+            }
+        }
         return;
     }
     w.add_wire_on_net(a, b, net);
@@ -1909,6 +1918,35 @@ mod tests {
 
         assert_eq!(writer.wires_with_nets().len(), 1);
         assert_eq!(scene.segments.len(), 1);
+        assert_eq!(writer.junction_positions(), vec![[105.41, 21.59]]);
+
+        writer.prepare();
+        assert_eq!(writer.wires_with_nets().len(), 2);
+    }
+
+    #[test]
+    fn routed_segment_covered_by_beside_wire_gets_attachment_junctions() {
+        let mut writer = SchematicWriter::new();
+        let mut scene = sch_model::route::RouteScene::default();
+        scene.segments.push(sch_model::route::NetSegment::new(
+            [10.16, 10.16].into(),
+            [20.32, 10.16].into(),
+            "SIG",
+        ));
+
+        emit_routed_segment(
+            &mut writer,
+            &mut scene,
+            "SIG",
+            [12.7, 10.16].into(),
+            [17.78, 10.16].into(),
+        );
+
+        assert!(writer.wires_with_nets().is_empty());
+        assert_eq!(
+            writer.junction_positions(),
+            vec![[12.7, 10.16], [17.78, 10.16]]
+        );
     }
 
     /// The `rf-lna-frontend` short, constructed directly: a ground riser drawn straight
