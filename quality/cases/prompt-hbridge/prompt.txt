@@ -1,0 +1,1 @@
+Design a discrete H-bridge for a 12V brushed DC motor using two P-channel and two N-channel MOSFETs driven by two NPN transistors from 3.3V logic, with gate resistors, flyback diodes, a bulk capacitor and a 2-pin motor connector. Render the schematic.

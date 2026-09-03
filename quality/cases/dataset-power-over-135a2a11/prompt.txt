@@ -1,0 +1,311 @@
+Draw this circuit as a schematic from the netlist in netlist.json: every part with its lib id and value, every pin on exactly the net given. Do not add or remove parts. A pin whose net is "nc" stays unconnected. The sheet is titled "135a2a11a338". Render the schematic when it is done.
+
+netlist.json:
+[
+ {
+  "ref": "C17",
+  "lib_id": "Device:C",
+  "value": "NC",
+  "pins": {
+   "1": "RS485_00_B",
+   "2": "N$1"
+  }
+ },
+ {
+  "ref": "C18",
+  "lib_id": "Device:C",
+  "value": "NC",
+  "pins": {
+   "1": "RS485_02_B",
+   "2": "N$2"
+  }
+ },
+ {
+  "ref": "C2",
+  "lib_id": "Device:C",
+  "value": "100n",
+  "pins": {
+   "1": "+3.3V",
+   "2": "GND"
+  }
+ },
+ {
+  "ref": "C20",
+  "lib_id": "Device:C",
+  "value": "NC",
+  "pins": {
+   "1": "RS485_01_B",
+   "2": "N$3"
+  }
+ },
+ {
+  "ref": "D10",
+  "lib_id": "Device:D_TVS",
+  "value": "D_TVS",
+  "pins": {
+   "1": "GND",
+   "2": "N$7"
+  }
+ },
+ {
+  "ref": "D11",
+  "lib_id": "Device:D_TVS",
+  "value": "D_TVS",
+  "pins": {
+   "1": "GND",
+   "2": "N$8"
+  }
+ },
+ {
+  "ref": "D12",
+  "lib_id": "Device:D_TVS",
+  "value": "D_TVS",
+  "pins": {
+   "1": "GND",
+   "2": "N$9"
+  }
+ },
+ {
+  "ref": "D7",
+  "lib_id": "Device:D_TVS",
+  "value": "D_TVS",
+  "pins": {
+   "1": "GND",
+   "2": "N$4"
+  }
+ },
+ {
+  "ref": "D8",
+  "lib_id": "Device:D_TVS",
+  "value": "D_TVS",
+  "pins": {
+   "1": "GND",
+   "2": "N$5"
+  }
+ },
+ {
+  "ref": "D9",
+  "lib_id": "Device:D_TVS",
+  "value": "D_TVS",
+  "pins": {
+   "1": "GND",
+   "2": "N$6"
+  }
+ },
+ {
+  "ref": "J4",
+  "lib_id": "Connector:Conn_01x02_Socket",
+  "value": "Conn_01x02_Socket",
+  "pins": {
+   "1": "N$4",
+   "2": "N$6"
+  }
+ },
+ {
+  "ref": "J5",
+  "lib_id": "Connector:Conn_01x02_Socket",
+  "value": "Conn_01x02_Socket",
+  "pins": {
+   "1": "N$5",
+   "2": "N$7"
+  }
+ },
+ {
+  "ref": "J6",
+  "lib_id": "Connector:Conn_01x02_Socket",
+  "value": "Conn_01x02_Socket",
+  "pins": {
+   "1": "N$8",
+   "2": "N$9"
+  }
+ },
+ {
+  "ref": "R1",
+  "lib_id": "Device:R",
+  "value": "120",
+  "pins": {
+   "1": "RS485_02_B",
+   "2": "RS485_02_A"
+  }
+ },
+ {
+  "ref": "R15",
+  "lib_id": "Device:R",
+  "value": "R",
+  "pins": {
+   "1": "RS485_00_RO",
+   "2": "RS485_00_B"
+  }
+ },
+ {
+  "ref": "R16",
+  "lib_id": "Device:R",
+  "value": "R",
+  "pins": {
+   "1": "RS485_00_DI",
+   "2": "RS485_00_A"
+  }
+ },
+ {
+  "ref": "R17",
+  "lib_id": "Device:R",
+  "value": "R",
+  "pins": {
+   "1": "RS485_02_RO",
+   "2": "RS485_02_B"
+  }
+ },
+ {
+  "ref": "R19",
+  "lib_id": "Device:R",
+  "value": "NC",
+  "pins": {
+   "1": "RS485_00_A",
+   "2": "N$1"
+  }
+ },
+ {
+  "ref": "R20",
+  "lib_id": "Device:R",
+  "value": "NC",
+  "pins": {
+   "1": "RS485_02_A",
+   "2": "N$2"
+  }
+ },
+ {
+  "ref": "R23",
+  "lib_id": "Device:R",
+  "value": "10",
+  "pins": {
+   "1": "RS485_00_B",
+   "2": "N$4"
+  }
+ },
+ {
+  "ref": "R24",
+  "lib_id": "Device:R",
+  "value": "10",
+  "pins": {
+   "1": "RS485_00_A",
+   "2": "N$6"
+  }
+ },
+ {
+  "ref": "R25",
+  "lib_id": "Device:R",
+  "value": "10",
+  "pins": {
+   "1": "RS485_02_B",
+   "2": "N$5"
+  }
+ },
+ {
+  "ref": "R26",
+  "lib_id": "Device:R",
+  "value": "10",
+  "pins": {
+   "1": "RS485_02_A",
+   "2": "N$7"
+  }
+ },
+ {
+  "ref": "R27",
+  "lib_id": "Device:R",
+  "value": "R",
+  "pins": {
+   "1": "RS485_01_RO",
+   "2": "RS485_01_B"
+  }
+ },
+ {
+  "ref": "R29",
+  "lib_id": "Device:R",
+  "value": "NC",
+  "pins": {
+   "1": "RS485_01_A",
+   "2": "N$3"
+  }
+ },
+ {
+  "ref": "R3",
+  "lib_id": "Device:R",
+  "value": "R",
+  "pins": {
+   "1": "RS485_01_DI",
+   "2": "RS485_01_A"
+  }
+ },
+ {
+  "ref": "R31",
+  "lib_id": "Device:R",
+  "value": "10",
+  "pins": {
+   "1": "RS485_01_B",
+   "2": "N$8"
+  }
+ },
+ {
+  "ref": "R32",
+  "lib_id": "Device:R",
+  "value": "10",
+  "pins": {
+   "1": "RS485_01_A",
+   "2": "N$9"
+  }
+ },
+ {
+  "ref": "R\u00ea1",
+  "lib_id": "Device:R",
+  "value": "R",
+  "pins": {
+   "1": "RS485_02_DI",
+   "2": "RS485_02_A"
+  }
+ },
+ {
+  "ref": "U3",
+  "lib_id": "Interface_UART:MAX3485",
+  "value": "MAX3485",
+  "pins": {
+   "1": "RS485_00_RO",
+   "2": "RS485_00_RE",
+   "3": "RS485_00_DE",
+   "4": "RS485_00_DI",
+   "5": "GND",
+   "6": "RS485_00_A",
+   "7": "RS485_00_B",
+   "8": "+3.3V"
+  }
+ },
+ {
+  "ref": "U4",
+  "lib_id": "Interface_UART:MAX3485",
+  "value": "MAX3485",
+  "pins": {
+   "1": "RS485_02_RO",
+   "2": "RS485_02_RE",
+   "3": "RS485_02_DE",
+   "4": "RS485_02_DI",
+   "5": "GND",
+   "6": "RS485_02_A",
+   "7": "RS485_02_B",
+   "8": "+3.3V"
+  }
+ },
+ {
+  "ref": "U5",
+  "lib_id": "Interface_UART:MAX3485",
+  "value": "MAX3485",
+  "pins": {
+   "1": "RS485_01_RO",
+   "2": "RS485_01_RE",
+   "3": "RS485_01_DE",
+   "4": "RS485_01_DI",
+   "5": "GND",
+   "6": "RS485_01_A",
+   "7": "RS485_01_B",
+   "8": "+3.3V"
+  }
+ }
+]

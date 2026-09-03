@@ -25,6 +25,9 @@ schematicFilename = "design.kicad_sch"
 [agent]
 postCommitReview = true
 reviewFixRounds = 1
+# Optional ceiling on model requests per turn. Absent means no cap: a turn runs
+# until the model stops calling tools.
+# maxRequests = 200
 
 [review]
 retryJson = false

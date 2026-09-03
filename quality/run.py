@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run Gordian quality cases: deterministic facts first, one VLM judge second.
 
-A case has `rubric.txt`, `input/`, and either `prompt.txt` or `prompts.txt`.
-The prompt session goes to the real agent; the artifacts it leaves behind are
-measured, not guessed at. Every
+A case has `rubric.txt`, `input/`, and `prompt.txt`. One prompt is one agent run,
+carried to completion: the harness never asks the agent to continue. The
+artifacts it leaves behind are measured, not guessed at. Every
 schematic case records what actually happened to the file — which symbols moved,
 which fields were dropped, how the net partition changed, what KiCAD's own ERC
 says — and a rubric may assert on any of it:
@@ -18,6 +18,7 @@ at 3 whatever the judge thought.
 
 import argparse
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import hashlib
 import html
@@ -30,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import tempfile
 import time
 import tomllib
@@ -41,6 +43,12 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 CASES = Path(__file__).resolve().parent / "cases"
 REFERENCES = Path(__file__).resolve().parent / "references"
+# The human sheet every schematic critic score is calibrated against: equal to it
+# is a 9, better a 10. `dataset-*` cases anchor on their own human original instead.
+ANCHOR_SCHEMATIC = Path(__file__).resolve().parent / "anchor" / "schematic-9.png"
+# Case inputs that describe the answer; the agent never sees them.
+REFERENCE_INPUTS = {"reference.kicad_sch", "reference.png", "reference.svg"}
+CRITIC_SAMPLES = 3
 KICAD_DEMOS = Path(
     "/home/mimi/agent/.local/kicad-10.0.4/AppDir/usr/share/kicad/demos"
 )
@@ -111,6 +119,9 @@ def command(args, *, timeout=600, check=True, env=None, input_text=None):
 
 
 BUILT = {}
+BUILD_LOCK = threading.Lock()
+# Two cases may want the same cached demo render at the same time.
+REFERENCE_LOCK = threading.Lock()
 
 
 def cargo_target_dir():
@@ -126,13 +137,14 @@ def example(package, name):
     target-dir lock — so a concurrent `cargo test` elsewhere on the machine
     could stall a case for as long as that build ran, and land in the timings.
     """
-    if name not in BUILT:
-        command(
-            ["cargo", "build", "--release", "-p", package, "--example", name],
-            timeout=1800,
-        )
-        BUILT[name] = str(cargo_target_dir() / "release" / "examples" / name)
-    return BUILT[name]
+    with BUILD_LOCK:
+        if name not in BUILT:
+            command(
+                ["cargo", "build", "--release", "-p", package, "--example", name],
+                timeout=1800,
+            )
+            BUILT[name] = str(cargo_target_dir() / "release" / "examples" / name)
+        return BUILT[name]
 
 
 def tool(project, name, payload=None, *, allow_failed_verdict=False):
@@ -151,7 +163,7 @@ def prepare_project(case, project):
     source = case / "input"
     if source.is_dir():
         for item in source.iterdir():
-            if item.name in {"seed.place-parts.json", "seed-board"}:
+            if item.name in {"seed.place-parts.json", "seed-board"} | REFERENCE_INPUTS:
                 continue
             target = project / item.name
             if item.is_dir():
@@ -493,6 +505,47 @@ def schematic_facts(project, before_project, artifacts):
     return facts, detail
 
 
+def pin_partition(named_nets):
+    """Every pin grouped by the net it sits on, power symbols dropped.
+
+    Single-pin groups are kept: a sheet whose signals are mostly one pin and a
+    label would otherwise compare as almost nothing, and shorting two of those
+    pins together is exactly the mistake this has to catch.
+    """
+    groups = [sorted(p for p in group if not p.startswith("#")) for group in named_nets]
+    return sorted(group for group in groups if group)
+
+
+def reference_netlist_facts(case, facts, artifacts):
+    """Is the delivered netlist the human original's netlist, pin set for pin set?
+
+    Net *names* are the agent's to choose; what must survive is which pins sit
+    together. A reference that will not export leaves the verdict unmeasured, so
+    the case fails rather than passing on a netlist nobody read.
+    """
+    reference = case / "input" / "reference.kicad_sch"
+    if not reference.is_file():
+        return {}
+    _, named, error = kicad_partition(reference, artifacts / "reference-netlist.xml")
+    if error or named is None:
+        return {"reference_netlist_error": error or "reference netlist not exported"}
+    expected = pin_partition(named.values())
+    delivered = pin_partition((facts.get("kicad_nets") or {}).values())
+    missing = [group for group in expected if group not in delivered]
+    extra = [group for group in delivered if group not in expected]
+    expected_refs = {pin.split(".")[0] for group in expected for pin in group}
+    delivered_refs = {pin.split(".")[0] for group in delivered for pin in group}
+    return {
+        "reference_netlist_error": None,
+        "netlist_matches_reference": bool(expected) and not missing and not extra,
+        "reference_net_count": len(expected),
+        "reference_nets_missing": missing,
+        "reference_nets_extra": extra,
+        "reference_parts_missing": sorted(expected_refs - delivered_refs),
+        "reference_parts_extra": sorted(delivered_refs - expected_refs),
+    }
+
+
 def first_schematic(project):
     """The project's schematic, chosen deterministically so the ERC and the
     netlist export can never end up measuring different sheets."""
@@ -577,7 +630,7 @@ def transcript_facts(artifacts):
     }
 
 
-def deterministic_facts(project, before_project, artifacts, agent_result):
+def deterministic_facts(case, project, before_project, artifacts, agent_result):
     schematic = first_schematic(project)
     board = next(iter(sorted(project.glob("*.kicad_pcb"))), None)
     board_quality = board_quality_facts(project) if board is not None else {}
@@ -603,6 +656,8 @@ def deterministic_facts(project, before_project, artifacts, agent_result):
         **transcript_facts(artifacts),
         **sch,
     }
+    if sch.get("schematic_created"):
+        facts.update(reference_netlist_facts(case, facts, artifacts))
     return facts, detail
 
 
@@ -788,8 +843,9 @@ def render_reference_candidate(kind, source, count):
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", source.stem).strip("-")
     REFERENCES.mkdir(parents=True, exist_ok=True)
     png = REFERENCES / f"{kind}-{count}-{stem}-{digest}-clean-v2.png"
-    if not png.is_file():
-        clean_render(kind, source, png)
+    with REFERENCE_LOCK:
+        if not png.is_file():
+            clean_render(kind, source, png)
     return {"path": str(png), "source": str(source), "part_count": count}
 
 
@@ -848,8 +904,9 @@ ERC, DRC, or connectivity claims from pixels."""
         payload["choices"][0]["message"].get("content") or ""
     )
     score = verdict.get("score")
-    worst = verdict.get("worst_three")
-    changes = verdict.get("what_a_human_would_change")
+    # A judge with nothing to add answers `null`, which is an empty list.
+    worst = verdict.get("worst_three") or []
+    changes = verdict.get("what_a_human_would_change") or []
     if not isinstance(score, int) or isinstance(score, bool) or not 1 <= score <= 10:
         raise ValueError(f"invalid human-look score: {score!r}")
     if not isinstance(worst, list) or not all(isinstance(item, str) for item in worst):
@@ -989,7 +1046,14 @@ capability."""
     }
 
 
-def critic(kind, rendered, prompt, facts, llm):
+def schematic_anchor(case):
+    """The human sheet this case's critic score is calibrated against: the case's
+    own original where there is one, else the suite-wide reference-9 sheet."""
+    own = case / "input" / "reference.png"
+    return (own, True) if own.is_file() else (ANCHOR_SCHEMATIC, False)
+
+
+def critic(kind, rendered, prompt, facts, llm, anchor=None, same_circuit=False):
     """Run one dedicated visual critic with the judge's gateway credentials."""
     path = rendered.get("path")
     if not path:
@@ -1012,6 +1076,10 @@ def critic(kind, rendered, prompt, facts, llm):
         model,
         "--json-only",
     ]
+    if kind == "schematic" and anchor is not None:
+        args.extend(["--anchor", str(anchor), "--samples", str(CRITIC_SAMPLES)])
+        if same_circuit:
+            args.append("--anchor-same-circuit")
     if kind == "pcb":
         args.extend(
             [
@@ -1054,6 +1122,7 @@ def critic(kind, rendered, prompt, facts, llm):
         ) from error
     score = verdict.get("score")
     issues = verdict.get("defects", [])
+    samples = verdict.get("samples")
     if (
         isinstance(score, bool)
         or not isinstance(score, (int, float))
@@ -1063,17 +1132,23 @@ def critic(kind, rendered, prompt, facts, llm):
         or not all(isinstance(issue, dict) for issue in issues)
     ):
         raise ValueError(f"invalid {kind} critic verdict: {verdict!r}")
-    return {"score": score, "issues": issues}
+    result = {"score": score, "issues": issues}
+    if samples:
+        result["samples"] = samples
+    if kind == "schematic" and anchor is not None:
+        result["anchor"] = str(anchor)
+        result["anchor_same_circuit"] = same_circuit
+    return result
 
 
 # --- render + run -----------------------------------------------------------
 
 
-def rasterize_clean_svg(svg, png, size=CLEAN_RENDER_SIZE):
-    """Rasterize one transparent KiCad SVG with a tight, consistent frame."""
+def frame_render(source, png, size=CLEAN_RENDER_SIZE):
+    """Trim, pad and scale one rasterized page into a judge PNG."""
     command(
         [
-            "magick", "-density", CLEAN_RENDER_DENSITY, str(svg),
+            "magick", "-density", CLEAN_RENDER_DENSITY, str(source),
             "-trim", "+repage", "-bordercolor", "white", "-border", "24",
             "-background", "white", "-alpha", "remove", "-alpha", "off",
             "-resize", size, str(png),
@@ -1081,7 +1156,37 @@ def rasterize_clean_svg(svg, png, size=CLEAN_RENDER_SIZE):
         timeout=180,
     )
     if not png.is_file():
-        raise RuntimeError(f"SVG conversion produced no PNG: {png}")
+        raise RuntimeError(f"page conversion produced no PNG: {png}")
+
+
+def rasterize_clean_svg(svg, png, size=CLEAN_RENDER_SIZE):
+    """Rasterize one transparent KiCad SVG with a tight, consistent frame."""
+    frame_render(svg, png, size)
+
+
+def rasterize_schematic_pdf(source, png, temporary, size=CLEAN_RENDER_SIZE):
+    """The rescue path for a sheet ImageMagick's own SVG renderer refuses.
+
+    Dense sheets hit its `vector graphics nested too deeply` limit; KiCad's PDF
+    of the same sheet, rasterized by poppler, is the same drawing.
+    """
+    pdf = temporary / "schematic.pdf"
+    command(
+        [
+            kicad_cli(), "sch", "export", "pdf", "--output", str(pdf),
+            "--exclude-drawing-sheet", "--no-background-color", str(source),
+        ],
+        timeout=180,
+    )
+    pages = temporary / "page"
+    command(
+        ["pdftoppm", "-r", CLEAN_RENDER_DENSITY, "-png", str(pdf), str(pages)],
+        timeout=180,
+    )
+    rendered = sorted(temporary.glob("page*.png"))
+    if not rendered:
+        raise RuntimeError(f"PDF rasterization produced no page: {source}")
+    frame_render(rendered[0], png, size)
 
 
 def kicad10_schematic_render_source(source, temporary):
@@ -1172,7 +1277,10 @@ def clean_render(kind, source, destination):
                 raise RuntimeError(f"KiCad schematic SVG export failed: {detail}")
             svg = svg_stem.with_suffix(".svg")
             shutil.copy2(rendered[0], svg)
-            rasterize_clean_svg(svg, destination)
+            try:
+                rasterize_clean_svg(svg, destination)
+            except RuntimeError:
+                rasterize_schematic_pdf(render_source, destination, temporary)
             return {"path": str(destination), "svg_paths": [str(svg)]}
 
         if kind != "pcb":
@@ -1264,14 +1372,13 @@ def render_project(project, artifacts, prefix):
     return rendered
 
 
-def agent_command(project, prompt, multiple=False):
+def agent_command(project, prompt):
     configured = os.environ.get("GORDIAN_BIN")
-    tail = ["--input", "-"] if multiple else [prompt]
     if configured:
-        return [configured, "agent", "--project", str(project), "--no-review", *tail]
+        return [configured, "agent", "--project", str(project), "--no-review", prompt]
     return [
         "cargo", "run", "--release", "--quiet", "-p", "gordian", "--",
-        "agent", "--project", str(project), "--no-review", *tail,
+        "agent", "--project", str(project), "--no-review", prompt,
     ]
 
 
@@ -1291,16 +1398,11 @@ USAGE_REQUEST = re.compile(
     r"latency=(?P<latency>[0-9.]+)s$"
 )
 TOTAL_REQUESTS = re.compile(r"\bprovider requests:\s*(\d+)\b")
-REQUEST_CAP = re.compile(r"ProviderRequestLimit\s*\{\s*requests:\s*(\d+)\s*\}")
+USER_CAP = re.compile(r"MaxRequestsReached\s*\{\s*requests:\s*(\d+)\s*\}")
 REFUSAL = re.compile(r"\brefus(?:e|ed|al|ing)\b", re.IGNORECASE)
 TURN_STARTED = re.compile(r"^turn (?P<turn>\d+): (?P<prompt>.*)$")
 TURN_DONE = re.compile(r"^turn (?P<turn>\d+) done:")
 ASSISTANT_TEXT = re.compile(r"^assistant:\s*(.+)$", re.M)
-BUDGET_STOP = re.compile(
-    r"^(?:Stopped after (?:the turn spent its \d+s wall-clock budget|"
-    r"the model exhausted the per-turn request safety limit)\b"
-    r"|## Partial state\b)"
-)
 
 
 def parse_agent_stderr(stderr):
@@ -1311,22 +1413,18 @@ def parse_agent_stderr(stderr):
     usage_counts = []
     total_counts = []
     requests = []
-    turns = []
-    active_turn = None
+    transcript = []
+    recording = False
     for line in text.splitlines():
         stripped = line.strip()
-        if match := TURN_STARTED.match(stripped):
-            active_turn = {
-                "turn": int(match.group("turn")),
-                "prompt": match.group("prompt"),
-                "transcript": [stripped],
-            }
-            turns.append(active_turn)
+        if TURN_STARTED.match(stripped):
+            recording = True
+            transcript.append(stripped)
             continue
-        if active_turn is not None:
-            active_turn["transcript"].append(stripped)
+        if recording:
+            transcript.append(stripped)
             if TURN_DONE.match(stripped):
-                active_turn = None
+                recording = False
         if match := TOOL_STARTED.match(stripped):
             name = match.group("tool")
             attempted.append(name)
@@ -1404,7 +1502,7 @@ def parse_agent_stderr(stderr):
             repeated.append({"tool": attempted[index], "count": end - index})
         index = end
 
-    cap = REQUEST_CAP.search(text)
+    cap = USER_CAP.search(text)
     assistant_messages = ASSISTANT_TEXT.findall(text)
     final_assistant = assistant_messages[-1].strip() if assistant_messages else ""
     return {
@@ -1415,13 +1513,12 @@ def parse_agent_stderr(stderr):
             else len(requests) if requests
             else sum(usage_counts)
         ),
-        "turns": turns,
+        "transcript": transcript,
         "refusals": refusals,
         "errors": errors,
         "repeated_calls": repeated,
-        "request_cap_hit": int(cap.group(1)) if cap else None,
+        "user_cap_hit": int(cap.group(1)) if cap else None,
         "final_assistant": final_assistant,
-        "budget_stop": bool(BUDGET_STOP.match(final_assistant)),
     }
 
 
@@ -1441,41 +1538,11 @@ def phase_health(project, artifacts, number):
     return health
 
 
-def requested_outputs(prompt):
-    lowered = prompt.lower()
-    return {
-        "pcb": bool(re.search(r"\bpcb\b|\bboard\b", lowered)),
-        "fab": "fabrication" in lowered or "gerber" in lowered,
-    }
-
-
-def missing_deliverable(project, prompt, health):
-    requested = requested_outputs(prompt)
-    missing = []
-    if not health.get("schematic_created"):
-        missing.append("the schematic is missing")
-    elif health.get("erc_check_error") or health.get("erc_errors") != 0:
-        missing.append("a clean ERC check is missing")
-    if requested["pcb"]:
-        if not health.get("pcb_created"):
-            missing.append("the PCB is missing")
-        else:
-            if health.get("drc_check_error") or health.get("drc_errors") != 0:
-                missing.append("a clean DRC check is missing")
-            if health.get("unconnected_items") != 0:
-                missing.append("the PCB still has unconnected items")
-    if requested["fab"]:
-        fab = project / "fab"
-        if not fab.is_dir() or len(list(fab.glob("*"))) < 3:
-            missing.append("fabrication files are missing")
-    return missing
-
-
 def write_gallery(artifacts, phases):
     cards = []
     for phase in phases:
         caption = (
-            f"Turn {phase['turn']} · {phase['tool_call_count']} tool calls · "
+            f"{phase['label']} · {phase['tool_call_count']} tool calls · "
             f"ERC {phase['health'].get('erc_errors', '?')} errors · "
             f"DRC {phase['health'].get('drc_errors', '?')} errors"
         )
@@ -1491,7 +1558,7 @@ def write_gallery(artifacts, phases):
                     relative = Path(item["path"]).relative_to(artifacts)
                     pair.append(
                         f'<figure><img src="{html.escape(str(relative))}" '
-                        f'alt="Turn {phase["turn"]} {kind} {html.escape(label)}">'
+                        f'alt="{html.escape(phase["label"])} {kind} {html.escape(label)}">'
                         f'<figcaption>{html.escape(label)}</figcaption></figure>'
                     )
                 else:
@@ -1521,63 +1588,13 @@ figcaption{text-align:center;padding-top:6px}@media(max-width:800px){.pair{grid-
     (artifacts / "gallery.html").write_text(document, encoding="utf-8")
 
 
-def turn_record(number, prompt, result, seconds, parsed, phase):
-    transcript = parsed.get("turns", [])
-    transcript = transcript[-1].get("transcript", []) if transcript else []
-    return {
-        "turn": number,
-        "prompt": prompt,
-        "exit": result.returncode,
-        "seconds": seconds,
-        "requests": parsed["request_count"],
-        "request_details": parsed["requests"],
-        "tool_calls": parsed["tool_calls"],
-        "refusals": parsed["refusals"],
-        "errors": parsed["errors"],
-        "repeated_calls": parsed["repeated_calls"],
-        "request_cap_hit": parsed["request_cap_hit"],
-        "final_assistant": parsed["final_assistant"],
-        "budget_stop": parsed["budget_stop"],
-        "health": phase["health"],
-        "renders": phase["renders"],
-        "transcript": transcript,
-    }
-
-
-def aggregate_turn_facts(turns):
-    requests = []
-    calls = []
-    refusals = []
-    errors = []
-    repeated = []
-    for turn in turns:
-        requests.extend({"turn": turn["turn"], **item} for item in turn["request_details"])
-        calls.extend({"turn": turn["turn"], **item} for item in turn["tool_calls"])
-        refusals.extend({"turn": turn["turn"], **item} for item in turn["refusals"])
-        errors.extend({"turn": turn["turn"], **item} for item in turn["errors"])
-        repeated.extend({"turn": turn["turn"], **item} for item in turn["repeated_calls"])
-    return {
-        "turns": turns,
-        "request_count": sum(turn["requests"] for turn in turns),
-        "requests": requests,
-        "tool_call_details": calls,
-        "refusals": refusals,
-        "errors": errors,
-        "repeated_calls": repeated,
-        "request_cap_hit": next(
-            (turn["request_cap_hit"] for turn in reversed(turns) if turn["request_cap_hit"]),
-            None,
-        ),
-    }
-
-
-def run_agent(project, prompt, timeout, env, multiple=False):
-    args = agent_command(project, prompt, multiple)
+def run_agent(project, prompt, timeout, env):
+    """Run one agent case to completion. `timeout` is None unless the operator
+    set `QUALITY_TIMEOUT`: the loop has no budget of its own and the harness
+    imposes none either."""
+    args = agent_command(project, prompt)
     try:
-        return command(
-            args, timeout=timeout, check=False, env=env,
-            input_text=prompt if multiple else None,
-        )
+        return command(args, timeout=timeout, check=False, env=env)
     except subprocess.TimeoutExpired as error:
         stdout = error.stdout or ""
         stderr = error.stderr or ""
@@ -1589,23 +1606,9 @@ def run_agent(project, prompt, timeout, env, multiple=False):
         return subprocess.CompletedProcess(args, 124, stdout, stderr)
 
 
-def prompt_lines(path):
-    return [
-        line.strip()
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip() and line.strip() != "---" and not line.lstrip().startswith("#")
-    ]
-
-
-def run_case(case, output_root, max_turns):
+def run_case(case, output_root):
     started = time.time()
-    prompts_path = case / "prompts.txt"
-    queued_prompts = (
-        prompt_lines(prompts_path)
-        if prompts_path.is_file()
-        else [(case / "prompt.txt").read_text(encoding="utf-8").strip()]
-    )
-    prompt = "\n".join(queued_prompts)
+    prompt = (case / "prompt.txt").read_text(encoding="utf-8").strip()
     rubric, checks = parse_rubric((case / "rubric.txt").read_text(encoding="utf-8"))
     run_dir = output_root / case.name
     if run_dir.exists():
@@ -1630,74 +1633,53 @@ def run_case(case, output_root, max_turns):
     shutil.copytree(project, before_project)
     renders = {"before": render_project(project, artifacts, "before")}
 
-    turns = []
-    phases = []
-    stdout_parts = []
-    stderr_parts = []
-    result = None
-    thread_id = f"quality-{case.name}-{int(started)}"
-    current_prompt = queued_prompts.pop(0)
-    while current_prompt and len(turns) < max_turns:
-        number = len(turns) + 1
-        agent_started = time.time()
-        result = run_agent(
-            project,
-            current_prompt,
-            int(os.environ.get("QUALITY_TIMEOUT", "900")),
-            {**os.environ, "GORDIAN_THREAD_ID": thread_id},
-            multiple=number > 1 or prompts_path.is_file(),
-        )
-        seconds = round(time.time() - agent_started, 1)
-        (artifacts / f"agent.turn-{number}.stdout.txt").write_text(
-            result.stdout, encoding="utf-8"
-        )
-        (artifacts / f"agent.turn-{number}.stderr.txt").write_text(
-            result.stderr, encoding="utf-8"
-        )
-        stdout_parts.append(result.stdout)
-        stderr_parts.append(result.stderr)
-        parsed = parse_agent_stderr(result.stderr)
-        phase = {
-            "turn": number,
-            "tool_call_count": len(parsed["tool_calls"]),
-            "health": phase_health(project, artifacts, number),
-            "renders": render_project(project, artifacts, f"phase-{number}"),
-        }
-        phases.append(phase)
-        turns.append(turn_record(number, current_prompt, result, seconds, parsed, phase))
-        write_gallery(artifacts, phases)
-        partial = {
-            "case": case.name,
-            "started_utc": started_utc,
-            "_started_epoch": started,
-            "agent_exit": result.returncode,
-            "agent_seconds": round(sum(turn["seconds"] for turn in turns), 1),
-            "elapsed_seconds": round(time.time() - started, 1),
-            **aggregate_turn_facts(turns),
-        }
-        result_path.write_text(json.dumps(partial, indent=2) + "\n", encoding="utf-8")
-
-        if queued_prompts:
-            current_prompt = queued_prompts.pop(0)
-            continue
-        missing = missing_deliverable(project, prompt, phase["health"])
-        if parsed["budget_stop"] and missing and len(turns) < max_turns:
-            current_prompt = "continue from the current state: " + "; ".join(missing)
-            continue
-        current_prompt = None
-
-    if result is None:
-        raise RuntimeError("case supplied no agent prompts")
-    agent_seconds = round(sum(turn["seconds"] for turn in turns), 1)
-    (artifacts / "agent.stdout.txt").write_text(
-        "\n".join(stdout_parts), encoding="utf-8"
+    agent_started = time.time()
+    result = run_agent(
+        project,
+        prompt,
+        int(os.environ["QUALITY_TIMEOUT"]) if os.environ.get("QUALITY_TIMEOUT") else None,
+        {**os.environ, "GORDIAN_THREAD_ID": f"quality-{case.name}-{int(started)}"},
     )
-    (artifacts / "agent.stderr.txt").write_text(
-        "\n".join(stderr_parts), encoding="utf-8"
+    agent_seconds = round(time.time() - agent_started, 1)
+    (artifacts / "agent.stdout.txt").write_text(result.stdout, encoding="utf-8")
+    (artifacts / "agent.stderr.txt").write_text(result.stderr, encoding="utf-8")
+    parsed = parse_agent_stderr(result.stderr)
+    phases = [{
+        "label": "After the run",
+        "tool_call_count": len(parsed["tool_calls"]),
+        "health": phase_health(project, artifacts, 1),
+        "renders": render_project(project, artifacts, "phase-1"),
+    }]
+    turn_facts = {
+        "agent_exit": result.returncode,
+        "request_count": parsed["request_count"],
+        "requests": parsed["requests"],
+        "tool_call_details": parsed["tool_calls"],
+        "refusals": parsed["refusals"],
+        "errors": parsed["errors"],
+        "repeated_calls": parsed["repeated_calls"],
+        "user_cap_hit": parsed["user_cap_hit"],
+        "final_assistant": parsed["final_assistant"],
+        "transcript": parsed["transcript"],
+    }
+    # failure costs the verdicts and not the whole run.
+    result_path.write_text(
+        json.dumps(
+            {
+                "case": case.name,
+                "started_utc": started_utc,
+                "_started_epoch": started,
+                "agent_seconds": agent_seconds,
+                "elapsed_seconds": round(time.time() - started, 1),
+                **turn_facts,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
-    turn_facts = aggregate_turn_facts(turns)
 
-    facts, detail = deterministic_facts(project, before_project, artifacts, result)
+    facts, detail = deterministic_facts(case, project, before_project, artifacts, result)
     renders["after"] = phases[-1]["renders"]
     facts.update(schematic_visual_facts(renders) if first_schematic(project) else {})
     facts.update(turn_facts)
@@ -1719,11 +1701,14 @@ def run_case(case, output_root, max_turns):
     except Exception as error:
         llm = None
 
+    anchor, same_circuit = schematic_anchor(case)
     for kind in ("schematic", "pcb"):
         key = f"critic_{kind}"
         rendered = renders.get("after", {}).get(kind, {})
+        arguments = (kind, rendered, prompt, facts, llm)
+        keywords = {"anchor": anchor, "same_circuit": same_circuit} if kind == "schematic" else {}
         if not rendered.get("path"):
-            report[key] = critic(kind, rendered, prompt, facts, llm)
+            report[key] = critic(*arguments, **keywords)
         elif llm is None:
             report[key] = {
                 "score": None,
@@ -1732,7 +1717,7 @@ def run_case(case, output_root, max_turns):
             }
         else:
             try:
-                report[key] = critic(kind, rendered, prompt, facts, llm)
+                report[key] = critic(*arguments, **keywords)
             except Exception as error:
                 report[key] = {"score": None, "issues": [], "error": str(error)}
 
@@ -1766,7 +1751,10 @@ def run_case(case, output_root, max_turns):
                     "error": str(error),
                 }
     facts["human_look"] = human_look
+    facts["critic_anchor"] = str(anchor)
     facts["schematic_critic_score"] = report["critic_schematic"].get("score")
+    if same_circuit:
+        facts["critic_vs_reference"] = facts["schematic_critic_score"]
     facts["pcb_critic_score"] = report["critic_pcb"].get("score")
     facts["human_look_schematic_score"] = human_look["schematic"].get("score")
     facts["human_look_pcb_score"] = human_look["pcb"].get("score")
@@ -1785,27 +1773,19 @@ def run_case(case, output_root, max_turns):
         except Exception as error:
             report["judge"] = {"score": None, "issues": [], "error": str(error)}
 
-    aggregate_diagnosis = {"struggles": [], "wishes": []}
-    for turn in turns:
-        if llm is None:
-            diagnosis = {"error": "judge credentials unavailable"}
-        else:
-            try:
-                transcript = (
-                    artifacts / f"agent.turn-{turn['turn']}.stderr.txt"
-                ).read_text(encoding="utf-8", errors="replace")
-                diagnosis = self_diagnose(turn["prompt"], transcript, llm)
-            except Exception as error:
-                diagnosis = {"error": str(error)}
-        turn["self_diagnosis"] = diagnosis
-        aggregate_diagnosis["struggles"].extend(
-            f"turn {turn['turn']}: {item}" for item in diagnosis.get("struggles", [])
-        )
-        aggregate_diagnosis["wishes"].extend(
-            f"turn {turn['turn']}: {item}" for item in diagnosis.get("wishes", [])
-        )
-    report["turns"] = turns
-    report["self_diagnosis"] = aggregate_diagnosis
+    if llm is None:
+        report["self_diagnosis"] = {"error": "judge credentials unavailable"}
+    else:
+        try:
+            report["self_diagnosis"] = self_diagnose(
+                prompt,
+                (artifacts / "agent.stderr.txt").read_text(
+                    encoding="utf-8", errors="replace"
+                ),
+                llm,
+            )
+        except Exception as error:
+            report["self_diagnosis"] = {"error": str(error)}
 
     report["judge_score"] = report["judge"]["score"]
     if report["judge_score"] is not None:
@@ -1903,23 +1883,21 @@ def findings_for(report):
 
     for signal_name, label in (("errors", "error"), ("refusals", "refusal")):
         for signal in report.get(signal_name, []):
-            turn = f"turn {signal['turn']} " if signal.get("turn") else ""
             findings.append(
                 (
                     "tool-contract",
-                    f"{turn}tool `{signal['tool']}` {label}: {signal['message']}",
+                    f"tool `{signal['tool']}` {label}: {signal['message']}",
                 )
             )
     for smell in report.get("repeated_calls", []):
-        turn = f"turn {smell['turn']} " if smell.get("turn") else ""
         findings.append(
             (
                 "prompt",
-                f"{turn}loop smell: tool `{smell['tool']}` called {smell['count']} times in a row",
+                f"loop smell: tool `{smell['tool']}` called {smell['count']} times in a row",
             )
         )
 
-    cap = report.get("request_cap_hit")
+    cap = report.get("user_cap_hit")
     cost_tag = "prompt" if cap or report.get("repeated_calls") else "variance"
     cost = (
         f"cost: {report.get('elapsed_seconds', 0):.1f}s elapsed, "
@@ -1927,7 +1905,7 @@ def findings_for(report):
         f"{report.get('request_count', 0)} provider requests"
     )
     if cap:
-        cost += f"; request cap hit at {cap}"
+        cost += f"; stopped at the user-set cap of {cap} requests"
     findings.append((cost_tag, cost))
     if report.get("requests"):
         latencies = ", ".join(
@@ -1966,15 +1944,9 @@ def write_case_findings(run_dir, report):
             lines.append(f"- Human change: {change}")
         if verdict.get("error"):
             lines.append(f"- Unavailable: {verdict['error']}")
-    for turn in report.get("turns", []):
-        lines.extend([
-            "",
-            f"## Turn {turn['turn']}: {turn['prompt']}",
-            "",
-            "````text",
-            *turn["transcript"],
-            "````",
-        ])
+    transcript = report.get("transcript")
+    if transcript:
+        lines.extend(["", "## Agent transcript", "", "````text", *transcript, "````"])
     (run_dir / "findings.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -2039,7 +2011,7 @@ def aggregate_findings(reports, output_root, suite, questions):
 
 COLUMNS = [
     "case", "score", "sch critic", "pcb critic", "human look", "checks", "erc e/w",
-    "moved", "lost", "added", "pcb moved", "turns", "agent s", "elapsed s",
+    "moved", "lost", "added", "pcb moved", "agent s", "elapsed s",
 ]
 
 
@@ -2079,15 +2051,40 @@ def row(report):
         count(report, "fields_lost"),
         count(report, "symbols_added"),
         count(report, "board_parts_moved"),
-        str(len(report.get("turns", []))),
         f"{report.get('agent_seconds', 0):.0f}s",
         f"{report['elapsed_seconds']:.0f}s",
     ]
 
 
-def scoreboard(reports):
-    rows = [COLUMNS] + [row(report) for report in reports]
-    widths = [max(len(r[i]) for r in rows) for i in range(len(COLUMNS))]
+SCHEMATIC_COLUMNS = [
+    "case", "parts", "netlist", "erc e/w", "critic", "human look", "agent s",
+]
+
+
+def schematic_row(report):
+    """The benchmark view: did the circuit come out right, and does it read well."""
+    if "error" in report:
+        return [report["case"]] + ["-"] * (len(SCHEMATIC_COLUMNS) - 2) + [report["error"][:60]]
+    match = report.get("netlist_matches_reference")
+    critic = report.get("critic_schematic", {})
+    score = critic.get("score")
+    samples = critic.get("samples")
+    return [
+        report["case"],
+        str(report.get("part_count", "-")),
+        "-" if match is None else ("yes" if match else "NO"),
+        f"{report.get('erc_errors', '?')}/{report.get('erc_warnings', '?')}",
+        "-" if score is None else (
+            f"{score:g}" + (f" {samples}" if samples and len(set(samples)) > 1 else "")
+        ),
+        human_look_score(report).split("/")[0],
+        f"{report.get('agent_seconds', 0):.0f}s",
+    ]
+
+
+def scoreboard(reports, columns=COLUMNS, row_of=row):
+    rows = [columns] + [row_of(report) for report in reports]
+    widths = [max(len(r[i]) for r in rows) for i in range(len(columns))]
     lines = ["| " + " | ".join(c.ljust(w) for c, w in zip(rows[0], widths)) + " |"]
     lines.append("| " + " | ".join("-" * w for w in widths) + " |")
     for r in rows[1:]:
@@ -2095,16 +2092,33 @@ def scoreboard(reports):
     return "\n".join(lines)
 
 
+def suite_view(suite):
+    """Columns and row builder for a suite's scoreboard."""
+    if suite == "schematic":
+        return SCHEMATIC_COLUMNS, schematic_row
+    return COLUMNS, row
+
+
+SUITES = {
+    "campaign": lambda name: name.startswith("campaign-"),
+    # The schematic benchmark: human sheets redrawn from their netlist, and
+    # generic circuit prompts.
+    "schematic": lambda name: name.startswith(("dataset-", "prompt-")),
+    "live-edit": lambda name: name.startswith("sch-"),
+    "pcb": lambda name: not name.startswith(("campaign-", "dataset-", "prompt-", "sch-")),
+    "all": lambda name: True,
+}
+
+
+def futures_report(futures, name):
+    """The finished report for one case, in the order the suite lists it."""
+    return next(future.result() for future, queued in futures.items() if queued == name)
+
+
 def select(available, args):
     if args.cases:
         return args.cases
-    if args.suite == "campaign":
-        return sorted(n for n in available if n.startswith("campaign-"))
-    if args.suite == "schematic":
-        return sorted(n for n in available if n.startswith("sch-"))
-    if args.suite == "pcb":
-        return sorted(n for n in available if not n.startswith("sch-"))
-    return sorted(available)
+    return sorted(name for name in available if SUITES[args.suite](name))
 
 
 def main():
@@ -2113,17 +2127,15 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("quality/runs"))
     parser.add_argument(
         "--suite",
-        choices=["campaign", "schematic", "pcb", "all"],
+        choices=sorted(SUITES),
         default="all",
-        help="campaign runs campaign-*, schematic runs sch-*, pcb runs the rest",
+        help="schematic runs dataset-*/prompt-*, campaign campaign-*, "
+             "live-edit sch-*, pcb the rest",
+    )
+    parser.add_argument(
+        "--jobs", type=int, default=1, help="cases to run at a time (default: 1)"
     )
     parser.add_argument("--scoreboard", type=Path, help="write the scoreboard here too")
-    parser.add_argument(
-        "--max-turns",
-        type=int,
-        default=4,
-        help="maximum agent turns per case, including budget continuations (default: 4)",
-    )
     parser.add_argument(
         "--question",
         action="append",
@@ -2132,8 +2144,8 @@ def main():
     )
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
-    if args.max_turns < 1:
-        parser.error("--max-turns must be at least 1")
+    if args.jobs < 1:
+        parser.error("--jobs must be at least 1")
 
     available = {path.name: path for path in CASES.iterdir() if path.is_dir()}
     if args.list:
@@ -2150,19 +2162,34 @@ def main():
             file=sys.stderr,
         )
 
-    reports = []
-    for name in selected:
+    columns, row_of = suite_view(args.suite)
+
+    def one(name):
         try:
-            report = run_case(available[name], output, args.max_turns)
+            return run_case(available[name], output)
         except Exception as error:
-            report = recover_failed_report(output, name, error)
             print(f"{name}: {error}", file=sys.stderr)
-        reports.append(report)
-        print(" | ".join(row(report)), flush=True)
+            return recover_failed_report(output, name, error)
+
+    def announce(report):
+        print(" | ".join(row_of(report)), flush=True)
         for failure in report.get("checks", {}).get("fail", []):
             print(f"    failed check: {failure}", flush=True)
 
-    table = scoreboard(reports)
+    if args.jobs == 1:
+        reports = []
+        for name in selected:
+            report = one(name)
+            reports.append(report)
+            announce(report)
+    else:
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            futures = {pool.submit(one, name): name for name in selected}
+            for future in as_completed(futures):
+                announce(future.result())
+            reports = [futures_report(futures, name) for name in selected]
+
+    table = scoreboard(reports, columns, row_of)
     print("\n" + table)
     if args.scoreboard:
         args.scoreboard.write_text(table + "\n", encoding="utf-8")

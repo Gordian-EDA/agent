@@ -69,18 +69,16 @@ pub enum Msg {
 }
 
 /// Why an in-flight turn stopped, carried on [`Msg::TurnEnded`]. The agent loop
-/// reports a clean completion or a bounded safety stop (via its `StopReason`);
+/// reports a clean completion, the user's own request cap, or a failed quality
+/// gate (via its `StopReason`);
 /// the shell adds `Interrupted` (user abort) and `Error`; `/compact` reports
 /// `Compacted`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TurnEndReason {
     /// The model returned a final reply — a clean finish.
     Completed,
-    /// The model kept requesting tools until the safety ceiling was reached.
-    ProviderRequestLimit { requests: usize },
-    TimeLimit { elapsed_secs: u64 },
-    /// A project mutation timed out and may still be running in the background.
-    MutationTimedOut,
+    /// The turn hit the optional, user-set request cap.
+    MaxRequestsReached { requests: usize },
     /// Required artifact checks or independent review still have findings.
     QualityGateFailed { failures: usize },
     /// The user pressed Esc to abort the turn.

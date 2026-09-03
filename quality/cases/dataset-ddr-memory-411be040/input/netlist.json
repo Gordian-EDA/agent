@@ -1,0 +1,446 @@
+{
+ "title": "411be040b743",
+ "parts": [
+  {
+   "ref": "C70",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C71",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C72",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C73",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C74",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C75",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C76",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C77",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C78",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C79",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C80",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C81",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C82",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C83",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C84",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C85",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDDDR",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C86",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDLPDDRVDD1",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C87",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDLPDDRVDD1",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C88",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDLPDDRVDD1",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C89",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDLPDDRVDD1",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C90",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDLPDDRVDD1",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C91",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDLPDDRVDD1",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C92",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDLPDDRVDD1",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C93",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "VDDLPDDRVDD1",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "R14",
+   "lib_id": "Device:R",
+   "value": "10k",
+   "pins": {
+    "1": "DDR_RESET_N",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "R15",
+   "lib_id": "Device:R",
+   "value": "240R",
+   "pins": {
+    "1": "N$1",
+    "2": "VDDDDR"
+   }
+  },
+  {
+   "ref": "U6",
+   "lib_id": "Memory_RAM:IS43LQ32256A-062BLI",
+   "value": "IS43LQ32256A-062BLI",
+   "pins": {
+    "A1": "nc",
+    "A2": "nc",
+    "A3": "GND",
+    "A4": "VDDDDR",
+    "A5": "N$1",
+    "A8": "nc",
+    "A9": "VDDDDR",
+    "B1": "nc",
+    "B2": "DDR_DQ0_A",
+    "B3": "VDDDDR",
+    "B4": "DDR_DQ7_A",
+    "B5": "VDDDDR",
+    "B8": "VDDDDR",
+    "B9": "DDR_DQ14_A",
+    "C1": "GND",
+    "C2": "DDR_DQ1_A",
+    "C3": "DDR_DMI0_A",
+    "C4": "DDR_DQ6_A",
+    "C5": "GND",
+    "C8": "GND",
+    "C9": "DDR_DQ15_A",
+    "D1": "VDDDDR",
+    "D2": "GND",
+    "D3": "DDR_DQS0_A_P",
+    "D4": "GND",
+    "D5": "VDDDDR",
+    "D8": "VDDDDR",
+    "D9": "GND",
+    "E1": "GND",
+    "E2": "DDR_DQ2_A",
+    "E3": "DDR_DQS0_A_N",
+    "E4": "DDR_DQ5_A",
+    "E5": "GND",
+    "E8": "GND",
+    "E9": "DDR_DQ13_A",
+    "F1": "VDDLPDDRVDD1",
+    "F2": "DDR_DQ3_A",
+    "F3": "VDDDDR",
+    "F4": "DDR_DQ4_A",
+    "F5": "VDDDDR",
+    "F8": "VDDDDR",
+    "F9": "DDR_DQ12_A",
+    "G1": "GND",
+    "G2": "VDDDDR",
+    "G3": "GND",
+    "G4": "VDDLPDDRVDD1",
+    "G5": "GND",
+    "G8": "GND",
+    "G9": "VDDLPDDRVDD1",
+    "H1": "VDDDDR",
+    "H2": "DDR_CA0_A",
+    "H3": "nc",
+    "H4": "DDR_CS0_A",
+    "H5": "VDDDDR",
+    "H8": "VDDDDR",
+    "H9": "DDR_CA2_A",
+    "J1": "GND",
+    "J2": "DDR_CA1_A",
+    "J3": "GND",
+    "J4": "DDR_CKE0_A",
+    "J5": "nc",
+    "J8": "DDR_CK_A_P",
+    "J9": "DDR_CK_A_N",
+    "K1": "VDDDDR",
+    "K2": "GND",
+    "K3": "VDDDDR",
+    "K4": "GND",
+    "K5": "nc",
+    "K8": "nc",
+    "K9": "GND",
+    "N1": "VDDDDR",
+    "N2": "GND",
+    "N3": "VDDDDR",
+    "N4": "GND",
+    "N5": "nc",
+    "N8": "nc",
+    "N9": "GND",
+    "P1": "GND",
+    "P2": "nc",
+    "P3": "GND",
+    "P4": "nc",
+    "P5": "nc",
+    "P8": "nc",
+    "P9": "nc",
+    "R1": "VDDDDR",
+    "R2": "nc",
+    "R3": "nc",
+    "R4": "nc",
+    "R5": "VDDDDR",
+    "R8": "VDDDDR",
+    "R9": "nc",
+    "T1": "GND",
+    "T2": "nc",
+    "T3": "GND",
+    "T4": "VDDLPDDRVDD1",
+    "T5": "GND",
+    "T8": "GND",
+    "T9": "VDDLPDDRVDD1",
+    "U1": "VDDLPDDRVDD1",
+    "U2": "nc",
+    "U3": "VDDDDR",
+    "U4": "nc",
+    "U5": "VDDDDR",
+    "U8": "VDDDDR",
+    "U9": "nc",
+    "V1": "GND",
+    "V2": "nc",
+    "V3": "nc",
+    "V4": "nc",
+    "V5": "GND",
+    "V8": "GND",
+    "V9": "nc",
+    "W1": "VDDDDR",
+    "W2": "GND",
+    "W3": "nc",
+    "W4": "GND",
+    "W5": "VDDDDR",
+    "W8": "VDDDDR",
+    "W9": "GND",
+    "Y1": "GND",
+    "Y2": "nc",
+    "Y3": "nc",
+    "Y4": "nc",
+    "Y5": "GND",
+    "Y8": "GND",
+    "Y9": "nc",
+    "A10": "GND",
+    "A11": "nc",
+    "A12": "nc",
+    "AA1": "nc",
+    "AA2": "nc",
+    "AA3": "VDDDDR",
+    "AA4": "nc",
+    "AA5": "VDDDDR",
+    "AA8": "VDDDDR",
+    "AA9": "nc",
+    "AB1": "nc",
+    "AB2": "nc",
+    "AB3": "GND",
+    "AB4": "VDDDDR",
+    "AB5": "GND",
+    "AB8": "GND",
+    "AB9": "VDDDDR",
+    "B10": "VDDDDR",
+    "B11": "DDR_DQ8_A",
+    "B12": "nc",
+    "C10": "DDR_DMI1_A",
+    "C11": "DDR_DQ9_A",
+    "C12": "GND",
+    "D10": "DDR_DQS1_A_P",
+    "D11": "GND",
+    "D12": "VDDDDR",
+    "E10": "DDR_DQS1_A_N",
+    "E11": "DDR_DQ10_A",
+    "E12": "GND",
+    "F10": "VDDDDR",
+    "F11": "DDR_DQ11_A",
+    "F12": "VDDLPDDRVDD1",
+    "G10": "GND",
+    "G11": "nc",
+    "G12": "GND",
+    "H10": "DDR_CA3_A",
+    "H11": "DDR_CA4_A",
+    "H12": "VDDDDR",
+    "J10": "GND",
+    "J11": "DDR_CA5_A",
+    "J12": "GND",
+    "K10": "VDDDDR",
+    "K11": "GND",
+    "K12": "VDDDDR",
+    "N10": "VDDDDR",
+    "N11": "GND",
+    "N12": "VDDDDR",
+    "P10": "GND",
+    "P11": "nc",
+    "P12": "GND",
+    "R10": "nc",
+    "R11": "nc",
+    "R12": "VDDDDR",
+    "T10": "GND",
+    "T11": "DDR_RESET_N",
+    "T12": "GND",
+    "U10": "VDDDDR",
+    "U11": "nc",
+    "U12": "VDDLPDDRVDD1",
+    "V10": "nc",
+    "V11": "nc",
+    "V12": "GND",
+    "W10": "nc",
+    "W11": "GND",
+    "W12": "VDDDDR",
+    "Y10": "nc",
+    "Y11": "nc",
+    "Y12": "GND",
+    "AA10": "VDDDDR",
+    "AA11": "nc",
+    "AA12": "nc",
+    "AB10": "GND",
+    "AB11": "nc",
+    "AB12": "nc"
+   }
+  }
+ ]
+}

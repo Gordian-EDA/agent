@@ -2,8 +2,9 @@
 //!
 //! [`Agent::run_turn`] drives one user turn: it repeatedly calls the
 //! [`Provider`], executes each tool the model requests, and feeds the structured
-//! result back, until the model returns a final text (or a safety iteration cap
-//! is hit). There is one domain (KiCAD, forever), so the loop dispatches [`crate::tools::run_tool`] /
+//! result back, until the model returns a final text. The turn ends when the
+//! model stops asking for tools — nothing else stops it, unless the user set an
+//! explicit request cap. There is one domain (KiCAD, forever), so the loop dispatches [`crate::tools::run_tool`] /
 //! [`crate::tools::tool_defs`] DIRECTLY — off-loading synchronous [`AgentRuntime`]
 //! work onto the blocking pool at the call site.
 //!
@@ -45,55 +46,6 @@ const MAX_FAILED_ROUTE_RETRIES: usize = 3;
 const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 
 const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. Fix the findings in what you touched; leave unrelated existing findings alone and mention them. If completeness.gaps is nonempty and this request calls for a complete powered/interface design, add exactly the listed support circuitry and check again. Those warnings are advisory for deliberately minimal designs and focused edits; do not add unrelated parts. Finish once errors in the requested work are clean and every applicable gap is resolved.";
-
-/// Base hard ceiling on provider invocations within one agent subturn. This is
-/// a last-resort guard against a model that keeps requesting tools forever: the
-/// narrower commit-nudge and routing retry budgets handle known stalls, while
-/// this bounds every other cycle (and therefore cost and context growth). An
-/// explicit component floor in the request raises it via [`TurnBudgets`].
-///
-/// [`TURN_WALL_CLOCK`], not this count, is the bound the product actually
-/// promises. The campaign suite measured a 50-part board+schematic end to end at
-/// roughly 16-22 requests when nothing is refused, and 30-45 with the ERC repair
-/// that real designs need; at 32 all four cases died mid-schematic and none ever
-/// reached the PCB. The ceiling is set above the measured need so that running
-/// out of *requests* is a bug, and running out of *time* is the real limit.
-const MAX_PROVIDER_REQUESTS_PER_TURN: usize = 56;
-
-/// Wall time one agent turn may take before it hands back a resumable partial
-/// state, regardless of how many requests remain.
-/// 270 s, not 300: the harness measures the whole run and the agent is not the only
-/// thing in it — rendering, ERC and the facts pass cost ~30 s after the last request.
-const TURN_WALL_CLOCK: Duration = Duration::from_secs(270);
-
-/// Fraction of [`TURN_WALL_CLOCK`] after which the model is told to wrap up.
-const WRAP_UP_AT_ELAPSED: f64 = 0.75;
-
-/// Share of the request budget held back for the wrap-up. A turn that runs into
-/// its ceiling should preserve a checked phase boundary. The model cannot see
-/// the budget, so it is told once while there is still room to land a correction,
-/// render, and final check. Relative to the ceiling so raising one raises the
-/// other.
-fn wrap_up_reserve(ceiling: usize) -> usize {
-    (ceiling / 8).max(4)
-}
-
-fn wrap_up_nudge(remaining: usize) -> String {
-    format!(
-        "Turn budget warning: {remaining} model requests remain before this turn hands its legal \
-         partial state back for continuation. Land at most one more corrective edit, render and \
-         check the current phase, then answer with `## Partial state` and `## Next steps`. Do not \
-         repeat a failed call without changing its arguments or the project first. Answer with \
-         prose ONLY — a response that still carries tool calls spends another request."
-    )
-}
-
-fn out_of_time_nudge() -> String {
-    "Most of this turn's wall-clock budget is spent. Finish the current small phase, render and \
-     check it, then hand the legal partial files back with `## Partial state` and `## Next steps`. \
-     Name the exact next phase and tool calls so the next turn can continue."
-        .to_string()
-}
 
 /// A provider request has no project-side effects, so transient transport
 /// failures are safe to retry. Keep this small so bad credentials and other
@@ -224,8 +176,8 @@ impl<P: Provider> Provider for MeteredProvider<P> {
         messages: &[ChatMessage],
         tools: &[Tool],
     ) -> Result<StreamEnd> {
-        let started = Instant::now();
         let request = self.request_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let started = Instant::now();
         self.pending
             .lock()
             .expect("usage meter poisoned")
@@ -285,37 +237,27 @@ impl<P: Provider> Provider for MeteredProvider<P> {
     }
 }
 
-/// Base cap on each kind of catalog exploration before the model must reuse
-/// its best prior hits. One assistant completion may contain several same-kind
-/// discovery calls and still costs that tool only one round. An explicit
-/// component floor in the request raises it via [`TurnBudgets`].
-const MAX_DISCOVERY_ROUNDS_PER_SUBTURN: usize = 1;
+/// Base cap on each kind of catalog exploration before the model must reuse its
+/// best prior hits, counted against one project state: committing a change
+/// clears it, so a long build searches per block rather than once per task. One
+/// assistant completion may contain several same-kind discovery calls and still
+/// costs that tool only one round. An explicit component floor in the request
+/// raises it via [`discovery_rounds_for_intent`].
+const MAX_DISCOVERY_ROUNDS_PER_STATE: usize = 1;
 
 /// A model can put dozens of near-duplicate catalog queries into one
 /// completion. Bound the actually dispatched fan-out so one speculative batch
 /// cannot flood history with hundreds of low-value hits.
 const MAX_DISCOVERY_CALLS_PER_COMPLETION: usize = 4;
 
-/// Turn-wide budgets computed once from the authoritative intent. A request
-/// with an explicit numeric component floor (45+ parts, multi-domain) needs
-/// more catalog discovery and more provider rounds than the base constants
-/// sized for small boards; without a stated floor, or below 24 parts, every
-/// field equals its base constant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TurnBudgets {
-    discovery_rounds_per_subturn: usize,
-    provider_requests: usize,
-}
-
-impl TurnBudgets {
-    fn for_intent(intent: &str) -> Self {
-        let floor = explicit_minimum_physical_components(intent).unwrap_or(0);
-        let provider_requests = MAX_PROVIDER_REQUESTS_PER_TURN + floor.saturating_sub(24);
-        Self {
-            discovery_rounds_per_subturn: MAX_DISCOVERY_ROUNDS_PER_SUBTURN + floor / 24,
-            provider_requests,
-        }
-    }
+/// Catalog discovery a request may spend per project state before it must reuse
+/// its best prior hits. A request with an explicit numeric component floor (45+
+/// parts, multi-domain) legitimately needs more catalog exploration than the base
+/// constant sized for small boards; without a stated floor, or below 24 parts,
+/// this is [`MAX_DISCOVERY_ROUNDS_PER_STATE`].
+fn discovery_rounds_for_intent(intent: &str) -> usize {
+    let floor = explicit_minimum_physical_components(intent).unwrap_or(0);
+    MAX_DISCOVERY_ROUNDS_PER_STATE + floor / 24
 }
 
 /// One chance for a model that has not touched the requested PCB workflow to
@@ -367,8 +309,7 @@ pub enum AgentEvent {
     /// `cache_read_tokens`, letting consumers bill cached prefixes correctly.
     Usage {
         /// Actual provider invocations represented by this event. This includes
-        /// main-loop, review, compaction, recovery, and failed invocations and
-        /// is deliberately separate from the main-loop request safety budget.
+        /// main-loop, review, compaction, recovery, and failed invocations.
         provider_requests: u64,
         input_tokens: u64,
         output_tokens: u64,
@@ -629,21 +570,13 @@ async fn stream_completion(
 pub enum StopReason {
     /// The model returned a final text with no pending tool calls — done.
     Completed,
-    /// The model kept requesting tools through the per-turn request ceiling.
-    ProviderRequestLimit {
-        /// Number of provider invocations made before the loop stopped.
+    /// The turn hit the optional, user-set request cap (`--max-requests` /
+    /// `agent.maxRequests`). It says nothing about the design: the work simply
+    /// stopped where the user asked it to.
+    MaxRequestsReached {
+        /// The cap that was configured, and therefore the requests made.
         requests: usize,
     },
-    /// The turn spent its wall-clock budget. This, not the request ceiling, is
-    /// the bound the product promises.
-    TimeLimit {
-        /// How long the turn had run when it stopped.
-        elapsed: Duration,
-    },
-    /// A non-cancellable project mutation timed out. Further mutations in the
-    /// same subturn are unsafe, so the loop reports a resumable handoff without
-    /// spending more provider requests on impossible same-turn recovery.
-    MutationTimedOut,
     /// The model stopped, but required end-to-end artifact checks did not pass.
     QualityGateFailed {
         /// Number of unresolved gate failures or review findings.
@@ -660,7 +593,8 @@ pub struct TurnOutcome {
     pub final_text: String,
     /// How many tool calls the loop handled.
     pub tool_calls_made: usize,
-    /// Whether the loop finished cleanly or stopped at a bounded safety guard.
+    /// Whether the model finished on its own, hit the user's request cap, or
+    /// left the quality gate unsatisfied.
     pub stop_reason: StopReason,
 }
 
@@ -684,21 +618,16 @@ pub struct Agent<P: Provider = GenaiProvider> {
     /// Highest project phase observed in this session. Tool availability only
     /// expands, avoiding stale-history/provider mismatches.
     tool_phase: ToolPhase,
-    /// When the user's turn began, and what it has already spent. A turn is one
-    /// or more subturns — the model's own work plus each review round — and the
-    /// per-turn budget covers all of them together, so the clock and request
-    /// ceiling belong to the turn, not to whichever subturn is running. `None`
-    /// until a turn starts one.
-    turn_budget: Option<TurnClock>,
-    turn_wall_clock: Duration,
+    /// Model requests this user turn has made. A turn is one or more subturns —
+    /// the model's own work plus each review round — so the optional user-set
+    /// cap in [`Agent::max_requests`] counts all of them together.
+    turn_requests: usize,
+    /// An optional, user-set ceiling on model requests per turn. `None` (the
+    /// default) means the turn runs until the model stops calling tools.
+    max_requests: Option<usize>,
+    /// Timed-out tool tasks a later mutation must wait for.
+    settling: SettlingTools,
     tool_seq: AtomicU64,
-}
-
-/// What a whole user turn has spent so far, shared by its subturns.
-#[derive(Clone, Copy)]
-struct TurnClock {
-    started: std::time::Instant,
-    provider_requests: usize,
 }
 
 impl<P: Provider> Agent<P> {
@@ -713,8 +642,9 @@ impl<P: Provider> Agent<P> {
             history: Vec::new(),
             turn_starts: Vec::new(),
             tool_phase,
-            turn_budget: None,
-            turn_wall_clock: TURN_WALL_CLOCK,
+            turn_requests: 0,
+            max_requests: None,
+            settling: SettlingTools::default(),
             tool_seq: AtomicU64::new(0),
         }
     }
@@ -725,10 +655,10 @@ impl<P: Provider> Agent<P> {
         &self.runtime
     }
 
-    /// Override the turn clock in deterministic loop tests.
-    #[doc(hidden)]
-    pub fn set_turn_wall_clock_for_test(&mut self, duration: Duration) {
-        self.turn_wall_clock = duration;
+    /// Set the optional user request cap for a turn. `None` (the default) lets a
+    /// turn run until the model stops calling tools.
+    pub fn set_max_requests(&mut self, max_requests: Option<usize>) {
+        self.max_requests = max_requests;
     }
 
     fn emit_pending_usage(&self, events: Events<'_>) {
@@ -875,7 +805,7 @@ impl<P: Provider> Agent<P> {
         Ok(outcome)
     }
 
-    /// Start a fresh whole-turn clock and request budget.
+    /// Start a fresh turn: its request count spans every subturn.
     fn start_turn(&mut self, events: Events<'_>) {
         emit(
             events,
@@ -885,10 +815,7 @@ impl<P: Provider> Agent<P> {
                 message: "turn started".to_owned(),
             },
         );
-        self.turn_budget = Some(TurnClock {
-            started: std::time::Instant::now(),
-            provider_requests: 0,
-        });
+        self.turn_requests = 0;
     }
 
     async fn run_agent_subturn(
@@ -902,7 +829,7 @@ impl<P: Provider> Agent<P> {
         self.turn_starts.push(current_turn_start);
         self.history.push(ChatMessage::user(instruction));
 
-        let budgets = TurnBudgets::for_intent(authoritative_intent);
+        let discovery_rounds = discovery_rounds_for_intent(authoritative_intent);
         let pcb_work_requested = request_requires_pcb_work(authoritative_intent);
         let fabrication_required = request_requires_fabrication(authoritative_intent);
         let mut applied = false;
@@ -911,89 +838,30 @@ impl<P: Provider> Agent<P> {
         let mut successful_place_parts = 0usize;
         let mut check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
-        let clock = *self.turn_budget.get_or_insert(TurnClock {
-            started: std::time::Instant::now(),
-            provider_requests: 0,
-        });
-        let started = clock.started;
-        let turn_wall_clock = self.turn_wall_clock;
-        let mut provider_requests = clock.provider_requests;
-        let mut wrap_up_sent = false;
+        let mut provider_requests = self.turn_requests;
         let mut provider_error_retries_left = MAX_PROVIDER_ERROR_RETRIES;
         let mut stream_transport_available = true;
         let mut tool_calls_made = 0usize;
         let mut tool_state_generation = 0u64;
         let mut discovery_rounds_used: HashMap<String, usize> = HashMap::new();
         let mut state_read_uses: HashMap<String, u64> = HashMap::new();
-        let mut timed_out_tool_calls: Vec<(String, Value, u64)> = Vec::new();
-        let mut last_tool_status: Option<String> = None;
         let mut pcb_recovery = PcbRecoveryState::default();
         let mut pcb_quality = PcbQualityState::default();
-        let mut progress = TurnProgress::from_project(&self.runtime);
-
         loop {
-            if provider_requests >= budgets.provider_requests {
-                progress.refresh_files(&self.runtime);
-                let final_text = progress.handoff(
-                    &format!(
-                        "Per-turn request budget reached after {provider_requests} model requests and {tool_calls_made} tool calls."
-                    ),
-                    started.elapsed(),
-                    last_tool_status.as_deref(),
-                );
-                emit(events, AgentEvent::AssistantText(final_text.clone()));
-                return Ok(TurnOutcome {
-                    applied,
-                    final_text,
-                    tool_calls_made,
-                    stop_reason: StopReason::ProviderRequestLimit {
-                        requests: provider_requests,
-                    },
-                });
-            }
-            if started.elapsed() >= turn_wall_clock {
-                progress.refresh_files(&self.runtime);
-                let final_text = progress.handoff(
-                    &format!(
-                        "Per-turn wall-clock budget reached after {}s and {tool_calls_made} tool calls.",
-                        started.elapsed().as_secs()
-                    ),
-                    started.elapsed(),
-                    last_tool_status.as_deref(),
-                );
-                emit(events, AgentEvent::AssistantText(final_text.clone()));
-                return Ok(TurnOutcome {
-                    applied,
-                    final_text,
-                    tool_calls_made,
-                    stop_reason: StopReason::TimeLimit {
-                        elapsed: started.elapsed(),
-                    },
-                });
-            }
-            let remaining = budgets.provider_requests - provider_requests;
-            // A wrap-up is advice about how to land work, so send it only once
-            // there is a partial state to preserve. Before that, the bounds alone
-            // end the turn and produce a structured continuation handoff.
-            let out_of_time = applied
-                && started.elapsed().as_secs_f64()
-                    >= turn_wall_clock.as_secs_f64() * WRAP_UP_AT_ELAPSED;
-            if !wrap_up_sent
-                && applied
-                && (remaining <= wrap_up_reserve(budgets.provider_requests) || out_of_time)
+            if let Some(cap) = self.max_requests
+                && provider_requests >= cap
             {
-                wrap_up_sent = true;
-                tracing::info!(remaining, out_of_time, "turn budget wrap-up nudge");
-                self.history.push(ChatMessage::user(if out_of_time {
-                    out_of_time_nudge()
-                } else {
-                    wrap_up_nudge(remaining)
-                }));
+                let final_text = max_requests_message(cap, tool_calls_made);
+                emit(events, AgentEvent::AssistantText(final_text.clone()));
+                return Ok(TurnOutcome {
+                    applied,
+                    final_text,
+                    tool_calls_made,
+                    stop_reason: StopReason::MaxRequestsReached { requests: cap },
+                });
             }
             provider_requests += 1;
-            if let Some(budget) = self.turn_budget.as_mut() {
-                budget.provider_requests = provider_requests;
-            }
+            self.turn_requests = provider_requests;
 
             let prior_phase = self.tool_phase;
             self.tool_phase = self.tool_phase.max(ToolPhase::observe(&self.runtime));
@@ -1002,15 +870,13 @@ impl<P: Provider> Agent<P> {
             }
             let state_reads_used = state_read_uses
                 .iter()
-                .filter(|(name, generation)| {
-                    name.as_str() == "read_schematic" || **generation == tool_state_generation
-                })
+                .filter(|(_, generation)| **generation == tool_state_generation)
                 .map(|(name, _)| name.clone())
                 .collect::<HashSet<_>>();
             let mut defs = tool_defs_for_phase(
                 self.tool_phase,
                 &discovery_rounds_used,
-                budgets.discovery_rounds_per_subturn,
+                discovery_rounds,
                 &state_reads_used,
             );
             if request_supplies_multiple_library_ids(authoritative_intent)
@@ -1047,15 +913,10 @@ impl<P: Provider> Agent<P> {
                     StreamCompletion::End { text, end } => (text, end),
                     StreamCompletion::MissingEnd { text } => {
                         stream_transport_available = false;
-                        if provider_requests >= budgets.provider_requests {
-                            progress.refresh_files(&self.runtime);
-                            let mut final_text = progress.handoff(
-                                &format!(
-                                    "Per-turn request budget reached after {provider_requests} model requests and {tool_calls_made} tool calls."
-                                ),
-                                started.elapsed(),
-                                last_tool_status.as_deref(),
-                            );
+                        if let Some(cap) = self.max_requests
+                            && provider_requests >= cap
+                        {
+                            let mut final_text = max_requests_message(cap, tool_calls_made);
                             if !text.trim().is_empty() {
                                 final_text.push_str("\n\nLast partial model response: ");
                                 final_text.push_str(text.trim());
@@ -1065,15 +926,11 @@ impl<P: Provider> Agent<P> {
                                 applied,
                                 final_text,
                                 tool_calls_made,
-                                stop_reason: StopReason::ProviderRequestLimit {
-                                    requests: provider_requests,
-                                },
+                                stop_reason: StopReason::MaxRequestsReached { requests: cap },
                             });
                         }
                         provider_requests += 1;
-                        if let Some(budget) = self.turn_budget.as_mut() {
-                            budget.provider_requests = provider_requests;
-                        }
+                        self.turn_requests = provider_requests;
                         let end = self
                             .client
                             .complete(&self.system, &self.history, &defs)
@@ -1148,7 +1005,6 @@ impl<P: Provider> Agent<P> {
             for call in &tool_calls {
                 tool_calls_made += 1;
                 let seq = self.next_tool_seq();
-                let phase_elapsed = started.elapsed();
                 let tool_started = Instant::now();
                 let args_digest = value_digest(&call.fn_arguments);
                 let span = tracing::info_span!(
@@ -1178,7 +1034,7 @@ impl<P: Provider> Agent<P> {
                         .get(&call.fn_name)
                         .copied()
                         .unwrap_or(0)
-                        >= budgets.discovery_rounds_per_subturn;
+                        >= discovery_rounds;
                 let discovery_batch_exhausted = budgeted_discovery
                     && discovery_calls_dispatched
                         .get(&call.fn_name)
@@ -1188,11 +1044,7 @@ impl<P: Provider> Agent<P> {
                 let repeated_read = is_state_scoped_read(&call.fn_name)
                     && state_read_uses
                         .get(&call.fn_name)
-                        .is_some_and(|generation| {
-                            call.fn_name == "read_schematic" || *generation == tool_state_generation
-                        });
-                let mutation_blocked = timed_out_mutation_name(&timed_out_tool_calls).is_some()
-                    && effect == ToolEffect::Mutating;
+                        .is_some_and(|generation| *generation == tool_state_generation);
 
                 let (mut content, images, image_path, dispatched) = if discovery_duplicate {
                     (
@@ -1238,17 +1090,6 @@ impl<P: Provider> Agent<P> {
                         None,
                         false,
                     )
-                } else if mutation_blocked {
-                    (
-                        json!({
-                            "error": "a prior mutation timed out and may still be running",
-                            "note": "no further mutation is safe in this turn"
-                        })
-                        .to_string(),
-                        Vec::new(),
-                        None,
-                        false,
-                    )
                 } else {
                     if budgeted_discovery {
                         if discovery_tools_started.insert(call.fn_name.clone()) {
@@ -1267,20 +1108,21 @@ impl<P: Provider> Agent<P> {
                     result
                 };
                 let parsed = parse_or_null(&content);
-                progress.observe(&call.fn_name, &parsed, phase_elapsed, dispatched);
-                if tool_result_is_timeout(&parsed) {
-                    timed_out_tool_calls.push((
-                        call.fn_name.clone(),
-                        call.fn_arguments.clone(),
-                        tool_state_generation,
-                    ));
-                }
                 if dispatched && is_state_scoped_read(&call.fn_name) {
                     state_read_uses.insert(call.fn_name.clone(), tool_state_generation);
                 }
                 let prior_generation = tool_state_generation;
                 tool_state_generation =
                     next_tool_state_generation(tool_state_generation, dispatched, effect, &parsed);
+                if tool_state_generation != prior_generation {
+                    // The per-state allowances are about repeating work on an
+                    // unchanged project. A committed change is new ground: the
+                    // next block may legitimately need the catalog again, and a
+                    // premature finish after it deserves the same nudge.
+                    discovery_rounds_used.clear();
+                    check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
+                    pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
+                }
                 if dispatched && schematic_mutation_succeeded(&call.fn_name, &parsed) {
                     applied = true;
                     schematic_mutated = true;
@@ -1320,7 +1162,6 @@ impl<P: Provider> Agent<P> {
                 let elapsed_ms = millis(tool_started.elapsed());
                 tracing::info!(parent: &span, elapsed_ms, "tool finished");
                 emit_result_diagnostic(events, &call.fn_name, &result);
-                last_tool_status = Some(format!("{}: {summary}", call.fn_name));
                 emit(
                     events,
                     AgentEvent::ToolFinished {
@@ -1345,24 +1186,6 @@ impl<P: Provider> Agent<P> {
                 prune_stale_images(&mut self.history);
             }
             prune_stale_tool_results(&mut self.history);
-
-            if let Some(tool) = timed_out_mutation_name(&timed_out_tool_calls) {
-                progress.refresh_files(&self.runtime);
-                let final_text = progress.handoff(
-                    &format!(
-                        "`{tool}` exceeded its operation deadline and may still be settling; no more mutations are safe in this turn."
-                    ),
-                    started.elapsed(),
-                    last_tool_status.as_deref(),
-                );
-                emit(events, AgentEvent::AssistantText(final_text.clone()));
-                return Ok(TurnOutcome {
-                    applied,
-                    final_text,
-                    tool_calls_made,
-                    stop_reason: StopReason::MutationTimedOut,
-                });
-            }
 
             if self.history.len().saturating_sub(current_turn_start) > 96 {
                 prune_stale_tool_results(&mut self.history);
@@ -1392,7 +1215,7 @@ impl<P: Provider> Agent<P> {
         }
         for round in 0..=max_fix {
             emit(events, AgentEvent::ReviewStarted { round });
-            let review = check_schematic_review(&self.runtime).await;
+            let review = check_schematic_review(&self.runtime, &self.settling).await;
             emit(
                 events,
                 AgentEvent::Reviewed {
@@ -1429,7 +1252,7 @@ impl<P: Provider> Agent<P> {
     }
 
     async fn run_tool_call(&self, call: &ToolCall) -> (String, Vec<Binary>, Option<String>, bool) {
-        let outcome = run_kicad_tool(&self.runtime, call).await;
+        let outcome = run_kicad_tool(&self.runtime, &self.settling, call).await;
         (
             tool_result_text(&outcome.value),
             outcome.images,
@@ -1477,222 +1300,15 @@ fn emit_result_diagnostic(events: Events<'_>, name: &str, result: &Value) {
     );
 }
 
-#[derive(Default)]
-struct TurnProgress {
-    schematic_parts: Option<usize>,
-    board_parts: Option<(usize, usize)>,
-    erc: Option<(u64, u64)>,
-    board_exists: bool,
-    board_started_at: Option<Duration>,
-    routed: Option<(u64, u64)>,
-    drc: Option<String>,
-    blocker: Option<String>,
-}
-
-impl TurnProgress {
-    fn from_project(runtime: &AgentRuntime) -> Self {
-        let mut progress = Self {
-            board_started_at: runtime.pcb_path().exists().then_some(Duration::ZERO),
-            ..Self::default()
-        };
-        progress.refresh_files(runtime);
-        progress
-    }
-
-    fn refresh_files(&mut self, runtime: &AgentRuntime) {
-        self.schematic_parts = read_schematic_part_count(runtime);
-        self.board_exists = runtime.pcb_path().exists();
-        self.board_parts = self
-            .board_exists
-            .then(|| run_tool("get_board", json!({}), runtime).ok())
-            .flatten()
-            .and_then(|board| board_placement_counts(&board));
-        if !self.board_exists {
-            self.board_parts = None;
-            self.routed = None;
-            self.drc = None;
-        }
-    }
-
-    fn observe(&mut self, name: &str, value: &Value, elapsed: Duration, dispatched: bool) {
-        if dispatched && is_pcb_stage_tool(name) && self.board_started_at.is_none() {
-            self.board_started_at = Some(elapsed);
-        }
-        match name {
-            "check_schematic" => {
-                self.erc = value
-                    .get("errors")
-                    .and_then(Value::as_u64)
-                    .zip(value.get("warnings").and_then(Value::as_u64));
-            }
-            "sync_board" | "get_board" | "place_board" => {
-                self.board_exists |= value.get("error").is_none() && name == "sync_board";
-                if let Some(counts) = board_placement_counts(value) {
-                    self.board_parts = Some(counts);
-                }
-            }
-            "route_board" => {
-                self.routed = value
-                    .get("routed_connection_count")
-                    .and_then(Value::as_u64)
-                    .zip(value.get("total_connection_count").and_then(Value::as_u64));
-            }
-            "check_board" => {
-                let blocking = value.get("blocking_findings").and_then(Value::as_u64);
-                let unconnected = value.get("unconnected_items").and_then(Value::as_u64);
-                self.drc = if check_board_is_clean(value) {
-                    Some("clean".to_string())
-                } else {
-                    blocking.map(|blocking| {
-                        format!(
-                            "{blocking} blocking finding(s), {} unconnected item(s)",
-                            unconnected.unwrap_or(0)
-                        )
-                    })
-                };
-            }
-            _ => {}
-        }
-        if let Some(error) = value.get("error").and_then(Value::as_str) {
-            self.blocker = Some(format!("`{name}`: {error}"));
-        } else if value.get("ok").and_then(Value::as_bool) == Some(false) {
-            self.blocker = value
-                .get("note")
-                .and_then(Value::as_str)
-                .map(|note| format!("`{name}`: {note}"));
-        }
-    }
-
-    fn handoff(&self, boundary: &str, elapsed: Duration, last_tool_status: Option<&str>) -> String {
-        let parts = self.board_parts.map_or_else(
-            || {
-                self.schematic_parts
-                    .map_or_else(|| "unknown".to_string(), |parts| format!("{parts}/{parts}"))
-            },
-            |(placed, total)| format!("{placed}/{total}"),
-        );
-        let erc = self.erc.map_or_else(
-            || "not checked this turn".to_string(),
-            |(errors, warnings)| format!("{errors} error(s), {warnings} warning(s)"),
-        );
-        let routed = self.routed.map_or_else(
-            || "not measured this turn".to_string(),
-            |(routed, total)| format!("{routed}/{total}"),
-        );
-        let drc = self.drc.as_deref().unwrap_or("not checked this turn");
-        let blocker = self
-            .blocker
-            .as_deref()
-            .or(last_tool_status)
-            .unwrap_or("none recorded; inspect the files before the next edit");
-        let (phase, calls) = self.next_phase();
-        let schematic_budget = self.board_started_at.unwrap_or(elapsed).min(elapsed);
-        let board_budget = elapsed.saturating_sub(schematic_budget);
-        format!(
-            "## Partial state\n\
-             - Turn boundary: {boundary}\n\
-             - Phase reached: {}\n\
-             - Budget used: schematic {}s, board {}s\n\
-             - Parts placed: {parts}\n\
-             - ERC: {erc}\n\
-             - Board: {}\n\
-             - Routed: {routed}\n\
-             - DRC: {drc}\n\
-             - Blocked: {blocker}\n\n\
-             ## Next steps\n\
-             - {calls}\n\
-             - Phase: {phase}\n\
-             - Continue from the project files in a new turn; the per-turn clock and request budget reset.",
-            self.phase_reached(),
-            schematic_budget.as_secs(),
-            board_budget.as_secs(),
-            if self.board_exists { "yes" } else { "no" },
-        )
-    }
-
-    fn phase_reached(&self) -> &'static str {
-        if !self.board_exists {
-            return if self.erc.is_some_and(|(errors, _)| errors == 0) {
-                "schematic ERC-error-free; board not started"
-            } else {
-                "schematic"
-            };
-        }
-        if self.drc.as_deref() == Some("clean") {
-            "board DRC-clean"
-        } else if self.routed.is_some() {
-            "board routing"
-        } else if self.board_parts.is_some() {
-            "board placement"
-        } else {
-            "board sync"
-        }
-    }
-
-    fn next_phase(&self) -> (&'static str, &'static str) {
-        if !self.board_exists && self.erc.is_some_and(|(errors, _)| errors == 0) {
-            return (
-                "Board phase 1 — choose layers, create the outline, and place connectors/mechanical parts",
-                "`sync_board({rules:{layer_count:...},intent:...})`, `place_board({refs:[...],intent:...})`, `render_board({})`, `check_board({})`",
-            );
-        }
-        if self.schematic_parts.is_none() {
-            return (
-                "Schematic phase 1 — power entry",
-                "`project_info({})`, `search_symbols({queries:[...]})`, `place_parts({parts:[...]})`, `render_schematic({})`, `check_schematic({})`",
-            );
-        }
-        if self.erc.is_none_or(|(errors, _)| errors > 0) {
-            return (
-                "Current schematic block — inspect or repair before advancing",
-                "`read_schematic({})`, a targeted schematic mutator, `render_schematic({})`, `check_schematic({})`",
-            );
-        }
-        if self
-            .board_parts
-            .is_some_and(|(placed, total)| placed < total)
-        {
-            return (
-                "Next unfinished board placement phase — connectors/mechanical, big ICs, satellites, then remaining parts",
-                "`get_board({})`, `place_board({refs:[...],intent:...})`, `render_board({})`, `check_board({})`",
-            );
-        }
-        if self.routed.is_some_and(|(routed, total)| routed < total) {
-            return (
-                "Board phase 5 or 6 — route the next blocked critical or remaining net batch",
-                "`get_board({net:\"...\"})`, make one concrete fix if blocked, `route_board({nets:[...]})`, `render_board({})`, `check_board({})`",
-            );
-        }
-        if self.drc.as_deref() == Some("clean") {
-            return (
-                "Board phase 8 — fabrication export",
-                "`get_board({})`, `render_board({})`, `check_board({})`, then `export_fab({})` only if the check remains clean",
-            );
-        }
-        (
-            "Board phase 7 — DRC and routing-progress loop",
-            "`get_board({include_copper:true})`, `check_board({})`, fix named blockers, `route_board({nets:[...]})`, `refill_zones({})`, `render_board({})`, `check_board({})`",
-        )
-    }
-}
-
-fn read_schematic_part_count(runtime: &AgentRuntime) -> Option<usize> {
-    let schematic = gordian_tools_sch::run("read_schematic", json!({}), runtime)?.ok()?;
-    let header = schematic.as_str()?.lines().next()?;
-    header
-        .split_once(" — ")?
-        .1
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
-}
-
-fn board_placement_counts(value: &Value) -> Option<(usize, usize)> {
-    let summary = value.get("summary").unwrap_or(value);
-    let total = summary.get("part_count")?.as_u64()? as usize;
-    let unplaced = summary.get("unplaced")?.as_array()?.len();
-    Some((total.saturating_sub(unplaced), total))
+/// What the loop answers with when the optional user-set cap ends a turn. It
+/// names the cap as the cause so nobody reads it as a statement about the design.
+fn max_requests_message(cap: usize, tool_calls_made: usize) -> String {
+    format!(
+        "Stopped at the user-set cap of {cap} model requests \
+         (`--max-requests` / `agent.maxRequests`) after {tool_calls_made} tool calls. \
+         This is the configured limit, not a judgement about the work: raise or remove \
+         the cap and run again to let the turn finish."
+    )
 }
 
 fn schematic_mutation_succeeded(name: &str, value: &Value) -> bool {
@@ -1911,17 +1527,6 @@ fn request_requires_fabrication(user_msg: &str) -> bool {
         || request.contains("export fab")
         || request.contains("gerber")
         || request.contains("board house")
-}
-
-/// The timed-out call whose edit may still be in flight — the reason the turn cannot
-/// safely continue. A mutation that enforces its own deadline is not one of those.
-fn timed_out_mutation_name(timed_out: &[(String, Value, u64)]) -> Option<&str> {
-    timed_out
-        .iter()
-        .find(|(name, _, _)| {
-            tool_effect(name) == ToolEffect::Mutating && !enforces_own_deadline(name)
-        })
-        .map(|(name, _, _)| name.as_str())
 }
 
 fn tool_result_is_timeout(value: &Value) -> bool {
@@ -2215,21 +1820,75 @@ fn fix_prompt(defects: &[String]) -> String {
 }
 
 /// Run one KiCAD tool on the blocking pool.
-async fn run_kicad_tool(ctx: &Arc<AgentRuntime>, call: &ToolCall) -> ToolOutcome {
-    into_outcome(run_blocking(ctx, &call.fn_name, call.fn_arguments.clone()).await)
+async fn run_kicad_tool(
+    ctx: &Arc<AgentRuntime>,
+    settling: &SettlingTools,
+    call: &ToolCall,
+) -> ToolOutcome {
+    into_outcome(run_blocking(ctx, settling, &call.fn_name, call.fn_arguments.clone()).await)
 }
 
-async fn run_blocking(ctx: &Arc<AgentRuntime>, name: &str, input: Value) -> Result<Value> {
+/// Tool tasks that outlived their deadline. `spawn_blocking` cannot be
+/// cancelled, so a timed-out mutation may still be writing; parking its handle
+/// here lets the next mutation wait for it instead of racing it.
+#[derive(Default)]
+struct SettlingTools(Mutex<Vec<(String, tokio::task::JoinHandle<Result<Value>>)>>);
+
+impl SettlingTools {
+    fn park(&self, name: &str, handle: tokio::task::JoinHandle<Result<Value>>) {
+        self.0
+            .lock()
+            .expect("settling tools poisoned")
+            .push((name.to_string(), handle));
+    }
+
+    /// Wait up to `grace` for every parked task, returning the names of those
+    /// that are still running.
+    async fn settle(&self, grace: Duration) -> Vec<String> {
+        let parked = std::mem::take(&mut *self.0.lock().expect("settling tools poisoned"));
+        let mut unsettled = Vec::new();
+        for (name, mut handle) in parked {
+            match tokio::time::timeout(grace, &mut handle).await {
+                Ok(_) => tracing::info!(tool = %name, "timed-out tool settled"),
+                Err(_) => {
+                    unsettled.push(name.clone());
+                    self.park(&name, handle);
+                }
+            }
+        }
+        unsettled
+    }
+}
+
+async fn run_blocking(
+    ctx: &Arc<AgentRuntime>,
+    settling: &SettlingTools,
+    name: &str,
+    input: Value,
+) -> Result<Value> {
+    let timeout = tool_timeout(name);
+    if tool_effect(name) == ToolEffect::Mutating {
+        let unsettled = settling.settle(timeout).await;
+        if !unsettled.is_empty() {
+            anyhow::bail!(
+                "`{}` is still running past its deadline and may be writing the project; \
+                 no other mutation is safe until it returns",
+                unsettled.join("`, `")
+            );
+        }
+    }
     let ctx = Arc::clone(ctx);
-    let name = name.to_string();
-    let timeout = tool_timeout(&name);
-    let handle = tokio::task::spawn_blocking({
-        let name = name.clone();
+    let owned_name = name.to_string();
+    let mut handle = tokio::task::spawn_blocking({
+        let name = owned_name.clone();
         move || run_tool(&name, input, &ctx)
     });
-    match tokio::time::timeout(timeout, handle).await {
+    match tokio::time::timeout(timeout, &mut handle).await {
         Ok(joined) => joined.map_err(|e| anyhow::anyhow!("tool execution task failed: {e}"))?,
-        Err(_) => anyhow::bail!(tool_timeout_message(&name, timeout)),
+        Err(_) => {
+            settling.park(&owned_name, handle);
+            anyhow::bail!(tool_timeout_message(&owned_name, timeout))
+        }
     }
 }
 
@@ -2282,13 +1941,16 @@ fn tool_timeout(name: &str) -> Duration {
 /// Tools that hold themselves to a wall-clock budget and write nothing once it has
 /// passed (`sch_floorplan::live::PlacementBudget`): the search is cooperatively
 /// cancelled and the document restored, so timing one out cannot leave a half-applied
-/// edit and the turn need not be abandoned.
+/// edit and later mutations stay safe.
 fn enforces_own_deadline(name: &str) -> bool {
     matches!(name, "place_parts" | "arrange")
 }
 
-async fn check_schematic_review(ctx: &Arc<AgentRuntime>) -> ReviewOutcome {
-    let value = match run_blocking(ctx, "check_schematic", json!({})).await {
+async fn check_schematic_review(
+    ctx: &Arc<AgentRuntime>,
+    settling: &SettlingTools,
+) -> ReviewOutcome {
+    let value = match run_blocking(ctx, settling, "check_schematic", json!({})).await {
         Ok(value) => value,
         Err(error) => {
             return ReviewOutcome {
@@ -2910,79 +2572,38 @@ mod tests {
     use crate::prompts::system_prompt;
     use crate::testing::ScriptedClient;
 
+    /// The user-set cap is the only stop the loop imposes, and it has to say so.
     #[tokio::test]
-    async fn expired_wall_clock_returns_structured_handoff() {
+    async fn the_user_set_request_cap_reports_itself_as_such() {
         let Some(ctx) = AgentRuntime::detect_for_test() else {
             eprintln!("SKIP: no KiCAD detected");
             return;
         };
-        let mut agent = Agent::new(ScriptedClient::new(Vec::new()), ctx, system_prompt());
-        agent.turn_budget = Some(TurnClock {
-            started: std::time::Instant::now() - TURN_WALL_CLOCK,
-            provider_requests: 0,
-        });
+        let script = (0..4)
+            .map(|index| {
+                crate::testing::tool_call(&format!("read-{index}"), "project_info", json!({}))
+            })
+            .collect();
+        let mut agent = Agent::new(ScriptedClient::new(script), ctx, system_prompt());
+        agent.set_max_requests(Some(2));
 
         let outcome = agent
-            .run_agent_subturn("continue", "continue", None)
+            .run_turn("inspect the project repeatedly", None)
             .await
             .unwrap();
 
-        assert!(matches!(outcome.stop_reason, StopReason::TimeLimit { .. }));
-        assert!(outcome.final_text.starts_with("## Partial state\n"));
-        assert!(outcome.final_text.contains("\n## Next steps\n"));
-        assert!(outcome.final_text.contains("Per-turn wall-clock budget"));
-        assert!(!outcome.final_text.contains("cannot be completed"));
-    }
-
-    #[test]
-    fn wall_clock_stop_yields_structured_handoff() {
-        let mut progress = TurnProgress {
-            schematic_parts: Some(18),
-            board_parts: Some((18, 18)),
-            erc: Some((0, 2)),
-            board_exists: true,
-            board_started_at: Some(Duration::from_secs(145)),
-            routed: Some((23, 41)),
-            drc: Some("3 blocking finding(s), 2 unconnected item(s)".to_string()),
-            blocker: Some("`route_board`: crystal net blocked by U1 courtyard".to_string()),
-        };
-        progress.observe(
-            "route_board",
-            &json!({
-                "routed_connection_count": 24,
-                "total_connection_count": 41
-            }),
-            Duration::from_secs(200),
-            true,
-        );
-
-        let handoff = progress.handoff(
-            "Per-turn wall-clock budget reached after 270s and 19 tool calls.",
-            Duration::from_secs(270),
-            None,
-        );
-
-        assert!(handoff.starts_with("## Partial state\n"), "{handoff}");
-        assert!(
-            handoff.contains("- Phase reached: board routing"),
-            "{handoff}"
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::MaxRequestsReached { requests: 2 }
         );
         assert!(
-            handoff.contains("- Budget used: schematic 145s, board 125s"),
-            "{handoff}"
+            outcome
+                .final_text
+                .contains("user-set cap of 2 model requests"),
+            "{}",
+            outcome.final_text
         );
-        assert!(handoff.contains("- Parts placed: 18/18"), "{handoff}");
-        assert!(
-            handoff.contains("- ERC: 0 error(s), 2 warning(s)"),
-            "{handoff}"
-        );
-        assert!(handoff.contains("- Board: yes"), "{handoff}");
-        assert!(handoff.contains("- Routed: 24/41"), "{handoff}");
-        assert!(handoff.contains("- DRC: 3 blocking"), "{handoff}");
-        assert!(handoff.contains("\n## Next steps\n"), "{handoff}");
-        assert!(handoff.contains("`route_board({nets:[...]})`"), "{handoff}");
-        assert!(handoff.contains("per-turn clock and request budget reset"));
-        assert!(!handoff.contains("cannot be completed"));
+        assert!(!outcome.final_text.contains("Partial state"));
     }
 
     #[test]
@@ -2990,7 +2611,7 @@ mod tests {
         let defs = tool_defs_for_phase(
             ToolPhase::Schematic,
             &HashMap::new(),
-            MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
+            MAX_DISCOVERY_ROUNDS_PER_STATE,
             &HashSet::new(),
         );
 

@@ -28,8 +28,11 @@ const DEFAULT_PROJECT_DIR: &str = "gordian-project";
 
 const USAGE: &str = "usage:
   gordian                              print version
-  gordian agent [--project <dir>] [--no-review] [--input <file|->] [\"<prompt>\"]
+  gordian agent [--project <dir>] [--no-review] [--input <file|->]
+                [--max-requests <n>] [\"<prompt>\"]
                                        run one or more agent turns
+                                       (a turn ends when the model stops calling
+                                       tools; --max-requests caps it, default none)
   gordian tui [--project <dir>]        launch the copilot cockpit
 
 options:
@@ -65,7 +68,7 @@ fn main() -> ExitCode {
         Some("agent") if is_help_request(&args[1..]) => {
             logging::init_stderr_only();
             tracing::info!(
-                "usage: gordian agent [--project <dir>] [--no-review] [--input <file|->] [\"<prompt>\"]\n\nRun one or more headless agent turns."
+                "usage: gordian agent [--project <dir>] [--no-review] [--input <file|->] [--max-requests <n>] [\"<prompt>\"]\n\nRun one or more headless agent turns. A turn ends when the model stops calling tools; --max-requests sets an optional ceiling (default: none)."
             );
             ExitCode::SUCCESS
         }
@@ -203,19 +206,24 @@ struct AgentInvocation {
     /// Run the independent post-commit review→fix pass (default on; `--no-review`
     /// turns it off). Read-only/conversational turns never trigger it regardless.
     review: bool,
+    /// Optional user-set ceiling on model requests per turn (`--max-requests`),
+    /// overriding `agent.maxRequests`. `None` means no cap: the turn runs until
+    /// the model stops calling tools.
+    max_requests: Option<usize>,
 }
 
 /// Parse `agent` args into an [`AgentInvocation`].
 ///
 /// Accepts both `agent --project <dir> "<prompt>"` and `agent <dir> "<prompt>"`,
 /// as well as `agent "<prompt>"` (default project dir), with optional
-/// `--no-review` and `--input <file|->` flags. A prompt is optional only when
-/// input supplies the session turns.
+/// `--no-review`, `--input <file|->`, and `--max-requests <n>` flags. A prompt is
+/// optional only when input supplies the session turns.
 fn parse_agent_args(args: &[String]) -> Result<AgentInvocation> {
     let mut project_dir: Option<PathBuf> = None;
     let mut positionals: Vec<String> = Vec::new();
     let mut review = true;
     let mut input: Option<PathBuf> = None;
+    let mut max_requests: Option<usize> = None;
     let mut parse_options = true;
 
     let mut i = 0;
@@ -238,6 +246,22 @@ fn parse_agent_args(args: &[String]) -> Result<AgentInvocation> {
             "--no-review" if parse_options => {
                 review = false;
                 i += 1;
+            }
+            "--max-requests" if parse_options => {
+                if max_requests.is_some() {
+                    bail!("max requests was specified more than once");
+                }
+                let value = args
+                    .get(i + 1)
+                    .context("--max-requests requires a positive integer")?;
+                let value: usize = value
+                    .parse()
+                    .with_context(|| format!("--max-requests expects an integer, got `{value}`"))?;
+                if value == 0 {
+                    bail!("--max-requests must be at least 1");
+                }
+                max_requests = Some(value);
+                i += 2;
             }
             "--input" if parse_options => {
                 if input.is_some() {
@@ -278,6 +302,7 @@ fn parse_agent_args(args: &[String]) -> Result<AgentInvocation> {
         prompt,
         input,
         review,
+        max_requests,
     })
 }
 
@@ -570,6 +595,7 @@ fn run_agent_command(args: &[String]) -> Result<()> {
         prompt,
         input,
         review,
+        max_requests,
     } = parse_agent_args(args)?;
     let mut prompts = prompt.into_iter().collect::<Vec<_>>();
     if let Some(path) = input.as_ref() {
@@ -626,6 +652,11 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("starting the Tokio runtime")?;
     let system = system_prompt();
     let mut agent = Agent::new(client, ctx, system);
+    let max_requests = max_requests.or(config.agent.max_requests);
+    agent.set_max_requests(max_requests);
+    if let Some(cap) = max_requests {
+        tracing::info!("max requests: {cap} per turn (user-set)");
+    }
 
     tracing::info!(target: logging::EVENTS_TARGET, "--- agent events ---");
     let run = runtime.block_on(async {
@@ -727,7 +758,7 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     tracing::info!("applied (wrote schematic): {}", outcome.applied);
     tracing::info!("stop reason: {:?}", outcome.stop_reason);
     tracing::info!(
-        "provider requests: {} (all model invocations; separate from the agent main-request safety budget)",
+        "provider requests: {} (all model invocations, including review and recovery calls)",
         usage.provider_requests
     );
     tracing::info!(
@@ -741,10 +772,10 @@ fn run_agent_command(args: &[String]) -> Result<()> {
 
     // 6. Final ERC: re-run on whatever the agent produced (the source of truth).
     tracing::info!("--- ERC ---");
-    let turn_is_partial = outcome.stop_reason != StopReason::Completed;
+    let stopped_at_user_cap = matches!(outcome.stop_reason, StopReason::MaxRequestsReached { .. });
     if !sch_path.exists() {
         tracing::warn!("no schematic was written at {}", sch_path.display());
-        if turn_is_partial {
+        if stopped_at_user_cap {
             return Ok(());
         }
         bail!("the agent did not produce a schematic");
@@ -759,9 +790,9 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     if report.error_count() > 0 {
         // A nonzero ERC error count is real signal, not a tool failure — surface
         // it as a failing exit so scripts notice, but after printing the path.
-        if turn_is_partial {
+        if stopped_at_user_cap {
             tracing::warn!(
-                "partial turn handed back with {} ERC error(s); continue from the saved files",
+                "the user-set request cap ended the turn with {} ERC error(s) still open",
                 report.error_count()
             );
         } else {
@@ -789,6 +820,36 @@ mod tests {
         assert_eq!(inv.project_dir, PathBuf::from("/tmp/demo"));
         assert_eq!(inv.prompt.as_deref(), Some("make a board"));
         assert!(inv.review, "review defaults on");
+    }
+
+    /// The cap is off unless the user asks for one, and a nonsense value is
+    /// rejected rather than silently ignored.
+    #[test]
+    fn parses_the_optional_user_request_cap() {
+        let inv = parse_agent_args(&["make a board".into()]).unwrap();
+        assert_eq!(inv.max_requests, None, "no cap by default");
+
+        let inv = parse_agent_args(&["--max-requests".into(), "40".into(), "make a board".into()])
+            .unwrap();
+        assert_eq!(inv.max_requests, Some(40));
+
+        for bad in [
+            vec!["--max-requests".into(), "0".into(), "p".into()],
+            vec!["--max-requests".into(), "lots".into(), "p".into()],
+            vec!["--max-requests".into()],
+            vec![
+                "--max-requests".into(),
+                "3".into(),
+                "--max-requests".into(),
+                "4".into(),
+                "p".into(),
+            ],
+        ] {
+            assert!(
+                parse_agent_args(&bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
     }
 
     #[test]

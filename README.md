@@ -141,8 +141,40 @@ VLM-judged suite under `quality/` runs natural-language create/edit/replace case
 
 ```sh
 python3 quality/run.py --list
-python3 quality/run.py --question "is the board production-ready?" --max-turns 4 create-hard-pcb
-python3 quality/run.py --suite schematic --output quality/runs/schematic
+python3 quality/run.py --question "is the board production-ready?" create-hard-pcb
+python3 quality/run.py --suite schematic --jobs 2 --output quality/runs/schematic
+```
+
+Suites: `schematic` (`dataset-*` + `prompt-*`, the schematic benchmark below),
+`campaign` (end-to-end schematic+PCB), `live-edit` (`sch-*` tool cases), `pcb`,
+`all`. `--jobs N` runs N cases at a time.
+
+### The schematic benchmark (`--suite schematic`)
+
+Fourteen schematic-only cases, scored on the drawing the agent delivers.
+
+* `dataset-*` (8): a human-drawn sheet from `~/kicad-scraper/dataset` — single
+  sheet, stock-library symbols only, 20-60 parts, two per size band — reduced to
+  its netlist by `tools/sch_netlist.py`. The prompt carries that netlist — every part
+  with its lib id and value, every pin's net — and the sheet title, nothing else.
+  `netlist_matches_reference` compares KiCAD's netlist of the delivered sheet with
+  KiCAD's netlist of the human original, pin set for pin set; the human sheet and
+  its render stay out of the agent's project.
+* `prompt-*` (6): generic circuit prompts (Sallen-Key filter + gain, 555 blinker +
+  LDO, BJT preamp, H-bridge, Arduino-style board, Blue Pill) with a part-count floor.
+
+Every schematic critic score is calibrated against a human sheet rated 9 — equal
+to it is a 9, better a 10 — read three times with the modal score kept
+(`tools/schematic_critic.py --anchor ... --samples 3`). A `dataset-*` case anchors
+on its own human original (recorded as `critic_vs_reference`); everything else on
+`quality/anchor/schematic-9.png`. The anchor used is recorded as `critic_anchor`
+in `result.json`.
+
+Regenerate the dataset cases (deterministic) with:
+
+```sh
+python3 tools/sch_netlist.py cases
+python3 tools/sch_netlist.py extract SHEET.kicad_sch -o netlist.json
 ```
 
 The runner uses the same `llm.endpoint`, `llm.apiKey`, and `llm.model` from the
@@ -159,16 +191,18 @@ and total `elapsed_seconds` remain recorded facts. Edit and replacement cases
 keep their exact moved/lost/added and connectivity checks. Rubric assertions use
 `expect: fact OP JSON` or `expect: len(fact) OP JSON`.
 
-If the agent's final reply says its wall-clock or request budget ended the turn
-and required files or clean checks are missing, the runner sends
-`continue from the current state: ...` through `--input -`. It repeats up to
-`--max-turns` (default 4) and grades only the accumulated final state. Every turn
-records seconds, provider requests, tool calls, refusals, loop smells, and a
-self-diagnosis in `result.json` under `turns[]`.
+One case is one prompt and one agent run, carried to completion: the agent loop
+has no per-turn time or request budget, so the harness never asks it to continue.
+The run records `agent_seconds`, provider requests, tool calls, refusals, loop
+smells, the agent's own final reply, its transcript, and a self-diagnosis in
+`result.json`. A user who wants a ceiling anyway sets `--max-requests <n>` on
+`gordian agent` or `agent.maxRequests` in the config; stopping there is reported
+as the user's cap, never as a partial state.
 
-Each turn also produces `artifacts/phase-N-schematic.png` and/or
-`artifacts/phase-N-pcb.png`. `artifacts/gallery.html` shows the phases side by
-side with tool-call and ERC/DRC captions, and `findings.md` links the gallery.
+The run produces `artifacts/phase-1-schematic.png` and/or
+`artifacts/phase-1-pcb.png` beside the `before` renders. `artifacts/gallery.html`
+shows them side by side with tool-call and ERC/DRC captions, and `findings.md`
+links the gallery.
 The final human-look judge compares each available render with the closest-size
 human-authored KiCad demo, rendered by KiCad 10 and cached under
 `quality/references/`.

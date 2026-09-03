@@ -300,3 +300,17 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   before moving), pre-existing symbols never move; snapshot gate green. Integrated gate + push running.
   Open follow-up: `region.rs slide_block` early-returns on `clear` without `on_page` (may become moot
   under layout trees).
+- no-turn-budget merged (gate running): wall clock, request cap, handoff, harness continuation all
+  deleted; only an off-by-default `--max-requests` remains; `SettlingTools` parks timed-out mutations
+  instead of dead-ending; per-state discovery allowances reset on commit. Single-run audio preamp:
+  52 requests, 407 s, routed 23/23, DRC 0, 17 fab files, model stopped itself. Next: campaign round 7
+  (one run per case, no cap) after the push.
+- Pushed 7abb6012 (no-turn-budget on origin). Campaign round 7 (camp10: one uncapped run per case)
+  running. In flight: text-box-model, sch-qc-suite (baseline on current main), layout-trees (+ engine
+  deletion). Next: merge those, run the schematic suite + campaign as round 8.
+- sch-qc-suite merged + pushed: `--suite schematic` (8 dataset cases: netlist → draw, compared with
+  the human original by KiCAD netlist and an anchored critic; 6 prompt cases), `--jobs N`,
+  `tools/sch_netlist.py`. Baseline on main: 1/14 pass, critic ≤ 8, netlist reproduced on 3/8 (the
+  agent invents parts despite "do not add") — defects: sprawl (14/14), text over circuitry (5),
+  no signal-flow grouping (6). These are the targets for lane/layout-trees. Follow-up: when the
+  prompt says not to add parts, completeness gaps must be silent.
