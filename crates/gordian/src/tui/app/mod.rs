@@ -833,16 +833,16 @@ mod tests {
         assert_eq!(last.level, NoticeLevel::Plain);
         assert!(!a.running && a.turn_started.is_none());
 
-        // Per-turn budget → resumable partial state, distinct from a clean completion.
+        // The user's own cap → named as the user's cap, never as a partial state.
         let mut a = app();
         type_str(&mut a, "go");
         a.update(Msg::Submit);
-        a.update(Msg::TurnEnded(TurnEndReason::ProviderRequestLimit {
+        a.update(Msg::TurnEnded(TurnEndReason::MaxRequestsReached {
             requests: 32,
         }));
         let last = a.transcript.last().unwrap();
-        assert!(last.text.contains("32 model requests"), "{}", last.text);
-        assert!(last.text.contains("continue when ready"), "{}", last.text);
+        assert!(last.text.contains("your 32-request cap"), "{}", last.text);
+        assert!(!last.text.contains("partial state"), "{}", last.text);
         assert_eq!(last.level, NoticeLevel::Plain);
 
         // Artifact/review quality failure → red and explicit, never "completed".
@@ -855,20 +855,6 @@ mod tests {
         let last = a.transcript.last().unwrap();
         assert!(last.text.contains("quality gate failed"), "{}", last.text);
         assert!(last.text.contains("2 unresolved"), "{}", last.text);
-        assert_eq!(last.level, NoticeLevel::Error);
-
-        // Non-cancellable mutation timeout → red and explicit about background work.
-        let mut a = app();
-        type_str(&mut a, "go");
-        a.update(Msg::Submit);
-        a.update(Msg::TurnEnded(TurnEndReason::MutationTimedOut));
-        let last = a.transcript.last().unwrap();
-        assert!(last.text.contains("mutation timed out"), "{}", last.text);
-        assert!(
-            last.text.contains("may still be finishing"),
-            "{}",
-            last.text
-        );
         assert_eq!(last.level, NoticeLevel::Error);
 
         // Error → red, carries the message.

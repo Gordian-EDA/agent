@@ -188,6 +188,10 @@ pub struct AgentConfig {
     pub post_commit_review: bool,
     /// Maximum number of review-driven follow-up fix turns after a commit.
     pub review_fix_rounds: u8,
+    /// Optional user-set ceiling on model requests per turn. `None` (the
+    /// default) lets a turn run until the model stops calling tools; the agent
+    /// loop imposes no time or request limit of its own.
+    pub max_requests: Option<usize>,
 }
 
 impl Default for AgentConfig {
@@ -195,12 +199,19 @@ impl Default for AgentConfig {
         Self {
             post_commit_review: true,
             review_fix_rounds: 1,
+            max_requests: None,
         }
     }
 }
 
 impl AgentConfig {
-    fn validate(&self, _path: &'static str) -> Result<(), ConfigError> {
+    fn validate(&self, path: &'static str) -> Result<(), ConfigError> {
+        if self.max_requests == Some(0) {
+            return Err(ConfigError::new(
+                format!("{path}.maxRequests"),
+                "must be at least 1, or absent for no cap",
+            ));
+        }
         Ok(())
     }
 }

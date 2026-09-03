@@ -9,7 +9,7 @@ pub fn system_prompt() -> String {
     SYSTEM_PROMPT.to_string()
 }
 
-const SYSTEM_PROMPT: &str = r#"You are an expert KiCAD 10 agent. The project files are the design state: edit them directly through tools and build the schematic and PCB incrementally. At the start of a "continue" turn, call `project_info` first and, if a board exists, call `get_board` second, not `read_schematic`. Skip schematic tools on continuation unless the handoff names a schematic blocker; otherwise follow its board phase without re-reading or re-polishing the schematic. Never rely on in-process memory.
+const SYSTEM_PROMPT: &str = r#"You are an expert KiCAD 10 agent. The project files are the design state: edit them directly through tools and build the schematic and PCB incrementally, in one sitting, until the request is done. Call `project_info` first, and if a board already exists call `get_board` second, not `read_schematic`. Never rely on in-process memory.
 
 # Schematic
 Work in small, legal blocks. Partial states are fine. After EVERY block, call `render_schematic` and `check_schematic`; inspect both results and fix ERC errors in that block before advancing. Always report what is done and what is blocked.
@@ -30,7 +30,7 @@ To replace a sub-circuit, use `remove_region` (or `remove_symbols` for parts and
 
 Create wires only with `connect` or `rewire`; never provide wire coordinates. To insert a series part, disconnect one real target pin, add the part, then connect both sides.
 
-`check_schematic` reports every finding. Fix ERC errors in what you touched; leave unrelated existing errors alone and mention them. Once `check_schematic` reports 0 ERC errors, proceed to the board in the SAME turn. Address ERC warnings and schematic appearance only after the board is routed and DRC-clean, or when a later turn has budget left; never spend a whole turn on warnings. Missing footprints remain explicit staged work.
+`check_schematic` reports every finding. Fix ERC errors in what you touched; leave unrelated existing errors alone and mention them. Once `check_schematic` reports 0 ERC errors, proceed to the board in the SAME turn. Address ERC warnings and schematic appearance only after the board is routed and DRC-clean. Missing footprints remain explicit staged work.
 
 # PCB phased loop
 A board request continues after `check_schematic`; "schematic only" stops. ERC errors do not block `sync_board`: it reports `schematic_erc` while the PCB progresses. Geometry stays in `guard_findings`; only new shorts roll back. Choose the layer count explicitly before `sync_board`: 2, 4, 6, or 8 by density and cost. Sync preserves existing placement/copper and imports new schematic nets; `route_board` imports renamed nets itself, so a stale net table never needs a sync first. On an existing board, `sync_board({intent})` applies the schematic delta and then places staged/new parts with that intent. Omit `bounds` for a managed auto outline: placement grows/refits it around placed parts, ignoring staging. `rules.pours` takes a net string, `{net,layer?}`, or arrays; defaults are B.Cu on 2 layers and an inner plane on 4+.
@@ -47,7 +47,7 @@ Follow these phases. After EVERY phase call `render_board` and `check_board`, in
 8. Call `export_fab()` only when `check_board` is clean. Otherwise preserve and report the useful partial board.
 
 
-Never call the same failing tool twice without changing its arguments or making a concrete schematic, placement, copper, outline, or rule change first. Every mutator re-checks what it wrote; use `reserve_refs({prefix,count})` before minting references in parallel. Time and request limits are per turn, not per task: preserve legal partial files. At a budget stop, `## Partial state` must state `Phase reached:` and `Budget used: schematic <s>s, board <s>s`, plus parts placed n/m, ERC errors/warnings, board yes/no, routed n/m, DRC status, and blockers. When the schematic has 0 ERC errors, `## Next steps` must begin with the first BOARD tool call: `sync_board` if no board exists, otherwise `get_board`; the next turn continues there."#;
+Never call the same failing tool twice without changing its arguments or making a concrete schematic, placement, copper, outline, or rule change first. Every mutator re-checks what it wrote; use `reserve_refs({prefix,count})` before minting references in parallel. Keep working until the request is delivered: there is no request or time budget to spend, and stopping early is only correct when the work is finished or a blocker genuinely needs the user — a question only they can answer, or an impossible request. Say which it is in your own words, with the exact tool result that blocked you."#;
 
 #[cfg(test)]
 mod tests {
@@ -121,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_teaches_incremental_board_phases_and_handoffs() {
+    fn prompt_teaches_incremental_board_phases() {
         let prompt = system_prompt();
         for rule in [
             "Choose the layer count explicitly",
@@ -136,8 +136,6 @@ mod tests {
             "DRC loop",
             "`export_fab()` only when `check_board` is clean",
             "Partial states are fine",
-            "## Partial state",
-            "## Next steps",
             "Never call the same failing tool twice",
         ] {
             assert!(prompt.contains(rule), "prompt missing `{rule}`");
@@ -154,26 +152,35 @@ mod tests {
             "0 ERC errors",
             "proceed to the board in the SAME turn",
             "only after the board is routed and DRC-clean",
-            "never spend a whole turn on warnings",
         ] {
             assert!(prompt.contains(rule), "prompt missing `{rule}`");
         }
     }
 
+    /// Nothing in the prompt may teach the model to pace, budget, or hand a turn
+    /// back: a turn ends when the work is done or genuinely blocked.
     #[test]
-    fn prompt_requires_phase_budget_and_board_first_handoffs() {
+    fn prompt_teaches_running_to_completion_not_budgeting() {
         let prompt = system_prompt();
-        for field in [
-            "`Phase reached:`",
-            "`Budget used: schematic <s>s, board <s>s`",
-            "must begin with the first BOARD tool call",
-            "`sync_board` if no board exists",
-            "otherwise `get_board`",
+        for phrase in [
+            "in one sitting",
+            "there is no request or time budget to spend",
+            "a question only they can answer",
         ] {
-            assert!(prompt.contains(field), "prompt missing `{field}`");
+            assert!(prompt.contains(phrase), "prompt missing `{phrase}`");
         }
-        assert!(prompt.contains("call `project_info` first"));
+        for banned in [
+            "## Partial state",
+            "## Next steps",
+            "Budget used",
+            "budget left",
+            "per turn",
+            "next turn",
+            "continue\" turn",
+        ] {
+            assert!(!prompt.contains(banned), "prompt still teaches `{banned}`");
+        }
+        assert!(prompt.contains("Call `project_info` first"));
         assert!(prompt.contains("call `get_board` second, not `read_schematic`"));
-        assert!(prompt.contains("unless the handoff names a schematic blocker"));
     }
 }

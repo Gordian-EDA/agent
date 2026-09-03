@@ -215,22 +215,10 @@ impl App {
                 NoticeLevel::Plain,
                 format!("Worked for {elapsed}"),
             )),
-            TurnEndReason::ProviderRequestLimit { requests } => Some(Entry::notice(
+            TurnEndReason::MaxRequestsReached { requests } => Some(Entry::notice(
                 NoticeLevel::Plain,
                 format!(
-                    "Worked for {elapsed} — partial state handed back after {requests} model requests; continue when ready"
-                ),
-            )),
-            TurnEndReason::TimeLimit { elapsed_secs } => Some(Entry::notice(
-                NoticeLevel::Plain,
-                format!(
-                    "Worked for {elapsed} — partial state handed back after {elapsed_secs}s; continue when ready"
-                ),
-            )),
-            TurnEndReason::MutationTimedOut => Some(Entry::notice(
-                NoticeLevel::Error,
-                format!(
-                    "Worked for {elapsed} — stopped after a project mutation timed out (it may still be finishing)"
+                    "Worked for {elapsed} — stopped at your {requests}-request cap (agent.maxRequests)"
                 ),
             )),
             TurnEndReason::QualityGateFailed { failures } => Some(Entry::notice(
