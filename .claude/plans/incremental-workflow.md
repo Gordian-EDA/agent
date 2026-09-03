@@ -260,3 +260,21 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   index write — recovered). Gating + push + round 6 (camp8, --max-turns 5) in background.
   lane/prompt-pace (codex): once ERC errors are 0 go to the board in the same turn; handoff names the
   first board call; "continue" turns start from get_board. Lessons recorded in memory.
+- Round 6 (camp8, 5 turns): all boards reached but regressed — sync_board short refusal ×41 at
+  CREATION (guard vs seeded staging/intent geometry) + sync↔route deadlock; place_parts panic
+  "no entry found for key" (BMS power_protection block). → lane/pcb-seed-shorts, lane/sch-refusals-4.
+  Train 3 (prompt-pace + sch-looks) merging → round 7.
+- Train 3: prompt-pace + sch-looks merged locally (7064352b, 309f7c6f) but the combined tree fails
+  `live_e2e::incremental_place_is_additive` (a graft moved an existing symbol via the whole-sheet
+  page-fit) → lane/graft-additive on the merged tree; push held. sch-refusals-4 finished its 5 items
+  (codex API 404 at the end → continuation running); pcb-seed-shorts running.
+- Codex backend outage (404s) killed sch-refusals-4 (5 commits done), pcb-seed-shorts (4 commits:
+  seed/intent placement shorts, nets refreshed before routing, staging state on synthetic
+  placements, delete_copper selectors) and graft-additive (no commits) → gating the first two myself
+  in background; graft-additive re-run as an Opus agent. Push of train 3 + these waits on the graft fix.
+- Root cause of the day's "No space left": /tmp is a 22 GB tmpfs (scratchpad lives there); build
+  targets now go to `.claude/targets/<lane>` on disk. Gates for sch-refusals-4 + pcb-seed-shorts
+  re-running there; graft-additive resumed on Opus after a 529.
+- sch-refusals-4 gated green and merged locally (1c799794). pcb-seed-shorts: codex's version did not
+  reach the dispatched tool paths (its own new tests fail with the old messages) → Opus agent
+  finishing it. Push waits on graft-additive + pcb-seed-shorts; then round 7.

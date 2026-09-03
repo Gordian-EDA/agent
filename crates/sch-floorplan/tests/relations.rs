@@ -29,6 +29,7 @@ fn passive(refdes: &str, at: [f64; 2]) -> Item {
     };
     Item {
         refdes: refdes.to_string(),
+        block: String::new(),
         part: "Device:R".to_string(),
         value: "1k".to_string(),
         footprint: None,

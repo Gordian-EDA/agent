@@ -877,6 +877,33 @@ fn footprint_search_accepts_a_query_without_a_symbol() {
 }
 
 #[test]
+fn footprint_search_chunks_batches_of_any_size() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+
+    let result = call(
+        &ctx,
+        "search_footprints",
+        json!({"queries": [
+            {"query": "BarrelJack_Horizontal", "symbol": "Connector:Barrel_Jack"},
+            {"query": "Horizontal", "symbol": "Connector_Audio:AudioJack2_Switch"},
+            {"query": "TO-92_Inline", "symbol": "Reference_Voltage:TLE2426xLP"},
+            {"query": "SOIC-8_3.9x4.9mm_P1.27mm", "symbol": "Amplifier_Operational:MCP6002-xSN"},
+            {"query": "0603", "symbol": "Device:C_Polarized"},
+            {"query": "CP_Elec", "symbol": "Device:C_Polarized"}
+        ]}),
+    );
+
+    assert!(result.get("error").is_none(), "{result}");
+    let searches = result["results"].as_array().unwrap();
+    assert_eq!(searches.len(), 6, "{result}");
+    assert_eq!(searches[0]["query"], "BarrelJack_Horizontal");
+    assert_eq!(searches[5]["query"], "CP_Elec");
+}
+
+#[test]
 fn nonblocking_footprint_repairs_preserve_the_package_family() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCad detected");

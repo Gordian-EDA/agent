@@ -12,7 +12,6 @@ use geom::{Dir, EPS, ParentForest, Rect};
 
 use circuit_graph::netclass::{is_connector_like, is_ground};
 use sch_model::item::{Incidence, Item};
-use sch_model::refine::FAST_PINS;
 use sch_model::route::SchRouter;
 
 use sch_model::ir::{Band, LayoutIr, Side};
@@ -35,13 +34,6 @@ pub(crate) fn wire(
 ) -> io::Result<()> {
     w.set_weld_guard(fan_risers);
     let refdes_of = |i: usize| items[i].refdes.clone();
-    // Auto-distributing a spread rail into local power symbols only applies to LARGER
-    // boards (`pins > FAST_PINS`). Every reference/snapshot fixture (≤34 pins) keeps
-    // its tuned short trunk even when its GND rail happens to span the sheet width, so
-    // those greedy renders stay byte-identical. The author opt-in (`rail_locals`)
-    // still works on any board.
-    let pin_total: usize = items.iter().map(|it| it.geom.pins.len()).sum();
-
     // Endpoints of every net first, so all rails can share common bands.
     let mut net_eps: BTreeMap<String, Vec<([f64; 2], Dir)>> = BTreeMap::new();
     for (net, pins) in inc {
@@ -133,16 +125,10 @@ pub(crate) fn wire(
         if let Some(band) = ir.rails.get(net) {
             let flag = needs_flag.contains(net).then_some(&mut *flag_points);
             // Draw DISTRIBUTED local power symbols (`rail_y = None` ⇒ one power symbol
-            // per pin) when either the author marked the net (≥2 placed power symbols)
-            // OR the net's pins are spread far enough that a single spanning trunk
-            // would be a long cross-sheet detour with a knot of converging risers —
-            // the professional idiom on a multi-module board, and the fix for the
-            // recurring "scattered caps / congested rail knot / long detour rails"
-            // critic complaints. Tight/small rails (every reference fixture) stay
-            // under the span gate and keep their clean short trunk → byte-identical.
-            let distribute = !ir.rail_force.contains(net)
-                && (ir.rail_locals.contains(net)
-                    || (pin_total > FAST_PINS && rail_should_distribute(eps)));
+            // per pin) where the author marked the net (≥2 placed power symbols).
+            // `emit_rail` distributes on its own account too, once it knows how long
+            // the trunk and risers it would actually draw are.
+            let distribute = ir.rail_locals.contains(net) && !ir.rail_force.contains(net);
             let rail_y = rail_y_map.get(net).copied().filter(|_| !distribute);
             emit_rail(
                 env,
@@ -151,6 +137,7 @@ pub(crate) fn wire(
                 eps,
                 *band,
                 rail_y,
+                ir.rail_force.contains(net),
                 flag,
                 &riser_offsets,
                 &bodies,
@@ -396,10 +383,9 @@ pub(crate) fn route_signal(
     let term_label_seatable: Vec<bool> = term_pin
         .iter()
         .map(|tp| {
-            tp.as_ref()
-                .is_none_or(|(it, num)| {
-                    label_stub(w, env, scene, &items[*it].refdes, num, net, finalize).1
-                })
+            tp.as_ref().is_none_or(|(it, num)| {
+                label_stub(w, env, scene, &items[*it].refdes, num, net, finalize).1
+            })
         })
         .collect();
 
@@ -1216,7 +1202,11 @@ pub(crate) fn nudge_port_exit(
 /// A foreign pennant's TEXT BOX is not a merge hazard, only an ugly one: it is long, and
 /// treating it as untouchable pushed a GPIO bank's pennants past anywhere their nets
 /// could route to, leaving three of them dangling.
-pub(crate) fn anchor_merges(scene: &sch_model::route::RouteScene, at: ::geom::Point2, net: &str) -> bool {
+pub(crate) fn anchor_merges(
+    scene: &sch_model::route::RouteScene,
+    at: ::geom::Point2,
+    net: &str,
+) -> bool {
     scene
         .segments
         .iter()
@@ -1258,25 +1248,24 @@ pub(crate) fn dir_toward(a: impl Into<::geom::Point2>, b: impl Into<::geom::Poin
     }
 }
 
-/// Assign each drawn rail (≥3 pins) a y. Rails in a band share a base y, but
-/// overlapping x-ranges are pushed to successive rows (away from the content)
-/// via greedy interval colouring, so distinct rails never merge into one wire.
-/// Half-perimeter span (mm) of a rail net above which a single spanning trunk is a
-/// long cross-sheet detour and the net is better drawn as distributed local power
-/// symbols. ~30 grid cells; every reference/snapshot fixture's rails span far less
-/// (≤34-pin compact boards), so they keep their trunk and stay byte-identical.
-pub(crate) const RAIL_DISTRIBUTE_SPAN: f64 = 76.0;
-
 /// A signal-net MST hop whose (direct OR routed) length exceeds this (mm) is delegated
 /// to a name-matched net-label pair instead of a drawn wire — the professional idiom for
-/// long-haul / cross-block connectivity. The signal-net analog of [`RAIL_DISTRIBUTE_SPAN`].
-/// Applied FINALIZE-ONLY (see [`LabelPolicy`]) so the per-move scorer / placement is never
-/// perturbed.
+/// long-haul / cross-block connectivity. Applied FINALIZE-ONLY (see [`LabelPolicy`]) so
+/// the per-move scorer / placement is never perturbed.
 ///
 /// 50mm, anchored directly to the human corpus (`tools/layout_metrics.py`): humans keep
 /// ~0% of wires above 50mm (`wire_frac_gt50` median 0). A literal wire longer than this is
-/// the auto-layout "spaghetti" tell. Override via `SIGNAL_LABEL_SPAN_MM`.
+/// the auto-layout "spaghetti" tell.
 pub(crate) const LABEL_LEN_MM: f64 = 50.0;
+
+/// Longest rail segment (mm) that still reads as a wire: above this the trunk, one of its
+/// risers or one of its lead-outs is a cross-sheet detour, and [`emit_rail`] gives the
+/// trunk up for distributed local power symbols instead.
+///
+/// A rail wire is a wire, so it is held to the same corpus rule as a signal wire and
+/// simply IS [`LABEL_LEN_MM`] — humans keep ~0% of wires above it, whatever net they are
+/// on. Measured the same way too: on the geometry actually drawn, not on a pin-span proxy.
+pub(crate) const RAIL_SEGMENT_MAX: f64 = LABEL_LEN_MM;
 
 /// The CROSSING-driven label threshold (mm): a hop longer than this whose literal route
 /// would cross a foreign wire is named rather than drawn (see [`LabelPolicy`]). Lower than
@@ -1284,26 +1273,12 @@ pub(crate) const LABEL_LEN_MM: f64 = 50.0;
 /// as clutter regardless of length, but very short hops stay drawn so the sheet keeps its
 /// local wires (humans still draw short stubs; `label_per_part` ≈ 0.76, not everything).
 /// 19mm ≈ 7.5 grid: above the human wire-length median (~5mm) and p75, so only the longer,
-/// genuinely-crossing hops promote. Override via `SIGNAL_CROSS_SPAN_MM`.
+/// genuinely-crossing hops promote.
 pub(crate) const CROSS_LABEL_LEN_MM: f64 = 19.0;
 
-/// Whether a rail net's pins are spread far enough to prefer DISTRIBUTED local power
-/// symbols over one spanning trunk (see [`RAIL_DISTRIBUTE_SPAN`]). A net with <3 pins
-/// already draws per-pin symbols, so it's irrelevant there.
-pub(crate) fn rail_should_distribute(eps: &[([f64; 2], Dir)]) -> bool {
-    if eps.len() < 3 {
-        return false;
-    }
-    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-    for (p, _) in eps {
-        lo[0] = lo[0].min(p[0]);
-        lo[1] = lo[1].min(p[1]);
-        hi[0] = hi[0].max(p[0]);
-        hi[1] = hi[1].max(p[1]);
-    }
-    (hi[0] - lo[0]) + (hi[1] - lo[1]) > RAIL_DISTRIBUTE_SPAN
-}
-
+/// Assign each drawn rail (≥3 pins) a y. Rails in a band share a base y, but overlapping
+/// x-ranges are pushed to successive rows (away from the content) via greedy interval
+/// colouring, so distinct rails never merge into one wire.
 pub(crate) fn assign_rail_levels(
     net_eps: &BTreeMap<String, Vec<([f64; 2], Dir)>>,
     ir: &LayoutIr,
@@ -1572,9 +1547,10 @@ pub(crate) fn riser_hits_foreign_pin(
 }
 
 /// A rail: with ≥3 pins, draw a horizontal wire spanning them, stub each pin up to it,
-/// and put one power symbol at the left end. With fewer pins, no common band, or no row
-/// the trunk can occupy without touching another net, emit a per-pin power symbol
-/// instead ([`emit_local_power`] — the clustered case, e.g. a divider's two GNDs).
+/// and put one power symbol at the left end. With fewer pins, no common band, no row the
+/// trunk can occupy without touching another net, or a trunk/riser longer than
+/// [`RAIL_SEGMENT_MAX`], emit a per-pin power symbol instead ([`emit_local_power`] — the
+/// clustered case, e.g. a divider's two GNDs).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_rail(
     env: &KicadInstallation,
@@ -1583,6 +1559,9 @@ pub(crate) fn emit_rail(
     eps: &[([f64; 2], Dir)],
     band: Band,
     rail_y: Option<f64>,
+    // `ir.rail_force`: the author pinned this net to a spanning trunk, so the
+    // drawn-length cap does not apply to it.
+    forced: bool,
     flag: Option<&mut BTreeMap<String, ([f64; 2], f64)>>,
     riser_offsets: &BTreeMap<(String, i64), f64>,
     bodies: &[([f64; 2], [f64; 2])],
@@ -1631,6 +1610,22 @@ pub(crate) fn emit_rail(
     else {
         return emit_local_power(env, w, net, eps, flag, power_keepouts);
     };
+    // The trunk and its risers are drawn literally, with no router and no length
+    // policy of their own, so a rail whose pins are spread across the sheet becomes
+    // exactly the "one wire runs the whole width" tell — the 723 mm GND riser and the
+    // 260 mm BMS_GND trunk that made our live-edit sheets read as machine output.
+    // Measure what would be drawn and, when a segment is too long to read as a wire,
+    // give the trunk up for distributed local power symbols. Length is the honest
+    // test: it is what the reader sees, unlike the pin half-perimeter it replaces.
+    let longest = eps
+        .iter()
+        .zip(&attaches)
+        .flat_map(|((p, _), &ax)| [(p[1] - rail_y).abs(), (ax - p[0]).abs()])
+        .chain(std::iter::once(span_hi - span_lo))
+        .fold(0.0, f64::max);
+    if longest > RAIL_SEGMENT_MAX && !forced {
+        return emit_local_power(env, w, net, eps, flag, power_keepouts);
+    }
     if fan_risers {
         for (ep, &ax) in eps.iter().map(|(p, _)| p).zip(&attaches) {
             used_lanes.push((ax, ep[1].min(rail_y), ep[1].max(rail_y), net.to_string()));
@@ -1648,7 +1643,14 @@ pub(crate) fn emit_rail(
     // rail's symbol sits above, a bottom rail's below — both at angle 0.
     let sym_x = span_lo;
     let flag_at = [sym_x, rail_y];
-    w.add_power_symbol(env, &power_lib_id(net), &format!("#PWR_{net}"), net, flag_at, 0.0)?;
+    w.add_power_symbol(
+        env,
+        &power_lib_id(net),
+        &format!("#PWR_{net}"),
+        net,
+        flag_at,
+        0.0,
+    )?;
     // The ERC flag (only when this net needs one) sits COINCIDENT with the rail's
     // power symbol, rotated to extend the same way the symbol does (up for a top
     // V+ rail, down for a bottom GND rail) — into open space, no dangling stub.
@@ -1699,9 +1701,7 @@ fn trunk_clear(
     let overlaps_x = |a: f64, b: f64| a <= hi + EPS && b >= lo - EPS;
     !foreign_pins
         .iter()
-        .any(|(p, pin_net)| {
-            pin_net != net && (p[1] - rail_y).abs() < EPS && overlaps_x(p[0], p[0])
-        })
+        .any(|(p, pin_net)| pin_net != net && (p[1] - rail_y).abs() < EPS && overlaps_x(p[0], p[0]))
         && !foreign_runs
             .iter()
             .any(|&(y, x_lo, x_hi)| (y - rail_y).abs() < EPS && overlaps_x(x_lo, x_hi))
@@ -1713,10 +1713,7 @@ fn trunk_clear(
 fn trunk_hits_body(rail_y: f64, span: (f64, f64), bodies: &[Rect]) -> bool {
     let (lo, hi) = span;
     bodies.iter().any(|b| {
-        rail_y > b.min_y + EPS
-            && rail_y < b.max_y - EPS
-            && lo < b.max_x - EPS
-            && hi > b.min_x + EPS
+        rail_y > b.min_y + EPS && rail_y < b.max_y - EPS && lo < b.max_x - EPS && hi > b.min_x + EPS
     })
 }
 
@@ -2142,6 +2139,7 @@ mod tests {
             &eps,
             Band::Bottom,
             Some(45.72),
+            false,
             None,
             &BTreeMap::new(),
             &[],

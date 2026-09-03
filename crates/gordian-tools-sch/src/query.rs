@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use crate::refs;
 use crate::session::Edit;
 
-const MAX_FOOTPRINT_QUERIES: usize = 4;
+const FOOTPRINT_QUERY_CHUNK: usize = 4;
 
 /// Search installed footprints by name, optionally ranking electrical compatibility.
 pub fn search_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -25,15 +25,15 @@ pub fn search_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let Some(queries) = queries.as_array() else {
             return Ok(json!({ "error": "`queries` must be an array" }));
         };
-        if queries.is_empty() || queries.len() > MAX_FOOTPRINT_QUERIES {
-            return Ok(json!({
-                "error": format!("`queries` must contain 1 to {MAX_FOOTPRINT_QUERIES} searches")
-            }));
+        let mut results = Vec::with_capacity(queries.len());
+        for chunk in queries.chunks(FOOTPRINT_QUERY_CHUNK) {
+            results.extend(
+                chunk
+                    .iter()
+                    .map(|item| search_footprints_one(item, ctx))
+                    .collect::<Result<Vec<_>>>()?,
+            );
         }
-        let results = queries
-            .iter()
-            .map(|item| search_footprints_one(item, ctx))
-            .collect::<Result<Vec<_>>>()?;
         return Ok(json!({ "results": results }));
     }
     search_footprints_one(&input, ctx)

@@ -7,6 +7,7 @@ use geom::{EPS, Point2, Rect, Segment};
 use gordian_runtime::AgentRuntime;
 use sch_doc::{LabelKind, SchDoc, connect};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 use crate::place::{Occupancy, snap_point};
 use crate::refs::{self, Target};
@@ -38,7 +39,24 @@ pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         done.push(result);
     }
     if failures == done.len() {
-        return Ok(json!({ "error": "every connection failed", "connected": done }));
+        let reasons = done
+            .iter()
+            .map(|result| {
+                format!(
+                    "{} -> {}: {}",
+                    result.get("from").and_then(Value::as_str).unwrap_or("<missing>"),
+                    result.get("to").and_then(Value::as_str).unwrap_or("<missing>"),
+                    result
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown failure")
+                )
+            })
+            .collect::<Vec<_>>();
+        return Ok(json!({
+            "error": format!("all {} connections failed — {}", done.len(), reasons.join("; ")),
+            "connected": done,
+        }));
     }
     Ok(json!({ "connected": done, "failed": failures }))
 }
@@ -84,7 +102,10 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     let (a, b) = (from.at(), to.at());
     if a.near_eq(b, EPS) {
-        return Ok(json!({ "error": "both ends are the same point; they already touch" }));
+        return Ok(json!({
+            "changed": "already connected",
+            "net_delta": "connectivity unchanged",
+        }));
     }
     // Clearing comes first, before the router looks at the sheet and before the
     // ends' nets are read: a marker severs its point, so a wire drawn to a still
@@ -96,6 +117,9 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Target::Point(_) => None,
     };
     let (from_net, to_net) = (existing(&from), existing(&to));
+    let endpoint_nets = named_nets_at(&edit.doc, a)
+        .into_iter()
+        .chain(named_nets_at(&edit.doc, b));
     let net = requested_net
         .as_ref()
         .map(|resolved| resolved.name.clone())
@@ -117,6 +141,7 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 .flatten()
                 .cloned(),
         )
+        .joining_endpoints(endpoint_nets)
         .parts(from.owner().map(str::to_string))
         .parts(to.owner().map(str::to_string))
         .creating();
@@ -192,6 +217,16 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             ))
         }
     }
+}
+
+fn named_nets_at(doc: &SchDoc, at: Point2) -> BTreeSet<String> {
+    connect::scene(doc)
+        .points
+        .into_iter()
+        .filter(|(point, _)| point.near_eq(at, EPS))
+        .map(|(_, net)| net)
+        .filter(|net| !net.starts_with("#node"))
+        .collect()
 }
 
 /// Interpret one bare string endpoint as the net to put the other pin on.
@@ -742,6 +777,7 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         false => connect::extract(&edit.doc),
     };
     let was = refs::net_of(&live, &pin.refdes, &pin.number).map(str::to_string);
+    let endpoint_nets = named_nets_at(&edit.doc, pin.at);
     let source = symbol_source(ctx);
     let candidates: Vec<String> = match input.get("lib_id").and_then(Value::as_str) {
         Some(lib_id) => vec![lib_id.to_string()],
@@ -796,7 +832,8 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         ),
         Allow::nothing()
             .joining_nets([net.to_string()])
-            .joining_nets(was)
+            .joining_endpoints(was)
+            .joining_endpoints(endpoint_nets)
             .part(&refdes)
             .part(&pin.refdes)
             .creating(),

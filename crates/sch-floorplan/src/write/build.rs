@@ -442,6 +442,81 @@ impl SchematicWriter {
         });
     }
 
+    /// Draw a block's dashed frame: a rectangle around every named part's body and
+    /// solved field text, the block's title in bold above its top-left corner, and an
+    /// optional note under its bottom-left — the way a human sheet says where one
+    /// functional block ends and the next begins.
+    ///
+    /// Draws nothing when the block has no parts on this sheet. Call AFTER
+    /// [`Self::prepare`], so the fields are where the solver put them; `prepare` is
+    /// idempotent and re-running it reframes the sheet with the frames included.
+    pub fn add_block_frame(&mut self, title: &str, note: Option<&str>, members: &[String]) {
+        /// Air between the block's outermost ink and its frame.
+        const FRAME_PAD: f64 = 3.81;
+        const TITLE_SIZE: f64 = 1.778;
+        const NOTE_SIZE: f64 = 1.27;
+        let member = |r: &str| members.iter().any(|m| m == r);
+        let mut bbox: Option<Rect> = None;
+        let mut grow = |r: Rect| {
+            bbox = Some(match bbox {
+                None => r,
+                Some(b) => Rect::new(
+                    b.min_x.min(r.min_x),
+                    b.min_y.min(r.min_y),
+                    b.max_x.max(r.max_x),
+                    b.max_y.max(r.max_y),
+                ),
+            });
+        };
+        for inst in self.instances.iter().filter(|i| member(&i.refdes)) {
+            let h = inst.half_extents.rotated_half_extents(inst.angle);
+            grow(Rect::new(
+                inst.at.x - h[0],
+                inst.at.y - h[1],
+                inst.at.x + h[0],
+                inst.at.y + h[1],
+            ));
+            let (r, v) = super::field_anchors(inst);
+            for (pos, text) in [(r, &inst.refdes), (v, &inst.value)] {
+                if !text.is_empty() {
+                    grow(super::field_box(
+                        pos.at,
+                        pos.justify,
+                        sch_model::text::text_width(text),
+                    ));
+                }
+            }
+        }
+        let Some(b) = bbox else { return };
+        let frame = Rect::new(
+            b.min_x - FRAME_PAD,
+            b.min_y - FRAME_PAD,
+            b.max_x + FRAME_PAD,
+            b.max_y + FRAME_PAD,
+        );
+        self.add_rect(
+            [frame.min_x, frame.min_y],
+            [frame.max_x, frame.max_y],
+            title,
+        );
+        self.add_text(
+            title,
+            [frame.min_x, frame.min_y - 1.27],
+            TITLE_SIZE,
+            true,
+            &format!("{title}:title"),
+        );
+        if let Some(note) = note.filter(|n| !n.is_empty()) {
+            self.add_text(
+                note,
+                [frame.min_x, frame.max_y + 3.81],
+                NOTE_SIZE,
+                false,
+                &format!("{title}:note"),
+            );
+        }
+    }
+
     /// Add a graphic rectangle annotation.
     pub fn add_rect(&mut self, start: impl Into<Point2>, end: impl Into<Point2>, key: &str) {
         self.rects.push(SheetRect {
@@ -747,7 +822,9 @@ impl SchematicWriter {
             }
         }
         for w in &self.wires {
-            scene.segments.push(NetSegment::new(w.a, w.b, w.net.clone()));
+            scene
+                .segments
+                .push(NetSegment::new(w.a, w.b, w.net.clone()));
         }
         scene.points.extend(self.beside.points.iter().cloned());
         scene.segments.extend(self.beside.segments.iter().cloned());

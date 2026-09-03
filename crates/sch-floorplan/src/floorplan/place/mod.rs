@@ -56,6 +56,7 @@ mod grid_tests {
             components.insert((*r).to_string(), Component::default());
         }
         Block {
+            title: None,
             note: None,
             components,
             layout,

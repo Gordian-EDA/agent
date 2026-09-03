@@ -121,6 +121,49 @@ fn connect_accepts_a_net_name_as_either_endpoint() {
 }
 
 #[test]
+fn add_power_authorizes_the_power_net_and_the_named_pins_net() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    add_resistors(&ctx, &["R1", "R2"]);
+    let seeded = call(&ctx, "connect", json!({"from": "R1.1", "to": "R2.1"}));
+    assert!(seeded.get("error").is_none(), "fixture failed: {seeded}");
+    let named = call(&ctx, "label", json!({"pin": "R1.1", "net": "3V3"}));
+    assert!(named.get("error").is_none(), "fixture failed: {named}");
+
+    let powered = call(&ctx, "add_power", json!({"pin": "R1.1", "net": "GND"}));
+
+    assert!(powered.get("error").is_none(), "{powered}");
+    let ground = call(&ctx, "get_net", json!({"name": "GND"})).to_string();
+    assert!(ground.contains("R1.1") && ground.contains("R2.1"), "{ground}");
+}
+
+#[test]
+fn a_failed_connect_batch_summarizes_every_endpoint_reason() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    add_resistors(&ctx, &["R1"]);
+
+    let failed = call(
+        &ctx,
+        "connect",
+        json!({"pairs": [
+            {"from": "NOPE.1", "to": "R1.1"},
+            {"from": "R1.2", "to": "MISSING.1"}
+        ]}),
+    );
+
+    let error = failed["error"].as_str().unwrap_or_default();
+    assert!(error.contains("NOPE.1 -> R1.1"), "{failed}");
+    assert!(error.contains("R1.2 -> MISSING.1"), "{failed}");
+    assert!(error.matches("no symbol").count() >= 2, "{failed}");
+    assert!(!error.contains("every connection failed"), "{failed}");
+}
+
+#[test]
 fn copied_derived_net_names_resolve_in_payloads_and_connect() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: KiCad 10 not configured");
