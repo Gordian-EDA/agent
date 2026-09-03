@@ -36,12 +36,10 @@ pub fn baseline_ir(design: &Design) -> LayoutIr {
         }
     }
     LayoutIr {
-        flow: Flow::Lr,
         rails,
         ports: BTreeMap::new(),
         trees: block_trees(design),
         rail_locals: local_rail_nets(design),
-        rail_force: Default::default(),
     }
 }
 
@@ -141,12 +139,10 @@ pub fn infer_ir(env: &KicadInstallation, design: &Design) -> LayoutIr {
     }
 
     LayoutIr {
-        flow: Flow::Lr,
         rails,
         ports,
         trees: block_trees(design),
         rail_locals: local_rail_nets(design),
-        rail_force: Default::default(),
     }
 }
 

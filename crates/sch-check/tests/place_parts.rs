@@ -74,14 +74,13 @@ const TEN_PARTS: &str = r#"{
     {"ref": "TP1", "part": "Device:R", "value": "0R", "dnp": true,
      "pins": {"1": "TX", "2": "nc"}}
   ],
-  "intent": {"flow": "lr", "rails": {"+3V3": "top", "GND": "bottom"},
+  "intent": {"rails": {"+3V3": "top", "GND": "bottom"},
              "ports": {"TX": "right", "RX": "right"}}
 }"#;
 
 const CAMPAIGN_BMS_POWER_PROTECTION: &str = r#"{
   "block": "power_protection",
   "intent": {
-    "flow": "lr",
     "ports": {
       "+3V3": "top", "CHG": "top", "DSG": "top", "GND": "bottom",
       "LOAD+": "right", "LOAD-": "right", "PACK+": "left", "PACK-": "left"

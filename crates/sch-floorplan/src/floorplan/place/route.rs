@@ -112,7 +112,7 @@ pub(crate) fn wire(
             // per pin) where the author marked the net (≥2 placed power symbols).
             // `emit_rail` distributes on its own account too, once it knows how long
             // the trunk and risers it would actually draw are.
-            let distribute = ir.rail_locals.contains(net) && !ir.rail_force.contains(net);
+            let distribute = ir.rail_locals.contains(net);
             let rail_y = rail_y_map.get(net).copied().filter(|_| !distribute);
             emit_rail(
                 env,
@@ -121,7 +121,6 @@ pub(crate) fn wire(
                 eps,
                 *band,
                 rail_y,
-                ir.rail_force.contains(net),
                 flag,
                 &riser_offsets,
                 &bodies,
@@ -1541,9 +1540,6 @@ pub(crate) fn emit_rail(
     eps: &[([f64; 2], Dir)],
     band: Band,
     rail_y: Option<f64>,
-    // `ir.rail_force`: the author pinned this net to a spanning trunk, so the
-    // drawn-length cap does not apply to it.
-    forced: bool,
     flag: Option<&mut BTreeMap<String, ([f64; 2], f64)>>,
     riser_offsets: &BTreeMap<(String, i64), f64>,
     bodies: &[([f64; 2], [f64; 2])],
@@ -1600,7 +1596,7 @@ pub(crate) fn emit_rail(
         .flat_map(|((p, _), &ax)| [(p[1] - rail_y).abs(), (ax - p[0]).abs()])
         .chain(std::iter::once(span_hi - span_lo))
         .fold(0.0, f64::max);
-    if longest > RAIL_SEGMENT_MAX && !forced {
+    if longest > RAIL_SEGMENT_MAX {
         return emit_local_power(env, w, net, eps, flag, power_keepouts);
     }
     for (ep, &ax) in eps.iter().map(|(p, _)| p).zip(&attaches) {
@@ -2114,7 +2110,6 @@ mod tests {
             &eps,
             Band::Bottom,
             Some(45.72),
-            false,
             None,
             &BTreeMap::new(),
             &[],

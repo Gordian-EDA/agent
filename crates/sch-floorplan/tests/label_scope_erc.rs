@@ -90,7 +90,6 @@ fn ported_block() -> PlacePartsInput {
              "pins": {"1": "NRST", "2": "GND"}}
         ],
         "intent": {
-            "flow": "lr",
             "rails": {"+3V3": "top", "GND": "bottom"},
             "ports": {"NRST": "right", "SWDIO": "right", "SWCLK": "right",
                       "USB_D+": "left", "USB_D-": "left", "BOOT0": "left"}

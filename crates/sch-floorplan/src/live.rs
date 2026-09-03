@@ -962,7 +962,6 @@ fn selection_drawing(doc: &SchDoc, owned: &[Rect], held: &[Item]) -> BTreeSet<St
 /// Apply the caller's intent over the inferred IR, keeping everything inference
 /// derived for itself.
 fn apply_intent(ir: &mut LayoutIr, intent: LayoutIr) {
-    ir.flow = intent.flow;
     ir.rails.extend(intent.rails);
     ir.ports.extend(intent.ports);
 }

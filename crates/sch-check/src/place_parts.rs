@@ -1,10 +1,10 @@
 //! The connectivity-only input of the bulk-create tool.
 //!
 //! The LLM states parts and what each pin connects to — never a coordinate, and
-//! never a wire. Layout *intent* rides along as [`Intent`]; solvers turn it into
-//! geometry. [`into_design`] lowers the input to the kernel [`Design`] the
-//! checkers and the placement engines already speak; the caller hands
-//! [`Intent::into_layout_ir`] to the placement engine alongside it.
+//! never a wire. Layout *intent* rides along as [`Intent`]; the typesetter turns
+//! it into geometry. [`into_design`] lowers the input to the kernel [`Design`] the
+//! checkers and `sch-floorplan` already speak; the caller hands
+//! [`Intent::into_layout_ir`] to `sch-floorplan` alongside it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,7 +12,7 @@ use circuit_graph::netclass::is_power_net;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use indexmap::IndexMap;
-use sch_model::ir::{Band, Flow, LayoutIr, Side};
+use sch_model::ir::{Band, LayoutIr, Side};
 use sch_model::tree::Tree;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -239,15 +239,13 @@ impl PayloadAudit {
     }
 }
 
-/// The layout hints an LLM may state — the input-facing subset of the engine's
-/// [`LayoutIr`]. What the engine derives for itself (recognized idioms, frozen
-/// clusters, zone biases) is absent rather than silently accepted.
+/// The layout hints an LLM may state — the input-facing subset of `sch-floorplan`'s
+/// [`LayoutIr`]. `rail_locals` (derived from the design's power-symbol count) and
+/// each block's authored tree (carried on the block itself, not here) are absent
+/// rather than silently accepted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Intent {
-    /// Global signal-flow direction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow: Option<Flow>,
     /// Net → band, for nets to draw as spanning rails.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub rails: BTreeMap<NetName, Band>,
@@ -257,16 +255,14 @@ pub struct Intent {
 }
 
 impl Intent {
-    /// The engine-facing IR. Everything the engine derives itself stays empty.
+    /// The floorplan-facing IR. Everything `sch-floorplan` derives itself stays empty.
     pub fn into_layout_ir(self) -> LayoutIr {
         LayoutIr {
-            flow: self.flow.unwrap_or_default(),
             rails: self.rails,
             ports: self.ports,
             ..Default::default()
         }
     }
-
 }
 
 /// The sheet a payload without an explicit `block` fills.
@@ -1021,7 +1017,6 @@ pub fn place_parts_input_schema() -> Value {
                 "description": "What the sheet does with a NET: which are rails and which exit as ports. Where the PARTS go is the `layout` tree.",
                 "additionalProperties": false,
                 "properties": {
-                    "flow": {"enum": ["lr", "tb"], "description": "Global signal-flow direction."},
                     "rails": {
                         "type": "object",
                         "description": "Net -> sheet side: nets drawn as spanning rails. Left/right are mapped to the nearest supported horizontal band.",

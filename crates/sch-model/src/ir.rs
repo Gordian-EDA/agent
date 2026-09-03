@@ -1,25 +1,14 @@
-//! The Layout IR — the geometry-free "frame" the LLM emits: the global flow,
-//! which nets are rails (and their band), where the anchors (ICs) sit, which nets
-//! exit as ports. The engine (`sch-floorplan`) turns this into exact millimetre
-//! placement; the LLM never sees a coordinate. This module is just the data
-//! vocabulary; the inference that *produces* an IR lives in the engine.
+//! The Layout IR — the geometry-free "frame" the LLM emits: which nets are rails
+//! (and their band), which nets exit as ports, and the row/col layout tree per
+//! block. `sch-floorplan` turns this into exact millimetre placement; the LLM
+//! never sees a coordinate. This module is just the data vocabulary; the
+//! inference that *produces* an IR lives in `sch-floorplan`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::tree::Trees;
-
-/// Global signal-flow direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum Flow {
-    /// Left → right (signals flow horizontally). The common case.
-    #[default]
-    Lr,
-    /// Top → bottom.
-    Tb,
-}
 
 /// Which horizontal band a rail net occupies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,8 +36,6 @@ pub enum Side {
 /// connectivity by the compiler's fixed rule set.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LayoutIr {
-    #[serde(default)]
-    pub flow: Flow,
     /// Net → band. Nets drawn as spanning rails.
     #[serde(default)]
     pub rails: BTreeMap<String, Band>,
@@ -63,13 +50,6 @@ pub struct LayoutIr {
     /// symbol per rail) deserialize empty and the tuned references stay rails.
     #[serde(default)]
     pub rail_locals: BTreeSet<String>,
-    /// The inverse of [`Self::rail_locals`]: power nets to draw as ONE shared trunk even when
-    /// the per-pin heuristic would distribute them. The cluster engine sets this for a power
-    /// net whose pins it laid in a single aligned row (the "modules between rails" idiom), then
-    /// keeps it only if its safety net confirms the trunk de-sprawls without colliding. Empty
-    /// elsewhere ⇒ references byte-identical.
-    #[serde(default)]
-    pub rail_force: BTreeSet<String>,
     /// Block name → the row/col arrangement its author composed
     /// ([`crate::tree::Tree`]). This is the layout: the typesetter measures the
     /// symbols and computes every coordinate from it. A block absent here is

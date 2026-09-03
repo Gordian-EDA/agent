@@ -13,7 +13,7 @@
 //! ENGINES never reach in at all: they speak only `sch-model`, and the realization
 //! library reaches them through `sch_model::engine::CandidateEvaluator`.
 
-pub use sch_model::ir::{Band, Flow, LayoutIr, Side};
+pub use sch_model::ir::{Band, LayoutIr, Side};
 
 mod infer;
 pub mod place;

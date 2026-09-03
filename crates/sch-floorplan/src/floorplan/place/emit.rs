@@ -569,7 +569,3 @@ pub(crate) fn incidence(items: &[Item]) -> Incidence {
     }
     inc
 }
-
-// ---------------------------------------------------------------------------
-// Placement — the coarse (col,row,orient) grid rendered as a table.
-// ---------------------------------------------------------------------------
