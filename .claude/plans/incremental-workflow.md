@@ -296,3 +296,7 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   `--suite schematic` = 8 dataset cases (netlist→draw, scored vs human original) + 6 prompt cases,
   critic anchored to a reference-9 sheet; baseline on current main. Also running: no-turn-budget,
   graft-additive, text-box-model.
+- graft-additive merged: `refit_page(frozen)` slides only the new block (geometric tear guard decided
+  before moving), pre-existing symbols never move; snapshot gate green. Integrated gate + push running.
+  Open follow-up: `region.rs slide_block` early-returns on `clear` without `on_page` (may become moot
+  under layout trees).
