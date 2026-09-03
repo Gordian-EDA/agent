@@ -706,6 +706,137 @@ pub(crate) fn schematic_net_changes(
     ))
 }
 
+/// Import live schematic net names and pad assignments without changing board geometry.
+///
+/// Routing calls this before resolving its net selector. Footprints, poses,
+/// annotations, outline, zones, and copper remain byte-for-byte untouched;
+/// structural schematic changes stay deferred to `sync_board`.
+pub(crate) fn refresh_route_net_table(
+    ctx: &AgentRuntime,
+    board: &kicad_board::BoardSnapshot,
+) -> std::result::Result<Value, String> {
+    if !ctx.sch_path().exists() {
+        return Ok(json!({
+            "changed": false,
+            "nets_changed": [],
+            "pads_retargeted": [],
+            "geometry_changed": false,
+        }));
+    }
+    let nets_changed = schematic_net_changes(ctx, board)?;
+    if nets_changed.is_empty() {
+        return Ok(json!({
+            "changed": false,
+            "nets_changed": [],
+            "pads_retargeted": [],
+            "geometry_changed": false,
+        }));
+    }
+
+    let netlist = ctx.env().netlist(ctx.sch_path()).map_err(|error| {
+        format!("could not import the schematic net table before routing: {error}")
+    })?;
+    let schematic_references = netlist
+        .components
+        .iter()
+        .map(|component| component.reference.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut wanted_by_reference = BTreeMap::<String, BTreeMap<String, String>>::new();
+    for net in &netlist.nets {
+        if net.name.is_empty() {
+            continue;
+        }
+        for (reference, pad) in &net.nodes {
+            if !reference.is_empty() && !pad.is_empty() {
+                wanted_by_reference
+                    .entry(reference.clone())
+                    .or_default()
+                    .insert(pad.clone(), net.name.clone());
+            }
+        }
+    }
+
+    let original = std::fs::read_to_string(ctx.pcb_path()).map_err(|error| {
+        format!(
+            "could not read {} for route-time net import: {error}",
+            ctx.pcb_path().display()
+        )
+    })?;
+    let mut doc = board_doc_for_sync(original.clone())?;
+    let footprints = doc.footprints();
+    let unplaceable = crate::staging::unplaceable_references(board);
+    let board_references = footprints
+        .iter()
+        .map(|footprint| footprint.reference.as_str())
+        .collect::<BTreeSet<_>>();
+    let wanted = wanted_by_reference
+        .iter()
+        .filter(|(reference, _)| {
+            board_references.contains(reference.as_str()) && !unplaceable.contains(*reference)
+        })
+        .flat_map(|(_, pads)| pads.values().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let codes = doc.ensure_nets(wanted)?;
+    let mut pads_retargeted = Vec::new();
+    let mut unavailable_pads = Vec::new();
+    for footprint in footprints.iter().filter(|footprint| {
+        schematic_references.contains(footprint.reference.as_str())
+            && !unplaceable.contains(&footprint.reference)
+    }) {
+        let wanted_pads = wanted_by_reference
+            .get(&footprint.reference)
+            .cloned()
+            .unwrap_or_default();
+        let pads = footprint
+            .pad_nets
+            .keys()
+            .chain(wanted_pads.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for pad in pads {
+            let from = footprint.pad_nets.get(&pad).cloned();
+            let to = wanted_pads.get(&pad).cloned();
+            if from == to {
+                continue;
+            }
+            let net = to
+                .as_ref()
+                .map(|name| {
+                    codes
+                        .get(name)
+                        .map(|code| (name.as_str(), *code))
+                        .ok_or_else(|| format!("net {name} is missing from the board net table"))
+                })
+                .transpose()?;
+            if doc.set_pad_net(&footprint.reference, &pad, net)? {
+                pads_retargeted.push(json!({
+                    "pad": format!("{}.{}", footprint.reference, pad),
+                    "from": from,
+                    "to": to,
+                }));
+            } else {
+                unavailable_pads.push(format!("{}.{}", footprint.reference, pad));
+            }
+        }
+    }
+    let changed = doc.text() != original;
+    if changed {
+        write_board(ctx, doc.text())?;
+    }
+    let missing_board_references = schematic_references
+        .into_iter()
+        .filter(|reference| !board_references.contains(reference))
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "changed": changed,
+        "nets_changed": nets_changed,
+        "pads_retargeted": pads_retargeted,
+        "unavailable_pads": unavailable_pads,
+        "missing_board_references": missing_board_references,
+        "geometry_changed": false,
+    }))
+}
+
 /// Resolve a requested schematic net to the equivalent name on the saved board.
 ///
 /// KiCad derives `Net-(…)` names from an arbitrary member of the partition, so
