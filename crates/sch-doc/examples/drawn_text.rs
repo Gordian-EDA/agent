@@ -1,9 +1,10 @@
 //! What a sheet's text overlaps, as the render draws it.
 //!
 //! `cargo run -p sch-doc --example drawn_text -- <sheet.kicad_sch>…` prints one
-//! line per sheet — parts, drawn texts, overlapping pairs and pairs per part —
-//! then every pair. The measurement the readability lint is built on, without
-//! the engine or KiCAD in the way.
+//! line per sheet — the extent its text really covers, its parts, its drawn
+//! texts, and the pairs of them that overlap — then every pair. The
+//! measurement the readability lint is built on, without the engine or KiCAD
+//! in the way.
 
 use sch_doc::{SchDoc, drawn_texts};
 
@@ -34,15 +35,26 @@ fn main() {
                 }
             }
         }
-        let extent = texts
-            .iter()
-            .map(|t| t.bbox)
-            .reduce(|a, b| geom::Rect::new(a.min_x.min(b.min_x), a.min_y.min(b.min_y), a.max_x.max(b.max_x), a.max_y.max(b.max_y)));
+        let extent = texts.iter().map(|t| t.bbox).reduce(|a, b| {
+            geom::Rect::new(
+                a.min_x.min(b.min_x),
+                a.min_y.min(b.min_y),
+                a.max_x.max(b.max_x),
+                a.max_y.max(b.max_y),
+            )
+        });
         println!(
-            "{path}\textent={extent:?}\tparts={sheet_parts}\ttexts={}\tpairs={}\tper_part={:.3}",
+            "{path}\tparts={sheet_parts}\ttexts={}\tpairs={}\tper_part={:.3}\textent={}",
             texts.len(),
             hits.len(),
-            hits.len() as f64 / sheet_parts.max(1) as f64
+            hits.len() as f64 / sheet_parts.max(1) as f64,
+            extent.map_or("none".into(), |r| format!(
+                "{:.1}x{:.1} to ({:.1},{:.1})",
+                r.width(),
+                r.height(),
+                r.max_x,
+                r.max_y
+            ))
         );
         for hit in &hits {
             println!("{hit}");
