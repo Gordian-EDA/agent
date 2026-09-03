@@ -74,7 +74,7 @@ fn mcu_core_after_the_buck_stage_is_truthful() {
 /// `campaign-bms-10s`: the pull-up network reduced to its cause. `Device:R_Network04`
 /// puts four pins at half-grid pitch, so `I2C_SCL`'s pennant — nudged 2.54 mm clear of
 /// the body — landed exactly on `I2C_SDA`'s, and two global labels at one coordinate are
-/// one net (`shorted I2C_SCL+I2C_SDA`, under BOTH spine and cluster).
+/// one net (`shorted I2C_SCL+I2C_SDA`).
 #[test]
 fn a_pullup_network_seats_one_pennant_per_anchor() {
     assert_no_shorts(&["i2c-pullup-network"]);
