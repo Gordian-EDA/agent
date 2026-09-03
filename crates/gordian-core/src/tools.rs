@@ -219,7 +219,7 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "move_parts".into(),
-            description: "Move footprints by to/at, by, near, or edge, with rotation/rot and offsets. Accepts ref/reference, defaults an omitted near/edge gap, and nudges an occupied target to the nearest legal pose when one exists.".into(),
+            description: "Move footprints by to/at, by, near, or edge, with rotation/rot and offsets. Accepts ref/reference, defaults an omitted near/edge gap, and nudges an occupied target through 5, 10, and 20 mm searches before choosing the nearest legal pose anywhere inside the outline. Reports nudged_to and nudge_distance_mm; refuses only when the outline has no legal room.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
