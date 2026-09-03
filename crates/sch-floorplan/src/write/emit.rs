@@ -726,11 +726,17 @@ mod tests {
             "R2 label must retract to its pin endpoint (177.8, 59.69):\n{sch}"
         );
 
-        // R1's stub survived: its SIG label must NOT sit at R1's pin endpoint (127, 59.69).
-        // (It should be at the stub end (127, 55.88) instead.)
+        // R1's stub survived the retraction pass: its wire is still drawn from
+        // the pin endpoint out to the stub end. (Where the label itself ends up
+        // is the text solver's call — it may still pull the text back onto the
+        // pin while the wire stays.)
         assert!(
-            !sch.contains("(label \"SIG\"\n\t\t(at 127 59.69"),
-            "R1 label must NOT retract to pin endpoint (127, 59.69) — same-net wire should allow the stub to survive:\n{sch}"
+            sch.contains("(xy 127 59.69) (xy 127 55.88)"),
+            "R1's same-net stub wire must survive:\n{sch}"
+        );
+        assert!(
+            !sch.contains("(xy 177.8 59.69) (xy 177.8 55.88)"),
+            "R2's foreign-touching stub must retract, wire and all:\n{sch}"
         );
     }
 

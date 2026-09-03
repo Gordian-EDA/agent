@@ -81,6 +81,24 @@ pub struct PlacedPin {
     /// Unit vector along which a wire leaves this pin, in sheet coordinates
     /// (y grows downward) — the direction pointing away from the symbol body.
     pub out: Point2,
+    /// Pin line length: the run from `at` back into the body.
+    pub length: f64,
+    /// How KiCAD draws this pin's name and number.
+    pub text: PinTextStyle,
+}
+
+impl PlacedPin {
+    /// This pin as the as-drawn text model measures it.
+    pub fn as_drawn(&self) -> sch_model::text::DrawnPin<'_> {
+        sch_model::text::DrawnPin {
+            tip: self.at,
+            out: self.out,
+            length: self.length,
+            name: &self.name,
+            number: &self.number,
+            style: self.text,
+        }
+    }
 }
 
 /// Sub-symbol names inside a definition end in `_<unit>_<style>`.
@@ -264,6 +282,8 @@ pub(crate) fn pins_of(doc: &SchDoc, inst: &SymbolInst) -> Vec<PlacedPin> {
                 power_symbol,
                 at: to_sheet(p.at.point(), inst.at, inst.mirror),
                 out,
+                length: p.length,
+                text: p.text,
             }
         })
         .collect()
@@ -350,49 +370,3 @@ mod tests {
     }
 }
 
-/// A placed pin with everything the as-drawn text model measures from.
-pub(crate) struct DrawnPinGeom {
-    pub(crate) name: String,
-    pub(crate) number: String,
-    tip: Point2,
-    out: Point2,
-    length: f64,
-    style: PinTextStyle,
-}
-
-impl DrawnPinGeom {
-    pub(crate) fn as_drawn(&self) -> sch_model::text::DrawnPin<'_> {
-        sch_model::text::DrawnPin {
-            tip: self.tip,
-            out: self.out,
-            length: self.length,
-            name: &self.name,
-            number: &self.number,
-            style: self.style,
-        }
-    }
-}
-
-/// Sheet-space geometry of every pin one placed instance draws text for.
-pub(crate) fn drawn_pins(doc: &SchDoc, inst: &SymbolInst) -> Vec<DrawnPinGeom> {
-    let Some(def) = doc
-        .lib_symbols()
-        .and_then(|libs| resolve(libs, lib_key(inst)))
-    else {
-        return Vec::new();
-    };
-    let style = body_style(inst);
-    let unit = inst.unit.clamp(1, unit_count(def));
-    lib_pins(def)
-        .into_iter()
-        .filter(|p| belongs(p, unit, style))
-        .map(|p| DrawnPinGeom {
-            tip: to_sheet(p.at.point(), inst.at, inst.mirror),
-            out: out_dir(&p, inst.at, inst.mirror),
-            length: p.length,
-            style: p.text,
-            name: p.name,
-            number: p.number,
-        })
-        .collect()
-}

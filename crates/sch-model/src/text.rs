@@ -9,12 +9,17 @@
 //! # Calibration
 //!
 //! The constants are measured, not guessed: `kicad-cli sch export svg` writes
-//! each string's exact advance (`textLength`) and its exact ink (a
-//! `stroked-text` path group). Fitting those over 1868 texts on seven placed
-//! sheets gives the numbers below, all in units of the font size except where
-//! stated. The resulting boxes contain the drawn ink with a median slack of
-//! +0.13 mm and a worst case of −0.41 mm, and they reproduce **103 of 103**
-//! ink-level text overlaps on those sheets.
+//! each string's exact ink as a `stroked-text` path group. Fitting those —
+//! one glyph per cell for the advance and reach tables, whole placed sheets
+//! for the justification bands — gives the numbers below, all in units of the
+//! font size except where stated.
+//!
+//! `sch-doc`'s `drawn_text` fixture test holds the model to both halves of
+//! that: every box CONTAINS the ink KiCAD strokes, and the boxes reproduce
+//! every text overlap three rendered sheets actually draw.
+//!
+//! Two shapes are extrapolated rather than measured, because the writer emits
+//! neither: [`LabelShape`]'s `input`/`output` and `passive` pentagon pads.
 
 use geom::{Dir, Point2, Rect};
 use kicad_symbol::geometry::{PinGeom, PinTextStyle};
@@ -24,12 +29,14 @@ pub const FONT_SIZE: f64 = 1.27;
 
 /// Per-glyph advance, in units of the font size, for the KiCAD stroke font.
 /// Sorted by character so [`glyph_advance`] can binary-search it.
-const GLYPH_ADVANCE: [(char, f64); 91] = [
+const GLYPH_ADVANCE: [(char, f64); 95] = [
+    (' ', 0.7220),
     ('!', 0.5162),
     ('"', 0.8019),
     ('#', 1.0400),
     ('$', 0.9924),
     ('%', 1.1828),
+    ('&', 1.2781),
     ('\'', 0.5162),
     ('(', 0.7067),
     (')', 0.7067),
@@ -51,7 +58,9 @@ const GLYPH_ADVANCE: [(char, f64); 91] = [
     ('9', 0.9924),
     (':', 0.5162),
     (';', 0.5162),
+    ('<', 1.2781),
     ('=', 1.2781),
+    ('>', 1.2781),
     ('?', 0.8972),
     ('@', 1.3257),
     ('A', 0.8972),
@@ -118,28 +127,66 @@ const GLYPH_ADVANCE: [(char, f64); 91] = [
     ('~', 0.7543),
 ];
 
-/// Advance of a glyph the table does not list (accented letters, `µ`, `Ω`,
-/// the space): the mean of the measured table, which errs wide.
+/// Advance of a glyph the table does not list (`µ`, `Ω`, accented letters):
+/// the mean of the measured table, which errs wide.
 const UNKNOWN_ADVANCE: f64 = 0.893;
 
-/// Half the ink height, plus a hair of margin: KiCAD's ink is exactly one font
-/// size tall, and 0.056 covers the stroke's outer half (stroke = 0.12·size).
-const HALF_HEIGHT: f64 = 0.556;
+/// Ink top of one text line, in units of the font size, measured from the
+/// anchor of a symbol PROPERTY. The line is exactly one size tall and the
+/// three justifications are one 0.585-size step apart, which is why only the
+/// tops are listed.
+const BAND_TOP: [f64; 3] = [0.041, -0.544, -1.129];
 
-/// Ink band of `justify bottom` text, relative to its anchor.
-const BOTTOM_BAND: (f64, f64) = (-1.13, 0.06);
+/// Slack added around every band, for the stroke KiCAD paints the glyphs with.
+const BAND_MARGIN: f64 = 0.06;
 
-/// A local `(label …)` floats this far off its anchor, away from the wire it
-/// names — the standoff that keeps a label off its own wire.
-const LABEL_STANDOFF: f64 = 0.319;
+/// How far a glyph's ink climbs above / drops below the standard line, in
+/// units of the font size. Measured one glyph per cell off a rendered sheet;
+/// everything not listed stays inside the line.
+const ASCENT_EXTRA: [(f64, &str); 3] = [(0.142, "$(){}"), (0.095, "#[\\]|"), (0.047, "/4^`")];
+const DESCENT_EXTRA: [(f64, &str); 6] = [
+    (0.381, "(){}"),
+    (0.334, "[]gjpqy|"),
+    (0.239, "/"),
+    (0.191, "#\\"),
+    (0.143, "$,;@"),
+    (0.096, "Q_"),
+];
+
+/// The reach of `text` past the standard line, in units of the font size.
+fn reach(text: &str) -> (f64, f64) {
+    let worst = |table: &[(f64, &str)]| {
+        table
+            .iter()
+            .filter(|(_, set)| text.chars().any(|c| set.contains(c)))
+            .map(|(extra, _)| *extra)
+            .fold(0.0, f64::max)
+    };
+    (worst(&ASCENT_EXTRA), worst(&DESCENT_EXTRA))
+}
+
+/// How far each kind of text lifts its ink off the anchor a property uses.
+/// A `(text …)` note and a `(label …)` sit higher than a field on the same
+/// point; a global label's pentagon puts its text a touch lower.
+const LIFT_NOTE: f64 = -0.241;
+const LIFT_LABEL: f64 = -0.25;
+const LIFT_PORT: f64 = 0.11;
+
+/// The ink band of pin text, which KiCAD centres on its pin line.
+fn pin_band(text: &str, size: f64) -> (f64, f64) {
+    let (ascent, descent) = reach(text);
+    (
+        (-0.5 - ascent - BAND_MARGIN) * size,
+        (0.5 + descent + BAND_MARGIN) * size,
+    )
+}
 
 /// A `(global_label …)`'s text starts this far along its reading direction:
 /// the pentagon's lead-in.
-const GLOBAL_LEAD: f64 = 1.394;
+const GLOBAL_LEAD: f64 = 1.28;
 
-/// A `(global_label …)`'s text centre sits this far past the anchor, across
-/// the reading direction.
-const GLOBAL_CROSS_SHIFT: f64 = 0.076;
+/// Baseline-to-baseline step of a multi-line note, in units of the font size.
+const LINE_PITCH: f64 = 1.6;
 
 /// Distance from a pin's line to the centre of its number (and, for a symbol
 /// that draws names outside, of its name).
@@ -173,10 +220,11 @@ pub enum HJust {
 /// Vertical justification. KiCAD's default — no token in `(justify …)` — is
 /// [`VJust::Center`], which is what the writer emits for symbol fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
 pub enum VJust {
-    Top,
-    Center,
-    Bottom,
+    Top = 0,
+    Center = 1,
+    Bottom = 2,
 }
 
 /// The `(shape …)` of a global or hierarchical label, which sets how far its
@@ -191,12 +239,14 @@ pub enum LabelShape {
 }
 
 impl LabelShape {
-    /// Pentagon length past the text advance, in mm.
+    /// Pentagon length past the text advance, in units of the font size.
+    /// Only `bidirectional` is measured — it is the shape the writer emits —
+    /// and the others scale from KiCAD's own ratios.
     fn pad(self) -> f64 {
         match self {
-            LabelShape::Input | LabelShape::Output => 2.242,
-            LabelShape::Bidirectional | LabelShape::TriState => 3.353,
-            LabelShape::Passive => 1.131,
+            LabelShape::Input | LabelShape::Output => 1.765,
+            LabelShape::Bidirectional | LabelShape::TriState => 2.640,
+            LabelShape::Passive => 0.891,
         }
     }
 
@@ -268,13 +318,14 @@ fn along(width: f64, hjust: HJust) -> (f64, f64) {
     }
 }
 
-/// The ink band across the reading direction, per justification.
-fn across(size: f64, vjust: VJust) -> (f64, f64) {
-    match vjust {
-        VJust::Center => (-HALF_HEIGHT * size, HALF_HEIGHT * size),
-        VJust::Bottom => (BOTTOM_BAND.0 * size, BOTTOM_BAND.1 * size),
-        VJust::Top => (-BOTTOM_BAND.1 * size, -BOTTOM_BAND.0 * size),
-    }
+/// The ink band `text` occupies across its reading direction.
+fn across(text: &str, size: f64, vjust: VJust, lift: f64) -> (f64, f64) {
+    let top = BAND_TOP[vjust as usize] + lift;
+    let (ascent, descent) = reach(text);
+    (
+        (top - ascent - BAND_MARGIN) * size,
+        (top + 1.0 + descent + BAND_MARGIN) * size,
+    )
 }
 
 /// The box a plain text — a symbol field, a free note — draws into.
@@ -290,8 +341,44 @@ pub fn drawn_box(
     angle: f64,
     anchor: Point2,
 ) -> Rect {
+    lifted_box(text, size, hjust, vjust, 0.0, angle, anchor)
+}
+
+/// The box a free `(text …)` note draws into. A note sits higher on its
+/// anchor than a symbol property does, by [`LIFT_NOTE`].
+///
+/// A note may carry newlines; KiCAD stacks the lines downward from the
+/// anchor, so the box is as wide as the widest line and as tall as the stack.
+pub fn note_box(
+    text: &str,
+    size: f64,
+    hjust: HJust,
+    vjust: VJust,
+    angle: f64,
+    anchor: Point2,
+) -> Rect {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let width = lines
+        .iter()
+        .map(|line| advance(line, size))
+        .fold(0.0, f64::max);
+    let (u0, u1) = along(width, hjust);
+    let (v0, v1) = across(text, size, vjust, LIFT_NOTE);
+    let stacked = v1 + (lines.len() - 1) as f64 * LINE_PITCH * size;
+    place(anchor, angle, (u0, v0, u1, stacked))
+}
+
+fn lifted_box(
+    text: &str,
+    size: f64,
+    hjust: HJust,
+    vjust: VJust,
+    lift: f64,
+    angle: f64,
+    anchor: Point2,
+) -> Rect {
     let (u0, u1) = along(advance(text, size), hjust);
-    let (v0, v1) = across(size, vjust);
+    let (v0, v1) = across(text, size, vjust, lift);
     place(anchor, angle, (u0, v0, u1, v1))
 }
 
@@ -305,10 +392,7 @@ pub fn local_label_box(
     angle: f64,
     anchor: Point2,
 ) -> Rect {
-    let (u0, u1) = along(advance(text, size), hjust);
-    let (v0, v1) = across(size, vjust);
-    let shift = -LABEL_STANDOFF * size;
-    place(anchor, angle, (u0, v0 + shift, u1, v1 + shift))
+    lifted_box(text, size, hjust, vjust, LIFT_LABEL, angle, anchor)
 }
 
 /// The box the TEXT of a `(global_label …)` / `(hierarchical_label …)` draws
@@ -327,17 +411,8 @@ pub fn port_label_text_box(
     } else {
         GLOBAL_LEAD * size
     };
-    let shift = GLOBAL_CROSS_SHIFT * size;
-    place(
-        anchor,
-        angle,
-        (
-            u0 + lead,
-            -HALF_HEIGHT * size + shift,
-            u1 + lead,
-            HALF_HEIGHT * size + shift,
-        ),
-    )
+    let (v0, v1) = across(text, size, VJust::Center, LIFT_PORT);
+    place(anchor, angle, (u0 + lead, v0, u1 + lead, v1))
 }
 
 /// The pentagon a `(global_label …)` / `(hierarchical_label …)` draws around
@@ -351,7 +426,7 @@ pub fn port_label_outline(
     angle: f64,
     anchor: Point2,
 ) -> Rect {
-    let length = advance(text, size) + shape.pad();
+    let length = advance(text, size) + shape.pad() * size;
     let (u0, u1) = if hjust == HJust::Right {
         (-length, 0.0)
     } else {
@@ -361,13 +436,17 @@ pub fn port_label_outline(
 }
 
 /// How the writer orients a label reading away from the body along `dir`:
-/// the drawn angle and horizontal justification, matching `write::emit`.
+/// the DRAWN angle and horizontal justification, matching `write::emit`.
+///
+/// The writer emits 0/180/90/270; KiCAD folds a text angle into `[0, 180)` so
+/// it never reads upside down, which is why West and South come back as their
+/// folded angle with the justification carrying the direction.
 pub fn label_pose(dir: Dir) -> (f64, HJust) {
     match dir {
         Dir::East => (0.0, HJust::Left),
-        Dir::West => (180.0, HJust::Right),
+        Dir::West => (0.0, HJust::Right),
         Dir::North => (90.0, HJust::Left),
-        Dir::South => (270.0, HJust::Right),
+        Dir::South => (90.0, HJust::Right),
     }
 }
 
@@ -426,11 +505,11 @@ pub fn placed_pin_texts(pin: &DrawnPin) -> Vec<(TextKind, Rect)> {
     let banded = |centre: Point2, text: &str, size: f64, side: f64| {
         let half = advance(text, size) / 2.0;
         let off = side * PIN_TEXT_GAP * size;
-        let cross = HALF_HEIGHT * size;
+        let (up, down) = pin_band(text, size);
         if horizontal {
-            Rect::new(centre.x - half, centre.y + off - cross, centre.x + half, centre.y + off + cross)
+            Rect::new(centre.x - half, centre.y + off + up, centre.x + half, centre.y + off + down)
         } else {
-            Rect::new(centre.x + off - cross, centre.y - half, centre.x + off + cross, centre.y + half)
+            Rect::new(centre.x + off + up, centre.y - half, centre.x + off + down, centre.y + half)
         }
     };
     let names_inside = pin.style.name_offset > 0.0;
@@ -447,7 +526,7 @@ pub fn placed_pin_texts(pin: &DrawnPin) -> Vec<(TextKind, Rect)> {
         if names_inside {
             let anchor = step(pin.length + pin.style.name_offset);
             let width = advance(pin.name, size);
-            let cross = HALF_HEIGHT * size;
+            let (up, down) = pin_band(pin.name, size);
             // The name reads on INTO the body, away from the pin tip.
             let rect = if horizontal {
                 let (x0, x1) = if pin.out.x > 0.0 {
@@ -455,14 +534,14 @@ pub fn placed_pin_texts(pin: &DrawnPin) -> Vec<(TextKind, Rect)> {
                 } else {
                     (anchor.x, anchor.x + width)
                 };
-                Rect::new(x0, anchor.y - cross, x1, anchor.y + cross)
+                Rect::new(x0, anchor.y + up, x1, anchor.y + down)
             } else {
                 let (y0, y1) = if pin.out.y > 0.0 {
                     (anchor.y - width, anchor.y)
                 } else {
                     (anchor.y, anchor.y + width)
                 };
-                Rect::new(anchor.x - cross, y0, anchor.x + cross, y1)
+                Rect::new(anchor.x + up, y0, anchor.x + down, y1)
             };
             out.push((TextKind::PinName, rect));
         } else {
@@ -560,4 +639,248 @@ pub trait TextSolver {
 
     /// Seat every movable clear of the obstacles and of each other.
     fn solve(&self, obstacles: &[Obstacle], movables: &[Movable]) -> Vec<Pick>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(got: Rect, want: Rect) {
+        for (g, w) in [
+            (got.min_x, want.min_x),
+            (got.min_y, want.min_y),
+            (got.max_x, want.max_x),
+            (got.max_y, want.max_y),
+        ] {
+            assert!((g - w).abs() < 1e-6, "got {got:?}, want {want:?}");
+        }
+    }
+
+    /// The table is sorted, which is what makes the binary search valid.
+    #[test]
+    fn glyph_table_is_sorted_and_covers_the_printable_ascii() {
+        assert!(GLYPH_ADVANCE.windows(2).all(|w| w[0].0 < w[1].0));
+        for c in ('a'..='z').chain('A'..='Z').chain('0'..='9').chain("_-+./#()".chars()) {
+            assert!(
+                GLYPH_ADVANCE.iter().any(|(g, _)| *g == c),
+                "no measured advance for {c:?}"
+            );
+        }
+        // The stroke font is proportional, and the model must not flatten it:
+        // `M` is more than twice `i`, and the space is narrower than any letter.
+        assert!(glyph_advance('M') > 2.0 * glyph_advance('i'));
+        assert!(glyph_advance(' ') < glyph_advance('a'));
+        // Anything unmeasured — `µ`, `Ω` — errs wide.
+        assert_eq!(glyph_advance('µ'), UNKNOWN_ADVANCE);
+    }
+
+    /// Ink reach is per glyph: a string of parentheses is visibly taller than
+    /// one of capitals, and a box that ignores that clips the render.
+    #[test]
+    fn descenders_and_brackets_deepen_the_box() {
+        let at = Point2::new(0.0, 0.0);
+        let plain = drawn_box("ABC", FONT_SIZE, HJust::Left, VJust::Center, 0.0, at);
+        let deep = drawn_box("A(g)", FONT_SIZE, HJust::Left, VJust::Center, 0.0, at);
+        assert!(deep.max_y > plain.max_y + 0.4, "{deep:?} vs {plain:?}");
+        assert!(deep.min_y < plain.min_y - 0.1, "{deep:?} vs {plain:?}");
+        // A string with neither keeps the plain band.
+        let same = drawn_box("XYZ", FONT_SIZE, HJust::Left, VJust::Center, 0.0, at);
+        assert!((same.max_y - plain.max_y).abs() < 1e-9);
+    }
+
+    /// A note stacks its lines downward and is as wide as its widest line.
+    #[test]
+    fn a_multi_line_note_stacks_downward() {
+        let at = Point2::new(0.0, 0.0);
+        let one = note_box("SHORT", FONT_SIZE, HJust::Left, VJust::Bottom, 0.0, at);
+        let two = note_box("SHORT\nA MUCH LONGER LINE", FONT_SIZE, HJust::Left, VJust::Bottom, 0.0, at);
+        assert!((two.min_y - one.min_y).abs() < 1e-9, "the first line does not move");
+        assert!(two.max_y > one.max_y + 1.9, "the second line is below it");
+        assert!(two.width() > one.width(), "the widest line sets the width");
+    }
+
+    /// A field carries no vertical justify token, so KiCAD straddles the
+    /// anchor with it; the horizontal token decides which way it runs.
+    #[test]
+    fn field_text_straddles_its_anchor() {
+        let at = Point2::new(10.0, 20.0);
+        let left = drawn_box("R1", FONT_SIZE, HJust::Left, VJust::Center, 0.0, at);
+        assert!((left.min_x - 10.0).abs() < 1e-9);
+        assert!((left.width() - text_width("R1")).abs() < 1e-9);
+        assert!(left.min_y < 20.0 && left.max_y > 20.0, "{left:?}");
+        let right = drawn_box("R1", FONT_SIZE, HJust::Right, VJust::Center, 0.0, at);
+        assert!((right.max_x - 10.0).abs() < 1e-9);
+        let centre = drawn_box("R1", FONT_SIZE, HJust::Center, VJust::Center, 0.0, at);
+        assert!((centre.center().x - 10.0).abs() < 1e-9);
+        // The three justifications sit one line-step apart vertically.
+        let bottom = drawn_box("R1", FONT_SIZE, HJust::Left, VJust::Bottom, 0.0, at);
+        let top = drawn_box("R1", FONT_SIZE, HJust::Left, VJust::Top, 0.0, at);
+        assert!(bottom.max_y < left.max_y && left.max_y < top.max_y);
+    }
+
+    /// A 90° text reads bottom-to-top: the advance lies along -y.
+    #[test]
+    fn rotation_turns_the_advance_onto_the_other_axis() {
+        let flat = drawn_box("ABC", FONT_SIZE, HJust::Left, VJust::Center, 0.0, Point2::new(0.0, 0.0));
+        let turned = drawn_box("ABC", FONT_SIZE, HJust::Left, VJust::Center, 90.0, Point2::new(0.0, 0.0));
+        assert!((turned.height() - flat.width()).abs() < 1e-9);
+        assert!((turned.width() - flat.height()).abs() < 1e-9);
+        assert!(turned.max_y <= 1e-9 && turned.min_y < 0.0, "reads upward: {turned:?}");
+    }
+
+    /// A local label floats off its anchor, away from the wire it names — the
+    /// 0.4 mm standoff that keeps a label's ink clear of its own wire, and the
+    /// millimetre the old centred box was wrong by.
+    #[test]
+    fn local_label_floats_off_its_wire() {
+        let at = Point2::new(0.0, 0.0);
+        let field = drawn_box("NET", FONT_SIZE, HJust::Left, VJust::Bottom, 0.0, at);
+        let label = local_label_box("NET", FONT_SIZE, HJust::Left, VJust::Bottom, 0.0, at);
+        assert!(label.max_y < field.max_y, "a label rides higher than a field");
+        assert!(label.max_y < 0.0, "its ink never reaches the wire at the anchor");
+        assert!((label.height() - field.height()).abs() < 1e-9, "same line, same height");
+    }
+
+    /// The writer emits every port as a `bidirectional` global label, whose
+    /// pentagon runs 3.353 mm past the text.
+    #[test]
+    fn port_pentagon_extends_past_its_text() {
+        let text = "USB_DP";
+        let outline = port_label_outline(
+            text,
+            FONT_SIZE,
+            LabelShape::Bidirectional,
+            HJust::Left,
+            0.0,
+            Point2::new(0.0, 0.0),
+        );
+        close(
+            outline,
+            Rect::new(0.0, -FONT_SIZE, text_width(text) + 2.640 * FONT_SIZE, FONT_SIZE),
+        );
+        // The glyphs sit inside it, starting past the pentagon's lead-in.
+        let inner = port_label_text_box(text, FONT_SIZE, HJust::Left, 0.0, Point2::new(0.0, 0.0));
+        assert!(inner.min_x > outline.min_x && inner.max_x < outline.max_x);
+        assert!(inner.min_y > outline.min_y && inner.max_y < outline.max_y);
+    }
+
+    /// A pin's number rides above its line at the midpoint; its name sits
+    /// inside the body, past the pin's body end.
+    #[test]
+    fn pin_number_rides_the_line_and_the_name_sits_inside() {
+        // A west-side pin: tip at (0,0), body to the east, 2.54 long.
+        let pin = DrawnPin {
+            tip: Point2::new(0.0, 0.0),
+            out: Point2::new(-1.0, 0.0),
+            length: 2.54,
+            name: "RST",
+            number: "4",
+            style: PinTextStyle::default(),
+        };
+        let boxes = placed_pin_texts(&pin);
+        assert_eq!(boxes.len(), 2);
+        let (kind, number) = boxes[0];
+        assert_eq!(kind, TextKind::PinNumber);
+        // Centred on the midpoint (1.27, 0), one gap ABOVE the line.
+        assert!((number.center().x - 1.27).abs() < 1e-9);
+        assert!((number.width() - text_width("4")).abs() < 1e-9);
+        assert!(
+            number.contains(Point2::new(1.27, -PIN_TEXT_GAP * FONT_SIZE)),
+            "the number's line sits one gap above the pin: {number:?}"
+        );
+        let (kind, name) = boxes[1];
+        assert_eq!(kind, TextKind::PinName);
+        // Body end at x = 2.54, plus the 0.508 name offset, running on east.
+        assert!((name.min_x - 3.048).abs() < 1e-9, "{name:?}");
+        assert!((name.width() - text_width("RST")).abs() < 1e-9);
+        assert!(name.min_y < 0.0 && name.max_y > 0.0, "centred on the pin axis");
+    }
+
+    /// With `pin_names` offset 0 the name goes OUTSIDE — it takes the line's
+    /// upper side and pushes the number to the other.
+    #[test]
+    fn zero_name_offset_puts_the_name_outside() {
+        let pin = DrawnPin {
+            tip: Point2::new(0.0, 0.0),
+            out: Point2::new(-1.0, 0.0),
+            length: 2.54,
+            name: "G",
+            number: "7",
+            style: PinTextStyle {
+                name_offset: 0.0,
+                ..PinTextStyle::default()
+            },
+        };
+        let boxes = placed_pin_texts(&pin);
+        assert_eq!(boxes.len(), 2);
+        assert!(boxes[0].1.min_y > 0.0, "number below the line");
+        assert!(boxes[1].1.max_y < 0.0, "name above the line");
+    }
+
+    /// Hidden pins, hidden names and hidden numbers draw nothing.
+    #[test]
+    fn hidden_pin_text_is_not_drawn() {
+        let base = DrawnPin {
+            tip: Point2::new(0.0, 0.0),
+            out: Point2::new(0.0, 1.0),
+            length: 2.54,
+            name: "GND",
+            number: "1",
+            style: PinTextStyle::default(),
+        };
+        assert!(
+            placed_pin_texts(&DrawnPin {
+                style: PinTextStyle {
+                    pin_hidden: true,
+                    ..PinTextStyle::default()
+                },
+                ..base
+            })
+            .is_empty()
+        );
+        let quiet = placed_pin_texts(&DrawnPin {
+            style: PinTextStyle {
+                names_hidden: true,
+                numbers_hidden: true,
+                ..PinTextStyle::default()
+            },
+            ..base
+        });
+        assert!(quiet.is_empty());
+        // An unnamed pin still shows its number.
+        let unnamed = placed_pin_texts(&DrawnPin { name: "~", ..base });
+        assert_eq!(unnamed.len(), 1);
+        assert_eq!(unnamed[0].0, TextKind::PinNumber);
+    }
+
+    /// A vertical pin's text turns with it: the number takes the line's left.
+    #[test]
+    fn vertical_pin_text_turns_with_the_pin() {
+        let pin = DrawnPin {
+            tip: Point2::new(0.0, 0.0),
+            out: Point2::new(0.0, 1.0),
+            length: 2.54,
+            name: "~",
+            number: "12",
+            style: PinTextStyle::default(),
+        };
+        let boxes = placed_pin_texts(&pin);
+        assert_eq!(boxes.len(), 1);
+        assert!(boxes[0].1.max_x < 0.0, "number left of a vertical pin line");
+        assert!(boxes[0].1.height() > boxes[0].1.width(), "text reads vertically");
+    }
+
+    /// The writer's four label orientations read away from the body, so a
+    /// label's box always extends in the direction its stub points.
+    #[test]
+    fn a_label_reads_along_its_stub() {
+        let north = label_box(Point2::new(0.0, 0.0), Dir::North, "NET");
+        assert!(north.max_y <= 1e-9 && north.min_y < 0.0, "reads north: {north:?}");
+        let south = label_box(Point2::new(0.0, 0.0), Dir::South, "NET");
+        assert!(south.min_y >= -1e-9 && south.max_y > 0.0, "reads south: {south:?}");
+        let east = label_box(Point2::new(0.0, 0.0), Dir::East, "NET");
+        assert!(east.min_x >= -1e-9 && east.max_x > 0.0, "reads east: {east:?}");
+        let west = label_box(Point2::new(0.0, 0.0), Dir::West, "NET");
+        assert!(west.max_x <= 1e-9 && west.min_x < 0.0, "reads west: {west:?}");
+    }
 }

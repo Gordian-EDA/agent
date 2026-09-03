@@ -8,7 +8,7 @@
 //! render shows.
 
 use kiutils_sexpr::Node;
-use sch_model::text::{DrawnText, HJust, TextKind, VJust};
+use sch_model::text::{DrawnText, FONT_SIZE, HJust, TextKind, VJust};
 
 use crate::doc::SchDoc;
 use crate::model::{Item, LabelKind, SymbolInst};
@@ -19,12 +19,12 @@ use crate::sexpr::{self, child, items};
 /// defaults: 1.27 mm, and centred both ways when a token is absent.
 fn effects(node: &Node) -> (f64, HJust, VJust, bool) {
     let Some(effects) = child(node, "effects") else {
-        return (1.27, HJust::Center, VJust::Center, false);
+        return (FONT_SIZE, HJust::Center, VJust::Center, false);
     };
     let size = child(effects, "font")
         .and_then(|font| child(font, "size"))
         .and_then(|size| items(size).get(1).and_then(sexpr::number))
-        .unwrap_or(1.27);
+        .unwrap_or(FONT_SIZE);
     let (mut hjust, mut vjust) = (HJust::Center, VJust::Center);
     if let Some(justify) = child(effects, "justify") {
         for token in items(justify).iter().skip(1).filter_map(sexpr::text) {
@@ -54,10 +54,7 @@ fn symbol_texts(doc: &SchDoc, symbol: &SymbolInst, out: &mut Vec<DrawnText>) {
         let Some(at) = field.at.filter(|_| !field.hidden && !field.value.is_empty()) else {
             continue;
         };
-        let (size, hjust, vjust, hidden) = effects(field.node());
-        if hidden {
-            continue;
-        }
+        let (size, hjust, vjust, _) = effects(field.node());
         out.push(DrawnText {
             owner: Some(owner.clone()),
             kind: TextKind::Field,
@@ -72,7 +69,7 @@ fn symbol_texts(doc: &SchDoc, symbol: &SymbolInst, out: &mut Vec<DrawnText>) {
             ),
         });
     }
-    for pin in pins::drawn_pins(doc, symbol) {
+    for pin in pins::pins_of(doc, symbol) {
         for (kind, bbox) in sch_model::text::placed_pin_texts(&pin.as_drawn()) {
             out.push(DrawnText {
                 owner: Some(owner.clone()),
@@ -102,9 +99,12 @@ pub fn drawn_texts(doc: &SchDoc) -> Vec<DrawnText> {
                     continue;
                 }
                 let angle = label.at.rot.rem_euclid(180.0);
+                // KiCAD renders the DECODED string: `A{slash}B` draws three
+                // glyphs, not nine.
+                let drawn = crate::text::unescape(&label.text);
                 let bbox = match label.kind {
                     LabelKind::Local => sch_model::text::local_label_box(
-                        &label.text,
+                        &drawn,
                         size,
                         hjust,
                         vjust,
@@ -112,7 +112,7 @@ pub fn drawn_texts(doc: &SchDoc) -> Vec<DrawnText> {
                         label.at.point(),
                     ),
                     _ => sch_model::text::port_label_text_box(
-                        &label.text,
+                        &drawn,
                         size,
                         hjust,
                         angle,
@@ -125,7 +125,7 @@ pub fn drawn_texts(doc: &SchDoc) -> Vec<DrawnText> {
                         LabelKind::Local => TextKind::Label,
                         _ => TextKind::PortLabel,
                     },
-                    text: label.text.clone(),
+                    text: drawn,
                     bbox,
                 });
             }
@@ -134,22 +134,94 @@ pub fn drawn_texts(doc: &SchDoc) -> Vec<DrawnText> {
                 if hidden || text.text.is_empty() {
                     continue;
                 }
+                let drawn = crate::text::unescape(&text.text);
                 out.push(DrawnText {
                     owner: None,
                     kind: TextKind::FreeText,
-                    text: text.text.clone(),
-                    bbox: sch_model::text::drawn_box(
-                        &text.text,
+                    bbox: sch_model::text::note_box(
+                        &drawn,
                         size,
                         hjust,
                         vjust,
                         text.at.rot.rem_euclid(180.0),
                         text.at.point(),
                     ),
+                    text: drawn,
                 });
             }
+            Item::Sheet(sheet) => sheet_texts(sheet, &mut out),
             _ => {}
         }
     }
+    // One glyph on the page counts once. A generator that stacks two identical
+    // power symbols on the same point draws its rail name twice at the same
+    // place; boxing both would report the sheet as colliding with itself.
+    let mut seen = std::collections::BTreeSet::new();
+    out.retain(|text| {
+        let micron = |v: f64| (v * 1000.0).round() as i64;
+        seen.insert((
+            text.text.clone(),
+            micron(text.bbox.min_x),
+            micron(text.bbox.min_y),
+            micron(text.bbox.max_x),
+            micron(text.bbox.max_y),
+        ))
+    });
     out
+}
+
+/// Text drawn by a hierarchical sheet: its Sheetname/Sheetfile properties and
+/// the port label on every sheet pin.
+fn sheet_texts(sheet: &crate::model::Sheet, out: &mut Vec<DrawnText>) {
+    for property in items(sheet.raw.node())
+        .iter()
+        .filter(|node| sexpr::head(node) == Some("property"))
+    {
+        let Some(value) = items(property).get(2).and_then(sexpr::text) else {
+            continue;
+        };
+        let (size, hjust, vjust, hidden) = effects(property);
+        if hidden || value.is_empty() {
+            continue;
+        }
+        let Some(at) = child(property, "at") else {
+            continue;
+        };
+        let coord = |i: usize| items(at).get(i).and_then(sexpr::number).unwrap_or_default();
+        out.push(DrawnText {
+            owner: None,
+            kind: TextKind::Field,
+            text: value.to_string(),
+            bbox: sch_model::text::drawn_box(
+                value,
+                size,
+                hjust,
+                vjust,
+                coord(3).rem_euclid(180.0),
+                geom::Point2::new(coord(1), coord(2)),
+            ),
+        });
+    }
+    for pin in &sheet.pins {
+        let drawn = crate::text::unescape(&pin.name);
+        // A sheet pin reads INTO the sheet: angle 0 sits on the left border
+        // with its text running right, 180 on the right border running left.
+        let hjust = if (90.0..270.0).contains(&pin.at.rot.rem_euclid(360.0)) {
+            HJust::Right
+        } else {
+            HJust::Left
+        };
+        out.push(DrawnText {
+            owner: None,
+            kind: TextKind::PortLabel,
+            bbox: sch_model::text::port_label_text_box(
+                &drawn,
+                FONT_SIZE,
+                hjust,
+                pin.at.rot.rem_euclid(180.0),
+                pin.at.point(),
+            ),
+            text: drawn,
+        });
+    }
 }
