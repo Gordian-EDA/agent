@@ -168,3 +168,7 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   `delete_labels{names|uuids|bbox|net}` and `remove_region{bbox|block}` with boundary clipping;
   UUIDs in read_schematic/get_net). Next: merge judge-clean-render, then a full campaign under the
   quality-first rubric on the merged tree → accounting round 3.
+- Found in the connector case (rem-runs): `swap_symbol` to a bigger connector left a DIAGONAL wire
+  (130.81,109.22)→(152.4,106.68) — it re-seats pins without the drag primitive's orthogonal redraw.
+  QUEUED after lane/swap-flex merges: swap_symbol (and any pin re-seat) goes through `sch_drag`, plus a
+  document invariant that every wire segment is axis-aligned (debug assert + test).
