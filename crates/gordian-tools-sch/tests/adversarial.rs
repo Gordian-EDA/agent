@@ -229,7 +229,7 @@ fn delete_wires_accepts_an_auto_name_left_by_stacked_pins() {
 }
 
 #[test]
-fn place_parts_refuses_a_reference_already_on_the_sheet() {
+fn place_parts_renames_a_reference_already_on_the_sheet_everywhere() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -247,18 +247,55 @@ fn place_parts_refuses_a_reference_already_on_the_sheet() {
     let result = call(
         &ctx,
         "place_parts",
-        json!({"parts": [{
-            "ref": "C2",
-            "part": "Device:C",
-            "pins": {"1": "VIN", "2": "GND"}
-        }]}),
+        json!({
+            "parts": [
+                {
+                    "ref": "C2",
+                    "part": "Device:C",
+                    "pins": {"1": "VIN", "2": "GND"}
+                },
+                {
+                    "ref": "R1",
+                    "part": "Device:R",
+                    "pins": {"1": "@C2.1", "2": "GND"}
+                }
+            ],
+            "intent": {"relations": [{"kind": "above", "a": "C2", "b": "R1"}]}
+        }),
     );
 
-    assert_eq!(result["code"], "invalid_payload");
-    assert_eq!(
-        result["duplicate_refs"],
-        json!([{"ref": "C2", "next_free": "C3"}])
+    assert!(result.get("error").is_none(), "{result:#}");
+    assert_eq!(result["renamed"], json!({"C2": "C3"}));
+    assert_eq!(result["changed"]["placed"], json!(["C3", "R1"]));
+    let net = call(&ctx, "get_net", json!({"name": "VIN"}));
+    let text = serde_json::to_string(&net).unwrap();
+    assert!(text.contains("C3") && text.contains("R1"), "{net:#}");
+}
+
+#[test]
+fn place_parts_refuses_one_reference_for_two_different_parts() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {"ref": "X1", "part": "Device:R", "pins": {"1": "A", "2": "B"}},
+            {"ref": "X1", "part": "Device:C", "pins": {"1": "A", "2": "B"}}
+        ]}),
     );
+
+    assert_eq!(result["code"], "invalid_payload", "{result:#}");
+    assert!(
+        result["input_errors"][0]
+            .as_str()
+            .is_some_and(|error| error.contains("two different parts"))
+    );
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    assert_eq!(doc.symbols().count(), 0);
 }
 
 #[test]
