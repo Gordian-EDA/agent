@@ -1,7 +1,7 @@
 //! Placement over the saved KiCad board.
 
 use circuit_graph::netclass::is_ground;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -3271,7 +3271,16 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             gate = Some(opened);
         }
     }
-    let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
+    let unplaced_refs = placement_unplaced
+        .iter()
+        .filter_map(|report| report.get("ref").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    let positions: Vec<Value> = result
+        .placements
+        .iter()
+        .filter(|placement| !unplaced_refs.contains(placement.reference.as_str()))
+        .map(placement_json)
+        .collect();
 
     // Discoverability: if a legal placement has a decoupling-heavy IC whose caps the
     // annealer scattered (>=4 bypass caps, none locked/pinned), suggest the `surround`
