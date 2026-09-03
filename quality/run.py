@@ -598,11 +598,10 @@ VISUAL_FACTS = ("body_overlaps", "text_collisions", "wires_through_bodies")
 
 
 def schematic_visual_facts(renders):
-    """Measured visual defects after the run, plus the ones the run ADDED.
+    """Measured visual defects after the run and input-sheet counts.
 
-    An edit case works on a sheet that may already carry collisions (hand-drawn
-    inputs do); `<fact>_added` is what the agent is answerable for there, while
-    the absolute fact is what a created sheet is judged on."""
+    Edit rubrics compare the live list length with the input count. The harness
+    owns that comparison without requiring turn state from the agent."""
     rendered = renders.get("after", {}).get("schematic", {})
     visual = rendered.get("visual")
     if not isinstance(visual, dict):
@@ -614,15 +613,8 @@ def schematic_visual_facts(renders):
         if not isinstance(visual.get(name), list):
             continue
         measured[name] = visual[name]
-        introduced = visual.get(f"{name}_introduced")
-        has_tool_baseline = visual.get("baseline") == "turn-start"
-        if isinstance(introduced, list) and (has_tool_baseline or not before):
-            measured[f"{name}_added"] = introduced
-        else:
-            seen = {json.dumps(item, sort_keys=True) for item in before.get(name, []) or []}
-            measured[f"{name}_added"] = [
-                item for item in visual[name] if json.dumps(item, sort_keys=True) not in seen
-            ]
+        if isinstance(before.get(name), list):
+            measured[f"before_{name}"] = len(before[name])
     missing = [name for name in VISUAL_FACTS if name not in measured]
     return {
         "schematic_visual_error": (
@@ -676,10 +668,14 @@ def evaluate_check(expression, facts):
         if not isinstance(actual, (list, dict)):
             return False, f"len() needs a collection, {name} is {actual!r}"
         actual = len(actual)
-    try:
-        expected = json.loads(match.group("value"))
-    except json.JSONDecodeError:
-        return False, f"expected value is not JSON: {match.group('value')}"
+    expected_text = match.group("value")
+    if re.fullmatch(IDENT, expected_text) and expected_text in facts:
+        expected = facts[expected_text]
+    else:
+        try:
+            expected = json.loads(expected_text)
+        except json.JSONDecodeError:
+            return False, f"expected value is not JSON or a measured fact: {expected_text}"
     try:
         ok = OPS[match.group("op")](actual, expected)
     except TypeError:

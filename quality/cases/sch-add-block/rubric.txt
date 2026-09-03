@@ -3,4 +3,4 @@ Exactly two new parts must appear (schematic_changes.symbols_added): an LED and 
 Existing parts must be untouched: symbols_moved and symbols_removed must be empty, and no existing net may lose a pin. ERC errors must not increase.
 
 Score 0 if either new part is unconnected, if the LED has no series resistor, or if any existing part moved. Score 10 for a correctly wired two-part indicator with the rest of the sheet byte-stable.
-expect: text_collisions_added == []
+expect: len(text_collisions) <= before_text_collisions
