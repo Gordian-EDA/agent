@@ -5,7 +5,7 @@
 use anyhow::Result;
 use geom::{EPS, Point2, Rect, Segment};
 use gordian_runtime::AgentRuntime;
-use sch_doc::{LabelKind, SchDoc, connect};
+use sch_doc::{LabelKind, NetSource, SchDoc, connect};
 use serde_json::{Value, json};
 
 use crate::place::{Occupancy, snap_point};
@@ -64,6 +64,9 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }));
         }
     };
+    if let Some(result) = connect_net_endpoint(&edit.doc, edit.before(), from, to, ctx)? {
+        return Ok(result);
+    }
     let from = match refs::target(&edit.doc, from) {
         Ok(target) => target,
         Err(error) => return Ok(reference_error(&edit.doc, &input, error)),
@@ -89,6 +92,32 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Target::Point(_) => None,
     };
     let (from_net, to_net) = (existing(&from), existing(&to));
+    let net_source = |name: &str| {
+        live.nets
+            .iter()
+            .find(|net| net.name == name)
+            .map(|net| net.source)
+    };
+    if let (Some(from_name), Some(to_name)) = (&from_net, &to_net)
+        && from_name != to_name
+        && net_source(from_name) != Some(NetSource::Auto)
+        && net_source(to_name) != Some(NetSource::Auto)
+    {
+        let to_pin = to.describe();
+        return Ok(json!({
+            "error": format!(
+                "refused: connecting {} on authored net `{from_name}` to {} on authored net \
+                 `{to_name}` would merge two authored nets; nothing was written",
+                from.describe(), to.describe(),
+            ),
+            "from_net": from_name,
+            "to_net": to_name,
+            "fix": {
+                "tool": "delete_wires",
+                "args": {"pins": [to_pin]},
+            },
+        }));
+    }
     let net = input
         .get("net")
         .and_then(Value::as_str)
@@ -105,8 +134,12 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
     let allow = Allow::nothing()
         .joining_nets(net.clone())
-        .joining_nets(from_net.clone())
-        .joining_nets(to_net.clone())
+        .joining_endpoints(
+            [from_net.as_ref(), to_net.as_ref()]
+                .into_iter()
+                .flatten()
+                .map(|name| (name.clone(), net_source(name) == Some(NetSource::Auto))),
+        )
         .parts(from.owner().map(str::to_string))
         .parts(to.owner().map(str::to_string))
         .creating();
@@ -137,7 +170,8 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 to.describe(),
                 redraw.redrawn_segments
             );
-            edit.commit(with_cleared(changed, cleared), allow)
+            let result = edit.commit(with_cleared(changed, cleared), allow)?;
+            Ok(with_joined(result, from_net, to_net))
         }
         None => {
             // Nothing orthogonal fits, so join the ends by name instead — the
@@ -163,15 +197,75 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 from.describe(),
                 to.describe()
             ));
-            edit.commit(
+            let result = edit.commit(
                 with_cleared(
                     format!("labelled both ends `{net}` — no clear wire path"),
                     cleared,
                 ),
                 allow,
-            )
+            )?;
+            Ok(with_joined(result, from_net, to_net))
         }
     }
+}
+
+/// Interpret one bare string endpoint as the net to put the other pin on.
+fn connect_net_endpoint(
+    doc: &SchDoc,
+    netlist: &sch_doc::Netlist,
+    from: &Value,
+    to: &Value,
+    ctx: &AgentRuntime,
+) -> Result<Option<Value>> {
+    fn bare(value: &Value) -> Option<&str> {
+        value.as_str().filter(|text| !text.contains('.'))
+    }
+    let (pin, net) = match (bare(from), bare(to)) {
+        (None, Some(net)) => (from.as_str(), Some(net)),
+        (Some(net), None) => (to.as_str(), Some(net)),
+        (Some(_), Some(_)) => {
+            return Ok(Some(json!({
+                "error": "connect needs at least one pin endpoint; two net names do not identify a connection"
+            })));
+        }
+        (None, None) => return Ok(None),
+    };
+    let Some(pin) = pin else {
+        return Ok(None);
+    };
+    let net = net.expect("a bare endpoint was matched");
+    let existed = refs::net_exists(doc, netlist, net);
+    let mut result = label_tool(json!({"pin": pin, "net": net}), ctx)?;
+    if result.get("error").is_none() {
+        result["net_endpoint"] = json!({
+            "net": net,
+            "existed": existed,
+            "created": !existed,
+        });
+    }
+    Ok(Some(result))
+}
+
+/// Add the endpoint partitions and the surviving net to a successful join.
+fn with_joined(mut result: Value, from_net: Option<String>, to_net: Option<String>) -> Value {
+    if result.get("error").is_some() || from_net == to_net {
+        return result;
+    }
+    let Some((from_net, to_net)) = from_net.zip(to_net) else {
+        return result;
+    };
+    let survivor = result
+        .pointer("/net_delta/merged/0/1")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(survivor) = survivor {
+        result["joined"] = json!({
+            "from_net": from_net,
+            "to_net": to_net,
+            "survivor": survivor,
+        });
+    }
+    result
 }
 
 /// The scope the sheet already draws `net` in, if it draws it at all.

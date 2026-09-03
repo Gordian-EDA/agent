@@ -159,6 +159,18 @@ pub(crate) fn nets_touching(netlist: &Netlist, refs: &[String]) -> Vec<String> {
     out
 }
 
+/// Whether a name is present either in extracted connectivity or on a power symbol.
+pub(crate) fn net_exists(doc: &SchDoc, netlist: &Netlist, name: &str) -> bool {
+    netlist.nets.iter().any(|net| net.name == name)
+        || doc.symbols().any(|symbol| {
+            symbol.refdes().starts_with("#PWR")
+                && match symbol.value() {
+                    "" => symbol.lib_id.strip_prefix("power:") == Some(name),
+                    value => value == name,
+                }
+        })
+}
+
 /// A wire's two ends. A `(wire)` with fewer than two points is malformed and
 /// has none, so callers skip it rather than index into it.
 pub(crate) fn ends(wire: &sch_doc::Wire) -> Option<(Point2, Point2)> {
