@@ -505,6 +505,17 @@ def schematic_facts(project, before_project, artifacts):
     return facts, detail
 
 
+def pin_partition(named_nets):
+    """Every pin grouped by the net it sits on, power symbols dropped.
+
+    Single-pin groups are kept: a sheet whose signals are mostly one pin and a
+    label would otherwise compare as almost nothing, and shorting two of those
+    pins together is exactly the mistake this has to catch.
+    """
+    groups = [sorted(p for p in group if not p.startswith("#")) for group in named_nets]
+    return sorted(group for group in groups if group)
+
+
 def reference_netlist_facts(case, facts, artifacts):
     """Is the delivered netlist the human original's netlist, pin set for pin set?
 
@@ -515,10 +526,11 @@ def reference_netlist_facts(case, facts, artifacts):
     reference = case / "input" / "reference.kicad_sch"
     if not reference.is_file():
         return {}
-    expected, named, error = kicad_partition(reference, artifacts / "reference-netlist.xml")
-    if error or expected is None:
+    _, named, error = kicad_partition(reference, artifacts / "reference-netlist.xml")
+    if error or named is None:
         return {"reference_netlist_error": error or "reference netlist not exported"}
-    delivered = normalize_partition((facts.get("kicad_nets") or {}).values())
+    expected = pin_partition(named.values())
+    delivered = pin_partition((facts.get("kicad_nets") or {}).values())
     missing = [group for group in expected if group not in delivered]
     extra = [group for group in delivered if group not in expected]
     expected_refs = {pin.split(".")[0] for group in expected for pin in group}
