@@ -162,3 +162,9 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   `floorplan_netlist` challenge fixtures trip the writer's new duplicate-segment debug assert
   (lane/arrange-dup); reversed-LED polarity fix needs turn-in-place (lane/turn-in-place); judges get
   clean renders (lane/judge-clean-render).
+- Pushed: turn-in-place (reversed-LED fix works: geometry-derived turn, wires held, declared net swap),
+  arrange-dup (MST edge over an earlier span; uncovered fragments only), remove-remnants
+  (`remove_symbols` takes dead runs/labels/markers/flags and accepts #PWR refs + UUIDs; new
+  `delete_labels{names|uuids|bbox|net}` and `remove_region{bbox|block}` with boundary clipping;
+  UUIDs in read_schematic/get_net). Next: merge judge-clean-render, then a full campaign under the
+  quality-first rubric on the merged tree → accounting round 3.
