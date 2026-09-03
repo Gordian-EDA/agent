@@ -296,15 +296,12 @@ fn sheet_extent(doc: &SchDoc, bodies: &BTreeMap<(String, u32), Rect>) -> [f64; 4
         extend_rect(&mut points, text.bbox);
     }
     for item in doc.items() {
-        match item {
-            DocItem::Sheet(sheet) => {
-                points.push(sheet.at);
-                points.push(Point2::new(
-                    sheet.at.x + sheet.size.x,
-                    sheet.at.y + sheet.size.y,
-                ));
-            }
-            _ => {}
+        if let DocItem::Sheet(sheet) = item {
+            points.push(sheet.at);
+            points.push(Point2::new(
+                sheet.at.x + sheet.size.x,
+                sheet.at.y + sheet.size.y,
+            ));
         }
     }
     Rect::bounding(&points).map_or([0.0; 4], |rect| {

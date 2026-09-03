@@ -810,6 +810,7 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     };
     let redraw = stand_off(&mut edit.doc, &refdes, &pin, net);
+    seat_rail_name(&mut edit.doc, &refdes);
     if redraw.labels_added > 0 {
         edit.warn(format!(
             "pin re-seat debit: {} labels added because no clean orthogonal power stub fit",
@@ -851,6 +852,43 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// own outline — the pin tip is inside that body — and the two print on top of
 /// each other. The report records either the orthogonal route or its label
 /// fallback.
+/// Move a placed rail symbol's Value — the name people read the rail by — to
+/// the first spot around its graphic that is clear of everything the sheet
+/// already draws. `add_symbol` seats every field at a fixed offset, which on a
+/// crowded pin puts the rail name straight through a neighbouring label.
+fn seat_rail_name(doc: &mut SchDoc, refdes: &str) {
+    let Some(symbol) = doc.symbol_by_ref(refdes) else {
+        return;
+    };
+    let (uuid, origin) = (symbol.uuid.clone(), symbol.at);
+    let Some(value) = symbol.fields.get("Value").filter(|f| !f.hidden) else {
+        return;
+    };
+    let (text, size) = (value.value.clone(), value.font_size[1]);
+    let occupied: Vec<geom::Rect> = sch_doc::drawn_texts(doc)
+        .into_iter()
+        .filter(|drawn| drawn.owner.as_deref() != Some(refdes))
+        .map(|drawn| drawn.bbox)
+        .collect();
+    // Below the graphic (where a GND-family rail points), then above, then to
+    // either side — the order `write::textsolve` seats a rail name in.
+    for offset in [[0.0, 2.54], [0.0, -2.54], [3.81, 0.0], [-3.81, 0.0]] {
+        let at = sch_doc::Pose::new(origin.x + offset[0], origin.y + offset[1], 0.0);
+        let box_ = sch_model::text::drawn_box(
+            &text,
+            size,
+            sch_model::text::HJust::Center,
+            sch_model::text::VJust::Center,
+            0.0,
+            at.point(),
+        );
+        if occupied.iter().all(|other| !box_.overlaps(other)) {
+            let _ = doc.set_field_pose(&uuid, "Value", at);
+            return;
+        }
+    }
+}
+
 fn stand_off(
     doc: &mut SchDoc,
     refdes: &str,

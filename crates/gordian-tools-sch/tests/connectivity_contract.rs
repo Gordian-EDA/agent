@@ -105,13 +105,16 @@ fn connector_swap_reflows_fields_without_moving_the_part() {
         eprintln!("SKIP: no KiCad detected");
         return;
     };
+    let collisions = |ctx: &AgentRuntime| {
+        sch_floorplan::visual::measure(&sch_doc::SchDoc::read(ctx.sch_path()).unwrap())
+            .text_collisions
+            .into_iter()
+            .map(|collision| (collision.reference, collision.field, collision.with))
+            .collect::<BTreeSet<_>>()
+    };
     let before_doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
     let before_at = before_doc.symbol_by_ref("P1").unwrap().at;
-    let before = sch_floorplan::visual::measure(&before_doc)
-        .text_collisions
-        .into_iter()
-        .map(|collision| (collision.reference, collision.field, collision.with))
-        .collect::<BTreeSet<_>>();
+    let before = collisions(&ctx);
     let swapped = tool(
         &ctx,
         "swap_symbol",
@@ -123,20 +126,16 @@ fn connector_swap_reflows_fields_without_moving_the_part() {
         }),
     );
     assert_success("swap_symbol", &swapped);
+    let after_swap: Vec<_> = collisions(&ctx).difference(&before).cloned().collect();
+    assert!(
+        after_swap.is_empty(),
+        "the swap must not smear text: {after_swap:?}"
+    );
+
     let powered = tool(&ctx, "add_power", json!({"net": "GND", "pin": "P1.3"}));
     assert_success("add_power", &powered);
     let after_doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
     assert_eq!(after_doc.symbol_by_ref("P1").unwrap().at, before_at);
-    let new_collisions = sch_floorplan::visual::measure(&after_doc)
-        .text_collisions
-        .into_iter()
-        .map(|collision| (collision.reference, collision.field, collision.with))
-        .collect::<BTreeSet<_>>()
-        .difference(&before)
-        .cloned()
-        .collect::<Vec<_>>();
-    assert!(
-        new_collisions.is_empty(),
-        "new collisions: {new_collisions:?}"
-    );
+    let added: Vec<_> = collisions(&ctx).difference(&before).cloned().collect();
+    assert!(added.is_empty(), "new collisions: {added:?}");
 }

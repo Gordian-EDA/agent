@@ -347,8 +347,10 @@ pub fn drawn_box(
 /// The box a free `(text …)` note draws into. A note sits higher on its
 /// anchor than a symbol property does, by [`LIFT_NOTE`].
 ///
-/// A note may carry newlines; KiCAD stacks the lines downward from the
-/// anchor, so the box is as wide as the widest line and as tall as the stack.
+/// A note may carry newlines. The box is as wide as its widest line and as
+/// tall as the stack, which grows away from the justified edge: a
+/// bottom-justified note keeps its LAST line on the anchor and piles the rest
+/// above it, a top-justified one the other way, a centred one splits.
 pub fn note_box(
     text: &str,
     size: f64,
@@ -364,8 +366,13 @@ pub fn note_box(
         .fold(0.0, f64::max);
     let (u0, u1) = along(width, hjust);
     let (v0, v1) = across(text, size, vjust, LIFT_NOTE);
-    let stacked = v1 + (lines.len() - 1) as f64 * LINE_PITCH * size;
-    place(anchor, angle, (u0, v0, u1, stacked))
+    let stack = (lines.len() - 1) as f64 * LINE_PITCH * size;
+    let (up, down) = match vjust {
+        VJust::Bottom => (stack, 0.0),
+        VJust::Top => (0.0, stack),
+        VJust::Center => (stack / 2.0, stack / 2.0),
+    };
+    place(anchor, angle, (u0, v0 - up, u1, v1 + down))
 }
 
 fn lifted_box(
@@ -694,8 +701,8 @@ mod tests {
         let at = Point2::new(0.0, 0.0);
         let one = note_box("SHORT", FONT_SIZE, HJust::Left, VJust::Bottom, 0.0, at);
         let two = note_box("SHORT\nA MUCH LONGER LINE", FONT_SIZE, HJust::Left, VJust::Bottom, 0.0, at);
-        assert!((two.min_y - one.min_y).abs() < 1e-9, "the first line does not move");
-        assert!(two.max_y > one.max_y + 1.9, "the second line is below it");
+        assert!((two.max_y - one.max_y).abs() < 1e-9, "the last line stays on the anchor");
+        assert!(two.min_y < one.min_y - 1.9, "the first line piles above it");
         assert!(two.width() > one.width(), "the widest line sets the width");
     }
 
