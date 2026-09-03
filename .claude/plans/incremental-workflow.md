@@ -272,3 +272,6 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   seed/intent placement shorts, nets refreshed before routing, staging state on synthetic
   placements, delete_copper selectors) and graft-additive (no commits) → gating the first two myself
   in background; graft-additive re-run as an Opus agent. Push of train 3 + these waits on the graft fix.
+- Root cause of the day's "No space left": /tmp is a 22 GB tmpfs (scratchpad lives there); build
+  targets now go to `.claude/targets/<lane>` on disk. Gates for sch-refusals-4 + pcb-seed-shorts
+  re-running there; graft-additive resumed on Opus after a 529.
