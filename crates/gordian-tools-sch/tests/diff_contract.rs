@@ -1,11 +1,14 @@
 //! Oracle-backed contract tests for `diff_schematic`.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use geom::EPS;
 use gordian_runtime::AgentRuntime;
-use sch_doc::{SchDoc, SymbolInst};
+use kicad::Netlist;
+use sch_doc::{SchDoc, SymbolInst, placed_pins};
 use serde_json::{Value, json};
 
 fn passive_fixture() -> Option<AgentRuntime> {
@@ -25,6 +28,41 @@ fn tool(ctx: &AgentRuntime, name: &str, input: Value) -> Value {
     gordian_tools_sch::run(name, input, ctx)
         .unwrap_or_else(|| panic!("{name} is not registered"))
         .unwrap_or_else(|error| panic!("{name} failed: {error}"))
+}
+
+fn partition(netlist: &Netlist) -> BTreeSet<Vec<String>> {
+    netlist
+        .nets
+        .iter()
+        .map(|net| {
+            let mut pins: Vec<String> = net
+                .nodes
+                .iter()
+                .filter(|(reference, _)| !reference.starts_with('#'))
+                .map(|(reference, pin)| format!("{reference}.{pin}"))
+                .collect();
+            pins.sort();
+            pins
+        })
+        .filter(|pins| !pins.is_empty())
+        .collect()
+}
+
+fn assert_pins_drawn(doc: &SchDoc, reference: &str) {
+    for pin in placed_pins(doc)
+        .into_iter()
+        .filter(|pin| pin.refdes == reference)
+    {
+        let wired = doc.wires().any(|wire| {
+            wire.points
+                .windows(2)
+                .any(|ends| geom::Segment::new(ends[0], ends[1]).contains_point(pin.at))
+        });
+        let labelled = doc
+            .labels()
+            .any(|label| label.at.point().near_eq(pin.at, EPS));
+        assert!(wired || labelled, "{reference}.{} is not drawn", pin.number);
+    }
 }
 
 fn symbol_json(symbol: &SymbolInst) -> Value {
@@ -85,6 +123,7 @@ fn diff_agrees_with_quality_harness_after_field_and_pose_edits() {
         json!({"ref": "R1", "fields": {"Value": "2.2K"}}),
     );
     assert!(fields.get("error").is_none(), "{fields}");
+    let before_netlist = ctx.env().netlist(ctx.sch_path()).unwrap();
     let moved = tool(
         &ctx,
         "move_symbols",
@@ -92,6 +131,23 @@ fn diff_agrees_with_quality_harness_after_field_and_pose_edits() {
     );
     assert!(moved.get("error").is_none(), "{moved}");
     let after = SchDoc::read(ctx.sch_path()).unwrap();
+    let after_netlist = ctx.env().netlist(ctx.sch_path()).unwrap();
+
+    assert_eq!(partition(&after_netlist), partition(&before_netlist));
+    assert_pins_drawn(&after, "R1");
+    assert!(
+        moved.pointer("/changed/redrawn_segments").is_some(),
+        "{moved}"
+    );
+    assert!(moved.pointer("/changed/labels_added").is_some(), "{moved}");
+    assert!(
+        moved.pointer("/changed/crossings_added").is_some(),
+        "{moved}"
+    );
+    assert!(
+        !moved.to_string().contains("rerouted_wires"),
+        "legacy report leaked: {moved}"
+    );
 
     let diff = tool(&ctx, "diff_schematic", json!({"detail": true}));
     let oracle = harness_compare(&before, &after);
