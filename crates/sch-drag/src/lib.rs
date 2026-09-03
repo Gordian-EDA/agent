@@ -26,7 +26,9 @@ pub mod route;
 pub mod sheet;
 pub mod tidy;
 
-pub use drag::{DragError, DragReport, Placement, drag, drag_many};
+pub use drag::{
+    DragError, DragReport, Placement, TurnError, TurnReport, drag, drag_many, turn_in_place,
+};
 pub use eval::{Metrics, Weights, measure};
 pub use promote::{Substitute, promote, substitutes};
 pub use sheet::Sheet;

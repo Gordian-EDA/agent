@@ -60,6 +60,49 @@ pub struct DragReport {
     pub junctions_removed: usize,
 }
 
+/// What an in-place turn deliberately reassigned.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnReport {
+    /// The symbol reference or UUID passed to [`turn_in_place`].
+    pub turned: String,
+    /// Each pin whose old net is now occupied by another pin.
+    pub pins_swapped: Vec<(String, String)>,
+}
+
+/// Why a requested in-place turn could not be made.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TurnError {
+    /// No symbol carries this reference or UUID.
+    Unknown(String),
+    /// The requested pose moves the symbol anchor by this offset.
+    AnchorOffset(Point2),
+    /// This pin misses every old pin position by the reported nearest offset.
+    PinOffset { pin: String, offset: Point2 },
+    /// The document rejected the orientation.
+    Doc(String),
+}
+
+impl std::fmt::Display for TurnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TurnError::Unknown(id) => write!(f, "no symbol {id}"),
+            TurnError::AnchorOffset(offset) => write!(
+                f,
+                "the symbol anchor would move by [{:.2}, {:.2}] mm",
+                offset.x, offset.y
+            ),
+            TurnError::PinOffset { pin, offset } => write!(
+                f,
+                "pin {pin} would miss every old pin position by offset [{:.2}, {:.2}] mm",
+                offset.x, offset.y
+            ),
+            TurnError::Doc(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for TurnError {}
+
 /// Why a drag could not be made.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DragError {
@@ -264,6 +307,89 @@ fn glued_symbols(sheet: &Sheet, moving: &HashSet<String>) -> Vec<(String, PinId)
 pub fn drag(doc: &mut SchDoc, id: &str, to: Placement) -> Result<DragReport, DragError> {
     let before = Sheet::of(doc);
     drag_many(doc, &[(id.to_string(), to)], &before).map(|(report, _)| report)
+}
+
+/// Turn a symbol while leaving every wire and other drawing object fixed.
+///
+/// This is intentionally not a drag: it permits the symbol's pins to exchange
+/// the nets already present at their positions. The operation is accepted only
+/// when the requested pose leaves the anchor fixed and permutes the complete
+/// set of pin positions exactly.
+pub fn turn_in_place(doc: &mut SchDoc, id: &str, to: Placement) -> Result<TurnReport, TurnError> {
+    let symbol = doc
+        .symbol(id)
+        .or_else(|| doc.symbol_by_ref(id))
+        .ok_or_else(|| TurnError::Unknown(id.to_string()))?;
+    let uuid = symbol.uuid.clone();
+    let anchor = symbol.at.point();
+    if !anchor.near_eq(to.at, geom::EPS) {
+        return Err(TurnError::AnchorOffset(Point2::new(
+            to.at.x - anchor.x,
+            to.at.y - anchor.y,
+        )));
+    }
+
+    let before = Sheet::of(doc);
+    let old_pins: Vec<_> = before.pins_of(&uuid).cloned().collect();
+    let mut turned = doc.clone();
+    turned
+        .set_symbol_orientation(&uuid, to.rot, to.mirror)
+        .map_err(|error| TurnError::Doc(error.to_string()))?;
+    let after = Sheet::of(&turned);
+    let new_pins: Vec<_> = after.pins_of(&uuid).cloned().collect();
+
+    let mut remaining: HashMap<NodeKey, usize> = HashMap::new();
+    for pin in &old_pins {
+        *remaining.entry(key(pin.at)).or_default() += 1;
+    }
+    for pin in &new_pins {
+        let at = key(pin.at);
+        if let Some(count) = remaining.get_mut(&at)
+            && *count > 0
+        {
+            *count -= 1;
+            continue;
+        }
+        let nearest = old_pins.iter().min_by(|left, right| {
+            pin.at
+                .manhattan(left.at)
+                .partial_cmp(&pin.at.manhattan(right.at))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let offset = nearest.map_or(pin.at, |old| {
+            Point2::new(pin.at.x - old.at.x, pin.at.y - old.at.y)
+        });
+        return Err(TurnError::PinOffset {
+            pin: pin.number.clone(),
+            offset,
+        });
+    }
+    if new_pins.len() != old_pins.len() || remaining.values().any(|count| *count != 0) {
+        return Err(TurnError::Doc(
+            "the orientation changed the symbol's pin count".to_string(),
+        ));
+    }
+
+    let mut pins_swapped = Vec::new();
+    for old in &old_pins {
+        let Some(old_net) = before.net_at(old.at) else {
+            continue;
+        };
+        let changed = new_pins
+            .iter()
+            .find(|new| new.number == old.number)
+            .and_then(|new| after.net_at(new.at))
+            != Some(old_net);
+        if changed {
+            pins_swapped.push((old.number.clone(), old_net.to_string()));
+        }
+    }
+    pins_swapped.sort();
+    *doc = turned;
+    Ok(TurnReport {
+        turned: id.to_string(),
+        pins_swapped,
+    })
 }
 
 /// Move several symbols at once, carrying their connections.

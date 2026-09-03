@@ -883,6 +883,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let mut placed = Vec::new();
     let mut drag_moves = Vec::new();
+    let mut turn_moves = Vec::new();
     // A part still waiting its turn is not an obstacle to the one being placed;
     // one already placed in this batch is.
     let mut pending: Vec<String> = moves
@@ -941,9 +942,43 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         if planning.symbol(&uuid).is_none() {
             return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
         }
-        // A turn changes the shape that has to fit, so plan it before choosing
-        // the destination.
-        let turned = orient(&mut planning, &uuid, step)?;
+        let staying = ["to", "by", "near"]
+            .iter()
+            .all(|key| step.get(key).is_none());
+        let explicit_turn = step.get("turn_in_place").and_then(Value::as_bool) == Some(true);
+        if explicit_turn && !staying {
+            return Ok(json!({
+                "error": format!(
+                    "the turn_in_place of {refdes} cannot also use `to`, `by`, or `near`; nothing was moved"
+                ),
+            }));
+        }
+        let turn_target = if staying {
+            let mut trial = planning.clone();
+            let turned = orient(&mut trial, &uuid, step)?;
+            trial.symbol(&uuid).map(|symbol| {
+                (
+                    turned,
+                    sch_drag::Placement::new(symbol.at.point(), symbol.at.rot, symbol.mirror),
+                )
+            })
+        } else {
+            None
+        };
+        let (turned, turn_in_place) = match turn_target {
+            Some((turned, target)) => match sch_drag::turn_in_place(&mut planning, &uuid, target) {
+                Ok(_) => (turned, Some(target)),
+                Err(error) if explicit_turn => {
+                    return Ok(json!({
+                        "error": format!(
+                            "turn_in_place for {refdes} was refused ({error}); nothing was moved"
+                        ),
+                    }));
+                }
+                Err(_) => (orient(&mut planning, &uuid, step)?, None),
+            },
+            None => (orient(&mut planning, &uuid, step)?, None),
+        };
         let symbol = match planning.symbol(&uuid) {
             Some(symbol) => symbol,
             None => return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") })),
@@ -952,9 +987,6 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let body = crate::place::extent(&planning, symbol);
         let (w, h) = body.map_or((10.0, 10.0), |r| (r.width(), r.height()));
         let centre = body.map_or(origin, |r| r.center());
-        let staying = ["to", "by", "near"]
-            .iter()
-            .all(|key| step.get(key).is_none());
         let want = if staying {
             Destination::Origin(origin)
         } else if let Some(by) = step.get("by").and_then(Value::as_array) {
@@ -969,13 +1001,17 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 Err(error) => return Ok(json!({ "error": error })),
             }
         };
-        let mut at = snap_point(want.origin_for(origin, centre));
+        let mut at = if turn_in_place.is_some() {
+            origin
+        } else {
+            snap_point(want.origin_for(origin, centre))
+        };
         // Clearance is about the extent, which sits `centre - origin` away.
         let offset = Point2::new(centre.x - origin.x, centre.y - origin.y);
         let landing = Point2::new(at.x + offset.x, at.y + offset.y);
         let occupancy = Occupancy::skipping(&planning, &pending);
         let mut nudge = None;
-        if !occupancy.free(landing, w, h) {
+        if turn_in_place.is_none() && !occupancy.free(landing, w, h) {
             // The spot the caller picked is taken, but the intent — put this
             // part about here — still holds: slide to the nearest grid spot
             // that fits and say where it went.
@@ -995,10 +1031,12 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let symbol = planning
             .symbol(&uuid)
             .expect("a planned move keeps its symbol");
-        drag_moves.push((
-            uuid.clone(),
-            sch_drag::Placement::new(symbol.at.point(), symbol.at.rot, symbol.mirror),
-        ));
+        let target = sch_drag::Placement::new(symbol.at.point(), symbol.at.rot, symbol.mirror);
+        if turn_in_place.is_some() {
+            turn_moves.push((placed.len(), uuid.clone(), refdes.clone(), target));
+        } else {
+            drag_moves.push((uuid.clone(), target));
+        }
         pending.retain(|pending_uuid| *pending_uuid != uuid);
         let mut report = json!({ "ref": refdes, "at": [at.x, at.y] });
         if let Some(to) = nudge {
@@ -1008,6 +1046,26 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             report["rot"] = json!(rot);
         }
         placed.push(report);
+    }
+    let moved: Vec<String> = placed
+        .iter()
+        .filter_map(|entry| entry.get("ref").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    let touched = refs::nets_touching(edit.before(), &moved);
+    let mut allow = Allow::nothing().nets(touched);
+    for (index, uuid, refdes, target) in turn_moves {
+        let turn = sch_drag::turn_in_place(&mut edit.doc, &uuid, target).map_err(|error| {
+            anyhow::anyhow!("planned turn_in_place for {refdes} failed: {error}")
+        })?;
+        let nets: Vec<String> = turn
+            .pins_swapped
+            .iter()
+            .map(|(_, net)| net.clone())
+            .collect();
+        allow = allow.joining_nets(nets).part(refdes);
+        placed[index]["turned_in_place"] = json!(true);
+        placed[index]["pins_swapped"] = json!(turn.pins_swapped);
     }
     let before = sch_drag::Sheet::of(&edit.doc);
     let drag = match sch_drag::drag_many(&mut edit.doc, &drag_moves, &before) {
@@ -1032,12 +1090,6 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         "connections preserved; review labels_added/crossings_added and batch-nudge the moved parts if either is nonzero"
     };
-    let moved: Vec<String> = placed
-        .iter()
-        .filter_map(|entry| entry.get("ref").and_then(Value::as_str))
-        .map(str::to_owned)
-        .collect();
-    let touched = refs::nets_touching(edit.before(), &moved);
     edit.commit(
         json!({
             "moved": placed,
@@ -1046,7 +1098,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "crossings_added": drag.crossings_added,
             "placement": placement,
         }),
-        Allow::nothing().nets(touched),
+        allow,
     )
 }
 

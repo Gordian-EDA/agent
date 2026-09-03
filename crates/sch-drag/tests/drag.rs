@@ -6,7 +6,7 @@
 use geom::Point2;
 use sch_doc::{Mirror, SchDoc};
 use sch_drag::drag::{DragError, Placement, drag, partition};
-use sch_drag::{Sheet, measure};
+use sch_drag::{Sheet, TurnError, measure, turn_in_place};
 
 const ROOT: &str = "00000000-0000-0000-0000-000000000001";
 
@@ -143,6 +143,31 @@ fn rotating_re_derives_the_pins_and_keeps_the_net() {
         pins.iter().all(|p| (p.y - 100.0).abs() < 1e-6),
         "a quarter turn lays the part on its side: {pins:?}"
     );
+}
+
+#[test]
+fn turn_in_place_permits_only_a_pin_position_permutation() {
+    let mut doc = series_pair();
+    let before = partition(&Sheet::of(&doc));
+    let report = turn_in_place(
+        &mut doc,
+        "R1",
+        Placement::new(at(100.0, 100.0), 180.0, Mirror::None),
+    )
+    .expect("a half turn exchanges the two pin positions");
+
+    assert_ne!(partition(&Sheet::of(&doc)), before);
+    assert_eq!(report.turned, "R1");
+    assert_eq!(report.pins_swapped.len(), 2);
+
+    let error = turn_in_place(
+        &mut doc,
+        "R1",
+        Placement::new(at(100.0, 100.0), 90.0, Mirror::None),
+    )
+    .expect_err("a quarter turn misses both fixed positions");
+    assert!(matches!(error, TurnError::PinOffset { .. }));
+    assert_eq!(doc.symbol_by_ref("R1").unwrap().at.rot, 180.0);
 }
 
 #[test]

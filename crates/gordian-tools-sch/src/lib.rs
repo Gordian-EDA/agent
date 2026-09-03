@@ -189,8 +189,11 @@ pub fn tool_defs() -> Vec<Tool> {
             "move_symbols",
             "Drag one or many parts to a full position/rotation/mirror pose in one atomic edit. \
              Attached wire runs retract and return as clean obstacle-aware orthogonal routes; welded \
-             power flags follow. A taken spot slides to final `nudged_to`. Refused with a nudge \
-             suggestion if no nearby spot fits, a pin loses its drawing, or any net would change. \
+             power flags follow. A pose-only rotation or mirror whose pins permute their existing \
+             positions is a turn in place: the body turns, the wires stay fixed, and the pin nets \
+             swap; set `turn_in_place:true` to require that geometry or get an offset error. A taken \
+             spot slides to final `nudged_to`. Refused with a nudge \
+             suggestion if no nearby spot fits, a pin loses its drawing, or an undeclared net would change. \
              After adding and connecting parts, use one batch drag to compact or align them when a \
              render reports visual findings. Cleaning up the newly added parts is part \
              of that edit, not unrelated movement; do not delete and redraw their connections.",
@@ -206,6 +209,7 @@ pub fn tool_defs() -> Vec<Tool> {
                                 "unit": { "type": "integer", "minimum": 1 },
                                 "rot": { "type": "number", "enum": [0, 90, 180, 270] },
                                 "mirror": { "type": "string", "enum": ["none", "x", "y"] },
+                                "turn_in_place": { "type": "boolean" },
                                 "to": point.clone(),
                                 "by": point.clone(),
                                 "near": { "type": "string" },
