@@ -375,7 +375,17 @@ fn coalesce_payload_parts(payload: &mut sch_check::PlacePartsInput) -> Option<Va
             parts.push(part);
             continue;
         };
-        let held_part = parts[index].part.clone();
+        let Some(held) = parts.get(index) else {
+            payload.parts = parts;
+            return Some(json!({
+                "ok": false,
+                "code": "invalid_payload",
+                "input_errors": [format!(
+                    "internal reference lookup for model-provided `{refdes}` was missing; resubmit that part"
+                )],
+            }));
+        };
+        let held_part = held.part.clone();
         if held_part != part.part {
             let incoming_part = part.part.clone();
             payload.parts = parts;
@@ -386,7 +396,16 @@ fn coalesce_payload_parts(payload: &mut sch_check::PlacePartsInput) -> Option<Va
                 "names two different parts",
             ));
         }
-        let held = &mut parts[index];
+        let Some(held) = parts.get_mut(index) else {
+            payload.parts = parts;
+            return Some(json!({
+                "ok": false,
+                "code": "invalid_payload",
+                "input_errors": [format!(
+                    "internal reference lookup for model-provided `{refdes}` was missing; resubmit that part"
+                )],
+            }));
+        };
         if let Err(field) = merge_part(held, part) {
             let lib_id = held.part.clone();
             payload.parts = parts;

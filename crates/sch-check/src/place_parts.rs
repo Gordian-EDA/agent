@@ -265,6 +265,53 @@ impl Intent {
             ..Default::default()
         }
     }
+
+    /// The engine-facing IR after dropping hints that name no available part.
+    pub fn into_layout_ir_for(self, available: &BTreeSet<String>) -> (LayoutIr, Vec<String>) {
+        let mut ir = self.into_layout_ir();
+        let mut warnings = Vec::new();
+        ir.place.retain(|reference, _| {
+            let keep = available.contains(reference);
+            if !keep {
+                warnings.push(format!(
+                    "dropped intent.place.{reference}: no arrangeable part has that reference"
+                ));
+            }
+            keep
+        });
+        ir.mirror.retain(|reference| {
+            let keep = available.contains(reference);
+            if !keep {
+                warnings.push(format!(
+                    "dropped intent.mirror entry `{reference}`: no arrangeable part has that reference"
+                ));
+            }
+            keep
+        });
+        ir.relations = ir
+            .relations
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, relation)| {
+                let missing = relation
+                    .refdes()
+                    .into_iter()
+                    .filter(|reference| !available.contains(*reference))
+                    .map(str::to_string)
+                    .collect::<BTreeSet<_>>();
+                if missing.is_empty() {
+                    Some(relation)
+                } else {
+                    warnings.push(format!(
+                        "dropped intent.relations[{index}]: unknown arrangeable reference(s): {}",
+                        missing.into_iter().collect::<Vec<_>>().join(", ")
+                    ));
+                    None
+                }
+            })
+            .collect();
+        (ir, warnings)
+    }
 }
 
 /// The sheet a payload without an explicit `block` fills.
@@ -743,11 +790,42 @@ fn expand_decouple(
             continue;
         };
         let block = spec.block.as_deref().unwrap_or(default_block);
-        let comp = &design.blocks[block].components[refdes];
-        match decouple::rails(refdes, comp, provider) {
+        let Some(comp) = design
+            .blocks
+            .get(block)
+            .and_then(|contents| contents.components.get(refdes))
+            .cloned()
+        else {
+            let why = "part was not lowered, so its supply and ground pins are unavailable";
+            unresolved.push(DecoupleUnresolved {
+                refdes: refdes.clone(),
+                why: why.to_string(),
+                how: "fix the part library ID or add the decoupling capacitors explicitly"
+                    .to_string(),
+            });
+            diags.push(Diagnostic::warning(
+                "decouple-unplaced",
+                format!("{refdes}: decouple ignored because the {why}"),
+            ));
+            continue;
+        };
+        match decouple::rails(refdes, &comp, provider) {
             Ok(rails) => {
                 let caps = decouple::expand(refdes, &spec.decouple, &rails);
-                let block = design.blocks.get_mut(block).unwrap();
+                let Some(block) = design.blocks.get_mut(block) else {
+                    unresolved.push(DecoupleUnresolved {
+                        refdes: refdes.clone(),
+                        why: format!("placement region `{block}` disappeared during lowering"),
+                        how: "add the decoupling capacitors explicitly".to_string(),
+                    });
+                    diags.push(Diagnostic::warning(
+                        "decouple-missing-block",
+                        format!(
+                            "{refdes}: decouple ignored because placement region `{block}` is unavailable"
+                        ),
+                    ));
+                    continue;
+                };
                 for (key, cap) in caps {
                     block.components.insert(key, cap);
                 }

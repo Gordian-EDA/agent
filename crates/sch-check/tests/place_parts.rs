@@ -78,6 +78,38 @@ const TEN_PARTS: &str = r#"{
              "ports": {"TX": "right", "RX": "right"}}
 }"#;
 
+const CAMPAIGN_BMS_POWER_PROTECTION: &str = r#"{
+  "block": "power_protection",
+  "intent": {
+    "flow": "lr",
+    "ports": {
+      "+3V3": "top", "CHG": "top", "DSG": "top", "GND": "bottom",
+      "LOAD+": "right", "LOAD-": "right", "PACK+": "left", "PACK-": "left"
+    },
+    "relations": [
+      {"kind": "group", "members": ["J1", "F1", "J2", "Q1", "Q2", "RS1", "D1"], "name": "power_path", "side": "right"},
+      {"anchor": "J1", "kind": "group", "members": ["U2", "C1", "C2"], "name": "ldo", "side": "top"}
+    ]
+  },
+  "name": "10S Li-ion BMS",
+  "parts": [
+    {"footprint": "TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-2_1x02_P5.00mm_Horizontal", "part": "TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-2_1x02_P5.00mm_Horizontal", "pins": {"1": "PACK+", "2": "PACK-"}, "ref": "J1", "value": "PACK"},
+    {"footprint": "TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-2_1x02_P5.00mm_Horizontal", "part": "TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-2_1x02_P5.00mm_Horizontal", "pins": {"1": "LOAD+", "2": "LOAD-"}, "ref": "J2", "value": "PROTECTED LOAD"},
+    {"footprint": "Fuse:Fuse_1206_3216Metric", "part": "Fuse:Fuse", "pins": {"1": "PACK+", "2": "FUSED+"}, "ref": "F1", "value": "5A"},
+    {"footprint": "Diode_SMD:D_SMB", "part": "Device:D_TVS", "pins": {"1": "LOAD+", "2": "LOAD-"}, "ref": "D1", "value": "SMBJ43CA 43V BIDIR"},
+    {"footprint": "Resistor_SMD:R_2512_6332Metric", "part": "Device:R_Shunt", "pins": {"1": "PACK-", "2": "SHUNT-"}, "ref": "RS1", "value": "2mR"},
+    {"footprint": "Package_SO:PowerPAK_SO-8_Single", "part": "Transistor_FET:Q_NMOS_GSD", "pins": {"D": "SHUNT-", "G": "CHG_GATE", "S": "FET_MID"}, "ref": "Q1", "value": "CHG NMOS"},
+    {"footprint": "Package_SO:PowerPAK_SO-8_Single", "part": "Transistor_FET:Q_NMOS_GSD", "pins": {"D": "LOAD-", "G": "DSG_GATE", "S": "FET_MID"}, "ref": "Q2", "value": "DSG NMOS"},
+    {"footprint": "Resistor_SMD:R_0603_1608Metric", "part": "Device:R", "pins": {"1": "CHG", "2": "CHG_GATE"}, "ref": "RCHG", "value": "100R GATE"},
+    {"footprint": "Resistor_SMD:R_0603_1608Metric", "part": "Device:R", "pins": {"1": "DSG", "2": "DSG_GATE"}, "ref": "RDSG", "value": "100R GATE"},
+    {"footprint": "Resistor_SMD:R_0603_1608Metric", "part": "Device:R", "pins": {"1": "CHG_GATE", "2": "FET_MID"}, "ref": "RPG", "value": "1M CHG PULLDOWN"},
+    {"footprint": "Resistor_SMD:R_0603_1608Metric", "part": "Device:R", "pins": {"1": "DSG_GATE", "2": "FET_MID"}, "ref": "RPD", "value": "1M DSG PULLDOWN"},
+    {"decouple": {"1uF": 2}, "footprint": "Package_TO_SOT_SMD:SOT-23", "part": "Regulator_Linear:MCP1799x-330xxTT", "pins": {"GND": "GND", "IN": "PACK+", "OUT": "+3V3"}, "ref": "U2", "value": "3V3 LDO"},
+    {"footprint": "Capacitor_SMD:C_0603_1608Metric", "part": "Device:C", "pins": {"1": "PACK+", "2": "GND"}, "ref": "C1", "value": "1uF LDO IN"},
+    {"footprint": "Capacitor_SMD:C_0603_1608Metric", "part": "Device:C", "pins": {"1": "+3V3", "2": "GND"}, "ref": "C2", "value": "1uF LDO OUT"}
+  ]
+}"#;
+
 fn parse() -> PlacePartsInput {
     serde_json::from_str(TEN_PARTS).expect("input parses")
 }
@@ -408,6 +440,48 @@ fn decouple_without_power_pins_names_the_fallback_candidates() {
     );
     assert!(audit.decouple_unresolved[0].how.contains("explicitly"));
     assert_eq!(design.blocks[DEFAULT_BLOCK].components.len(), 1);
+}
+
+#[test]
+fn campaign_bms_unresolvable_decoupled_part_is_reported_without_panicking() {
+    let input: PlacePartsInput = serde_json::from_str(CAMPAIGN_BMS_POWER_PROTECTION).unwrap();
+    let (design, diags, audit) = into_design(&input, &provider(), &Default::default());
+
+    assert!(
+        design
+            .blocks
+            .values()
+            .flat_map(|block| block.components.keys())
+            .any(|reference| reference == "C1")
+    );
+    assert!(audit.unplaced.iter().any(|part| part.refdes == "U2"), "{audit:?}");
+    assert_eq!(audit.decouple_unresolved[0].refdes, "U2", "{audit:?}");
+    assert!(
+        diags
+            .0
+            .iter()
+            .any(|diagnostic| diagnostic.code == "decouple-unplaced"),
+        "{diags:?}"
+    );
+
+    let available = design
+        .blocks
+        .values()
+        .flat_map(|block| block.components.keys().cloned())
+        .collect();
+    let (ir, warnings) = input.intent.unwrap().into_layout_ir_for(&available);
+    assert!(ir.relations.is_empty(), "{ir:?}");
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("J1") && warning.contains("J2")),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings.iter().any(|warning| warning.contains("U2")),
+        "{warnings:?}"
+    );
 }
 
 #[test]
