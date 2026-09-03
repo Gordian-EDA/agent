@@ -141,3 +141,10 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   symbol copies on EVERY write (pins lost), `body_rect` unioned multi-unit bodies, `pins::resolve`
   ignored `lib_name`. QUEUED: wire `sch_drag::drag` into `move_symbols` (replace move_attached +
   straighten) once lane/bluepill-erc merges; delete `tidy` if still unused after W3.
+- bluepill-erc merged (locally; push after lane/dup-segment): one label scope per net enforced at the
+  document, `connect`/`label`/`add_power` clear no-connect markers first, a label on a pin already on
+  another authored net REFUSES naming both nets, `remove_symbols`/`delete_wires` retract orphaned runs;
+  BluePill repro ERC 89 → 0. Its float-epsilon test exposed a real duplicate wire segment → lane/dup-segment.
+- Launched: W3 lane/sch-bench (Opus: place_parts partial commit + bench + netlist-drawn arrange +
+  reserve_refs enforcement + extractor label-scope parity), lane/drag-move (codex: sch_drag::drag
+  inside move_symbols).
