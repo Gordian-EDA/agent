@@ -17,9 +17,7 @@ use sch_check::{PinType, SymbolMeta, find_pin};
 use crate::write::SchematicWriter;
 use geom::Dir;
 use kicad_symbol::PinDir;
-use sch_model::engine::CandidateEvaluator;
-use sch_model::engine::{PinFlow, PlacementEngine, SchematicPlaceProblem};
-use sch_model::place::PlaceOptions;
+use sch_model::engine::PinFlow;
 use sch_model::refine::SEARCH_SEED;
 use sch_model::result::EmitOutput;
 
@@ -200,28 +198,24 @@ mod resolve_pin_tests {
 // Public entry.
 // ---------------------------------------------------------------------------
 
-/// Build the neutral placement problem: gathered parts, connectivity, the layout intent
-/// to honour (inferred from connectivity when the caller has none), and the pin flow
-/// directions resolved from the symbol library — so no engine ever opens one itself.
+/// A design lowered to the geometry the typesetter and the realiser share: the items to
+/// draw, the net incidence over them, and the sheet intent.
+pub struct Scene {
+    pub items: Vec<Item>,
+    pub inc: Incidence,
+    pub ir: LayoutIr,
+}
+
+/// Lower `design` into a [`Scene`], inferring the sheet intent when the caller has none.
 pub fn place_problem(
     env: &KicadInstallation,
     design: &Design,
     ir: Option<LayoutIr>,
-    options: PlaceOptions,
-) -> io::Result<SchematicPlaceProblem> {
+) -> io::Result<Scene> {
     let items = gather(env, design)?;
     let inc = incidence(&items);
     let ir = ir.unwrap_or_else(|| super::super::infer::infer_ir(env, design));
-    let pin_flow = resolve_pin_flow(env, &items);
-    Ok(SchematicPlaceProblem {
-        items,
-        inc,
-        ir,
-        pin_flow,
-        seed: SEARCH_SEED,
-        options,
-        deadline: None,
-    })
+    Ok(Scene { items, inc, ir })
 }
 
 /// `(item, pin)` → flow direction, from the symbol library's electrical pin types.
@@ -262,10 +256,9 @@ pub fn resolve_pin_flow(
 pub fn emit_strategy(
     env: &KicadInstallation,
     design: &Design,
-    engine: Box<dyn PlacementEngine>,
     ir: Option<LayoutIr>,
 ) -> io::Result<EmitOutput> {
-    let (w, mut out) = prepare_writer(env, design, ir, engine)?;
+    let (w, mut out) = prepare_writer(env, design, ir)?;
     out.sch = w.finish();
     // The OPEN half of truthfulness, read off the finished document with the same
     // extractor the live-edit gate uses — so a whole-sheet emit can never ship a rail
@@ -293,36 +286,22 @@ fn block_prop(it: &Item) -> Vec<(String, String)> {
     vec![(sch_model::result::AP_BLOCK.to_string(), it.block.clone())]
 }
 
-/// Lay out `design` under `engine` and build its FINALIZED writer (placed, routed,
-/// text-solved, reframed) WITHOUT rendering it. Returns the prepared writer plus the
-/// readability metadata; `EmitOutput.sch` and `net_opens` are left empty because both
-/// need the finished document — [`emit_strategy`] fills them in.
+/// Typeset `design` and build its FINALIZED writer (placed, routed, text-solved,
+/// reframed) WITHOUT rendering it. Returns the prepared writer plus the readability
+/// metadata; `EmitOutput.sch` and `net_opens` are left empty because both need the
+/// finished document — [`emit_strategy`] fills them in.
 #[tracing::instrument(
     skip_all,
-    fields(
-        engine = engine.name(),
-        design = design.name.as_deref().unwrap_or("<unnamed>")
-    )
+    fields(design = design.name.as_deref().unwrap_or("<unnamed>"))
 )]
 pub(crate) fn prepare_writer(
     env: &KicadInstallation,
     design: &Design,
     ir: Option<LayoutIr>,
-    engine: Box<dyn PlacementEngine>,
 ) -> io::Result<(SchematicWriter, EmitOutput)> {
-    let mut problem = place_problem(env, design, ir, PlaceOptions::default())?;
-    if problem.options.debug_timing {
-        tracing::debug!("[place] engine = {}", engine.name());
-    }
-    // The oracle is a SNAPSHOT of the problem's connectivity and intent: the engine mutates
-    // only item poses, so the two never diverge, and the borrow checker stays out of the way.
-    let ir = {
-        let (inc, intent) = (problem.inc.clone(), problem.ir.clone());
-        let realizer = RoutedSheetRealizer::new(env, &inc, &intent);
-        engine
-            .place(&mut problem, &RoutedEvaluator::new(realizer, design))
-            .ir
-    };
+    let mut problem = place_problem(env, design, ir)?;
+    sch_flex::typeset(&mut problem.items, &problem.ir.trees);
+    let ir = problem.ir.clone();
 
     let detected_idioms = ir.idioms.clone();
     let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);

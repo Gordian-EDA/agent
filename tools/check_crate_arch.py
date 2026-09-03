@@ -30,7 +30,7 @@ API_CRATES = {"pcb-model"}
 # `cargo run -p <leaf> --example bench` must work with no installation and no agent.
 PURE_HELPERS = {"geom", "circuit-graph", "kicad-symbol", "pcb-grid"}
 MODEL_CRATES = {"sch-model": PURE_HELPERS, "pcb-model": PURE_HELPERS}
-SCH_LEAVES = {"anneal-place", "cluster-place", "spine-place", "sch-flex"}
+SCH_LEAVES = {"sch-flex"}
 # `sch-drag` is a leaf over the *document* rather than over the abstract model: it
 # edits a real `.kicad_sch` and gates itself on the connectivity extracted from it,
 # so `sch-doc` is its model crate.
@@ -41,9 +41,6 @@ LEAF_LIBRARY_DEPS = {
     **{leaf: {"sch-model"} | PURE_HELPERS for leaf in SCH_LEAVES},
     **{leaf: {"pcb-model"} | PURE_HELPERS for leaf in PCB_LEAVES},
 }
-# `cluster-place` is a PORTFOLIO engine: it runs the other two schematic leaves and keeps
-# the better result, so composing them is its method, not a coupling.
-LEAF_LIBRARY_DEPS["cluster-place"] |= {"anneal-place", "spine-place"}
 LEAF_TEST_DEPS = {
     **{leaf: LEAF_LIBRARY_DEPS[leaf] for leaf in DOC_LEAVES},
     **{leaf: LEAF_LIBRARY_DEPS[leaf] | SCH_LEAVES for leaf in SCH_LEAVES},

@@ -13,9 +13,6 @@ use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan;
 use sch_floorplan::live::{self, PlacementBudget};
 use sch_floorplan::region::{RegionProblem, arrange};
-use sch_model::engine::{
-    CandidateEvaluator, PlacementEngine, PlacementOutput, SchematicPlaceProblem,
-};
 use sch_model::geometry::body_rect;
 use sch_model::item::Item;
 use sch_model::place::PlaceOptions;
@@ -89,7 +86,7 @@ fn arrange_places_new_parts_without_disturbing_the_neighbours() {
         fixed.clone(),
         obstacles.clone(),
         ir,
-        &spine_place::SpinePlace,
+        ,
     ));
 
     assert_eq!(out.poses.len(), 3);
@@ -163,7 +160,7 @@ fn arrange_with_no_neighbours_is_the_bulk_placement_path() {
         Vec::new(),
         Vec::new(),
         ir,
-        &spine_place::SpinePlace,
+        ,
     ));
     assert_eq!(out.poses.len(), n);
     assert_eq!(out.result.truthfulness_breaks, 0);
@@ -185,7 +182,7 @@ impl PlacementEngine for ObserveSpine {
             problem.items.iter().filter(|item| item.frozen).count(),
             Ordering::Release,
         );
-        spine_place::SpinePlace.place(problem, eval)
+        .place(problem, eval)
     }
 }
 
@@ -225,7 +222,6 @@ fn thirty_part_named_block_uses_the_region_path_on_a_sixty_part_sheet() {
         &env,
         &mut doc,
         &base,
-        Box::new(spine_place::SpinePlace),
         Some(PlacementBudget::within(Duration::from_secs(45), 60)),
     )
     .unwrap();

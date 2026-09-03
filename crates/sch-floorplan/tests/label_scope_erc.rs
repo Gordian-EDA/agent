@@ -16,10 +16,9 @@ use kicad::KicadInstallation;
 use sch_check::place_parts::PlacePartsInput;
 use sch_doc::{LabelKind, SchDoc};
 use sch_floorplan::live;
-use sch_model::engine::PlacementEngine;
 
 fn engine() -> impl PlacementEngine {
-    cluster_place::ClusterPlace
+    
 }
 
 const BLANK: &str = "(kicad_sch\n\

@@ -38,9 +38,9 @@ pub struct Part<'a> {
 }
 
 impl<'a> Part<'a> {
-    /// `outside` names the nets that continue beyond this part's block, so the measure can
-    /// keep room for the label they will need.
-    pub fn new(index: usize, item: &'a Item, outside: &BTreeSet<String>) -> Self {
+    /// `labelled` names the pins that will carry a net label — one per net leaving the
+    /// block — so the measure keeps room for exactly the labels that get drawn.
+    pub fn new(index: usize, item: &'a Item, labelled: &BTreeSet<(usize, String)>) -> Self {
         // The unit's pins are the ones the LOWERING resolved onto this item, matched by
         // number: `PinGeom::unit` folds a symbol's common pins onto unit 1, so filtering
         // the geometry by unit drops an op-amp's shared supply pins.
@@ -60,7 +60,9 @@ impl<'a> Part<'a> {
             .iter()
             .map(|pin| match part.net(pin) {
                 Some(net) if is_power_net(net) => POWER_STUB,
-                Some(net) if outside.contains(net) => LABEL_STUB + label_room(net),
+                Some(net) if labelled.contains(&(index, pin.number.clone())) => {
+                    LABEL_STUB + label_room(net)
+                }
                 _ => 0.0,
             })
             .collect();

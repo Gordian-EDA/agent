@@ -15,7 +15,6 @@ use std::path::Path;
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan;
-use sch_model::engine::PlacementEngine;
 
 fn corpus() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/validation")
@@ -50,7 +49,7 @@ fn defects_of(env: &KicadInstallation, provider: &SymbolTable, name: &str) -> Ve
         .clone()
         .map(sch_check::Intent::into_layout_ir)
         .unwrap_or_else(|| floorplan::baseline_ir(&design));
-    let engine: Box<dyn PlacementEngine> = Box::new(spine_place::SpinePlace);
+    let engine: Box<dyn PlacementEngine> = ;
     let out = floorplan::emit_strategy(env, &design, engine, Some(ir))
         .unwrap_or_else(|e| panic!("{name}: {e}"));
     out.net_shorts
@@ -122,7 +121,6 @@ fn live_place_parts_commits_every_corpus_fixture() {
             &env,
             &mut doc,
             &input,
-            Box::new(spine_place::SpinePlace),
             None,
         ) {
             Ok(report) if !report.committed => {

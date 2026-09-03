@@ -33,7 +33,6 @@ use serde_json::{Value, json};
 
 /// The wall-clock promise `place_parts` / `arrange` keep — the agent loop sizes its
 /// own timeout from it.
-pub use sch_floorplan::live::PlacementBudget;
 
 /// The tools that write the schematic.
 pub const MUTATORS: [&str; 18] = [

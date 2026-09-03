@@ -33,11 +33,10 @@ use sch_check::model::Design;
 use sch_check::place_parts::PlacePartsInput;
 use sch_doc::{SchDoc, connect};
 use sch_floorplan::live::{self, Selection};
-use sch_model::engine::PlacementEngine;
 
 /// The engine the agent ships with, so the gates measure what actually runs.
 fn engine() -> impl PlacementEngine {
-    cluster_place::ClusterPlace
+    
 }
 
 /// The corpus the gate runs by default: the four tuned references plus the authored

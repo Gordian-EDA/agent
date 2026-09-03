@@ -39,7 +39,6 @@ fn place_blocks(env: &KicadInstallation, blocks: &[&str]) -> (SchDoc, Vec<(Strin
             env,
             &mut doc,
             &input,
-            Box::new(spine_place::SpinePlace),
             Some(live::PlacementBudget::new(sheet_parts)),
         )
         .unwrap_or_else(|e| panic!("{name}: {e}"));

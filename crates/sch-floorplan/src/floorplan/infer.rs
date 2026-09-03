@@ -52,7 +52,6 @@ pub fn baseline_ir(design: &Design) -> LayoutIr {
         rail_locals: local_rail_nets(design),
         rail_force: Default::default(),
         zone: BTreeMap::new(),
-        relations: Vec::new(),
     }
 }
 
@@ -491,7 +490,6 @@ pub fn infer_ir(env: &KicadInstallation, design: &Design) -> LayoutIr {
         rail_locals: local_rail_nets(design),
         rail_force: Default::default(),
         zone: BTreeMap::new(),
-        relations: Vec::new(),
     }
 }
 

@@ -7,7 +7,6 @@
 //! the resulting values into core constructors.
 
 pub use gordian_llm::{DEFAULT_MAX_TOKENS, LlmConfig, LlmReasoningEffort};
-pub use sch_model::place::PlacementEngineKind;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -56,8 +55,6 @@ pub struct GordianConfig {
     pub review: ReviewConfig,
     /// Tool-level defaults shared across schematic and PCB tools.
     pub tools: ToolConfig,
-    /// Deterministic engine selection.
-    pub engines: EngineConfig,
 }
 
 impl Default for GordianConfig {
@@ -71,7 +68,6 @@ impl Default for GordianConfig {
             legacy_retrieval: None,
             review: ReviewConfig::default(),
             tools: ToolConfig::default(),
-            engines: EngineConfig::default(),
         }
     }
 }
@@ -115,7 +111,6 @@ impl GordianConfig {
         self.project.validate("project")?;
         self.agent.validate("agent")?;
         self.tools.validate("tools")?;
-        self.engines.validate("engines")?;
         Ok(())
     }
 }
@@ -265,22 +260,6 @@ impl ToolConfig {
     }
 }
 
-/// Deterministic engine selection.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-pub struct EngineConfig {
-    /// Force a schematic placement engine. Unset — the default — lets
-    /// `sch_floorplan::live::PlacementBudget` pick the engine that keeps the call
-    /// inside its deadline.
-    pub schematic_placer: Option<PlacementEngineKind>,
-}
-
-impl EngineConfig {
-    fn validate(&self, _path: &'static str) -> Result<(), ConfigError> {
-        Ok(())
-    }
-}
-
 /// One config validation failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigError {
@@ -366,7 +345,6 @@ mod tests {
         assert_eq!(cfg.llm.api_key.as_deref(), Some("test-key"));
         assert_eq!(cfg.llm.max_tokens, DEFAULT_MAX_TOKENS);
         assert_eq!(cfg.tools.default_search_limit, DEFAULT_SEARCH_LIMIT);
-        assert_eq!(cfg.engines, EngineConfig::default());
         cfg.validate().unwrap();
     }
 
@@ -510,20 +488,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn engine_config_deserializes_aliases() {
-        let cfg: GordianConfig = toml::from_str(
-            r#"
-            [engines]
-            schematicPlacer = "sa"
-            "#,
-        )
-        .unwrap();
-        assert_eq!(
-            cfg.engines.schematic_placer,
-            Some(PlacementEngineKind::Anneal)
-        );
-    }
 
     #[test]
     fn validation_reports_field_path() {

@@ -126,7 +126,6 @@ fn placing_a_two_pin_part_honours_every_authored_orientation() {
                 &env,
                 &mut doc,
                 &input,
-                Box::new(cluster_place::ClusterPlace),
                 None,
             )
             .unwrap();

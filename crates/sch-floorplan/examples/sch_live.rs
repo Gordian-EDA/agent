@@ -1,8 +1,8 @@
 //! `sch_live` — drive the live-edit API from a shell, one `.kicad_sch` at a time.
 //!
 //! ```text
-//! sch_live place-parts <sch> <input.json> [--engine flex|cluster|anneal|spine]
-//! sch_live arrange     <sch> R1,R2,…      [--engine …]
+//! sch_live place-parts <sch> <input.json>
+//! sch_live arrange     <sch> R1,R2,…
 //! sch_live rewire      <sch> R1,R2,…
 //! ```
 //!
@@ -16,18 +16,16 @@ use kicad::KicadInstallation;
 use sch_check::PlacePartsInput;
 use sch_doc::SchDoc;
 use sch_floorplan::live::{self, Selection};
-use sch_model::engine::PlacementEngine;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let engine = engine(&args);
     let positional: Vec<&str> = args
         .iter()
         .map(String::as_str)
         .filter(|a| !a.starts_with("--"))
         .collect();
     let [command, sheet, rest @ ..] = positional.as_slice() else {
-        eprintln!("usage: sch_live <place-parts|arrange|rewire> <sch> <arg> [--engine E]");
+        eprintln!("usage: sch_live <place-parts|arrange|rewire> <sch> <arg>");
         std::process::exit(2);
     };
 
@@ -42,15 +40,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "place-parts" => {
             let source = std::fs::read_to_string(rest.first().ok_or("missing input.json")?)?;
             let input: PlacePartsInput = serde_json::from_str(&source)?;
-            let report = live::place_parts(&env, &mut doc, &input, engine, None)?;
+            let report = live::place_parts(&env, &mut doc, &input)?;
             (serde_json::to_string_pretty(&report)?, report.committed)
         }
         "arrange" => {
-            let report = live::arrange(&env, &mut doc, &selection(rest)?, None, None, engine, None)?;
+            let report = live::arrange(&env, &mut doc, &selection(rest)?, None, None)?;
             (serde_json::to_string_pretty(&report)?, report.committed)
         }
         "rewire" => {
-            let report = live::rewire(&env, &mut doc, &selection(rest)?, None)?;
+            let report = live::rewire(&env, &mut doc, &selection(rest)?)?;
             (serde_json::to_string_pretty(&report)?, report.committed)
         }
         other => return Err(format!("unknown command `{other}`").into()),
@@ -81,17 +79,3 @@ fn selection(rest: &[&str]) -> Result<Selection, Box<dyn std::error::Error>> {
     }
 }
 
-fn engine(args: &[String]) -> Box<dyn PlacementEngine> {
-    let name = args
-        .iter()
-        .position(|a| a == "--engine")
-        .and_then(|i| args.get(i + 1))
-        .map(String::as_str)
-        .unwrap_or("flex");
-    match name {
-        "anneal" => Box::new(anneal_place::Anneal),
-        "spine" => Box::new(spine_place::SpinePlace),
-        "cluster" => Box::new(cluster_place::ClusterPlace),
-        _ => Box::new(sch_floorplan::flex::FlexPlace),
-    }
-}

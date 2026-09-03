@@ -12,7 +12,7 @@ use circuit_graph::netclass::is_power_net;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use indexmap::IndexMap;
-use sch_model::ir::{Band, Cell, Flow, LayoutIr, Relation, Side};
+use sch_model::ir::{Band, Cell, Flow, LayoutIr, Side};
 use sch_model::tree::Tree;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -264,10 +264,6 @@ pub struct Intent {
     /// Anchors to flip left-to-right.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub mirror: BTreeSet<RefDes>,
-    /// Relative statements about parts — `left_of`, `group`, `align`. The only way
-    /// to say where new parts go with respect to parts already on the sheet.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub relations: Vec<Relation>,
 }
 
 impl Intent {
@@ -279,7 +275,6 @@ impl Intent {
             ports: self.ports,
             place: self.place,
             mirror: self.mirror,
-            relations: self.relations,
             ..Default::default()
         }
     }
@@ -306,28 +301,6 @@ impl Intent {
             }
             keep
         });
-        ir.relations = ir
-            .relations
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, relation)| {
-                let missing = relation
-                    .refdes()
-                    .into_iter()
-                    .filter(|reference| !available.contains(*reference))
-                    .map(str::to_string)
-                    .collect::<BTreeSet<_>>();
-                if missing.is_empty() {
-                    Some(relation)
-                } else {
-                    warnings.push(format!(
-                        "dropped intent.relations[{index}]: unknown arrangeable reference(s): {}",
-                        missing.into_iter().collect::<Vec<_>>().join(", ")
-                    ));
-                    None
-                }
-            })
-            .collect();
         (ir, warnings)
     }
 }
@@ -888,55 +861,6 @@ fn expand_decouple(
 /// JSON Schema for the tool's `input_schema`. Deliberately terse: the LLM needs
 /// the shape and the rules that are not obvious (`"nc"`, that a pin key may be a
 /// name or a number, and that anything left out is a no-connect).
-/// The `intent.relations` schema: every accepted entry shape, with an example.
-///
-/// Split out because the whole payload schema is one `json!` literal and the
-/// macro's recursion limit is real; it also keeps the grammar in one readable place.
-fn relations_schema() -> Value {
-    json!({
-    "type": "array",
-    "description":
-        "Relative placement. `b` and `anchor` may name a part already \
-         on the sheet. Example: \
-         {\"kind\":\"group\",\"name\":\"leds\",\"members\":[\"R3\",\"D1\"],\
-         \"side\":\"right\",\"anchor\":\"U1\"}",
-    "items": {
-        "type": "object",
-        "properties": {
-            "kind": {
-                "type": "string",
-                "enum": ["left_of", "right_of", "above", "below",
-                         "group", "align"]
-            },
-            "a": {"type": "string"},
-            "b": {"type": "string"},
-            "name": {"type": "string"},
-            "members": {
-                "type": "array",
-                "items": {"type": "string"},
-                "minItems": 1
-            },
-            "side": {
-                "description":
-                    "An edge, or an [edge, anchor] pair, or \
-                     {side, anchor}.",
-                "anyOf": [
-                    {"type": "string",
-                     "enum": ["left", "right", "top", "bottom"]},
-                    {"type": "array", "minItems": 2, "maxItems": 2},
-                    {"type": "object"}
-                ]
-            },
-            "anchor": {"type": "string"},
-            "axis": {
-                "type": "string",
-                "enum": ["horizontal", "vertical"]
-            }
-        },
-        "required": ["kind"]
-    }})
-}
-
 /// What is wrong with a region's layout tree: a leaf naming a part that is not in the
 /// region, or the same part placed twice. Both would silently lose a part off the drawing,
 /// so they refuse the payload rather than surprise the author.
@@ -1143,8 +1067,7 @@ pub fn place_parts_input_schema() -> Value {
                         "type": "array",
                         "description": "Refdes to flip left-to-right.",
                         "items": {"type": "string"}
-                    },
-                    "relations": relations_schema()
+                    }
                 }
             }
         }

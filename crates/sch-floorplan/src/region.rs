@@ -1,35 +1,29 @@
 //! `region` — place a SUBSET of a sheet among neighbours that are already there.
 //!
-//! The whole-sheet pipeline lays out every part from nothing. Live editing needs the
+//! The whole-sheet pipeline typesets every block from nothing. Live editing needs the
 //! other shape: "arrange these three parts, leave everything else exactly where it is".
-//! [`arrange`] is that adapter — it drives an ordinary [`PlacementEngine`] over the union
-//! of the movable set and the fixed neighbours, then hands back poses for the movable set
-//! only. It is what an `arrange(selection)` tool calls, and what a bulk `place_parts`
-//! calls with an empty fixed set.
+//! [`arrange`] is that adapter — it runs the typesetter over the movable set among the
+//! fixed neighbours, then hands back poses for the movable set only. It is what an
+//! `arrange(selection)` tool calls, and what a bulk `place_parts` calls with an empty
+//! fixed set.
 //!
-//! Two invariants the adapter owns, because the engine contract does not:
-//! - **Fixed neighbours do not move.** The adapter marks them `frozen` (the search may not
-//!   move them) AND `preseeded` (they already hold the pose the caller owns), so they keep
-//!   that pose through seeding, search, and the overlap relaxers. The engines still `normalize`
-//!   the sheet — a rigid translation — so the adapter measures that offset off the fixed
-//!   set and takes it back out, returning poses in the caller's own frame.
-//! - **Nothing lands on an obstacle.** Engines have no obstacle vocabulary (their only
-//!   geometry is the items they place), so the adapter legalises afterwards: any movable
-//!   part overlapping an obstacle, a fixed neighbour, or another movable part is walked
-//!   out to the nearest clear grid position. With no obstacles this is a no-op.
+//! Two invariants the adapter owns, because the typesetter does not:
+//! - **Fixed neighbours do not move.** The adapter marks them `preseeded` (they already
+//!   hold the pose the caller owns), and the typesetter leaves those alone.
+//! - **Nothing lands on an obstacle.** The typesetter's only geometry is the parts it
+//!   draws, so the adapter legalises afterwards: any movable part overlapping an obstacle,
+//!   a fixed neighbour, or another movable part is walked out to the nearest clear grid
+//!   position. With no obstacles this is a no-op.
 
 use geom::{EPS, Point2, Rect};
 
 use kicad::KicadInstallation;
 use sch_check::Design;
-use sch_model::engine::CandidateEvaluator;
 use sch_model::ir::LayoutIr;
 use sch_model::item::{Incidence, Item};
-use sch_model::place::{Deadline, PlaceOptions, PlaceResult};
+use sch_model::place::PlaceResult;
 
-use sch_model::engine::{PlacementEngine, SchematicPlaceProblem};
-
-use crate::floorplan::place::{RoutedEvaluator, RoutedSheetRealizer, incidence, resolve_pin_flow};
+use crate::floorplan::place::{RoutedEvaluator, RoutedSheetRealizer, incidence};
 use sch_model::geometry::body_rect;
 
 /// Step of the legalisation walk (100 mil — two schematic grid steps).
@@ -61,10 +55,6 @@ pub struct RegionProblem<'a> {
     /// Net → pins over `items` followed by `fixed`. [`RegionProblem::new`] builds it.
     pub incidence: Incidence,
     pub ir: LayoutIr,
-    pub engine: &'a dyn PlacementEngine,
-    pub options: PlaceOptions,
-    /// When the search must stop; `None` searches to its full iteration budget.
-    pub deadline: Option<Deadline>,
 }
 
 /// The pose of one placed part, in the CALLER's coordinate frame.
@@ -77,11 +67,10 @@ pub struct Pose {
     pub mirror: bool,
 }
 
-/// New poses for the movable set, in input order, plus what the engine measured.
+/// New poses for the movable set, in input order, plus what the finished sheet measures.
 pub struct RegionOutput {
     pub poses: Vec<Pose>,
-    /// The IR the engine finished with — its recognized idioms and rail decisions, which
-    /// the realiser needs to draw the same sheet the engine scored.
+    /// The IR the sheet ships with — its recognized idioms and rail decisions.
     pub ir: LayoutIr,
     pub result: PlaceResult,
 }
@@ -95,7 +84,6 @@ impl<'a> RegionProblem<'a> {
         fixed: Vec<Item>,
         obstacles: Vec<Rect>,
         ir: LayoutIr,
-        engine: &'a dyn PlacementEngine,
     ) -> Self {
         let mut all = items.clone();
         all.extend(fixed.iter().cloned());
@@ -108,16 +96,7 @@ impl<'a> RegionProblem<'a> {
             obstacles,
             incidence,
             ir,
-            engine,
-            options: PlaceOptions::default(),
-            deadline: None,
         }
-    }
-
-    /// Stop the search by `deadline`; the engine ships its best-so-far.
-    pub fn by(mut self, deadline: Option<Deadline>) -> Self {
-        self.deadline = deadline;
-        self
     }
 }
 
@@ -278,16 +257,6 @@ fn nudge_parts(movable: &mut [Item], fixed: &[Item], obstacles: &[Rect]) {
     }
 }
 
-/// The rigid translation the engine applied to the whole sheet, read off the fixed set.
-fn engine_offset(placed_fixed: &[Item], live: &[Item]) -> Point2 {
-    placed_fixed
-        .iter()
-        .zip(live)
-        .next()
-        .map(|(p, l)| Point2::new(p.at[0] - l.at[0], p.at[1] - l.at[1]))
-        .unwrap_or(Point2::new(0.0, 0.0))
-}
-
 /// Place `problem.items` among `problem.fixed` and `problem.obstacles`, returning new
 /// poses for the movable set only.
 ///
@@ -303,78 +272,48 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
         obstacles,
         incidence,
         ir,
-        engine,
-        options,
-        deadline,
     } = problem;
 
     let movable = items.len();
     let mut all = items;
     all.extend(fixed.iter().cloned());
     for it in all.iter_mut().take(movable) {
-        it.frozen = false;
         it.preseeded = false;
     }
     for it in all.iter_mut().skip(movable) {
-        it.frozen = true;
         it.preseeded = true;
     }
 
-    let pin_flow = resolve_pin_flow(env, &all);
-    let mut place = SchematicPlaceProblem {
-        items: all,
-        inc: incidence,
-        ir,
-        pin_flow,
-        seed: sch_model::refine::SEARCH_SEED,
-        options,
-        deadline,
-    };
-    let out = {
-        let (inc, intent) = (place.inc.clone(), place.ir.clone());
-        let realizer = RoutedSheetRealizer::new(env, &inc, &intent);
-        engine.place(&mut place, &RoutedEvaluator::new(realizer, design))
-    };
-
-    // Reverse the engines' whole-sheet `normalize` translation so the caller gets poses in
-    // its own frame, then restore the neighbours bit-for-bit.
-    let d = engine_offset(&place.items[movable..], &fixed);
-    if d[0].abs() > EPS || d[1].abs() > EPS {
-        for it in &mut place.items {
-            it.at = Point2::new(it.at[0] - d[0], it.at[1] - d[1]);
-        }
-    }
-    for (it, live) in place.items.iter_mut().skip(movable).zip(&fixed) {
+    sch_flex::typeset(&mut all, &ir.trees);
+    for (it, live) in all.iter_mut().skip(movable).zip(&fixed) {
         it.at = live.at;
         it.angle = live.angle;
     }
 
-    // With nothing to avoid, the engine's own overlap handling is authoritative — walking
-    // parts apart here would only reverse the placement it spent its whole search tuning.
+    // With nothing to avoid, the typeset arrangement is authoritative — walking parts
+    // apart here would only undo the alignment it just computed.
     let stuck = if obstacles.is_empty() && fixed.is_empty() {
         0
     } else {
-        let (moved, held) = place.items.split_at_mut(movable);
+        let (moved, held) = all.split_at_mut(movable);
         legalize(moved, held, &obstacles)
     };
 
     let result = {
-        let realizer = RoutedSheetRealizer::new(env, &place.inc, &out.ir);
+        let realizer = RoutedSheetRealizer::new(env, &incidence, &ir);
         let eval = RoutedEvaluator::new(realizer, design);
         PlaceResult {
-            engine: out.result.engine,
-            truthfulness_breaks: eval.truthfulness_breaks(&place.items),
+            truthfulness_breaks: eval.truthfulness_breaks(&all),
             // A part legalisation could not clear is a readability defect like any other,
             // and the realiser cannot see it: both passes give up rather than fling a part
             // across the sheet, so this is the only place it is counted.
-            warnings: eval.warnings(&place.items) + stuck,
-            crossings: eval.crossings(&place.items),
-            cost: out.result.cost,
+            warnings: eval.warnings(&all) + stuck,
+            crossings: eval.crossings(&all),
         }
     };
     RegionOutput {
-        ir: out.ir,
-        poses: place.items[..movable]
+        ir,
+        poses: all[..movable]
             .iter()
             .map(|it| Pose {
                 refdes: it.refdes.clone(),

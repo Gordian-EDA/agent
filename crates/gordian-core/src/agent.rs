@@ -36,7 +36,6 @@ use crate::AgentRuntime;
 use crate::tools::{run_tool, tool_defs};
 use gordian_runtime::tool::IMAGE_PATH_KEY;
 use gordian_runtime::tool::{ReviewOutcome, ToolEffect, ToolOutcome};
-use gordian_tools_sch::PlacementBudget;
 
 /// After this many route attempts with failed nets, block further blind PCB
 /// sync/place/route retries in the same turn and force an honest report.
@@ -2261,17 +2260,17 @@ fn is_board_tool(name: &str) -> bool {
     )
 }
 
-/// Margin over a self-deadlining tool's own budget. The budget covers the search and
-/// the gate; the payload audit before it and the atomic write plus the post-commit
-/// ERC after it are outside it, and ERC shells out to `kicad-cli`. Generous, because
-/// this timeout only ever fires on a genuine hang.
-const DEADLINE_MARGIN: Duration = Duration::from_secs(60);
+/// How long a layout tool may take before the loop calls it hung. Typesetting is
+/// deterministic and fast; the time goes to the payload audit, the atomic write and the
+/// post-commit ERC, which shells out to `kicad-cli`. Generous, because this timeout only
+/// ever fires on a genuine hang.
+const LAYOUT_TIMEOUT: Duration = Duration::from_secs(105);
 
 fn tool_timeout(name: &str) -> Duration {
     match name {
-        // These enforce their own budget and return cleanly; the loop timeout is a
-        // backstop for a hang, not the mechanism.
-        name if enforces_own_deadline(name) => PlacementBudget::DEFAULT + DEADLINE_MARGIN,
+        // These write nothing unless they finish, so the loop timeout is a backstop
+        // for a hang, not the mechanism.
+        name if enforces_own_deadline(name) => LAYOUT_TIMEOUT,
         // KiCad CLI paths can legitimately take longer on first use.
         "sync_board" | "place_board" | "route_board" | "refill_zones" | "check_board"
         | "export_fab" => Duration::from_secs(180),
@@ -2279,10 +2278,9 @@ fn tool_timeout(name: &str) -> Duration {
     }
 }
 
-/// Tools that hold themselves to a wall-clock budget and write nothing once it has
-/// passed (`sch_floorplan::live::PlacementBudget`): the search is cooperatively
-/// cancelled and the document restored, so timing one out cannot leave a half-applied
-/// edit and the turn need not be abandoned.
+/// Tools that write nothing unless they complete: they work on a clone of the document
+/// and adopt it only at the end, so timing one out cannot leave a half-applied edit and
+/// the turn need not be abandoned.
 fn enforces_own_deadline(name: &str) -> bool {
     matches!(name, "place_parts" | "arrange")
 }

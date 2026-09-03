@@ -49,7 +49,7 @@ fn render(env: &KicadInstallation, provider: &SymbolTable, name: &str) -> String
         .intent
         .map(sch_check::Intent::into_layout_ir)
         .unwrap_or_else(|| floorplan::infer_ir(env, &design));
-    floorplan::emit_strategy(env, &design, Box::new(anneal_place::Anneal), Some(ir))
+    floorplan::emit_strategy(env, &design, Some(ir))
         .unwrap_or_else(|e| panic!("{name}: {e}"))
         .sch
 }

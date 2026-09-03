@@ -225,8 +225,8 @@ fn validate_fixture(
         // default stays anneal so existing runs are untouched.
         let engine: Box<dyn sch_model::engine::PlacementEngine> =
             match std::env::var("SCH_ENGINE").as_deref() {
-                Ok("spine") => Box::new(spine_place::SpinePlace),
-                _ => Box::new(anneal_place::Anneal),
+                Ok("spine") => ,
+                _ => ,
             };
         let out = floorplan::emit_strategy(env, &design, engine, Some(ir))
             .unwrap_or_else(|e| panic!("{name}: {e}"));

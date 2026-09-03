@@ -11,7 +11,6 @@ use std::path::Path;
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan;
-use sch_model::engine::PlacementEngine;
 
 /// Longest wire the realiser may draw (mm): the rail cap and the signal-label threshold
 /// are the same corpus rule, plus the elbow router's detour around one body.
@@ -54,7 +53,7 @@ fn emit(env: &KicadInstallation, provider: &SymbolTable, name: &str) -> String {
         .clone()
         .map(sch_check::Intent::into_layout_ir)
         .unwrap_or_else(|| floorplan::baseline_ir(&design));
-    let engine: Box<dyn PlacementEngine> = Box::new(spine_place::SpinePlace);
+    let engine: Box<dyn PlacementEngine> = ;
     floorplan::emit_strategy(env, &design, engine, Some(ir))
         .unwrap_or_else(|e| panic!("{name}: {e}"))
         .sch

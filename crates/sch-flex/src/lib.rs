@@ -78,10 +78,10 @@ pub fn typeset(items: &mut [Item], trees: &Trees) -> Report {
     let drawings: Vec<(Vec<measure::Placed>, Rect)> = blocks
         .iter()
         .map(|(block, tree, members)| {
-            let outside = leaving(items, block);
+            let labelled = label_pins(items, block, members);
             let mine: Vec<Part> = members
                 .iter()
-                .map(|i| Part::new(*i, &items[*i], &outside))
+                .map(|i| Part::new(*i, &items[*i], &labelled))
                 .collect();
             let index = |refdes: &str, unit: u8| {
                 mine.iter()
@@ -117,8 +117,29 @@ pub fn typeset(items: &mut [Item], trees: &Trees) -> Report {
     report
 }
 
-/// Nets of `block` that carry a pin somewhere else — they will need a label here, and a
-/// label needs room the measure has to know about.
+/// The pins that will carry a net label: one per net of `block` that continues elsewhere
+/// (or has no second pin at all). The writer draws one label per net per block, so
+/// reserving room on every pin of the net is what makes a block sprawl.
+fn label_pins(
+    items: &[Item],
+    block: &str,
+    members: &[usize],
+) -> BTreeSet<(usize, String)> {
+    let leaving = leaving(items, block);
+    let mut taken: BTreeSet<&str> = BTreeSet::new();
+    let mut out = BTreeSet::new();
+    for i in members {
+        for (number, _, net) in &items[*i].pins {
+            let Some(net) = net.as_deref() else { continue };
+            if leaving.contains(net) && taken.insert(net) {
+                out.insert((*i, number.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Nets of `block` that carry a pin somewhere else — they will need a label here.
 fn leaving(items: &[Item], block: &str) -> BTreeSet<String> {
     let mut here: BTreeSet<&str> = BTreeSet::new();
     let mut elsewhere: BTreeSet<&str> = BTreeSet::new();
