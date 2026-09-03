@@ -2060,7 +2060,7 @@ mod tests {
         assert_ne!(moved.at, Point2::new(20.0, 20.0));
         assert_eq!(illegal_move_error(&board, &plan, 0.2), None);
         let output = plan.output(&RetractedCopper::default());
-        assert_eq!(output["positions"][0]["nudged_to"].is_array(), true);
+        assert!(output["positions"][0]["nudged_to"].is_array());
         assert!(
             output["positions"][0]["nudge_distance_mm"]
                 .as_f64()

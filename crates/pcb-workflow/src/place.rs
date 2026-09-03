@@ -171,21 +171,21 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         },
         None => None,
     };
-    if let Some(net) = requested_net {
-        if resolved_net.is_none() {
-            if !schematic_changes.is_empty() {
-                return Ok(json!({
-                    "error": format!(
-                        "run sync_board first (schematic changed: nets {})",
-                        schematic_changes.join(", ")
-                    ),
-                    "code": "board_net_table_stale",
-                    "schematic_changed": { "nets": schematic_changes },
-                    "next_tool": "sync_board",
-                }));
-            }
-            return Ok(json!({ "error": format!("no net named `{net}` on this board") }));
+    if let Some(net) = requested_net
+        && resolved_net.is_none()
+    {
+        if !schematic_changes.is_empty() {
+            return Ok(json!({
+                "error": format!(
+                    "run sync_board first (schematic changed: nets {})",
+                    schematic_changes.join(", ")
+                ),
+                "code": "board_net_table_stale",
+                "schematic_changed": { "nets": schematic_changes },
+                "next_tool": "sync_board",
+            }));
         }
+        return Ok(json!({ "error": format!("no net named `{net}` on this board") }));
     }
     let net_filter = resolved_net.as_deref();
     let include_copper = net_filter.is_some()
