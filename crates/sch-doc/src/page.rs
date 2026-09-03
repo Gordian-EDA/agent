@@ -8,8 +8,10 @@
 //! measures what is drawn, shifts it rigidly to the margin, and picks the
 //! smallest standard page that holds it.
 //!
-//! Rigid translation cannot change connectivity (every coincidence is
-//! preserved), so this runs unconditionally after every write path.
+//! What may move is the caller's to say. A graft promises the sheet's own parts stay
+//! where they are, so the fit is told which items are frozen and slides only the rest —
+//! and a slide that is not whole-sheet is not rigid, so it is offered only when the new
+//! drawing does not touch the frozen one.
 
 use std::collections::BTreeSet;
 
@@ -60,7 +62,9 @@ pub fn standard_page(size: [f64; 2]) -> Option<(&'static str, [f64; 2])> {
 /// What [`SchDoc::refit_page`] did.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageFit {
-    /// The grid-snapped shift applied to every drawn item.
+    /// The grid-snapped shift applied to the items that were free to move. `[0, 0]`
+    /// means the drawing already started inside the frame, or that the only shift that
+    /// would have rescued it would have torn it away from the frozen content.
     pub shift: [f64; 2],
     /// The page the sheet now declares, in mm.
     pub page: [f64; 2],
@@ -154,6 +158,56 @@ fn item_points(doc: &SchDoc, item: &Item, points: &mut Vec<Point2>) {
     }
 }
 
+/// Where a set of items connects: the points that join nets, and the wire segments other
+/// points can attach along.
+#[derive(Default)]
+struct Wiring {
+    points: Vec<Point2>,
+    segments: Vec<[Point2; 2]>,
+}
+
+impl Wiring {
+    fn is_empty(&self) -> bool {
+        self.points.is_empty() && self.segments.is_empty()
+    }
+
+    fn shifted(&self, [dx, dy]: [f64; 2]) -> Wiring {
+        let move_point = |p: &Point2| Point2::new(p.x + dx, p.y + dy);
+        Wiring {
+            points: self.points.iter().map(move_point).collect(),
+            segments: self
+                .segments
+                .iter()
+                .map(|[a, b]| [move_point(a), move_point(b)])
+                .collect(),
+        }
+    }
+
+    /// Whether any connection point of one drawing lies on a point or a wire of the other.
+    fn touches(&self, other: &Wiring) -> bool {
+        let on_wire = |p: &Point2, w: &Wiring| w.segments.iter().any(|[a, b]| on_segment(*p, *a, *b));
+        self.points.iter().any(|p| {
+            other.points.iter().any(|q| p.near_eq(*q, TOUCH_EPS)) || on_wire(p, other)
+        }) || other.points.iter().any(|p| on_wire(p, self))
+    }
+}
+
+/// How close two connection points must be to count as one, in mm — the 1 µm the
+/// connectivity extractor quantises to.
+const TOUCH_EPS: f64 = 0.001;
+
+/// Whether `p` lies on the segment `a`-`b`, endpoints included.
+fn on_segment(p: Point2, a: Point2, b: Point2) -> bool {
+    let (ab, ap) = ((b.x - a.x, b.y - a.y), (p.x - a.x, p.y - a.y));
+    let len = (ab.0 * ab.0 + ab.1 * ab.1).sqrt();
+    if len < TOUCH_EPS {
+        return p.near_eq(a, TOUCH_EPS);
+    }
+    let along = (ap.0 * ab.0 + ap.1 * ab.1) / len;
+    let across = (ap.0 * ab.1 - ap.1 * ab.0) / len;
+    across.abs() <= TOUCH_EPS && along >= -TOUCH_EPS && along <= len + TOUCH_EPS
+}
+
 impl SchDoc {
     /// The bounding box of everything drawn on the sheet, in mm. `None` for an
     /// empty sheet.
@@ -163,18 +217,11 @@ impl SchDoc {
 
     /// The bounding box of the items `keep` accepts, in mm. `None` when it accepts
     /// nothing drawn.
-    pub fn bbox_where(&self, mut keep: impl FnMut(&Item) -> bool) -> Option<Rect> {
+    fn bbox_where(&self, mut keep: impl FnMut(&Item) -> bool) -> Option<Rect> {
         let mut points: Vec<Point2> = Vec::new();
         for item in self.items().iter().filter(|item| keep(item)) {
             item_points(self, item, &mut points);
         }
-        Rect::bounding(&points)
-    }
-
-    /// The bounding box of one item as drawn, in mm.
-    pub fn item_bbox(&self, item: &Item) -> Option<Rect> {
-        let mut points = Vec::new();
-        item_points(self, item, &mut points);
         Rect::bounding(&points)
     }
 
@@ -281,9 +328,9 @@ impl SchDoc {
     /// its own bytes. An empty `frozen` means the whole sheet may slide, which is what a
     /// sheet drawn from scratch and a whole-sheet re-arrange both want.
     ///
-    /// A partial slide is not rigid — it can pull new wiring off the frozen pins it was
-    /// drawn to — so it is kept only when the netlist is unchanged by it, and otherwise
-    /// abandoned in favour of the page size alone.
+    /// A partial slide is not rigid, so it is offered only when the movable drawing does
+    /// not touch the frozen one — before or after the shift. A re-wire of seated symbols
+    /// draws straight to their pins and so is never slid at all.
     ///
     /// The shift is one way and only as far as the margin: a drawing that already starts
     /// inside the frame is not moved at all, so an untouched item still writes back from
@@ -294,17 +341,20 @@ impl SchDoc {
     /// grid-aligned (KiCAD's ERC rejects off-grid endpoints). `None` for an empty
     /// sheet, which keeps whatever page it declares.
     pub fn refit_page(&mut self, frozen: &BTreeSet<String>) -> Option<PageFit> {
-        let movable = |item: &Item| !item.uuid().is_some_and(|u| frozen.contains(u));
-        let shift = self
-            .bbox_where(movable)
-            .map(|bbox| {
-                [
-                    GRID_50_MIL.snap((PAGE_MARGIN - bbox.min_x).max(0.0)),
-                    GRID_50_MIL.snap((PAGE_MARGIN - bbox.min_y).max(0.0)),
-                ]
-            })
-            .filter(|shift| self.slide(shift[0], shift[1], movable))
-            .unwrap_or([0.0, 0.0]);
+        // An item with no UUID cannot be told apart from one the caller froze, so it is
+        // treated as frozen: the denylist fails closed.
+        let movable = |item: &Item| item.uuid().is_some_and(|u| !frozen.contains(u));
+        let mut shift = [0.0, 0.0];
+        if let Some(bbox) = self.bbox_where(movable) {
+            let want = [
+                GRID_50_MIL.snap((PAGE_MARGIN - bbox.min_x).max(0.0)),
+                GRID_50_MIL.snap((PAGE_MARGIN - bbox.min_y).max(0.0)),
+            ];
+            if self.slide_is_safe(want, movable) {
+                shift = want;
+                self.translate_where(shift[0], shift[1], movable);
+            }
+        }
 
         let bbox = self.content_bbox()?;
         let band = if self.has_title_block() {
@@ -333,19 +383,49 @@ impl SchDoc {
         })
     }
 
-    /// Shift the items `keep` accepts, undoing it and reporting `false` when the shift
-    /// changed the netlist. A whole-sheet shift always holds; a partial one need not.
-    fn slide(&mut self, dx: f64, dy: f64, keep: impl Fn(&Item) -> bool + Copy) -> bool {
-        if dx == 0.0 && dy == 0.0 {
+    /// Whether moving the items `keep` accepts by `shift` leaves every connection alone.
+    ///
+    /// It does when the two drawings do not touch — no connection point of one sitting on
+    /// a point or a wire of the other — neither where they are now nor where the shift
+    /// would put them. Touching is the only way a partial move can join or break a net;
+    /// two wires that merely cross are not connected in KiCAD, only a junction connects
+    /// them, and a junction is a point.
+    fn slide_is_safe(&self, shift: [f64; 2], keep: impl Fn(&Item) -> bool) -> bool {
+        if shift == [0.0, 0.0] {
             return true;
         }
-        let before = crate::connect::extract(self);
-        self.translate_where(dx, dy, keep);
-        if crate::Netlist::diff(&before, &crate::connect::extract(self)).is_empty() {
+        let frozen = self.connection_geometry(|item| !keep(item));
+        if frozen.is_empty() {
             return true;
         }
-        self.translate_where(-dx, -dy, keep);
-        false
+        let moving = self.connection_geometry(keep);
+        !moving.touches(&frozen) && !moving.shifted(shift).touches(&frozen)
+    }
+
+    /// The connection geometry of the items `keep` accepts.
+    fn connection_geometry(&self, mut keep: impl FnMut(&Item) -> bool) -> Wiring {
+        let mut w = Wiring::default();
+        for item in self.items().iter().filter(|item| keep(item)) {
+            match item {
+                Item::Symbol(inst) => w
+                    .points
+                    .extend(crate::pins::pins_of(self, inst).iter().map(|pin| pin.at)),
+                Item::Wire(wire) => {
+                    w.points.extend(wire.points.iter().copied());
+                    w.segments
+                        .extend(wire.points.windows(2).map(|p| [p[0], p[1]]));
+                }
+                Item::Junction(j) => w.points.push(j.at),
+                Item::NoConnect(n) => w.points.push(n.at),
+                Item::Label(l) => w.points.push(l.at.point()),
+                Item::Sheet(s) => w.points.extend(s.pins.iter().map(|p| p.at.point())),
+                // Buses and whatever else the typed model does not decode still carry
+                // connectivity, and every coordinate they name is a place they carry it.
+                Item::Other(raw) => raw_points(&raw.node, &mut w.points),
+                Item::Text(_) | Item::Rectangle(_) | Item::LibSymbols(_) => {}
+            }
+        }
+        w
     }
 
     pub(crate) fn has_title_block(&self) -> bool {
@@ -456,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn a_slide_that_would_tear_the_netlist_is_abandoned() {
+    fn a_slide_that_would_tear_the_drawing_is_abandoned() {
         let mut doc = SchDoc::parse(
             "(kicad_sch\n\
              \t(version 20250114)\n\
@@ -466,13 +546,13 @@ mod tests {
              )\n",
         )
         .expect("parse");
-        let before = crate::connect::extract(&doc);
-        doc.refit_page(&BTreeSet::from(["seated".to_string()]));
-        let after = crate::connect::extract(&doc);
-        assert!(
-            crate::Netlist::diff(&before, &after).is_empty(),
-            "the page fit tore the netlist apart"
-        );
+        let fit = doc
+            .refit_page(&BTreeSet::from(["seated".to_string()]))
+            .expect("content to fit");
+
+        assert_eq!(fit.shift, [0.0, 0.0], "the new wire was slid off the seated one");
+        let new = doc.wires().find(|w| w.uuid == "new").expect("the new wire");
+        assert_eq!(new.points[0], Point2::new(5.08, 40.64), "its junction moved");
     }
 
     #[test]

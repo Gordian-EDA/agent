@@ -12,6 +12,8 @@
 //! be annotated on another. Nothing already in the target is touched, so its untouched
 //! items still write back from their original bytes.
 
+use std::collections::BTreeSet;
+
 use kicad::KicadInstallation;
 use sch_check::Design;
 use sch_doc::SchDoc;
@@ -112,7 +114,7 @@ pub fn graft(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<Vec<S
 }
 
 /// The UUIDs of everything on the sheet right now — what a graft must leave untouched.
-fn seated_uuids(doc: &SchDoc) -> std::collections::BTreeSet<String> {
+fn seated_uuids(doc: &SchDoc) -> BTreeSet<String> {
     doc.items()
         .iter()
         .filter_map(|item| item.uuid().map(String::from))
@@ -221,10 +223,14 @@ mod tests {
         assert_eq!(before, after, "the seated wire moved");
         let bbox = doc.content_bbox().unwrap();
         assert!(
-            bbox.min_x >= 0.0 && bbox.min_y >= 0.0,
+            bbox.min_x >= sch_doc::PAGE_MARGIN && bbox.min_y >= sch_doc::PAGE_MARGIN,
             "the block is still off the page: {bbox:?}"
         );
-        assert!(doc.page().is_some_and(|p| p[0] >= bbox.max_x));
+        let page = doc.page().expect("a page");
+        assert!(
+            page[0] >= bbox.max_x && page[1] >= bbox.max_y,
+            "the page does not hold the drawing: {page:?} vs {bbox:?}"
+        );
     }
 }
 
