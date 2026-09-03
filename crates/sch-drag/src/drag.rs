@@ -154,6 +154,25 @@ pub struct PinReSeat {
     pub new_number: String,
 }
 
+/// A pin identity removed by the symbol edit surrounding a re-seat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetiredPin {
+    /// UUID of the symbol that owned the removed pin.
+    pub owner: String,
+    /// Physical number of the removed pin.
+    pub number: String,
+}
+
+impl RetiredPin {
+    /// Describe a removed pin by owner UUID and physical pin number.
+    pub fn new(owner: impl Into<String>, number: impl Into<String>) -> RetiredPin {
+        RetiredPin {
+            owner: owner.into(),
+            number: number.into(),
+        }
+    }
+}
+
 impl PinReSeat {
     /// Describe a pin replacement by owner UUID and physical pin number.
     pub fn new(
@@ -456,7 +475,7 @@ pub fn drag_many(
         .filter(|pin| owners.contains(pin.owner.as_str()))
         .map(|pin| PinReSeat::new(&pin.owner, &pin.number, &pin.owner, &pin.number))
         .collect::<Vec<_>>();
-    reseat_impl(doc, before, &seats, &targets, moves)
+    reseat_impl(doc, before, &seats, &[], &targets, moves)
 }
 
 /// Reconnect pins whose identities or positions changed during a symbol edit.
@@ -469,8 +488,9 @@ pub fn reseat_many(
     doc: &mut SchDoc,
     before: &Sheet,
     seats: &[PinReSeat],
+    retired: &[RetiredPin],
 ) -> Result<(DragReport, Sheet), DragError> {
-    reseat_impl(doc, before, seats, &[], &[])
+    reseat_impl(doc, before, seats, retired, &[], &[])
 }
 
 /// Draw one obstacle-aware orthogonal connection between two fixed points.
@@ -516,6 +536,7 @@ fn reseat_impl(
     doc: &mut SchDoc,
     before: &Sheet,
     seats: &[PinReSeat],
+    retired: &[RetiredPin],
     targets: &[(String, Placement)],
     reported_moves: &[(String, Placement)],
 ) -> Result<(DragReport, Sheet), DragError> {
@@ -529,7 +550,15 @@ fn reseat_impl(
             )
         })
         .collect();
-    let moving: HashSet<PinId> = mapping.keys().cloned().collect();
+    let moving: HashSet<PinId> = mapping
+        .keys()
+        .cloned()
+        .chain(
+            retired
+                .iter()
+                .map(|pin| (pin.owner.clone(), pin.number.clone())),
+        )
+        .collect();
 
     let backup = doc.clone();
     let was = remap_partition(partition(before), &mapping);
@@ -548,6 +577,29 @@ fn reseat_impl(
     let glued = glued_symbols(before, &moving);
 
     doc.remove_drawing(&removed);
+    let retired_points = retired
+        .iter()
+        .filter_map(|pin| {
+            old_pins
+                .get(&(pin.owner.clone(), pin.number.clone()))
+                .copied()
+        })
+        .collect::<Vec<_>>();
+    let retired_markers = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            Item::NoConnect(marker)
+                if retired_points
+                    .iter()
+                    .any(|point| marker.at.near_eq(*point, geom::EPS)) =>
+            {
+                Some(marker.uuid.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    doc.remove_drawing(&retired_markers);
     for (a, b) in &kept {
         doc.add_wire(*a, *b);
     }
@@ -942,7 +994,10 @@ fn redraw(
         if from.near_eq(target, geom::EPS) {
             continue;
         }
-        match best_route(&obstacles, &sheet, from, out, target, net, &stub.anchor) {
+        match best_route(&obstacles, &sheet, from, out, target, net, &stub.anchor).filter(|path| {
+            path.windows(2)
+                .any(|pair| !pair[0].near_eq(pair[1], geom::EPS))
+        }) {
             Some(path) => {
                 obstacles.add_path(&path, net);
                 drawn.push(path);
@@ -959,6 +1014,9 @@ fn redraw(
     }));
     for path in &drawn {
         for pair in path.windows(2) {
+            if pair[0].near_eq(pair[1], geom::EPS) {
+                continue;
+            }
             doc.add_wire(pair[0], pair[1]);
             redrawn_segments += 1;
             // A same-net point the new wire runs straight through needs the dot
@@ -1004,6 +1062,7 @@ fn redraw(
             .map(|reach| {
                 route::snap_point(Point2::new(from.x + out.x * reach, from.y + out.y * reach))
             })
+            .filter(|end| !end.near_eq(from, geom::EPS))
             .find(|end| obstacles.path_ok(&[from, *end], &name));
         let anchor = match stub_end {
             Some(end) => {

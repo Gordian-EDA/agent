@@ -23,7 +23,8 @@ const EMPTY_SHEET: &str = "(kicad_sch\n\
 )\n";
 
 fn sheet() -> Option<AgentRuntime> {
-    let ctx = AgentRuntime::detect_for_test()?;
+    let ctx =
+        AgentRuntime::detect_for_test().filter(|ctx| ctx.env().major_version() == Some(10))?;
     std::fs::write(ctx.sch_path(), EMPTY_SHEET).unwrap();
     Some(ctx)
 }
@@ -337,4 +338,80 @@ fn explicit_turn_in_place_names_the_pin_offset_when_geometry_cannot_land() {
     );
     let unchanged = SchDoc::read(ctx.sch_path()).unwrap();
     assert_eq!(unchanged.symbol_by_ref("J1").unwrap().at.rot, 0.0);
+}
+
+#[test]
+fn explicit_turn_after_a_drag_moves_first_then_swaps_the_fixed_nets() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let mut doc = SchDoc::read(ctx.sch_path()).unwrap();
+    doc.add_symbol(
+        "Device:LED",
+        "D1",
+        "LED",
+        Pose::new(100.0, 100.0, 0.0),
+        &source(&ctx),
+    )
+    .unwrap();
+    add_named_stubs(&mut doc, "D1");
+    doc.write(ctx.sch_path()).unwrap();
+
+    let result = call(
+        &ctx,
+        json!({"moves": [{
+            "ref": "D1",
+            "by": [20.32, 0.0],
+            "rot": 180,
+            "turn_in_place": true
+        }]}),
+    );
+    assert!(result.get("error").is_none(), "{result:#}");
+    assert_eq!(result["changed"]["moved"][0]["dragged"], true);
+    assert_eq!(result["changed"]["moved"][0]["turned_in_place"], true);
+    let after = ctx.env().netlist(ctx.sch_path()).unwrap();
+    assert_eq!(net_of(&after, "D1", "1"), Some("SIG_2"));
+    assert_eq!(net_of(&after, "D1", "2"), Some("SIG_1"));
+    let landed = result["changed"]["moved"][0]["at"]
+        .as_array()
+        .expect("reported landing point");
+    let actual = SchDoc::read(ctx.sch_path())
+        .unwrap()
+        .symbol_by_ref("D1")
+        .unwrap()
+        .at
+        .point();
+    assert!(actual.x > 100.0, "the drag did not move: {result}");
+    assert!(actual.near_eq(
+        Point2::new(landed[0].as_f64().unwrap(), landed[1].as_f64().unwrap()),
+        EPS
+    ));
+}
+
+#[test]
+fn turn_in_place_accepts_the_campaign_zero_offset_drag_shape() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let mut doc = SchDoc::read(ctx.sch_path()).unwrap();
+    doc.add_symbol(
+        "Device:LED",
+        "D1",
+        "LED",
+        Pose::new(100.0, 100.0, 0.0),
+        &source(&ctx),
+    )
+    .unwrap();
+    add_named_stubs(&mut doc, "D1");
+    doc.write(ctx.sch_path()).unwrap();
+
+    let result = call(
+        &ctx,
+        json!({"moves": [{"ref": "D1", "by": [0, 0], "turn_in_place": true}]}),
+    );
+    assert!(result.get("error").is_none(), "{result:#}");
+    assert_eq!(result["changed"]["moved"][0]["dragged"], true);
+    assert_eq!(result["changed"]["moved"][0]["turned_in_place"], true);
 }

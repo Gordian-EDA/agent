@@ -1583,6 +1583,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut placed = Vec::new();
     let mut drag_moves = Vec::new();
     let mut turn_moves = Vec::new();
+    let mut post_drag_turns = Vec::new();
     // A part still waiting its turn is not an obstacle to the one being placed;
     // one already placed in this batch is.
     let mut pending: Vec<String> = moves
@@ -1645,13 +1646,10 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .iter()
             .all(|key| step.get(key).is_none());
         let explicit_turn = step.get("turn_in_place").and_then(Value::as_bool) == Some(true);
-        if explicit_turn && !staying {
-            return Ok(json!({
-                "error": format!(
-                    "the turn_in_place of {refdes} cannot also use `to`, `by`, or `near`; nothing was moved"
-                ),
-            }));
-        }
+        let before_pose = planning
+            .symbol(&uuid)
+            .map(|symbol| sch_drag::Placement::new(symbol.at.point(), symbol.at.rot, symbol.mirror))
+            .expect("the symbol was just resolved");
         let turn_target = if staying {
             let mut trial = planning.clone();
             let turned = orient(&mut trial, &uuid, step)?;
@@ -1733,6 +1731,12 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let target = sch_drag::Placement::new(symbol.at.point(), symbol.at.rot, symbol.mirror);
         if turn_in_place.is_some() {
             turn_moves.push((placed.len(), uuid.clone(), refdes.clone(), target));
+        } else if explicit_turn {
+            drag_moves.push((
+                uuid.clone(),
+                sch_drag::Placement::new(target.at, before_pose.rot, before_pose.mirror),
+            ));
+            post_drag_turns.push((placed.len(), uuid.clone(), refdes.clone(), target));
         } else {
             drag_moves.push((uuid.clone(), target));
         }
@@ -1784,6 +1788,20 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             return Ok(json!({ "error": format!("refused: {detail}; nothing was moved") }));
         }
     };
+    for (index, uuid, refdes, target) in post_drag_turns {
+        let turn = sch_drag::turn_in_place(&mut edit.doc, &uuid, target).map_err(|error| {
+            anyhow::anyhow!("planned turn_in_place for {refdes} failed after its drag: {error}")
+        })?;
+        let nets = turn
+            .pins_swapped
+            .iter()
+            .map(|(_, net)| net.clone())
+            .collect::<Vec<_>>();
+        allow = allow.joining_nets(nets).part(refdes);
+        placed[index]["dragged"] = json!(true);
+        placed[index]["turned_in_place"] = json!(true);
+        placed[index]["pins_swapped"] = json!(turn.pins_swapped);
+    }
     let placement = if drag.labels_added == 0 && drag.crossings_added == 0 {
         "connections preserved as clean wire routes; any nudged_to coordinate is final"
     } else {
@@ -2224,7 +2242,15 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             sch_drag::PinReSeat::new(&old.owner, &old.number, &new.owner, &new.number)
         })
         .collect::<Vec<_>>();
-    let mut redraw = match sch_drag::reseat_many(&mut edit.doc, &before_sheet, &seats) {
+    let retired = plan
+        .old_without_counterpart
+        .iter()
+        .map(|index| {
+            let old = &old_pins[*index];
+            sch_drag::RetiredPin::new(&old.owner, &old.number)
+        })
+        .collect::<Vec<_>>();
+    let mut redraw = match sch_drag::reseat_many(&mut edit.doc, &before_sheet, &seats, &retired) {
         Ok((report, _)) => report,
         Err(error) => {
             return Ok(json!({
@@ -2247,6 +2273,29 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let pin = &new_pins[assignment.new];
         let after = sch_doc::connect::extract(&edit.doc);
         if refs::net_of(&after, refdes, &pin.number) == Some(net.as_str()) {
+            continue;
+        }
+        let kind = crate::wiring::sheet_scope(&edit.doc, net).unwrap_or(LabelKind::Local);
+        edit.doc
+            .add_label(kind, net, Pose::new(pin.at.x, pin.at.y, 0.0));
+        named.push(format!("{refdes}.{}={net}", pin.number));
+    }
+    let after = sch_doc::connect::extract(&edit.doc);
+    for (old_number, net, _) in &before {
+        let Some(assignment) = plan
+            .assignments
+            .iter()
+            .find(|assignment| old_pins[assignment.old].number == *old_number)
+        else {
+            continue;
+        };
+        let pin = &new_pins[assignment.new];
+        if refs::net_of(&after, refdes, &pin.number) == Some(net.as_str())
+            || edit.doc.labels().any(|label| {
+                label.at.point().near_eq(pin.at, geom::EPS)
+                    && sch_doc::unescape(&label.text) == *net
+            })
+        {
             continue;
         }
         let kind = crate::wiring::sheet_scope(&edit.doc, net).unwrap_or(LabelKind::Local);
