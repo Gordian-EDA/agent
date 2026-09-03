@@ -32,7 +32,10 @@ pub(crate) fn design(doc: &SchDoc, netlist: &Netlist) -> Design {
     // The units of a multi-unit part are separate symbols sharing one
     // reference; they are one component, and folding them together is what
     // stops the lints seeing each unit's pins as a design of its own.
-    for symbol in doc.symbols().filter(|s| !sch_floorplan::bench::is_benched(s)) {
+    for symbol in doc
+        .symbols()
+        .filter(|s| !sch_floorplan::bench::is_benched(s))
+    {
         let field = |name: &str| {
             symbol
                 .fields
@@ -1247,10 +1250,9 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
     let on_bench: BTreeSet<&str> = bench.iter().map(String::as_str).collect();
     findings.retain(|finding| {
         finding.refs.is_empty()
-            || !finding
-                .refs
-                .iter()
-                .all(|reference| on_bench.contains(reference.split('.').next().unwrap_or(reference)))
+            || !finding.refs.iter().all(|reference| {
+                on_bench.contains(reference.split('.').next().unwrap_or(reference))
+            })
     });
     Ok(Inspection {
         doc,

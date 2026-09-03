@@ -78,7 +78,8 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
         }
     });
     if engine {
-        properties["intent"] = sch_check::place_parts_input_schema()["properties"]["intent"].clone();
+        properties["intent"] =
+            sch_check::place_parts_input_schema()["properties"]["intent"].clone();
         properties["engine"] = json!({
             "type": "string",
             "enum": ["anneal", "spine", "cluster"],
@@ -586,7 +587,9 @@ fn arrange_in_place(ctx: &AgentRuntime, selection: &Selection, overrun: Value) -
 pub(crate) fn rewire(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let input: SelectionInput = typed(input, "rewire")?;
     if input.engine.is_some() || input.intent.is_some() {
-        return Err(anyhow!("rewire moves nothing, so it takes no engine or intent"));
+        return Err(anyhow!(
+            "rewire moves nothing, so it takes no engine or intent"
+        ));
     }
     let selection = selection(&input)?;
     let mut edit = Edit::open(ctx)?;
@@ -803,14 +806,14 @@ fn bench_payload(
     skipped: &[&str],
     warnings: &[String],
 ) -> Result<Value> {
-    let report =
-        match sch_floorplan::live::add_parts(ctx.env(), &mut edit.doc, payload, None, why) {
-            Ok(report) => report,
-            Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
-                return Ok(invalid_payload_response(*audit, warnings));
-            }
-            Err(error) => return Err(error.into()),
-        };
+    let report = match sch_floorplan::live::add_parts(ctx.env(), &mut edit.doc, payload, None, why)
+    {
+        Ok(report) => report,
+        Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
+            return Ok(invalid_payload_response(*audit, warnings));
+        }
+        Err(error) => return Err(error.into()),
+    };
     if !report.committed {
         return Ok(with_warnings(
             json!({
@@ -861,9 +864,15 @@ fn mismatch_clause(mismatch: &sch_floorplan::live::Mismatch) -> String {
         why.push(format!("scattered {}", mismatch.scattered.join(", ")));
     }
     if !mismatch.disturbed.is_empty() {
-        why.push(format!("disturbed existing {}", mismatch.disturbed.join(", ")));
+        why.push(format!(
+            "disturbed existing {}",
+            mismatch.disturbed.join(", ")
+        ));
     }
-    format!("no placement engine could draw it truthfully ({})", why.join("; "))
+    format!(
+        "no placement engine could draw it truthfully ({})",
+        why.join("; ")
+    )
 }
 
 fn selection(input: &SelectionInput) -> Result<Selection> {

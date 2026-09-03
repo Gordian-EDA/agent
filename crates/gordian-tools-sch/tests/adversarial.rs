@@ -586,7 +586,12 @@ fn place_parts_reports_a_duplicate_ref_and_a_bad_pin_in_one_response() {
     // The pin fault costs that part, not the payload; the duplicate reference is
     // what refuses, and both are named in the same response.
     assert_eq!(result["unplaced"][0]["ref"], "J1", "{result:#}");
-    assert!(result["unplaced"][0]["reason"].as_str().unwrap().contains("bad-pin"));
+    assert!(
+        result["unplaced"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("bad-pin")
+    );
     assert!(result["footprint_mismatch"].as_array().unwrap().is_empty());
     let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
     assert_eq!(

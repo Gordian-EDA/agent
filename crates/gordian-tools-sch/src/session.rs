@@ -91,6 +91,12 @@ impl Allow {
             if is_auto(from) && is_auto(to) || self.unnamed_nets.contains(from) && is_auto(to) {
                 continue;
             }
+            // A derived name the call declared may take a minted one: a drag that
+            // leaves a label on `Net-(D1-K)` has to name it, and the partition
+            // behind that name did not change.
+            if is_auto(from) && self.nets.contains(from) {
+                continue;
+            }
             offenders.extend([from, to].into_iter().filter(|n| unnamed(n)).cloned());
         }
         // On a merge or a split the *authored* names are what matter; the

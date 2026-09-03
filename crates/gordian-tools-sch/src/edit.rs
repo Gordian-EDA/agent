@@ -1032,6 +1032,12 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         "connections preserved; review labels_added/crossings_added and batch-nudge the moved parts if either is nonzero"
     };
+    let moved: Vec<String> = placed
+        .iter()
+        .filter_map(|entry| entry.get("ref").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    let touched = refs::nets_touching(edit.before(), &moved);
     edit.commit(
         json!({
             "moved": placed,
@@ -1040,7 +1046,7 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "crossings_added": drag.crossings_added,
             "placement": placement,
         }),
-        Allow::nothing(),
+        Allow::nothing().nets(touched),
     )
 }
 

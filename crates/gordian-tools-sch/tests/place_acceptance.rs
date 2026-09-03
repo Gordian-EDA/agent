@@ -69,11 +69,17 @@ fn stm32_pin_keys_resolve_alternate_functions_and_rank_misses() {
             "pins": {"OSC_INPUT": "HSE_IN"}
         }]}),
     );
-    assert_eq!(missed["code"], "invalid_payload", "{missed}");
-    let diagnostic = missed["unknown_pins"][0].as_str().unwrap();
-    assert!(diagnostic.contains("did_you_mean"), "{diagnostic}");
-    assert!(diagnostic.contains("RCC_OSC_IN"), "{diagnostic}");
-    assert!(!diagnostic.contains("available pins"), "{diagnostic}");
+    assert_eq!(missed["code"], "nothing_placed", "{missed}");
+    let unplaced = &missed["unplaced"][0];
+    assert_eq!(unplaced["ref"], "U2", "{missed}");
+    assert!(
+        unplaced["did_you_mean"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|n| n == "RCC_OSC_IN")),
+        "{missed}"
+    );
+    let reason = unplaced["reason"].as_str().unwrap();
+    assert!(!reason.contains("available pins"), "{reason}");
     assert!(!diagnostic.contains("more"), "{diagnostic}");
 }
 
