@@ -3021,7 +3021,8 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let board_text = std::fs::read_to_string(ctx.pcb_path())?;
     let managed_outline = super::outline::managed_outline_bounds(&board_text).ok();
     let auto_outline = managed_outline.is_some_and(|managed| !managed.explicit);
-    if auto_outline {
+    let routed_board = !board.copper.traces.is_empty() || !board.copper.vias.is_empty();
+    if auto_outline && !routed_board {
         let sizing = board_sizing(&problem, &board.imported.parts, &board.problem);
         problem.bounds.max_x = problem
             .bounds
@@ -3163,7 +3164,8 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut mechanical_locks: Vec<String> = Vec::new();
     let mut retracted = None;
     let mut outline_refit = None;
-    let mut outline_target = auto_outline.then_some(problem.bounds);
+    let outline_refit_skipped = auto_outline && routed_board;
+    let mut outline_target = (auto_outline && !routed_board).then_some(problem.bounds);
     let mut applied_refs = Vec::new();
     // A subset placement answers only for the parts it may move.
     let legal = match &refs {
@@ -3177,7 +3179,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             // is the explicit way to shrink a fixed one.
             if managed.explicit {
                 tracing::info!("outline bounds were explicit; placement leaves them as set");
-            } else {
+            } else if !routed_board {
                 let mut routing = board.problem.clone();
                 routing.fixed_copper = board.copper.clone();
                 if let Some(plan) =
@@ -3426,6 +3428,8 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     if let Some(plan) = &outline_refit {
         out["outline_refit"] = super::outline::outline_refit_json(plan);
+    } else if outline_refit_skipped {
+        out["outline_refit"] = json!("skipped (routed board)");
     }
     let retract = retracted.unwrap_or_default();
     out["retracted_tracks"] = json!(retract.count);

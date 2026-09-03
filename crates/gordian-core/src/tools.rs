@@ -359,7 +359,7 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "update_board_outline".into(),
-            description: "Edit Edge.Cuts by bounds, polygon, or fitted geometry.".into(),
+            description: "Edit Edge.Cuts by bounds, polygon, or fitted geometry. A fit request on a routed board is a successful no-op reported as outline_refit: skipped (routed board).".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -384,7 +384,7 @@ pub fn tool_defs() -> Vec<Tool> {
                     },
                     "fit_to_geometry": {
                         "type": "boolean",
-                        "description": "Fit around parts/copper."
+                        "description": "Fit around parts before routing; reports a successful skipped no-op when copper already exists."
                     },
                     "margin": { "type": "number", "description": "Margin mm; default 2." }
                 }
