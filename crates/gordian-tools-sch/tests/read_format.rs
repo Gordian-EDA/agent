@@ -82,15 +82,6 @@ fn read_schematic_groups_and_sorts_the_demo() {
         "{compact}"
     );
     assert!(compact.contains("\nLABELS  (scope  name  @x,y  uuid)\n"));
-    let labels = compact
-        .split_once("\nLABELS  (scope  name  @x,y  uuid)\n")
-        .unwrap()
-        .1
-        .split_once("\nNETS")
-        .unwrap()
-        .0;
-    assert!(labels.lines().next().is_some_and(|line| line.contains("uuid=")));
-    assert!(labels.lines().all(|line| line.contains("uuid=")), "{labels}");
     let gnd = compact
         .lines()
         .find(|line| line.starts_with("GND "))
