@@ -155,10 +155,12 @@ fn the_board_guard_and_its_subset_placement() {
         );
     }
 
-    // An unknown reference is named, not silently ignored.
+    // An unknown reference is classified while valid placement work remains applied.
     let unknown = run_tool("place_board", json!({ "refs": ["R9"] }), &ctx).unwrap();
-    assert!(
-        unknown["error"].as_str().unwrap_or_default().contains("R9"),
+    assert_eq!(unknown["placement_applied"], false, "{unknown:#}");
+    assert_eq!(
+        unknown["reference_status"],
+        json!([{ "reference": "R9", "status": "absent_from_schematic" }]),
         "{unknown:#}"
     );
 }
@@ -234,19 +236,19 @@ fn move_parts_measures_the_real_courtyards() {
     );
     assert_eq!(beside["moved"], json!(1), "{beside:#}");
 
-    // And a move that really does collide still refuses — showing its work.
-    let refused = run_tool(
+    // A colliding target is nudged to the nearest free legal grid point.
+    let nudged = tool(
+        &ctx,
         "move_parts",
         json!({"moves": [{ "reference": "R2", "to": [40.0, 40.0] }]}),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(refused["code"], json!("courtyards_overlap"), "{refused:#}");
-    assert_eq!(refused["moved"]["reference"], json!("R2"), "{refused:#}");
+    );
+    assert_eq!(nudged["moved"], 1, "{nudged:#}");
     assert!(
-        refused["moved"]["courtyard_mm"]
+        nudged["positions"][0]["nudged_to"]
             .as_array()
-            .is_some_and(|r| r.len() == 4),
-        "the refusal must show both courtyards: {refused:#}"
+            .is_some_and(|at| {
+                at.first() != Some(&json!(40.0)) || at.get(1) != Some(&json!(40.0))
+            }),
+        "the move reports the legal pose it chose: {nudged:#}"
     );
 }
