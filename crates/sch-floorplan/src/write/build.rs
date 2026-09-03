@@ -869,8 +869,8 @@ impl SchematicWriter {
             .collect()
     }
 
-    /// Junction-dot positions (for the scorer's merge check: a junction sitting
-    /// on wires of two different nets fuses them).
+    /// Junction-dot positions (for `count_merges`: a junction sitting on wires of
+    /// two different nets fuses them).
     pub fn junction_positions(&self) -> Vec<[f64; 2]> {
         let mut seen = std::collections::BTreeSet::new();
         self.junctions

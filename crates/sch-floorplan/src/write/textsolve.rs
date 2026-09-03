@@ -858,8 +858,8 @@ impl SchematicWriter {
     /// Run every geometry-finalizing pass: stub retraction, wire splitting at
     /// taps, text placement, and reframing. All four are idempotent, so calling
     /// this before [`Self::layout_warnings`] (to lint the *final* geometry) and
-    /// then [`Self::finish`] (which re-runs it harmlessly) is safe and is how the
-    /// floorplan engine reports truthful, post-solve warnings.
+    /// then [`Self::finish`] (which re-runs it harmlessly) is safe and is how
+    /// `sch-floorplan` reports truthful, post-solve warnings.
     pub fn prepare(&mut self) {
         // Dedup labels that are IDENTICAL (same net) AND COINCIDENT (same point): a multi-unit BGA
         // stacks its many same-rail power balls onto ONE schematic point, so each pin's signal label
@@ -894,7 +894,7 @@ impl SchematicWriter {
         }
     }
 
-    /// Enable [`Self::reframe`] at finalize (floorplan engine).
+    /// Enable [`Self::reframe`] on the final geometry (whole-sheet emit only).
     pub fn set_frame(&mut self, on: bool) {
         self.frame = on;
     }
@@ -1068,11 +1068,11 @@ impl SchematicWriter {
         let mut warnings = Vec::new();
         // Wire through an IC body: a wire segment running strictly inside a chip's
         // package box (the pin-tip bbox shrunk past the pin stubs onto the body
-        // rectangle — the same geometry the placement cost's `count_ic_body_crossings`
-        // prices). This reads as a connection straight through the chip — the defect
-        // the eye most often misses — and the soft cost term alone can be OVERRUN (a
-        // rigid `layout:` grid forcing a part to the far side of its anchor), so it
-        // must LINT too, not just nudge the search.
+        // rectangle — the same geometry `count_ic_body_crossings` measures). This reads
+        // as a connection straight through the chip — the defect the eye most often
+        // misses — and an authored `layout:` tree can still produce it (a rigid grid
+        // forcing a part to the far side of its anchor), so it must LINT here too, not
+        // just be counted.
         const BODY_INSET: f64 = 2.0; // shrink the pin-tip bbox onto the body rectangle
         for inst in &self.instances {
             if inst.refdes.starts_with('#') {

@@ -34,7 +34,7 @@
 //! structures via the same `write` module tree:
 //!
 //! - [`build`] — accumulating the document: `add_*` placement, pin-endpoint
-//!   geometry, route-scene/refinement accessors, and the rigid `translate`.
+//!   geometry, route-scene/truthfulness accessors, and the rigid `translate`.
 //! - [`textsolve`] — the field/label placement solver: stub retraction, wire
 //!   splitting at taps, the greedy candidate solver, reframing, and the
 //!   readability lint.
