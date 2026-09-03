@@ -118,7 +118,11 @@ pub(crate) fn outline_containment_against(
         .map(|point| format!("{:016x}:{:016x}", point.x.to_bits(), point.y.to_bits()))
         .collect::<Vec<_>>()
         .join("/");
+    let staged: BTreeSet<String> = crate::staging::staged_references(board);
     for part in &board.imported.parts {
+        if staged.contains(&part.reference) {
+            continue;
+        }
         if let Some(local) = part.courtyard {
             let courtyard = crate::place::courtyard_at(
                 local,
@@ -149,6 +153,12 @@ pub(crate) fn outline_containment_against(
         .obstacles
         .iter()
         .filter(|obstacle| obstacle.kind.starts_with("pad:") || obstacle.kind == "zone")
+        .filter(|obstacle| {
+            obstacle
+                .kind
+                .strip_prefix("pad:")
+                .is_none_or(|reference| !staged.contains(reference))
+        })
         .enumerate()
     {
         let bounds = geom::Rect::from_center_half(
@@ -207,7 +217,7 @@ pub(crate) fn outline_containment_against(
     result
 }
 
-fn rect_inside_outline(rect: geom::Rect, outline: &Polygon) -> bool {
+pub(crate) fn rect_inside_outline(rect: geom::Rect, outline: &Polygon) -> bool {
     let corners_inside = [
         Point2::new(rect.min_x, rect.min_y),
         Point2::new(rect.max_x, rect.min_y),
@@ -572,6 +582,17 @@ mod tests {
         let outside = outline_containment(&containment_snapshot(9.5, 9.8));
         assert_eq!(outside.outside_outline, BTreeSet::from(["R1".to_owned()]));
         assert!(outside.copper_outside_outline >= 2, "{outside:?}");
+    }
+
+    #[test]
+    fn outline_containment_ignores_staged_courtyards_and_pads() {
+        let mut board = containment_snapshot(9.5, 8.0);
+        board.imported.parts[0].properties.insert(
+            kicad_board::STAGED_REASON.to_owned(),
+            "new_from_sync".to_owned(),
+        );
+
+        assert!(outline_containment(&board).is_clear());
     }
 
     #[test]

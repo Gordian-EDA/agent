@@ -42,6 +42,7 @@ pub(super) fn is_zone_self_unconnected(v: &Violation) -> bool {
 /// A badly broken board can have hundreds of unconnected items; enough of them
 /// to act on is enough.
 const MAX_UNCONNECTED_PAIRS: usize = 20;
+const MAX_REPORTED_FINDINGS: usize = 20;
 
 pub(super) fn violation_summaries<'a>(
     violations: impl IntoIterator<Item = &'a Violation>,
@@ -208,6 +209,35 @@ fn finding_summaries<'a>(
         .take(limit)
         .copied()
         .map(finding_json)
+        .collect()
+}
+
+fn grouped_violation_summaries<'a>(
+    findings: impl IntoIterator<Item = &'a BoardFinding<'a>>,
+    limit: usize,
+) -> Vec<Value> {
+    let mut grouped = std::collections::BTreeMap::<String, (usize, BTreeSet<String>)>::new();
+    for finding in findings {
+        if finding.violation.severity != "error" {
+            continue;
+        }
+        let (kind, refs, _) = violation_key(finding.violation);
+        let group = grouped.entry(kind).or_default();
+        group.0 += 1;
+        group.1.extend(refs);
+    }
+    let mut groups: Vec<_> = grouped.into_iter().collect();
+    groups.sort_by(|left, right| right.1.0.cmp(&left.1.0).then_with(|| left.0.cmp(&right.0)));
+    groups
+        .into_iter()
+        .take(limit)
+        .map(|(kind, (count, refs))| {
+            json!({
+                "type": kind,
+                "count": count,
+                "example_refs": refs.into_iter().take(5).collect::<Vec<_>>(),
+            })
+        })
         .collect()
 }
 
@@ -479,9 +509,11 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .iter()
             .map(|finding| finding.violation),
     );
+    let finding_count = violations.len() + unconnected_findings.len() + outline_blocking;
     let mut findings = violations
         .iter()
         .chain(&unconnected_findings)
+        .take(MAX_REPORTED_FINDINGS.saturating_sub(outline_blocking))
         .copied()
         .map(finding_json)
         .collect::<Vec<_>>();
@@ -564,6 +596,12 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "Fix the blocking violations/unconnected items, then call check_board again. Do not resync blindly.".to_owned()
     };
     let text = diagnostics.join("\n");
+    let top_violations = grouped_violation_summaries(
+        violations
+            .iter()
+            .filter(|finding| !is_non_copper(finding.violation)),
+        3,
+    );
     // The DRC detail and the silkscreen pass each get their own object: the
     // board's verdict and its progress stay at the top level, where a caller
     // reads them, and no single `json!` grows past what the macro can expand.
@@ -575,10 +613,7 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "ignored_zone_self_unconnected": gate.ignored_zone_self_unconnected,
         "outside_outline": containment.outside_outline,
         "copper_outside_outline": containment.copper_outside_outline > 0,
-        "top_violations": finding_summaries(
-            violations.iter().filter(|finding| !is_non_copper(finding.violation)),
-            5,
-        ),
+        "top_violations": top_violations,
         "top_unconnected": finding_summaries(meaningful_unconnected.iter(), 5),
     });
     let silk = json!({
@@ -612,9 +647,17 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "blocked": blocked,
         "staged": staged,
         "staged_count": staged_refs_list.len(),
+        "top_violations": top_violations,
+        "outline": crate::staging::outline_json(&board),
+        "outside": crate::staging::outside_json(
+            &board,
+            containment.outside_outline.iter().cloned(),
+        ),
         "drc": drc,
         "silk": silk,
         "findings": findings,
+        "finding_count": finding_count,
+        "findings_truncated": finding_count > MAX_REPORTED_FINDINGS,
         "diagnostics": diagnostics,
         "text": text,
         // Never a bare count: the two pads that should be joined are what say
@@ -691,5 +734,35 @@ mod tests {
         assert_eq!(islands[0]["net"], "GND");
         assert_eq!(islands[0]["at"], json!([4.0, 5.0]));
         assert_eq!(islands[0]["pads"], json!(["U1.1"]));
+    }
+
+    #[test]
+    fn top_violations_group_by_type_and_name_example_references() {
+        let violation = |kind: &str, reference: &str| Violation {
+            severity: "error".to_owned(),
+            kind: kind.to_owned(),
+            description: format!("Footprint {reference} overlaps another item"),
+            items: Vec::new(),
+        };
+        let violations = [
+            violation("courtyards_overlap", "R1"),
+            violation("clearance", "C1"),
+            violation("courtyards_overlap", "U1"),
+            violation("shorting_items", "J1"),
+            violation("courtyards_overlap", "R2"),
+        ];
+        let mut findings = board_findings(&violations);
+        findings[0].staged = true;
+
+        let top = grouped_violation_summaries(findings.iter(), 3);
+
+        assert_eq!(
+            top,
+            [
+                json!({"type": "courtyards_overlap", "count": 3, "example_refs": ["R1", "R2", "U1"]}),
+                json!({"type": "clearance", "count": 1, "example_refs": ["C1"]}),
+                json!({"type": "shorting_items", "count": 1, "example_refs": ["J1"]}),
+            ]
+        );
     }
 }

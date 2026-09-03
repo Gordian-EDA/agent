@@ -17,6 +17,46 @@ use gordian_runtime::tool::footprint_suggestion_clause;
 use super::fmt_num;
 use super::seed::{BoardSeedRules, PourPadConnection, PourSpec};
 
+/// Board-library identity used while a schematic part has no assigned footprint.
+pub(super) const MISSING_FOOTPRINT_ID: &str = "Gordian:MissingFootprint";
+
+/// Padless KiCad 10 footprint that preserves an unresolved schematic reference.
+const MISSING_FOOTPRINT_SOURCE: &str = r#"(footprint "MissingFootprint"
+	(version 20240108)
+	(generator "gordian")
+	(layer "F.Cu")
+	(property "Reference" "REF**" (at 0 -1.5 0) (layer "F.SilkS"))
+	(property "Value" "MissingFootprint" (at 0 1.5 0) (layer "F.Fab"))
+	(fp_rect (start -1 -1) (end 1 1) (stroke (width 0.2) (type default)) (fill none) (layer "F.SilkS"))
+	(fp_rect (start -1.25 -1.25) (end 1.25 1.25) (stroke (width 0.05) (type default)) (fill none) (layer "F.CrtYd"))
+)"#;
+
+fn footprint_source(
+    reference: &str,
+    footprint: &str,
+    catalog: &FootprintCatalog,
+) -> std::result::Result<String, String> {
+    if footprint == MISSING_FOOTPRINT_ID {
+        return Ok(MISSING_FOOTPRINT_SOURCE.to_owned());
+    }
+    let id = FootprintId::parse(footprint).map_err(|e| {
+        let clause = footprint_suggestion_clause(&catalog.suggest(footprint));
+        format!("part {reference}: invalid footprint id `{footprint}`: {e}{clause}")
+    })?;
+    catalog.source(&id).map_err(|e| {
+        if e.is_not_found() {
+            let clause = footprint_suggestion_clause(&catalog.suggest(footprint));
+            format!(
+                "part {reference}: unknown footprint `{footprint}`{clause} — assign a real lib_id via search_footprints"
+            )
+        } else {
+            format!(
+                "part {reference}: footprint `{footprint}` source is not readable: {e} — edit the schematic footprint field"
+            )
+        }
+    })
+}
+
 // ── board synthesis ───────────────────────────────────────────────────────────────
 
 /// The outline a seed is asked for: an explicit rectangle, or one sized from
@@ -181,27 +221,7 @@ pub(super) fn plan_seed_board(
     let mut x = kicad_board::seed_row_x(seed_origin.x, 0);
     let y = kicad_board::seed_row_y(seed_origin.y);
     for dp in &spec.parts {
-        let id = FootprintId::parse(&dp.footprint).map_err(|e| {
-            let clause = footprint_suggestion_clause(&catalog.suggest(&dp.footprint));
-            format!(
-                "part {}: invalid footprint id `{}`: {e}{clause}",
-                dp.reference, dp.footprint
-            )
-        })?;
-        let source = catalog.source(&id).map_err(|e| {
-            if e.is_not_found() {
-                let clause = footprint_suggestion_clause(&catalog.suggest(&dp.footprint));
-                format!(
-                    "part {}: unknown footprint `{}`{clause} — assign a real lib_id via search_footprints",
-                    dp.reference, dp.footprint
-                )
-            } else {
-                format!(
-                    "part {}: footprint `{}` source is not readable: {e} — edit the schematic footprint field",
-                    dp.reference, dp.footprint
-                )
-            }
-        })?;
+        let source = footprint_source(&dp.reference, &dp.footprint, catalog)?;
         parts.push(SeedFootprint {
             reference: dp.reference.clone(),
             value: dp.value.clone(),
@@ -782,23 +802,7 @@ pub(super) fn emit_board_footprint(
     catalog: &FootprintCatalog,
     net_codes: &BTreeMap<String, i32>,
 ) -> std::result::Result<String, String> {
-    let id = FootprintId::parse(&part.footprint).map_err(|e| {
-        let hint = kicad_footprint::unknown_footprint_message(
-            &part.footprint,
-            &catalog.suggest(&part.footprint),
-        );
-        format!("part {}: invalid footprint id: {e}; {hint}", part.reference)
-    })?;
-    let source = catalog.source(&id).map_err(|e| {
-        let hint = kicad_footprint::unknown_footprint_message(
-            &part.footprint,
-            &catalog.suggest(&part.footprint),
-        );
-        format!(
-            "part {}: footprint `{}` is not usable: {e}; {hint}",
-            part.reference, part.footprint
-        )
-    })?;
+    let source = footprint_source(&part.reference, &part.footprint, catalog)?;
     let seed = SeedFootprint {
         reference: part.reference.clone(),
         value: part.value.clone(),
@@ -1554,20 +1558,39 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
             net_widths.insert(net.clone(), w);
         }
     }
-    // Copper pours: [{"net":"GND","layer":"bottom"}] — flood a net on a signal layer.
     let mut pours = Vec::new();
     let mut pours_by_layer = BTreeMap::<u32, (String, PourPadConnection)>::new();
     if let Some(pv) = obj.get("pours") {
-        let arr = pv
-            .as_array()
-            .ok_or_else(|| "rules.pours must be an array of {net, layer}".to_string())?;
-        for p in arr {
-            let net = p
-                .get("net")
+        let entries: Vec<&Value> = match pv {
+            Value::Array(entries) => entries.iter().collect(),
+            Value::String(_) | Value::Object(_) => vec![pv],
+            _ => {
+                return Err(
+                    "rules.pours must be a net string, {net, layer?}, or an array of either"
+                        .to_owned(),
+                );
+            }
+        };
+        for entry in entries {
+            let net = match entry {
+                Value::String(net) if !net.trim().is_empty() => net.as_str(),
+                Value::Object(_) => entry
+                    .get("net")
+                    .and_then(Value::as_str)
+                    .filter(|net| !net.trim().is_empty())
+                    .ok_or_else(|| "rules.pours[].net must be a non-empty string".to_owned())?,
+                _ => {
+                    return Err(
+                        "each rules.pours entry must be a net string or {net, layer?}".to_owned(),
+                    );
+                }
+            };
+            let default_layer = if layer_count >= 4 { "inner1" } else { "bottom" };
+            let layer = entry
+                .get("layer")
                 .and_then(Value::as_str)
-                .ok_or_else(|| "rules.pours[].net must be a string".to_string())?;
-            let layer = p.get("layer").and_then(Value::as_str).unwrap_or("bottom");
-            let pad_connection = match p.get("connect").and_then(Value::as_str) {
+                .unwrap_or(default_layer);
+            let pad_connection = match entry.get("connect").and_then(Value::as_str) {
                 None | Some("thermal") => PourPadConnection::Thermal,
                 Some("solid") => PourPadConnection::Solid,
                 Some(other) => {
@@ -1576,9 +1599,6 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
                     ));
                 }
             };
-            // A pour floods the requested copper layer. Reserved inner plane indices
-            // are valid explicit overrides of the automatic GND/supply assignment;
-            // the emitter suppresses the competing default on that physical layer.
             match resolve_pour_layer(layer, layer_count) {
                 None => {
                     return Err(format!(
@@ -1744,6 +1764,58 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn parse_seed_rules_normalizes_lenient_pour_forms() {
+        for (layer_count, input, expected_layer) in [
+            (2, json!("GND"), "bottom"),
+            (2, json!(["GND"]), "bottom"),
+            (4, json!({ "net": "GND" }), "inner1"),
+            (4, json!({ "net": "GND", "layer": "B.Cu" }), "B.Cu"),
+        ] {
+            let rules = parse_seed_rules(Some(&json!({
+                "layer_count": layer_count,
+                "pours": input,
+            })))
+            .unwrap();
+
+            assert_eq!(rules.pours.len(), 1);
+            assert_eq!(rules.pours[0].net, "GND");
+            assert_eq!(rules.pours[0].layer, expected_layer);
+            assert_eq!(rules.pours[0].pad_connection, PourPadConnection::Thermal);
+        }
+    }
+
+    #[test]
+    fn missing_footprint_placeholder_is_padless_and_kicad_parseable() {
+        let root = tempfile::tempdir().unwrap();
+        let catalog = FootprintCatalog::from_root(root.path()).unwrap();
+        let part = SeedPart {
+            reference: "R1".to_owned(),
+            value: Some("10k".to_owned()),
+            footprint: MISSING_FOOTPRINT_ID.to_owned(),
+            pad_nets: BTreeMap::from([
+                ("1".to_owned(), "IN".to_owned()),
+                ("2".to_owned(), "OUT".to_owned()),
+            ]),
+            locked: None,
+        };
+
+        let emitted = emit_board_footprint(
+            &part,
+            Point2::new(2.0, 2.25),
+            0.0,
+            false,
+            &catalog,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert!(emitted.contains("Gordian:MissingFootprint"));
+        assert!(!emitted.contains("\n\t\t(pad "));
+        kicad_footprint::Footprint::parse_str(MISSING_FOOTPRINT_ID, MISSING_FOOTPRINT_SOURCE)
+            .unwrap();
     }
 
     #[test]

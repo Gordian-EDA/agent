@@ -31,7 +31,7 @@ use crate::board::guard::{Edit, Guard};
 use crate::seed::{PourPadConnection, PourSpec};
 
 use crate::create::{
-    BoardSeedSpec, SeedPart, SeedRules, add_default_power_pours,
+    BoardSeedSpec, MISSING_FOOTPRINT_ID, SeedPart, SeedRules, add_default_power_pours,
     apply_complexity_default_layer_count, emit_board_footprint, merge, parse_seed_bounds,
     parse_seed_rules_over, plan_seed_board, write_seed_plan,
 };
@@ -254,16 +254,7 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     };
     // The parts whose symbol and footprint disagree did not block this sync;
     // they were built into the board and staged, and the report says so.
-    let staged = result
-        .get("staged_footprint_mismatch")
-        .and_then(Value::as_array)
-        .map(|refs| {
-            refs.iter()
-                .filter_map(|reference| reference.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
-    report_staged(&design, staged, &mut result);
+    report_staged(&design, &mut result);
     phase.facts(
         result
             .get("retracted_tracks")
@@ -289,16 +280,18 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// placed part away from its copper opens every net that reached it, which is a
 /// connectivity change — so this runs INSIDE the caller's guard, retracts that
 /// copper like every other mover, and writes the board atomically.
-fn stage_mismatched(
+fn stage_incomplete(
     ctx: &AgentRuntime,
+    missing: &BTreeSet<String>,
     mismatched: &BTreeMap<String, String>,
-) -> std::result::Result<Vec<String>, String> {
-    if mismatched.is_empty() {
-        return Ok(Vec::new());
+) -> std::result::Result<(Vec<String>, Vec<String>), String> {
+    if missing.is_empty() && mismatched.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
     }
     let board = crate::active_board(ctx)?;
-    let on_board: Vec<&String> = mismatched
-        .keys()
+    let incomplete: BTreeSet<&String> = missing.iter().chain(mismatched.keys()).collect();
+    let on_board: Vec<&String> = incomplete
+        .into_iter()
         .filter(|reference| {
             board
                 .imported
@@ -308,7 +301,7 @@ fn stage_mismatched(
         })
         .collect();
     if on_board.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     // A part the board already seeded is in the row where it belongs; only the
     // ones a laid-out board carries have to be moved there, and they go after
@@ -331,9 +324,19 @@ fn stage_mismatched(
                 });
                 slot += 1;
             }
-            kicad_board::Annotation::new((*reference).clone())
-                .set(kicad_board::STAGED_REASON, "footprint_mismatch")
-                .set(kicad_board::STAGED_DETAIL, mismatched[*reference].clone())
+            let annotation = kicad_board::Annotation::new((*reference).clone());
+            if missing.contains(*reference) {
+                annotation
+                    .set(kicad_board::STAGED_REASON, "missing_footprint")
+                    .set(
+                        kicad_board::STAGED_DETAIL,
+                        "assign a compatible footprint, then sync_board again",
+                    )
+            } else {
+                annotation
+                    .set(kicad_board::STAGED_REASON, "footprint_mismatch")
+                    .set(kicad_board::STAGED_DETAIL, mismatched[*reference].clone())
+            }
         })
         .collect();
 
@@ -356,36 +359,61 @@ fn stage_mismatched(
     let patched = kicad_board::patch_annotations(&text, &annotations)?;
     crate::route::write_board_atomically(&path, patched.as_bytes())
         .map_err(|error| error.to_string())?;
-    Ok(on_board
+    let missing_staged = on_board
         .iter()
+        .filter(|reference| missing.contains(**reference))
         .map(|reference| (*reference).clone())
-        .collect())
+        .collect();
+    let mismatched_staged = on_board
+        .iter()
+        .filter(|reference| mismatched.contains_key(**reference))
+        .map(|reference| (*reference).clone())
+        .collect();
+    Ok((missing_staged, mismatched_staged))
 }
 
 /// Tell the caller which parts this sync staged rather than finished, and how
 /// to make each one's symbol and footprint agree.
-fn report_staged(design: &SchematicDesign, staged: Vec<String>, result: &mut Value) {
+fn report_staged(design: &SchematicDesign, result: &mut Value) {
     let Some(object) = result.as_object_mut() else {
         return;
     };
-    if staged.is_empty() {
+    let missing = object
+        .get("staged_missing_footprint")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| design.missing.iter().cloned().map(Value::String).collect());
+    let mismatched = object
+        .get("staged_footprint_mismatch")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| {
+            design
+                .mismatched
+                .keys()
+                .cloned()
+                .map(Value::String)
+                .collect()
+        });
+    if missing.is_empty() && mismatched.is_empty() {
         return;
     }
-    object.insert("staged_footprint_mismatch".to_owned(), json!(staged));
-    object.insert(
-        "footprint_pin_mismatches".to_owned(),
-        json!(design.mismatches),
-    );
-    object.insert("next_tool".to_owned(), json!("swap_symbol"));
+    object.insert("missing_footprints".to_owned(), json!(design.missing));
+    object.insert("staged_missing_footprint".to_owned(), json!(missing));
+    object.insert("staged_footprint_mismatch".to_owned(), json!(mismatched));
+    if !mismatched.is_empty() {
+        object.insert(
+            "footprint_pin_mismatches".to_owned(),
+            json!(design.mismatches),
+        );
+    }
+    object.insert("next_tool".to_owned(), json!("assign_footprints"));
     object.insert(
         "next".to_owned(),
         json!(format!(
-            "{} part(s) are staged because their symbol pins and footprint pads disagree: {}. \
-             The rest of the board is synced. Make the two agree — swap_symbol to a part whose \
-             pin numbers are the footprint's pad numbers, or assign_footprints a package whose \
-             pads match the pins — then sync_board again.",
-            staged.len(),
-            staged.join(", "),
+            "{} incomplete part(s) remain staged; the rest of the board is synced. Assign the \
+             missing footprints and repair any pin/pad mismatches, then sync_board again.",
+            missing.len() + mismatched.len(),
         )),
     );
 }
@@ -395,6 +423,8 @@ fn report_staged(design: &SchematicDesign, staged: Vec<String>, result: &mut Val
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SchematicDesign {
     pub(crate) parts: Vec<SchematicPart>,
+    /// References that currently have no schematic footprint assignment.
+    pub(crate) missing: BTreeSet<String>,
     /// Reference → why its symbol and footprint disagree.
     pub(crate) mismatched: BTreeMap<String, String>,
     /// The full mismatch records, for the report.
@@ -465,7 +495,7 @@ fn schematic_parts(ctx: &AgentRuntime) -> std::result::Result<SchematicDesign, V
     }
 
     let mut parts = Vec::with_capacity(netlist.components.len());
-    let mut missing = Vec::new();
+    let mut missing = BTreeSet::new();
     for component in &netlist.components {
         let footprint = component
             .properties
@@ -473,35 +503,30 @@ fn schematic_parts(ctx: &AgentRuntime) -> std::result::Result<SchematicDesign, V
             .cloned()
             .unwrap_or_default();
         if footprint.is_empty() {
-            missing.push(component.reference.clone());
+            missing.insert(component.reference.clone());
         }
         parts.push(SchematicPart {
             reference: component.reference.clone(),
             value: component.value.clone(),
-            footprint,
+            footprint: if footprint.is_empty() {
+                MISSING_FOOTPRINT_ID.to_owned()
+            } else {
+                footprint
+            },
             pad_nets: pad_nets_by_ref
                 .remove(&component.reference)
                 .unwrap_or_default(),
         });
     }
-    if !missing.is_empty() {
-        return Err(json!({
-            "ok": false,
-            "part_count": parts.len(),
-            "missing_footprints": missing,
-            "next_tool": "assign_footprints",
-            "next": "call assign_footprints({assignments:[{reference, footprint}, ...]}), then sync_board again",
-            "note": "some live schematic symbols have no footprint field — do not retry sync_board until footprints are assigned",
-        }));
-    }
-
-    let mismatches =
+    let mismatches: Vec<_> =
         gordian_runtime::footprint_compat::netlist_pin_mismatches(ctx, &netlist, &ignored_pins)
-            .map_err(
-                |e| json!({ "error": format!("could not compare symbol pins to pads: {e}") }),
-            )?;
+            .map_err(|e| json!({ "error": format!("could not compare symbol pins to pads: {e}") }))?
+            .into_iter()
+            .filter(|mismatch| !missing.contains(&mismatch.reference))
+            .collect();
     Ok(SchematicDesign {
         parts,
+        missing,
         mismatched: mismatches
             .iter()
             .map(|mismatch| (mismatch.reference.clone(), mismatch_detail(mismatch)))
@@ -572,10 +597,16 @@ fn create_board(
     }
     // Every seeded part is already in the staging row, so this only writes the
     // reason onto the mismatched ones — no part moves, no copper exists yet.
-    match stage_mismatched(ctx, mismatched) {
-        Ok(staged) => {
+    let missing = parts
+        .iter()
+        .filter(|part| part.footprint == MISSING_FOOTPRINT_ID)
+        .map(|part| part.reference.clone())
+        .collect();
+    match stage_incomplete(ctx, &missing, mismatched) {
+        Ok((missing, mismatched)) => {
             if let Some(object) = result.as_object_mut() {
-                object.insert("staged_footprint_mismatch".to_owned(), json!(staged));
+                object.insert("staged_missing_footprint".to_owned(), json!(missing));
+                object.insert("staged_footprint_mismatch".to_owned(), json!(mismatched));
             }
         }
         Err(error) => {
@@ -681,6 +712,7 @@ fn seed_board(
             "min_trace_width": seeded.rules.min_trace_width,
             "via_diameter": seeded.rules.via_diameter,
             "via_drill": seeded.rules.via_drill,
+            "pours": pours_json(&seeded.rules.pours),
         },
         "rules_from_footprints": seeded.rule_notes,
         "path": ctx.pcb_path().display().to_string(),
@@ -746,6 +778,22 @@ fn bounds_json(bounds: &Rect) -> Value {
     })
 }
 
+fn pours_json(pours: &[PourSpec]) -> Vec<Value> {
+    pours
+        .iter()
+        .map(|pour| {
+            json!({
+                "net": pour.net,
+                "layer": pour.layer,
+                "connect": match pour.pad_connection {
+                    PourPadConnection::Thermal => "thermal",
+                    PourPadConnection::Solid => "solid",
+                },
+            })
+        })
+        .collect()
+}
+
 // ── the incremental edit ────────────────────────────────────────────────────
 
 fn update_board(
@@ -755,7 +803,7 @@ fn update_board(
     ctx: &AgentRuntime,
 ) -> Value {
     if input.get("rules").is_some() || input.get("bounds").is_some() {
-        return reseed_board(parts, input, ctx);
+        return reseed_board(parts, mismatched, input, ctx);
     }
     let catalog = match ctx.footprint_catalog() {
         Ok(catalog) => catalog,
@@ -852,6 +900,11 @@ fn update_board(
         .added
         .iter()
         .filter(|reference| !mismatched.contains_key(*reference))
+        .filter(|reference| {
+            parts.iter().any(|part| {
+                part.reference == ***reference && part.footprint != MISSING_FOOTPRINT_ID
+            })
+        })
         .cloned()
         .collect();
     let placed = match place_added(&to_place, ctx) {
@@ -861,7 +914,15 @@ fn update_board(
     if let Err(e) = mark_new_from_sync(ctx, &delta.added) {
         return gate.rollback(ctx, json!({ "error": e }));
     }
-    let staged = match stage_mismatched(ctx, mismatched) {
+    let (missing_staged, mismatched_staged) = match stage_incomplete(
+        ctx,
+        &parts
+            .iter()
+            .filter(|part| part.footprint == MISSING_FOOTPRINT_ID)
+            .map(|part| part.reference.clone())
+            .collect(),
+        mismatched,
+    ) {
         Ok(staged) => staged,
         Err(e) => {
             return gate.rollback(
@@ -877,7 +938,8 @@ fn update_board(
     let result = json!({
         "ok": true,
         "changed": true,
-        "staged_footprint_mismatch": staged,
+        "staged_missing_footprint": missing_staged,
+        "staged_footprint_mismatch": mismatched_staged,
         "delta": delta.to_json(),
         "placed": placed,
         "retracted_tracks": retract.count,
@@ -960,7 +1022,12 @@ fn has_top_level_net(text: &str) -> bool {
 /// its netlist: they cannot be patched into an existing document one node at a
 /// So a rules change re-synthesizes the board and restores the placement — the
 /// layout survives, the copper does not, and the model re-routes.
-fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> Value {
+fn reseed_board(
+    parts: &[SchematicPart],
+    mismatched: &BTreeMap<String, String>,
+    input: &Value,
+    ctx: &AgentRuntime,
+) -> Value {
     let gate = match Guard::open(ctx, Edit::new("sync_board", &[ctx.pcb_path()])) {
         Ok(gate) => gate,
         Err(refusal) => return refusal,
@@ -1030,14 +1097,27 @@ fn reseed_board(parts: &[SchematicPart], input: &Value, ctx: &AgentRuntime) -> V
             );
         }
     }
+    let missing = parts
+        .iter()
+        .filter(|part| part.footprint == MISSING_FOOTPRINT_ID)
+        .map(|part| part.reference.clone())
+        .collect();
+    let (missing_staged, mismatched_staged) = match stage_incomplete(ctx, &missing, mismatched) {
+        Ok(staged) => staged,
+        Err(error) => {
+            return gate.rollback(
+                ctx,
+                json!({ "error": format!("could not restore incomplete staging: {error}") }),
+            );
+        }
+    };
     merge(
         &mut result,
         json!({
             "created": false,
             "reseeded": true,
-            // The rebuild restored every part where it sat, so nothing is
-            // waiting on placement — only the copper is.
-            "staged": Vec::<String>::new(),
+            "staged_missing_footprint": missing_staged,
+            "staged_footprint_mismatch": mismatched_staged,
             "delta": delta.to_json(),
             "retracted_tracks": original.matches("(segment").count(),
             "nets_to_reroute": delta_nets(parts),

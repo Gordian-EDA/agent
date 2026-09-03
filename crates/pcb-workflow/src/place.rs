@@ -1,7 +1,7 @@
 //! Placement over the saved KiCad board.
 
 use circuit_graph::netclass::is_ground;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -130,12 +130,14 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "pad_count": part.pads.iter().filter(|pad| pad.net.is_some()).count(),
                 "locked_reason": crate::staging::lock_reason(part)
                     .map(crate::staging::LockReason::as_str),
+                "extent": crate::staging::part_extent(part).map(crate::staging::rect_json),
             })
         })
         .collect();
+    let containment = crate::board::guard::outline_containment(&board);
     let mut board_json = json!({
         "bounds": board.imported.bounds,
-        "outline": board.problem.outline,
+        "outline": crate::staging::outline_json(&board),
         "rules": {
             "clearance": board.problem.clearance,
             "min_trace_width": board.problem.min_trace_width,
@@ -192,6 +194,10 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "locked": state.locked,
             "fully_placed": state.staged.is_empty(),
             "routed": routed,
+            "outside": crate::staging::outside_json(
+                &board,
+                containment.outside_outline.into_iter(),
+            ),
         },
     }))
 }
@@ -618,6 +624,9 @@ pub(super) fn place_problem_from_snapshot(
         .map_err(|e| format!("footprint catalog unavailable: {e}"))?;
     let mut parts: Vec<Part> = Vec::with_capacity(board.imported.parts.len());
     for imported in &board.imported.parts {
+        if imported.lib_id == crate::create::MISSING_FOOTPRINT_ID {
+            continue;
+        }
         let id = FootprintId::parse(&imported.lib_id).map_err(|e| {
             format!(
                 "part {}: invalid footprint id `{}`: {e}",
@@ -716,6 +725,68 @@ fn placement_json(p: &Placement) -> Value {
         "x": p.at.x,
         "y": p.at.y,
         "rotation": p.rotation,
+    })
+}
+
+fn union_rect(a: Rect, b: Rect) -> Rect {
+    Rect::new(
+        a.min_x.min(b.min_x),
+        a.min_y.min(b.min_y),
+        a.max_x.max(b.max_x),
+        a.max_y.max(b.max_y),
+    )
+}
+
+fn placed_extent(
+    problem: &PlacementView,
+    imported: &[ImportedPart],
+    placement: &Placement,
+) -> Option<Rect> {
+    let part = problem
+        .parts
+        .iter()
+        .find(|part| part.reference == placement.reference)?;
+    let half = pcb_place::rotated_courtyard_half(part, placement.rotation);
+    let copper = pcb_place::rotated_copper_bbox(part, placement.rotation);
+    let envelope = pcb_place::part_placement_bounds_envelope(part, half, copper);
+    let mut extent = pcb_place::placement_envelope_at(placement.at, envelope);
+    if let Some(saved) = imported
+        .iter()
+        .find(|part| part.reference == placement.reference)
+        && let Some(courtyard) = saved.courtyard
+    {
+        extent = union_rect(
+            extent,
+            courtyard_at(
+                courtyard,
+                placement.at,
+                placement.rotation,
+                saved.side == kicad_board::BoardSide::Back,
+            ),
+        );
+    }
+    Some(extent)
+}
+
+fn bounds_containing_placement(
+    bounds: Rect,
+    problem: &PlacementView,
+    imported: &[ImportedPart],
+    result: &PlaceResult,
+) -> Rect {
+    result
+        .placements
+        .iter()
+        .filter_map(|placement| placed_extent(problem, imported, placement))
+        .fold(bounds, union_rect)
+}
+
+fn outside_placement_json(extent: Rect, outline: Rect) -> Value {
+    json!({
+        "extent": crate::staging::rect_json(extent),
+        "outline": crate::staging::rect_json(outline),
+        "suggested_bounds": crate::staging::rect_json(union_rect(extent, outline)),
+        "reason": "outside_explicit_outline",
     })
 }
 
@@ -2435,17 +2506,21 @@ fn sizing_report(
     result: &PlaceResult,
     legal: bool,
 ) -> Value {
+    let sizing = board_sizing(problem, &board.imported.parts, &board.problem);
     // On a failed placement, give the agent a CONCRETE board size so it can retry
     // deterministically instead of guessing — in the one vocabulary
     // `sync_board` also uses, grown past the outline that just failed so a
     // retry can never propose it again. `suggested_min_bounds_mm` carries the
     // same recommendation under the name the auto-resize path already reads.
-    let mut extra = json!({});
+    let mut extra = json!({
+        "parts_courtyard_area_mm2": sizing.courtyard_area_mm2,
+        "required_bounds": { "width": sizing.required_w, "height": sizing.required_h },
+        "recommended_bounds": { "width": sizing.recommended_w, "height": sizing.recommended_h },
+    });
     if !legal {
         let cw = (problem.bounds.max_x - problem.bounds.min_x).max(0.1);
         let ch = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
-        let sizing =
-            board_sizing(problem, &board.imported.parts, &board.problem).grown_past(cw, ch);
+        let sizing = sizing.grown_past(cw, ch);
         extra = json!({
             "overlap_pairs": placement_overlap_pairs(problem, result),
             "parts_courtyard_area_mm2": sizing.courtyard_area_mm2,
@@ -2488,16 +2563,19 @@ fn sizing_report(
             // envelope ratio always reads full even on an oversized board.
             let fresh = placement_size_estimate_with_growth(problem, 0.0, 0.0, false, false);
             let utilization = (fresh.total_area * 2.0) / (cw * ch);
-            extra = json!({
-                "utilized_bounds_mm": {
-                    "w": (envelope.width() * 10.0).round() / 10.0,
-                    "h": (envelope.height() * 10.0).round() / 10.0,
-                },
-                "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
-                "fit_bounds_mm": { "w": fresh.width.ceil(), "h": fresh.height.ceil() },
-                "canvas_utilization_percent": (utilization * 100.0).round().min(100.0),
-                "connectors_off_edge": connectors_off_edge(problem, &board.imported.parts, result),
-            });
+            crate::create::merge(
+                &mut extra,
+                json!({
+                    "utilized_bounds_mm": {
+                        "w": (envelope.width() * 10.0).round() / 10.0,
+                        "h": (envelope.height() * 10.0).round() / 10.0,
+                    },
+                    "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
+                    "fit_bounds_mm": { "w": fresh.width.ceil(), "h": fresh.height.ceil() },
+                    "canvas_utilization_percent": (utilization * 100.0).round().min(100.0),
+                    "connectors_off_edge": connectors_off_edge(problem, &board.imported.parts, result),
+                }),
+            );
         }
     }
     extra
@@ -2510,6 +2588,8 @@ struct PlacementSubset {
     /// Named parts a lock protects. They stay where they are, and the result
     /// says so rather than reporting a move that never happened.
     locked: Vec<Value>,
+    /// Staged parts that cannot be placed until their footprint metadata is repaired.
+    unplaceable: Vec<Value>,
 }
 
 /// Which parts a `place_board` call may move: the caller's `refs`, or — with no
@@ -2526,17 +2606,39 @@ fn placement_subset(
     board: &BoardSnapshot,
     replace: bool,
 ) -> PlacementSubset {
-    let staged = crate::staging::staged_references(board);
-    let whole_board = refs.is_none() && staged.len() == board.imported.parts.len();
+    let state = crate::staging::BoardState::of(board);
+    let unplaceable_refs = crate::staging::unplaceable_references(board);
+    let staged: std::collections::BTreeSet<String> = state
+        .staged_references()
+        .into_iter()
+        .filter(|reference| !unplaceable_refs.contains(reference))
+        .collect();
+    let whole_board = refs.is_none()
+        && staged.len() + unplaceable_refs.len() == board.imported.parts.len()
+        && unplaceable_refs.is_empty();
     let refs = match refs {
-        Some(refs) => Some(refs),
+        Some(refs) => Some(
+            refs.into_iter()
+                .filter(|reference| !unplaceable_refs.contains(reference))
+                .collect::<Vec<_>>(),
+        ),
         None if whole_board || replace => None,
         None => Some(staged.into_iter().collect()),
     };
+    let unplaceable = state
+        .staged_json()
+        .into_iter()
+        .filter(|part| {
+            part.get("ref")
+                .and_then(Value::as_str)
+                .is_some_and(|reference| unplaceable_refs.contains(reference))
+        })
+        .collect();
     let Some(named) = refs else {
         return PlacementSubset {
             refs: None,
             locked: Vec::new(),
+            unplaceable,
         };
     };
     let locked = crate::locks::locked_among(board, named.iter().map(String::as_str));
@@ -2556,6 +2658,7 @@ fn placement_subset(
                 |(reference, reason)| json!({ "ref": reference, "locked_reason": reason.as_str() }),
             )
             .collect(),
+        unplaceable,
     }
 }
 
@@ -2800,12 +2903,21 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let PlacementSubset {
         refs,
         locked: locked_out,
+        unplaceable: mut placement_unplaced,
     } = placement_subset(refs, &board, replace);
     // Everything is placed and nothing was named: there is no work, and saying
     // so is the whole answer. `replace: true` is how a caller asks for the
     // destructive re-place.
     if refs.as_ref().is_some_and(Vec::is_empty) {
-        return Ok(nothing_to_place(&board, &locked_out));
+        let mut result = nothing_to_place(&board, &locked_out);
+        if !placement_unplaced.is_empty() {
+            result["unplaced"] = json!(placement_unplaced);
+            result["note"] = json!(
+                "Every selected part without a usable footprint remains staged. Assign or repair \
+                 those footprints, run sync_board, then place_board again."
+            );
+        }
+        return Ok(result);
     }
 
     let mut problem = match place_problem_from_snapshot(&board, ctx) {
@@ -2816,6 +2928,35 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         refs.iter().flatten().map(String::as_str).collect();
     if refs.is_some() {
         restrict_to_refs(&mut problem, &board, &free);
+    }
+    let staged = crate::staging::staged_references(&board);
+    let unplaceable_refs = crate::staging::unplaceable_references(&board);
+    problem.parts.retain(|part| {
+        !unplaceable_refs.contains(&part.reference)
+            && (refs.is_none()
+                || free.contains(part.reference.as_str())
+                || !staged.contains(&part.reference))
+    });
+    let board_text = std::fs::read_to_string(ctx.pcb_path())?;
+    let managed_outline = super::outline::managed_outline_bounds(&board_text).ok();
+    let auto_outline = managed_outline.is_some_and(|managed| !managed.explicit);
+    if auto_outline {
+        let sizing = board_sizing(&problem, &board.imported.parts, &board.problem);
+        problem.bounds.max_x = problem
+            .bounds
+            .max_x
+            .max(problem.bounds.min_x + sizing.recommended_w);
+        problem.bounds.max_y = problem
+            .bounds
+            .max_y
+            .max(problem.bounds.min_y + sizing.recommended_h);
+        problem.outline = Polygon::new(vec![
+            Point2::new(problem.bounds.min_x, problem.bounds.min_y),
+            Point2::new(problem.bounds.max_x, problem.bounds.min_y),
+            Point2::new(problem.bounds.max_x, problem.bounds.max_y),
+            Point2::new(problem.bounds.min_x, problem.bounds.max_y),
+        ])
+        .ok();
     }
     let problem = problem;
 
@@ -2941,19 +3082,15 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut mechanical_locks: Vec<String> = Vec::new();
     let mut retracted = None;
     let mut outline_refit = None;
+    let mut outline_target = auto_outline.then_some(problem.bounds);
+    let mut applied_refs = Vec::new();
     // A subset placement answers only for the parts it may move.
     let legal = match &refs {
         Some(_) => subset_is_legal(&problem, &result, &free),
         None => result.legal,
     };
     if legal {
-        if refs.is_none() {
-            let path = ctx.pcb_path();
-            let board_text = std::fs::read_to_string(&path)?;
-            let managed = match super::outline::managed_outline_bounds(&board_text) {
-                Ok(managed) => managed,
-                Err(error) => return Ok(json!({ "error": error })),
-            };
+        if let Some(managed) = managed_outline {
             // Bounds the caller fixed are theirs; only a seeder-sized outline is
             // re-fitted to what placement produced. `update_board_outline{fit:true}`
             // is the explicit way to shrink a fixed one.
@@ -2966,6 +3103,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     plan_outline_refit(&problem, &board.imported.parts, &routing, &hints, &result)
                 {
                     result = plan.result.clone();
+                    outline_target = Some(plan.to);
                     outline_refit = Some(plan);
                 }
             }
@@ -2977,7 +3115,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .filter(|p| p.locked)
             .map(|p| p.reference.as_str())
             .collect();
-        let moves: Vec<FootprintPlacement> = result
+        let mut moves: Vec<FootprintPlacement> = result
             .placements
             .iter()
             .filter(|p| !locked_refs.contains(p.reference.as_str()))
@@ -2988,7 +3126,44 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 rotation_deg: Some(p.rotation),
             })
             .collect();
-        if !moves.is_empty() || outline_refit.is_some() {
+        if managed_outline.is_some_and(|managed| managed.explicit) {
+            let outline = board.problem.bounds;
+            let by_reference: BTreeMap<&str, &Placement> = result
+                .placements
+                .iter()
+                .map(|placement| (placement.reference.as_str(), placement))
+                .collect();
+            moves.retain(|movement| {
+                let Some(placement) = by_reference.get(movement.reference.as_str()) else {
+                    return false;
+                };
+                let Some(extent) = placed_extent(&problem, &board.imported.parts, placement) else {
+                    return false;
+                };
+                let fits = board.problem.outline.as_ref().is_some_and(|polygon| {
+                    crate::board::guard::rect_inside_outline(extent, polygon)
+                });
+                if !fits {
+                    let mut report = outside_placement_json(extent, outline);
+                    report["ref"] = json!(movement.reference);
+                    placement_unplaced.push(report);
+                }
+                fits
+            });
+        }
+        if auto_outline {
+            outline_target = Some(bounds_containing_placement(
+                outline_target.unwrap_or(problem.bounds),
+                &problem,
+                &board.imported.parts,
+                &result,
+            ));
+        }
+        applied_refs = moves
+            .iter()
+            .map(|movement| movement.reference.clone())
+            .collect();
+        if !moves.is_empty() || outline_target.is_some() {
             let opened = match Guard::open(ctx, Edit::new("place_board", &[ctx.pcb_path()])) {
                 Ok(opened) => opened,
                 Err(refusal) => return Ok(refusal),
@@ -3039,13 +3214,13 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     }
                 }
             }
-            if let Some(plan) = &outline_refit {
+            if let Some(target) = outline_target {
                 let path = ctx.pcb_path();
                 let proposed = Polygon::new(vec![
-                    Point2::new(plan.to.min_x, plan.to.min_y),
-                    Point2::new(plan.to.max_x, plan.to.min_y),
-                    Point2::new(plan.to.max_x, plan.to.max_y),
-                    Point2::new(plan.to.min_x, plan.to.max_y),
+                    Point2::new(target.min_x, target.min_y),
+                    Point2::new(target.max_x, target.min_y),
+                    Point2::new(target.max_x, target.max_y),
+                    Point2::new(target.min_x, target.max_y),
                 ])
                 .expect("a refit rectangle is a polygon");
                 let realised = match crate::active_board(ctx) {
@@ -3079,7 +3254,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                         ));
                     }
                 };
-                let updated = match super::outline::replace_managed_outline(&placed, plan.to) {
+                let updated = match super::outline::replace_managed_outline(&placed, target) {
                     Ok(updated) => updated,
                     Err(error) => {
                         return Ok(opened.rollback(ctx, json!({ "error": error.to_string() })));
@@ -3096,7 +3271,16 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             gate = Some(opened);
         }
     }
-    let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
+    let unplaced_refs = placement_unplaced
+        .iter()
+        .filter_map(|report| report.get("ref").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    let positions: Vec<Value> = result
+        .placements
+        .iter()
+        .filter(|placement| !unplaced_refs.contains(placement.reference.as_str()))
+        .map(placement_json)
+        .collect();
 
     // Discoverability: if a legal placement has a decoupling-heavy IC whose caps the
     // annealer scattered (>=4 bypass caps, none locked/pinned), suggest the `surround`
@@ -3131,9 +3315,10 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 
     let extra = sizing_report(&problem, &board, &result, legal);
+    let placement_applied = legal && (refs.is_none() || !applied_refs.is_empty());
 
     let mut out = json!({
-        "placement_applied": legal,
+        "placement_applied": placement_applied,
         "legal": legal,
         "hpwl": result.report.hpwl,
         "overlaps_resolved": result.report.overlaps_resolved,
@@ -3170,8 +3355,15 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !mechanical_locks.is_empty() {
         out["mechanically_locked"] = json!(mechanical_locks);
     }
+    if !placement_unplaced.is_empty() {
+        out["unplaced"] = json!(placement_unplaced);
+        out["note"] = json!(
+            "placed every selected footprint that fit; the reported remainder stays staged. \
+             Repair missing footprints or apply suggested_bounds, then place those references again."
+        );
+    }
     if let Some(refs) = &refs {
-        out["placed_refs"] = json!(refs);
+        out["placed_refs"] = json!(applied_refs);
         if let Some(bbox) = bbox {
             out["bbox"] = json!({
                 "min_x": bbox.min_x, "min_y": bbox.min_y,
@@ -3195,7 +3387,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
         // it short of another `check_board`. An ILLEGAL placement wrote nothing,
         // so the parts it selected are still in the seed row too.
         let placed: std::collections::BTreeSet<&str> = if legal {
-            refs.iter().map(String::as_str).collect()
+            applied_refs.iter().map(String::as_str).collect()
         } else {
             Default::default()
         };
@@ -3377,6 +3569,50 @@ mod tests {
             edge_datum: None,
             locked: None,
         }
+    }
+
+    #[test]
+    fn explicit_outline_report_names_true_extent_and_suggested_bounds() {
+        let outline = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let problem = PlacementView {
+            bounds: outline,
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            parts: vec![Part {
+                reference: "RV1".to_owned(),
+                courtyard_w: 2.0,
+                courtyard_h: 2.0,
+                pads: Vec::new(),
+                edge_datum: None,
+                locked: None,
+            }],
+            keepouts: Vec::new(),
+            outline: None,
+        };
+        let imported = vec![ImportedPart {
+            reference: "RV1".to_owned(),
+            lib_id: "Potentiometer_THT:Potentiometer_Test".to_owned(),
+            at: Point2::new(5.0, 5.0),
+            rotation: 0,
+            side: kicad_board::BoardSide::Front,
+            locked: false,
+            properties: Default::default(),
+            courtyard: Some(Rect::new(-3.0, -1.0, 1.0, 1.0)),
+            pads: Vec::new(),
+        }];
+        let placement = Placement {
+            reference: "RV1".to_owned(),
+            at: Point2::new(1.0, 5.0),
+            rotation: 0.0,
+        };
+
+        let extent = placed_extent(&problem, &imported, &placement).unwrap();
+        let report = outside_placement_json(extent, outline);
+
+        assert_eq!(report["extent"]["min"], json!([-2.0, 4.0]));
+        assert_eq!(report["outline"]["min"], json!([0.0, 0.0]));
+        assert_eq!(report["suggested_bounds"]["min"], json!([-2.0, 0.0]));
     }
 
     fn opto817_fixture(
