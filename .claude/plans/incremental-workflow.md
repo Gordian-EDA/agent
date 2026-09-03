@@ -275,3 +275,6 @@ re-place." Quality first; time later via parallel subagents; schematic too.
 - Root cause of the day's "No space left": /tmp is a 22 GB tmpfs (scratchpad lives there); build
   targets now go to `.claude/targets/<lane>` on disk. Gates for sch-refusals-4 + pcb-seed-shorts
   re-running there; graft-additive resumed on Opus after a 529.
+- sch-refusals-4 gated green and merged locally (1c799794). pcb-seed-shorts: codex's version did not
+  reach the dispatched tool paths (its own new tests fail with the old messages) → Opus agent
+  finishing it. Push waits on graft-additive + pcb-seed-shorts; then round 7.
