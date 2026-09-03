@@ -193,11 +193,7 @@ fn arrange_reports_power_furniture_and_nearby_real_parts() {
         &ctx,
         "arrange",
         json!({
-            "refs": ["#FLG_Q9", "#FLG_RAW2"],
-            "intent": {"relations": [
-                {"kind": "below", "a": "#FLG_Q9", "b": "R1"},
-                {"kind": "below", "a": "#FLG_RAW2", "b": "R2"}
-            ]}
+            "refs": ["#FLG_Q9", "#FLG_RAW2"]
         }),
     );
     assert_eq!(furniture.get("error"), None, "{furniture:#}");
@@ -222,23 +218,12 @@ fn arrange_reports_power_furniture_and_nearby_real_parts() {
         &ctx,
         "arrange",
         json!({
-            "refs": ["#FLG_Q9", "R1"],
-            "intent": {"relations": [
-                {"kind": "below", "a": "#FLG_Q9", "b": "R1"}
-            ]}
+            "refs": ["#FLG_Q9", "R1"]
         }),
     );
     assert_eq!(mixed.get("error"), None, "{mixed:#}");
     assert_eq!(mixed["changed"]["moved"], json!(["R1"]), "{mixed:#}");
     assert_eq!(mixed["not_arrangeable"], json!(["#FLG_Q9"]), "{mixed:#}");
-    assert!(
-        mixed["changed"]["warnings"]
-            .as_array()
-            .is_some_and(|warnings| warnings.iter().any(|warning| warning
-                .as_str()
-                .is_some_and(|warning| warning.contains("intent.relations[0]")))),
-        "{mixed:#}"
-    );
 }
 
 #[test]

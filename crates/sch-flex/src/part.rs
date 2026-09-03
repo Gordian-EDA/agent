@@ -41,13 +41,18 @@ impl<'a> Part<'a> {
     /// `labelled` names the pins that will carry a net label — one per net leaving the
     /// block — so the measure keeps room for exactly the labels that get drawn.
     pub fn new(index: usize, item: &'a Item, labelled: &BTreeSet<(usize, String)>) -> Self {
-        // The unit's pins are the ones the LOWERING resolved onto this item, matched by
-        // number: `PinGeom::unit` folds a symbol's common pins onto unit 1, so filtering
-        // the geometry by unit drops an op-amp's shared supply pins.
-        let pins = item
+        // This unit's pins: the geometry's own, plus any the caller's net map names.
+        // Neither alone is complete — `PinGeom::unit` folds a symbol's common pins onto
+        // unit 1 (dropping an op-amp's shared supplies), and a net map lifted off a live
+        // sheet carries only the pins that are connected.
+        let pins: Vec<&PinGeom> = item
+            .geom
             .pins
             .iter()
-            .filter_map(|(number, ..)| item.geom.pins.iter().find(|p| p.number == *number))
+            .filter(|p| {
+                p.unit == item.unit
+                    || item.pins.iter().any(|(number, ..)| *number == p.number)
+            })
             .collect();
         let mut part = Self {
             index,

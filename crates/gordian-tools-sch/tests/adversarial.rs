@@ -563,7 +563,7 @@ fn place_parts_renames_a_reference_already_on_the_sheet_everywhere() {
                     "pins": {"1": "@C2.1", "2": "GND"}
                 }
             ],
-            "intent": {"relations": [{"kind": "above", "a": "C2", "b": "R1"}]}
+            "layout": {"main": {"col": [{"part": "C2"}, {"part": "R1"}]}}
         }),
     );
 
@@ -1675,8 +1675,12 @@ fn place_parts_joins_a_net_named_only_by_a_pin_reference() {
     );
 }
 
+
+
+/// A tree that names a part outside its own region loses that part off the drawing, so
+/// the payload is refused with the block and the reference named.
 #[test]
-fn place_parts_drops_one_malformed_relation_with_a_warning() {
+fn place_parts_refuses_a_layout_tree_that_names_a_foreign_part() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -1684,47 +1688,14 @@ fn place_parts_drops_one_malformed_relation_with_a_warning() {
     let result = call(
         &ctx,
         "place_parts",
-        json!({"parts": [{"ref": "R1", "part": "Device:R", "pins": {"1": "A", "2": "B"}}],
-               "intent": {"relations": [["R1", "U1", "left"]]}}),
+        json!({"block": "amp",
+               "parts": [{"ref": "R1", "part": "Device:R", "pins": {"1": "A", "2": "B"}}],
+               "layout": {"amp": {"row": [{"part": "R1"}, {"part": "R9"}]}}}),
     );
-    assert!(result.get("error").is_none(), "{result}");
+    let message = serde_json::to_string(&result).unwrap();
     assert!(
-        result["warnings"][0]
-            .as_str()
-            .is_some_and(|warning| warning.contains("intent.relations[0]")),
-        "{result}"
-    );
-}
-
-#[test]
-fn place_parts_accepts_the_engine_its_own_refusal_recommends() {
-    let Some(ctx) = sheet() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    // The placement-failure refusal names an engine override as the way out, so
-    // the payload has to accept one; `deny_unknown_fields` used to reject it.
-    let result = call(
-        &ctx,
-        "place_parts",
-        json!({"engine": "anneal", "parts": [
-            {"ref": "R1", "part": "Device:R", "value": "10k", "pins": {"1": "A", "2": "B"}},
-            {"ref": "R2", "part": "Device:R", "value": "10k", "pins": {"1": "A", "2": "B"}}
-        ]}),
-    );
-    assert!(result.get("error").is_none(), "{result}");
-
-    let unknown = call(
-        &ctx,
-        "place_parts",
-        json!({"engine": "nonsense", "parts": [
-            {"ref": "R3", "part": "Device:R", "pins": {"1": "A", "2": "B"}}
-        ]}),
-    );
-    let message = unknown["error"].as_str().unwrap_or_default();
-    assert!(
-        message.contains("nonsense") && message.contains("anneal"),
-        "{unknown}"
+        message.contains("layout-unknown-part") && message.contains("R9"),
+        "{result:#}"
     );
 }
 

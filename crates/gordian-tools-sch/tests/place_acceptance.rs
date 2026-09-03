@@ -207,20 +207,14 @@ fn malformed_layout_intent_is_dropped_but_parts_remain_strict() {
             }],
             "intent": {
                 "ports": {"J1_PIN2": "GND"},
-                "rails": {"3V3": "right"},
-                "relations": [{"kind": "group", "name": "input"}]
+                "rails": {"3V3": "right"}
             }
         }),
     );
     assert!(result.get("error").is_none(), "placement failed: {result}");
     let warnings = result["warnings"].as_array().unwrap();
-    assert_eq!(warnings.len(), 4, "{result}");
-    for path in [
-        "parts[0].",
-        "intent.ports.J1_PIN2",
-        "intent.rails.3V3",
-        "intent.relations[0]",
-    ] {
+    assert_eq!(warnings.len(), 3, "{result}");
+    for path in ["parts[0].", "intent.ports.J1_PIN2", "intent.rails.3V3"] {
         assert!(
             warnings
                 .iter()

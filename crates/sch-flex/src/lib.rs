@@ -104,12 +104,10 @@ pub fn typeset(items: &mut [Item], trees: &Trees) -> Report {
         .map(|(_, b)| (b.width() + 2.0 * FRAME_PAD, b.height() + 2.0 * FRAME_PAD))
         .collect();
     for (origin, (placed, bbox)) in pack(&sizes).into_iter().zip(&drawings) {
+        let shift = block_shift(origin, *bbox);
         for p in placed {
             let item = &mut items[p.part];
-            item.at = Point2::new(
-                origin.x + FRAME_PAD + p.at.x - bbox.min_x,
-                origin.y + FRAME_PAD + p.at.y - bbox.min_y,
-            );
+            item.at = Point2::new(shift.x + p.at.x, shift.y + p.at.y);
             item.angle = p.pose.angle;
             item.mirror = p.pose.mirror;
         }
@@ -224,6 +222,19 @@ fn complete(tree: &Tree, items: &[Item], members: &[usize]) -> Tree {
     })
 }
 
+/// Where a block's own frame lands on the sheet: ONE snapped delta for every part in it.
+///
+/// A block's extent is measured over text and label room, which is not a grid multiple, so
+/// the shift has to be snapped — unsnapped, every pin in the block sits a fraction of a
+/// millimetre off the wire drawn to it, and the sheet renders perfectly while its netlist
+/// is empty.
+fn block_shift(origin: Point2, bbox: Rect) -> Point2 {
+    geom::GRID_50_MIL.snap_point(Point2::new(
+        origin.x + FRAME_PAD - bbox.min_x,
+        origin.y + FRAME_PAD - bbox.min_y,
+    ))
+}
+
 fn drawing_bbox(placed: &[measure::Placed], parts: &[Part]) -> Rect {
     let corners: Vec<Point2> = placed
         .iter()
@@ -313,5 +324,15 @@ mod tests {
     fn a_shelf_never_overflows_the_page_to_look_squarer() {
         let origins = pack(&[(200.0, 40.0), (200.0, 40.0)]);
         assert!(origins[1].y > origins[0].y);
+    }
+
+    /// A block lands on the lattice a pin connects on, however ragged the extent that
+    /// positioned it. Unsnapped, every pin in the block sits a fraction of a millimetre off
+    /// its wire — a sheet that renders perfectly and whose netlist is empty.
+    #[test]
+    fn a_block_lands_on_the_pin_lattice() {
+        let ragged = Rect::new(-7.31, -4.09, 63.77, 51.13);
+        let shift = block_shift(Point2::new(MARGIN, MARGIN), ragged);
+        assert_eq!(geom::GRID_50_MIL.snap_point(shift), shift, "{shift:?}");
     }
 }

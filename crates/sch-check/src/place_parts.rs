@@ -42,10 +42,6 @@ pub struct PlacePartsInput {
     pub blocks: BTreeMap<BlockName, BlockDoc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<Intent>,
-    /// Placement engine override. The refusal a placement-engine failure returns
-    /// names this as the way out, so it has to exist.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine: Option<String>,
 }
 
 /// What a region says about itself on the drawn sheet.
@@ -1026,13 +1022,6 @@ pub fn place_parts_input_schema() -> Value {
                     },
                     "additionalProperties": false
                 }
-            },
-            "engine": {
-                "type": "string",
-                "enum": ["flex"],
-                "description":
-                    "Placement engine override. Only worth setting after a placement-engine \
-                     failure; the default is chosen from the sheet's size."
             },
             "intent": {
                 "type": "object",

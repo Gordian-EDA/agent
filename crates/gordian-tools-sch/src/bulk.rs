@@ -11,16 +11,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::session::{Allow, Edit, attach_connectivity};
 
-/// Every accepted shape of an `intent.relations` entry, with an example of each.
-///
-/// Serde can only report the first malformed field and says nothing about what it
-/// wanted, so a caller who mis-shapes a relation has to guess. Relations are the
-/// field that is actually guessed wrong, so the refusal carries the whole grammar.
-const RELATION_SHAPES: &str = "each entry is an object tagged by `kind`: \
-     {\"kind\":\"left_of\",\"a\":\"R1\",\"b\":\"U1\"} (also right_of, above, below); \
-     {\"kind\":\"group\",\"name\":\"leds\",\"members\":[\"R3\",\"D1\"],\"side\":\"right\",\"anchor\":\"U1\"} \
-     (`side` alone is fine; [\"right\",\"U1\"] and {\"side\":\"right\",\"anchor\":\"U1\"} also parse); \
-     {\"kind\":\"align\",\"members\":[\"C1\",\"C2\"],\"axis\":\"horizontal\"}";
 
 /// Deserialize a tool's arguments, naming the field that was wrong.
 ///
@@ -29,12 +19,7 @@ const RELATION_SHAPES: &str = "each entry is an object tagged by `kind`: \
 fn typed<T: serde::de::DeserializeOwned>(input: Value, tool: &str) -> Result<T> {
     serde_path_to_error::deserialize(input).map_err(|e| {
         let path = e.path().to_string();
-        let help = if path.contains("relations") {
-            format!(" — {RELATION_SHAPES}")
-        } else {
-            String::new()
-        };
-        anyhow!("invalid {tool} input at `{path}`: {}{help}", e.into_inner())
+        anyhow!("invalid {tool} input at `{path}`: {}", e.into_inner())
     })
 }
 
