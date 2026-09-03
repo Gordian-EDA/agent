@@ -1675,8 +1675,6 @@ fn place_parts_joins_a_net_named_only_by_a_pin_reference() {
     );
 }
 
-
-
 /// A tree that names a part outside its own region loses that part off the drawing, so
 /// the payload is refused with the block and the reference named.
 #[test]

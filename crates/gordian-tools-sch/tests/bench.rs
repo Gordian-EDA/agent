@@ -198,8 +198,7 @@ fn arrange_reports_power_furniture_and_nearby_real_parts() {
     );
     assert_eq!(furniture.get("error"), None, "{furniture:#}");
     assert_eq!(
-        furniture["changed"],
-        "no arrangeable parts selected",
+        furniture["changed"], "no arrangeable parts selected",
         "{furniture:#}"
     );
     assert_eq!(
@@ -272,8 +271,7 @@ fn connecting_coincident_power_and_flag_pins_is_idempotent() {
     assert_eq!(connected.get("error"), None, "{connected:#}");
     assert_eq!(connected["changed"], "already connected", "{connected:#}");
     assert_eq!(
-        connected["net_delta"],
-        "connectivity unchanged",
+        connected["net_delta"], "connectivity unchanged",
         "{connected:#}"
     );
 }

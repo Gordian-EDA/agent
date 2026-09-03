@@ -11,7 +11,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::session::{Allow, Edit, attach_connectivity};
 
-
 /// Deserialize a tool's arguments, naming the field that was wrong.
 ///
 /// Serde's own message says what is malformed but not where; without the path a caller
@@ -192,7 +191,13 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         // The drawn sheet did not mean what the payload said. The connectivity is not
         // the typesetter's to throw away: the parts go to the bench, named at every
         // pin, and `arrange` lays them out from there.
-        let value = bench_payload(ctx, edit, &payload, &mismatch_clause(&report.mismatch), &warnings)?;
+        let value = bench_payload(
+            ctx,
+            edit,
+            &payload,
+            &mismatch_clause(&report.mismatch),
+            &warnings,
+        )?;
         let value = with_renamed(value, &renamed);
         let value = with_resolved_nets(value, &resolved_nets.reported);
         return Ok(with_nc_overrides(value, &audit.nc_overridden));
@@ -693,14 +698,8 @@ fn guarded_place_parts(
     }
 }
 
-/// Re-lay out a selection, or — when the search runs out of clock — do the half of
-/// the work that has no search in it.
-///
-/// The engines stop themselves at the search deadline, so an overrun means an
-/// engine ignored it and the whole call was abandoned. Coming back empty is the
-/// one outcome worth avoiding: a re-wire in place redraws the same selection's
-/// wiring from the same netlist with no search at all, which is the honest
-/// best-so-far — the layout is what it was, and the drawing reflects the netlist.
+/// Re-typeset a selection: `sch_floorplan::live::arrange` places it, gated on the
+/// module's truthfulness invariant (see its module docs) before anything is kept.
 pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let input: SelectionInput = typed(input, "arrange")?;
     let mut selection = selection(&input)?;
@@ -807,17 +806,17 @@ fn resolve_arrangeable_refs(
     notes
 }
 
-
 pub(crate) fn rewire(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let input: SelectionInput = typed(input, "rewire")?;
     if input.intent.is_some() || input.layout.is_some() {
-        return Err(anyhow!("rewire moves nothing, so it takes no intent or layout"));
+        return Err(anyhow!(
+            "rewire moves nothing, so it takes no intent or layout"
+        ));
     }
     let selection = selection(&input)?;
     let mut edit = Edit::open(ctx)?;
     let timing = Timing::start("rewire", edit.doc.symbols().count());
-    let report =
-        sch_floorplan::live::rewire(ctx.env(), &mut edit.doc, &selection)?;
+    let report = sch_floorplan::live::rewire(ctx.env(), &mut edit.doc, &selection)?;
     timing.done(if report.committed {
         "committed"
     } else {
@@ -1065,7 +1064,7 @@ fn bench_payload(
     Ok(with_warnings(value, warnings))
 }
 
-/// One clause naming what the engines got wrong, for the bench report.
+/// One clause naming what the typesetter got wrong, for the bench report.
 fn mismatch_clause(mismatch: &sch_floorplan::live::Mismatch) -> String {
     let mut why = Vec::new();
     if !mismatch.shorted.is_empty() {
@@ -1085,10 +1084,7 @@ fn mismatch_clause(mismatch: &sch_floorplan::live::Mismatch) -> String {
             mismatch.disturbed.join(", ")
         ));
     }
-    format!(
-        "no placement engine could draw it truthfully ({})",
-        why.join("; ")
-    )
+    format!("could not be drawn truthfully ({})", why.join("; "))
 }
 
 fn selection(input: &SelectionInput) -> Result<Selection> {
