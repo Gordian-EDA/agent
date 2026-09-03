@@ -87,12 +87,11 @@ impl BoardDelta {
 
     /// References whose pads move, vanish or change identity — the copper on
     /// them can no longer be trusted.
-    fn copper_invalidating(&self) -> BTreeSet<&str> {
+    fn structurally_copper_invalidating(&self) -> BTreeSet<&str> {
         self.removed
             .iter()
             .map(String::as_str)
             .chain(self.footprint_changed.iter().map(|c| c.reference.as_str()))
-            .chain(self.pads_retargeted.iter().map(|p| p.reference.as_str()))
             .collect()
     }
 
@@ -459,7 +458,7 @@ fn stage_incomplete(
         let moved = moves.iter().map(|placement| placement.reference.as_str());
         let pads = crate::copper::pad_extents(&board.problem, moved);
         let retract = crate::copper::retract(&board.copper, &pads, &BTreeSet::new());
-        if retract.count > 0 {
+        if retract.changed() {
             crate::copper::write_retained(
                 ctx,
                 board.problem.layer_count,
@@ -1123,6 +1122,21 @@ fn update_board(
         Err(refusal) => return refusal,
     };
 
+    // Compute the invalid old-net components against the pre-edit board. Pad
+    // net names in the document change below, but this geometry remains the
+    // authority for deciding exactly what copper must come out.
+    let (mut retract, mut copper_retracted) = crate::copper::retract_retargeted(
+        &before,
+        delta.pads_retargeted.iter().map(|retarget| {
+            (
+                retarget.reference.as_str(),
+                retarget.pad.as_str(),
+                retarget.from.as_deref(),
+                retarget.to.as_deref(),
+            )
+        }),
+    );
+
     let existing: BTreeMap<String, BoardFootprint> = doc
         .footprints()
         .into_iter()
@@ -1147,17 +1161,30 @@ fn update_board(
     ) {
         return gate.rollback(ctx, json!({ "error": e }));
     }
+    let removed_zones =
+        match doc.remove_zones_for_nets(retract.zone_nets.iter().map(String::as_str)) {
+            Ok(removed) => removed,
+            Err(e) => return gate.rollback(ctx, json!({ "error": e })),
+        };
+    for report in &mut copper_retracted {
+        report.zones = removed_zones.get(&report.net_a).copied().unwrap_or(0)
+            + removed_zones.get(&report.net_b).copied().unwrap_or(0);
+    }
 
     if let Err(e) = write_board(ctx, &doc.into_text()) {
         return gate.rollback(ctx, json!({ "error": e }));
     }
 
-    // Only copper the edit invalidated comes out: traces touching a pad that
-    // vanished, changed package, or changed net. Pad extents are per part, so a
-    // single retargeted pad retracts its part's traces — conservative, and the
-    // named nets are the ones the agent re-routes.
-    let pads = crate::copper::pad_extents(&before.problem, delta.copper_invalidating());
-    let retract = crate::copper::retract(&before.copper, &pads, &BTreeSet::new());
+    // A pad re-net removes only the old-net copper component that physically
+    // reaches that pad. A removed or package-swapped footprint still
+    // invalidates every net reaching any of its old pads.
+    let pads =
+        crate::copper::pad_extents(&before.problem, delta.structurally_copper_invalidating());
+    let structural = crate::copper::retract(&retract.retained, &pads, &BTreeSet::new());
+    retract.count += structural.count;
+    retract.via_count += structural.via_count;
+    retract.nets.extend(structural.nets);
+    retract.retained = structural.retained;
     if let Err(e) = crate::copper::write_retained(
         ctx,
         before.problem.layer_count,
@@ -1208,6 +1235,16 @@ fn update_board(
 
     let mut nets_to_reroute: BTreeSet<String> = retract.nets.clone();
     nets_to_reroute.extend(delta.nets_changed.iter().cloned());
+    let now_open = crate::active_board(ctx)
+        .ok()
+        .map(|board| {
+            crate::ratsnest::build(&board, &board.problem, &[], Some(&nets_to_reroute))
+                .entries
+                .into_iter()
+                .filter(|entry| entry.get("status").and_then(Value::as_str) != Some("routed"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     let result = json!({
         "ok": true,
@@ -1217,6 +1254,16 @@ fn update_board(
         "delta": delta.to_json(),
         "placed": placed,
         "retracted_tracks": retract.count,
+        "retracted_vias": retract.via_count,
+        "copper_retracted": copper_retracted.iter().map(|report| json!({
+            "net_a": report.net_a,
+            "net_b": report.net_b,
+            "segments": report.segments,
+            "vias": report.vias,
+            "zone_memberships": report.zones,
+            "refs": report.refs,
+        })).collect::<Vec<_>>(),
+        "now_open": now_open,
         "nets_to_reroute": nets_to_reroute,
         "next_tool": "route_board",
         "next": "call route_board({nets: nets_to_reroute}), then check_board",
@@ -1744,7 +1791,7 @@ mod tests {
         assert_eq!(delta.added, ["C1"]);
         assert!(delta.removed.is_empty());
         assert_eq!(delta.nets_changed, ["GND", "VIN"]);
-        assert_eq!(delta.copper_invalidating(), BTreeSet::new());
+        assert_eq!(delta.structurally_copper_invalidating(), BTreeSet::new());
     }
 
     #[test]
@@ -1753,7 +1800,10 @@ mod tests {
         assert_eq!(delta.removed, ["R2"]);
         assert!(delta.added.is_empty());
         assert_eq!(delta.nets_changed, ["GND", "SENSE"]);
-        assert_eq!(delta.copper_invalidating(), BTreeSet::from(["R2"]));
+        assert_eq!(
+            delta.structurally_copper_invalidating(),
+            BTreeSet::from(["R2"])
+        );
     }
 
     #[test]
@@ -1775,7 +1825,10 @@ mod tests {
         assert!(delta.pads_retargeted.is_empty());
         assert!(delta.value_changed.is_empty());
         assert!(delta.nets_changed.is_empty());
-        assert_eq!(delta.copper_invalidating(), BTreeSet::from(["R1"]));
+        assert_eq!(
+            delta.structurally_copper_invalidating(),
+            BTreeSet::from(["R1"])
+        );
     }
 
     #[test]
@@ -1802,7 +1855,7 @@ mod tests {
             ]
         );
         assert_eq!(delta.nets_changed, ["MID", "SENSE"]);
-        assert_eq!(delta.copper_invalidating(), BTreeSet::from(["R1", "R2"]));
+        assert_eq!(delta.structurally_copper_invalidating(), BTreeSet::new());
     }
 
     #[test]
@@ -1823,7 +1876,7 @@ mod tests {
         assert!(delta.pads_retargeted.is_empty());
         assert!(delta.nets_changed.is_empty());
         // Nothing about a value invalidates copper.
-        assert_eq!(delta.copper_invalidating(), BTreeSet::new());
+        assert_eq!(delta.structurally_copper_invalidating(), BTreeSet::new());
     }
 
     #[test]

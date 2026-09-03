@@ -12,7 +12,7 @@
 //! `(footprint …)` synthesis); this module owns placement in the document and
 //! the net table that footprint text refers to.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use geom::Point2;
 
@@ -232,6 +232,35 @@ impl BoardDoc {
             )],
         );
         Ok(true)
+    }
+
+    /// Remove copper zones assigned to any of `nets`, returning the number
+    /// removed for each net. A zone is one connected copper membership, so it
+    /// cannot survive a pad re-net when its old fill reaches that pad.
+    pub fn remove_zones_for_nets<'a>(
+        &mut self,
+        nets: impl IntoIterator<Item = &'a str>,
+    ) -> Result<BTreeMap<String, usize>, String> {
+        let nets = nets.into_iter().collect::<BTreeSet<_>>();
+        if nets.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let (body_start, body_end) = root_body(&self.text)?;
+        let mut removed = BTreeMap::new();
+        let edits = child_nodes(&self.text, body_start, body_end)
+            .into_iter()
+            .filter(|node| node_head(&self.text, node) == "zone")
+            .filter_map(|node| {
+                let net = quoted_field(&self.text[node.start..node.end], "net_name")?;
+                if !nets.contains(net) {
+                    return None;
+                }
+                *removed.entry(net.to_owned()).or_default() += 1;
+                Some((line_start(&self.text, node.start), node.end, String::new()))
+            })
+            .collect();
+        self.text = apply_edits(&self.text, edits);
+        Ok(removed)
     }
 
     // ── scanning ────────────────────────────────────────────────────────────
@@ -562,6 +591,23 @@ mod tests {
             "(kicad_pcb\n\t(gr_line\n\t\t(start 0 0)\n\t\t(end 10 0)\n\t\t(layer \"Edge.Cuts\")\n\t)\n",
         );
         assert!(!BoardDoc::parse(drawn).unwrap().outline_is_rectangular());
+    }
+
+    #[test]
+    fn zones_are_removed_only_for_named_nets() {
+        let zoned = BOARD.replace(
+            "\n)",
+            "\n\t(zone (net 1) (net_name \"GND\") (layer \"F.Cu\"))\n\
+             \t(zone (net 2) (net_name \"VIN\") (layer \"B.Cu\"))\n)",
+        );
+        let mut doc = BoardDoc::parse(zoned).unwrap();
+        assert_eq!(
+            doc.remove_zones_for_nets(["GND"]).unwrap(),
+            BTreeMap::from([("GND".to_owned(), 1)])
+        );
+        assert!(!doc.text().contains("(net_name \"GND\")"));
+        assert!(doc.text().contains("(net_name \"VIN\")"));
+        assert!(BoardDoc::parse(doc.into_text()).is_ok());
     }
 
     #[test]

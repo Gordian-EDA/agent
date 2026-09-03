@@ -434,7 +434,9 @@ pub fn tool_defs() -> Vec<Tool> {
                  clearance/min_trace_width are lowered to what those footprints permit \
                  (reported in design_rules). Subminimum clearance, width, via diameter, drill, \
                  and annular-ring requests are raised to standard-fab floors and reported in \
-                 rule_adjustments instead of refusing the sync."
+                 rule_adjustments instead of refusing the sync. When a schematic edit re-nets \
+                 routed pads, sync retracts only the old copper components that would short the \
+                 new nets and returns copper_retracted plus their now_open ratsnest entries."
                 .into(),
             input_schema: json!({
                 "type": "object",

@@ -3272,7 +3272,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     &pads,
                     &std::collections::BTreeSet::new(),
                 );
-                if retract.count > 0
+                if retract.changed()
                     && let Err(e) = crate::copper::write_retained(
                         ctx,
                         board.problem.layer_count,
