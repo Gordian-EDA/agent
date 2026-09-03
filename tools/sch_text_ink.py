@@ -35,6 +35,11 @@ TEXT = re.compile(
 )
 
 
+def unxml(text: str) -> str:
+    """`&`, `<` and `>` reach the SVG as entities; the glyphs are one each."""
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
 def cli() -> str:
     return os.environ.get("KICAD_CLI", "kicad-cli")
 
@@ -44,8 +49,8 @@ def inked(svg: str) -> list[dict]:
     out, pending = [], None
     for match in TEXT.finditer(svg):
         if match.group(5):
-            pending = {"text": match.group(11)}
-        elif match.group(12) and pending is not None and pending["text"] == match.group(13):
+            pending = {"text": unxml(match.group(11)), "advance": float(match.group(8))}
+        elif match.group(12) and pending is not None and pending["text"] == unxml(match.group(13)):
             points = [
                 (float(m.group(2)), float(m.group(3)))
                 for m in re.finditer(r"([ML])\s*(" + NUM + r")\s+(" + NUM + r")", match.group(14))
@@ -117,13 +122,16 @@ def overlaps(sheet: str) -> None:
 
 
 def glyphs(out_dir: str) -> None:
-    """Render one printable glyph per cell and report its advance and reach.
+    """Render each printable glyph once and twice, and report advance and reach.
 
-    The advance of a glyph is the exact step a string grows by when it is
-    added; the reach is how far its ink climbs above or drops below the line a
-    bottom-justified string sits on ([-1.326, -0.326] font sizes).
+    A glyph's advance is the `textLength` KiCAD declares for it, less the one
+    stroke width that length carries on top of the pen step. Its reach is how
+    far the ink climbs above or drops below the line a bottom-justified string
+    sits on ([-1.326, -0.326] font sizes).
     """
+    stroke = 0.12  # KiCAD strokes schematic text at 0.12 of the font size
     printable = [chr(c) for c in range(0x21, 0x7F)]
+    printable += [" A", " A A"]
     os.makedirs(out_dir, exist_ok=True)
     pitch, cols, size = 10.0, 12, 1.27
     body, meta = [], []
@@ -146,15 +154,26 @@ def glyphs(out_dir: str) -> None:
         + "\n".join(body)
         + '\n\t(sheet_instances\n\t\t(path "/" (page "1"))\n\t)\n)\n'
     )
-    ink = {t["text"]: t["ink"] for t in render(sheet)}
+    drawn = {t["text"]: t for t in render(sheet)}
     table = {}
     for ch, x, y in meta:
-        box = ink.get(ch)
-        if box is None:
+        t = drawn.get(ch)
+        if t is None or len(ch) != 1:
             continue
         table[ch] = {
-            "ascent_extra": round(max(0.0, -1.326 - (box[1] - y) / size), 3),
-            "descent_extra": round(max(0.0, (box[3] - y) / size - (-0.326)), 3),
+            "advance": round(t["advance"] / size - stroke, 4),
+            "ascent_extra": round(max(0.0, -1.326 - (t["ink"][1] - y) / size), 3),
+            "descent_extra": round(max(0.0, (t["ink"][3] - y) / size - (-0.326)), 3),
+        }
+    # The space strokes nothing, so it has no ink and no `textLength` of its
+    # own: read it off what a string grows by around it.
+    step = lambda s: drawn[s]["advance"] / size if s in drawn else None
+    if step(" A A") and step(" A"):
+        table[" "] = {
+            # A difference of two lengths cancels the stroke term.
+            "advance": round(step(" A A") - step(" A") - table["A"]["advance"], 4),
+            "ascent_extra": 0.0,
+            "descent_extra": 0.0,
         }
     print(json.dumps(table, indent=1, sort_keys=True))
 

@@ -9,10 +9,11 @@
 //! # Calibration
 //!
 //! The constants are measured, not guessed: `kicad-cli sch export svg` writes
-//! each string's exact ink as a `stroked-text` path group. Fitting those —
-//! one glyph per cell for the advance and reach tables, whole placed sheets
-//! for the justification bands — gives the numbers below, all in units of the
-//! font size except where stated.
+//! each string's pen step and strokes its ink as a `<g class="stroked-text">`
+//! path group. `tools/sch_text_ink.py glyphs` reads both back — it reproduces
+//! every advance and reach below exactly — and `… overlaps` regenerates the
+//! ink fixtures the model is held to. Everything is in units of the font size
+//! except where stated.
 //!
 //! `sch-doc`'s `drawn_text` fixture test holds the model to both halves of
 //! that: every box CONTAINS the ink KiCAD strokes, and the boxes reproduce
