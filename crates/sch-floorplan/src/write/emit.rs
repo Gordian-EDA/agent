@@ -329,6 +329,17 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
         270 => 90,
         _ => 0,
     };
+    // A 180 symbol composes its field to 180, and `(mirror y)` reflects the
+    // sheet: either way KiCAD refuses to draw the text upside down and hangs
+    // it off the OTHER side of its anchor instead. The solver placed these
+    // boxes reading the way their `Justify` says, so emit the token that
+    // draws them that way.
+    let reversed = (inst.angle.rem_euclid(360.0) == 180.0) != inst.mirror;
+    let (ref_j, val_j) = if reversed {
+        (ref_j.flipped(), val_j.flipped())
+    } else {
+        (ref_j, val_j)
+    };
 
     // Hide Reference for power/flag symbols whose refdes is `#`-prefixed
     // (KiCAD convention: #PWR…, #FLG…) — they must not appear in the netlist

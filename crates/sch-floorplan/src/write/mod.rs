@@ -295,6 +295,16 @@ pub(super) fn field_anchors(inst: &Instance) -> (TextPos, TextPos) {
 }
 
 impl Justify {
+    /// The justification that draws the same text on the same side of the
+    /// anchor once the symbol's transform has reversed the sheet.
+    pub(super) fn flipped(self) -> Justify {
+        match self {
+            Justify::Left => Justify::Right,
+            Justify::Right => Justify::Left,
+            Justify::Center => Justify::Center,
+        }
+    }
+
     /// The as-drawn model's horizontal justification.
     pub(super) fn hjust(self) -> sch_model::text::HJust {
         match self {

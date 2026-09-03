@@ -18,7 +18,7 @@ use kiutils_sexpr::Node;
 use sch_model::text::{DrawnText, FONT_SIZE, HJust, TextKind, VJust};
 
 use crate::doc::SchDoc;
-use crate::model::{Item, LabelKind, SymbolInst};
+use crate::model::{Item, LabelKind, Mirror, SymbolInst};
 use crate::pins;
 use crate::sexpr::{self, child, items};
 
@@ -47,11 +47,32 @@ fn effects(node: &Node) -> (f64, HJust, VJust, bool) {
     (size, hjust, vjust, sexpr::flag_present(effects, "hide"))
 }
 
-/// A symbol property's DRAWN angle. KiCAD composes a property's angle with its
-/// symbol's and then folds it into `[0, 180)`, auto-flipping past 180° so the
-/// text stays readable.
-fn field_angle(symbol_rot: f64, field_rot: f64) -> f64 {
-    (symbol_rot + field_rot).rem_euclid(180.0)
+/// How a symbol property is DRAWN: its angle, and whether its horizontal
+/// justification comes out reversed.
+///
+/// KiCAD composes a property's angle with its symbol's and never draws text
+/// upside down, so a composed 180 or 270 is folded back into `[0, 180)` — and
+/// the justification flips with it, because the text now hangs off the other
+/// side of its anchor. A mirror reverses the reading direction the same way
+/// when it reflects the axis the text reads along.
+fn field_pose(symbol: &SymbolInst, field_rot: f64) -> (f64, bool) {
+    let composed = (symbol.at.rot + field_rot).rem_euclid(360.0);
+    let vertical = (45.0..135.0).contains(&composed) || (225.0..315.0).contains(&composed);
+    let mirrored = match symbol.mirror {
+        Mirror::Y => !vertical,
+        Mirror::X => vertical,
+        Mirror::None => false,
+    };
+    (composed.rem_euclid(180.0), (composed >= 180.0) != mirrored)
+}
+
+/// The justification a reversed reading direction leaves the text with.
+fn flip(hjust: HJust) -> HJust {
+    match hjust {
+        HJust::Left => HJust::Right,
+        HJust::Right => HJust::Left,
+        HJust::Center => HJust::Center,
+    }
 }
 
 /// Text drawn by one placed symbol: its visible fields and its pin text.
@@ -65,18 +86,13 @@ fn symbol_texts(doc: &SchDoc, symbol: &SymbolInst, out: &mut Vec<DrawnText>) {
             continue;
         };
         let (size, hjust, vjust, _) = effects(field.node());
+        let (angle, reversed) = field_pose(symbol, at.rot);
+        let hjust = if reversed { flip(hjust) } else { hjust };
         out.push(DrawnText {
             owner: Some(owner.clone()),
             kind: TextKind::Field,
             text: field.value.clone(),
-            bbox: sch_model::text::drawn_box(
-                &field.value,
-                size,
-                hjust,
-                vjust,
-                field_angle(symbol.at.rot, at.rot),
-                at.point(),
-            ),
+            bbox: sch_model::text::drawn_box(&field.value, size, hjust, vjust, angle, at.point()),
         });
     }
     for pin in pins::pins_of(doc, symbol) {
