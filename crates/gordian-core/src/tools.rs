@@ -656,7 +656,7 @@ pub fn tool_defs() -> Vec<Tool> {
 /// loop off-loads this onto the blocking pool.
 pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Some(result) = gordian_tools_sch::run(name, input.clone(), ctx) {
-        return result;
+        return result.map(pcb_workflow::enrich_positional_pin_refusal);
     }
     match name {
         "search_symbols" => search_symbols(input, ctx),
