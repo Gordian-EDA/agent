@@ -24,5 +24,5 @@ pub use drag::{
     DragError, DragReport, PinReSeat, Placement, RetiredPin, TurnError, TurnReport, drag,
     drag_many, redraw_wire, reseat_many, turn_in_place,
 };
-pub use eval::{Metrics, Weights, measure};
+pub use eval::{Metrics, measure};
 pub use sheet::Sheet;
