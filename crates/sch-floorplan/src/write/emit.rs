@@ -13,7 +13,7 @@ use super::{
 };
 
 impl SchematicWriter {
-    /// The page the drawn content needs: the smallest of A4/A3/A2 landscape whose
+    /// The page the drawn content needs: the smallest of A5/A4/A3/A2 landscape whose
     /// usable area (the content bbox plus a margin on every side, and the bottom band
     /// a title block prints in) holds it. `None` when there is nothing to draw.
     ///

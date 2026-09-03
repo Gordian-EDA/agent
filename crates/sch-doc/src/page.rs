@@ -33,9 +33,15 @@ fn text_width(s: &str, size: f64) -> f64 {
     s.chars().count() as f64 * 1.1 * (size / 1.27)
 }
 
-/// The standard landscape pages a generated sheet may use, smallest first. Humans use A4
-/// and A3 for boards of this size and almost never a custom page.
-pub const STANDARD_PAGES: [(&str, [f64; 2]); 3] = [
+/// The standard landscape pages a generated sheet may use, smallest first.
+///
+/// The ladder starts at A5 because the page is what the reader sees: a four-part circuit
+/// on A4 is a drawing stranded in one corner of an empty sheet, which the visual critic
+/// scored a point WORSE than the snug custom page it replaced. Standard sizes are what
+/// humans draw on (a `User` page is 3% of the reference corpus); starting small is what
+/// keeps the ink on the paper.
+pub const STANDARD_PAGES: [(&str, [f64; 2]); 4] = [
+    ("A5", [210.0, 148.0]),
     ("A4", [297.0, 210.0]),
     ("A3", [420.0, 297.0]),
     ("A2", [594.0, 420.0]),
@@ -234,7 +240,7 @@ impl SchDoc {
     ///
     /// Content that starts before [`PAGE_MARGIN`] — which is content the drawing frame
     /// clips away, invisibly — is pushed back to it, and the page becomes the smallest of
-    /// A4/A3/A2 landscape that holds the result: the sizes humans draw on. Only content
+    /// A5/A4/A3/A2 landscape that holds the result: the sizes humans draw on. Only content
     /// larger than A2 keeps a `User` page, because an invisible drawing is worse than an
     /// unconventional page. A sheet carrying a title block also reserves the band it
     /// prints in, so metadata never overprints the lowest parts.
