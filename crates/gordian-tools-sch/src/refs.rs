@@ -182,32 +182,68 @@ pub(crate) fn label(pin: &PinRef) -> String {
     format!("{}.{}", pin.refdes, pin.pin)
 }
 
-/// Why a name KiCAD generated for an unnamed net cannot be reused as a label.
-///
-/// `read_schematic` shows those names — `Net-(U1B-G)` — and they read like an
-/// identity anything may join. They are not: they are derived from the net's
-/// own pins each time connectivity is extracted. Writing a label with that text
-/// creates a *second* net, and KiCAD silently disambiguates the original to
-/// `…_1`, severing a signal path that every guard still calls unchanged.
-pub(crate) fn derived_name_refusal(netlist: &Netlist, net: &str) -> Option<String> {
-    let auto = netlist
-        .nets
-        .iter()
-        .find(|candidate| candidate.name == net && candidate.source == sch_doc::NetSource::Auto)?;
-    let pins = auto
-        .pins
-        .iter()
-        .take(4)
-        .map(label)
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        "refused: `{net}` is the name KiCAD generates for an unnamed net ({pins}), not a label \
-         anything can join — naming a new node `{net}` forks it and renames the original to \
-         `{net}_1`. Write \"@{first}\" to join that pin's net whatever it is called, or name the \
-         net first with `label({{pin: \"{first}\", net: \"…\"}})` and use the name you gave it.",
-        first = auto.pins.first().map(label).unwrap_or_default()
+/// The stable pin address encoded by a KiCad-derived net name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DerivedNetRef {
+    /// Physical-number address used internally, including the `@` prefix.
+    pub spec: String,
+    /// Human-readable name address reported back to the caller.
+    pub reported: String,
+}
+
+/// Resolve `Net-(U1-BAT)`, `Net-(J1-Pad1)`, and numbered suffix variants.
+pub(crate) fn derived_net_ref(doc: &SchDoc, name: &str) -> Result<Option<DerivedNetRef>, String> {
+    let Some(close) = name.rfind(')') else {
+        return Ok(None);
+    };
+    let base = &name[..=close];
+    let suffix = &name[close + 1..];
+    if !base.starts_with("Net-(")
+        || !(suffix.is_empty()
+            || suffix.strip_prefix('_').is_some_and(|digits| {
+                !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+            }))
+    {
+        return Ok(None);
+    }
+    for pin in placed_pins(doc) {
+        let unit = derived_unit_letter(&pin);
+        let key = match pin.name.as_str() {
+            "" | "~" => format!("Pad{}", pin.number),
+            pin_name if pin_name == pin.number => format!("Pad{}", pin.number),
+            pin_name => sch_doc::unescape(pin_name),
+        };
+        if base == format!("Net-({}{}-{key})", pin.refdes, unit) {
+            let reported_key = key.strip_prefix("Pad").unwrap_or(&key);
+            return Ok(Some(DerivedNetRef {
+                spec: format!("@{}.{}", pin.refdes, pin.number),
+                reported: format!("@{}.{reported_key}", pin.refdes),
+            }));
+        }
+    }
+    let encoded = base
+        .strip_prefix("Net-(")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or(base)
+        .replacen('-', ".", 1);
+    Err(format!(
+        "derived net `{name}` names pin `{encoded}`, but that pin does not exist on the sheet"
     ))
+}
+
+fn derived_unit_letter(pin: &PlacedPin) -> String {
+    if !pin.multi_unit {
+        return String::new();
+    }
+    let mut index = pin.unit.max(1) - 1;
+    let mut out = String::new();
+    loop {
+        out.insert(0, char::from(b'A' + (index % 26) as u8));
+        if index < 26 {
+            return out;
+        }
+        index = index / 26 - 1;
+    }
 }
 
 /// Prefix that turns a pin reference into a *net* reference: `"@P3.1"` means

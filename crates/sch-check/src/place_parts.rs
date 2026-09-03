@@ -67,7 +67,8 @@ pub struct PartSpec {
     /// Pin name or number → net name, or `"nc"` for an explicit no-connect. Pin
     /// numbers are unique across a multi-unit symbol's units, so this one map
     /// reaches every unit. A value of `"@R1.2"` means the net that pin already
-    /// carries, whatever it is called.
+    /// carries, whatever it is called. A copied KiCad name such as
+    /// `"Net-(R1-Pad2)"` is normalized to the same pin reference.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub pins: IndexMap<String, String>,
     /// Decoupling sugar: cap value → count, expanded across this part's rails.
@@ -795,7 +796,8 @@ pub fn place_parts_input_schema() -> Value {
                                  land on at least two pins across these parts and the existing sheet; \
                                  power rails and nets declared under intent.ports may be terminal. \
                                  Write \"@R1.2\" to join whatever net that existing pin is on, which \
-                                 is the only way to reach a net KiCAD named for itself.",
+                                 is the stable form of a copied KiCad-derived name such as \
+                                 \"Net-(R1-Pad2)\".",
                             "additionalProperties": {"type": "string"}
                         },
                         "decouple": {

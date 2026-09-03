@@ -75,6 +75,13 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(target) => target,
         Err(error) => return Ok(reference_error(&edit.doc, &input, error)),
     };
+    let requested_net = match input.get("net").and_then(Value::as_str) {
+        Some(net) => match resolve_tool_net(&mut edit, net) {
+            Ok(resolved) => Some(resolved),
+            Err(error) => return Ok(json!({"error": error})),
+        },
+        None => None,
+    };
     let (a, b) = (from.at(), to.at());
     if a.near_eq(b, EPS) {
         return Ok(json!({ "error": "both ends are the same point; they already touch" }));
@@ -83,10 +90,7 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // ends' nets are read: a marker severs its point, so a wire drawn to a still
     // marked pin joins nothing and the pin reads as belonging to no net at all.
     let cleared = clear_no_connects(&mut edit.doc, &[(a, from.describe()), (b, to.describe())]);
-    let live = match cleared.is_empty() {
-        true => edit.before().clone(),
-        false => connect::extract(&edit.doc),
-    };
+    let live = connect::extract(&edit.doc);
     let existing = |target: &Target| match target {
         Target::Pin(pin) => refs::net_of(&live, &pin.refdes, &pin.number).map(str::to_string),
         Target::Point(_) => None,
@@ -118,10 +122,9 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             },
         }));
     }
-    let net = input
-        .get("net")
-        .and_then(Value::as_str)
-        .map(str::to_string)
+    let net = requested_net
+        .as_ref()
+        .map(|resolved| resolved.name.clone())
         .or_else(|| from_net.clone())
         .or_else(|| to_net.clone());
     let out_a = match &from {
@@ -157,7 +160,9 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Some(redraw) => {
             // An explicitly asked-for name is part of the request, not just a
             // routing hint: give the wire that name unless it already has it.
-            if let Some(wanted) = input.get("net").and_then(Value::as_str)
+            if let Some(wanted) = requested_net
+                .as_ref()
+                .map(|resolved| resolved.name.as_str())
                 && from_net.as_deref() != Some(wanted)
                 && to_net.as_deref() != Some(wanted)
             {
@@ -171,7 +176,10 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 redraw.redrawn_segments
             );
             let result = edit.commit(with_cleared(changed, cleared), allow)?;
-            Ok(with_joined(result, from_net, to_net))
+            Ok(with_resolved_net(
+                with_joined(result, from_net, to_net),
+                requested_net.as_ref(),
+            ))
         }
         None => {
             // Nothing orthogonal fits, so join the ends by name instead — the
@@ -204,7 +212,10 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 ),
                 allow,
             )?;
-            Ok(with_joined(result, from_net, to_net))
+            Ok(with_resolved_net(
+                with_joined(result, from_net, to_net),
+                requested_net.as_ref(),
+            ))
         }
     }
 }
@@ -264,6 +275,51 @@ fn with_joined(mut result: Value, from_net: Option<String>, to_net: Option<Strin
             "to_net": to_net,
             "survivor": survivor,
         });
+    }
+    result
+}
+
+struct ResolvedToolNet {
+    name: String,
+    report: Option<(String, String)>,
+}
+
+/// Resolve a caller-facing pin-net alias and establish a stable local identity.
+fn resolve_tool_net(
+    edit: &mut Edit,
+    original: &str,
+) -> std::result::Result<ResolvedToolNet, String> {
+    let Some(derived) = refs::derived_net_ref(&edit.doc, original)? else {
+        return refs::net_of_pin_name(&edit.doc, edit.before(), original)
+            .map(|name| ResolvedToolNet { name, report: None });
+    };
+    let found = refs::net_of_pin(&edit.doc, edit.before(), &derived.spec)?;
+    if let refs::PinNet::Mint {
+        refdes,
+        number,
+        net,
+    } = &found
+    {
+        let pin = refs::pin(&edit.doc, &format!("{refdes}.{number}"))?;
+        edit.doc.add_label(LabelKind::Local, net, pose(pin.at));
+        let mut allowed = vec![net.clone()];
+        if let Some(was) = refs::net_of(edit.before(), refdes, number) {
+            allowed.push(was.to_string());
+        }
+        edit.joined_nets(allowed);
+    }
+    Ok(ResolvedToolNet {
+        name: found.net().to_string(),
+        report: Some((original.to_string(), derived.reported)),
+    })
+}
+
+fn with_resolved_net(mut result: Value, resolved: Option<&ResolvedToolNet>) -> Value {
+    if result.get("error").is_some() {
+        return result;
+    }
+    if let Some((original, pin)) = resolved.and_then(|resolved| resolved.report.as_ref()) {
+        result["resolved_nets"] = json!({original: pin});
     }
     result
 }
@@ -351,7 +407,7 @@ pub(crate) fn pose(at: Point2) -> sch_doc::Pose {
 
 /// Name the net at one pin.
 pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let (Some(spec), Some(net)) = (
+    let (Some(spec), Some(original_net)) = (
         input.get("pin").and_then(Value::as_str),
         input.get("net").and_then(Value::as_str),
     ) else {
@@ -365,15 +421,11 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Some(other) => return Ok(json!({ "error": format!("unknown label kind `{other}`") })),
     };
     let mut edit = Edit::open(ctx)?;
-    // `@R1.2` names whatever net that pin is on — the only way to join a net whose
-    // own name KiCAD generated.
-    let net = &match refs::net_of_pin_name(&edit.doc, edit.before(), net) {
+    let resolved_net = match resolve_tool_net(&mut edit, original_net) {
         Ok(resolved) => resolved,
         Err(error) => return Ok(json!({ "error": error })),
     };
-    if let Some(error) = refs::derived_name_refusal(edit.before(), net) {
-        return Ok(json!({ "error": error }));
-    }
+    let net = &resolved_net.name;
     let pin = match refs::pin(&edit.doc, spec) {
         Ok(pin) => pin,
         Err(error) => return Ok(reference_error(&edit.doc, &input, error)),
@@ -383,10 +435,7 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // as belonging to nothing. That is how a name landed on a pin that already had
     // one and merged two nets in silence.
     let cleared = clear_no_connects(&mut edit.doc, &[(pin.at, spec.to_string())]);
-    let live = match cleared.is_empty() {
-        true => edit.before().clone(),
-        false => connect::extract(&edit.doc),
-    };
+    let live = connect::extract(&edit.doc);
     let was = refs::net_of(&live, &pin.refdes, &pin.number).map(str::to_string);
     // A label never REPLACES the name a pin already has — it stacks a second one on
     // the same point, which merges the two partitions under whichever name wins. So
@@ -415,14 +464,15 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .or_else(|| sheet_scope(&edit.doc, net))
         .unwrap_or(LabelKind::Local);
     edit.doc.add_label(kind, net, pose(pin.at));
-    edit.commit(
+    let result = edit.commit(
         with_cleared(format!("named {spec} `{net}`"), cleared),
         Allow::nothing()
             .joining_nets([net.to_string()])
             .joining_nets(was)
             .part(&pin.refdes)
             .creating(),
-    )
+    )?;
+    Ok(with_resolved_net(result, Some(&resolved_net)))
 }
 
 fn string_list(input: &Value, key: &str) -> Vec<String> {

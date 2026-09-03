@@ -105,3 +105,57 @@ fn connect_accepts_a_net_name_as_either_endpoint() {
     let sense = call(&ctx, "get_net", json!({"name": "NEW_SENSE"})).to_string();
     assert!(sense.contains("R3.1"), "{sense}");
 }
+
+#[test]
+fn copied_derived_net_names_resolve_in_payloads_and_connect() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    add_resistors(&ctx, &["R1", "R2", "R3", "R4"]);
+    let seeded = call(&ctx, "connect", json!({"from": "R1.2", "to": "R2.1"}));
+    assert!(seeded.get("error").is_none(), "fixture failed: {seeded}");
+    let listing = call(&ctx, "read_schematic", json!({})).to_string();
+    let start = listing.find("Net-(").expect("fixture has a derived net");
+    let generated = &listing[start..start + listing[start..].find(')').unwrap() + 1];
+
+    let placed = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [{
+            "ref": "C1",
+            "part": "Device:C",
+            "pins": {"1": generated, "2": "GND"}
+        }]}),
+    );
+    assert!(placed.get("error").is_none(), "{placed}");
+    assert_eq!(placed["resolved_nets"][generated], "@R1.2", "{placed}");
+
+    let suffixed = format!("{generated}_1");
+    let connected = call(
+        &ctx,
+        "connect",
+        json!({"from": "R3.1", "to": "R4.1", "net": suffixed}),
+    );
+    assert!(connected.get("error").is_none(), "{connected}");
+    assert_eq!(
+        connected["resolved_nets"][&suffixed], "@R1.2",
+        "{connected}"
+    );
+    let net = call(&ctx, "get_net", json!({"name": "N_R1_2"})).to_string();
+    for pin in ["R1.2", "R2.1", "R3.1", "R4.1", "C1.1"] {
+        assert!(net.contains(pin), "{pin} absent from resolved net: {net}");
+    }
+
+    let missing = call(
+        &ctx,
+        "label",
+        json!({"pin": "R3.2", "net": "Net-(U99-NOPE)"}),
+    );
+    assert!(
+        missing["error"].as_str().is_some_and(
+            |error| error.contains("pin `U99.NOPE`") && error.contains("does not exist")
+        ),
+        "{missing}"
+    );
+}

@@ -367,7 +367,8 @@ pub fn tool_defs() -> Vec<Tool> {
         (
             "label",
             "Name the net at one pin. Two pins carrying the same local label are connected. \
-             `net` may be \"@R1.2\" to reuse whatever net that pin is on.",
+             `net` may be \"@R1.2\" or a copied KiCad-derived name such as \
+             \"Net-(R1-Pad2)\" to reuse whatever net that pin is on.",
             json!({
                 "type": "object",
                 "properties": {

@@ -112,8 +112,8 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         Edit::create(ctx, sch_floorplan::live::blank_sheet()?)
     };
-    let minted = match resolve_pin_net_refs(&mut payload, &mut edit)? {
-        Ok(minted) => minted,
+    let resolved_nets = match resolve_pin_net_refs(&mut payload, &mut edit)? {
+        Ok(resolved) => resolved,
         Err(error) => return Ok(with_warnings(error, &warnings)),
     };
     let existing_netlist = sch_doc::connect::extract(&edit.doc);
@@ -167,17 +167,6 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }),
             &warnings,
         ));
-    }
-    let derived: Vec<String> = payload
-        .parts
-        .iter()
-        .flat_map(|part| part.pins.values())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .filter_map(|net| crate::refs::derived_name_refusal(edit.before(), net))
-        .collect();
-    if !derived.is_empty() {
-        return Ok(json!({ "ok": false, "code": "derived_net_name", "nets": derived }));
     }
     let requested = match payload.engine.as_deref().map(engine_named) {
         Some(Some(kind)) => Some(kind),
@@ -272,7 +261,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         // Every engine drew a sheet that did not mean what the payload said. The
         // connectivity is not the engines' to throw away: the parts go to the
         // bench, named at every pin, and `arrange` lays them out from there.
-        return bench_payload(
+        let value = bench_payload(
             ctx,
             edit,
             &payload,
@@ -280,7 +269,8 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             &tried,
             &skipped,
             &warnings,
-        );
+        )?;
+        return Ok(with_resolved_nets(value, &resolved_nets.reported));
     }
     let refs = report.placed.clone();
     let mut value = edit
@@ -288,7 +278,10 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             json!(report),
             // Naming a previously auto-named net renames it; that is the point of an
             // `@ref.pin` target, so the guard is told rather than surprised.
-            Allow::nothing().parts(refs).joining_nets(minted).creating(),
+            Allow::nothing()
+                .parts(refs)
+                .joining_nets(resolved_nets.allowed.iter().cloned())
+                .creating(),
         )
         .context("committing placed parts")?;
     if value.get("error").is_some() {
@@ -302,6 +295,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let value = with_check(value, ctx).context("checking placed parts")?;
     let value = with_unresolved_footprints(value, &footprints_unresolved);
     let value = with_unresolved_decoupling(value, &audit.decouple_unresolved);
+    let value = with_resolved_nets(value, &resolved_nets.reported);
     Ok(with_warnings(value, &warnings))
 }
 
@@ -705,24 +699,43 @@ fn finish_arrangement(edit: Edit, report: ArrangeReport, ctx: &AgentRuntime) -> 
 /// This is what makes a net reachable that has no name of its own: the model can
 /// say "join whatever P3 pin 1 is on" instead of guessing at `Net-(P3-Pad1)`,
 /// which is regenerated from the net's own pins and forks it if written as a label.
-#[allow(clippy::type_complexity)]
+#[derive(Default)]
+struct ResolvedPayloadNets {
+    allowed: Vec<String>,
+    reported: std::collections::BTreeMap<String, String>,
+}
+
 fn resolve_pin_net_refs(
     payload: &mut sch_check::PlacePartsInput,
     edit: &mut Edit,
-) -> Result<std::result::Result<Vec<String>, Value>> {
+) -> Result<std::result::Result<ResolvedPayloadNets, Value>> {
     let specs: std::collections::BTreeSet<String> = payload
         .parts
         .iter()
         .flat_map(|part| part.pins.values())
-        .filter(|net| net.starts_with(crate::refs::NET_OF_PIN))
+        .filter(|net| net.starts_with(crate::refs::NET_OF_PIN) || net.starts_with("Net-("))
         .cloned()
         .collect();
     if specs.is_empty() {
-        return Ok(Ok(Vec::new()));
+        return Ok(Ok(ResolvedPayloadNets::default()));
     }
-    let mut minted = Vec::new();
+    let mut result = ResolvedPayloadNets::default();
     let mut resolved = std::collections::BTreeMap::new();
-    for spec in specs {
+    for original in specs {
+        let spec = match crate::refs::derived_net_ref(&edit.doc, &original) {
+            Ok(Some(derived)) => {
+                result.reported.insert(original.clone(), derived.reported);
+                derived.spec
+            }
+            Ok(None) => original.clone(),
+            Err(error) => {
+                return Ok(Err(json!({
+                    "ok": false,
+                    "code": "unknown_pin_net_ref",
+                    "error": error,
+                })));
+            }
+        };
         match crate::refs::net_of_pin(&edit.doc, edit.before(), &spec) {
             Ok(found) => {
                 if let crate::refs::PinNet::Mint {
@@ -734,20 +747,20 @@ fn resolve_pin_net_refs(
                 {
                     edit.doc
                         .add_label(sch_doc::LabelKind::Local, net, crate::wiring::pose(pin.at));
-                    minted.push(net.clone());
+                    result.allowed.push(net.clone());
                     if let Some(was) =
                         crate::refs::net_of(edit.before(), refdes, number).map(str::to_string)
                     {
-                        minted.push(was);
+                        result.allowed.push(was);
                     }
                 }
-                resolved.insert(spec, found.net().to_string());
+                resolved.insert(original, found.net().to_string());
             }
             Err(error) => {
                 return Ok(Err(json!({
                     "ok": false,
                     "code": "unknown_pin_net_ref",
-                    "error": format!("{spec}: {error}"),
+                    "error": format!("{original}: {error}"),
                 })));
             }
         }
@@ -759,7 +772,18 @@ fn resolve_pin_net_refs(
             }
         }
     }
-    Ok(Ok(minted))
+    edit.joined_nets(result.allowed.iter().cloned());
+    Ok(Ok(result))
+}
+
+fn with_resolved_nets(
+    mut value: Value,
+    resolved: &std::collections::BTreeMap<String, String>,
+) -> Value {
+    if !resolved.is_empty() {
+        value["resolved_nets"] = json!(resolved);
+    }
+    value
 }
 
 /// The engine a payload named, if it named a real one.

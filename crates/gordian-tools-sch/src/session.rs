@@ -201,6 +201,7 @@ pub(crate) struct Edit {
     /// References another caller was promised by `reserve_refs`. No designator
     /// this edit mints may take one.
     reserved: BTreeSet<String>,
+    joined_nets: BTreeSet<String>,
     pub doc: SchDoc,
     pub warnings: Vec<String>,
 }
@@ -221,6 +222,7 @@ impl Edit {
             before,
             rollback,
             reserved: ctx.reservations().reserved()?,
+            joined_nets: BTreeSet::new(),
             doc,
         })
     }
@@ -235,6 +237,7 @@ impl Edit {
             before,
             rollback,
             reserved: ctx.reservations().reserved().unwrap_or_default(),
+            joined_nets: BTreeSet::new(),
             doc,
         }
     }
@@ -258,9 +261,15 @@ impl Edit {
         self.warnings.push(message.into());
     }
 
+    /// Record net identities deliberately established while normalizing input.
+    pub fn joined_nets<I: Into<String>>(&mut self, names: impl IntoIterator<Item = I>) {
+        self.joined_nets.extend(names.into_iter().map(Into::into));
+    }
+
     /// Write the edit if its net delta stays within `allow`, else restore and
     /// report what it would have done.
     pub fn commit(mut self, changed: Value, allow: Allow) -> Result<Value> {
+        let allow = allow.joining_nets(self.joined_nets.iter().cloned());
         let wire_faults = self.doc.wire_faults();
         if !wire_faults.is_empty() {
             self.doc.restore(self.rollback)?;
