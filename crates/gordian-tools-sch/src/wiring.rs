@@ -565,10 +565,12 @@ fn power_candidates(net: &str) -> Vec<String> {
         names.push(format!("+{whole}V{frac}"));
     }
     names.dedup();
-    names
+    let mut candidates = names
         .into_iter()
         .map(|name| format!("power:{name}"))
-        .collect()
+        .collect::<Vec<_>>();
+    candidates.push("power:VDC".to_string());
+    candidates
 }
 
 /// Drop a rail symbol onto a loose pin, or a PWR_FLAG onto an existing rail.
@@ -630,7 +632,7 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             redraw.labels_added
         ));
     }
-    edit.commit(
+    let mut result = edit.commit(
         with_cleared(
             format!(
                 "attached {lib_id} `{net}` to {spec}{}",
@@ -650,7 +652,11 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .part(&refdes)
             .part(&pin.refdes)
             .creating(),
-    )
+    )?;
+    if result.get("error").is_none() {
+        result["power_symbol_used"] = json!(lib_id);
+    }
+    Ok(result)
 }
 
 /// Seat a rail symbol on its pin, backing it off along the pin until its body

@@ -580,6 +580,16 @@ fn net_source(source: NetSource) -> &'static str {
     }
 }
 
+fn power_symbol_net(symbol: &SymbolInst) -> Option<&str> {
+    if !symbol.refdes().starts_with("#PWR") {
+        return None;
+    }
+    match symbol.value() {
+        "" => symbol.lib_id.strip_prefix("power:"),
+        value => Some(value),
+    }
+}
+
 fn placed_net_pin<'a>(placed: &'a [PlacedPin], pin: &PinRef) -> Option<&'a PlacedPin> {
     placed.iter().find(|candidate| {
         candidate.refdes == pin.refdes && candidate.unit == pin.unit && candidate.number == pin.pin
@@ -592,20 +602,73 @@ pub fn get_net(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "get_net needs `name`" }));
     };
     let (doc, netlist) = Edit::read(ctx)?;
-    let Some(net) = netlist.nets.iter().find(|net| net.name == name) else {
-        let mut known: Vec<&str> = netlist.nets.iter().map(|net| net.name.as_str()).collect();
-        known.sort_unstable();
-        let closest = known
-            .iter()
-            .max_by(|left, right| {
-                strsim::jaro_winkler(left, name).total_cmp(&strsim::jaro_winkler(right, name))
+    let power_only = || {
+        let pins = placed_pins(&doc)
+            .into_iter()
+            .filter(|pin| pin.refdes.starts_with("#PWR"))
+            .filter(|pin| {
+                doc.symbol(&pin.owner)
+                    .and_then(power_symbol_net)
+                    .is_some_and(|net| net == name)
             })
-            .filter(|candidate| strsim::jaro_winkler(candidate, name) > 0.8);
-        let error = match closest {
-            Some(candidate) => format!("no net `{name}` — did you mean `{candidate}`?"),
-            None => format!("no net `{name}`"),
-        };
-        return Ok(json!({ "error": error, "nets": known }));
+            .map(|pin| PinRef {
+                refdes: pin.refdes,
+                unit: pin.unit,
+                pin: pin.number,
+                dnp: pin.dnp,
+            })
+            .collect::<Vec<_>>();
+        let exists = doc
+            .symbols()
+            .any(|symbol| power_symbol_net(symbol) == Some(name));
+        exists.then(|| Net {
+            name: name.to_string(),
+            source: NetSource::Power,
+            pins,
+        })
+    };
+    let synthetic;
+    let net = if let Some(net) = netlist.nets.iter().find(|net| net.name == name) {
+        net
+    } else if let Some(net) = power_only() {
+        synthetic = net;
+        &synthetic
+    } else {
+        let mut known = netlist
+            .nets
+            .iter()
+            .map(|net| net.name.clone())
+            .chain(
+                doc.symbols()
+                    .filter_map(power_symbol_net)
+                    .map(str::to_string),
+            )
+            .collect::<Vec<_>>();
+        known.sort();
+        known.dedup();
+        let close = known
+            .iter()
+            .filter_map(|candidate| {
+                let score = strsim::jaro_winkler(candidate, name);
+                (score > 0.8).then_some((score, candidate))
+            })
+            .collect::<Vec<_>>();
+        if close.len() == 1 {
+            let resolved = close[0].1;
+            let mut result = get_net(json!({"name": resolved}), ctx)?;
+            return match result.as_object_mut() {
+                Some(object) => {
+                    object.insert("resolved_from".to_string(), json!(name));
+                    Ok(result)
+                }
+                None => Ok(json!({
+                    "resolved_from": name,
+                    "name": resolved,
+                    "report": result,
+                })),
+            };
+        }
+        return Ok(json!({ "error": format!("no net `{name}`"), "nets": known }));
     };
     let placed = placed_pins(&doc);
     let pins: Vec<&PlacedPin> = net

@@ -53,6 +53,61 @@ fn labelled_resistor(ctx: &AgentRuntime) {
 }
 
 #[test]
+fn add_power_uses_a_renamed_generic_bar_for_an_unknown_rail() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    labelled_resistor(&ctx);
+
+    let result = call(&ctx, "add_power", json!({"pin": "R1.1", "net": "+5V_USB"}));
+
+    assert!(result.get("error").is_none(), "{result}");
+    assert_eq!(result["power_symbol_used"], "power:VDC", "{result}");
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let power = doc
+        .symbols()
+        .find(|symbol| symbol.refdes().starts_with("#PWR"))
+        .expect("generic power symbol");
+    assert_eq!(power.lib_id, "power:VDC");
+    assert_eq!(power.value(), "+5V_USB");
+}
+
+#[test]
+fn get_net_resolves_power_only_nets_and_a_unique_close_name() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let added = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [{"lib_id": "power:GND", "ref": "#PWR01"}]}),
+    );
+    assert!(added.get("error").is_none(), "fixture failed: {added}");
+    let power = call(&ctx, "get_net", json!({"name": "GND"}));
+    assert!(
+        power
+            .as_str()
+            .is_some_and(|text| text.starts_with("NET GND")),
+        "{power}"
+    );
+
+    labelled_resistor(&ctx);
+    let named = call(&ctx, "label", json!({"pin": "R1.1", "net": "OUT_AC"}));
+    assert!(named.get("error").is_none(), "fixture failed: {named}");
+    let resolved = call(&ctx, "get_net", json!({"name": "OUT_ISO"}));
+    assert_eq!(resolved["resolved_from"], "OUT_ISO", "{resolved}");
+    assert_eq!(resolved["name"], "OUT_AC", "{resolved}");
+    assert!(
+        resolved["report"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("NET OUT_AC")),
+        "{resolved}"
+    );
+}
+
+#[test]
 fn no_connect_retracts_single_pin_nets_in_one_batch() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCad detected");
