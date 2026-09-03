@@ -278,3 +278,25 @@ re-place." Quality first; time later via parallel subagents; schematic too.
 - sch-refusals-4 gated green and merged locally (1c799794). pcb-seed-shorts: codex's version did not
   reach the dispatched tool paths (its own new tests fail with the old messages) → Opus agent
   finishing it. Push waits on graft-additive + pcb-seed-shorts; then round 7.
+- Text-collision measurement (scratchpad/textcol): lint measures a disjoint universe from the render
+  (recall 0/103, 16 FPs); one validated as-drawn box model would take 0.353 → ~0.055 collisions/part
+  → lane/text-box-model (Opus). Running: graft-additive (Opus), pcb-seed-shorts (Opus), text-box-model.
+- pcb-seed-shorts finished on Opus and merged locally (staging by property, envelopes side by side,
+  guard drops staged pads, route imports stale net tables, delete_copper selectors; review fixed a
+  rotated-envelope bug and outline refit unstaging parts). Prompt tightened back under 8000 chars.
+  Local main now holds: train 3 (pace, looks), sch-refusals-4, pcb-seed-shorts, prompt trim — push
+  waits on graft-additive; then round 7.
+- USER: "we should never stop on a partial state" → lane/no-turn-budget (Opus): delete the 270 s wall
+  clock, the 56-request cap, the `## Partial state` handoff and harness continuation; one prompt runs
+  to completion; only an off-by-default user cap remains.
+- USER: adopt ~/sch-agent's layout trees (model composes row/col trees; engine measures/aligns/routes
+  with shape acceptance) and "simplify to the most: remove those not wanted code" → lane/layout-trees
+  (Opus: `sch-flex` crate, payload `layout`, prompt rules, measure vs engines, then delete
+  anneal/cluster/spine + relation intents + ladder + sch-drag tidy). lane/sch-qc-suite (Opus):
+  `--suite schematic` = 8 dataset cases (netlist→draw, scored vs human original) + 6 prompt cases,
+  critic anchored to a reference-9 sheet; baseline on current main. Also running: no-turn-budget,
+  graft-additive, text-box-model.
+- graft-additive merged: `refit_page(frozen)` slides only the new block (geometric tear guard decided
+  before moving), pre-existing symbols never move; snapshot gate green. Integrated gate + push running.
+  Open follow-up: `region.rs slide_block` early-returns on `clear` without `on_page` (may become moot
+  under layout trees).

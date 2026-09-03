@@ -146,13 +146,17 @@ fn refit_existing_board(ctx: &AgentRuntime) -> Result<Value> {
                      footprints and rules allow; nothing was changed",
         }));
     };
-    let locked: std::collections::BTreeSet<&str> = board
+    // A refit answers for the placed board only. Locked parts keep their pose,
+    // and staged parts are not on the board yet: moving them would clear the
+    // annotation that keeps them out of the guard, DRC and fab export.
+    let locked: std::collections::BTreeSet<String> = board
         .imported
         .parts
         .iter()
         .filter(|part| part.locked)
-        .map(|part| part.reference.as_str())
+        .map(|part| part.reference.clone())
         .collect();
+    let staged = crate::staging::staged_references(&board);
     let gate = match Guard::open(
         ctx,
         Edit::new("update_board_outline", std::slice::from_ref(&path)),
@@ -164,7 +168,9 @@ fn refit_existing_board(ctx: &AgentRuntime) -> Result<Value> {
         .result
         .placements
         .iter()
-        .filter(|placement| !locked.contains(placement.reference.as_str()))
+        .filter(|placement| {
+            !locked.contains(&placement.reference) && !staged.contains(&placement.reference)
+        })
         .map(|placement| kicad_board::FootprintPlacement {
             reference: placement.reference.clone(),
             at: placement.at,
@@ -226,8 +232,9 @@ fn refit_existing_board(ctx: &AgentRuntime) -> Result<Value> {
             "bounds": plan.to,
             "outline_refit": outline_refit_json(&plan),
             "skipped_locked": locked.iter().collect::<Vec<_>>(),
+            "skipped_staged": staged.iter().collect::<Vec<_>>(),
             "note": "re-placed the unrouted board on its compact rule-derived managed outline; \
-                     locked footprints kept their pose",
+                     locked and staged footprints kept their pose",
         }),
     ))
 }

@@ -122,17 +122,13 @@ impl SchDoc {
     /// Every UUID already in the document, pins and sheet pins included — a
     /// collision check that missed those would not be one.
     fn uuid_taken(&self, uuid: &str) -> bool {
-        self.items().iter().any(|item| match item {
-            Item::Symbol(s) => s.uuid == uuid || s.pin_uuids.values().any(|u| u == uuid),
-            Item::Wire(w) => w.uuid == uuid,
-            Item::Junction(j) => j.uuid == uuid,
-            Item::NoConnect(n) => n.uuid == uuid,
-            Item::Label(l) => l.uuid == uuid,
-            Item::Text(t) => t.uuid == uuid,
-            Item::Rectangle(r) => r.uuid == uuid,
-            Item::Sheet(s) => s.uuid == uuid || s.pins.iter().any(|p| p.uuid == uuid),
-            Item::LibSymbols(_) => false,
-            Item::Other(raw) => crate::sexpr::child_text(&raw.node, "uuid") == Some(uuid),
+        self.items().iter().any(|item| {
+            item.uuid() == Some(uuid)
+                || match item {
+                    Item::Symbol(s) => s.pin_uuids.values().any(|u| u == uuid),
+                    Item::Sheet(s) => s.pins.iter().any(|p| p.uuid == uuid),
+                    _ => false,
+                }
         })
     }
 

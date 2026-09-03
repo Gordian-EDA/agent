@@ -23,7 +23,7 @@
 //! - [`rules`] — the design rules the board's own footprints permit.
 //! - [`diagnose`] — violations and obstructions in terms a caller can act on.
 //! - [`locks`] — `lock_parts` / `unlock_parts`: the poses no helper moves.
-//! - [`staging`] — the seed row read back as board state: staged, placed, locked.
+//! - [`staging`] — the staging row read back as board state: staged, placed, locked.
 //! - [`intent`] — board intent (edges, proximity, groups, zones) → placement
 //!   constraints. The model states intent; solvers own coordinates.
 //! - [`ratsnest`] — the one connectivity shape `get_board` and `route_board`

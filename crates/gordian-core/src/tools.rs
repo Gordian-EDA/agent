@@ -306,7 +306,7 @@ pub fn tool_defs() -> Vec<Tool> {
         },
         Def {
             name: "delete_copper".into(),
-            description: "Delete track/via copper by click, or remove a net globally or inside a bbox. Returns now_open nets; removing copper never refuses for a newly attributed clearance finding."
+            description: "Delete track/via copper by click, all:true, nets, or bbox. Reports deleted counts by kind and any now_open nets; removing copper never refuses for a newly attributed clearance finding."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -335,9 +335,14 @@ pub fn tool_defs() -> Vec<Tool> {
                         "items": { "type": "string", "enum": ["track", "via"] },
                         "description": "Default both."
                     },
-                    "net": { "type": "string" },
+                    "nets": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "description": "Delete all copper on these nets."
+                    },
                     "layer": { "type": "string" },
-                    "all": { "type": "boolean", "description": "All matches; default nearest." }
+                    "all": { "type": "boolean", "description": "Set true to delete all track/via copper; may be combined only with kinds or layer." }
                 }
             }),
         },

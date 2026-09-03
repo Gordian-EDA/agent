@@ -25,7 +25,6 @@ use geom::Rect;
 use gordian_runtime::AgentRuntime;
 use kicad_board::{BoardDoc, BoardFootprint};
 use kicad_footprint::FootprintCatalog;
-use pcb_model::Point2;
 use pcb_place::PlacementHints;
 
 use crate::board::guard::{Edit, Guard};
@@ -34,7 +33,8 @@ use crate::seed::{PourPadConnection, PourSpec};
 use crate::create::{
     BoardSeedSpec, MISSING_FOOTPRINT_ID, SeedPart, SeedRules, add_default_power_pours,
     apply_complexity_default_layer_count, emit_board_footprint, merge, parse_seed_bounds,
-    parse_seed_rules_over, plan_seed_board, rule_adjustments, write_seed_plan,
+    parse_seed_rules_over, plan_seed_board, rule_adjustments, seed_part_envelope,
+    write_seed_plan,
 };
 
 /// One schematic part as the exported netlist has it.
@@ -320,14 +320,14 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             object.insert("normalized_edges".to_owned(), json!(normalized_edges));
         }
     }
-    if board_existed
-        && input.get("intent").is_some()
+    if input.get("intent").is_some()
         && result.get("error").is_none()
         && result.get("ok").and_then(Value::as_bool) != Some(false)
     {
         let sync_half = result.clone();
         let placement = place_after_sync(&input, &sync_half, ctx);
         if let Some(object) = result.as_object_mut() {
+            object.remove("next");
             object.insert("sync".to_owned(), sync_half);
             object.insert("placement".to_owned(), placement.clone());
             object.insert(
@@ -341,6 +341,15 @@ pub fn sync_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "note".to_owned(),
                 json!("applied the schematic delta, then passed the requested intent to place_board for staged/new parts"),
             );
+            if let Some(next_tool) = placement.get("next_tool") {
+                object.insert("next_tool".to_owned(), next_tool.clone());
+            }
+            if let Ok(board) = crate::active_board(ctx) {
+                object.insert(
+                    "staged".to_owned(),
+                    json!(crate::staging::BoardState::of(&board).staged_references()),
+                );
+            }
         }
     }
     phase.facts(
@@ -419,23 +428,26 @@ fn stage_incomplete(
     // A part the board already seeded is in the row where it belongs; only the
     // ones a laid-out board carries have to be moved there, and they go after
     // the slots the row already occupies rather than on top of them.
-    let already_staged = crate::staging::staged_references(&board);
-    let mut slot = already_staged.len();
-    let row_y = kicad_board::seed_row_y(board.imported.bounds.min_y);
+    let mut row = crate::staging::StagingRow::of(&board);
+    let already_staged = row.references.clone();
     let mut moves = Vec::new();
     let annotations: Vec<kicad_board::Annotation> = on_board
         .iter()
         .map(|reference| {
             if !already_staged.contains(*reference) {
+                let part = board
+                    .imported
+                    .parts
+                    .iter()
+                    .find(|part| &part.reference == *reference)
+                    .expect("on_board was resolved from this snapshot");
+                let local = crate::staging::part_local_extent(part)
+                    .unwrap_or(Rect::new(-1.25, -1.25, 1.25, 1.25));
                 moves.push(kicad_board::FootprintPlacement {
                     reference: (*reference).clone(),
-                    at: Point2::new(
-                        kicad_board::seed_row_x(board.imported.bounds.min_x, slot),
-                        row_y,
-                    ),
+                    at: row.next_pose(local),
                     rotation_deg: Some(0.0),
                 });
-                slot += 1;
             }
             let annotation = kicad_board::Annotation::new((*reference).clone());
             if missing.contains(*reference) {
@@ -679,6 +691,137 @@ pub(crate) fn schematic_net_changes(
         &assignment_members(&schematic),
         &assignment_members(&saved),
     ))
+}
+
+/// Import live schematic net names and pad assignments without changing board geometry.
+///
+/// Routing calls this before resolving its net selector. Footprints, poses,
+/// annotations, outline, zones, and copper remain byte-for-byte untouched;
+/// structural schematic changes stay deferred to `sync_board`.
+pub(crate) fn refresh_route_net_table(
+    ctx: &AgentRuntime,
+    board: &kicad_board::BoardSnapshot,
+) -> std::result::Result<Value, String> {
+    if !ctx.sch_path().exists() {
+        return Ok(json!({
+            "changed": false,
+            "nets_changed": [],
+            "pads_retargeted": [],
+            "geometry_changed": false,
+        }));
+    }
+    let nets_changed = schematic_net_changes(ctx, board)?;
+    if nets_changed.is_empty() {
+        return Ok(json!({
+            "changed": false,
+            "nets_changed": [],
+            "pads_retargeted": [],
+            "geometry_changed": false,
+        }));
+    }
+
+    let netlist = ctx.env().netlist(ctx.sch_path()).map_err(|error| {
+        format!("could not import the schematic net table before routing: {error}")
+    })?;
+    let schematic_references = netlist
+        .components
+        .iter()
+        .map(|component| component.reference.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut wanted_by_reference = BTreeMap::<String, BTreeMap<String, String>>::new();
+    for net in &netlist.nets {
+        if net.name.is_empty() {
+            continue;
+        }
+        for (reference, pad) in &net.nodes {
+            if !reference.is_empty() && !pad.is_empty() {
+                wanted_by_reference
+                    .entry(reference.clone())
+                    .or_default()
+                    .insert(pad.clone(), net.name.clone());
+            }
+        }
+    }
+
+    let original = std::fs::read_to_string(ctx.pcb_path()).map_err(|error| {
+        format!(
+            "could not read {} for route-time net import: {error}",
+            ctx.pcb_path().display()
+        )
+    })?;
+    let mut doc = board_doc_for_sync(original.clone())?;
+    let footprints = doc.footprints();
+    let unplaceable = crate::staging::unplaceable_references(board);
+    let board_references = footprints
+        .iter()
+        .map(|footprint| footprint.reference.as_str())
+        .collect::<BTreeSet<_>>();
+    let wanted = wanted_by_reference
+        .iter()
+        .filter(|(reference, _)| {
+            board_references.contains(reference.as_str()) && !unplaceable.contains(*reference)
+        })
+        .flat_map(|(_, pads)| pads.values().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let codes = doc.ensure_nets(wanted)?;
+    let mut pads_retargeted = Vec::new();
+    let mut unavailable_pads = Vec::new();
+    for footprint in footprints.iter().filter(|footprint| {
+        schematic_references.contains(footprint.reference.as_str())
+            && !unplaceable.contains(&footprint.reference)
+    }) {
+        let wanted_pads = wanted_by_reference
+            .get(&footprint.reference)
+            .cloned()
+            .unwrap_or_default();
+        let pads = footprint
+            .pad_nets
+            .keys()
+            .chain(wanted_pads.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for pad in pads {
+            let from = footprint.pad_nets.get(&pad).cloned();
+            let to = wanted_pads.get(&pad).cloned();
+            if from == to {
+                continue;
+            }
+            let net = to
+                .as_ref()
+                .map(|name| {
+                    codes
+                        .get(name)
+                        .map(|code| (name.as_str(), *code))
+                        .ok_or_else(|| format!("net {name} is missing from the board net table"))
+                })
+                .transpose()?;
+            if doc.set_pad_net(&footprint.reference, &pad, net)? {
+                pads_retargeted.push(json!({
+                    "pad": format!("{}.{}", footprint.reference, pad),
+                    "from": from,
+                    "to": to,
+                }));
+            } else {
+                unavailable_pads.push(format!("{}.{}", footprint.reference, pad));
+            }
+        }
+    }
+    let changed = doc.text() != original;
+    if changed {
+        write_board(ctx, doc.text())?;
+    }
+    let missing_board_references = schematic_references
+        .into_iter()
+        .filter(|reference| !board_references.contains(reference))
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "changed": changed,
+        "nets_changed": nets_changed,
+        "pads_retargeted": pads_retargeted,
+        "unavailable_pads": unavailable_pads,
+        "missing_board_references": missing_board_references,
+        "geometry_changed": false,
+    }))
 }
 
 /// Resolve a requested schematic net to the equivalent name on the saved board.
@@ -1146,16 +1289,13 @@ fn update_board(
         .iter()
         .map(|part| (part.reference.as_str(), part))
         .collect();
-    let seed_origin = Point2::new(
-        before.imported.bounds.min_x + 2.0,
-        before.imported.bounds.min_y + 2.0,
-    );
+    let mut staging = crate::staging::StagingRow::of(&before);
     if let Err(e) = apply(
         &mut doc,
         &delta,
         &by_reference,
         &existing,
-        seed_origin,
+        &mut staging,
         catalog,
         mismatched,
     ) {
@@ -1374,10 +1514,12 @@ fn reseed_board(
         });
     }
     let delta = diff(parts, &doc.footprints());
+    let staged = crate::staging::staged_references(&before);
     let poses: Vec<kicad_board::FootprintPlacement> = doc
         .footprints()
         .into_iter()
         .filter(|fp| parts.iter().any(|part| part.reference == fp.reference))
+        .filter(|fp| !staged.contains(&fp.reference))
         .map(|fp| kicad_board::FootprintPlacement {
             reference: fp.reference,
             at: fp.at,
@@ -1514,7 +1656,7 @@ fn apply(
     delta: &BoardDelta,
     schematic: &BTreeMap<&str, &SchematicPart>,
     existing: &BTreeMap<String, BoardFootprint>,
-    seed_origin: Point2,
+    staging: &mut crate::staging::StagingRow,
     catalog: &FootprintCatalog,
     mismatched: &BTreeMap<String, String>,
 ) -> std::result::Result<(), String> {
@@ -1551,26 +1693,18 @@ fn apply(
         }
     }
 
-    // A swap keeps the part where it sat, lock and all; a new part starts in the
-    // board's own seed row and is placed properly below.
-    for (index, reference) in delta
+    // A laid-out swap keeps its pose. New and already-staged parts take a fresh,
+    // non-overlapping staging position outside the outline.
+    for reference in delta
         .footprint_changed
         .iter()
         .map(|c| c.reference.as_str())
         .chain(delta.added.iter().map(String::as_str))
-        .enumerate()
     {
         let part = schematic
             .get(reference)
             .ok_or_else(|| format!("part {reference} vanished from the schematic mid-sync"))?;
         let was = existing.get(reference);
-        let (at, rotation) = was.map_or(
-            (
-                Point2::new(seed_origin.x + 2.54 * index as f64, seed_origin.y),
-                0.0,
-            ),
-            |fp| (fp.at, fp.rotation),
-        );
         let seed = SeedPart {
             reference: part.reference.clone(),
             value: Some(part.value.clone()),
@@ -1578,8 +1712,15 @@ fn apply(
             pad_nets: part.pad_nets.clone(),
             locked: None,
         };
+        let staged = was.is_none() || staging.references.contains(reference);
+        let (at, rotation) = if staged {
+            (staging.next_pose(seed_part_envelope(&seed, catalog)?), 0.0)
+        } else {
+            let fp = was.expect("a non-staged replacement has an existing pose");
+            (fp.at, fp.rotation)
+        };
         let locked = was.is_some_and(|fp| fp.locked);
-        let block = emit_board_footprint(&seed, at, rotation, locked, catalog, &codes)?;
+        let block = emit_board_footprint(&seed, at, rotation, locked, staged, catalog, &codes)?;
         doc.insert_footprint(&block)?;
     }
 
@@ -1689,6 +1830,7 @@ fn place_added(added: &[String], ctx: &AgentRuntime) -> std::result::Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pcb_model::Point2;
 
     fn schematic(
         reference: &str,

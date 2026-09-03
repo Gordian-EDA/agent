@@ -394,6 +394,13 @@ fn incremental_place_is_additive() {
 
     assert_no_overlap(&doc);
 
+    // ...and the block that was added is on the page, not rescued by abandoning it.
+    let bbox = doc.content_bbox().expect("content");
+    assert!(
+        bbox.min_x >= 0.0 && bbox.min_y >= 0.0,
+        "the graft left content outside the frame: {bbox:?}"
+    );
+
     // The sheet's own nets are untouched; only the new block's nets appeared.
     let after = connect::extract(&doc);
     let delta = sch_doc::Netlist::diff(&before, &after);

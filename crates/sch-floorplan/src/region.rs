@@ -218,10 +218,10 @@ fn slide_block(movable: &mut [Item], blockers: &[Rect]) {
         w + h
     };
     // There is no sheet to the left of the origin: a block slid to a negative coordinate
-    // is drawn outside the frame, and the page fitter then has to shove the WHOLE sheet
-    // over to rescue it — moving parts the caller was promised would not move. So the
-    // landing must be on the page; only if nothing on the page is free does an off-page
-    // landing beat leaving the block on top of something.
+    // is drawn outside the frame, and the page fitter can only rescue it by sliding the
+    // block back — which it refuses to do when the block touches what is already drawn.
+    // So the landing must be on the page; only if nothing on the page is free does an
+    // off-page landing beat leaving the block on top of something.
     let on_page = |r: &Rect| r.min_x >= sch_doc::PAGE_MARGIN && r.min_y >= sch_doc::PAGE_MARGIN;
     let search = |page_only: bool| {
         (1..=BLOCK_RINGS).find_map(|ring| {
