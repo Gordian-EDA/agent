@@ -73,7 +73,7 @@ pub use error::{Error, Result};
 pub use libsyms::SymbolSource;
 pub use model::{
     Field, Item, Junction, Label, LabelKind, LibSymbols, Mirror, NoConnect, Pose, Retained, Sheet,
-    SheetPin, SymbolInst, Text, Wire,
+    SheetPin, SymbolInst, Text, Wire, WireFault, WireFaultKind,
 };
 pub use pins::{PlacedPin, placed_pins};
 pub use text::{escape, unescape};
