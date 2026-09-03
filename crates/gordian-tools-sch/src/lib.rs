@@ -217,7 +217,8 @@ pub fn tool_defs() -> Vec<Tool> {
              suggestion if no nearby spot fits, a pin loses its drawing, or any net would change. \
              After adding and connecting parts, use one batch drag to compact or align them when a \
              render reports introduced visual findings. Cleaning up the newly added parts is part \
-             of that edit, not unrelated movement; do not delete and redraw their connections.",
+             of that edit, not unrelated movement. Include the whole new bank in one `moves` array \
+             so it stays aligned; do not delete and redraw its connections.",
             json!({
                 "type": "object",
                 "properties": {
