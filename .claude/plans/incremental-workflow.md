@@ -289,3 +289,10 @@ re-place." Quality first; time later via parallel subagents; schematic too.
 - USER: "we should never stop on a partial state" → lane/no-turn-budget (Opus): delete the 270 s wall
   clock, the 56-request cap, the `## Partial state` handoff and harness continuation; one prompt runs
   to completion; only an off-by-default user cap remains.
+- USER: adopt ~/sch-agent's layout trees (model composes row/col trees; engine measures/aligns/routes
+  with shape acceptance) and "simplify to the most: remove those not wanted code" → lane/layout-trees
+  (Opus: `sch-flex` crate, payload `layout`, prompt rules, measure vs engines, then delete
+  anneal/cluster/spine + relation intents + ladder + sch-drag tidy). lane/sch-qc-suite (Opus):
+  `--suite schematic` = 8 dataset cases (netlist→draw, scored vs human original) + 6 prompt cases,
+  critic anchored to a reference-9 sheet; baseline on current main. Also running: no-turn-budget,
+  graft-additive, text-box-model.
