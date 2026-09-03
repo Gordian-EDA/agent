@@ -2342,7 +2342,14 @@ mod tests {
         assert!(board.contains("(property \"Value\" \"10k\""));
         assert!(board.contains("(property \"Value\" \"NE555P\""));
         assert!(!board.contains("(property \"Value\" \"Fixture\""));
-        assert_eq!(board.matches("(hide yes)").count(), 3);
+        // Every seeded part hides its Value and carries a hidden staging reason.
+        assert_eq!(board.matches("(hide yes)").count(), 6);
+        assert_eq!(
+            board
+                .matches("(property \"gordian:staged_reason\" \"unplaced\"")
+                .count(),
+            3
+        );
     }
 
     #[test]
