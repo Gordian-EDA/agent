@@ -174,10 +174,12 @@ fn global_nets(doc: &SchDoc) -> BTreeSet<String> {
 
 /// Where the next benched symbol goes.
 ///
-/// The bench is a column of cells to the RIGHT of everything drawn, so it never
+/// The bench is a rectangle of cells to the RIGHT of everything drawn, so it never
 /// collides with the sheet and never has to move when the drawing grows. It is
-/// bounded in height by the drawing's own, wrapping into a second column, so a
-/// long bench stays on one page rather than running off the bottom.
+/// bounded in height by the drawing's own, wrapping into further columns, so a long
+/// bench stays on one page rather than running off the bottom. Each call measures
+/// the sheet again, bench included, so one block's rectangle sits beside the last
+/// rather than on top of it.
 struct Cursor {
     origin: Point2,
     rows: usize,

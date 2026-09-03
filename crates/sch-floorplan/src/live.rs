@@ -296,6 +296,10 @@ pub struct ArrangeReport {
     /// Symbols this call took off the bench, now laid out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left_bench: Vec<String>,
+    /// Nets the redraw left as a matching LABEL because it could not draw a clean
+    /// wire — the debit a re-layout pays instead of refusing.
+    #[serde(default)]
+    pub labelled: usize,
     /// Nets the redrawn wiring touches — the scope of what this call may rename.
     /// A net the selection drew as a label and now draws as a wire loses its
     /// authored name to KiCAD's derived one; the partition is unchanged, which is
@@ -844,7 +848,7 @@ fn rearrange_inner(
         None => (movable, ir),
     };
     ir.ports.extend(boundary_ports);
-    let (redrawn, inc, warnings, left_bench) = live_phase(
+    let (redrawn, inc, warnings, left_bench, labelled) = live_phase(
         phase,
         "realise",
         placed.len(),
@@ -877,8 +881,9 @@ fn rearrange_inner(
             )?;
             let mut warnings = writer.layout_warnings();
             warnings.extend(net_conflict_warnings(env, &writer, &placed, &inc));
+            let labelled = writer.signal_label_count();
             crate::realize::graft_drawing(doc, writer)?;
-            Ok((redrawn, inc, warnings, left_bench))
+            Ok((redrawn, inc, warnings, left_bench, labelled))
         },
     )?;
     // A re-wire declares no ports of its own, so every net keeps the scope the
@@ -895,6 +900,7 @@ fn rearrange_inner(
     }
     Ok(ArrangeReport {
         left_bench,
+        labelled,
         nets: before
             .nets
             .iter()
