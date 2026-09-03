@@ -298,8 +298,10 @@ fn retraction_stops_at_a_junction() {
     let doomed = pin_at(&doc, "R5", "2");
     let kept = pin_at(&doc, "R6", "1");
     let tee = Point2::new(doomed.x, doomed.y + 3.81);
+    let bend = Point2::new(kept.x, tee.y);
     doc.add_wire(doomed, tee);
-    doc.add_wire(tee, kept);
+    doc.add_wire(tee, bend);
+    doc.add_wire(bend, kept);
     doc.add_junction(tee);
     doc.write(ctx.sch_path()).unwrap();
 
@@ -309,7 +311,7 @@ fn retraction_stops_at_a_junction() {
     let after = SchDoc::read(ctx.sch_path()).unwrap();
     assert_eq!(
         after.wires().count(),
-        1,
+        2,
         "the wire past the junction was taken too"
     );
 }

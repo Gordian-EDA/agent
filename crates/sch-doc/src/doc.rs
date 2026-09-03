@@ -5,7 +5,7 @@ use std::path::Path;
 use kiutils_sexpr::parse_one;
 
 use crate::error::{Error, Result};
-use crate::model::{Item, Label, LibSymbols, SymbolInst, Wire};
+use crate::model::{Item, Label, LibSymbols, SymbolInst, Wire, WireFault, WireFaultKind};
 use crate::sexpr::{self, print};
 
 /// A borrow of a symbol that is about to change. See [`SchDoc::symbol_mut`].
@@ -131,6 +131,11 @@ impl SchDoc {
         if self.edited {
             self.gc_lib_symbols();
         }
+        let wire_faults = self.wire_faults();
+        debug_assert!(
+            wire_faults.is_empty(),
+            "schematic contains malformed wire segments: {wire_faults:?}"
+        );
         let path = path.as_ref();
         let dir = path.parent().unwrap_or(Path::new("."));
         let mut temp = tempfile::Builder::new()
@@ -145,6 +150,31 @@ impl SchDoc {
         }
         temp.persist(path).map_err(|e| e.error)?;
         Ok(())
+    }
+
+    /// Return every wire segment that is diagonal or has zero length.
+    pub fn wire_faults(&self) -> Vec<WireFault> {
+        self.wires()
+            .flat_map(|wire| {
+                wire.points
+                    .windows(2)
+                    .enumerate()
+                    .filter_map(|(segment, points)| {
+                        let same_x = (points[0].x - points[1].x).abs() < geom::EPS;
+                        let same_y = (points[0].y - points[1].y).abs() < geom::EPS;
+                        let kind = match (same_x, same_y) {
+                            (true, true) => WireFaultKind::Degenerate,
+                            (false, false) => WireFaultKind::Diagonal,
+                            _ => return None,
+                        };
+                        Some(WireFault {
+                            wire: wire.uuid.clone(),
+                            segment,
+                            kind,
+                        })
+                    })
+            })
+            .collect()
     }
 
     /// Whether any mutator has run on this document.

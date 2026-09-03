@@ -271,6 +271,26 @@ pub struct Wire {
     pub(crate) raw: Retained,
 }
 
+/// A malformed segment in a schematic wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireFault {
+    /// UUID of the wire containing the segment.
+    pub wire: String,
+    /// Zero-based segment index within the wire's point list.
+    pub segment: usize,
+    /// Why the segment violates the document invariant.
+    pub kind: WireFaultKind,
+}
+
+/// The geometry defect found in a wire segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireFaultKind {
+    /// Both endpoints occupy the same point.
+    Degenerate,
+    /// Both coordinates change between the endpoints.
+    Diagonal,
+}
+
 impl Wire {
     fn decode(node: &Node) -> Wire {
         Wire {

@@ -3,27 +3,14 @@
 //! nothing orthogonal fits — names the net at both ends instead, and says so.
 
 use anyhow::Result;
-use geom::{Dir, EPS, Point2, Rect, Segment};
+use geom::{EPS, Point2, Rect, Segment};
 use gordian_runtime::AgentRuntime;
-use sch_doc::{LabelKind, SchDoc, body_rects, connect};
-use sch_floorplan::wire::ElbowRouter;
-use sch_model::route::{NetSegment, RouteScene, SchRouter};
+use sch_doc::{LabelKind, SchDoc, connect};
 use serde_json::{Value, json};
 
 use crate::place::{Occupancy, snap_point};
 use crate::refs::{self, Target};
 use crate::session::{Allow, Edit, is_auto, symbol_source};
-
-/// The direction a wire leaves a pin, snapped to the nearest axis.
-pub(crate) fn dir_of(out: Point2) -> Dir {
-    if out.x.abs() >= out.y.abs() {
-        if out.x < 0.0 { Dir::West } else { Dir::East }
-    } else if out.y < 0.0 {
-        Dir::North
-    } else {
-        Dir::South
-    }
-}
 
 /// The name a route is drawn under while it is being solved.
 ///
@@ -31,100 +18,6 @@ pub(crate) fn dir_of(out: Point2) -> Dir {
 /// treat every scrap of GND copper on the sheet as its own and be free to land
 /// on it. Only the two partitions actually being joined get this name.
 const ROUTING_NET: &str = "#routing";
-
-/// The obstacle scene for a route between `a` and `b`.
-///
-/// The partitions those two ends belong to are relabelled [`ROUTING_NET`]: the
-/// router must be free to touch what it is about to join, and would otherwise
-/// refuse to leave its own start point. Everything else keeps its own name and
-/// stays untouchable.
-///
-/// The two symbols being joined are also lifted out of the solids: a pin tip
-/// often falls inside its own body's bounding box — an LED's does — and a
-/// router that treats that box as a wall can never reach the pin at all.
-fn scene(doc: &SchDoc, a: Point2, b: Point2, own: &[String]) -> RouteScene {
-    let live = connect::scene(doc);
-    let joined: Vec<String> = live
-        .points
-        .iter()
-        .filter(|(p, _)| p.near_eq(a, EPS) || p.near_eq(b, EPS))
-        .map(|(_, name)| name.clone())
-        .collect();
-    let rename = |name: &String| match joined.iter().any(|j| j == name) {
-        true => ROUTING_NET.to_string(),
-        false => name.clone(),
-    };
-    let labels = doc
-        .labels()
-        .map(|label| {
-            let at = label.at.point();
-            let half = (1.27 * label.text.chars().count() as f64).max(2.54);
-            (
-                geom::Rect::from_center_half(at, (half, 1.27)),
-                rename(&sch_doc::unescape(&label.text)),
-            )
-        })
-        .collect();
-    RouteScene {
-        solids: body_rects(doc)
-            .into_iter()
-            .filter(|(refdes, _)| !own.contains(refdes))
-            .map(|(_, r)| r)
-            .collect(),
-        points: live
-            .points
-            .iter()
-            .map(|(p, name)| (*p, rename(name)))
-            .collect(),
-        segments: live
-            .segments
-            .iter()
-            .map(|(from, to, name)| NetSegment::new(*from, *to, rename(name)))
-            .collect(),
-        label_solids: labels,
-    }
-}
-
-/// Draw a wire path, adding a junction wherever it meets existing copper — at
-/// its ends and at every corner, since a corner landing mid-span draws a T that
-/// KiCAD does not treat as a connection unless a dot says so.
-fn draw(doc: &mut SchDoc, path: &[Point2]) -> Vec<String> {
-    if path.len() < 2 {
-        return Vec::new();
-    }
-    let existing: Vec<(Point2, Point2)> = doc
-        .wires()
-        .flat_map(|w| {
-            w.points
-                .windows(2)
-                .map(|p| (p[0], p[1]))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let mut uuids = Vec::new();
-    for pair in path.windows(2) {
-        uuids.push(doc.add_wire(pair[0], pair[1]));
-    }
-    for &vertex in path {
-        let interior = existing.iter().any(|(from, to)| {
-            Segment::new(*from, *to).contains_point(vertex)
-                && !vertex.near_eq(*from, EPS)
-                && !vertex.near_eq(*to, EPS)
-        });
-        let ends = existing
-            .iter()
-            .filter(|(from, to)| vertex.near_eq(*from, EPS) || vertex.near_eq(*to, EPS))
-            .count();
-        let already = doc
-            .items()
-            .iter()
-            .any(|item| matches!(item, sch_doc::Item::Junction(j) if j.at.near_eq(vertex, EPS)));
-        if !already && (interior || ends >= 2) {
-            doc.add_junction(vertex);
-        }
-    }
-    uuids
-}
 
 /// Route one connection, or every connection in `pairs`.
 pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -202,9 +95,12 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .map(str::to_string)
         .or_else(|| from_net.clone())
         .or_else(|| to_net.clone());
-    let dir_a = match &from {
-        Target::Pin(pin) => dir_of(pin.out),
-        Target::Point(_) => dir_of(Point2::new(b.x - a.x, b.y - a.y)),
+    let out_a = match &from {
+        Target::Pin(pin) => pin.out,
+        Target::Point(_) if (b.x - a.x).abs() >= (b.y - a.y).abs() => {
+            Point2::new((b.x - a.x).signum(), 0.0)
+        }
+        Target::Point(_) => Point2::new(0.0, (b.y - a.y).signum()),
     };
 
     let allow = Allow::nothing()
@@ -220,15 +116,12 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .flatten()
         .map(str::to_string)
         .collect();
-    let scene = scene(&edit.doc, a, b, &own);
-    let drawn = ElbowRouter
-        .route_edge(a, dir_a, b, ROUTING_NET, &scene)
-        .map(|path| draw(&mut edit.doc, &path))
+    let drawn = sch_drag::redraw_wire(&mut edit.doc, a, out_a, b, ROUTING_NET, &own)
         // Drawing a path is not the same as making a connection: if the two
         // ends did not end up on one partition, the wire is decoration.
         .filter(|_| joined(&edit.doc, a, b));
     match drawn {
-        Some(wires) => {
+        Some(redraw) => {
             // An explicitly asked-for name is part of the request, not just a
             // routing hint: give the wire that name unless it already has it.
             if let Some(wanted) = input.get("net").and_then(Value::as_str)
@@ -242,7 +135,7 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "wired {} to {} with {} segment(s)",
                 from.describe(),
                 to.describe(),
-                wires.len()
+                redraw.redrawn_segments
             );
             edit.commit(with_cleared(changed, cleared), allow)
         }
@@ -730,12 +623,24 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             ),
         }));
     };
-    let stub = stand_off(&mut edit.doc, &refdes, &pin);
+    let redraw = stand_off(&mut edit.doc, &refdes, &pin, net);
+    if redraw.labels_added > 0 {
+        edit.warn(format!(
+            "pin re-seat debit: {} labels added because no clean orthogonal power stub fit",
+            redraw.labels_added
+        ));
+    }
     edit.commit(
         with_cleared(
             format!(
                 "attached {lib_id} `{net}` to {spec}{}",
-                if stub { " through a short wire" } else { "" }
+                if redraw.labels_added > 0 {
+                    " by matched labels"
+                } else if redraw.redrawn_segments > 0 {
+                    " through an orthogonal wire"
+                } else {
+                    ""
+                }
             ),
             cleared,
         ),
@@ -753,8 +658,14 @@ pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 ///
 /// A rail dropped straight onto the pin of a diode lands inside the diode's
 /// own outline — the pin tip is inside that body — and the two print on top of
-/// each other. Returns whether a stub wire was needed.
-fn stand_off(doc: &mut SchDoc, refdes: &str, pin: &sch_doc::PlacedPin) -> bool {
+/// each other. The report records either the orthogonal route or its label
+/// fallback.
+fn stand_off(
+    doc: &mut SchDoc,
+    refdes: &str,
+    pin: &sch_doc::PlacedPin,
+    net: &str,
+) -> sch_drag::DragReport {
     let owner = doc
         .symbol(&pin.owner)
         .and_then(|inst| crate::place::extent(doc, inst));
@@ -774,10 +685,31 @@ fn stand_off(doc: &mut SchDoc, refdes: &str, pin: &sch_doc::PlacedPin) -> bool {
         at = Point2::new(at.x + pin.out.x * 1.27, at.y + pin.out.y * 1.27);
     }
     if at.near_eq(pin.at, EPS) {
-        return false;
+        return sch_drag::DragReport::default();
     }
-    doc.add_wire(pin.at, at);
-    true
+    let Some(rail) = sch_doc::placed_pins(doc)
+        .into_iter()
+        .find(|placed| placed.refdes == refdes)
+    else {
+        return sch_drag::DragReport::default();
+    };
+    if let Some(report) = sch_drag::redraw_wire(
+        doc,
+        pin.at,
+        pin.out,
+        rail.at,
+        ROUTING_NET,
+        &[pin.refdes.clone(), refdes.to_string()],
+    ) {
+        return report;
+    }
+    let kind = sheet_scope(doc, net).unwrap_or(LabelKind::Global);
+    doc.add_label(kind, net, pose(pin.at));
+    doc.add_label(kind, net, pose(rail.at));
+    sch_drag::DragReport {
+        labels_added: 2,
+        ..sch_drag::DragReport::default()
+    }
 }
 
 /// Rotate and shift a just-placed one-pin symbol so its pin sits exactly on
