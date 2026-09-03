@@ -25,20 +25,6 @@ pub fn synthesized_block(name: &str) -> bool {
 /// not laid out. `"1"` when set, cleared when the symbol is arranged.
 pub const AP_BENCH: &str = "ap_bench";
 
-/// A circuit idiom the engine RECOGNIZED purely from connectivity and co-placed as
-/// one cohesive cluster (a crystal+its load caps, a decoupling bank, an op-amp
-/// feedback resistor). Reported back so the LLM can confirm the layout matched its
-/// intent — detection needs NO new YAML syntax, only the netlist.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct IdiomReport {
-    /// `"crystal"` | `"decoupling"` | `"feedback"`.
-    pub kind: String,
-    /// The IC (anchor) refdes the cluster serves.
-    pub anchor: String,
-    /// The refdes of every part placed as part of this idiom.
-    pub parts: Vec<String>,
-}
-
 /// The rendered schematic plus deterministic readability findings.
 pub struct EmitOutput {
     /// The assembled `.kicad_sch` document text.

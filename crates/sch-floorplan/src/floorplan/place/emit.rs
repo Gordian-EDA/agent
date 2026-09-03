@@ -16,8 +16,6 @@ use sch_check::{PinType, SymbolMeta, find_pin};
 
 use crate::write::SchematicWriter;
 use geom::Dir;
-use kicad_symbol::PinDir;
-use sch_model::engine::PinFlow;
 use sch_model::result::EmitOutput;
 
 use super::*;
@@ -215,39 +213,6 @@ pub fn place_problem(
     let inc = incidence(&items);
     let ir = ir.unwrap_or_else(|| super::super::infer::infer_ir(env, design));
     Ok(Scene { items, inc, ir })
-}
-
-/// `(item, pin)` → flow direction, from the symbol library's electrical pin types.
-pub fn resolve_pin_flow(
-    env: &KicadInstallation,
-    items: &[Item],
-) -> BTreeMap<(usize, String), PinFlow> {
-    let table = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    let mut meta_cache: BTreeMap<String, Option<SymbolMeta>> = BTreeMap::new();
-    let mut flows = BTreeMap::new();
-    for (i, it) in items.iter().enumerate() {
-        let meta = meta_cache
-            .entry(it.part.clone())
-            .or_insert_with(|| table.symbol(&it.part));
-        let Some(meta) = meta else { continue };
-        for (num, _name, net) in &it.pins {
-            if net.is_none() {
-                continue;
-            }
-            let Some(pm) = find_pin(&meta.pins, num) else {
-                continue;
-            };
-            let flow = match pm.dir {
-                PinDir::Out => Some(PinFlow::Source),
-                PinDir::In => Some(PinFlow::Sink),
-                _ => None,
-            };
-            if let Some(flow) = flow {
-                flows.insert((i, num.clone()), flow);
-            }
-        }
-    }
-    flows
 }
 
 /// Emit a complete `.kicad_sch`. Pass `ir: None` for connectivity inference (production);
@@ -528,7 +493,6 @@ pub(crate) fn gather(env: &KicadInstallation, design: &Design) -> io::Result<Vec
                     angle: 0.0,
                     unit: u,
                     mirror: false,
-                    frozen: false,
                     preseeded: false,
                 });
             }

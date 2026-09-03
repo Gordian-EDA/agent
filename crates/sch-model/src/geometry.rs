@@ -189,7 +189,6 @@ mod tests {
             angle: 0.0,
             unit: 1,
             mirror: false,
-            frozen: false,
             preseeded: false,
         }
     }

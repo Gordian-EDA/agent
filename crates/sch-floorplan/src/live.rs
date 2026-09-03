@@ -586,7 +586,6 @@ fn rearrange_inner(
         return Err(Error::EmptySelection);
     }
     for it in &mut movable {
-        it.frozen = false;
         it.preseeded = false;
     }
 
@@ -1317,7 +1316,6 @@ fn seated_items(doc: &SchDoc, netlist: &Netlist) -> Vec<Item> {
                 angle: symbol.at.rot,
                 unit,
                 mirror: symbol.mirror == sch_doc::Mirror::Y,
-                frozen: true,
                 preseeded: true,
             })
         })

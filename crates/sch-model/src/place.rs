@@ -17,13 +17,6 @@ pub struct Crossings {
     pub wire: usize,
 }
 
-impl Crossings {
-    /// Total crossings — the candidate-pick sort key.
-    pub fn total(&self) -> usize {
-        self.body + self.ic + self.wire
-    }
-}
-
 /// What a finished placement measures. Purely DIAGNOSTIC: the geometry itself lives in
 /// the placed items, so this never carries a second, driftable copy of the layout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
