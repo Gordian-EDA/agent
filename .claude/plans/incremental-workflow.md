@@ -177,3 +177,13 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   connector case 6→7, replace-ic 10). Running: lane/orthogonal-wires (every pin re-seat via the drag
   primitive + axis-aligned wire invariant), campaign rerun camp5 (`--max-turns 3`, quality-first
   rubric) = accounting round 3; slow floorplan gates on pushed main.
+- Campaign round 3 (camp5) was a harness miss: continuation never fired (regex wanted "Stopped
+  after…", the agent now hands off with "## Partial state") and the sch critic died (600 dpi
+  ImageMagick abort) — both fixed and pushed; round 4 (camp6, --max-turns 3) running. Real harvest:
+  audio reached the board (41 parts, ERC 0) but sync_board refused on missing footprints, place_board
+  refused edge parts outside the auto outline, pours schema strict → 18 unrouted / 245 DRC / critic 1
+  (parts left in the staging row, outline sized around it) → lane/pcb-refusals. esp32: "the bench
+  draw did not preserve connectivity" + duplicate_refs whole-payload refusal → lane/bench-draw.
+  QUEUED (after lane/orthogonal-wires): add_power generic bar symbol for unknown power nets, get_net
+  resolving power nets, remove_symbols partial (missing refs reported), delete_wires{pins} declaring
+  the touched derived nets itself, decouple-ambiguous → place + gap instead of refuse.
