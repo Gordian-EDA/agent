@@ -19,7 +19,6 @@
 
 mod bulk;
 mod check;
-mod diff;
 mod edit;
 mod place;
 mod query;
@@ -35,15 +34,6 @@ use serde_json::{Value, json};
 /// The wall-clock promise `place_parts` / `arrange` keep — the agent loop sizes its
 /// own timeout from it.
 pub use sch_floorplan::live::PlacementBudget;
-
-/// Hash the live schematic bytes, distinguishing a missing file from an empty one.
-pub fn schematic_content_hash(ctx: &AgentRuntime) -> Result<Option<u64>> {
-    match std::fs::read(ctx.sch_path()) {
-        Ok(bytes) => Ok(Some(geom::fnv1a(&bytes))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
 
 /// The tools that write the schematic.
 pub const MUTATORS: [&str; 15] = [
@@ -70,13 +60,7 @@ pub fn handles(name: &str) -> bool {
 }
 
 fn tool_names() -> Vec<&'static str> {
-    let mut names = vec![
-        "read_schematic",
-        "diff_schematic",
-        "get_symbol",
-        "get_net",
-        "check_schematic",
-    ];
+    let mut names = vec!["read_schematic", "get_symbol", "get_net", "check_schematic"];
     names.extend(MUTATORS);
     names
 }
@@ -128,20 +112,6 @@ pub fn tool_defs() -> Vec<Tool> {
             }),
         ),
         (
-            "diff_schematic",
-            "Compare the live schematic with its turn-start baseline. Reports added and removed symbols, moved poses, changed fields, swapped library IDs, partition-aware net delta, and wire/label count changes as compact text; pass detail: true for structured JSON.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "detail": {
-                        "type": "boolean",
-                        "description": "Return structured JSON instead of aligned plain text."
-                    }
-                },
-                "additionalProperties": false
-            }),
-        ),
-        (
             "get_symbol",
             "Read one part as aligned plain text with fields, flags, per-unit pose and body size, and pin geometry and nets.",
             json!({
@@ -163,7 +133,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "check_schematic",
-            "Lint + electrical rules + KiCAD ERC over the live file. Every finding includes an executable `{tool,args}` fix or `null` with a reason; `fix_groups` coalesces findings closed by one call. Findings are `introduced` or `pre_existing` against the turn-start baseline, matched by code, refs, and nets. `ok` and `erc_clean` consider introduced errors only: fix those and leave inherited findings alone unless asked. Compact results put introduced findings first and use at most forty finding lines; pass `detail: true` to get all. Completeness findings are advisory: resolve them when the request implies a complete powered/interface design, but never expand a deliberately minimal or focused edit.",
+            "Lint + electrical rules + KiCAD ERC over the live file. Every finding includes its source and an executable `{tool,args}` fix or `null` with a reason; `fix_groups` coalesces findings closed by one call. `ok` and `erc_clean` consider every live error. Compact results use at most forty finding lines; pass `detail: true` to get all. Fix findings in what you touched; leave unrelated existing findings alone and mention them. Completeness findings are advisory: resolve them when the request implies a complete powered/interface design, but never expand a deliberately minimal or focused edit.",
             json!({
                 "type": "object",
                 "properties": {
@@ -216,7 +186,7 @@ pub fn tool_defs() -> Vec<Tool> {
              power flags follow. A taken spot slides to final `nudged_to`. Refused with a nudge \
              suggestion if no nearby spot fits, a pin loses its drawing, or any net would change. \
              After adding and connecting parts, use one batch drag to compact or align them when a \
-             render reports introduced visual findings. Cleaning up the newly added parts is part \
+             render reports visual findings. Cleaning up the newly added parts is part \
              of that edit, not unrelated movement; do not delete and redraw their connections.",
             json!({
                 "type": "object",
@@ -435,7 +405,6 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "arrange" => bulk::arrange(input, ctx),
         "rewire" => bulk::rewire(input, ctx),
         "read_schematic" => query::read_schematic(input, ctx),
-        "diff_schematic" => diff::diff_schematic(input, ctx),
         "get_symbol" => query::get_symbol(input, ctx),
         "get_net" => query::get_net(input, ctx),
         "check_schematic" => check::check_schematic(input, ctx),

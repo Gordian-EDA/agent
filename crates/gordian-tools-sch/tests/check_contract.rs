@@ -51,15 +51,7 @@ fn check_schematic_matches_kicad_warning_count_and_names_each_finding() {
     );
     for finding in findings {
         for field in [
-            "classification",
-            "severity",
-            "source",
-            "code",
-            "message",
-            "refs",
-            "nets",
-            "fix",
-            "why",
+            "severity", "source", "code", "message", "refs", "nets", "fix", "why",
         ] {
             assert!(
                 finding.get(field).is_some(),
@@ -132,22 +124,16 @@ fn check_schematic_matches_kicad_warning_count_and_names_each_finding() {
 }
 
 #[test]
-fn check_schematic_uses_the_turn_snapshot() {
+fn check_schematic_reports_all_live_findings() {
     let Some(ctx) = passive_fixture() else {
         eprintln!("SKIP: no KiCad detected");
         return;
     };
-    ctx.begin_turn().unwrap();
-
-    let unchanged = gordian_tools_sch::run("check_schematic", json!({"detail": true}), &ctx)
+    let original_report = gordian_tools_sch::run("check_schematic", json!({"detail": true}), &ctx)
         .unwrap()
         .unwrap();
-    assert_eq!(unchanged["baseline"], json!("turn-start"));
-    assert_eq!(unchanged["introduced"], 0);
-    assert_eq!(
-        unchanged["pre_existing"],
-        unchanged["findings"].as_array().unwrap().len()
-    );
+    let original_count = original_report["findings"].as_array().unwrap().len();
+    assert!(original_report.get("classification").is_none());
 
     let original = std::fs::read_to_string(ctx.sch_path()).unwrap();
     let edited = original.replacen(
@@ -160,14 +146,21 @@ fn check_schematic_uses_the_turn_snapshot() {
     let changed = gordian_tools_sch::run("check_schematic", json!({"detail": true}), &ctx)
         .unwrap()
         .unwrap();
+    assert!(changed["findings"].as_array().unwrap().len() > original_count);
     assert!(
-        changed["introduced"].as_u64().unwrap() > 0,
-        "edited sheet should have introduced findings: {changed}"
+        changed["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| { finding["source"] == "footprint" && finding["severity"] == "error" })
     );
 
     std::fs::write(ctx.sch_path(), original).unwrap();
     let restored = gordian_tools_sch::run("check_schematic", json!({"detail": true}), &ctx)
         .unwrap()
         .unwrap();
-    assert_eq!(restored["introduced"], 0);
+    assert_eq!(
+        restored["findings"].as_array().unwrap().len(),
+        original_count
+    );
 }

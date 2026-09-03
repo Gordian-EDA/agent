@@ -29,7 +29,7 @@ part of design — intent, part selection, and triage.
 | Area | Tools |
 |------|-------|
 | Project and discovery | `project_info`, `reserve_refs`, `search_symbols`, `get_symbol_info`, `search_footprints`, `get_footprint_info` |
-| Schematic inspection | `read_schematic`, `diff_schematic`, `get_symbol`, `get_net`, `check_schematic`, `render_schematic` |
+| Schematic inspection | `read_schematic`, `get_symbol`, `get_net`, `check_schematic`, `render_schematic` |
 | Schematic editing | `place_parts`, `arrange`, `rewire`, `add_symbols`, `remove_symbols`, `move_symbols`, `set_fields`, `assign_footprints`, `set_flags`, `swap_symbol`, `connect`, `label`, `no_connect`, `add_power`, `delete_wires` |
 | PCB workflow | `sync_board`, `get_board`, `place_board`, `move_parts`, `lock_parts`, `unlock_parts`, `route_board`, `route_track`, `delete_copper`, `set_net_width`, `update_board_outline`, `refill_zones`, `check_board`, `render_board`, `export_fab` |
 

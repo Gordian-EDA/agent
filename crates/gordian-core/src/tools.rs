@@ -582,9 +582,8 @@ pub fn tool_defs() -> Vec<Tool> {
             name: "check_board".into(),
             description: "Progress and DRC for the board as it stands: `routed N/M`, `blocked` \
                  (the same ratsnest entries route_board returns), `staged` (the parts still in \
-                 the staging row, with the reason), and the classified DRC findings. `ok` \
-                 considers introduced blocking findings only: fix those and leave inherited \
-                 findings alone unless asked. A staged part is never a violation."
+                 the staging row, with the reason), and every live DRC finding. `ok` considers \
+                 every blocking finding. A staged part is never a violation."
                 .into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
@@ -1003,19 +1002,7 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
     }
     let doc = sch_doc::SchDoc::read(ctx.sch_path()).context("reading schematic visual facts")?;
     let visual = sch_floorplan::visual::measure(&doc);
-    let baseline = ctx.turn_baseline()?;
-    let baseline_visual = baseline
-        .as_ref()
-        .and_then(|baseline| baseline.file(ctx.project_dir(), ctx.sch_path()))
-        .map(|bytes| {
-            let text = std::str::from_utf8(bytes).context("decoding turn-start schematic")?;
-            sch_doc::SchDoc::parse(text)
-                .map(|doc| sch_floorplan::visual::measure(&doc))
-                .context("measuring turn-start schematic visual facts")
-        })
-        .transpose()?;
-    let mut visual_json = visual_with_introduced(&visual, baseline_visual.as_ref())?;
-    visual_json["baseline"] = json!(baseline.as_ref().map(|_| "turn-start"));
+    let visual_json = serde_json::to_value(&visual)?;
     let content_bounds = render_bounds(visual.sheet_extent);
     let overview_bounds = padded_bounds(content_bounds, 2.54);
     let part_count = doc
@@ -1060,48 +1047,6 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
     });
     obj[IMAGE_PATH_KEY] = json!(path.display().to_string());
     Ok(obj)
-}
-
-fn visual_with_introduced(
-    visual: &sch_floorplan::visual::VisualFacts,
-    baseline: Option<&sch_floorplan::visual::VisualFacts>,
-) -> Result<Value> {
-    let mut current = serde_json::to_value(visual)?;
-    let baseline = baseline
-        .map(serde_json::to_value)
-        .transpose()?
-        .unwrap_or_else(|| json!({}));
-    for name in [
-        "body_overlaps",
-        "wires_through_bodies",
-        "text_collisions",
-        "off_grid_pins",
-        "dangling_wire_ends",
-    ] {
-        let mut available = baseline
-            .get(name)
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let introduced = current
-            .get(name)
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|item| {
-                available
-                    .iter()
-                    .position(|baseline| baseline == *item)
-                    .is_none_or(|position| {
-                        available.remove(position);
-                        false
-                    })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        current[format!("{name}_introduced")] = json!(introduced);
-    }
-    Ok(current)
 }
 
 fn render_bounds(extent: [f64; 4]) -> gordian_runtime::render::RenderBounds {

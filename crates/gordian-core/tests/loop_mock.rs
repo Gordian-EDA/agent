@@ -2,18 +2,8 @@
 
 use gordian_core::prompts::system_prompt;
 use gordian_core::testing::{ScriptedClient, final_text, tool_call};
-use gordian_core::{Agent, AgentRuntime, ContentPart, MessageContent, StopReason};
+use gordian_core::{Agent, AgentRuntime, StopReason};
 use serde_json::json;
-
-fn text_of(content: &MessageContent) -> String {
-    content
-        .iter()
-        .filter_map(|part| match part {
-            ContentPart::Text(text) => Some(text.as_str()),
-            _ => None,
-        })
-        .collect()
-}
 
 fn place_two_resistors() -> gordian_core::StreamEnd {
     tool_call(
@@ -76,72 +66,6 @@ async fn reviewed_turn_uses_check_schematic_without_a_reviewer_model_call() {
 
     assert_eq!(outcome.stop_reason, StopReason::Completed);
     assert_eq!(seen.lock().unwrap().len(), 3, "review used no VLM request");
-}
-
-#[tokio::test]
-async fn unchanged_turn_gets_one_explicit_second_chance() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    let sch_path = ctx.sch_path().to_path_buf();
-    let (client, seen) = ScriptedClient::recording(vec![
-        place_two_resistors(),
-        tool_call("seed-check", "check_schematic", json!({})),
-        final_text("seeded"),
-        tool_call(
-            "first-edit",
-            "set_fields",
-            json!({"ref": "R1", "fields": {"Value": "47k"}}),
-        ),
-        tool_call(
-            "restore-edit",
-            "set_fields",
-            json!({"ref": "R1", "fields": {"Value": "10k"}}),
-        ),
-        tool_call("restored-check", "check_schematic", json!({})),
-        final_text("done"),
-        tool_call(
-            "second-edit",
-            "set_fields",
-            json!({"ref": "R1", "fields": {"Value": "22k"}}),
-        ),
-        tool_call("final-check", "check_schematic", json!({})),
-        final_text("verified"),
-        tool_call("final-diff", "diff_schematic", json!({})),
-        final_text("done for real"),
-    ]);
-    let mut agent = Agent::new(client, ctx, system_prompt());
-
-    agent
-        .run_turn("create a two-resistor divider", None)
-        .await
-        .unwrap();
-    let baseline = std::fs::read(&sch_path).unwrap();
-    let outcome = agent.run_turn("change R1 to 22k", None).await.unwrap();
-
-    assert_eq!(outcome.stop_reason, StopReason::Completed);
-    assert_eq!(outcome.tool_calls_made, 6);
-    let seen = seen.lock().unwrap();
-    let second_chance = seen.get(7).expect("feedback triggered another request");
-    let feedback = second_chance
-        .iter()
-        .rev()
-        .find(|message| text_of(&message.content).contains("schematic is unchanged"))
-        .expect("unchanged-schematic feedback reached the model");
-    let feedback = text_of(&feedback.content);
-    assert!(feedback.contains("request is not satisfied"), "{feedback}");
-    assert!(feedback.contains("`set_fields`"), "{feedback}");
-    assert!(feedback.contains("cannot be done and why"), "{feedback}");
-    let final_bytes = std::fs::read(&sch_path).unwrap();
-    assert_ne!(
-        final_bytes, baseline,
-        "the second chance must change the file"
-    );
-    assert!(
-        String::from_utf8(final_bytes).unwrap().contains("22k"),
-        "the second edit must be dispatched after the clean-check lock is reopened"
-    );
 }
 
 #[tokio::test]
